@@ -883,6 +883,7 @@ mod tests {
     fn agent_state(status: AgentStatus) -> AgentState {
         AgentState {
             agent_id: "run-1".to_string(),
+            current_visit: String::new(),
             current_stage: "plan".to_string(),
             iteration: 1,
             status,
@@ -911,6 +912,7 @@ mod tests {
     fn infer(text: &str) -> InferenceResult {
         InferenceResult {
             parts: Vec::new(),
+            attempt_id: String::new(),
             response: text.to_string(),
             tool_calls: vec![],
             tokens_used: 0,

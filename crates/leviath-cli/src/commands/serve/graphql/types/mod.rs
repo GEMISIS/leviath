@@ -15,6 +15,7 @@ pub(crate) mod machine;
 pub(crate) mod manifest;
 pub(crate) mod run;
 pub(crate) mod run_detail;
+pub(crate) mod run_files;
 pub(crate) mod tool_calls;
 pub(crate) mod update;
 

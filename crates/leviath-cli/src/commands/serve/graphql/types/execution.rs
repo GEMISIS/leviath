@@ -5,14 +5,14 @@
 //! that failed and was reissued, one that was cut off by a restart: all three are
 //! here, and none of them is visible in a folded context window.
 
-use async_graphql::{Enum, Object, SimpleObject};
+use async_graphql::{Context, Enum, Object, SimpleObject};
 use leviath_core::run_archive::Execution;
 
 use super::super::error::IntoGraphql;
 use super::super::scalars::{BigInt, Timestamp};
 use super::tool_calls::{ToolCall, tool_call};
 use crate::commands::serve::blocking::blocking;
-use crate::commands::serve::core::executions;
+use crate::commands::serve::core::{context_changes, executions, inferences};
 
 /// How one attempt to execute a tool call ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
@@ -56,6 +56,27 @@ pub(crate) struct ToolExecution {
     pub(crate) record: Execution,
 }
 
+impl ToolExecution {
+    /// The stay this belongs to, or nothing where the journal recorded none.
+    ///
+    /// The journal writes an unrecorded correlation as an empty string. Nothing
+    /// would ever match one, and an empty id passed to a lookup would look like a
+    /// question rather than the absence of one.
+    fn visit_id(&self) -> Option<&str> {
+        Some(self.record.visit_id.as_str()).filter(|id| !id.is_empty())
+    }
+
+    /// The attempt that asked for this call, or nothing where none was recorded.
+    fn requested_by_id(&self) -> Option<String> {
+        Some(self.record.requested_by.clone()).filter(|id| !id.is_empty())
+    }
+
+    /// This execution's own id, or nothing where none was minted.
+    fn minted_id(&self) -> Option<String> {
+        Some(self.record.id.clone()).filter(|id| !id.is_empty())
+    }
+}
+
 #[Object]
 impl ToolExecution {
     /// This attempt's own id, minted when it was dispatched.
@@ -64,8 +85,8 @@ impl ToolExecution {
     /// provider's call id is the only handle there is. A client that needs a key
     /// for a list can use `journalPosition` and `callId` together, which every
     /// journal supports.
-    async fn id(&self) -> Option<&str> {
-        Some(self.record.id.as_str()).filter(|id| !id.is_empty())
+    async fn id(&self) -> Option<String> {
+        self.minted_id()
     }
 
     /// The call this attempt was carrying out, typed by its tool.
@@ -96,13 +117,117 @@ impl ToolExecution {
     }
 
     /// The stage it was dispatched in, by index.
+    ///
+    /// Where it sat, not which stay it belonged to: a stage entered three times
+    /// has one index and three visits. Correlate on `visit`.
     async fn stage_index(&self) -> i32 {
         i32::try_from(self.record.stage_index).unwrap_or(i32::MAX)
     }
 
     /// The stage-local iteration whose turn asked for it.
+    ///
+    /// The batch key within one stay: one batch per iteration. It restarts at
+    /// every entry into a stage, so it names an execution only together with
+    /// `visit`.
     async fn iteration(&self) -> i32 {
         i32::try_from(self.record.iteration).unwrap_or(i32::MAX)
+    }
+
+    /// The stay in a stage this execution belongs to.
+    ///
+    /// The correlation key for everything that happened during one stay, which is
+    /// what `stageIndex` and `iteration` cannot be: a stage entered three times
+    /// has one index, and the iteration restarts on every entry.
+    ///
+    /// Null means one of three things. The journal recorded no visit for this
+    /// batch - either it was written by a build that did not, or the run had no
+    /// stage ledger. Or the visit was past the ledger's per-stage cap of the
+    /// earliest 128 stays, where the stay is real and its detail is not kept; the
+    /// stage's own roll-ups in `stages` are the complete figures there.
+    async fn visit(&self) -> async_graphql::Result<Option<super::run_detail::StageVisit>> {
+        let Some(visit_id) = self.visit_id() else {
+            return Ok(None);
+        };
+        let run_id = self.run_id.clone();
+        let records = blocking(move || crate::runstate::read_stages_index(&run_id)).await;
+        Ok(records
+            .iter()
+            .map(super::run_detail::StageRecord::from)
+            .find_map(|stage| {
+                stage
+                    .visits
+                    .into_iter()
+                    .find(|visit| visit.id.as_deref() == Some(visit_id))
+            }))
+    }
+
+    /// The provider attempt whose answer asked for this call.
+    ///
+    /// One trip to the provider, from `inferences`. It is the attempt that
+    /// answered, which a client cannot work out for itself: a failover means the
+    /// answer came from a different provider than the attempt before it went to.
+    ///
+    /// Null means the journal recorded no attempt for this batch, which is every
+    /// batch in a journal written by a build that did not record the connection,
+    /// and any batch no provider answer asked for.
+    async fn requested_by(
+        &self,
+    ) -> async_graphql::Result<Option<super::inference::InferenceAttempt>> {
+        let Some(attempt_id) = self.requested_by_id() else {
+            return Ok(None);
+        };
+        let run_id = self.run_id.clone();
+        let found = blocking(move || inferences::attempt(&run_id, &attempt_id))
+            .await
+            .gql()?;
+        Ok(found.map(|attempt| super::inference::InferenceAttempt {
+            record: attempt.record,
+            failover: attempt.failover,
+        }))
+    }
+
+    /// The context-window transactions this execution committed.
+    ///
+    /// Empty for an execution that committed none, which most are: a tool that
+    /// reads a file changes nothing, and its answer landing in the conversation is
+    /// committed by the batch rather than by the call. The `context_*` and `todo_*`
+    /// tools are the ones that show up here, along with anything that wrote a part
+    /// into a region of its own.
+    ///
+    /// Independent of `outcome`. A call that succeeded may have committed nothing,
+    /// and a call that failed may have committed something before it failed, so
+    /// neither field may be read off the other.
+    async fn context_changes(
+        &self,
+    ) -> async_graphql::Result<Vec<super::context_change::ContextChange>> {
+        let Some(id) = self.minted_id() else {
+            return Ok(Vec::new());
+        };
+        let run_id = self.run_id.clone();
+        let changes = blocking(move || context_changes::by_execution(&run_id, &id))
+            .await
+            .gql()?;
+        Ok(changes
+            .into_iter()
+            .map(super::context_change::ContextChange::from)
+            .collect())
+    }
+
+    /// The files this execution produced, as the journal recorded them when it
+    /// produced them.
+    ///
+    /// Empty for every execution that produced none, which is all but a
+    /// `submit_output` that named artifacts. Read from the journal rather than
+    /// from the run's answer on purpose: the answer holds the *latest*
+    /// submission's files and says nothing about which call made them, so a
+    /// submission a later one replaced would be invisible.
+    async fn produced_artifacts(&self, ctx: &Context<'_>) -> Vec<super::run_detail::Artifact> {
+        let state = ctx.data_unchecked::<crate::commands::serve::AppState>();
+        self.record
+            .artifacts
+            .iter()
+            .map(|artifact| super::run_detail::artifact(state, &self.run_id, artifact))
+            .collect()
     }
 
     /// When it was dispatched.

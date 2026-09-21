@@ -815,7 +815,10 @@ async fn a_stage_record_carries_its_region_peaks() {
         crate::runstate::create_run(&meta).expect("run written");
         let mut record = leviath_core::run_meta::StageRecord::new("review".to_string(), 0);
         record.region_tokens = std::collections::BTreeMap::from([("plan".to_string(), 120usize)]);
-        record.visits = vec![leviath_core::run_meta::StageVisitRecord::opened_at(100)];
+        record.visits = vec![leviath_core::run_meta::StageVisitRecord::opened_at(
+            100,
+            "v-one".to_string(),
+        )];
         crate::runstate::write_stages_index(&meta.run_id, &[record]).expect("the ledger");
 
         let json = data(
@@ -1033,6 +1036,102 @@ async fn a_history_cursor_from_elsewhere_is_refused() {
             !answer.errors.is_empty(),
             "a cursor this listing did not mint is not followed"
         );
+    })
+    .await;
+}
+
+/// A revision taken from the history reads back as exactly that window, and goes
+/// on meaning it however far the run moves afterwards.
+///
+/// This is the guarantee the whole debugger rests on. A revision is derived from
+/// the window's contents, so the read is immutable: it can only ever answer with
+/// the content the revision was minted from, never with what the run holds now.
+#[tokio::test]
+async fn a_revision_reads_back_the_window_it_names() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-revision", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        create_run(&meta).expect("run written");
+        write_journal(&meta, &[10, 20, 30]);
+
+        // Every point carries its own revision, and no two of these windows
+        // share one.
+        let json = data(
+            meta_in(workdir.path()),
+            "{ run { contextHistory(first: 3) { edges { node { window { revision \
+             totalTokens } } } } } }",
+        )
+        .await;
+        let edges = json["run"]["contextHistory"]["edges"]
+            .as_array()
+            .expect("edges")
+            .clone();
+        let revisions: Vec<&str> = edges
+            .iter()
+            .map(|edge| {
+                edge["node"]["window"]["revision"]
+                    .as_str()
+                    .expect("a revision")
+            })
+            .collect();
+        assert_eq!(revisions.len(), 3);
+        assert!(
+            revisions.iter().all(|r| r.starts_with("cw1-")),
+            "{revisions:?}"
+        );
+        assert_eq!(
+            revisions
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "three windows, three names"
+        );
+
+        // The middle one resolves to the middle window, not to the run's latest.
+        let json = data(
+            meta_in(workdir.path()),
+            &format!(
+                r#"{{ run {{ contextSnapshot(revision: "{}") {{
+                     at stage window {{ revision totalTokens }}
+                   }} }} }}"#,
+                revisions[1]
+            ),
+        )
+        .await;
+        let point = &json["run"]["contextSnapshot"];
+        assert_eq!(point["window"]["totalTokens"], 20);
+        assert_eq!(point["window"]["revision"], revisions[1]);
+        assert_eq!(point["stage"], "review");
+        assert_eq!(point["at"], 2);
+
+        // And a revision this run never held is null rather than the nearest
+        // thing to it.
+        let json = data(
+            meta_in(workdir.path()),
+            r#"{ run { contextSnapshot(
+                 revision: "cw1-00000000000000000000000000000000"
+               ) { at } } }"#,
+        )
+        .await;
+        assert!(json["run"]["contextSnapshot"].is_null());
+    })
+    .await;
+}
+
+/// A run with no journal has no window to name, and says so rather than failing.
+#[tokio::test]
+async fn a_run_with_no_journal_has_no_named_window() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-revision-empty", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        create_run(&meta).expect("run written");
+        let json = data(
+            meta_in(workdir.path()),
+            r#"{ run { contextSnapshot(revision: "cw1-anything") { at } } }"#,
+        )
+        .await;
+        assert!(json["run"]["contextSnapshot"].is_null());
     })
     .await;
 }

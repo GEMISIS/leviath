@@ -33,6 +33,7 @@ fn agent_state(status: AgentStatus) -> AgentState {
     AgentState {
         agent_id: "a".to_string(),
         current_stage: "implement".to_string(),
+        current_visit: String::new(),
         iteration: 3,
         status,
         spawned_children_ids: vec![],

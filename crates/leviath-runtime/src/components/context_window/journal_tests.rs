@@ -9,152 +9,333 @@
 use super::*;
 use leviath_core::{Region, RegionKind};
 
-fn shape(entries: usize, tokens: usize) -> RegionShape {
-    RegionShape { entries, tokens }
-}
-
-/// A plain append: one entry in, nothing out, tokens up.
-#[test]
-fn an_append_reports_one_added_and_nothing_removed() {
-    let moved = RegionMove::between(shape(2, 20), shape(3, 35), 1);
-    assert_eq!(moved.added, 1);
-    assert_eq!(moved.removed, 0);
-    assert_eq!(moved.token_delta, 15);
-    assert!(!moved.is_still());
-}
-
-/// The case the arithmetic exists for: the write appended, and the region
-/// evicted to make room. Three entries left, not one.
-#[test]
-fn an_append_that_evicted_reports_what_left() {
-    let moved = RegionMove::between(shape(5, 90), shape(3, 40), 1);
-    assert_eq!(moved.added, 1);
-    assert_eq!(moved.removed, 3);
-    assert_eq!(moved.token_delta, -50);
-}
-
-/// A replacement measured from before its own clear: everything that was
-/// there left, and the one new entry arrived.
-#[test]
-fn a_replacement_reports_the_clear_it_did_first() {
-    let moved = RegionMove::between(shape(4, 60), shape(1, 12), 1);
-    assert_eq!(moved.added, 1);
-    assert_eq!(moved.removed, 4);
-    assert_eq!(moved.token_delta, -48);
-}
-
-/// A write nothing accepted moves nothing, and a journal of those is noise.
-#[test]
-fn a_refused_write_is_still() {
-    assert!(RegionMove::between(shape(2, 20), shape(2, 20), 0).is_still());
-}
-
-/// Growing by more than the write pushed cannot happen today, and if it ever
-/// did the record must not claim entries were removed to balance it.
-#[test]
-fn unaccountable_growth_reports_no_removals() {
-    let moved = RegionMove::between(shape(1, 10), shape(4, 40), 1);
-    assert_eq!(moved.removed, 0);
-    assert_eq!(moved.added, 1);
-    assert_eq!(moved.token_delta, 30);
-}
-
+/// A window with one pinned region, and nothing recorded.
 fn window_with_region() -> ContextWindow {
     let mut window = ContextWindow::new(10_000);
     window.add_region(Region::new("plan".to_string(), RegionKind::Pinned, 1_000));
     window
 }
 
-/// A region's shape is read off the region itself, and a name the window
-/// does not carry reads as empty rather than panicking.
-#[test]
-fn a_shape_is_the_regions_own_counts() {
+/// A window with two regions, for the transactions that touch both.
+fn window_with_two_regions() -> ContextWindow {
     let mut window = window_with_region();
-    assert_eq!(window.region_shape("plan"), shape(0, 0));
+    window.add_region(Region::new("notes".to_string(), RegionKind::Pinned, 1_000));
     window
-        .add_to_region_caused(ContextCause::Seed, "plan", "the plan".to_string(), 4)
-        .expect("the write fits");
-    assert_eq!(window.region_shape("plan"), shape(1, 4));
-    assert_eq!(window.region_shape("nowhere"), shape(0, 0));
 }
 
-/// The whole point of the handle: with one, a write lands in the run's
-/// archive as a record naming its cause.
+/// A window recording into `tx`, with the stage the caller must hold for as
+/// long as it wants writes to land.
+fn attached(
+    tx: tokio::sync::mpsc::UnboundedSender<PersistMsg>,
+) -> crate::pipeline::PersistenceStage {
+    crate::pipeline::PersistenceStage(tx)
+}
+
+/// The one transaction the lane received, as the record's own fields.
+fn one_transaction(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistMsg>,
+) -> (String, RunRecord) {
+    let PersistMsg::Append { run_id, record, .. } = rx.try_recv().expect("one record") else {
+        unreachable!("the window sends nothing else")
+    };
+    (run_id, *record)
+}
+
+/// The parts of a transaction record a test asserts on.
+fn parts(record: RunRecord) -> (String, String, ContextCause, Vec<RegionCommit>, String) {
+    match record {
+        RunRecord::ContextTransaction {
+            revision_before,
+            revision_after,
+            cause,
+            regions,
+            execution_id,
+            ..
+        } => (
+            revision_before,
+            revision_after,
+            cause,
+            regions,
+            execution_id,
+        ),
+        other => unreachable!("the window records transactions, not {other:?}"),
+    }
+}
+
+/// How many entries a push reports for a region that went from `before` to
+/// `after` entries.
 #[test]
-fn an_attached_window_records_what_moved_and_why() {
+fn what_each_kind_of_push_reports() {
+    assert_eq!(Pushed::Nothing.into_region(4, 1), 0);
+    assert_eq!(Pushed::Into(2).into_region(4, 6), 2);
+    assert_eq!(Pushed::Everything.into_region(0, 7), 7);
+    // A keyed write that took a new key grew the region; one that replaced a key
+    // where it stood did not, and nothing the caller holds tells them apart.
+    assert_eq!(Pushed::Upsert.into_region(3, 4), 1);
+    assert_eq!(Pushed::Upsert.into_region(3, 3), 0);
+}
+
+/// The whole point of the handle: with one, a write lands in the run's archive
+/// as a transaction naming its cause, the window either side of it, and what
+/// the region it touched held either side.
+#[test]
+fn an_attached_window_records_the_transaction_a_write_committed() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut window = window_with_region();
     // The stage is held for the whole test, as the world holds it for the whole
     // run: a window's handle on the lane is weak and writes nothing once the
     // lane's owner has let go.
-    let stage = crate::pipeline::PersistenceStage(tx);
+    let stage = attached(tx);
+    window.attach_journal("run-c", Some(&stage));
+    let empty = window.revision_now();
+    window
+        .add_to_region_caused(ContextCause::Seed, "plan", "the plan".to_string(), 4)
+        .expect("the write fits");
+
+    let (run_id, record) = one_transaction(&mut rx);
+    assert_eq!(run_id, "run-c");
+    let (before, after, cause, regions, execution) = parts(record);
+    assert_eq!(cause, ContextCause::Seed);
+    assert_eq!(before, empty, "it started from the window that was there");
+    assert_eq!(
+        after,
+        window.revision_now(),
+        "and produced the one that is there now"
+    );
+    assert_ne!(before, after);
+    assert!(execution.is_empty(), "no call was being handled");
+    assert_eq!(regions.len(), 1);
+    let plan = &regions[0];
+    assert_eq!(plan.region, "plan");
+    assert_eq!(plan.entries_before, 0);
+    assert_eq!(plan.entries_after, 1);
+    assert_eq!(plan.entries_added, 1);
+    assert_eq!(plan.tokens_before, 0);
+    assert_eq!(plan.tokens_after, 4);
+    assert_ne!(
+        plan.digest_before, plan.digest_after,
+        "the region holds something it did not hold"
+    );
+}
+
+/// A revision a transaction records is one a reader can find: the window's own
+/// revision matches the one computed from the snapshot the lane writes.
+///
+/// This is the join the whole debugger rests on. Two spellings of the rule would
+/// drift, and the first person to notice would be someone whose revision did not
+/// resolve.
+#[test]
+fn a_recorded_revision_is_the_snapshots_own() {
+    let mut window = window_with_region();
+    window
+        .add_to_region_caused(ContextCause::Seed, "plan", "the plan".to_string(), 4)
+        .expect("the write fits");
+    let snapshot = crate::persistence::build_context_snapshot(&window, "gather");
+    assert_eq!(
+        window.revision_now(),
+        leviath_core::run_meta::revision::context_revision(&snapshot)
+    );
+}
+
+/// An entry's sensitivity is part of the window's identity, and the live window
+/// reads it from the region the way the snapshot writer does.
+///
+/// Two spellings of that rule would drift, and a run whose region tracks taint
+/// would then record revisions no reader could resolve. The same content at two
+/// sensitivities is also not the same window: a region that was re-classified has
+/// changed, whatever its text says.
+#[test]
+fn an_entrys_sensitivity_is_part_of_the_windows_identity() {
+    let mut window = window_with_region();
+    window
+        .get_region_mut("plan")
+        .expect("it is there")
+        .taint
+        .get_or_insert_default();
+    window
+        .add_tainted_to_region(
+            ContextCause::Seed,
+            "plan",
+            "the plan".to_string(),
+            4,
+            leviath_core::TaintLevel::Private,
+        )
+        .expect("the write fits");
+
+    // The snapshot writer takes the entry's level off the region, and the live
+    // window has to agree with it.
+    let snapshot = crate::persistence::build_context_snapshot(&window, "gather");
+    assert_eq!(
+        snapshot.regions[0].entries[0].taint,
+        leviath_core::TaintLevel::Private
+    );
+    assert_eq!(
+        window.revision_now(),
+        leviath_core::run_meta::revision::context_revision(&snapshot)
+    );
+
+    // And the level counts: the same text at another sensitivity is another
+    // window.
+    let mut public = window_with_region();
+    public
+        .add_to_region_caused(ContextCause::Seed, "plan", "the plan".to_string(), 4)
+        .expect("the write fits");
+    assert_ne!(window.revision_now(), public.revision_now());
+}
+
+/// One transaction over two regions is one record naming both, which is what a
+/// compaction and a stage edge do.
+#[test]
+fn a_transaction_over_two_regions_is_one_record() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut window = window_with_two_regions();
+    let stage = attached(tx);
     window.attach_journal("run-c", Some(&stage));
     window
         .add_to_region_caused(ContextCause::Seed, "plan", "the plan".to_string(), 4)
         .expect("the write fits");
+    rx.try_recv().expect("the seed's own transaction");
 
-    let PersistMsg::Append { run_id, record, .. } = rx.try_recv().expect("one write, one record")
-    else {
-        unreachable!("the window sends nothing else")
-    };
-    assert_eq!(run_id, "run-c");
-    let mut value = serde_json::to_value(&*record).expect("a record serializes");
-    let fields = value["ContextChange"]
-        .as_object_mut()
-        .expect("the new variant");
-    assert!(fields.remove("at").is_some(), "a change is stamped");
-    assert_eq!(
-        value,
-        serde_json::json!({
-            "ContextChange": {
-                "region": "plan",
-                "cause": "seed",
-                "entries_added": 1,
-                "entries_removed": 0,
-                "token_delta": 4,
-            }
-        })
-    );
+    let both = window.begin_changes(["plan", "notes"]);
+    window.get_region_mut("plan").expect("it is there").clear();
+    window
+        .get_region_mut("notes")
+        .expect("it is there")
+        .add_entry("a summary".to_string(), 3)
+        .expect("it fits");
+    window.current_tokens = window.calculate_tokens();
+    window.commit_change(ContextCause::Compaction, both, Pushed::Upsert);
+
+    let (_, record) = one_transaction(&mut rx);
+    let (_, _, cause, regions, _) = parts(record);
+    assert_eq!(cause, ContextCause::Compaction);
+    assert_eq!(regions.len(), 2, "both halves, in one record");
+    assert_eq!(regions[0].region, "plan");
+    assert_eq!(regions[0].entries_after, 0);
+    assert_eq!(regions[0].entries_added, 0, "nothing arrived in it");
+    assert_eq!(regions[1].region, "notes");
+    assert_eq!(regions[1].entries_added, 1);
 }
 
-/// A window with no journal is the common case in tests and in `lev test`,
-/// and it has to be a no-op rather than a panic.
+/// A region a transaction names but nothing wrote to is still in the record,
+/// with the same digest either side. A reader can then see that a stage edge
+/// looked at it and left it alone, which is a different fact from not knowing.
 #[test]
-fn a_detached_window_records_nothing() {
+fn a_region_the_transaction_left_alone_says_so() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut window = window_with_two_regions();
+    let stage = attached(tx);
+    window.attach_journal("run-c", Some(&stage));
+
+    let both = window.begin_changes(["plan", "notes"]);
+    window
+        .get_region_mut("plan")
+        .expect("it is there")
+        .add_entry("only here".to_string(), 2)
+        .expect("it fits");
+    window.current_tokens = window.calculate_tokens();
+    window.commit_change(ContextCause::Transform, both, Pushed::Upsert);
+
+    let (_, record) = one_transaction(&mut rx);
+    let (_, _, _, regions, _) = parts(record);
+    assert_eq!(regions[1].region, "notes");
+    assert_eq!(regions[1].digest_before, regions[1].digest_after);
+    assert_eq!(regions[1].entries_added, 0);
+    assert_eq!(regions[1].tokens_before, regions[1].tokens_after);
+}
+
+/// A region the window does not carry measures as an empty one, which is also
+/// what a write to it would find.
+#[test]
+fn a_region_that_is_not_there_measures_as_empty() {
+    let window = window_with_region();
+    let plan = window.region_before("plan");
+    let nowhere = window.region_before("nowhere");
+    assert_eq!(nowhere.entries, 0);
+    assert_eq!(nowhere.tokens, 0);
+    assert_eq!(
+        nowhere.digest, plan.digest,
+        "an empty region and an absent one hold the same nothing"
+    );
+    assert_eq!(nowhere.name, "nowhere");
+}
+
+/// The execution being handled is carried on the transactions committed while it
+/// is, and nothing is carried once it is cleared.
+#[test]
+fn a_transaction_carries_the_execution_being_handled() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut window = window_with_region();
+    let stage = attached(tx);
+    window.attach_journal("run-c", Some(&stage));
+
+    window.attribute_to("x0123-0001");
+    window
+        .add_to_region_caused(ContextCause::ContextTool, "plan", "written".to_string(), 3)
+        .expect("the write fits");
+    let (_, record) = one_transaction(&mut rx);
+    let (_, _, _, _, execution) = parts(record);
+    assert_eq!(execution, "x0123-0001");
+
+    window.attribute_to("");
+    window
+        .add_to_region_caused(ContextCause::Framework, "plan", "a nudge".to_string(), 2)
+        .expect("the write fits");
+    let (_, record) = one_transaction(&mut rx);
+    let (_, _, _, _, execution) = parts(record);
+    assert!(execution.is_empty(), "no call is being handled any more");
+}
+
+/// Attributing on a window with no journal is a no-op rather than a panic: the
+/// dispatcher does it for every call, and most worlds keep no history.
+#[test]
+fn attributing_a_detached_window_changes_nothing() {
     let mut window = window_with_region();
     window.attach_journal("run-c", None);
+    window.attribute_to("x0123-0001");
+    assert!(window.journal.is_none());
+}
+
+/// A window with no journal is the common case in tests and in `lev test`, and
+/// it has to be a no-op rather than a panic - including the measuring, which is
+/// skipped entirely so a run that keeps no history pays nothing for one.
+#[test]
+fn a_detached_window_records_nothing_and_measures_nothing() {
+    let mut window = window_with_region();
+    window.attach_journal("run-c", None);
+    let txn = window.begin_change("plan");
+    assert!(txn.opened.is_none(), "nothing to record, nothing measured");
     window
         .add_to_region_caused(ContextCause::Seed, "plan", "the plan".to_string(), 4)
         .expect("the write fits");
     assert!(window.journal.is_none());
+    // And committing one is still a no-op.
+    window.commit_change(ContextCause::Seed, txn, Pushed::Into(1));
 }
 
-/// A write the window could not place records nothing: the region is
-/// untouched, and saying otherwise would put a change in the history that
-/// never happened.
+/// A write the window could not place records nothing: the region is untouched,
+/// and saying otherwise would put a change in the history that never happened.
 #[test]
 fn a_write_that_moved_nothing_records_nothing() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut window = window_with_region();
-    // The stage is held for the whole test, as the world holds it for the whole
-    // run: a window's handle on the lane is weak and writes nothing once the
-    // lane's owner has let go.
-    let stage = crate::pipeline::PersistenceStage(tx);
+    let stage = attached(tx);
     window.attach_journal("run-c", Some(&stage));
     window
         .add_to_region_caused(ContextCause::Seed, "nowhere", "lost".to_string(), 4)
         .expect_err("no such region");
     assert!(rx.try_recv().is_err(), "nothing moved, nothing recorded");
 
-    // And a change that reached the journal with nothing to report is dropped
-    // there too. A region hook may accept a write and store it unchanged, so
-    // "the write succeeded" and "the region moved" are different facts, and a
-    // record for the first would say a region changed when it did not.
-    let before = window.region_shape("plan");
-    window.journal_change(ContextCause::Hook, "plan", before, 0);
+    // And a transaction that reached the journal with nothing to report is
+    // dropped there too. A region hook may accept a write and store it
+    // unchanged, so "the write succeeded" and "the window moved" are different
+    // facts, and a record for the first would say a region changed when it did
+    // not. The window's revision either side is what answers it.
+    let txn = window.begin_change("plan");
+    window.commit_change(ContextCause::Hook, txn, Pushed::Nothing);
     assert!(
         rx.try_recv().is_err(),
-        "a region that stood still is not a change"
+        "a window that stood still is not a change"
     );
 }
 
@@ -169,10 +350,7 @@ fn a_write_that_moved_nothing_records_nothing() {
 async fn an_attached_window_does_not_hold_the_lane_open() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut window = window_with_region();
-    window.attach_journal(
-        "run-c",
-        Some(&crate::pipeline::PersistenceStage(tx.clone())),
-    );
+    window.attach_journal("run-c", Some(&attached(tx.clone())));
 
     // What a clean shutdown does: drop the world's own sender. The window's
     // handle is all that is left, and it must not count.
@@ -183,5 +361,5 @@ async fn an_attached_window_does_not_hold_the_lane_open() {
     window
         .add_to_region_caused(ContextCause::Seed, "plan", "late".to_string(), 4)
         .expect("the write fits");
-    assert_eq!(window.region_shape("plan").entries(), 1);
+    assert_eq!(window.region_before("plan").entries, 1);
 }

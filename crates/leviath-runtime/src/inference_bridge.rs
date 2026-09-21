@@ -400,9 +400,10 @@ impl ModelInputPlan {
 }
 
 impl AttemptJournal {
-    /// Append one attempt's record.
+    /// Append one attempt's record, under the id the loop minted for it.
     fn record(
         &self,
+        id: &str,
         attempt: u32,
         outcome: leviath_core::run_archive::AttemptOutcome,
         took: Duration,
@@ -415,6 +416,7 @@ impl AttemptJournal {
                 run_id: self.run_id.clone(),
                 record: Box::new(leviath_core::run_archive::RunRecord::InferenceAttempt(
                     leviath_core::run_archive::AttemptRecord {
+                        id: id.to_string(),
                         stage: self.stage.clone(),
                         attempt,
                         provider: self.provider.clone(),
@@ -625,6 +627,14 @@ pub(crate) struct InferenceOutcome {
     pub entity: Entity,
     /// The provider's response, or the error it failed with.
     pub result: Result<InferenceResponse, ProviderError>,
+    /// The attempt that produced the answer, as minted before that request went
+    /// out. Empty on a call that produced none.
+    ///
+    /// Carried because the tool calls in an answer are asked for by one
+    /// particular trip to the provider, and nothing further along can work out
+    /// which: a failover means the answer came from a different provider than
+    /// the attempt before it went to.
+    pub attempt_id: String,
     /// Wall-clock time the job took, retries and backoff included. Measured
     /// here because the ECS only sees the outcome land on a later tick; this
     /// is the only place the call's real duration exists.
@@ -667,6 +677,7 @@ pub(crate) async fn run_inference_job(
         drop(permit);
         let _ = results.send(InferenceOutcome {
             entity,
+            attempt_id: String::new(),
             result: Err(ProviderError::RetentionRefused(refusal)),
             latency: std::time::Duration::ZERO,
             pricing: None,
@@ -713,12 +724,17 @@ pub(crate) async fn run_inference_job(
         // The request is a parameter rather than something the closure captures:
         // a file renewal takes it mutably, and a record has to carry the bodies
         // as they were when each attempt went out.
-        let record = |attempt, outcome, took, waited, request: &InferenceRequest| {
+        let record = |id: &str, attempt, outcome, took, waited, request: &InferenceRequest| {
             if let Some(journal) = journal.as_ref() {
-                journal.record(attempt, outcome, took, waited, request);
+                journal.record(id, attempt, outcome, took, waited, request);
             }
         };
         loop {
+            // One id per trip, minted before the request goes out and whatever
+            // the world does with the journal: the answer's own consequences
+            // name the attempt that carried it, and a run that keeps no history
+            // still has to hand its tool batches a consistent one.
+            let id = leviath_core::execution::mint_attempt_id();
             // Both arms produce the same finished `InferenceResponse`; the
             // difference is entirely in how the bytes crossed the wire. A
             // stream that dies part-way through reports a dropped connection,
@@ -745,13 +761,17 @@ pub(crate) async fn run_inference_job(
             match answer {
                 Ok(response) => {
                     record(
+                        &id,
                         made,
                         leviath_core::run_archive::AttemptOutcome::Succeeded,
                         took,
                         waited,
                         &request,
                     );
-                    break Ok(response);
+                    // The id travels out with the answer: the tool calls in it
+                    // are asked for by this attempt, and nothing downstream can
+                    // work out which trip produced them.
+                    break Ok((response, id));
                 }
                 // A file the request named is gone (expired, deleted, or held
                 // by another account): upload again and retry once, at once.
@@ -762,6 +782,7 @@ pub(crate) async fn run_inference_job(
                         && hydration.as_ref().is_some() =>
                 {
                     record(
+                        &id,
                         made,
                         failed(&e, leviath_core::run_archive::Retry::RenewedFiles),
                         took,
@@ -783,6 +804,7 @@ pub(crate) async fn run_inference_job(
                 Err(e) => match backoff_after(&retry, &e, attempt, spent) {
                     Some(delay) => {
                         record(
+                            &id,
                             made,
                             failed(&e, leviath_core::run_archive::Retry::SameModel),
                             took,
@@ -796,6 +818,7 @@ pub(crate) async fn run_inference_job(
                     }
                     None => {
                         record(
+                            &id,
                             made,
                             failed(&e, leviath_core::run_archive::Retry::Reported),
                             took,
@@ -848,9 +871,17 @@ pub(crate) async fn run_inference_job(
         },
     };
     drop(permit); // free the pool slot before the collect system runs
+    // The attempt that answered, split back off the answer. A failure names no
+    // attempt here: nothing downstream of a failed call asks which trip refused
+    // it, and the attempt records are where that question is answered.
+    let (result, attempt_id) = match result {
+        Ok((response, id)) => (Ok(response), id),
+        Err(e) => (Err(e), String::new()),
+    };
     let _ = results.send(InferenceOutcome {
         entity,
         result,
+        attempt_id,
         latency: started.elapsed(),
         pricing: provider.pricing(&request.model),
     });

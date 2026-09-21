@@ -111,14 +111,12 @@ pub fn restore_agent(
         let mut window = world
             .get_mut::<ContextWindow>(entity)
             .expect("a spawned agent has a context window");
-        // What each region held before the overlay, so the resume can say what
-        // it put back. Taken in one pass because the overlay below holds the
-        // region mutably and nothing can be measured through that borrow.
-        let before: Vec<(String, crate::components::RegionShape)> = snapshot
-            .regions
-            .iter()
-            .map(|r| (r.name.clone(), window.region_shape(&r.name)))
-            .collect();
+        // One transaction over every region the overlay is about to write. A
+        // resume rebuilds the whole window in one act, and the record says so:
+        // this is where the window came from after the restart, not a series of
+        // unrelated writes that happened to share a second.
+        let names: Vec<String> = snapshot.regions.iter().map(|r| r.name.clone()).collect();
+        let rebuilding = window.begin_changes(names.iter().map(String::as_str));
         for snap_region in &snapshot.regions {
             if let Some(region) = window
                 .regions
@@ -155,13 +153,13 @@ pub fn restore_agent(
         }
         window.current_tokens = window.calculate_tokens();
         // A resume rebuilds the window by assignment rather than by writing, so
-        // every entry it puts back is invisible to the write paths. Recorded per
-        // region here, and counted as arrivals: from the journal's point of view
-        // this is where the window came from after the restart.
-        for (name, before) in before {
-            let added = window.region_shape(&name).entries();
-            window.journal_change(leviath_core::ContextCause::Resume, &name, before, added);
-        }
+        // every entry it puts back is invisible to the write paths. Every one of
+        // them counts as an arrival, which is what `Everything` says.
+        window.commit_change(
+            leviath_core::ContextCause::Resume,
+            rebuilding,
+            crate::components::Pushed::Everything,
+        );
     }
 
     // 2. Jump to the persisted stage, swapping in its inference config and
@@ -480,6 +478,7 @@ mod tests {
                 StageCursor { index: 0 },
                 AgentState {
                     agent_id: "a".to_string(),
+                    current_visit: String::new(),
                     current_stage: "s0".to_string(),
                     iteration: 0,
                     status: AgentStatus::Active,
@@ -971,6 +970,8 @@ mod tests {
                 at: 1,
                 stage_index: 0,
                 iteration: 7,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             })
             .is_none(),

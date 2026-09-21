@@ -14,7 +14,7 @@ use std::path::Path;
 use leviath_core::mime::{BlobStore, InboundPart, MimeRegistry};
 
 use crate::blob_store::MimeParams;
-use crate::components::{ContextWindow, WriteOrigin};
+use crate::components::{ContextWindow, Pushed, WriteOrigin};
 use crate::context_setup::PartSink;
 
 /// Whether `name` is one of the mime tools this module answers.
@@ -140,7 +140,7 @@ fn attach(
     let key = arg(args, "key");
     // A keyed attach replaces the previous version: the region never holds
     // two of the same sprite.
-    let before = window.region_shape(region);
+    let before = window.begin_change(region);
     if let Some(k) = key
         && let Some(r) = window.get_region_mut(region)
         && r.remove_by_key(k)
@@ -149,7 +149,11 @@ fn attach(
         // Recorded apart from the write that follows: the release happens
         // outside it, and a history showing only the arrival would say the
         // region grew when it held steady.
-        window.journal_change(leviath_core::ContextCause::ProducedPart, region, before, 0);
+        window.commit_change(
+            leviath_core::ContextCause::ProducedPart,
+            before,
+            Pushed::Nothing,
+        );
     }
     let written = window.typed_write_content(
         crate::components::TypedWrite {

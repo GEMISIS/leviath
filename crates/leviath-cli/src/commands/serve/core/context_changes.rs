@@ -8,7 +8,7 @@
 //! reason the interactions listing is: a change record is a region name, a
 //! cause and three numbers, never the text the change moved.
 
-use leviath_core::run_archive::ContextChangeRecord;
+use leviath_core::run_archive::IndexedChange;
 
 use super::error::ServeError;
 use crate::runstate;
@@ -78,16 +78,16 @@ impl ContextChangesSpec {
 
 /// One change, with the position it holds among the run's own.
 ///
-/// The position is what a page cursor names. A timestamp would not do: several
-/// regions can change on one tick, and a cursor that could not tell them apart
+/// The index is what a page cursor names. A timestamp would not do: several
+/// changes can land on one tick, and a cursor that could not tell them apart
 /// would either repeat a change or skip one.
 #[derive(Debug)]
 pub(crate) struct IndexedContextChange {
     /// Where this change sits among the run's changes, in the order they
     /// landed.
     pub(crate) index: usize,
-    /// What the journal recorded.
-    pub(crate) record: ContextChangeRecord,
+    /// What the journal recorded, and where the record that carries it sits.
+    pub(crate) change: IndexedChange,
 }
 
 /// One page of a run's context changes.
@@ -117,7 +117,7 @@ pub(crate) fn page(
         .enumerate()
         .skip(start)
         .take(spec.limit + 1)
-        .map(|(index, record)| IndexedContextChange { index, record })
+        .map(|(index, change)| IndexedContextChange { index, change })
         .collect();
     let has_more = wanted.len() > spec.limit;
     wanted.truncate(spec.limit);
@@ -137,24 +137,42 @@ pub(crate) fn page(
     })
 }
 
-/// Every region change a run's journal records, in the order they landed.
+/// Every change one execution committed, in the order they landed.
+///
+/// Empty for an execution that committed none, which most are, and for an empty
+/// id: an id that names nothing matches nothing rather than matching every change
+/// that recorded no execution.
+pub(crate) fn by_execution(
+    run_id: &str,
+    execution_id: &str,
+) -> Result<Vec<IndexedChange>, ServeError> {
+    if execution_id.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(read(run_id)?
+        .into_iter()
+        .filter(|change| change.record.execution_id.as_deref() == Some(execution_id))
+        .collect())
+}
+
+/// Every change a run's journal records, in the order they landed.
+///
+/// Streamed one frame at a time rather than folded, for two reasons: a fold
+/// materializes the whole parsed journal to answer a question about a handful of
+/// small records, and the position of each record is what a client needs to name
+/// one - which a fold does not carry.
 ///
 /// A run with no journal is not an error here, and neither is a journal that
 /// names no causes: a run whose writes all went through paths that cannot name
 /// one has nothing to report, and an empty list says so.
-fn read(run_id: &str) -> Result<Vec<ContextChangeRecord>, ServeError> {
+fn read(run_id: &str) -> Result<Vec<IndexedChange>, ServeError> {
     let path = runstate::run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE);
     let Ok(file) = std::fs::File::open(&path) else {
         return Ok(Vec::new());
     };
     let mut reader = std::io::BufReader::new(file);
-    let (_version, records) = leviath_core::run_archive::read_archive_lenient(&mut reader)
-        .map_err(|e| {
-            ServeError::Internal(format!("Run '{run_id}' has an unreadable journal: {e}"))
-        })?;
-    Ok(leviath_core::run_archive::fold(&records)
-        .map(|folded| folded.context_changes)
-        .unwrap_or_default())
+    leviath_core::run_archive::read_archive_changes(&mut reader)
+        .map_err(|e| ServeError::Internal(format!("Run '{run_id}' has an unreadable journal: {e}")))
 }
 
 #[cfg(test)]

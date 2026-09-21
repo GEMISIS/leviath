@@ -454,6 +454,25 @@ pub(crate) struct ContextWindow {
 
 #[Object]
 impl ContextWindow {
+    /// This window's revision: a content address of what it holds.
+    ///
+    /// Derived from the window's contents and budgets, so it names one window for
+    /// ever. Two guarantees follow, and the whole point of the field is that you
+    /// may rely on both. A revision you hold always means the same content: no
+    /// later write can change what it refers to, because a write produces a
+    /// *different* revision. And `contextSnapshot(revision:)` resolves one to
+    /// exactly that content, never to whatever the run holds now.
+    ///
+    /// It is the same value `ContextChange.revisionBefore` and `revisionAfter`
+    /// carry, so a change joins to the windows either side of it.
+    ///
+    /// Two points holding identical contents share a revision - that is what
+    /// content addressing means. The stage the run was in is not part of it:
+    /// `stageName` and `ContextSnapshotPoint.at` say where and when.
+    async fn revision(&self) -> String {
+        leviath_core::run_meta::revision::context_revision(&self.snapshot)
+    }
+
     /// Tokens held across every region: what the next request costs before the
     /// model's reply.
     async fn total_tokens(&self) -> i32 {
@@ -530,6 +549,30 @@ pub(crate) struct Artifact {
     pub(crate) path: String,
     /// A short-lived signed link to the bytes.
     pub(crate) url: String,
+}
+
+/// One recorded artifact, with a signed link to its bytes.
+///
+/// Shared by the run's own list and by the execution that produced it, so the two
+/// describe one file the same way and mint the same kind of link for it.
+pub(crate) fn artifact(
+    state: &crate::commands::serve::AppState,
+    run_id: &str,
+    artifact: &leviath_core::output::Artifact,
+) -> Artifact {
+    Artifact {
+        url: super::super::super::signed_url::signed_path(
+            &state.signer,
+            &format!("/api/agents/{run_id}/artifacts/{}", artifact.name),
+            &[],
+            leviath_core::duration::now_secs(),
+        ),
+        name: artifact.name.clone(),
+        mime_type: artifact.mime_type.to_string(),
+        size: Some(BigInt(artifact.size as i64)),
+        sha256: Some(artifact.sha256.clone()).filter(|hash| !hash.is_empty()),
+        path: artifact.path.clone(),
+    }
 }
 
 /// Narrow a daemon counter to the 32 bits GraphQL's `Int` carries.

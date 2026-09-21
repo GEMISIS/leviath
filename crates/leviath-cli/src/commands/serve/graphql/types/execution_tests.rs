@@ -130,6 +130,8 @@ async fn the_executions_read_back_typed_with_their_results() {
                 at: 100,
                 stage_index: 1,
                 iteration: 3,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: "reading then listing".to_string(),
             },
             RunRecord::ToolCallDone {
@@ -213,6 +215,8 @@ async fn an_abandoned_attempt_reads_as_indeterminate() {
                 at: 100,
                 stage_index: 0,
                 iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::ToolCallDone {
@@ -256,6 +260,8 @@ async fn an_inline_result_reads_from_its_batch_record() {
             at: 100,
             stage_index: 0,
             iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         }]);
 
@@ -289,6 +295,8 @@ async fn the_executions_page_carries_on_from_its_cursor() {
             at: 100,
             stage_index: 0,
             iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         }]);
 
@@ -381,6 +389,8 @@ async fn a_large_result_comes_back_as_its_head() {
                 at: 100,
                 stage_index: 0,
                 iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::ToolCallDone {
@@ -479,6 +489,8 @@ async fn a_result_with_stored_parts_names_them() {
                 at: 100,
                 stage_index: 0,
                 iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::ToolCallDone {
@@ -535,6 +547,9 @@ async fn a_result_read_from_a_broken_journal_fails() {
                     arguments: r#"{"command":"ls"}"#.to_string(),
                     stage_index: 0,
                     iteration: 1,
+                    visit_id: String::new(),
+                    requested_by: String::new(),
+                    artifacts: Vec::new(),
                     dispatched_at: 100,
                     position: 6,
                     ended_at: Some(101),
@@ -660,4 +675,330 @@ async fn with_daemon(
     let answer = schema.execute(Request::new(query)).await;
     assert!(answer.errors.is_empty(), "{:?}", answer.errors);
     serde_json::to_value(&answer.data).expect("data serializes")
+}
+
+/// One committed transaction against `plan`, by `execution`.
+fn committed(execution: &str, at: i64) -> RunRecord {
+    RunRecord::ContextTransaction {
+        revision_before: format!("cw1-{at}"),
+        revision_after: format!("cw1-{}", at + 1),
+        cause: leviath_core::ContextCause::ContextTool,
+        regions: vec![run_archive::RegionCommit {
+            region: "plan".to_string(),
+            digest_before: "rg1-a".to_string(),
+            digest_after: "rg1-b".to_string(),
+            tokens_before: 0,
+            tokens_after: 10,
+            entries_before: 0,
+            entries_after: 1,
+            entries_added: 1,
+        }],
+        execution_id: execution.to_string(),
+        at,
+    }
+}
+
+/// One attempt record, under the id an answer names it by.
+fn attempt(id: &str, provider: &str, model: &str) -> RunRecord {
+    RunRecord::InferenceAttempt(run_archive::AttemptRecord {
+        id: id.to_string(),
+        stage: "plan".to_string(),
+        attempt: 2,
+        provider: provider.to_string(),
+        model: model.to_string(),
+        outcome: run_archive::AttemptOutcome::Succeeded,
+        duration_ms: 900,
+        backoff_ms: 100,
+        digest: run_archive::RequestDigest {
+            system_hash: 7,
+            messages: 4,
+            tools: 2,
+            max_tokens: 1024,
+            temperature: 0.2,
+        },
+        model_input: None,
+        at: 99,
+    })
+}
+
+/// An execution says which stay it belonged to, which trip to the provider asked
+/// for it, what it committed to the window, and what it produced.
+///
+/// None of the four is recoverable from the timeline, which is why the journal
+/// records each of them as the run goes.
+#[tokio::test]
+async fn an_execution_reads_back_with_what_it_is_connected_to() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-execution-joins", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        let mut stages = leviath_core::run_meta::StageRecord::new("plan".to_string(), 0);
+        stages.begin_visit(90, "v-the-stay".to_string());
+        crate::runstate::write_stages_index(&meta().run_id, &[stages]).expect("a ledger");
+        write_journal(vec![
+            attempt("a-answered", "anthropic", "claude-sonnet-5"),
+            RunRecord::ToolBatch {
+                calls: vec![call("c1", "x1", "context_write", r#"{"region":"plan"}"#)],
+                at: 100,
+                stage_index: 0,
+                iteration: 3,
+                visit_id: "v-the-stay".to_string(),
+                requested_by: "a-answered".to_string(),
+                response: "writing the plan".to_string(),
+            },
+            committed("x1", 101),
+            committed("x-somebody-else", 102),
+            RunRecord::ArtifactsProduced {
+                execution_id: "x1".to_string(),
+                artifacts: vec![leviath_core::output::Artifact {
+                    name: "report".to_string(),
+                    path: "out/report.md".to_string(),
+                    mime_type: leviath_core::mime::MimeType::parse("text/markdown")
+                        .expect("a type"),
+                    size: 4_096,
+                    sha256: "beef".to_string(),
+                }],
+                at: 103,
+            },
+        ]);
+
+        let json = data(
+            r#"{ run { executions(first: 10) { edges { node {
+                 id stageIndex iteration
+                 visit { id ordinal enteredAt inProgress }
+                 requestedBy { attempt provider model outcome { kind } }
+                 contextChanges { cause revisionAfter regions { region tokenDelta } }
+                 producedArtifacts { name mimeType size path url }
+               } } } } }"#,
+        )
+        .await;
+        let node = &json["run"]["executions"]["edges"][0]["node"];
+        assert_eq!(node["id"], "x1");
+        assert_eq!(node["stageIndex"], 0);
+        assert_eq!(node["iteration"], 3);
+
+        assert_eq!(node["visit"]["id"], "v-the-stay");
+        assert_eq!(node["visit"]["ordinal"], 1);
+        assert_eq!(node["visit"]["enteredAt"], 90);
+        assert_eq!(node["visit"]["inProgress"], true);
+
+        assert_eq!(node["requestedBy"]["attempt"], 2);
+        assert_eq!(node["requestedBy"]["provider"], "anthropic");
+        assert_eq!(node["requestedBy"]["model"], "claude-sonnet-5");
+        assert_eq!(node["requestedBy"]["outcome"]["kind"], "SUCCEEDED");
+
+        // Its own changes, and nobody else's.
+        let changes = node["contextChanges"].as_array().expect("changes");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["cause"], "CONTEXT_TOOL");
+        assert_eq!(changes[0]["revisionAfter"], "cw1-102");
+        assert_eq!(changes[0]["regions"][0]["region"], "plan");
+        assert_eq!(changes[0]["regions"][0]["tokenDelta"], 10);
+
+        let artifacts = node["producedArtifacts"].as_array().expect("artifacts");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["name"], "report");
+        assert_eq!(artifacts[0]["mimeType"], "text/markdown");
+        assert_eq!(artifacts[0]["size"], 4_096);
+        assert_eq!(artifacts[0]["path"], "out/report.md");
+        assert!(
+            artifacts[0]["url"]
+                .as_str()
+                .expect("a link")
+                .contains("/artifacts/report"),
+            "{}",
+            artifacts[0]["url"]
+        );
+    })
+    .await;
+}
+
+/// A journal that recorded none of the connections says so, rather than
+/// answering with whatever is nearest.
+///
+/// This is every journal written before they were recorded, and a run with no
+/// stage ledger. A nearest-in-time guess would be wrong in exactly the cases a
+/// person is debugging: a failover means the answer came from a provider the
+/// previous attempt did not go to.
+#[tokio::test]
+async fn an_execution_with_nothing_recorded_invents_nothing() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-execution-nojoins", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        write_journal(vec![
+            attempt("a-answered", "anthropic", "claude-sonnet-5"),
+            RunRecord::ToolBatch {
+                calls: vec![call("c1", "x1", "shell", r#"{"command":"ls"}"#)],
+                at: 100,
+                stage_index: 0,
+                iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
+                response: String::new(),
+            },
+        ]);
+
+        let json = data(
+            "{ run { executions(first: 10) { edges { node { \
+             visit { id } requestedBy { attempt } contextChanges { cause } \
+             producedArtifacts { name } } } } } }",
+        )
+        .await;
+        let node = &json["run"]["executions"]["edges"][0]["node"];
+        assert!(node["visit"].is_null(), "no stay was recorded");
+        assert!(node["requestedBy"].is_null(), "no attempt was recorded");
+        assert_eq!(node["contextChanges"].as_array().map(Vec::len), Some(0));
+        assert_eq!(node["producedArtifacts"].as_array().map(Vec::len), Some(0));
+    })
+    .await;
+}
+
+/// A recorded visit the ledger no longer describes reads as null rather than as
+/// somebody else's stay.
+///
+/// The per-stage list keeps the earliest stays only, so a long-looping run has
+/// visits whose id is real and whose detail was never written. Answering with a
+/// visit that merely happens to be in the file would attribute a stay's work to
+/// the wrong one.
+#[tokio::test]
+async fn a_visit_the_ledger_does_not_hold_is_null() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-execution-capped", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        let mut stages = leviath_core::run_meta::StageRecord::new("plan".to_string(), 0);
+        stages.begin_visit(90, "v-an-early-stay".to_string());
+        crate::runstate::write_stages_index(&meta().run_id, &[stages]).expect("a ledger");
+        write_journal(vec![RunRecord::ToolBatch {
+            calls: vec![call("c1", "x1", "shell", r#"{"command":"ls"}"#)],
+            at: 100,
+            stage_index: 0,
+            iteration: 1,
+            visit_id: "v-past-the-cap".to_string(),
+            requested_by: String::new(),
+            response: String::new(),
+        }]);
+
+        let json =
+            data("{ run { executions(first: 10) { edges { node { visit { id } } } } } }").await;
+        assert!(json["run"]["executions"]["edges"][0]["node"]["visit"].is_null());
+    })
+    .await;
+}
+
+/// An attempt id from a batch that no attempt record backs reads as null.
+///
+/// A resume can carry a run whose earlier attempts were journaled by another
+/// build, so a batch can name an attempt the file does not hold. Answering with
+/// a different attempt would be a join nobody recorded.
+#[tokio::test]
+async fn an_attempt_the_journal_does_not_hold_is_null() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-execution-noattempt",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            write_journal(vec![
+                attempt("a-one", "anthropic", "claude-sonnet-5"),
+                RunRecord::ToolBatch {
+                    calls: vec![call("c1", "x1", "shell", r#"{"command":"ls"}"#)],
+                    at: 100,
+                    stage_index: 0,
+                    iteration: 1,
+                    visit_id: String::new(),
+                    requested_by: "a-from-another-build".to_string(),
+                    response: String::new(),
+                },
+            ]);
+
+            let json = data(
+                "{ run { executions(first: 10) { edges { node { requestedBy { attempt } } } } } }",
+            )
+            .await;
+            assert!(json["run"]["executions"]["edges"][0]["node"]["requestedBy"].is_null());
+        },
+    )
+    .await;
+}
+
+/// An unreadable journal is reported when the changes are asked for, rather than
+/// answered as an execution that committed nothing.
+#[tokio::test]
+async fn an_unreadable_journal_is_not_an_execution_that_changed_nothing() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-execution-cc-corrupt",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            let execution = super::execution::ToolExecution {
+                run_id: "did-things".to_string(),
+                record: leviath_core::run_archive::Execution {
+                    id: "x1".to_string(),
+                    call_id: "c1".to_string(),
+                    tool: "context_write".to_string(),
+                    arguments: "{}".to_string(),
+                    stage_index: 0,
+                    iteration: 1,
+                    visit_id: String::new(),
+                    requested_by: "a-one".to_string(),
+                    artifacts: Vec::new(),
+                    dispatched_at: 100,
+                    position: 6,
+                    ended_at: Some(101),
+                    result_position: None,
+                    outcome: None,
+                },
+            };
+            std::fs::write(
+                crate::runstate::run_dir("did-things").join(leviath_core::files::ARCHIVE_FILE),
+                b"not an archive",
+            )
+            .expect("a corrupt journal");
+            let schema =
+                Schema::build(OneExecution { execution }, EmptyMutation, EmptySubscription)
+                    .data(state_with_agent_paths(Vec::new()))
+                    .finish();
+
+            for query in [
+                "{ execution { contextChanges { cause } } }",
+                "{ execution { requestedBy { attempt } } }",
+            ] {
+                let answer = schema.execute(Request::new(query)).await;
+                let message = answer
+                    .errors
+                    .first()
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| format!("no error for {query}"));
+                assert!(message.contains("unreadable journal"), "{message}");
+            }
+        },
+    )
+    .await;
+}
+
+/// An execution with no id of its own claims no changes, and the journal is not
+/// read to find that out.
+///
+/// Every call in a journal written before executions had identity carries an
+/// empty id, and matching an empty id against an empty id would hand one call's
+/// changes to every call in the run.
+#[tokio::test]
+async fn an_unidentified_execution_claims_no_changes() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-execution-noid", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        write_journal(vec![
+            RunRecord::ToolBatch {
+                calls: vec![call("c1", "", "context_write", r#"{"region":"plan"}"#)],
+                at: 100,
+                stage_index: 0,
+                iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
+                response: String::new(),
+            },
+            committed("", 101),
+        ]);
+
+        let json = data(
+            "{ run { executions(first: 10) { edges { node { id contextChanges { cause } } } } } }",
+        )
+        .await;
+        let node = &json["run"]["executions"]["edges"][0]["node"];
+        assert!(node["id"].is_null(), "no id was minted for it");
+        assert_eq!(node["contextChanges"].as_array().map(Vec::len), Some(0));
+    })
+    .await;
 }

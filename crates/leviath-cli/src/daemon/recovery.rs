@@ -1391,6 +1391,8 @@ mod tests {
                     at: 3,
                     stage_index: 0,
                     iteration: 9,
+                    visit_id: String::new(),
+                    requested_by: String::new(),
                     response: "writing then running".to_string(),
                 },
                 RunRecord::ToolCallDone {
@@ -1444,6 +1446,86 @@ mod tests {
             world
                 .world()
                 .get::<leviath_runtime::pipeline::ReadyToInfer>(entity.entity())
+                .is_some()
+        );
+    }
+
+    /// A batch the dispatcher answered itself is journaled, and a reload replays
+    /// none of it.
+    ///
+    /// This is the hazard the whole rule exists for. A replay lands the recorded
+    /// results in the conversation and does **not** redo a context tool's write,
+    /// so replaying this batch would restore a turn saying `context_write: ok`
+    /// over a region that never received the content - a window that lies, which
+    /// is worse than a turn the run simply issues again. `fold` refuses to make
+    /// such a batch pending, and this asserts the consequence at the layer that
+    /// would have been wrong: what the resumed run's conversation holds.
+    #[tokio::test]
+    async fn reload_replays_nothing_of_a_batch_the_dispatcher_answered_itself() {
+        use leviath_core::run_archive::RunRecord;
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        write_run(runs.path(), "run-inline", mpath, RunStatus::Running, None);
+        // The window the crash left: the write never reached it, which is
+        // exactly the state a replay would paper over.
+        let ctx = ContextSnapshot {
+            stage_name: "implement".to_string(),
+            total_tokens: 0,
+            max_tokens: 100_000,
+            regions: vec![],
+        };
+        write_run_archive(runs.path(), "run-inline", mpath, 0, 9, 99, &ctx);
+        append_archive_records(
+            runs.path(),
+            "run-inline",
+            &[RunRecord::ToolBatch {
+                calls: vec![batch_call("c1", "context_write", Some("ok"))],
+                at: 3,
+                stage_index: 0,
+                iteration: 9,
+                visit_id: String::new(),
+                requested_by: String::new(),
+                response: "writing the plan".to_string(),
+            }],
+        );
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
+            runs.path(),
+        );
+
+        assert_eq!(restored.len(), 1);
+        // Nothing at all: a replay would put the turn here and the answer the
+        // dispatcher gave itself beside it, over a region that never received
+        // the content. Asserted as a count rather than as two searches for what
+        // is absent, which is the same claim and leaves no arm behind.
+        let entries = conversation_of(&world, restored[0].1.entity());
+        assert!(
+            entries.is_empty(),
+            "nothing of the batch is replayed: {entries:?}"
+        );
+        // The run carries on by re-issuing the turn, which is what it did before
+        // such a batch was journaled at all.
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::pipeline::ReadyToInfer>(restored[0].1.entity())
                 .is_some()
         );
     }
@@ -1514,6 +1596,8 @@ mod tests {
                 at: 3,
                 stage_index: 0,
                 iteration: 9,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: "done".to_string(),
             }],
         );
@@ -2195,7 +2279,7 @@ mod tests {
         });
         // One closed stay, priced, so the money survives the reload rather than
         // restarting from zero the way the tokens would.
-        analyze.begin_visit(10);
+        analyze.begin_visit(10, leviath_core::execution::mint_visit_id());
         analyze.record_call(
             &leviath_core::run_meta::StageCall {
                 prompt_tokens: 1_234,
@@ -2219,7 +2303,7 @@ mod tests {
             since: Some(200),
         });
         // And so is the visit it was on, with a clock of its own left running.
-        implement.begin_visit(20);
+        implement.begin_visit(20, leviath_core::execution::mint_visit_id());
         implement.visits[0].active = Some(leviath_core::run_meta::ActiveClock {
             banked_secs: 3,
             since: Some(200),

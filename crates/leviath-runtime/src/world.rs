@@ -1337,6 +1337,7 @@ mod tests {
     fn agent_state() -> AgentState {
         AgentState {
             agent_id: "a".to_string(),
+            current_visit: String::new(),
             current_stage: "s".to_string(),
             iteration: 0,
             status: AgentStatus::Active,
@@ -2048,6 +2049,7 @@ mod tests {
                 outcome: crate::inference_bridge::InferenceOutcome {
                     entity: e.entity(),
                     latency: std::time::Duration::ZERO,
+                    attempt_id: String::new(),
                     result: Ok(text("t1")),
                     pricing: None,
                 },
@@ -2102,6 +2104,7 @@ mod tests {
                 outcome: crate::inference_bridge::InferenceOutcome {
                     entity: e.entity(),
                     latency: std::time::Duration::ZERO,
+                    attempt_id: String::new(),
                     result: Ok(text("t1")),
                     pricing: None,
                 },

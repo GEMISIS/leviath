@@ -21,6 +21,7 @@ use super::blueprint::Blueprint;
 use super::run_detail::{
     Artifact, BlobEntry, ContextWindow, FinalOutput, RunFlags, StageRecord, WaitReason,
 };
+use super::run_files::{FileListing, FileSource, FileWindow};
 use crate::runstate::RunMeta;
 
 /// The lifecycle states a run moves through.
@@ -550,29 +551,13 @@ impl Run {
     /// Same as `blobs`: metadata here, bytes behind a signed link.
     async fn artifacts(&self, ctx: &Context<'_>) -> Vec<Artifact> {
         let state = ctx.data_unchecked::<AppState>();
-        let now = leviath_core::duration::now_secs();
         self.meta
             .final_output
             .as_ref()
-            .map(|output| output.artifacts.clone())
+            .map(|output| output.artifacts.as_slice())
             .unwrap_or_default()
-            .into_iter()
-            .map(|artifact| Artifact {
-                url: super::super::super::signed_url::signed_path(
-                    &state.signer,
-                    &format!(
-                        "/api/agents/{}/artifacts/{}",
-                        self.meta.run_id, artifact.name
-                    ),
-                    &[],
-                    now,
-                ),
-                name: artifact.name,
-                mime_type: artifact.mime_type.to_string(),
-                size: Some(BigInt(artifact.size as i64)),
-                sha256: Some(artifact.sha256).filter(|hash| !hash.is_empty()),
-                path: artifact.path,
-            })
+            .iter()
+            .map(|artifact| super::run_detail::artifact(state, &self.meta.run_id, artifact))
             .collect()
     }
 
@@ -771,14 +756,19 @@ impl Run {
         super::inference::page(self.meta.run_id.clone(), first, after).await
     }
 
-    /// Why each of this run's regions changed, in the order the changes landed,
-    /// paged.
+    /// Every committed change to this run's context window, in the order they
+    /// landed, paged.
     ///
     /// `contextHistory` serves the window snapshots: what every region held at
-    /// each point. This serves the reasons: which path through the runtime moved
-    /// a region, so one that lost its plan to a compaction reads differently
-    /// from one a stage-edge transform cleared and one the model deleted. No
-    /// content, since the snapshot on the same tick already holds the text.
+    /// each point. This serves the changes: which path through the runtime moved
+    /// the window, so a region that lost its plan to a compaction reads
+    /// differently from one a stage-edge transform cleared and one the model
+    /// deleted. No content, since the snapshot on the same tick already holds the
+    /// text.
+    ///
+    /// Each entry is one transaction, which may touch several regions, and names
+    /// the window's revision either side of it - so `contextSnapshot` takes you
+    /// to exactly what it started from and what it produced.
     ///
     /// Empty for a run whose journal holds no change records, and for writes
     /// whose path cannot name a cause.
@@ -856,6 +846,35 @@ impl Run {
                 has_next_page: end_cursor.is_some(),
             },
             total,
+        })
+    }
+
+    /// One window this run held, by its revision.
+    ///
+    /// A historical read, and an immutable one: a revision is derived from a
+    /// window's contents and the journal it is looked up in is append-only, so
+    /// this resolves to exactly the content the revision was minted from. No
+    /// later write can change what a revision means, and asking for one can never
+    /// answer with what the run holds now - `context` is the field for that.
+    ///
+    /// Take a revision from `ContextChange.revisionBefore` or `revisionAfter` to
+    /// see the window either side of a change, or from `ContextWindow.revision`.
+    ///
+    /// Null when this run never held that window, which is also what a revision
+    /// from another run looks like. Where the run held the same content more than
+    /// once, this is the first time it did; the content is identical either way.
+    async fn context_snapshot(
+        &self,
+        #[graphql(desc = "The window's revision.")] revision: String,
+    ) -> Option<ContextSnapshotPoint> {
+        let run_id = self.meta.run_id.clone();
+        let point = blocking(move || history::at_revision(&run_id, &revision)).await;
+        point.map(|point| ContextSnapshotPoint {
+            at: Timestamp(point.at),
+            stage: point.meta.current_stage.clone(),
+            window: ContextWindow {
+                snapshot: Arc::new(point.context),
+            },
         })
     }
 
@@ -1037,136 +1056,6 @@ pub(crate) struct CurrentStage {
     pub(crate) of: i32,
 }
 
-/// Which question a file listing answers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub(crate) enum FileSource {
-    /// What the run recorded modifying. Free, and a claim about the run rather
-    /// than about the disk: it is capped at record time, and `modifiedFilesTruncated`
-    /// says when that cap was hit.
-    Modified,
-    /// What is in the run's working directory now, one level per request.
-    Workdir,
-}
-
-impl From<FileSource> for files::FileSource {
-    fn from(source: FileSource) -> Self {
-        match source {
-            FileSource::Modified => Self::Modified,
-            FileSource::Workdir => Self::Workdir,
-        }
-    }
-}
-
-/// One entry of a run's file listing.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct FileEntry {
-    /// The entry's own name.
-    pub(crate) name: String,
-    /// Relative to the run's working directory where possible, so it can be
-    /// passed straight back as `path`. Separated the way the serving host
-    /// separates paths, so a Windows server answers `src\main.rs`: it is the
-    /// host's own path, and it goes back to that host.
-    pub(crate) path: String,
-    /// Whether it is a directory. List it by passing its path back to `files`.
-    pub(crate) is_dir: bool,
-    /// Its size. Null when it could not be stat-ed.
-    pub(crate) size: Option<BigInt>,
-    /// False for a recorded path that has since been deleted.
-    pub(crate) exists: bool,
-    /// True for a recorded path outside the working directory, which happens
-    /// when a tool was handed an absolute path. Reported rather than hidden.
-    pub(crate) outside_workdir: bool,
-    /// What the run's own mime registry makes of the name. By extension, never
-    /// sniffed: a listing must not read every file. Empty for a directory.
-    pub(crate) mime_type: String,
-}
-
-/// A run's files, one directory level at a time.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct FileListing {
-    /// Which question this answers.
-    pub(crate) source: FileSource,
-    /// The directory listed, or the working directory for a recorded listing.
-    pub(crate) path: String,
-    /// Where "up one level" goes. Null at the working directory's root: a client
-    /// is never led above the fence.
-    pub(crate) parent: Option<String>,
-    /// The run's working directory, which the paths are relative to.
-    pub(crate) workdir: String,
-    /// The entries, directories first and then by name.
-    pub(crate) entries: Vec<FileEntry>,
-    /// Whether this listing stops short of the directory's real contents.
-    pub(crate) truncated: bool,
-    /// Whether the run hit the tracked-file cap, so its record is a prefix and
-    /// the rest of the names were never stored anywhere. Read `WORKDIR` for the
-    /// truth when this is true.
-    pub(crate) modified_files_truncated: bool,
-    /// Successful modifying tool calls, which is not a file count: a run that
-    /// edits one file three times records three.
-    pub(crate) modifying_tool_calls: i32,
-}
-
-impl From<files::FileListing> for FileListing {
-    fn from(listed: files::FileListing) -> Self {
-        Self {
-            source: match listed.source {
-                files::FileSource::Modified => FileSource::Modified,
-                files::FileSource::Workdir => FileSource::Workdir,
-            },
-            path: listed.path,
-            parent: listed.parent,
-            workdir: listed.workdir,
-            entries: listed
-                .entries
-                .into_iter()
-                .map(|entry| FileEntry {
-                    name: entry.name,
-                    path: entry.path,
-                    is_dir: entry.is_dir,
-                    size: entry.size.map(|size| BigInt(size as i64)),
-                    exists: entry.exists,
-                    outside_workdir: entry.outside_workdir,
-                    mime_type: entry.mime_type,
-                })
-                .collect(),
-            truncated: listed.truncated,
-            modified_files_truncated: listed.modified_files_truncated,
-            modifying_tool_calls: i32::try_from(listed.modifying_tool_calls).unwrap_or(i32::MAX),
-        }
-    }
-}
-
-/// One window of one file's text.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct FileWindow {
-    /// The resolved absolute path that was read.
-    pub(crate) path: String,
-    /// The file's whole size, which is larger than this window when truncated.
-    pub(crate) size: BigInt,
-    /// Where this window starts. Not always the offset asked for: one landing
-    /// mid-character is moved forward, so the windows of a file line up.
-    pub(crate) offset: BigInt,
-    /// Where to start the next read. Null when this window reached the end.
-    pub(crate) next_offset: Option<BigInt>,
-    /// This window's text.
-    pub(crate) content: String,
-    /// Whether the file continues past this window.
-    pub(crate) truncated: bool,
-}
-
-impl From<files::FileWindow> for FileWindow {
-    fn from(window: files::FileWindow) -> Self {
-        Self {
-            path: window.path,
-            size: BigInt(window.size as i64),
-            offset: BigInt(window.offset as i64),
-            next_offset: window.next_offset.map(|at| BigInt(at as i64)),
-            content: window.content,
-            truncated: window.truncated,
-        }
-    }
-}
-
 /// One point in a run's history: the whole context window, as it stood.
 #[derive(SimpleObject)]
 pub(crate) struct ContextSnapshotPoint {
@@ -1176,6 +1065,9 @@ pub(crate) struct ContextSnapshotPoint {
     pub(crate) stage: String,
     /// The window itself. Region contents are their own field, so asking for the
     /// shape of a hundred windows does not read a hundred windows' text.
+    ///
+    /// Its `revision` is this point's stable name: pass it to `contextSnapshot`
+    /// to come back to exactly this content, whatever the run does next.
     pub(crate) window: ContextWindow,
 }
 

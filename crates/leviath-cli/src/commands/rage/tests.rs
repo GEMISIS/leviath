@@ -363,6 +363,8 @@ api_token = "{EXTRA_VALUE}"
             at: 2,
             stage_index: 0,
             iteration: 0,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         },
     ];

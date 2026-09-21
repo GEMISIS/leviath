@@ -425,6 +425,53 @@ success and not a safe thing to retry silently.
 journal, as a byte offset. It only climbs within a run and it never changes, so
 it orders executions and names one for as long as the run exists.
 
+### What an execution is connected to
+
+An execution sits inside a stay in a stage and follows from one trip to a
+provider, and both of those are things you can ask for rather than pair up
+yourself.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    executions(first: 20) { edges { node {
+      id stageIndex iteration
+      visit { id ordinal enteredAt leftAt inProgress }
+      requestedBy { attempt provider model outcome { kind } }
+      contextChanges { cause revisionAfter regions { region tokenDelta } }
+      producedArtifacts { name mimeType size url }
+    } } }
+  } } }
+}
+```
+
+`visit` is the stay, and it is the key to correlate on. `stageIndex` says where an
+execution sat, not which stay it belonged to: a stage entered three times has one
+index and three visits, and `iteration` restarts on every entry. A visit's id is
+minted when the run enters the stage, so it stays put however long the run loops.
+
+`requestedBy` is the trip to the provider whose answer asked for the call. You
+cannot work it out from the timeline: a failover means the answer came from a
+different provider than the attempt before it went to.
+
+`contextChanges` is what this execution committed to the window, and it is
+independent of `outcome`. A call that succeeded may have committed nothing, and a
+call that failed may have committed something before it failed, so neither may be
+read off the other. Most executions commit nothing: the `context_*` and `todo_*`
+tools are the ones that show up, along with anything that wrote a part into a
+region of its own. A lane tool's answer landing in the conversation is committed
+by the batch, not by the call, and is not attributed to one.
+
+`producedArtifacts` is the files the call produced, read from the journal as it
+produced them rather than from the run's answer. The answer holds only the latest
+submission's files and says nothing about which call made them, so a submission a
+later one replaced would otherwise be invisible.
+
+Each of these is null or empty where the journal did not record the connection,
+and never a guess. `visit` is also null past the ledger's per-stage cap of the
+earliest 128 stays, where the stay is real and its detail is not kept; the stage's
+own roll-ups in `stages` are the complete figures there.
+
 ### Results are their own field
 
 One result can be a whole file, so a page of executions carries none of them.
@@ -633,12 +680,16 @@ Read the warning in [Observability](/docs/observability#capturing-what-went-to-t
 first. A captured request holds whatever the run's context held, including file
 contents a tool read and anything somebody pasted, and there is no size cap.
 
-## Why a region changed
+## What changed the window
 
 `contextHistory` serves snapshots of the window. `contextChanges` serves the
-reasons it moved. Both read the same journal, and neither answers for the other. A
-region that lost its plan looks identical in a snapshot, whether a compaction took
-it, a transform cleared it, or the model deleted it.
+changes that moved it. Both read the same journal, and neither answers for the
+other. A region that lost its plan looks identical in a snapshot, whether a
+compaction took it, a transform cleared it, or the model deleted it.
+
+Each entry is one committed transaction, which may touch several regions. A
+compaction summarises one region and empties another; a stage edge clears four; a
+resume rebuilds every region there is. All of those are one change.
 
 ```graphql
 {
@@ -646,7 +697,14 @@ it, a transform cleared it, or the model deleted it.
     contextChanges(first: 50) {
       total
       pageInfo { hasNextPage endCursor }
-      edges { node { region cause entriesAdded entriesRemoved tokenDelta at } }
+      edges { node {
+        cause at journalPosition
+        revisionBefore revisionAfter executionId
+        regions {
+          region digestBefore digestAfter tokensBefore tokensAfter
+          tokenDelta entriesAdded entriesRemoved
+        }
+      } }
     }
   } } }
 }
@@ -659,14 +717,46 @@ it, a transform cleared it, or the model deleted it.
 conversation stay two causes, because which of them ran is the question being
 asked.
 
+`revisionBefore` and `revisionAfter` name the window either side of the change.
+Pass either to `contextSnapshot` to read exactly that content. `executionId` is
+the tool execution that committed it, and is null for every change made outside a
+tool call: the model's own reply, a compaction, a transform, a resume, a nudge.
+
 A change carries no content, because the snapshot recorded on the same tick
-already holds the text. Read `contextHistory` beside this when the words matter.
-`tokenDelta` is negative where the region shrank, and `entriesRemoved` counts any
-eviction the change itself triggered.
+already holds the text. The per-region digests are what tell you whether you need
+to go and read it: `digestBefore` equal to `digestAfter` means that region ended
+the transaction holding what it started with. `tokenDelta` is negative where a
+region shrank, and `entriesRemoved` counts any eviction the change triggered.
 
 An empty list means the journal holds no change records. A write whose path cannot
 name its cause records nothing rather than borrowing the nearest neighbour, so a
 gap here reads as a gap rather than as a wrong answer.
+
+## A window by name
+
+A window's revision is a content address: it is derived from what the window
+holds, so it names that content for ever. Reading one back is immutable. No later
+write can change what a revision means, because a write produces a different
+revision, and `contextSnapshot` therefore resolves one to exactly the content it
+was minted from - never to whatever the run holds now.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    context { revision totalTokens }
+    contextSnapshot(revision: "cw1-4f2a9c8e5b1d7063a4e2f8c19d0b6537") {
+      at stage
+      window { revision totalTokens regions { name tokens } }
+    }
+  } } }
+}
+```
+
+Null means this run never held that window, which is also what a revision from
+another run looks like. Two points holding identical contents share a revision -
+that is what content addressing means - and the read answers with the first time
+the run held it. The stage is not part of the identity: `stage` and `at` say where
+and when.
 
 ## The machine itself
 

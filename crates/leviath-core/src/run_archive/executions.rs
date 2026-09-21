@@ -40,6 +40,15 @@ pub struct Execution {
     pub stage_index: usize,
     /// The stage-local iteration that produced the batch.
     pub iteration: usize,
+    /// The stay in that stage it was dispatched during. Empty where the journal
+    /// records no visit.
+    pub visit_id: String,
+    /// The provider attempt whose answer asked for it. Empty where the journal
+    /// records no attempt.
+    pub requested_by: String,
+    /// The files it produced, as the journal recorded them when it produced
+    /// them. Empty for every execution that produced none.
+    pub artifacts: Vec<crate::output::Artifact>,
     /// When it was dispatched, in unix seconds.
     pub dispatched_at: i64,
     /// Where the batch record that dispatched it sits in the journal.
@@ -87,6 +96,8 @@ pub fn read_archive_executions(r: &mut dyn Read) -> io::Result<Vec<Execution>> {
                 at,
                 stage_index,
                 iteration,
+                visit_id,
+                requested_by,
                 ..
             } => {
                 for call in calls {
@@ -102,12 +113,31 @@ pub fn read_archive_executions(r: &mut dyn Read) -> io::Result<Vec<Execution>> {
                         arguments: call.arguments,
                         stage_index,
                         iteration,
+                        visit_id: visit_id.clone(),
+                        requested_by: requested_by.clone(),
+                        artifacts: Vec::new(),
                         dispatched_at: at,
                         position,
                         ended_at: inline.then_some(at),
                         result_position: inline.then_some(position),
                         outcome: None,
                     });
+                }
+            }
+            // Files one execution produced. Attached by execution id alone,
+            // which is exact: nothing else in the journal claims to have made
+            // them, and an id that matches nothing dispatched is dropped rather
+            // than attached to the nearest call.
+            RunRecord::ArtifactsProduced {
+                execution_id,
+                artifacts,
+                ..
+            } => {
+                if let Some(execution) = executions
+                    .iter_mut()
+                    .find(|e| !e.id.is_empty() && e.id == execution_id)
+                {
+                    execution.artifacts.extend(artifacts);
                 }
             }
             RunRecord::ToolCallDone {
@@ -243,6 +273,8 @@ mod tests {
                 at: 10,
                 stage_index: 2,
                 iteration: 5,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: "doing two things".to_string(),
             },
             RunRecord::ToolCallDone {
@@ -293,6 +325,8 @@ mod tests {
             at: 10,
             stage_index: 0,
             iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         }]);
         let executions = read_archive_executions(&mut bytes.as_slice()).expect("it reads");
@@ -312,6 +346,8 @@ mod tests {
             at: 10,
             stage_index: 0,
             iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         }]);
         let executions = read_archive_executions(&mut bytes.as_slice()).expect("it reads");
@@ -341,6 +377,8 @@ mod tests {
                 at: 10,
                 stage_index: 0,
                 iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::ToolCallDone {
@@ -382,6 +420,8 @@ mod tests {
                 at: 10,
                 stage_index: 0,
                 iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::ToolCallDone {
@@ -397,6 +437,8 @@ mod tests {
                 at: 12,
                 stage_index: 0,
                 iteration: 2,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::ToolCallDone {
@@ -429,6 +471,8 @@ mod tests {
                 at: 10,
                 stage_index: 0,
                 iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::ToolBatch {
@@ -436,6 +480,8 @@ mod tests {
                 at: 12,
                 stage_index: 0,
                 iteration: 2,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::ToolCallDone {
@@ -474,6 +520,99 @@ mod tests {
         assert!(executions.is_empty(), "{executions:?}");
     }
 
+    /// One file, as a submission recorded it.
+    fn artifact(name: &str) -> crate::output::Artifact {
+        crate::output::Artifact {
+            name: name.to_string(),
+            path: format!("out/{name}"),
+            mime_type: crate::mime::MimeType::parse("text/markdown").expect("a type"),
+            size: 12,
+            sha256: "beef".to_string(),
+        }
+    }
+
+    /// The files an execution produced land on that execution, by its id alone.
+    ///
+    /// By id and nothing else, which is exact. An id matching nothing dispatched
+    /// is dropped rather than attached to the nearest call: a file the journal
+    /// cannot attribute is a file nobody made, and guessing which call made it is
+    /// the mistake this record exists to prevent.
+    #[test]
+    fn the_files_an_execution_produced_land_on_it() {
+        let bytes = archive(vec![
+            RunRecord::ToolBatch {
+                calls: vec![
+                    call("c1", "x1", Some("recorded")),
+                    call("c2", "x2", Some("ok")),
+                ],
+                at: 10,
+                stage_index: 0,
+                iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
+                response: String::new(),
+            },
+            RunRecord::ArtifactsProduced {
+                execution_id: "x1".to_string(),
+                artifacts: vec![artifact("report")],
+                at: 11,
+            },
+            RunRecord::ArtifactsProduced {
+                execution_id: "x1".to_string(),
+                artifacts: vec![artifact("chart")],
+                at: 12,
+            },
+            RunRecord::ArtifactsProduced {
+                execution_id: "x-nothing-dispatched".to_string(),
+                artifacts: vec![artifact("orphan")],
+                at: 13,
+            },
+        ]);
+        let executions = read_archive_executions(&mut bytes.as_slice()).expect("it reads");
+        let names: Vec<&str> = executions[0]
+            .artifacts
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["report", "chart"],
+            "both, in the order recorded"
+        );
+        assert!(
+            executions[1].artifacts.is_empty(),
+            "the other call produced nothing"
+        );
+    }
+
+    /// An execution with no id of its own takes no artifacts, whatever a record
+    /// names.
+    ///
+    /// A journal written before executions had identity records every call with
+    /// an empty id, and an empty id matching an empty id would hand one call's
+    /// files to every call in the run.
+    #[test]
+    fn an_unidentified_execution_takes_no_files() {
+        let bytes = archive(vec![
+            RunRecord::ToolBatch {
+                calls: vec![call("c1", "", Some("recorded"))],
+                at: 10,
+                stage_index: 0,
+                iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
+                response: String::new(),
+            },
+            RunRecord::ArtifactsProduced {
+                execution_id: String::new(),
+                artifacts: vec![artifact("report")],
+                at: 11,
+            },
+        ]);
+        let executions = read_archive_executions(&mut bytes.as_slice()).expect("it reads");
+        assert!(executions[0].artifacts.is_empty());
+    }
+
     /// A file that is not an archive is refused, rather than read as one with no
     /// executions.
     #[test]
@@ -490,6 +629,8 @@ mod tests {
             at: 10,
             stage_index: 0,
             iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         }]);
         // Half a length prefix, which is what a crash mid-append leaves.
@@ -510,6 +651,8 @@ mod tests {
             at: 10,
             stage_index: 0,
             iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         }]);
         // A well-formed frame whose payload is not a record this build knows.
@@ -556,6 +699,8 @@ mod tests {
                 at: 10,
                 stage_index: 0,
                 iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             },
             RunRecord::StatusChanged {

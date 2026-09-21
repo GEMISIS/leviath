@@ -33,6 +33,7 @@ fn meta(run_id: &str) -> RunMetadata {
 fn agent(stage: &str, iteration: usize, status: AgentStatus) -> AgentState {
     AgentState {
         agent_id: "a1".to_string(),
+        current_visit: String::new(),
         current_stage: stage.to_string(),
         iteration,
         status,

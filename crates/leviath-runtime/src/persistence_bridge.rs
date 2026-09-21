@@ -1930,6 +1930,8 @@ mod tests {
             at: 1,
             stage_index: 0,
             iteration,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: "running".to_string(),
         }
     }

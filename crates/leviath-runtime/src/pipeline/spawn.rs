@@ -480,7 +480,8 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
     // Stage 0 is the one stage no transition enters, so its first visit is
     // opened here for the same reason its `VisitCounts` entry is pre-counted
     // above: without it the two disagree from the first tick.
-    ledger.0[0].begin_visit(chrono::Utc::now().timestamp());
+    let stage0_visit = leviath_core::execution::mint_visit_id();
+    ledger.0[0].begin_visit(chrono::Utc::now().timestamp(), stage0_visit.clone());
 
     // Repetition detection is opt-in per blueprint.
     let repetition = blueprint
@@ -494,6 +495,7 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
             AgentState {
                 agent_id,
                 current_stage: stage0_name,
+                current_visit: stage0_visit,
                 iteration: 0,
                 status: AgentStatus::Active,
                 spawned_children_ids: vec![],

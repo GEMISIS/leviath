@@ -9,7 +9,7 @@
 
 use leviath_core::{ContextCause, Region};
 
-use super::{ContextWindow, HookDecision, RegionShape, WriteOrigin};
+use super::{ContextTxn, ContextWindow, HookDecision, Pushed, WriteOrigin};
 
 /// Everything one typed write needs besides its content and token count: where
 /// it lands, whose write it is, why the region is changing, and what taint to
@@ -231,7 +231,7 @@ impl ContextWindow {
         content: String,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        let before = self.region_shape(region_name);
+        let before = self.begin_change(region_name);
         let (content, tokens, key_override) = match origin {
             WriteOrigin::Agent => self.on_write_agent(
                 region_name,
@@ -279,7 +279,7 @@ impl ContextWindow {
         content: String,
         tokens: usize,
     ) -> leviath_core::Result<()> {
-        let before = self.region_shape(region_name);
+        let before = self.begin_change(region_name);
         let (content, tokens, key_override) = self.on_write_agent(
             region_name,
             content,
@@ -322,7 +322,7 @@ impl ContextWindow {
         // answers), so a hook rejection is downgraded inside the adapter to
         // store-unchanged plus a warning: a script that could veto the
         // replacement could silently delete an interaction answer.
-        let before = self.region_shape(region_name);
+        let before = self.begin_change(region_name);
         let (content, tokens, key_override) = self.on_write_system(
             region_name,
             content,
@@ -337,7 +337,7 @@ impl ContextWindow {
                 None => region.add_entry(content, tokens),
             };
             self.current_tokens = self.calculate_tokens();
-            self.journal_change(cause, region_name, before, usize::from(stored.is_ok()));
+            self.commit_change(cause, before, Pushed::Into(usize::from(stored.is_ok())));
             true
         } else {
             false
@@ -481,7 +481,7 @@ impl ContextWindow {
         &mut self,
         cause: Option<ContextCause>,
         region_name: &str,
-        before: RegionShape,
+        before: ContextTxn,
         tokens: usize,
         insert: &mut dyn FnMut(&mut Region, usize) -> leviath_core::Result<()>,
     ) -> leviath_core::Result<()> {
@@ -508,7 +508,7 @@ impl ContextWindow {
             Err(e) => Err(e),
         };
         if let Some(cause) = cause {
-            self.journal_change(cause, region_name, before, usize::from(stored.is_ok()));
+            self.commit_change(cause, before, Pushed::Into(usize::from(stored.is_ok())));
         }
         stored
     }

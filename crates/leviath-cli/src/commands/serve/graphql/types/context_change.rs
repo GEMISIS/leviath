@@ -1,14 +1,20 @@
-//! Why a run's context regions changed.
+//! What changed a run's context window, transaction by transaction.
 //!
 //! The half a snapshot cannot carry. `contextHistory` rebuilds the window turn
 //! by turn, and a region that lost the plan it was holding looks identical there
 //! whether a compaction summarised it away, a stage-edge transform cleared it,
 //! or the model called `context_delete` on it - three answers with a bug in
 //! three different places. These records name the path through the runtime that
-//! moved each region, recorded as it moved.
+//! moved the window, recorded as it moved.
+//!
+//! One record per committed transaction rather than per region, because that is
+//! what happens: a compaction summarises one region and empties another, a stage
+//! edge clears four, a resume rebuilds every region there is. Each carries the
+//! window's revision either side, so a change is anchored to exact content
+//! rather than to a moment.
 
 use async_graphql::{Enum, SimpleObject};
-use leviath_core::run_archive::ContextChangeRecord;
+use leviath_core::run_archive::IndexedChange;
 
 use super::super::error::IntoGraphql;
 use super::super::scalars::{BigInt, Cursor, Timestamp};
@@ -87,38 +93,129 @@ impl From<leviath_core::ContextCause> for ContextCause {
     }
 }
 
-/// One change to one region, as the journal recorded it.
+/// What one committed change did to one region.
 ///
 /// No content: the window recorded on the same tick already holds the text, so
-/// repeating it here would double the journal to say nothing new. Read this
-/// beside `contextHistory` when the text matters.
+/// repeating it here would double the journal to say nothing new. The digests are
+/// what tell you whether you need to go and read it - `digestBefore` equal to
+/// `digestAfter` means this region ended the transaction holding exactly what it
+/// started with.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct RegionTransition {
+    /// The region this part of the transaction touched.
+    pub(crate) region: String,
+    /// A content address of what it held before the change. Compare it with
+    /// `digestAfter`, and with the same region in another transaction; nothing
+    /// else is promised about the value.
+    ///
+    /// Null on a change a build that recorded one region at a time wrote, which
+    /// digested nothing.
+    pub(crate) digest_before: Option<String>,
+    /// A content address of what it held afterwards. Null on the same changes.
+    pub(crate) digest_after: Option<String>,
+    /// What it held before, in tokens. Null on a change that recorded only how
+    /// the count moved.
+    pub(crate) tokens_before: Option<BigInt>,
+    /// What it held afterwards. Null on the same changes.
+    pub(crate) tokens_after: Option<BigInt>,
+    /// How its token count moved. Negative when the region shrank.
+    pub(crate) token_delta: BigInt,
+    /// How many entries it held before. Null on a change that recorded only the
+    /// counts it moved.
+    pub(crate) entries_before: Option<i32>,
+    /// How many it held afterwards. Null on the same changes.
+    pub(crate) entries_after: Option<i32>,
+    /// Entries the change itself pushed. Not derivable from the counts either
+    /// side: a write into a full sliding region leaves the count where it was.
+    pub(crate) entries_added: i32,
+    /// Entries that left, including any eviction the change itself triggered.
+    pub(crate) entries_removed: i32,
+}
+
+/// One committed transaction against a run's context window.
+///
+/// A transaction, not a write: a compaction summarises one region and empties
+/// another, a stage edge clears four, a resume rebuilds every region there is.
+/// All of those are one change here, with `regions` carrying each region it
+/// touched - so a region that lost its plan can be read beside whatever moved
+/// with it.
+///
+/// `revisionBefore` and `revisionAfter` anchor it to exact content rather than to
+/// a moment: they are the revisions of `contextSnapshot`, so a transaction says
+/// which window it started from and which one it produced.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ContextChange {
-    /// The region that changed.
-    pub(crate) region: String,
-    /// What changed it.
+    /// What made the change.
     pub(crate) cause: ContextCause,
-    /// Entries the change added.
-    pub(crate) entries_added: i32,
-    /// Entries it removed, including any eviction the change itself triggered.
-    pub(crate) entries_removed: i32,
-    /// How the region's token count moved. Negative when the region shrank.
-    pub(crate) token_delta: BigInt,
-    /// When the change landed.
+    /// The window's revision before the transaction, as `contextSnapshot` takes
+    /// it. Null on a change a build that named no window wrote.
+    pub(crate) revision_before: Option<String>,
+    /// The window's revision after it. Null on the same changes.
+    pub(crate) revision_after: Option<String>,
+    /// The tool execution that committed it, by `ToolExecution.id`.
+    ///
+    /// Null means the journal recorded no execution for this change, which is
+    /// every change made outside a tool call: the model's own reply landing in
+    /// the conversation, a compaction, a stage-edge transform, a resume, a
+    /// framework nudge. It is also null throughout a journal written by a build
+    /// that did not record the connection.
+    ///
+    /// A call the dispatcher answers without the tool lane - a `context_*` tool,
+    /// a refusal, a gate denial - is journaled as a dispatch like any other, so
+    /// an id here names an execution `executions` lists.
+    pub(crate) execution_id: Option<String>,
+    /// Every region the transaction touched, in the order the write path named
+    /// them.
+    pub(crate) regions: Vec<RegionTransition>,
+    /// Where in the run's journal the record that carries this change sits.
+    ///
+    /// A byte offset. It only climbs within a run and never changes, so it orders
+    /// changes and names one for as long as the run exists.
+    pub(crate) journal_position: BigInt,
+    /// When the transaction committed.
     pub(crate) at: Timestamp,
 }
 
-impl From<ContextChangeRecord> for ContextChange {
-    fn from(record: ContextChangeRecord) -> Self {
+impl From<IndexedChange> for ContextChange {
+    fn from(indexed: IndexedChange) -> Self {
+        let record = indexed.record;
         Self {
-            region: record.region,
             cause: ContextCause::from(record.cause),
-            entries_added: count(record.entries_added),
-            entries_removed: count(record.entries_removed),
-            token_delta: BigInt(record.token_delta),
+            revision_before: record.revision_before,
+            revision_after: record.revision_after,
+            execution_id: record.execution_id,
+            regions: record
+                .regions
+                .into_iter()
+                .map(RegionTransition::from)
+                .collect(),
+            journal_position: BigInt(i64::try_from(indexed.position).unwrap_or(i64::MAX)),
             at: Timestamp(record.at),
         }
     }
+}
+
+impl From<leviath_core::run_archive::RegionTransition> for RegionTransition {
+    fn from(region: leviath_core::run_archive::RegionTransition) -> Self {
+        Self {
+            region: region.region,
+            digest_before: region.digest_before,
+            digest_after: region.digest_after,
+            tokens_before: region.tokens_before.map(tokens),
+            tokens_after: region.tokens_after.map(tokens),
+            token_delta: BigInt(region.token_delta),
+            entries_before: region.entries_before.map(count),
+            entries_after: region.entries_after.map(count),
+            entries_added: count(region.entries_added),
+            entries_removed: count(region.entries_removed),
+        }
+    }
+}
+
+/// A token count as the 64 bits `BigInt` carries, saturating rather than
+/// wrapping.
+fn tokens(value: usize) -> BigInt {
+    BigInt(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
 /// One page of a run's context changes.
@@ -194,7 +291,7 @@ pub(crate) async fn page(
                 // The index among the run's own changes: several regions can
                 // change on one tick, so a timestamp could not name one of them.
                 cursor: Cursor(indexed.index.to_string()),
-                node: ContextChange::from(indexed.record),
+                node: ContextChange::from(indexed.change),
             })
             .collect(),
         page_info: super::super::connection::PageInfo {

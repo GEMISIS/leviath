@@ -304,7 +304,7 @@ fn mirror_into_region(
     // already ruled out, so nothing can ever take it.
     // Measured before the clear, so the record below describes what the clear
     // took as well as what replaced it.
-    let before = window.region_shape(FINAL_OUTPUT_REGION);
+    let before = window.begin_change(FINAL_OUTPUT_REGION);
     let budget = {
         let Some(region) = window.get_region_mut(FINAL_OUTPUT_REGION) else {
             return;
@@ -317,11 +317,10 @@ fn mirror_into_region(
     window.current_tokens = window.calculate_tokens();
     // The clear is recorded on its own because it happens outside any write: a
     // reader seeing only the entry that followed would think nothing left.
-    window.journal_change(
+    window.commit_change(
         leviath_core::ContextCause::ToolResult,
-        FINAL_OUTPUT_REGION,
         before,
-        0,
+        crate::components::Pushed::Nothing,
     );
     // Through the window method rather than the region directly, so a custom
     // region's `on_write` hook fires - the same reason `context_write` does it.

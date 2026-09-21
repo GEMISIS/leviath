@@ -391,6 +391,7 @@ async fn a_finished_agent_deletes_its_uploads_in_the_background_and_a_paused_one
     let mut world = bevy_ecs::world::World::new();
     let state = AgentState {
         agent_id: "run-1".into(),
+        current_visit: String::new(),
         current_stage: "s".into(),
         iteration: 0,
         status: AgentStatus::Paused,

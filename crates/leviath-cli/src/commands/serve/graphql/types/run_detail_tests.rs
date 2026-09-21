@@ -164,7 +164,7 @@ fn a_stage_record_carries_its_ledger() {
     core.ended_at = Some(200);
     core.region_tokens.insert("plan".to_string(), 120);
     core.region_tokens.insert("conversation".to_string(), 900);
-    let mut visit = leviath_core::run_meta::StageVisitRecord::opened_at(100);
+    let mut visit = leviath_core::run_meta::StageVisitRecord::opened_at(100, "v-one".to_string());
     visit.left_at = Some(150);
     visit.prompt_tokens = 400;
     visit.cost_usd = Some(0.01);

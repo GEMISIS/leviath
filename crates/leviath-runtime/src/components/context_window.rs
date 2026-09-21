@@ -22,7 +22,7 @@ mod mime;
 /// Every path that puts something into a region, and the cause it states.
 mod writes;
 
-pub(crate) use journal::{ContextJournal, RegionShape};
+pub(crate) use journal::{ContextJournal, ContextTxn, Pushed};
 pub(crate) use writes::TypedWrite;
 
 /// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.

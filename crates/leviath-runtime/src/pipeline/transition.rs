@@ -650,7 +650,13 @@ pub(crate) fn enter_stage(
             rec.close_visit(at);
         }
         if let Some(rec) = ledger.0.get_mut(idx) {
-            rec.begin_visit(at);
+            // Minted here, where the stay begins, and carried on the run so that
+            // everything dispatched during it records the visit it belongs to.
+            // A visit past the ledger's cap keeps no record of its own, and the
+            // id still names it: what it costs is in the stage's own totals.
+            let visit = leviath_core::execution::mint_visit_id();
+            state.current_visit = visit.clone();
+            rec.begin_visit(at, visit);
         }
     }
     cursor.index = idx;

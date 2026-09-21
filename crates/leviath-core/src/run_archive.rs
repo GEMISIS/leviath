@@ -323,6 +323,24 @@ pub enum RunRecord {
         /// (one batch per iteration).
         #[serde(default)]
         iteration: usize,
+        /// The stay in that stage the batch was dispatched during, as minted
+        /// when the run entered it.
+        ///
+        /// The correlation key a reader wants, where the index and the iteration
+        /// are only where it sat: a stage entered three times has three stays,
+        /// and the index is the same for all of them. Empty in a journal written
+        /// before visits had identity, and in a world with no stage ledger.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        visit_id: String,
+        /// The provider attempt whose answer asked for these calls, as minted
+        /// before that request went out.
+        ///
+        /// Empty in a journal written before attempts had identity, and on a
+        /// batch no answer asked for. A reader must not fall back to the nearest
+        /// attempt in time: a failover means the answer came from a different
+        /// provider than the attempt before it went to.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        requested_by: String,
         /// The assistant text of the turn that issued the calls.
         #[serde(default)]
         response: String,
@@ -357,6 +375,22 @@ pub enum RunRecord {
         /// distinguish from one that finished.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<crate::execution::ToolOutcome>,
+        /// Unix seconds.
+        at: i64,
+    },
+    /// Files one tool execution produced, recorded as it produced them.
+    ///
+    /// `output.json` holds the artifacts of the run's *latest* answer, and a
+    /// later submission replaces it whole: a file an earlier submission produced
+    /// leaves no trace there at all, and nothing in that file says which call
+    /// made any of it. This record is written by the dispatcher that was handling
+    /// the call, so an artifact is attributable for as long as the journal
+    /// exists, superseded submissions included.
+    ArtifactsProduced {
+        /// The execution that produced them, as minted at dispatch.
+        execution_id: String,
+        /// The files, exactly as the answer recorded them.
+        artifacts: Vec<crate::output::Artifact>,
         /// Unix seconds.
         at: i64,
     },
@@ -421,6 +455,37 @@ pub enum RunRecord {
         entries_removed: usize,
         /// How the region's token count moved; negative when it shrank.
         token_delta: i64,
+        /// Unix seconds.
+        at: i64,
+    },
+    /// One committed transaction against the context window: what moved it, the
+    /// window it started from and the window it produced, and every region it
+    /// touched.
+    ///
+    /// The record a debugger joins on. A change carries the window's
+    /// [revision](crate::run_meta::revision) either side, so it is anchored to
+    /// exact content rather than to a moment, and it carries every region of the
+    /// transaction at once - a compaction that summarised one region and emptied
+    /// another is one record, not two events that share a second.
+    ///
+    /// Carries no content, for the reason [`RunRecord::ContextChange`] gives:
+    /// the snapshot recorded on the same tick holds the text, and the per-region
+    /// digests here are what tell a reader whether it needs to go and read it.
+    ContextTransaction {
+        /// The window's revision before the transaction.
+        revision_before: String,
+        /// The window's revision after it.
+        revision_after: String,
+        /// What made the change.
+        cause: crate::ContextCause,
+        /// Every region the transaction touched, in the order the write path
+        /// named them.
+        regions: Vec<RegionCommit>,
+        /// The tool execution that committed it, as minted at dispatch. Empty
+        /// where nothing knew of one: a write outside any tool call, and a tool
+        /// whose results the batch applies rather than the call itself.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        execution_id: String,
         /// Unix seconds.
         at: i64,
     },
@@ -739,6 +804,7 @@ mod attempt;
 mod codec;
 mod executions;
 mod points;
+mod transaction;
 
 pub use attempt::{
     AttemptOutcome, AttemptRecord, CaptureStatus, FailoverRecord, ModelInput, RequestDigest, Retry,
@@ -749,6 +815,9 @@ pub use codec::{
 };
 pub use executions::{Execution, SeekRead, read_archive_executions, read_result_at};
 pub use points::{PointRef, RunPoint, replay_points, visit_archive_points, visit_points};
+pub use transaction::{
+    ContextChangeRecord, IndexedChange, RegionCommit, RegionTransition, read_archive_changes,
+};
 
 // ─── fold ───────────────────────────────────────────────────────────────────
 
@@ -756,6 +825,12 @@ pub use points::{PointRef, RunPoint, replay_points, visit_archive_points, visit_
 /// window - what a crash-resume must replay instead of re-running. `calls` carry
 /// every result recorded before the crash ([`RunRecord::ToolCallDone`] merged
 /// in); a call still at `result: None` genuinely never finished.
+///
+/// Only a batch that had work in the tool lane becomes one. A batch the
+/// dispatcher resolved entirely by itself - context tools, refusals, gate
+/// denials - is re-issued instead: a replay lands recorded results in the
+/// conversation without redoing a context tool's write, so replaying one would
+/// put `context_write: ok` over a region that never received the content.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingToolBatch {
     /// The stage index the batch was dispatched in.
@@ -828,26 +903,6 @@ pub struct InferenceUsageRecord {
     pub at: i64,
 }
 
-/// One region's change, as folded out of the journal.
-///
-/// The flattened form of [`RunRecord::ContextChange`], so a consumer reading a
-/// folded run does not have to match the record enum to ask why a region moved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextChangeRecord {
-    /// The region that changed.
-    pub region: String,
-    /// What changed it.
-    pub cause: crate::ContextCause,
-    /// Entries the change added.
-    pub entries_added: usize,
-    /// Entries it removed.
-    pub entries_removed: usize,
-    /// How the region's token count moved; negative when it shrank.
-    pub token_delta: i64,
-    /// Unix seconds.
-    pub at: i64,
-}
-
 /// The state reconstructed from a run journal - enough to resume or inspect the
 /// run at its latest recorded point.
 #[derive(Debug, Clone, PartialEq)]
@@ -879,12 +934,12 @@ pub struct FoldedRun {
     pub attempts: Vec<AttemptRecord>,
     /// Every move from one provider to another, in order.
     pub failovers: Vec<FailoverRecord>,
-    /// Why each region changed, in the order the changes landed.
+    /// Every committed change to the window, in the order they landed.
     ///
     /// Read beside the window itself, this is the half a snapshot cannot carry:
     /// which path in the runtime moved a region, rather than only what it holds
-    /// now. Empty for a journal written before causes were recorded, and for the
-    /// write paths that still cannot name one.
+    /// now. Empty for a journal that records no causes, and for the write paths
+    /// that cannot name one.
     pub context_changes: Vec<ContextChangeRecord>,
     /// A dispatched tool batch whose results never made it into the context
     /// window (the run crashed mid-batch). `None` when the run has no batch in
@@ -952,6 +1007,10 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                 folded.identity.world_id = world_id.clone();
             }
             RunRecord::Inference { .. } => folded.inference_count += 1,
+            // A folded run carries the state a resume needs and the totals a
+            // reader asks for; which execution made which file is neither, and
+            // the executions listing is where it is answered.
+            RunRecord::ArtifactsProduced { .. } => {}
             RunRecord::InferenceAttempt(attempt) => folded.attempts.push(attempt.clone()),
             RunRecord::InferenceFailover(failover) => folded.failovers.push(failover.clone()),
             RunRecord::Interaction {
@@ -1016,12 +1075,24 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                 folded.tool_call_count += calls.len();
                 // A later batch replaces an earlier one - only the newest can
                 // still be in flight.
-                folded.pending_batch = Some(PendingToolBatch {
-                    stage_index: *stage_index,
-                    iteration: *iteration,
-                    response: response.clone(),
-                    calls: calls.clone(),
-                });
+                //
+                // A batch whose every call already carried a result at dispatch
+                // had nothing in the tool lane, so there is nothing a resume
+                // could finish: it is re-issued, and re-issuing is the only
+                // correct thing to do with it. Replaying it instead would land a
+                // turn saying `context_write: ok` over a region the write never
+                // reached, because a replay puts recorded results in the
+                // conversation and does not redo a context tool's write.
+                folded.pending_batch =
+                    calls
+                        .iter()
+                        .any(|call| call.result.is_none())
+                        .then(|| PendingToolBatch {
+                            stage_index: *stage_index,
+                            iteration: *iteration,
+                            response: response.clone(),
+                            calls: calls.clone(),
+                        });
             }
             RunRecord::ToolCallDone {
                 iteration,
@@ -1040,21 +1111,15 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                     call.result = Some(result.clone());
                 }
             }
-            RunRecord::ContextChange {
-                region,
-                cause,
-                entries_added,
-                entries_removed,
-                token_delta,
-                at,
-            } => folded.context_changes.push(ContextChangeRecord {
-                region: region.clone(),
-                cause: *cause,
-                entries_added: *entries_added,
-                entries_removed: *entries_removed,
-                token_delta: *token_delta,
-                at: *at,
-            }),
+            RunRecord::ContextChange { .. } | RunRecord::ContextTransaction { .. } => {
+                // Both record a committed change, and a reader asking why a
+                // region moved should not have to know which shape the build
+                // that wrote the journal used. `change_of` is the one place that
+                // knows, so the two can never be folded into different stories.
+                folded
+                    .context_changes
+                    .extend(transaction::change_of(record));
+            }
             RunRecord::ContextCheckpoint { snapshot, .. } => folded.context = snapshot.clone(),
             RunRecord::ContextDiff { delta, .. } => apply_delta(&mut folded.context, delta),
             RunRecord::Message { message, .. } => folded.messages.push(message.clone()),
@@ -1630,6 +1695,7 @@ mod tests {
                 at: 102,
             },
             RunRecord::InferenceAttempt(AttemptRecord {
+                id: "a0001".to_string(),
                 stage: "plan".to_string(),
                 attempt: 1,
                 provider: "anthropic".to_string(),
@@ -1674,17 +1740,23 @@ mod tests {
                 at: 102,
             }),
             RunRecord::ToolBatch {
+                // Dispatched to the lane, so it goes out pending and the
+                // completion record below is what fills it. A call the
+                // dispatcher had already answered would not be waiting on
+                // anything, and a resume has nothing to finish for one.
                 calls: vec![ToolCallRecord {
                     execution_id: String::new(),
                     id: "c1".to_string(),
                     name: "read_file".to_string(),
                     arguments: "{}".to_string(),
-                    result: Some("body".to_string().into()),
+                    result: None,
                     thought_signature: Some("sig".to_string()),
                 }],
                 at: 103,
                 stage_index: 0,
                 iteration: 0,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: "reading".to_string(),
             },
             RunRecord::ToolCallDone {
@@ -2172,6 +2244,8 @@ mod tests {
             at: 10,
             stage_index: 0,
             iteration,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: "running tools".to_string(),
         }
     }
@@ -2237,38 +2311,64 @@ mod tests {
     fn folding_gathers_why_each_region_moved() {
         use crate::ContextCause;
 
-        let changed = |region: &str, cause, added, removed, delta, at| RunRecord::ContextChange {
+        let moved = |region: &str, before: usize, after: usize, added| RegionCommit {
             region: region.to_string(),
-            cause,
+            digest_before: format!("rg1-{before:032x}"),
+            digest_after: format!("rg1-{after:032x}"),
+            tokens_before: before * 10,
+            tokens_after: after * 10,
+            entries_before: before,
+            entries_after: after,
             entries_added: added,
-            entries_removed: removed,
-            token_delta: delta,
+        };
+        let committed = |cause, regions, at| RunRecord::ContextTransaction {
+            revision_before: format!("cw1-{at:032x}"),
+            revision_after: format!("cw1-{:032x}", at + 1),
+            cause,
+            regions,
+            execution_id: String::new(),
             at,
         };
         let records = vec![
             header(),
-            changed("plan", ContextCause::Seed, 1, 0, 40, 20),
-            changed("conversation", ContextCause::ToolResult, 2, 0, 900, 21),
-            // A compaction is the case the record exists for: it takes entries
-            // away, and nothing else in the journal says who did.
-            changed("plan", ContextCause::Compaction, 1, 6, -380, 22),
+            committed(ContextCause::Seed, vec![moved("plan", 0, 1, 1)], 20),
+            committed(
+                ContextCause::ToolResult,
+                vec![moved("conversation", 0, 2, 2)],
+                21,
+            ),
+            // A compaction is the case the record exists for: it summarises one
+            // region into another and empties the first, and the two halves are
+            // one transaction rather than two events that share a second.
+            committed(
+                ContextCause::Compaction,
+                vec![moved("plan", 6, 0, 0), moved("plan_history", 0, 1, 1)],
+                22,
+            ),
         ];
         let folded = fold(&records).expect("a journal with a header folds");
 
         assert_eq!(folded.context_changes.len(), 3);
-        assert_eq!(folded.context_changes[0].region, "plan");
+        assert_eq!(folded.context_changes[0].regions[0].region, "plan");
         assert_eq!(folded.context_changes[0].cause, ContextCause::Seed);
-        assert_eq!(folded.context_changes[0].entries_added, 1);
-        assert_eq!(folded.context_changes[0].token_delta, 40);
+        assert_eq!(folded.context_changes[0].regions[0].entries_added, 1);
+        assert_eq!(folded.context_changes[0].regions[0].token_delta, 10);
         assert_eq!(folded.context_changes[0].at, 20);
+        assert_eq!(
+            folded.context_changes[0].revision_after.as_deref(),
+            Some(format!("cw1-{:032x}", 21).as_str()),
+            "a transaction names the window it produced"
+        );
         assert_eq!(folded.context_changes[1].cause, ContextCause::ToolResult);
         let compacted = &folded.context_changes[2];
         assert_eq!(compacted.cause, ContextCause::Compaction);
-        assert_eq!(compacted.entries_removed, 6);
+        assert_eq!(compacted.regions.len(), 2, "both halves, in one record");
+        assert_eq!(compacted.regions[0].entries_removed, 6);
         assert_eq!(
-            compacted.token_delta, -380,
+            compacted.regions[0].token_delta, -60,
             "a region that shrank reads as a loss, not as an absence"
         );
+        assert_eq!(compacted.regions[1].region, "plan_history");
         // A change is not a turn: neither counter above moves for one.
         assert_eq!(folded.inference_count, 0);
         assert_eq!(folded.tool_call_count, 0);
@@ -2333,13 +2433,15 @@ mod tests {
         assert_eq!(folded.tool_call_count, 0);
     }
 
-    /// Folding gathers why each region moved, in order, with the causes intact.
+    /// A journal of single-region change records folds, in order, with the
+    /// causes intact.
     ///
-    /// The whole point of the record: the window the snapshots rebuild shows the
-    /// plan region empty either way, and only these say a compaction took it
-    /// rather than the model releasing it.
+    /// This is the shape a journal written before transactions holds, and the
+    /// fold has to keep reading it: a run paused by one build and resumed by
+    /// another has a journal of both shapes, and a reader that understood only
+    /// the newer one would report a run whose history began halfway through.
     #[test]
-    fn folding_gathers_why_each_region_changed() {
+    fn folding_reads_a_journal_of_single_region_changes() {
         let changed = |region: &str, cause: ContextCause, added, removed, delta, at| {
             RunRecord::ContextChange {
                 region: region.to_string(),
@@ -2367,11 +2469,19 @@ mod tests {
                 ContextCause::Compaction
             ]
         );
-        assert_eq!(folded.context_changes[2].region, "plan");
-        assert_eq!(folded.context_changes[2].entries_added, 0);
-        assert_eq!(folded.context_changes[2].entries_removed, 3);
-        assert_eq!(folded.context_changes[2].token_delta, -120);
-        assert_eq!(folded.context_changes[2].at, 30);
+        let compaction = &folded.context_changes[2];
+        assert_eq!(compaction.regions.len(), 1, "one region is all it recorded");
+        assert_eq!(compaction.regions[0].region, "plan");
+        assert_eq!(compaction.regions[0].entries_added, 0);
+        assert_eq!(compaction.regions[0].entries_removed, 3);
+        assert_eq!(compaction.regions[0].token_delta, -120);
+        assert_eq!(compaction.at, 30);
+        // And nothing is invented around them: these records named no window and
+        // digested no region, so a reader is told so rather than guessing.
+        assert_eq!(compaction.revision_before, None);
+        assert_eq!(compaction.revision_after, None);
+        assert_eq!(compaction.regions[0].digest_after, None);
+        assert_eq!(compaction.regions[0].tokens_after, None);
         // A change is not a point in the timeline: the snapshot beside it
         // already carries the window it produced.
         assert!(replay_points(&records).is_empty());
@@ -2422,6 +2532,60 @@ mod tests {
         assert_eq!(pending.calls[0].result, None, "stale/unknown dones ignored");
     }
 
+    /// A folded run carries no artifact records.
+    ///
+    /// They are neither state a resume needs nor a total anyone asks a folded run
+    /// for: which execution made which file is a question about the run's
+    /// executions, and the executions listing is where it is answered. Folding
+    /// them into anything here would be a second answer to disagree with that one.
+    #[test]
+    fn folding_passes_over_the_files_an_execution_produced() {
+        let records = vec![
+            header(),
+            RunRecord::ArtifactsProduced {
+                execution_id: "x1".to_string(),
+                artifacts: vec![crate::output::Artifact {
+                    name: "report".to_string(),
+                    path: "out/report.md".to_string(),
+                    mime_type: crate::mime::MimeType::parse("text/markdown").expect("a type"),
+                    size: 12,
+                    sha256: "beef".to_string(),
+                }],
+                at: 30,
+            },
+        ];
+        let folded = fold(&records).expect("a journal with a header folds");
+        assert_eq!(folded.tool_call_count, 0, "a file is not a call");
+        assert!(folded.context_changes.is_empty());
+        assert!(folded.pending_batch.is_none());
+    }
+
+    /// A batch every call of which was resolved at dispatch is not pending.
+    ///
+    /// It had nothing in the tool lane, so a resume has nothing to finish - and
+    /// replaying it would be worse than re-issuing it. A replay lands the
+    /// recorded results in the conversation without redoing a context tool's
+    /// write, so the restored turn would say `context_write: ok` over a region
+    /// that never received the content.
+    #[test]
+    fn fold_does_not_make_a_batch_it_resolved_itself_pending() {
+        let records = vec![header(), batch(0, vec![call("c1", Some("wrote the plan"))])];
+        assert_eq!(fold(&records).unwrap().pending_batch, None);
+        assert_eq!(
+            fold(&records).unwrap().tool_call_count,
+            1,
+            "it is still a call the run made"
+        );
+        // And such a batch retires the one before it: only the newest batch can
+        // still be in flight, however the newest one was resolved.
+        let after = vec![
+            header(),
+            batch(0, vec![call("c1", None)]),
+            batch(0, vec![call("c2", Some("wrote the plan"))]),
+        ];
+        assert_eq!(fold(&after).unwrap().pending_batch, None);
+    }
+
     #[test]
     fn fold_clears_a_batch_once_the_iteration_moves_on() {
         // A later inference bumped meta.iteration past the batch: the batch was
@@ -2430,7 +2594,15 @@ mod tests {
         advanced.iteration = 1;
         let records = vec![
             header(),
-            batch(0, vec![call("c1", Some("done"))]),
+            batch(0, vec![call("c1", None)]),
+            RunRecord::ToolCallDone {
+                execution_id: String::new(),
+                outcome: None,
+                iteration: 0,
+                call_id: "c1".to_string(),
+                result: "done".to_string().into(),
+                at: 10,
+            },
             RunRecord::Progress {
                 meta: Box::new(advanced),
                 delta: ContextDelta {
@@ -2451,7 +2623,15 @@ mod tests {
         // turn: apply_tool_results ran before the crash, nothing to replay.
         let records = vec![
             header(),
-            batch(0, vec![call("c1", Some("done"))]),
+            batch(0, vec![call("c1", None)]),
+            RunRecord::ToolCallDone {
+                execution_id: String::new(),
+                outcome: None,
+                iteration: 0,
+                call_id: "c1".to_string(),
+                result: "done".to_string().into(),
+                at: 10,
+            },
             RunRecord::ContextCheckpoint {
                 snapshot: snapshot("plan", vec![region("conv", vec![turn_entry(&["c1"])])]),
                 at: 11,
@@ -2502,6 +2682,8 @@ mod tests {
                 at: 9,
                 stage_index: 0,
                 iteration: 0,
+                visit_id: String::new(),
+                requested_by: String::new(),
                 response: String::new(),
             }
         );

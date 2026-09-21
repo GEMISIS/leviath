@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn the_visit_breakdown_and_an_unknown_total_print() {
         let mut priced = record("gather", 100);
-        priced.begin_visit(10);
+        priced.begin_visit(10, leviath_core::execution::mint_visit_id());
         priced.record_call(
             &leviath_core::run_meta::StageCall {
                 prompt_tokens: 40,
@@ -202,7 +202,7 @@ mod tests {
             11,
         );
         priced.close_visit(20);
-        priced.begin_visit(30);
+        priced.begin_visit(30, leviath_core::execution::mint_visit_id());
         let mut unpriced = record("answer", 50);
         unpriced.record_call(&leviath_core::run_meta::StageCall::default(), 40);
         // The cap is past, so the stage row is the only complete figure and the

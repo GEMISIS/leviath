@@ -370,6 +370,7 @@ mod tests {
     fn state() -> AgentState {
         AgentState {
             agent_id: "run".to_string(),
+            current_visit: String::new(),
             current_stage: "s".to_string(),
             iteration: 0,
             status: crate::components::AgentStatus::Active,

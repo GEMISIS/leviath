@@ -852,6 +852,7 @@ pub(crate) fn dispatch_inference(
                         let _ = lost_outcomes.send(InferenceOutcome {
                             entity,
                             result: Err(leviath_providers::ProviderError::Other(message)),
+                            attempt_id: String::new(),
                             // The job never got to measure itself.
                             latency: std::time::Duration::ZERO,
                             // ...and never reached a provider, so it billed

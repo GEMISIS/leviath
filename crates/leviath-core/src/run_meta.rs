@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod revision;
 mod stage_ledger;
 
 // Re-exported flat rather than left behind a path of their own: the stage ledger

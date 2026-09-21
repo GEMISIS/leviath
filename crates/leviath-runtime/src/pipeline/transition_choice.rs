@@ -323,6 +323,7 @@ pub(crate) fn dispatch_transition_choice(
             move |message| {
                 let _ = lost_outcomes.send(crate::inference_bridge::InferenceOutcome {
                     entity,
+                    attempt_id: String::new(),
                     result: Err(leviath_providers::ProviderError::Other(message)),
                     latency: std::time::Duration::ZERO,
                     // A job that never reached a provider has no rates and no

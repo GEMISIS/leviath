@@ -538,13 +538,17 @@ pub(crate) fn apply_file_tracking(
         };
         let body = truncate_file(body, ft.max_file_tokens);
         let tokens = leviath_core::estimate_tokens(&body);
-        let before = window.region_shape(&ft.region);
+        let before = window.begin_change(&ft.region);
         window
             .get_region_mut(&ft.region)
             .expect("region presence checked above")
             .upsert_by_key(path, body, tokens)
             .ok();
-        window.journal_upsert(leviath_core::ContextCause::ToolResult, &ft.region, before);
+        window.commit_change(
+            leviath_core::ContextCause::ToolResult,
+            before,
+            crate::components::Pushed::Upsert,
+        );
         *result = format!(
             "File {verb} in [{}] → ### [{}] ({} tokens). Reference it there; do not re-read this path.",
             ft.region, path, tokens

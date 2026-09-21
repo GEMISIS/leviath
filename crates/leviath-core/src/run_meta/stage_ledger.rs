@@ -160,10 +160,11 @@ pub struct StageVisitRecord {
 }
 
 impl StageVisitRecord {
-    /// A visit that has just started and billed nothing.
-    pub fn opened_at(at: i64) -> Self {
+    /// A visit that has just started and billed nothing, under the id the run
+    /// entered the stage with.
+    pub fn opened_at(at: i64, id: String) -> Self {
         Self {
-            id: crate::execution::mint_visit_id(),
+            id,
             entered_at: at,
             left_at: None,
             prompt_tokens: 0,
@@ -415,6 +416,12 @@ impl StageRecord {
     /// `None` once [`MAX_STAGE_VISITS`] have been recorded: the stage's own
     /// totals keep counting, and the per-visit split stops rather than growing
     /// a file that is rewritten whole on every tick.
+    ///
+    /// A visit opened here gets an id of its own, because the caller has none to
+    /// give: this is the path a call takes when it arrives with no visit open,
+    /// which is not how a stage is entered. Nothing correlates to such a visit,
+    /// and giving it the id the run is carrying would attach a stay's worth of
+    /// work to a stay the ledger never saw begin.
     pub fn open_visit(&mut self, at: i64) -> Option<&mut StageVisitRecord> {
         if matches!(self.visits.last(), Some(v) if v.left_at.is_none()) {
             return self.visits.last_mut();
@@ -425,27 +432,34 @@ impl StageRecord {
         if self.visits.len() >= MAX_STAGE_VISITS {
             return None;
         }
-        self.start_visit(at);
+        self.start_visit(at, crate::execution::mint_visit_id());
         self.visits.last_mut()
     }
 
-    /// Start a new visit at `at`, closing whatever was open first.
+    /// Start a new visit at `at`, under `id`, closing whatever was open first.
     ///
     /// Called when the run enters the stage, which is the only place the
     /// boundary is exact. A self-transition is an entry like any other and
     /// starts a new visit, matching the visit number the `stage_transition`
     /// event carries.
-    pub fn begin_visit(&mut self, at: i64) {
+    ///
+    /// The id is minted by the caller because the run carries it too: everything
+    /// that happens during the stay records the visit it happened in, and the two
+    /// have to be the same string. Past [`MAX_STAGE_VISITS`] no record is kept,
+    /// so that id names a stay this file cannot describe - which is what
+    /// [`visit_count`](Self::visit_count) being larger than
+    /// [`visits`](Self::visits) says.
+    pub fn begin_visit(&mut self, at: i64, id: String) {
         self.close_visit(at);
-        self.start_visit(at);
+        self.start_visit(at, id);
     }
 
     /// Count one entry into the stage, recording it in detail while there is
     /// room. The count runs past the cap; the list does not.
-    fn start_visit(&mut self, at: i64) {
+    fn start_visit(&mut self, at: i64, id: String) {
         self.visit_count += 1;
         if self.visits.len() < MAX_STAGE_VISITS {
-            self.visits.push(StageVisitRecord::opened_at(at));
+            self.visits.push(StageVisitRecord::opened_at(at, id));
         }
     }
 
@@ -575,11 +589,11 @@ mod tests {
     #[test]
     fn a_revisited_stage_splits_its_cost_by_visit() {
         let mut rec = StageRecord::new("gather".to_string(), 0);
-        rec.begin_visit(100);
+        rec.begin_visit(100, crate::execution::mint_visit_id());
         rec.record_call(&computed(0.25), 101);
         rec.close_visit(110);
 
-        rec.begin_visit(200);
+        rec.begin_visit(200, crate::execution::mint_visit_id());
         rec.record_call(&computed(0.75), 201);
 
         assert_eq!(rec.cost_usd, Some(1.0), "the stage is still the sum");
@@ -597,7 +611,7 @@ mod tests {
     #[test]
     fn closing_a_visit_is_idempotent_and_a_call_reopens_nothing() {
         let mut rec = StageRecord::new("gather".to_string(), 0);
-        rec.begin_visit(100);
+        rec.begin_visit(100, crate::execution::mint_visit_id());
         rec.close_visit(110);
         rec.close_visit(400);
         assert_eq!(rec.visits.len(), 1);
@@ -621,7 +635,7 @@ mod tests {
         let mut rec = StageRecord::new("loop".to_string(), 0);
         for i in 0..(MAX_STAGE_VISITS + 20) {
             let at = 100 + i as i64;
-            rec.begin_visit(at);
+            rec.begin_visit(at, crate::execution::mint_visit_id());
             rec.record_call(&computed(0.01), at);
             rec.close_visit(at + 1);
         }
@@ -644,7 +658,7 @@ mod tests {
     #[test]
     fn a_visits_clock_measures_work_rather_than_the_stay() {
         let mut rec = StageRecord::new("gather".to_string(), 0);
-        rec.begin_visit(100);
+        rec.begin_visit(100, crate::execution::mint_visit_id());
         rec.observe_visit(100, true);
         rec.observe_visit(130, false); // parked
         rec.observe_visit(500, true); // back to work
@@ -653,7 +667,7 @@ mod tests {
 
         // A record written before the clock existed falls back to the stay,
         // which is the only thing it recorded.
-        let mut old = StageVisitRecord::opened_at(100);
+        let mut old = StageVisitRecord::opened_at(100, crate::execution::mint_visit_id());
         old.left_at = Some(160);
         old.active = None;
         assert_eq!(old.active_runtime_secs(9_999), 60);
@@ -671,7 +685,7 @@ mod tests {
         assert!(never_entered.visits.is_empty());
 
         let mut left = StageRecord::new("gather".to_string(), 0);
-        left.begin_visit(100);
+        left.begin_visit(100, crate::execution::mint_visit_id());
         left.observe_visit(100, true);
         left.close_visit(140);
         left.observe_visit(9_000, true);
@@ -685,7 +699,7 @@ mod tests {
     #[test]
     fn a_stage_record_with_visits_survives_the_file_it_lives_in() {
         let mut rec = StageRecord::new("gather".to_string(), 1);
-        rec.begin_visit(100);
+        rec.begin_visit(100, crate::execution::mint_visit_id());
         rec.record_call(&computed(0.25), 101);
         let json = serde_json::to_string(&rec).unwrap();
         let back: StageRecord = serde_json::from_str(&json).unwrap();

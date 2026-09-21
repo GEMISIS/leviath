@@ -3,6 +3,7 @@ use super::*;
 fn agent_state(status: AgentStatus) -> AgentState {
     AgentState {
         agent_id: "a".to_string(),
+        current_visit: String::new(),
         current_stage: "implement".to_string(),
         iteration: 3,
         status,

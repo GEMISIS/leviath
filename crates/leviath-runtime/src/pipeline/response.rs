@@ -18,8 +18,10 @@ pub(crate) struct InferenceResults(pub UnboundedReceiver<InferenceOutcome>);
 pub(crate) fn to_inference_result(
     response: &leviath_providers::InferenceResponse,
     parts: Vec<leviath_core::mime::Part>,
+    attempt_id: &str,
 ) -> crate::components::InferenceResult {
     crate::components::InferenceResult {
+        attempt_id: attempt_id.to_string(),
         response: response.content.clone(),
         parts,
         tool_calls: response
@@ -370,7 +372,7 @@ pub(crate) fn collect_inference(
                         buffer.logs.push((idx, note));
                     }
                 }
-                let result = to_inference_result(&response, parts);
+                let result = to_inference_result(&response, parts, &outcome.attempt_id);
                 commands
                     .entity(outcome.entity)
                     .insert(result)

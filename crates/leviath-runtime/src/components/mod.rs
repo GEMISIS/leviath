@@ -16,6 +16,14 @@ pub struct AgentState {
     /// Current execution stage
     pub current_stage: String,
 
+    /// The id of this stay in that stage, minted when the run entered it.
+    ///
+    /// The correlation key for everything that happens during the stay: a tool
+    /// batch dispatched now records it, so a reader can ask what one visit did
+    /// without pairing timestamps. Empty in a world with no stage ledger, which
+    /// is where nothing opens a visit to be in.
+    pub current_visit: String,
+
     /// Number of iterations in current stage
     pub iteration: usize,
 
@@ -331,6 +339,14 @@ impl StageHookScripts {
 /// and any tool calls that need to be executed.
 #[derive(Component, Debug, Clone)]
 pub(crate) struct InferenceResult {
+    /// The provider attempt that produced this answer, as minted before its
+    /// request went out. Empty in a world that minted none.
+    ///
+    /// Carried so a tool batch can say which trip to the provider asked for it.
+    /// Nothing at the dispatch end could work it out: a failover means the answer
+    /// came from a different provider than the attempt before it went to.
+    pub attempt_id: String,
+
     /// The model's response text
     pub response: String,
 
@@ -816,6 +832,7 @@ mod tests {
     fn test_agent_state_with_children_fields() {
         let state = AgentState {
             agent_id: "test-01".to_string(),
+            current_visit: String::new(),
             current_stage: "analyze".to_string(),
             iteration: 0,
             status: AgentStatus::Active,
@@ -985,6 +1002,7 @@ mod tests {
     #[test]
     fn test_inference_result_fields() {
         let ir = InferenceResult {
+            attempt_id: String::new(),
             response: "Hello".to_string(),
             tool_calls: vec![ToolCall {
                 tool_id: "t1".to_string(),
