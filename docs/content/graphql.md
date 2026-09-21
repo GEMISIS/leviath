@@ -749,7 +749,7 @@ one run with `captureModelInput` on `spawnRun`:
 ```graphql
 mutation {
   spawnRun(input: {
-    blueprint: "coder", task: "fix the parser", workdir: "/work",
+    blueprint: { name: "coder" }, task: "fix the parser", workdir: "/work",
     captureModelInput: true
   }) { run { id status } }
 }
@@ -1033,9 +1033,18 @@ not what it does. None of them is gated, and a read-only client can use them.
 
 `validateBlueprint` reports rather than fails. A manifest that will not install
 comes back `valid: false` with the reasons, because the request to check it
-succeeded. It takes the text as `blueprint: { content: "..." }`, and a `name`
-beside it checks the text as that installed blueprint, so its own scripts
-resolve.
+succeeded. It takes the text as `content`, and a `name` beside it checks the
+text as that installed blueprint, so its own scripts resolve.
+
+```graphql
+{
+  validateBlueprint(content: "[agent]\nname = \"coder\"\n", name: "coder") {
+    valid
+    errors
+    warnings
+  }
+}
+```
 
 A second group changes the machine rather than a run, and `lev serve` opens it
 only with `--allow-admin`: `addMcpServer`, `removeMcpServer`, `putMimeRow` and

@@ -586,18 +586,17 @@ impl Query {
     /// succeeded, and what it found is the answer.
     async fn validate_blueprint(
         &self,
+        #[graphql(desc = "The manifest text to check.")] content: String,
         #[graphql(
-            desc = "The manifest to check, as `content`. A `name` beside it checks the text \
-                    as that installed blueprint, so its own scripts resolve."
+            desc = "Check the text as this installed blueprint, so its own scripts resolve."
         )]
-        blueprint: BlueprintInput,
+        name: Option<String>,
     ) -> async_graphql::Result<ValidationReport> {
-        let definition = blueprint.definition().gql()?;
-        let dir = match definition.name.as_deref() {
+        let dir = match name.as_deref() {
             Some(name) => blueprints::blueprint_dir(name).gql()?,
             None => std::path::PathBuf::new(),
         };
-        let report = super::super::blueprints::validate_manifest_text(&definition.content, &dir);
+        let report = super::super::blueprints::validate_manifest_text(&content, &dir);
         Ok(ValidationReport {
             valid: report.valid,
             errors: report.errors.unwrap_or_default(),

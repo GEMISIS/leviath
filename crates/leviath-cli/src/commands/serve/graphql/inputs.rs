@@ -4,6 +4,10 @@
 //! are what an argument takes in place of a name, so a client that means "the
 //! blueprint I am looking at" can say which revision it means, and a region is
 //! the same shape wherever it is named.
+//!
+//! Both are pure references to something that exists. Manifest text is not a
+//! reference to anything, so an operation that reads text takes it as an
+//! argument of its own.
 
 use async_graphql::InputObject;
 
@@ -11,41 +15,23 @@ use super::super::core::blueprints;
 use super::super::core::error::ServeError;
 use super::super::types::AppState;
 
-/// Which blueprint an operation is about.
+/// Which installed blueprint an operation is about.
 ///
-/// A pointer at an installed blueprint, as `name` with an optional `digest`
-/// pin - or, for an operation that checks a definition rather than pointing at
-/// one, `content` with the manifest text. The two are not combined: text to
-/// check and a blueprint to act on are different things, and an argument
-/// carrying both does not say which the caller meant.
-#[derive(Debug, Default, InputObject)]
+/// The `name` it is installed under, and optionally the `digest` of the
+/// revision the caller means. Nothing else: a reference says which blueprint,
+/// and an operation that also needs a manifest's text takes that text as an
+/// argument of its own.
+#[derive(Debug, InputObject)]
 pub(crate) struct BlueprintInput {
-    /// The installed blueprint's name. Required except where `content` carries a
-    /// manifest to check, and there it scopes the check to that blueprint's own
-    /// directory so its scripts resolve.
-    pub(crate) name: Option<String>,
+    /// The installed blueprint's name.
+    pub(crate) name: String,
     /// The revision the caller believes is installed, as the lowercase hex
     /// SHA-256 on `Blueprint.digest`.
     ///
     /// Optional, and worth sending: a digest that does not match the installed
     /// manifest fails the request rather than acting on a revision the caller
-    /// has not seen. Refused beside `content`, where nothing installed is being
-    /// pointed at.
+    /// has not seen.
     pub(crate) digest: Option<String>,
-    /// The manifest text, for an operation that checks a definition. Refused
-    /// where the operation acts on an installed blueprint, which has its own
-    /// text already.
-    pub(crate) content: Option<String>,
-}
-
-/// A blueprint to check, as `validateBlueprint` reads one.
-#[derive(Debug)]
-pub(crate) struct BlueprintDefinition {
-    /// The manifest text.
-    pub(crate) content: String,
-    /// The installed blueprint whose directory scripts resolve against, when the
-    /// request named one.
-    pub(crate) name: Option<String>,
 }
 
 impl BlueprintInput {
@@ -56,42 +42,11 @@ impl BlueprintInput {
     /// it was: an empty listing or the daemon's own refusal, rather than a walk
     /// of every blueprint directory on the way in.
     pub(crate) async fn installed(self, state: &AppState) -> Result<String, ServeError> {
-        if self.content.is_some() {
-            return Err(ServeError::BadRequest(
-                "`content` is a manifest to check, and this argument acts on an installed \
-                 blueprint; send `name`"
-                    .to_string(),
-            ));
-        }
-        let name = self.name.ok_or_else(|| {
-            ServeError::BadRequest(
-                "a blueprint argument needs `name`: which installed blueprint to act on"
-                    .to_string(),
-            )
-        })?;
         let Some(pinned) = self.digest else {
-            return Ok(name);
+            return Ok(self.name);
         };
-        verify_digest(state, &name, &pinned).await?;
-        Ok(name)
-    }
-
-    /// Read a definition to check, with the blueprint it is checked as.
-    pub(crate) fn definition(self) -> Result<BlueprintDefinition, ServeError> {
-        if self.digest.is_some() {
-            return Err(ServeError::BadRequest(
-                "`digest` pins an installed revision, and a check reads the text it is given; \
-                 send `content` without it"
-                    .to_string(),
-            ));
-        }
-        let content = self.content.ok_or_else(|| {
-            ServeError::BadRequest("a check needs `content`: the manifest text to read".to_string())
-        })?;
-        Ok(BlueprintDefinition {
-            content,
-            name: self.name,
-        })
+        verify_digest(state, &self.name, &pinned).await?;
+        Ok(self.name)
     }
 }
 

@@ -62,6 +62,19 @@ same list.
   The REST run listing is untouched: its query parameters, its filters and its
   cursors are exactly what they were.
 
+- **Breaking, GraphQL clients:** `BlueprintInput` is a pure reference to an
+  installed blueprint - `{ name: String!, digest: String }` - and
+  `validateBlueprint` takes the manifest as arguments of its own:
+  `validateBlueprint(content: String!, name: String)`. A query that sent
+  `blueprint: { content: "..." }` to it becomes `content: "..."`, and a `name`
+  beside it still scopes the check to that installed blueprint's directory so
+  its scripts resolve. `spawnRun`, `scripts`, `tools` and the run filter keep
+  taking `blueprint:`, and what they send is unchanged: a `name`, plus a
+  `digest` to pin the revision. The field is required now, so a reference that
+  names nothing is refused by the schema rather than by the server. The REST
+  routes are untouched: `POST /api/blueprints/validate` takes the same body and
+  answers the same shape.
+
 - `callback_secret` without a `callback_url` is refused rather than accepted and
   dropped. The secret signs the callback body, so a request that sends one and
   no URL is asking for a signed callback that can never fire, and accepting it

@@ -303,6 +303,53 @@ async fn a_spawn_reads_its_input_from_a_variable() {
     .await;
 }
 
+/// A spawn pinned to a revision that is not the installed one is a conflict,
+/// and nothing is started.
+///
+/// The pin is what a client sends to start the blueprint it read rather than
+/// whatever is on disk now, so it has to be checked before the daemon is asked
+/// for anything - which is also why this needs no daemon at all.
+#[tokio::test]
+async fn a_spawn_pinned_to_another_revision_is_a_conflict() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-pinned", |_d| async move {
+        let agents = tempfile::tempdir().expect("a temp dir");
+        let agent = agents.path().join("coder");
+        std::fs::create_dir_all(&agent).expect("the agent dir");
+        std::fs::write(
+            agent.join(leviath_core::files::MANIFEST_FILENAME),
+            "[agent]\nname = \"coder\"\n\n[stages.only]\nmode = \"autonomous\"\n",
+        )
+        .expect("manifest written");
+        let state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
+            .data(state)
+            .finish();
+
+        let answer = schema
+            .execute(Request::new(
+                r#"mutation { spawnRun(input: {
+                     blueprint: { name: "coder",
+                       digest: "0000000000000000000000000000000000000000000000000000000000000000" },
+                     task: "t"
+                   }) { run { id } } }"#,
+            ))
+            .await;
+        let error = answer.errors.first().expect("a refusal");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"CONFLICT\"".to_string()),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("coder"), "{}", error.message);
+    })
+    .await;
+}
+
 /// A spawn this server is configured to refuse says which decision refused it.
 #[tokio::test]
 async fn a_spawn_the_server_refuses_is_forbidden() {
@@ -359,8 +406,8 @@ async fn a_spawn_the_server_refuses_is_forbidden() {
             negative.errors
         );
 
-        // A spawn starts an installed blueprint, so manifest text on the
-        // argument is a request that cannot be honoured either way.
+        // A spawn starts an installed blueprint, and a reference to one says
+        // which name, not what the manifest says.
         let definition = schema
             .execute(Request::new(
                 r#"mutation { spawnRun(input: {
@@ -374,7 +421,7 @@ async fn a_spawn_the_server_refuses_is_forbidden() {
                 .first()
                 .expect("a refusal")
                 .message
-                .contains("`content`"),
+                .contains("unknown field \"content\""),
             "{:?}",
             definition.errors
         );
@@ -1391,8 +1438,8 @@ fn every_input_object_round_trips() {
 
     let spawn = SpawnRunInput {
         blueprint: BlueprintInput {
-            name: Some("coder".to_string()),
-            ..BlueprintInput::default()
+            name: "coder".to_string(),
+            digest: None,
         },
         task: "fix the parser".to_string(),
         model: Some("gpt-5.6".to_string()),
@@ -1421,7 +1468,7 @@ fn every_input_object_round_trips() {
     let Ok(read_back) = SpawnRunInput::parse(Some(spawn.to_value())) else {
         panic!("a spawn input reads back from its own value");
     };
-    assert_eq!(read_back.blueprint.name.as_deref(), Some("coder"));
+    assert_eq!(read_back.blueprint.name, "coder");
     assert_eq!(read_back.max_depth, Some(3));
     assert_eq!(
         read_back.regions.as_ref().map(Vec::len),
@@ -1637,8 +1684,8 @@ fn a_spawn_input_reads_as_a_field_of_another_input() {
 
     let spawn = SpawnRunInput {
         blueprint: BlueprintInput {
-            name: Some("coder".to_string()),
-            ..BlueprintInput::default()
+            name: "coder".to_string(),
+            digest: None,
         },
         task: "fix the parser".to_string(),
         model: None,
@@ -1662,7 +1709,7 @@ fn a_spawn_input_reads_as_a_field_of_another_input() {
         panic!("a spawn input reads back as a carried field");
     };
     assert_eq!(probe.input.task, "fix the parser");
-    assert_eq!(probe.input.blueprint.name.as_deref(), Some("coder"));
+    assert_eq!(probe.input.blueprint.name, "coder");
 
     // And a carried value the reader refuses is refused through the field too.
     let mut broken = IndexMap::new();

@@ -654,37 +654,27 @@ input BlueprintFilter {
 }
 
 """
-Which blueprint an operation is about.
+Which installed blueprint an operation is about.
 
-A pointer at an installed blueprint, as `name` with an optional `digest`
-pin - or, for an operation that checks a definition rather than pointing at
-one, `content` with the manifest text. The two are not combined: text to
-check and a blueprint to act on are different things, and an argument
-carrying both does not say which the caller meant.
+The `name` it is installed under, and optionally the `digest` of the
+revision the caller means. Nothing else: a reference says which blueprint,
+and an operation that also needs a manifest's text takes that text as an
+argument of its own.
 """
 input BlueprintInput {
 	"""
-	The installed blueprint's name. Required except where `content` carries a
-	manifest to check, and there it scopes the check to that blueprint's own
-	directory so its scripts resolve.
+	The installed blueprint's name.
 	"""
-	name: String
+	name: String!
 	"""
 	The revision the caller believes is installed, as the lowercase hex
 	SHA-256 on `Blueprint.digest`.
 	
 	Optional, and worth sending: a digest that does not match the installed
 	manifest fails the request rather than acting on a revision the caller
-	has not seen. Refused beside `content`, where nothing installed is being
-	pointed at.
+	has not seen.
 	"""
 	digest: String
-	"""
-	The manifest text, for an operation that checks a definition. Refused
-	where the operation acts on an installed blueprint, which has its own
-	text already.
-	"""
-	content: String
 }
 
 """
@@ -5239,9 +5229,13 @@ type Query {
 	"""
 	validateBlueprint(
 		"""
-		The manifest to check, as `content`. A `name` beside it checks the text as that installed blueprint, so its own scripts resolve.
+		The manifest text to check.
 		"""
-		blueprint: BlueprintInput!
+		content: String!,
+		"""
+		Check the text as this installed blueprint, so its own scripts resolve.
+		"""
+		name: String
 	): ValidationReport!
 	"""
 	Whether a provider key looks like one of that provider's.

@@ -307,19 +307,41 @@ async fn an_export_takes_the_filter_unpaged() {
     assert!(refused.to_string().contains("at most"), "{refused}");
 }
 
-/// A blueprint argument that a listing cannot act on is refused where it is
-/// read, before a single run is looked at.
+/// A blueprint reference pinned to a revision that is not the installed one is
+/// refused where it is read, before a single run is looked at.
+///
+/// Runs are matched by the name they recorded, whatever is installed now, so
+/// the pin is the only thing that tells a client asking for "this agent's runs"
+/// that the agent has been edited under it.
 #[tokio::test]
-async fn a_blueprint_reference_that_names_nothing_is_refused() {
-    let state = state_with_agent_paths(Vec::new());
-    let nameless = RunFilter {
-        blueprint: Some(BlueprintInput::default()),
-        ..Default::default()
-    }
-    .selection(&state, 50)
-    .await
-    .expect_err("a filter has to say which blueprint");
-    assert!(nameless.to_string().contains("`name`"), "{nameless}");
+async fn a_stale_blueprint_pin_is_refused_before_anything_is_read() {
+    let agents = tempfile::tempdir().expect("a temp agents dir");
+    let dir = agents.path().join("drifted");
+    std::fs::create_dir_all(&dir).expect("the agent directory");
+    std::fs::write(
+        dir.join(leviath_core::files::MANIFEST_FILENAME),
+        "[agent]\nname = \"drifted\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
+         [stages.only]\nmode = \"autonomous\"\n",
+    )
+    .expect("the manifest is written");
+    let stale = "0".repeat(64);
+
+    crate::commands::serve::blueprints::TEST_AGENTS_DIR
+        .scope(agents.path().to_path_buf(), async move {
+            let state = state_with_agent_paths(Vec::new());
+            let drifted = RunFilter {
+                blueprint: Some(BlueprintInput {
+                    name: "drifted".to_string(),
+                    digest: Some(stale),
+                }),
+                ..Default::default()
+            }
+            .selection(&state, 50)
+            .await
+            .expect_err("the pin is stale");
+            assert!(drifted.to_string().contains("drifted"), "{drifted}");
+        })
+        .await;
 }
 
 // ─── the matcher ────────────────────────────────────────────────────────────

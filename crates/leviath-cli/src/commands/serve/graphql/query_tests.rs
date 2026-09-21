@@ -71,52 +71,91 @@ fn ids_of(data: &async_graphql::Value, field: &str) -> Vec<String> {
         .collect()
 }
 
-/// A blueprint argument that a field cannot act on is refused where it is
-/// read, before a single directory is walked.
+/// A blueprint reference the schema cannot read is refused before the query
+/// runs at all.
 ///
-/// Every field that takes one refuses the same two shapes, so they are checked
-/// together: manifest text, which is a definition rather than a pointer, and no
-/// name at all.
+/// Every field that takes one takes the same reference, so they are checked
+/// together: a reference says which installed blueprint, and manifest text is
+/// not part of saying that.
 #[tokio::test]
-async fn a_blueprint_argument_that_names_nothing_is_refused() {
+async fn a_blueprint_reference_the_schema_cannot_read_is_refused() {
     for query in [
         r#"{ tools(blueprint: { content: "[agent]" }) { tools { name } } }"#,
         r#"{ scripts(blueprint: { content: "[agent]" }) { name } }"#,
         r#"{ tools(blueprint: {}) { tools { name } } }"#,
         r#"{ scripts(blueprint: {}) { name } }"#,
+        r#"{ runs(filter: { blueprint: {} }) { edges { node { id } } } }"#,
     ] {
         let answer = run_query(query).await;
         let error = answer.errors.first().expect("a refusal");
-        assert_eq!(
-            error
-                .extensions
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .map(ToString::to_string),
-            Some("\"BAD_USER_INPUT\"".to_string()),
+        assert!(
+            error.message.contains("blueprint"),
             "{query}: {}",
             error.message
         );
     }
 }
 
-/// A check needs the text to check, and a pin has nothing to pin against it.
+/// A stale pin is refused wherever a blueprint reference is read, before a
+/// single directory is walked.
+///
+/// The pin is checked by the reference itself, so one blueprint installed under
+/// a known digest answers for every field that takes one.
+#[tokio::test]
+async fn a_stale_blueprint_pin_is_refused_wherever_a_reference_is_read() {
+    let agents = tempfile::tempdir().expect("a temp agents dir");
+    let dir = agents.path().join("drifted");
+    std::fs::create_dir_all(&dir).expect("the agent directory");
+    std::fs::write(
+        dir.join(leviath_core::files::MANIFEST_FILENAME),
+        manifest_text("drifted", "1.0.0"),
+    )
+    .expect("the manifest is written");
+    let stale = "0".repeat(64);
+
+    crate::commands::serve::blueprints::TEST_AGENTS_DIR
+        .scope(agents.path().to_path_buf(), async move {
+            for query in [
+                format!(
+                    r#"{{ tools(blueprint: {{ name: "drifted", digest: "{stale}" }})
+                         {{ tools {{ name }} }} }}"#
+                ),
+                format!(
+                    r#"{{ scripts(blueprint: {{ name: "drifted", digest: "{stale}" }})
+                         {{ name }} }}"#
+                ),
+            ] {
+                let answer = run_query(&query).await;
+                let error = answer.errors.first().expect("a refusal");
+                assert_eq!(
+                    error
+                        .extensions
+                        .as_ref()
+                        .and_then(|e| e.get("code"))
+                        .map(ToString::to_string),
+                    Some("\"CONFLICT\"".to_string()),
+                    "{query}: {}",
+                    error.message
+                );
+            }
+        })
+        .await;
+}
+
+/// A check needs the text to check, and takes nothing that points elsewhere.
 #[tokio::test]
 async fn validating_a_blueprint_with_no_text_is_refused() {
-    for (query, field) in [
-        (
-            r#"query { validateBlueprint(blueprint: { name: "coder" }) { valid } }"#,
-            "`content`",
-        ),
-        (
-            r#"query { validateBlueprint(blueprint: { content: "[agent]",
-                 digest: "abc" }) { valid } }"#,
-            "`digest`",
-        ),
+    for query in [
+        r#"query { validateBlueprint(name: "coder") { valid } }"#,
+        r#"query { validateBlueprint(content: "[agent]", digest: "abc") { valid } }"#,
     ] {
         let answer = run_query(query).await;
         let error = answer.errors.first().expect("a refusal");
-        assert!(error.message.contains(field), "{query}: {}", error.message);
+        assert!(
+            error.message.contains("validateBlueprint"),
+            "{query}: {}",
+            error.message
+        );
     }
 }
 
@@ -2157,8 +2196,8 @@ fn manifest_text(name: &str, version: &str) -> String {
 
 // ─── The four pure checks ─────────────────────────────────────────────────────
 //
-// Query fields, not mutations: text in, verdict out. Each used to sit beside
-// the write it precedes, which is where it appears in a form, not what it does.
+// Query fields, not mutations: text in, verdict out. Each one sits beside the
+// write it precedes, which is where it appears in a form, not what it does.
 
 /// Validation reports what it found. A manifest that will not install is a
 /// report with the reasons, not a failed request.
@@ -2169,7 +2208,7 @@ async fn validation_reports_rather_than_fails() {
             .replace('\n', "\\n")
             .replace('"', "\\\"");
         let answer = run_query(&format!(
-            r#"query {{ validateBlueprint(blueprint: {{ content: "{good}" }}) {{ valid errors warnings }} }}"#
+            r#"query {{ validateBlueprint(content: "{good}") {{ valid errors warnings }} }}"#
         ))
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -2180,10 +2219,9 @@ async fn validation_reports_rather_than_fails() {
             Some(0)
         );
 
-        let bad = run_query(
-            r#"query { validateBlueprint(blueprint: { content: "not a manifest" }) { valid errors } }"#,
-        )
-        .await;
+        let bad =
+            run_query(r#"query { validateBlueprint(content: "not a manifest") { valid errors } }"#)
+                .await;
         assert!(bad.errors.is_empty(), "a finding is not a request failure");
         let json = serde_json::to_value(&bad.data).expect("data serializes");
         assert_eq!(json["validateBlueprint"]["valid"], false);
@@ -2332,7 +2370,7 @@ async fn a_yolo_profile_decides_about_one_call() {
 async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let report = run_query(
-            r#"query { validateBlueprint(blueprint: { content: "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\nentry_stage = \"nope\"\n\n[stages.only]\nmode = \"autonomous\"\n" })
+            r#"query { validateBlueprint(content: "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\nentry_stage = \"nope\"\n\n[stages.only]\nmode = \"autonomous\"\n")
                  { valid errors warnings } }"#,
         )
         .await;
@@ -2356,8 +2394,8 @@ async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
 async fn validating_against_an_agent_refuses_a_name_that_could_escape() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let answer = run_query(
-            r#"query { validateBlueprint(blueprint: { content: "[agent]\nname = \"x\"\n",
-                 name: "../elsewhere" }) { valid } }"#,
+            r#"query { validateBlueprint(content: "[agent]\nname = \"x\"\n",
+                 name: "../elsewhere") { valid } }"#,
         )
         .await;
         let error = answer.errors.first().expect("a refusal");
