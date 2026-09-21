@@ -407,8 +407,18 @@ type Blueprint implements Node {
 	description: String!
 	"""
 	The stage a run starts in. Defaults to the first stage declared.
+	
+	Null for a blueprint that declares no stages, and for one whose
+	`entry_stage` names a stage it does not declare, which `lev validate`
+	refuses and the daemon will not spawn. `entryStageName` is the name it
+	wrote.
 	"""
 	entryStage: Stage
+	"""
+	The name the manifest gave as its entry stage, verbatim. Null where it
+	names none, which starts the run in the first stage declared.
+	"""
+	entryStageName: String
 	"""
 	How deep sub-agent spawning may nest.
 	"""
@@ -426,11 +436,14 @@ type Blueprint implements Node {
 	"""
 	stages: [Stage!]!
 	"""
-	One entry per declared context region.
+	One entry per context region the blueprint declares run-wide.
+	
+	A stage may declare a layout of its own on top of this, and those regions
+	are on `Stage.context.regions` rather than here.
 	"""
 	regions: [Region!]!
 	"""
-	Paths this agent declares it needs beyond its workdir. Declaring is not
+	Paths this blueprint declares it needs beyond its workdir. Declaring is not
 	granting: an entry takes effect only where the host grants it.
 	"""
 	readPaths: [String!]!
@@ -440,8 +453,8 @@ type Blueprint implements Node {
 	"""
 	dependencies: [BlueprintDependency!]!
 	"""
-	The mime rows this blueprint ships, so an agent that works in a file type
-	the machine has never heard of carries the row that describes it.
+	The mime rows this blueprint ships, so one that works in a file type the
+	machine has never heard of carries the row that describes it.
 	"""
 	mimeTypes: [BlueprintMimeRow!]!
 	"""
@@ -450,7 +463,7 @@ type Blueprint implements Node {
 	"""
 	security: BlueprintSecurity
 	"""
-	Where this agent's tools run, unless a stage says otherwise. Null leaves
+	Where this blueprint's tools run, unless a stage says otherwise. Null leaves
 	the machine's own setting.
 	"""
 	sandbox: SandboxConfig
@@ -465,7 +478,7 @@ type Blueprint implements Node {
 	"""
 	compaction: CompactionConfig
 	"""
-	Keeping the files this agent reads and writes in one region, so a tool
+	Keeping the files this blueprint's runs read and write in one region, so a tool
 	result can point at the region rather than repeating the file.
 	"""
 	fileTracking: FileTrackingConfig
@@ -475,17 +488,17 @@ type Blueprint implements Node {
 	"""
 	repetitionDetection: RepetitionDetection
 	"""
-	What this agent would like to run without being asked. A request rather
+	What this blueprint would like to run without being asked. A request rather
 	than a grant: the machine's own policy decides, and this is what an
 	operator reads when deciding whether to write it in.
 	"""
 	safeCommands: SafeCommands
 	"""
-	The shape this agent's answer takes, unless a stage narrows it.
+	The shape this blueprint's answer takes, unless a stage narrows it.
 	"""
 	output: OutputSpec
 	"""
-	How this agent's context maps onto another's, for a handoff to a
+	How this blueprint's context maps onto another's, for a handoff to a
 	different blueprint.
 	"""
 	transforms: [ContextTransform!]!
@@ -538,7 +551,7 @@ type BlueprintDependency {
 	"""
 	remedy: String
 	"""
-	One line on why the agent needs it.
+	One line on why the blueprint needs it.
 	"""
 	description: String
 	"""
@@ -579,6 +592,40 @@ type BlueprintEdge {
 	Cursor for this edge.
 	"""
 	cursor: Cursor!
+}
+
+"""
+Which blueprint an operation is about.
+
+A pointer at an installed blueprint, as `name` with an optional `digest`
+pin - or, for an operation that checks a definition rather than pointing at
+one, `content` with the manifest text. The two are not combined: text to
+check and a blueprint to act on are different things, and an argument
+carrying both does not say which the caller meant.
+"""
+input BlueprintInput {
+	"""
+	The installed blueprint's name. Required except where `content` carries a
+	manifest to check, and there it scopes the check to that blueprint's own
+	directory so its scripts resolve.
+	"""
+	name: String
+	"""
+	The revision the caller believes is installed, as the lowercase hex
+	SHA-256 on `Blueprint.digest`.
+	
+	Optional, and worth sending: a digest that does not match the installed
+	manifest fails the request rather than acting on a revision the caller
+	has not seen. Refused beside `content`, where nothing installed is being
+	pointed at.
+	"""
+	digest: String
+	"""
+	The manifest text, for an operation that checks a definition. Refused
+	where the operation acts on an installed blueprint, which has its own
+	text already.
+	"""
+	content: String
 }
 
 """
@@ -801,7 +848,7 @@ type ChildEdge {
 The model that summarizes a region when it fills.
 
 Its own model on purpose: compaction is cheap, frequent and not the work, so
-an agent running on an expensive model usually summarizes on a small one.
+a run on an expensive model usually summarizes on a small one.
 """
 type CompactionConfig {
 	"""
@@ -1210,8 +1257,8 @@ enum ContextCause {
 	"""
 	SEED
 	"""
-	A message delivered into the running agent, landing in the region that
-	accepts messages.
+	A message delivered into the run while it runs, landing in the region
+	that accepts messages.
 	"""
 	MESSAGE
 	"""
@@ -1273,35 +1320,60 @@ enum ContextCause {
 }
 
 """
-One change to one region, as the journal recorded it.
+One committed transaction against a run's context window.
 
-No content: the window recorded on the same tick already holds the text, so
-repeating it here would double the journal to say nothing new. Read this
-beside `contextHistory` when the text matters.
+A transaction, not a write: a compaction summarises one region and empties
+another, a stage edge clears four, a resume rebuilds every region there is.
+All of those are one change here, with `regions` carrying each region it
+touched - so a region that lost its plan can be read beside whatever moved
+with it.
+
+`revisionBefore` and `revisionAfter` anchor it to exact content rather than to
+a moment: they are the revisions of `contextSnapshot`, so a transaction says
+which window it started from and which one it produced.
 """
 type ContextChange {
 	"""
-	The region that changed.
-	"""
-	region: String!
-	"""
-	What changed it.
+	What made the change.
 	"""
 	cause: ContextCause!
 	"""
-	Entries the change added.
+	The window's revision before the transaction, as `contextSnapshot` takes
+	it. Null on a change a build that named no window wrote.
 	"""
-	entriesAdded: Int!
+	revisionBefore: String
 	"""
-	Entries it removed, including any eviction the change itself triggered.
+	The window's revision after it. Null on the same changes.
 	"""
-	entriesRemoved: Int!
+	revisionAfter: String
 	"""
-	How the region's token count moved. Negative when the region shrank.
+	The tool execution that committed it, by `ToolExecution.id`.
+	
+	Null means the journal recorded no execution for this change, which is
+	every change made outside a tool call: the model's own reply landing in
+	the conversation, a compaction, a stage-edge transform, a resume, a
+	framework nudge. It is also null throughout a journal written by a build
+	that did not record the connection.
+	
+	A call the dispatcher answers without the tool lane - a `context_*` tool,
+	a refusal, a gate denial - is journaled as a dispatch like any other, so
+	an id here names an execution `executions` lists.
 	"""
-	tokenDelta: BigInt!
+	executionId: String
 	"""
-	When the change landed.
+	Every region the transaction touched, in the order the write path named
+	them.
+	"""
+	regions: [RegionTransition!]!
+	"""
+	Where in the run's journal the record that carries this change sits.
+	
+	A byte offset. It only climbs within a run and never changes, so it orders
+	changes and names one for as long as the run exists.
+	"""
+	journalPosition: BigInt!
+	"""
+	When the transaction committed.
 	"""
 	at: Timestamp!
 }
@@ -1580,6 +1652,9 @@ type ContextSnapshotPoint {
 	"""
 	The window itself. Region contents are their own field, so asking for the
 	shape of a hundred windows does not read a hundred windows' text.
+	
+	Its `revision` is this point's stable name: pass it to `contextSnapshot`
+	to come back to exactly this content, whatever the run does next.
 	"""
 	window: ContextWindow!
 }
@@ -1587,7 +1662,7 @@ type ContextSnapshotPoint {
 """
 How this blueprint's context maps onto another's.
 
-What a handoff needs: two agents with different memory structures cannot
+What a handoff needs: two blueprints with different memory structures cannot
 simply pass a context along, so the blueprint that hands off says which of
 its regions becomes which of the other's.
 
@@ -1633,6 +1708,24 @@ type ContextUpdated {
 }
 
 type ContextWindow {
+	"""
+	This window's revision: a content address of what it holds.
+	
+	Derived from the window's contents and budgets, so it names one window for
+	ever. Two guarantees follow, and the whole point of the field is that you
+	may rely on both. A revision you hold always means the same content: no
+	later write can change what it refers to, because a write produces a
+	*different* revision. And `contextSnapshot(revision:)` resolves one to
+	exactly that content, never to whatever the run holds now.
+	
+	It is the same value `ContextChange.revisionBefore` and `revisionAfter`
+	carry, so a change joins to the windows either side of it.
+	
+	Two points holding identical contents share a revision - that is what
+	content addressing means. The stage the run was in is not part of it:
+	`stageName` and `ContextSnapshotPoint.at` say where and when.
+	"""
+	revision: String!
 	"""
 	Tokens held across every region: what the next request costs before the
 	model's reply.
@@ -1952,7 +2045,7 @@ type DirectiveEntry {
 	"""
 	What the stage is told to do next. It re-runs in place rather than
 	transitioning, so the decision is the runtime's and the work is the
-	agent's.
+	run's.
 	"""
 	instruction: String!
 }
@@ -2218,12 +2311,6 @@ type EventsDropped {
 	count: BigInt!
 }
 
-"""
-What a stage's fan-out splits into, and how.
-
-Only a `FAN_OUT` stage has one. Every other mode answers null, rather than a
-block of defaults nobody wrote.
-"""
 type FanOut {
 	"""
 	A separate installed blueprint run as the worker, by name. It has to be
@@ -2232,19 +2319,36 @@ type FanOut {
 	"""
 	workerAgent: String
 	"""
-	A stage of this same blueprint run as the worker, by name. That stage has
-	to allow it.
+	A stage of this same blueprint run as the worker. That stage has to allow
+	it.
+	
+	Null when the fan-out runs a separate blueprint or a query instead, and
+	also when it names a stage this blueprint does not declare, which
+	`lev validate` refuses and the daemon will not spawn.
+	`workerStageName` tells those apart.
 	"""
-	workerStage: String
+	workerStage: Stage
 	"""
-	A description matched against the installed agents, when the manifest
+	The stage name the fan-out wrote for its worker, verbatim. Null when it
+	names no stage of this blueprint.
+	"""
+	workerStageName: String
+	"""
+	A description matched against the installed blueprints, when the manifest
 	would rather describe the worker than name it.
 	"""
 	workerQuery: String
 	"""
-	The stage that reconciles what the workers sent back, by name.
+	The stage that reconciles what the workers sent back.
+	
+	Null when the fan-out names none, and also when it names a stage this
+	blueprint does not declare. `mergeStageName` tells those apart.
 	"""
-	mergeStage: String
+	mergeStage: Stage
+	"""
+	The merge stage's name, verbatim. Null when the fan-out names none.
+	"""
+	mergeStageName: String
 	"""
 	The prompt that produces the work items.
 	"""
@@ -2271,11 +2375,18 @@ type FanOut {
 	"""
 	onWorkerFailure: WorkerFailurePolicy!
 	"""
-	The region the consolidated report is written to, by name. Null means the
-	conversation, which is a sliding window, so a bulky report is worth its
-	own region and its own budget.
+	The region the consolidated report is written to.
+	
+	Null where the fan-out names none, which means the conversation - a
+	sliding window, so a bulky report is worth its own region and its own
+	budget - and also where it names a region no layout declares.
+	`resultsRegionName` tells those apart.
 	"""
-	resultsRegion: String
+	resultsRegion: Region
+	"""
+	The results region's name, verbatim. Null when the fan-out names none.
+	"""
+	resultsRegionName: String
 }
 
 """
@@ -2436,17 +2547,18 @@ enum FileSource {
 	WORKDIR
 }
 
-"""
-Keeping the files a run reads and writes in one region.
-
-So a tool result can point at the region rather than repeating a file the
-context already holds.
-"""
 type FileTrackingConfig {
 	"""
-	The key-value region the files are synced to, by name.
+	The key-value region the files are synced to.
+	
+	Null where no layout in this blueprint declares that name, which is file
+	tracking with nowhere to write. `regionName` carries the name either way.
 	"""
-	region: String!
+	region: Region
+	"""
+	The region name the blueprint wrote, verbatim.
+	"""
+	regionName: String!
 	"""
 	Whether a read updates it.
 	"""
@@ -2525,7 +2637,7 @@ A custom model gateway from `[model_providers]`.
 """
 type Gateway {
 	"""
-	The name an agent references, and the table key.
+	The name a blueprint references, and the table key.
 	"""
 	name: String!
 	"""
@@ -2547,7 +2659,7 @@ A custom model gateway to write into the config.
 """
 input GatewayInput {
 	"""
-	The name an agent references, and the table key.
+	The name a blueprint references, and the table key.
 	"""
 	name: String!
 	"""
@@ -2727,7 +2839,7 @@ type InferenceFailover {
 	"""
 	stage: String!
 	"""
-	The stage-local iteration, which the move leaves alone: the agent still
+	The stage-local iteration, which the move leaves alone: the run still
 	has not had a turn.
 	"""
 	iteration: Int!
@@ -3016,9 +3128,6 @@ type InteractionPayload {
 	accepted: Boolean!
 }
 
-"""
-A checkpoint a stage raises, where the run waits for a person.
-"""
 type InteractionPoint {
 	"""
 	The point's name, unique within the stage.
@@ -3048,7 +3157,8 @@ type InteractionPoint {
 	options: [String!]!
 	"""
 	Options that send the stage back round with an instruction instead of
-	letting it transition.
+	letting it transition, sorted by option so two reads of one blueprint
+	cannot disagree about the order.
 	"""
 	directives: [DirectiveEntry!]!
 	"""
@@ -3061,11 +3171,18 @@ type InteractionPoint {
 	"""
 	editOptions: [String!]!
 	"""
-	The region holding this point's authoritative document, by name. Each
-	time the point is raised, the current document replaces that region, so a
-	later revision builds on the current version rather than starting over.
+	The region holding this point's authoritative document. Each time the
+	point is raised, the current document replaces that region, so a later
+	revision builds on the current version rather than starting over.
+	
+	Null when the point names none, and also when it names a region no layout
+	in this blueprint declares. `documentRegionName` tells those apart.
 	"""
-	documentRegion: String
+	documentRegion: Region
+	"""
+	The document region's name, verbatim. Null when the point names none.
+	"""
+	documentRegionName: String
 }
 
 """
@@ -3137,6 +3254,70 @@ define, so this appears only where a manifest or a model chose the shape and
 inventing one here would mean dropping whatever did not fit.
 """
 scalar JSON
+
+"""
+What the daemon has recorded about its runs, and what it has lost.
+
+A daemon that cannot write a run's journal answers every request and reports
+every lane as idle, so this is the only field that says so. A run whose
+journal record cannot be written is failed, rather than carried on with a
+history that cannot record what it did.
+"""
+type JournalHealth {
+	"""
+	Whether every write the daemon has attempted reached the disk. Once
+	something has been lost this stays false for the life of the daemon: a
+	record that went missing does not come back.
+	"""
+	healthy: Boolean!
+	"""
+	Journal records the daemon has tried to append.
+	"""
+	appendsAttempted: BigInt!
+	"""
+	Those it could not write, retry included. Each one is something a run did
+	that its journal does not mention.
+	"""
+	appendsFailed: BigInt!
+	"""
+	Snapshot writes that lost at least one file. A snapshot is rewritten
+	whole whenever the run changes, so these cost freshness rather than
+	history.
+	"""
+	snapshotsFailed: BigInt!
+	"""
+	How many messages the persistence lane took in one go the last time it
+	looked. A large number means runs are queueing behind the disk.
+	"""
+	queueDepth: Int!
+	"""
+	The most recent write the daemon lost, with the run and the file. Null
+	while nothing has been lost.
+	"""
+	lastError: JournalWriteError
+}
+
+"""
+One write the daemon attempted and lost.
+"""
+type JournalWriteError {
+	"""
+	The run whose write it was.
+	"""
+	runId: String!
+	"""
+	The file that could not be written, as the daemon resolved it.
+	"""
+	path: String!
+	"""
+	What the operating system said about it.
+	"""
+	message: String!
+	"""
+	When it happened.
+	"""
+	at: Timestamp!
+}
 
 """
 Whether a key looks like one of that provider's.
@@ -3916,7 +4097,7 @@ type Mutation {
 		"""
 		Deliver into this context region instead of the default one.
 		"""
-		targetRegion: String
+		targetRegion: RegionInput
 	): RunPayload!
 	"""
 	Install a blueprint.
@@ -4202,7 +4383,7 @@ type Mutation {
 		"""
 		Install the bundled blueprints.
 		"""
-		agents: Boolean! = true,
+		blueprints: Boolean! = true,
 		"""
 		Respell keys that changed name in your own blueprints.
 		"""
@@ -4394,7 +4575,7 @@ A slot rather than a file: this is what the blueprint asked for, and a run's
 """
 type OutputArtifact {
 	"""
-	The name the agent hands it back under.
+	The name the run hands it back under.
 	"""
 	name: String!
 	"""
@@ -4424,9 +4605,6 @@ type OutputRequirement {
 	reasks: Int!
 }
 
-"""
-Where the parts a stage produces are written, by mime pattern.
-"""
 type OutputRoute {
 	"""
 	The mime pattern this rule matches: `image/png`, `image/*` or `*/*`. The
@@ -4434,9 +4612,17 @@ type OutputRoute {
 	"""
 	pattern: String!
 	"""
-	The region matching parts are written to, by name.
+	The region matching parts are written to.
+	
+	Null where no layout in this blueprint declares that name, which is a
+	route whose parts would land nowhere: `lev validate` refuses it and the
+	daemon will not spawn it. `regionName` carries the name either way.
 	"""
-	region: String!
+	region: Region
+	"""
+	The region name the route was written with, verbatim.
+	"""
+	regionName: String!
 }
 
 """
@@ -4639,7 +4825,7 @@ type Query {
 		"""
 		Only this blueprint's own scripts, plus the global ones.
 		"""
-		blueprint: String
+		blueprint: BlueprintInput
 	): [Script!]!
 	"""
 	The directories under a path, for a file picker.
@@ -4684,7 +4870,7 @@ type Query {
 	"""
 	providers: [Provider!]!
 	"""
-	The tools an agent on this machine can call.
+	The tools a run on this machine can call.
 	
 	Scoped to one blueprint's own directory when `blueprint` names one,
 	which is what an editor offering an `available_tools` list wants.
@@ -4693,7 +4879,7 @@ type Query {
 		"""
 		Scope to this blueprint's own tools directory.
 		"""
-		blueprint: String
+		blueprint: BlueprintInput
 	): ToolInventory!
 	"""
 	Who is on the other end of the control socket.
@@ -4703,6 +4889,20 @@ type Query {
 	not mean requests fail, it means the live frames have stopped.
 	"""
 	daemon: DaemonStatus!
+	"""
+	Whether the daemon is still recording what its runs do.
+	
+	Null when the daemon cannot be reached, because this is the daemon's own
+	reading and no other copy of it exists - `daemon.reachable` says whether
+	that is why. Everything else about a run is read from disk and keeps
+	working while the daemon is down; this does not.
+	
+	Worth asking on any page that shows runs as healthy. A daemon whose
+	journal is refusing writes serves every field here exactly as it did
+	before, and a run whose journal record cannot be written is failed rather
+	than carried on.
+	"""
+	journal: JournalHealth
 	"""
 	What an update would do, and whether there is anything newer to get.
 	
@@ -4808,13 +5008,9 @@ type Query {
 	"""
 	validateBlueprint(
 		"""
-		The manifest text to check.
+		The manifest to check, as `content`. A `name` beside it checks the text as that installed blueprint, so its own scripts resolve.
 		"""
-		manifest: String!,
-		"""
-		Check it as this installed blueprint, so its own scripts resolve.
-		"""
-		blueprint: String
+		blueprint: BlueprintInput!
 	): ValidationReport!
 	"""
 	Whether a provider key looks like one of that provider's.
@@ -4840,7 +5036,7 @@ type Query {
 	"""
 	Whether a script compiles, without writing it.
 	
-	The alternative was saving it and waiting for an agent to fail, which is
+	The alternative was saving it and waiting for a run to fail, which is
 	not much of an improvement on editing the file over SSH. Ungated:
 	compiling text in memory writes nothing and runs nothing, because every
 	compiler here stops at the syntax tree.
@@ -4941,9 +5137,20 @@ type ReadFilesCall implements ToolCall {
 
 type Region {
 	"""
-	Region name, unique within the blueprint.
+	Region name, unique within the layout that declares it.
 	"""
 	name: String!
+	"""
+	The stage whose own `[context.regions]` declares this region. Null for a
+	region the blueprint declares run-wide, which is every region in
+	`Blueprint.regions`.
+	
+	A stage may declare a layout of its own, and a name resolved from
+	anywhere in the manifest can land in one of those. This says where the
+	declaration was read from, so a client can tell a run-wide region from
+	one only a single stage sets up.
+	"""
+	declaredByStage: Stage
 	"""
 	What the region does when it fills.
 	"""
@@ -5013,7 +5220,7 @@ type Region {
 	accepts: [String!]!
 	"""
 	What fills this region before the first inference. Null means it starts
-	empty, for the agent to fill.
+	empty, for the run to fill.
 	"""
 	seed: RegionSeed
 	"""
@@ -5037,9 +5244,21 @@ type Region {
 	"""
 	thresholdTokens: Int
 	"""
-	The compacting region whose summaries land here, by name.
+	The compacting region whose summaries land here.
+	
+	Null for every kind but `COMPACT_HISTORY`, and also where the name this
+	region was given is one no layout in the blueprint declares, which is a
+	history region nothing will ever write to. Read `sourceRegionName` to
+	tell those two apart.
 	"""
-	sourceRegion: String
+	sourceRegion: Region
+	"""
+	The name this region's `source_region` was given, verbatim.
+	
+	Null for every kind but `COMPACT_HISTORY`. Set beside a null
+	`sourceRegion` when the name matches no layout in the blueprint.
+	"""
+	sourceRegionName: String
 	"""
 	The most keys a key-value region holds.
 	"""
@@ -5069,18 +5288,36 @@ enum RegionAdmission {
 	REJECT
 }
 
-"""
-A region and the fewest entries it must hold.
-"""
 type RegionEntryRequirement {
 	"""
-	The region counted, by name.
+	The region counted.
+	
+	Null where no layout in this blueprint declares that name.
+	`regionName` carries the name either way.
 	"""
-	region: String!
+	region: Region
+	"""
+	The region name the gate wrote, verbatim.
+	"""
+	regionName: String!
 	"""
 	The fewest entries that satisfy the gate.
 	"""
 	atLeast: Int!
+}
+
+"""
+One context region, by name.
+
+An object rather than a string so a region reads the same on the way in as it
+does on the way out, and so a later field can be added to it without changing
+the argument's type.
+"""
+input RegionInput {
+	"""
+	The region's name, as the blueprint declares it.
+	"""
+	name: String!
 }
 
 """
@@ -5131,6 +5368,10 @@ enum RegionKind {
 
 """
 One region's route into another blueprint's layout.
+
+Both regions are names. Each belongs to a blueprint the mapping names rather
+than to this one, and the receiving blueprint has to be installed for the
+handoff to happen at all, so neither side has a declaration to read here.
 """
 type RegionMapping {
 	"""
@@ -5168,20 +5409,20 @@ type RegionPeak {
 """
 What fills a region before the first inference.
 
-A region with no seed starts empty and is filled by the agent. A union rather
+A region with no seed starts empty and is filled by the run. A union rather
 than one object with a field per source: a seed has exactly one source, and a
 bag of nullable fields would admit combinations no manifest can express.
 """
 union RegionSeed = SeedFromCaller | SeedFromGlob | SeedFromFiles | SeedFromLiteral | SeedFromScript | SeedFromCommand | SeedFromTools
 
 """
-Seed text for one named context region at spawn.
+Seed text for one context region at spawn.
 """
 input RegionSeedInput {
 	"""
-	The region to seed, by name.
+	The region to seed.
 	"""
-	region: String!
+	region: RegionInput!
 	"""
 	The text it starts with.
 	"""
@@ -5209,6 +5450,75 @@ enum RegionStrategy {
 	The oldest entries are summarized into one, `compactCount` at a time.
 	"""
 	COMPACT
+}
+
+"""
+What one committed change did to one region.
+
+No content: the window recorded on the same tick already holds the text, so
+repeating it here would double the journal to say nothing new. The digests are
+what tell you whether you need to go and read it - `digestBefore` equal to
+`digestAfter` means this region ended the transaction holding exactly what it
+started with.
+"""
+type RegionTransition {
+	"""
+	The region this part of the transaction touched, by the name it carries
+	in the run's window.
+	
+	A name rather than a `Region`, because the window is not the manifest.
+	The runtime carries `conversation`, `tool_results`, `final_output` and
+	`stage_instructions` whether a blueprint declares them or not, and those
+	are the regions that move most, so a manifest lookup would answer nothing
+	for the common case. Join on `contextHistory`'s `ContextRegion.name` for
+	what the region held, and on `blueprint { regions { name } }` for what
+	the author declared.
+	"""
+	region: String!
+	"""
+	A content address of what it held before the change. Compare it with
+	`digestAfter`, and with the same region in another transaction; nothing
+	else is promised about the value.
+	
+	Null on a change a build that recorded one region at a time wrote, which
+	digested nothing.
+	"""
+	digestBefore: String
+	"""
+	A content address of what it held afterwards. Null on the same changes.
+	"""
+	digestAfter: String
+	"""
+	What it held before, in tokens. Null on a change that recorded only how
+	the count moved.
+	"""
+	tokensBefore: BigInt
+	"""
+	What it held afterwards. Null on the same changes.
+	"""
+	tokensAfter: BigInt
+	"""
+	How its token count moved. Negative when the region shrank.
+	"""
+	tokenDelta: BigInt!
+	"""
+	How many entries it held before. Null on a change that recorded only the
+	counts it moved.
+	"""
+	entriesBefore: Int
+	"""
+	How many it held afterwards. Null on the same changes.
+	"""
+	entriesAfter: Int
+	"""
+	Entries the change itself pushed. Not derivable from the counts either
+	side: a write into a full sliding region leaves the count where it was.
+	"""
+	entriesAdded: Int!
+	"""
+	Entries that left, including any eviction the change itself triggered.
+	"""
+	entriesRemoved: Int!
 }
 
 """
@@ -5679,14 +5989,19 @@ type Run implements Node {
 		after: Cursor
 	): InferenceAttemptConnection!
 	"""
-	Why each of this run's regions changed, in the order the changes landed,
-	paged.
+	Every committed change to this run's context window, in the order they
+	landed, paged.
 	
 	`contextHistory` serves the window snapshots: what every region held at
-	each point. This serves the reasons: which path through the runtime moved
-	a region, so one that lost its plan to a compaction reads differently
-	from one a stage-edge transform cleared and one the model deleted. No
-	content, since the snapshot on the same tick already holds the text.
+	each point. This serves the changes: which path through the runtime moved
+	the window, so a region that lost its plan to a compaction reads
+	differently from one a stage-edge transform cleared and one the model
+	deleted. No content, since the snapshot on the same tick already holds the
+	text.
+	
+	Each entry is one transaction, which may touch several regions, and names
+	the window's revision either side of it - so `contextSnapshot` takes you
+	to exactly what it started from and what it produced.
 	
 	Empty for a run whose journal holds no change records, and for writes
 	whose path cannot name a cause.
@@ -5724,6 +6039,28 @@ type Run implements Node {
 		"""
 		descending: Boolean! = false
 	): ContextHistoryConnection!
+	"""
+	One window this run held, by its revision.
+	
+	A historical read, and an immutable one: a revision is derived from a
+	window's contents and the journal it is looked up in is append-only, so
+	this resolves to exactly the content the revision was minted from. No
+	later write can change what a revision means, and asking for one can never
+	answer with what the run holds now - `context` is the field for that.
+	
+	Take a revision from `ContextChange.revisionBefore` or `revisionAfter` to
+	see the window either side of a change, or from `ContextWindow.revision`.
+	
+	Null when this run never held that window, which is also what a revision
+	from another run looks like. Where the run held the same content more than
+	once, this is the first time it did; the content is identical either way.
+	"""
+	contextSnapshot(
+		"""
+		The window's revision.
+		"""
+		revision: String!
+	): ContextSnapshotPoint
 	"""
 	A short-lived signed link to one stored part's bytes.
 	
@@ -5983,10 +6320,15 @@ input RunFilter {
 	"""
 	descendantOf: String
 	"""
-	Only runs of this blueprint, by the name the run recorded. A name nothing
-	matches gives an empty page rather than an error.
+	Only runs of this blueprint, matched on the name each run recorded. A
+	name nothing matches gives an empty page rather than an error.
+	
+	A `digest` on it pins the revision installed now, and the request fails
+	where that is something else: runs are matched by name whatever is
+	installed, so the pin is how a client asking "this agent's runs" finds out
+	the agent has been edited under it.
 	"""
-	blueprint: String
+	blueprint: BlueprintInput
 	"""
 	Inclusive lower bound on the sort value. Pass the previous page's
 	`serverTime` to poll for what changed.
@@ -6204,7 +6546,7 @@ enum RunStatus {
 	"""
 	COMPLETE
 	"""
-	Every required stage finished but the agent still accepts messages.
+	Every required stage finished but the run still accepts messages.
 	"""
 	COMPLETE_INTERACTIVE
 	"""
@@ -6301,7 +6643,10 @@ what an operator reads when they are deciding whether to write it in.
 """
 type SafeCommands {
 	"""
-	Tools the agent would like allowed outright.
+	Tools the blueprint would like allowed outright, by the names the manifest
+	used. Names rather than `Tool`s: a request may name an MCP server's tool,
+	a group token, or one this machine does not have, and it is still the
+	request the author wrote.
 	"""
 	tools: [String!]!
 	"""
@@ -6429,8 +6774,8 @@ type ScriptTool implements Tool {
 	"""
 	arguments: JSON!
 	"""
-	`AGENT_SCRIPT` or `GLOBAL_SCRIPT`, which is the difference between a
-	tool one agent has and one every agent here has.
+	`BLUEPRINT_SCRIPT` or `GLOBAL_SCRIPT`, which is the difference between a
+	tool one blueprint carries and one every run here has.
 	"""
 	origin: ToolOrigin!
 	"""
@@ -6492,7 +6837,7 @@ inside runs" toggle rather than paying for on every keystroke.
 """
 enum SearchScope {
 	"""
-	Run metadata: title, agent name, status, task, caller metadata.
+	Run metadata: title, blueprint name, status, task, caller metadata.
 	"""
 	META
 	"""
@@ -6584,7 +6929,7 @@ Filled with the output of tool calls run at spawn.
 
 Through the run's own tool layer rather than a shell, so each call answers to
 the same permissions and taint rules it would answer to mid-run. That is what
-makes an unrestricted list safe: a seed reaches nothing the agent was not
+makes an unrestricted list safe: a seed reaches nothing the run was not
 already granted.
 """
 type SeedFromTools {
@@ -6747,8 +7092,8 @@ enum SettledApprovalScope {
 How a question this run asked ended up, and what the answer was.
 
 `approved`, `scope`, `choice`, `text` and `feedback` are null unless
-`outcome` is `ANSWERED`. Nobody answered a `TIMED_OUT` or `CANCELLED` ask,
-so there is nothing for any of them to carry.
+`outcome` is `ANSWERED`. Nobody answered a `TIMED_OUT`, `CANCELLED` or
+`REFUSED` ask, so there is nothing for any of them to carry.
 """
 type Settlement {
 	"""
@@ -6798,6 +7143,16 @@ enum SettlementOutcome {
 	asked it went away.
 	"""
 	CANCELLED
+	"""
+	It never opened, because a request was already open under the same id,
+	and the daemon keeps the one somebody may already be reading.
+	
+	Not a denial: the run was handed the neutral answer, which a tool
+	approval and a taint gate both read as not-approved. Its own outcome
+	because it means two runs minted one id, which is a fault in this
+	server rather than a decision about the call.
+	"""
+	REFUSED
 }
 
 """
@@ -6990,9 +7345,11 @@ Everything about a new run.
 """
 input SpawnRunInput {
 	"""
-	The blueprint to start, by name.
+	The blueprint to start. A `digest` on it refuses the spawn where what is
+	installed under that name is a different revision, which is how a client
+	starts the blueprint it read rather than whatever is there now.
 	"""
-	blueprint: String!
+	blueprint: BlueprintInput!
 	"""
 	The initial ask.
 	"""
@@ -7072,6 +7429,9 @@ input SpawnRunInput {
 	"""
 	Shared secret for signing that webhook. Write-only: never read back on
 	the run.
+	
+	Ignored without a `callbackUrl`, since there is no webhook to sign. A
+	secret sent on its own is accepted and does nothing.
 	"""
 	callbackSecret: String
 }
@@ -7234,24 +7594,41 @@ type Stage {
 	transitions: [TransitionEdge!]!
 }
 
-"""
-Which regions a stage adds, hides or empties on its way in.
-"""
 type StageContext {
 	"""
-	Regions this stage declares of its own, beyond the blueprint's layout, by
-	name. Look them up in the blueprint's `regions`.
+	Regions this stage declares of its own, beyond the blueprint's layout.
+	
+	Every one is declared right here, so this list is always the whole of
+	what the stage wrote.
 	"""
-	regions: [String!]!
+	regions: [Region!]!
 	"""
-	Regions kept out of this stage's prompt, by name. The contents survive;
-	the stage simply does not see them.
+	Regions kept out of this stage's prompt. The contents survive; the stage
+	simply does not see them.
+	
+	Declared names only. `hideNames` carries every name the stage wrote,
+	which is where a name with no declaration stays readable.
 	"""
-	hide: [String!]!
+	hide: [Region!]!
 	"""
-	Regions emptied as this stage is entered, by name.
+	Every name the stage wrote in `hide`, verbatim and in order, declared or
+	not.
 	"""
-	reset: [String!]!
+	hideNames: [String!]!
+	"""
+	Regions emptied as this stage is entered.
+	
+	Declared names only, and a stage resetting `conversation` is the ordinary
+	case of a name with no declaration: the runtime carries that region
+	whatever a manifest says. `resetNames` carries every name the stage
+	wrote.
+	"""
+	reset: [Region!]!
+	"""
+	Every name the stage wrote in `reset`, verbatim and in order, declared or
+	not.
+	"""
+	resetNames: [String!]!
 }
 
 """
@@ -7331,7 +7708,7 @@ enum StageMode {
 	"""
 	INTERACTIVE_POINTS
 	"""
-	Splits work across worker agents, then continues.
+	Splits work across worker runs, then continues.
 	"""
 	FAN_OUT
 	"""
@@ -7880,7 +8257,7 @@ type TokensUpdated {
 }
 
 """
-One tool an agent on this machine can be given.
+One tool a run on this machine can be given.
 
 An interface rather than one type with nullable extras: a script tool always
 has a file and a built-in never does, and a schema that says so lets a client
@@ -7914,7 +8291,8 @@ text is never hidden by one.
 """
 type ToolAcceptRule {
 	"""
-	The tool, by the name the manifest used.
+	The tool, by the name the manifest used. A name rather than a `Tool`: a
+	rule may name an MCP server's tool or one this machine does not have.
 	"""
 	tool: String!
 	"""
@@ -8046,12 +8424,70 @@ type ToolExecution {
 	outcome: ToolOutcome
 	"""
 	The stage it was dispatched in, by index.
+	
+	Where it sat, not which stay it belonged to: a stage entered three times
+	has one index and three visits. Correlate on `visit`.
 	"""
 	stageIndex: Int!
 	"""
 	The stage-local iteration whose turn asked for it.
+	
+	The batch key within one stay: one batch per iteration. It restarts at
+	every entry into a stage, so it names an execution only together with
+	`visit`.
 	"""
 	iteration: Int!
+	"""
+	The stay in a stage this execution belongs to.
+	
+	The correlation key for everything that happened during one stay, which is
+	what `stageIndex` and `iteration` cannot be: a stage entered three times
+	has one index, and the iteration restarts on every entry.
+	
+	Null means one of three things. The journal recorded no visit for this
+	batch - either it was written by a build that did not, or the run had no
+	stage ledger. Or the visit was past the ledger's per-stage cap of the
+	earliest 128 stays, where the stay is real and its detail is not kept; the
+	stage's own roll-ups in `stages` are the complete figures there.
+	"""
+	visit: StageVisit
+	"""
+	The provider attempt whose answer asked for this call.
+	
+	One trip to the provider, from `inferences`. It is the attempt that
+	answered, which a client cannot work out for itself: a failover means the
+	answer came from a different provider than the attempt before it went to.
+	
+	Null means the journal recorded no attempt for this batch, which is every
+	batch in a journal written by a build that did not record the connection,
+	and any batch no provider answer asked for.
+	"""
+	requestedBy: InferenceAttempt
+	"""
+	The context-window transactions this execution committed.
+	
+	Empty for an execution that committed none, which most are: a tool that
+	reads a file changes nothing, and its answer landing in the conversation is
+	committed by the batch rather than by the call. The `context_*` and `todo_*`
+	tools are the ones that show up here, along with anything that wrote a part
+	into a region of its own.
+	
+	Independent of `outcome`. A call that succeeded may have committed nothing,
+	and a call that failed may have committed something before it failed, so
+	neither field may be read off the other.
+	"""
+	contextChanges: [ContextChange!]!
+	"""
+	The files this execution produced, as the journal recorded them when it
+	produced them.
+	
+	Empty for every execution that produced none, which is all but a
+	`submit_output` that named artifacts. Read from the journal rather than
+	from the run's answer on purpose: the answer holds the *latest*
+	submission's files and says nothing about which call made them, so a
+	submission a later one replaced would be invisible.
+	"""
+	producedArtifacts: [Artifact!]!
 	"""
 	When it was dispatched.
 	"""
@@ -8128,7 +8564,7 @@ type ToolGroup {
 }
 
 """
-The tool inventory: what an agent on this machine can call.
+The tool inventory: what a run on this machine can call.
 """
 type ToolInventory {
 	"""
@@ -8151,13 +8587,13 @@ type ToolInventory {
 """
 What kind of thing offers a tool.
 
-A closed set, and the whole of it: this inventory is what an agent on this
+A closed set, and the whole of it: this inventory is what a run on this
 machine can be given, and an MCP server's tools are not in it. Read
 `mcpServers` for those.
 """
 enum ToolOrigin {
 	"""
-	Compiled into this build. Every agent has it.
+	Compiled into this build. Every run has it.
 	"""
 	BUILTIN
 	"""
@@ -8165,12 +8601,12 @@ enum ToolOrigin {
 	"""
 	SUBAGENT
 	"""
-	A `.rhai` script in one agent's own `tools/`, so it travels with that
-	agent and no other.
+	A `.rhai` script in one blueprint's own `tools/`, so it travels with that
+	blueprint and no other.
 	"""
-	AGENT_SCRIPT
+	BLUEPRINT_SCRIPT
 	"""
-	A `.rhai` script in the machine-wide tools directory, so every agent
+	A `.rhai` script in the machine-wide tools directory, so every run
 	here gets it.
 	"""
 	GLOBAL_SCRIPT
@@ -8227,21 +8663,22 @@ One tool and what this level does with it.
 """
 type ToolPermissionRule {
 	"""
-	The tool, by the name the manifest used.
+	The tool, by the name the manifest used. A name rather than a `Tool`: a
+	rule may name an MCP server's tool, a group token, or one this machine
+	does not have, and the rule still applies to the name it wrote.
 	"""
 	tool: String!
 	"""
-	What happens when it is called. Null when the manifest's word is one the
-	daemon does not recognise, which is a rule that grants nothing.
+	What happens when it is called.
 	"""
-	policy: ToolPermissionPolicy
+	policy: ToolPermissionPolicy!
 }
 
 """
 When a run looks for tools again after it started.
 
 Discovery happens either way. What this decides is whether it happens more
-than once - not whether the agent may install a tool, which is what the tool
+than once - not whether the run may install a tool, which is what the tool
 permissions decide.
 """
 enum ToolRescan {
@@ -8259,10 +8696,10 @@ enum ToolRescan {
 	As `RESCAN_AFTER_WRITES`, and the run looks at the scanned directories
 	before each batch of tool calls.
 	
-	`RESCAN_AFTER_WRITES` is told about a tool only when the agent writes one
+	`RESCAN_AFTER_WRITES` is told about a tool only when the run writes one
 	with `write_file`, `edit_file` or `install_tool`. This notices one that
 	arrived any other way: from a shell command, from a script tool, or from
-	another agent sharing the workdir.
+	another run sharing the workdir.
 	"""
 	RESCAN_BEFORE_DISPATCH
 }
@@ -8290,30 +8727,43 @@ type ToolResult {
 	parts: [String!]!
 }
 
-"""
-Where one tool's results go, in place of the stage's default region.
-"""
 type ToolRouteOverride {
 	"""
-	The tool, by canonical name.
+	The tool, by the name the manifest used. A name rather than a `Tool`: an
+	override may name an MCP server's tool or one this machine does not have.
 	"""
 	tool: String!
 	"""
-	The region its results are written to, by name.
+	The region its results are written to.
+	
+	Null where no layout in this blueprint declares that name, which is an
+	override sending results nowhere the stage can read: `lev validate`
+	refuses it and the daemon will not spawn it. `regionName` carries the name
+	either way.
 	"""
-	region: String!
+	region: Region
+	"""
+	The region name the override was written with, verbatim.
+	"""
+	regionName: String!
 }
 
-"""
-Where a stage's tool results land in its context.
-"""
 type ToolRouting {
 	"""
 	The region results go to when no override names another.
+	
+	Null where no layout in this blueprint declares that name, which is a
+	stage whose results land nowhere it can read. `defaultRegionName` carries
+	the name either way.
 	"""
-	defaultRegion: String!
+	defaultRegion: Region
 	"""
-	Tools whose results go somewhere else.
+	The default region's name, verbatim.
+	"""
+	defaultRegionName: String!
+	"""
+	Tools whose results go somewhere else, sorted by tool name so two reads
+	of one blueprint cannot disagree about the order.
 	"""
 	overrides: [ToolRouteOverride!]!
 	"""
@@ -8326,7 +8776,7 @@ type ToolRouting {
 	"""
 	maxResultTokens: Int
 	"""
-	Tools with a ceiling of their own.
+	Tools with a ceiling of their own, sorted by tool name.
 	"""
 	maxResultTokensPerTool: [ToolTokenCeiling!]!
 }
@@ -8339,7 +8789,8 @@ answer is small and wanted whole, and reads files, where it can be enormous.
 """
 type ToolTokenCeiling {
 	"""
-	The tool, by canonical name.
+	The tool, by the name the manifest used. A name rather than a `Tool`: a
+	ceiling may name an MCP server's tool or one this machine does not have.
 	"""
 	tool: String!
 	"""
@@ -8364,30 +8815,41 @@ type ToolUseGuidance {
 	shellForMultiStepWork: HintSetting!
 }
 
-"""
-What a transform does in detail: which regions it carries, compacts and
-clears, and what it asks the summarizer for.
-
-Set for `COMPACT`, which carries the prompt and nothing else, and for
-`CUSTOM`, which carries the per-region lists. Null for `DIRECT` and `CLEAR`,
-which have nothing to say.
-
-Region names rather than regions: a transform may name one a later edit
-removed, and dropping it would hide the instruction rather than the problem.
-"""
 type TransformConfig {
 	"""
 	Regions carried over verbatim.
+	
+	One entry per name the edge wrote that a layout in this blueprint
+	declares. A name with no declaration is in `carryNames` and not here:
+	either a later edit removed the region, or the edge names one of the four
+	the runtime carries whatever a manifest says - `conversation`,
+	`tool_results`, `final_output` and `stage_instructions` - which exist at
+	run time with nothing declared to read.
 	"""
-	carry: [String!]!
+	carry: [Region!]!
 	"""
-	Regions handed to the summarizer.
+	Every name the edge wrote in `carry`, verbatim and in order, declared or
+	not.
 	"""
-	compact: [String!]!
+	carryNames: [String!]!
 	"""
-	Regions emptied.
+	Regions handed to the summarizer. Declared names only; `compactNames`
+	carries the whole list.
 	"""
-	clear: [String!]!
+	compact: [Region!]!
+	"""
+	Every name the edge wrote in `compact`, verbatim and in order.
+	"""
+	compactNames: [String!]!
+	"""
+	Regions emptied. Declared names only; `clearNames` carries the whole
+	list.
+	"""
+	clear: [Region!]!
+	"""
+	Every name the edge wrote in `clear`, verbatim and in order.
+	"""
+	clearNames: [String!]!
 	"""
 	A prompt for the summarizer on this edge, in place of the default.
 	"""
@@ -8425,18 +8887,20 @@ enum TransitionCondition {
 	DEAD_END
 }
 
-"""
-One outgoing edge of a stage.
-
-A stage with no edges is terminal. The target is an object because the
-manifest cannot name a stage it does not declare: that is refused at load.
-"""
 type TransitionEdge {
 	"""
-	The stage this edge leads to, by name. Look it up in the blueprint's
-	`stages`.
+	The stage this edge leads to.
+	
+	Null only where the blueprint names a stage it does not declare, which
+	`lev validate` refuses and the daemon will not spawn: an installed
+	manifest can still be in that state, and `targetName` is the name it
+	wrote.
 	"""
-	target: String!
+	target: Stage
+	"""
+	The stage name this edge was keyed by, verbatim.
+	"""
+	targetName: String!
 	"""
 	Told to the model when it is choosing where to go next.
 	"""
@@ -8466,13 +8930,6 @@ type TransitionEdge {
 	stuck: StuckThresholds
 }
 
-"""
-What a stage must have done before an edge may be taken.
-
-A gate that is not satisfied re-runs the stage with `message` instead of
-transitioning, up to `maxAttempts` times, and then lets the run through: an
-unmet gate slows a run down, it never strands one.
-"""
 type TransitionGate {
 	"""
 	The stage must have modified something.
@@ -8483,27 +8940,64 @@ type TransitionGate {
 	anything also passes. It is an alternative rather than a requirement,
 	because per-stage tool counters do not survive a daemon restart and a
 	region does.
+	
+	Null when the gate names no region, and also when it names one no layout
+	in this blueprint declares. `regionName` tells those apart: it is null
+	only in the first case.
 	"""
-	region: String
+	region: Region
+	"""
+	The region name the gate wrote for its `requireModifications`
+	alternative, verbatim. Null when it names none.
+	"""
+	regionName: String
 	"""
 	Tools counted as modifying, beyond `write_file` and `edit_file`. For an
-	agent whose writes go through MCP or a script.
+	blueprint whose writes go through MCP or a script.
+	
+	Names rather than `Tool`s, because an MCP server's tool is exactly what
+	this list is for and an inventory does not describe one.
 	"""
 	tools: [String!]!
 	"""
 	Regions that must all hold something. Conjunctive, unlike `region`.
+	
+	Declared names only. `requireRegionNames` carries every name the gate
+	wrote, which is where a name with no declaration in this blueprint stays
+	readable.
 	"""
-	requireRegions: [String!]!
+	requireRegions: [Region!]!
+	"""
+	Every name the gate wrote in `requireRegions`, verbatim and in order,
+	declared or not.
+	"""
+	requireRegionNames: [String!]!
 	"""
 	A region that must have changed during this stage, not merely be
 	present. What a revise loop needs: re-emitting the same content
 	satisfies a presence check.
+	
+	Null when the gate asks for none, and also when it names one no layout
+	declares. `requireRegionUpdatedName` tells those apart.
 	"""
-	requireRegionUpdated: String
+	requireRegionUpdated: Region
+	"""
+	The name the gate wrote for `requireRegionUpdated`, verbatim. Null when
+	it asks for none.
+	"""
+	requireRegionUpdatedName: String
 	"""
 	A checklist region that must have no open items left.
+	
+	Null when the gate asks for none, and also when it names one no layout
+	declares. `requireNoOpenItemsName` tells those apart.
 	"""
-	requireNoOpenItems: String
+	requireNoOpenItems: Region
+	"""
+	The name the gate wrote for `requireNoOpenItems`, verbatim. Null when it
+	asks for none.
+	"""
+	requireNoOpenItemsName: String
 	"""
 	A region that must hold at least so many entries.
 	"""
@@ -8603,7 +9097,7 @@ type UntypedToolCall implements ToolCall {
 """
 One bundled blueprint, and what an update would do to it.
 """
-type UpdateAgentEntry {
+type UpdateBlueprintEntry {
 	"""
 	The blueprint's name.
 	"""
@@ -8684,7 +9178,7 @@ type UpdateInfo {
 	"""
 	The bundled blueprints, and what would happen to each.
 	"""
-	agents: [UpdateAgentEntry!]!
+	blueprints: [UpdateBlueprintEntry!]!
 	"""
 	The config migrations that apply.
 	"""
@@ -8803,7 +9297,7 @@ enum UpdateStep {
 	"""
 	The bundled blueprints in the agents directory.
 	"""
-	AGENTS
+	BLUEPRINTS
 	"""
 	Keys in the reader's own blueprints that changed name.
 	"""
@@ -8878,7 +9372,7 @@ type UpgradeByCommand {
 What a validation found.
 
 `valid` is the verdict; the lists say why. A manifest can be valid and still
-carry warnings, which is the common case for an agent that works but names
+carry warnings, which is the common case for a blueprint that works but names
 something the engine has retired.
 """
 type ValidationReport {
@@ -8987,7 +9481,7 @@ enum WaitReasonKind {
 	"""
 	TOOL_APPROVAL
 	"""
-	Waiting on an answer to a question the agent asked.
+	Waiting on an answer to a question the run asked.
 	"""
 	USER_PROMPT
 	"""
@@ -9175,7 +9669,7 @@ type YoloProfile implements Node {
 	"""
 	default: YoloWaiver!
 	"""
-	What happens to the agent's own questions.
+	What happens to the run's own questions.
 	"""
 	questions: YoloHuman!
 	"""
