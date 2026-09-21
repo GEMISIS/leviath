@@ -124,6 +124,35 @@ type Artifact {
 }
 
 """
+An artifact the model named by path alone.
+"""
+type ArtifactByPath {
+	"""
+	The file, relative to the run's working directory.
+	"""
+	path: String!
+}
+
+"""
+An artifact the model named and described.
+"""
+type ArtifactDescribed {
+	"""
+	The file, relative to the run's working directory.
+	"""
+	path: String!
+	"""
+	What to call it. Null when the model left it to the file name.
+	"""
+	name: String
+	"""
+	The `type` key the model wrote, which is a mime type. Null when it left
+	the type to the registry.
+	"""
+	mimeType: String
+}
+
+"""
 Arguments for the `ask_user_choice` tool.
 """
 type AskUserChoiceArgs {
@@ -344,15 +373,18 @@ type BlobEntry {
 	url: String
 }
 
-type Blueprint {
+type Blueprint implements Node {
 	"""
 	This revision's id: `<name>@<digest prefix>`.
 	
 	The digest is part of the identity on purpose. A run's frozen copy and
 	the installed blueprint share a name and may differ in every other way,
 	and a client that caches by type and id would otherwise merge the two.
+	
+	`node` answers with the installed revision. A revision only a run
+	carries is read through that run, so its id answers with nothing there.
 	"""
-	id: String!
+	id: ID!
 	"""
 	Unique within the installed set.
 	"""
@@ -645,11 +677,13 @@ type BuiltinTool implements Tool {
 """
 An export job, as a client polls it.
 """
-type BulkExport {
+type BulkExport implements Node {
 	"""
-	The job's id.
+	The job's id, which `bulkExport` and `node` both take. Unique to this
+	server: the jobs live in memory, so nothing answers to it after a
+	restart.
 	"""
-	id: String!
+	id: ID!
 	"""
 	Where it has got to: `queued`, `running`, `complete` or `failed`.
 	"""
@@ -667,6 +701,35 @@ type BulkExport {
 	complete, because there is nothing to fetch before then.
 	"""
 	downloadUrl: String
+}
+
+"""
+Whether an attempt's exact request is in the journal, and where it went if
+not.
+
+Each value describes the state of the record rather than the intent behind
+it: a body that is here can be read, a body that was never taken cannot be
+recovered, and a body that was taken and then removed is a different fact
+from one that never existed.
+"""
+enum CaptureStatus {
+	"""
+	The request is on this record, as the provider adapter received it.
+	"""
+	RETAINED
+	"""
+	Capture was off for this run, so no body was ever taken. Everything else
+	on `modelInput` still describes the attempt.
+	"""
+	NOT_CAPTURED
+	"""
+	A body was captured and then deliberately scrubbed.
+	"""
+	REDACTED
+	"""
+	A body was captured and then aged out.
+	"""
+	EXPIRED
 }
 
 """
@@ -2267,8 +2330,11 @@ type FanOutItem {
 	"""
 	id: String!
 	"""
-	Everything the worker gets, which the blueprint's author defines. Raw
-	JSON because nothing here knows its shape.
+	Everything the worker gets, which the blueprint's author defines.
+	
+	Raw JSON because the tool declares it as an object and nothing more: the
+	worker is seeded with whatever this holds, so its shape is a contract
+	between one blueprint's stages and nothing this schema can name.
 	"""
 	context: JSON!
 }
@@ -2596,6 +2662,15 @@ type InferenceAttempt {
 	What went out.
 	"""
 	digest: RequestDigest!
+	"""
+	What this attempt sent, and what the request was assembled from.
+	
+	Null for an attempt whose journal holds no record of one. Where it is
+	set, `captureStatus` says whether the request body itself is there:
+	capture is off unless an operator asked for it, and everything beside the
+	body is recorded either way.
+	"""
+	modelInput: ModelInput
 	"""
 	When the attempt finished.
 	"""
@@ -3311,7 +3386,12 @@ enum McpLoginStatus {
 """
 One MCP server in the config.
 """
-type McpServer {
+type McpServer implements Node {
+	"""
+	`mcpServer:<name>`. A machine holds one server per name, so the name is
+	the whole key.
+	"""
+	id: ID!
 	"""
 	Unique server name.
 	"""
@@ -3584,6 +3664,11 @@ One model this machine can route to.
 type Model {
 	"""
 	The model id, as the provider names it.
+	
+	Not unique on this machine and so not a `Node` id: `openai` and `codex`
+	both answer to `gpt-5.5` and bill to different places. Key on `provider`
+	and this together, which is also how `provider/model` is spelled
+	wherever one string has to name a model.
 	"""
 	id: String!
 	"""
@@ -3639,6 +3724,57 @@ type Model {
 	Mime type patterns it produces.
 	"""
 	outputTypes: [String!]!
+}
+
+type ModelInput {
+	"""
+	Whether `request` is here, and where it went if it is not.
+	"""
+	captureStatus: CaptureStatus!
+	"""
+	The assembled request, exactly as the provider adapter received it.
+	
+	Null unless `captureStatus` is `RETAINED`. This is Leviath's own request
+	shape rather than one vendor's wire body: the adapter turns it into the
+	vendor's JSON and never hands that back, so serving the vendor shape
+	would mean rebuilding it, and a rebuilt prompt is not the request that
+	was sent.
+	"""
+	request: JSON
+	"""
+	Bytes the captured body took, so the cost of capture is readable even
+	from a record whose body has since been removed. Zero where no body was
+	ever taken.
+	"""
+	bytes: BigInt!
+	"""
+	An opaque fingerprint of the context window this request was assembled
+	from, so an attempt joins to the window it came from. Compare it between
+	attempts; nothing else is promised about the value.
+	
+	Empty where no body was taken. Computing it walks the whole window, which
+	is a cost a run nobody asked to capture does not pay.
+	"""
+	sourceContextDigest: String!
+	"""
+	The parameters the request really carried, after every override and
+	clamp: the sampling temperature, the completion budget the window left
+	room for, and any provider-specific keys. A stage's *declared*
+	parameters are on its blueprint and can differ from all of these.
+	"""
+	parameters: ModelParameters!
+	"""
+	An identifier for the tool set this attempt offered the model. Two
+	attempts offering the same tools in the same order share it; nothing else
+	is promised about the value.
+	"""
+	toolCatalogVersion: String!
+	"""
+	The version of the prompt-assembly logic that produced the request, so a
+	captured body stays interpretable once assembly changes. It moves when
+	what a request means changes, not when a field is added.
+	"""
+	assemblyVersion: String!
 }
 
 """
@@ -4157,7 +4293,7 @@ type Mutation {
 		"""
 		baseUrl: String!,
 		"""
-		Its API key, when it wants one.
+		Its API key, when it wants one. Used for this one call and dropped: never written to the config, and this server logs no request body, so it reaches nothing on disk.
 		"""
 		apiKey: String,
 		"""
@@ -4180,6 +4316,19 @@ type Mutation {
 		"""
 		text: String!
 	): YoloProfiles!
+}
+
+"""
+Anything this schema can hand back from its id alone.
+
+The id is globally unique: no two nodes of any type share one, so a client
+may cache by id alone and `node` needs no type from the caller.
+"""
+interface Node {
+	"""
+	This node's id, unique across every type that implements `Node`.
+	"""
+	id: ID!
 }
 
 """
@@ -4563,6 +4712,35 @@ type Query {
 	page to ask every time it opens.
 	"""
 	update: UpdateInfo!
+	"""
+	Anything with a globally unique id, from that id alone.
+	
+	For a client that holds an id and no type: a webhook payload, a cache
+	key, a link somebody pasted. Ask for the fields on `Node` and narrow
+	with `... on Run { }` for the rest.
+	
+	How an id routes, in order. An id tagged `mcpServer:`, `yoloProfile:` or
+	`script:` names that kind of thing; a tag this server does not know
+	answers null. An id carrying an `@` is a blueprint revision. Anything
+	else is a minted id, and the two job registries are asked before the run
+	store, which is the only one of the three that reads a file.
+	
+	Null rather than an error for an id that names nothing: a deleted run, an
+	expired export and a typo are the same answer, and all three mean the
+	thing is not here. A read that could not answer the question at all, such
+	as a config file that will not parse, fails the way the listing it would
+	have come from fails.
+	
+	`Model` is not a `Node`, because a model id is the provider's own and two
+	providers can serve the same one; read `models` and key on provider and
+	id together.
+	"""
+	node(
+		"""
+		The id, as whatever holds it spelled it.
+		"""
+		id: ID!
+	): Node
 	"""
 	One update run, by id.
 	
@@ -5133,11 +5311,11 @@ enum RetryDecision {
 	RENEWED_FILES
 }
 
-type Run {
+type Run implements Node {
 	"""
-	Globally unique run id.
+	Globally unique run id, and the id every REST route names this run by.
 	"""
-	id: String!
+	id: ID!
 	"""
 	The name of the blueprint this run was spawned from.
 	"""
@@ -5313,6 +5491,9 @@ type Run {
 	neither reads more than `tail` bytes from the end of each stream. The cap
 	is the server's, because `allStages` multiplies whatever the client asks
 	for by the stage count.
+	
+	Empty is not null: a stage that has written nothing, an index no stage
+	answers to and a file this server cannot read all read as no text.
 	"""
 	logs(
 		"""
@@ -5352,6 +5533,9 @@ type Run {
 	The byte route verifies the signature, so this works in an `<img src>` or
 	a download link, where a header cannot be set. It is good for a few
 	minutes and for that one path.
+	
+	Minted without resolving the path, so a file this run never wrote is a
+	404 from the byte route rather than nothing here.
 	"""
 	fileUrl(
 		"""
@@ -5443,14 +5627,19 @@ type Run {
 		after: Cursor
 	): ToolExecutionConnection!
 	"""
-	Every question this run put to a person, in the order it asked them,
-	paged.
+	Every question this run put to a person and got an outcome for, in the
+	order it asked them, paged.
 	
 	The only record that this run stopped for somebody. `executions` says
 	what the run tried; this says what it needed a person for, and what
 	came back - including a scope that only ever lived here, since a
 	granted approval reads no differently from a call no policy ever
 	stopped once the tool has read it.
+	
+	A question is written down when it settles, so one the run is parked on
+	right now is not here yet: `interaction` carries that one while it is
+	open. A run reading as `WAITING_INPUT` with nothing on its last page has
+	asked something nobody has answered, rather than asked nothing.
 	
 	Empty for an unattended run, which asks nobody: `--yolo` answers before
 	the question reaches a person, so an empty list on a run that plainly
@@ -5538,9 +5727,10 @@ type Run {
 	"""
 	A short-lived signed link to one stored part's bytes.
 	
-	The same kind of link `fileUrl` mints. `blobs` carries one per part
-	already; this is for asking about a hash a client already holds, and for
-	the download form of a part it is showing inline.
+	The same kind of link `fileUrl` mints, and minted without asking the
+	store whether the hash is held. `blobs` carries one per part already and
+	nulls it for bytes that are gone; this is for a hash a client holds, and
+	for the download form of a part it is showing inline.
 	"""
 	blobUrl(
 		"""
@@ -5554,6 +5744,9 @@ type Run {
 	): String!
 	"""
 	A short-lived signed link to one artifact's bytes.
+	
+	Minted without reading what the run produced, so an unknown name is a
+	404 from the byte route rather than nothing here.
 	"""
 	artifactUrl(
 		"""
@@ -5576,6 +5769,10 @@ type Run {
 	acceptsMessages: Boolean
 	"""
 	Caller-supplied metadata from spawn. Values are always strings.
+	
+	Labels for whoever started the run, such as a ticket or a tenant. They
+	are searched by `filter.query` and read back unchanged, and nothing in
+	the run reads them: not a typed extension point.
 	
 	Sorted by key: the daemon keeps these in a hash map, and a listing
 	whose order changes between two identical requests is a diff nobody
@@ -6184,14 +6381,24 @@ enum SandboxUnavailable {
 """
 One registered script.
 """
-type Script {
+type Script implements Node {
+	"""
+	`script:<kind>:<name>` for a script every blueprint gets, and
+	`script:<kind>@<blueprint>:<name>` for one blueprint's own.
+	
+	The kind and the owning blueprint as well as the name, because a name is
+	unique only within its kind and the directory it came from: one machine
+	can hold a global `tool` called `summarise` and a blueprint's own `tool`
+	of that name, and they are two scripts.
+	"""
+	id: ID!
 	"""
 	Which registry it belongs to: a tool, a hook, a validator, a mime check
 	or a provider.
 	"""
 	kind: String!
 	"""
-	Its name, unique within that kind.
+	Its name, unique within that kind and the directory it came from.
 	"""
 	name: String!
 	"""
@@ -6411,11 +6618,17 @@ One tool call a seed makes.
 """
 type SeedToolCall {
 	"""
-	The tool to call, by the name the manifest used.
+	The tool to call, by the name the manifest used, so an MCP tool keeps
+	its `<server>__<tool>` qualification.
 	"""
 	tool: String!
 	"""
 	Its arguments, as the manifest wrote them.
+	
+	Raw JSON, and not because nothing has typed it yet: a seed may name any
+	tool this machine can offer, including an MCP tool and a script tool, so
+	the shape is whatever that one tool's schema is. `tools` carries the
+	schema a name resolves to. Empty for the many tools that take none.
 	"""
 	args: JSON!
 }
@@ -6801,6 +7014,9 @@ input SpawnRunInput {
 	"""
 	Run unattended: approvals resolve without a person. Refused outright on
 	a server started with `--no-remote-yolo`.
+	
+	Null is `false`, not a third state: the run asks a person. Only
+	`yoloProfile` says which prompts are waived rather than all of them.
 	"""
 	yolo: Boolean
 	"""
@@ -6814,14 +7030,30 @@ input SpawnRunInput {
 	"""
 	Refuse this blueprint's command seeds, which run before any approval
 	prompt exists.
+	
+	Null is `false`, not a third state: the seeds the blueprint declares run.
 	"""
 	noSeedCommands: Boolean
+	"""
+	Write this run's exact requests into its journal, once per provider
+	attempt, whatever this machine is configured to do for other runs.
+	
+	A captured request is the whole prompt, holding whatever the run's
+	context held: file contents, command output, the words somebody typed.
+	There is no size cap, and every call re-sends the window, so a captured
+	run's journal grows by roughly the context size per attempt. Read it back
+	on `InferenceAttempt.modelInput`.
+	"""
+	captureModelInput: Boolean
 	"""
 	Seed text for named context regions.
 	"""
 	regions: [RegionSeedInput!]
 	"""
-	Caller-supplied metadata. Values are always strings.
+	Caller-supplied metadata: labels for whoever started the run, such as a
+	ticket or a tenant. Values are always strings, the run reads none of
+	them, and `filter.query` searches them. Not a typed extension point. A
+	key given twice keeps the last value.
 	"""
 	metadata: [MetadataEntryInput!]
 	"""
@@ -7363,11 +7595,10 @@ type SubmitOutputArgs {
 	"""
 	content: String!
 	"""
-	Files produced alongside it. Each entry is raw JSON because the tool
-	takes either a bare path or an object, and a debugger showing what was
-	submitted must show whichever of the two the model chose.
+	Files produced alongside it, in whichever of the tool's two shapes the
+	model wrote each one. Absent when the answer named no files.
 	"""
-	artifacts: [JSON!]
+	artifacts: [SubmittedArtifact!]
 }
 
 """
@@ -7392,6 +7623,16 @@ type SubmitOutputCall implements ToolCall {
 	"""
 	args: SubmitOutputArgs!
 }
+
+"""
+One entry of `submit_output`'s `artifacts` argument.
+
+The tool takes a bare path or an object, and which one the model chose is
+part of what was submitted, so it is a type here rather than a reading that
+flattens the two. The run's own record of what it produced is `artifacts` on
+the run, which is resolved and typed either way.
+"""
+union SubmittedArtifact = ArtifactByPath | ArtifactDescribed
 
 type Subscription {
 	"""
@@ -8459,11 +8700,13 @@ type UpdateInfo {
 """
 One update run.
 """
-type UpdateJob {
+type UpdateJob implements Node {
 	"""
-	The job's id.
+	The job's id, which `updateJob` and `node` both take. Unique to this
+	server: the jobs live in memory, so nothing answers to it after a
+	restart.
 	"""
-	id: String!
+	id: ID!
 	"""
 	Where the run as a whole got to.
 	"""
@@ -8917,7 +9160,12 @@ One named yolo profile, summarised.
 The counts rather than the rules: a settings list shows how much a profile
 waives, and `lev yolo show` prints the rules themselves.
 """
-type YoloProfile {
+type YoloProfile implements Node {
+	"""
+	`yoloProfile:<name>`. One file holds the profiles, one profile per
+	name, so the name is the whole key.
+	"""
+	id: ID!
 	"""
 	The profile's name, as `--yolo=<name>` spells it.
 	"""

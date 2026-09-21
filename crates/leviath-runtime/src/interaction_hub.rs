@@ -278,10 +278,18 @@ impl InteractionHub {
 
     /// Put one settled interaction where the journal will find it.
     ///
-    /// Called on every way a request can end, because the ways are not
+    /// Called on each way a request is *settled*, because the ways are not
     /// interchangeable to a reader: an answer, a request nobody answered in
     /// time, and one withdrawn when the run was cancelled all hand the caller
     /// the same neutral response, and only this record tells them apart.
+    ///
+    /// One way out is deliberately not settlement and so records nothing: a
+    /// second request arriving under an id already open replaces the first in
+    /// `pending`, and the replaced entry's dropped responder resolves its
+    /// caller with the neutral response. That is not a decision anybody made,
+    /// so writing it down as one would put a settlement in the history that
+    /// never happened. It also cannot arise from any provider that supplies
+    /// its own tool-call ids, which is every API-backed one.
     fn record(&self, entry: &PendingEntry, settlement: leviath_core::interaction::Settlement) {
         leviath_core::sync::lock(&self.settled).push((
             entry.agent_id.clone(),
