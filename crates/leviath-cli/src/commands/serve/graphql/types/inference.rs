@@ -16,7 +16,8 @@ use async_graphql::{Enum, Object, SimpleObject};
 use leviath_core::run_archive::{AttemptRecord, FailoverRecord};
 
 use super::super::error::IntoGraphql;
-use super::super::scalars::{BigInt, Cursor, Timestamp};
+use super::super::scalars::{BigInt, Cursor, Json, Timestamp};
+use super::manifest::model::ModelParameters;
 use crate::commands::serve::blocking::blocking;
 use crate::commands::serve::core::inferences;
 
@@ -144,6 +145,121 @@ impl From<&leviath_core::run_archive::RequestDigest> for RequestDigest {
     }
 }
 
+/// Whether an attempt's exact request is in the journal, and where it went if
+/// not.
+///
+/// Each value describes the state of the record rather than the intent behind
+/// it: a body that is here can be read, a body that was never taken cannot be
+/// recovered, and a body that was taken and then removed is a different fact
+/// from one that never existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum CaptureStatus {
+    /// The request is on this record, as the provider adapter received it.
+    Retained,
+    /// Capture was off for this run, so no body was ever taken. Everything else
+    /// on `modelInput` still describes the attempt.
+    NotCaptured,
+    /// A body was captured and then deliberately scrubbed.
+    Redacted,
+    /// A body was captured and then aged out.
+    Expired,
+}
+
+impl From<leviath_core::run_archive::CaptureStatus> for CaptureStatus {
+    fn from(status: leviath_core::run_archive::CaptureStatus) -> Self {
+        use leviath_core::run_archive::CaptureStatus as Core;
+        match status {
+            Core::Retained => Self::Retained,
+            Core::NotCaptured => Self::NotCaptured,
+            Core::Redacted => Self::Redacted,
+            Core::Expired => Self::Expired,
+        }
+    }
+}
+
+/// What one attempt sent the model, and what the request was assembled from.
+///
+/// The body itself is here only for a run whose operator asked for it, because a
+/// captured request is the whole prompt: whatever the run's context held at that
+/// moment, including file contents a tool read and anything somebody pasted.
+/// Turn it on with `[observability] capture_model_input` for a machine, or
+/// `captureModelInput` on one `spawnRun`.
+///
+/// Everything beside the body is recorded whether capture is on or off, and
+/// answers what a digest cannot: which parameters were really in force after
+/// resolution, which tools the model was offered, and which build of the
+/// assembly produced the shape.
+pub(crate) struct ModelInput {
+    /// What the journal recorded about the request.
+    pub(crate) record: leviath_core::run_archive::ModelInput,
+}
+
+#[Object]
+impl ModelInput {
+    /// Whether `request` is here, and where it went if it is not.
+    async fn capture_status(&self) -> CaptureStatus {
+        CaptureStatus::from(self.record.capture_status)
+    }
+
+    /// The assembled request, exactly as the provider adapter received it.
+    ///
+    /// Null unless `captureStatus` is `RETAINED`. This is Leviath's own request
+    /// shape rather than one vendor's wire body: the adapter turns it into the
+    /// vendor's JSON and never hands that back, so serving the vendor shape
+    /// would mean rebuilding it, and a rebuilt prompt is not the request that
+    /// was sent.
+    async fn request(&self) -> Option<Json> {
+        self.record.request.clone().map(Json)
+    }
+
+    /// Bytes the captured body took, so the cost of capture is readable even
+    /// from a record whose body has since been removed. Zero where no body was
+    /// ever taken.
+    async fn bytes(&self) -> BigInt {
+        BigInt(i64::try_from(self.record.bytes).unwrap_or(i64::MAX))
+    }
+
+    /// An opaque fingerprint of the context window this request was assembled
+    /// from, so an attempt joins to the window it came from. Compare it between
+    /// attempts; nothing else is promised about the value.
+    ///
+    /// Empty where no body was taken. Computing it walks the whole window, which
+    /// is a cost a run nobody asked to capture does not pay.
+    async fn source_context_digest(&self) -> &str {
+        &self.record.source_context_digest
+    }
+
+    /// The parameters the request really carried, after every override and
+    /// clamp: the sampling temperature, the completion budget the window left
+    /// room for, and any provider-specific keys. A stage's *declared*
+    /// parameters are on its blueprint and can differ from all of these.
+    async fn parameters(&self) -> ModelParameters {
+        // The blueprint reader's own type, over the same vocabulary: a
+        // declared cap and an effective one should not need two shapes.
+        let table: std::collections::HashMap<String, serde_json::Value> = self
+            .record
+            .parameters
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        ModelParameters::from_table(&table)
+    }
+
+    /// An identifier for the tool set this attempt offered the model. Two
+    /// attempts offering the same tools in the same order share it; nothing else
+    /// is promised about the value.
+    async fn tool_catalog_version(&self) -> &str {
+        &self.record.tool_catalog_version
+    }
+
+    /// The version of the prompt-assembly logic that produced the request, so a
+    /// captured body stays interpretable once assembly changes. It moves when
+    /// what a request means changes, not when a field is added.
+    async fn assembly_version(&self) -> &str {
+        &self.record.assembly_version
+    }
+}
+
 /// One provider judged unusable, and the model tried in its place.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct InferenceFailover {
@@ -240,6 +356,19 @@ impl InferenceAttempt {
     /// What went out.
     async fn digest(&self) -> RequestDigest {
         RequestDigest::from(&self.record.digest)
+    }
+
+    /// What this attempt sent, and what the request was assembled from.
+    ///
+    /// Null for an attempt whose journal holds no record of one. Where it is
+    /// set, `captureStatus` says whether the request body itself is there:
+    /// capture is off unless an operator asked for it, and everything beside the
+    /// body is recorded either way.
+    async fn model_input(&self) -> Option<ModelInput> {
+        self.record
+            .model_input
+            .clone()
+            .map(|record| ModelInput { record })
     }
 
     /// When the attempt finished.

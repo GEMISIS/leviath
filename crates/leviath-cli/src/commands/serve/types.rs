@@ -478,6 +478,11 @@ pub(super) struct SpawnAgentReq {
     /// otherwise execute at spawn before any approval prompt.
     #[serde(default)]
     pub(super) no_seed_commands: bool,
+    /// Write this run's exact requests into its journal, once per provider
+    /// attempt, whatever the machine's `[observability] capture_model_input`
+    /// says. A captured request is the whole prompt, and there is no size cap.
+    #[serde(default)]
+    pub(super) capture_model_input: bool,
     pub(super) workdir: Option<String>,
     /// Literal seed content for named caller-input regions, keyed by region name.
     #[serde(default)]

@@ -332,6 +332,10 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
         parent_run_id: None,
         worker_stage: None,
         output: output_request,
+        // `lev run` carries no flag for it. A capture is an operator decision
+        // about a machine, taken in `[observability] capture_model_input`, or a
+        // caller's decision about one run, taken over the API.
+        capture_model_input: false,
     })
 }
 

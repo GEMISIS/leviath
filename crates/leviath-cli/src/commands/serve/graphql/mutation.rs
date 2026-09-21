@@ -62,6 +62,15 @@ pub(crate) struct SpawnRunInput {
     /// Refuse this blueprint's command seeds, which run before any approval
     /// prompt exists.
     pub(crate) no_seed_commands: Option<bool>,
+    /// Write this run's exact requests into its journal, once per provider
+    /// attempt, whatever this machine is configured to do for other runs.
+    ///
+    /// A captured request is the whole prompt, holding whatever the run's
+    /// context held: file contents, command output, the words somebody typed.
+    /// There is no size cap, and every call re-sends the window, so a captured
+    /// run's journal grows by roughly the context size per attempt. Read it back
+    /// on `InferenceAttempt.modelInput`.
+    pub(crate) capture_model_input: Option<bool>,
     /// Seed text for named context regions.
     pub(crate) regions: Option<Vec<RegionSeedInput>>,
     /// Caller-supplied metadata. Values are always strings.
@@ -381,6 +390,7 @@ impl RunMutation {
             yolo_profile: input.yolo_profile,
             allow: input.allow.unwrap_or_default(),
             no_seed_commands: input.no_seed_commands.unwrap_or(false),
+            capture_model_input: input.capture_model_input.unwrap_or(false),
             regions: input
                 .regions
                 .into_iter()

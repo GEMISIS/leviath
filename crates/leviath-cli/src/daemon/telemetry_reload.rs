@@ -205,6 +205,7 @@ mod tests {
             endpoint: None,
             service_name: None,
             log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
+            capture_model_input: false,
         }
     }
 
@@ -312,6 +313,7 @@ mod tests {
             endpoint: Some("http://127.0.0.1:9".to_string()),
             service_name: Some("leviath-test".to_string()),
             log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
+            capture_model_input: false,
         };
         assert!(reload.refresh_into(&mut world, &otlp));
         assert_eq!(

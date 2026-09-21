@@ -532,6 +532,7 @@ mod tests {
             worker_stage: None,
             output: None,
             parts: Vec::new(),
+            capture_model_input: false,
         };
         let (global_defs, global_owners) = spawner.mcp_global.current();
         let parent = build_agent(

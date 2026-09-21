@@ -509,6 +509,79 @@ why the first provider was judged unusable. The journal records a move one tick
 after the attempt it follows, because the tick loop decides it rather than the
 call. This field puts the pair back together, so your client does not have to.
 
+### What one call sent
+
+`modelInput` is the request itself, per attempt. It is off by default, and
+`captureStatus` says which of the four states a record is in before you read
+anything else from it.
+
+```graphql
+{
+  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+    inferences(first: 50) { edges { node {
+      attempt
+      modelInput {
+        captureStatus bytes sourceContextDigest
+        toolCatalogVersion assemblyVersion
+        request
+        parameters {
+          temperature
+          maxOutputTokens { ... on MaxTokensCount { tokens } }
+          providerParams
+        }
+      }
+    } } }
+  } } }
+}
+```
+
+`RETAINED` means `request` is there. `NOT_CAPTURED` means no body was ever taken,
+which is every run nobody asked to capture. `REDACTED` means a body was taken and
+then scrubbed, and `EXPIRED` means it was taken and then aged out. The last two
+are a different fact from `NOT_CAPTURED`: something existed and is gone.
+
+`modelInput` itself is null for an attempt whose journal recorded none.
+
+Everything beside `request` is recorded whether capture is on or off, because it
+costs nothing and answers what `digest` cannot. `parameters` is what the request
+really carried after every override and clamp, so `maxOutputTokens` is an
+absolute count rather than the percentage a blueprint may have declared.
+`toolCatalogVersion` distinguishes two attempts that offered different tools.
+`assemblyVersion` moves when the meaning of an assembled request changes, so an
+old captured body stays interpretable.
+
+`sourceContextDigest` names the window the request was assembled from, which is
+how a captured request joins to `contextHistory`. It is empty when no body was
+taken: folding it walks the whole window, and a run nobody asked to capture does
+not pay for that. `bytes` is the size of the captured body, so a client can show
+what capture cost even once the body is gone, and zero where none was taken.
+
+`request` is Leviath's own request shape, not one vendor's wire body. The adapter
+turns it into the vendor's JSON and never hands that back, so serving the vendor
+shape would mean rebuilding it, and a rebuilt prompt is not the request that was
+sent.
+
+There is no mapping from context regions to places in the request. Assembly does
+not keep one: conversation messages carry no region, one region can become
+several system blocks, and the blocks are then reordered by cache tier. A mapping
+would have to be inferred after the fact, and an inferred one is not evidence.
+
+Turn capture on for a machine with `[observability] capture_model_input`, or for
+one run with `captureModelInput` on `spawnRun`:
+
+```graphql
+mutation {
+  spawnRun(input: {
+    blueprint: "coder", task: "fix the parser", workdir: "/work",
+    captureModelInput: true
+  }) { run { id status } }
+}
+```
+
+Read the warning in [Observability](/docs/observability#capturing-what-went-to-the-model)
+first. A captured request holds whatever the run's context held, including file
+contents a tool read and anything somebody pasted, and there is no size cap.
+
 ## Why a region changed
 
 `contextHistory` serves snapshots of the window. `contextChanges` serves the

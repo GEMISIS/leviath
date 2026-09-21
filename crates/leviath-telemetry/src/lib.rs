@@ -83,6 +83,7 @@ mod tests {
             endpoint: None,
             service_name: None,
             log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
+            capture_model_input: false,
         }
     }
 
@@ -118,6 +119,7 @@ mod tests {
             endpoint: Some("not a url at all".to_string()),
             service_name: None,
             log_file_max_bytes: leviath_core::config::DEFAULT_LOG_FILE_MAX_BYTES,
+            capture_model_input: false,
         };
         assert!(build_sink(&cfg).is_none());
     }

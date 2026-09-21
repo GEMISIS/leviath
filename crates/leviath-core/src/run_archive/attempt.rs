@@ -10,12 +10,14 @@
 //! failover, so "why did this turn take ninety seconds" has an answer that does
 //! not depend on the daemon's log still being around.
 //!
-//! Deliberately small. None of these records carries a request body, a response
-//! body or an error message: the bodies are what the context window and the
-//! stage logs are for, and a record that grew with the prompt would put a copy
-//! of the whole window in the journal once per retry. What is here is timing,
-//! classification, and enough identity ([`RequestDigest`]) to answer whether two
-//! attempts sent the same thing.
+//! Small by default. Timing, classification, and enough identity
+//! ([`RequestDigest`]) to answer whether two attempts sent the same thing: no
+//! response body, no error message, and no request body unless the operator
+//! asked for one. A record that grew with the prompt would put a copy of the
+//! whole window in the journal once per retry, which is why [`ModelInput`]
+//! carries a body only where [`CaptureStatus::Retained`] says it does.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +46,74 @@ pub struct RequestDigest {
     pub max_tokens: usize,
     /// The sampling temperature it asked for.
     pub temperature: f32,
+}
+
+/// Whether an attempt's exact request is in the journal, and where it went if
+/// not.
+///
+/// Every variant describes the state of the *record*, not the intent behind it,
+/// because that is what a reader can act on: a body that is here can be read, a
+/// body that was never taken cannot be recovered, and a body that was taken and
+/// then removed is a different fact from one that never existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureStatus {
+    /// The request is in this record, byte for byte as it was handed to the
+    /// provider adapter.
+    Retained,
+    /// Capture was off for this run, so no body was ever taken. The rest of
+    /// [`ModelInput`] still describes the attempt.
+    #[default]
+    NotCaptured,
+    /// A body was captured and then deliberately scrubbed.
+    Redacted,
+    /// A body was captured and then aged out.
+    Expired,
+}
+
+/// What one attempt sent, and what the request was assembled from.
+///
+/// Written per attempt whether or not capture is on, because everything here
+/// except `request` is cheap and answers questions a digest cannot: which
+/// sampling knobs were really in force after resolution, which tools the model
+/// was offered, and which build of the assembly produced the shape.
+///
+/// `request` is the whole prompt. It holds whatever the run's context held -
+/// file contents, command output, credentials a tool read - so it is written
+/// only for a run whose operator asked for it, and there is no size cap on it:
+/// every call re-sends the window, so a captured run's journal grows by roughly
+/// the context size per attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInput {
+    /// Whether `request` is here, and where it went if it is not.
+    pub capture_status: CaptureStatus,
+    /// The request as it was handed to the provider adapter, serialized exactly
+    /// as the adapter received it. Absent unless `capture_status` is
+    /// [`CaptureStatus::Retained`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<serde_json::Value>,
+    /// Bytes the captured body took, so the cost of capture is readable from a
+    /// record whose body has since been removed. Zero where no body was ever
+    /// taken.
+    pub bytes: u64,
+    /// The fingerprint of the context this request was assembled from, as
+    /// [`ContextDigest::fingerprint`](super::ContextDigest::fingerprint)
+    /// computes it, so an attempt joins to the window it came from. Empty where
+    /// no body was taken: the fingerprint costs a walk of the whole window, and
+    /// a run that is not being captured should not pay for one.
+    pub source_context_digest: String,
+    /// The parameters the request really carried, after every override and
+    /// clamp: the sampling temperature, the completion budget the window left
+    /// room for, and any provider-specific keys. What a stage *declared* is in
+    /// its blueprint and can differ from all of these.
+    pub parameters: BTreeMap<String, serde_json::Value>,
+    /// An identifier for the tool set this attempt offered the model. Two
+    /// attempts offering the same tools share it; nothing else is promised
+    /// about the value.
+    pub tool_catalog_version: String,
+    /// The version of the prompt-assembly logic that produced the request, so a
+    /// captured body stays interpretable once assembly changes.
+    pub assembly_version: String,
 }
 
 /// What the retry loop did after an attempt failed.
@@ -125,6 +195,11 @@ pub struct AttemptRecord {
     pub backoff_ms: u64,
     /// What went out, as much of it as is worth keeping.
     pub digest: RequestDigest,
+    /// What went out exactly, when the run was asked to keep it, and what the
+    /// request was assembled from either way. Absent in a journal whose writer
+    /// recorded no model input at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_input: Option<ModelInput>,
     /// Unix seconds when the attempt finished.
     pub at: i64,
 }

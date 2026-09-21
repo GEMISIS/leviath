@@ -112,6 +112,21 @@ pub struct SpawnArgs {
     /// (see [`leviath_core::resolve_output_spec`]).
     #[serde(default)]
     pub output: Option<leviath_core::output::OutputSpec>,
+    /// Write the exact request this run sends the model into its journal, once
+    /// per provider attempt, whatever `[observability] capture_model_input`
+    /// says machine-wide.
+    ///
+    /// A captured request is the whole prompt, so this is consent for one run
+    /// rather than a setting: it is the switch to reach for when the question
+    /// is about a single run, and it leaves every other run alone. The journal
+    /// then grows by roughly the context size per attempt, with no cap.
+    ///
+    /// Not carried across a daemon restart, for the reason `allow` and
+    /// `max_depth` are not: losing it writes less rather than more, which is
+    /// the harmless direction. A machine-wide setting still applies to the
+    /// reloaded run.
+    #[serde(default)]
+    pub capture_model_input: bool,
 }
 
 /// Every field, with the webhook secret shown as present-or-absent only.
@@ -145,6 +160,7 @@ impl std::fmt::Debug for SpawnArgs {
             .field("parent_run_id", &self.parent_run_id)
             .field("worker_stage", &self.worker_stage)
             .field("output", &self.output)
+            .field("capture_model_input", &self.capture_model_input)
             .finish()
     }
 }

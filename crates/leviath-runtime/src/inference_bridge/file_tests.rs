@@ -150,6 +150,14 @@ fn setup(lost: usize, with_route: bool) -> Setup {
                 max_tokens: 100,
                 temperature: 0.0,
             },
+            // Captured, because a file renewal is the one case where two
+            // attempts at one call send different bytes.
+            model_input: ModelInputPlan {
+                capture: true,
+                source_context_digest: "0f0f0f0f0f0f0f0f".to_string(),
+                parameters: std::collections::BTreeMap::new(),
+                tool_catalog_version: "no-tools".to_string(),
+            },
         }),
     };
     Setup {
@@ -223,6 +231,32 @@ async fn a_gone_file_is_uploaded_again_and_the_call_retried_once() {
     assert_eq!(records[0].stage, "read");
     assert_eq!(records[0].provider, "anthropic");
     assert_eq!(records[0].model, "claude");
+
+    // The digest is the same and the captured bodies are not: the renewal
+    // replaced the file ids, which is exactly what a digest of counts cannot
+    // show and a captured request can. Each body is taken as its own attempt
+    // went out rather than once for the call.
+    let captured: Vec<_> = records
+        .iter()
+        .map(|record| {
+            let input = record.model_input.as_ref().expect("a model input");
+            assert_eq!(
+                input.capture_status,
+                leviath_core::run_archive::CaptureStatus::Retained
+            );
+            assert_eq!(input.source_context_digest, "0f0f0f0f0f0f0f0f");
+            assert_eq!(input.tool_catalog_version, "no-tools");
+            assert_eq!(
+                input.assembly_version,
+                crate::pipeline::MODEL_INPUT_ASSEMBLY_VERSION
+            );
+            let body = input.request.clone().expect("a retained body").to_string();
+            assert_eq!(input.bytes, body.len() as u64);
+            body
+        })
+        .collect();
+    assert!(captured[0].contains("file-0"), "{}", captured[0]);
+    assert!(captured[1].contains("file-1"), "{}", captured[1]);
 }
 
 #[tokio::test]

@@ -44,6 +44,7 @@ fn attempt(stage: &str, n: u32, provider: &str, model: &str, outcome: AttemptOut
         duration_ms: 1_200,
         backoff_ms: 400,
         digest: digest(),
+        model_input: None,
         at: 200,
     })
 }

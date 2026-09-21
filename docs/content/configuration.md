@@ -1265,6 +1265,7 @@ exporter     = "otlp"    # otlp | stdout | none
 endpoint     = "http://localhost:4318"
 service_name = "leviath"
 log_file_max_bytes = 5242880   # daemon.log and each serve-<name>.log; 0 never rolls
+capture_model_input = false    # write each run's exact prompts into its journal
 ```
 
 `endpoint` falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4318`. Leviath
@@ -1277,6 +1278,14 @@ cap it is renamed to `<name>.1`, replacing the previous one, and a fresh file st
 is 5 MiB, so no process holds more than about 10 MiB of its own output. Set `0` to let the files
 grow without limit. The daemon applies a change on the next run, with no restart; a server reads
 the cap when it starts. See [the daemon page](/docs/daemon#where-it-logs) for what the files hold.
+
+`capture_model_input` writes the exact request every run sends the model into that run's journal,
+once per provider attempt. **Off by default, and read the warning before you change that.** A
+captured request is the whole prompt: file contents a tool read, command output, the task somebody
+typed, and any credential that passed through them. There is no size cap, so a captured run's
+journal grows by roughly the context size per attempt. The setting is read at spawn, so it applies
+to runs started after the change. To capture a single run, ask at spawn instead. See
+[capturing what went to the model](/docs/observability#capturing-what-went-to-the-model).
 
 ## Environment variables
 

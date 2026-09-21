@@ -3938,6 +3938,11 @@
             "type": "boolean",
             "default": false
           },
+          "capture_model_input": {
+            "type": "boolean",
+            "default": false,
+            "description": "Write this run's exact requests into its journal, once per provider attempt, whatever the machine's own [observability] capture_model_input says. A captured request is the whole prompt and there is no size cap, so the journal grows by roughly the context size per attempt. Read it back on InferenceAttempt.modelInput over GraphQL."
+          },
           "workdir": {
             "type": "string",
             "description": "Confined to --workdir-root when the server sets one."

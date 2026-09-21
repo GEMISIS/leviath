@@ -15,6 +15,25 @@ same list.
 
 ### Added
 
+- A run can be asked to journal the exact request it sent the model, once per
+  provider attempt. **Off by default**, because a captured request is the whole
+  prompt: it holds whatever the run's context held, including file contents a
+  tool read, command output, and anything somebody pasted, and a run directory is
+  a plain file. Turn it on for a machine with `[observability]
+  capture_model_input`, or for one run with `capture_model_input` on
+  `POST /api/agents` and `captureModelInput` on `spawnRun`. There is no size
+  cap, deliberately: every call re-sends the window, so a captured run's journal
+  grows by roughly the context size per attempt, and a truncated prompt that
+  reads like a whole one would be worse than a large file. Each entry says
+  whether the body is there, was never taken, was scrubbed or aged out, so a
+  reader can tell "never captured" from "captured and gone". The parameters that
+  were really in force after resolution, an identifier for the tool set the model
+  was offered, the version of the assembly that built the request, and a
+  fingerprint of the window it came from are recorded whether capture is on or
+  off. Read it all back on `InferenceAttempt.modelInput`. There is no mapping
+  from context regions to places in the request, because assembly keeps none and
+  an inferred one would not be evidence.
+
 - The journal records why a context window changed, not only what it then held.
   Every write that can name its cause records one beside the snapshot: a region
   seeded at spawn or on stage entry, a message delivered into the run, the

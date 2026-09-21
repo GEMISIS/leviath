@@ -27,6 +27,7 @@ fn request(blueprint: &str, workdir: Option<&str>) -> SpawnRequest {
         callback_url: None,
         callback_secret: None,
         output: None,
+        capture_model_input: false,
     }
 }
 

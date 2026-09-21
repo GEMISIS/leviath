@@ -191,6 +191,96 @@ pub(crate) struct PriorCalls {
     pub(crate) raise_output_cap: bool,
 }
 
+/// This run writes the exact request it sends the model into its journal, once
+/// per provider attempt.
+///
+/// A marker rather than a field on the stage's inference config, because it is a
+/// property of the run and not of a stage: it arrives from `[observability]
+/// capture_model_input` or from the spawn's own `capture_model_input`, and every
+/// stage of a captured run is captured.
+///
+/// Absent on all but the runs whose operator asked, which is the whole safety
+/// property: a captured request is the whole prompt, with whatever the context
+/// held in it.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct CaptureModelInput;
+
+/// The version of the prompt-assembly logic, recorded beside every captured
+/// request so a body stays interpretable once assembly changes.
+///
+/// Bumped by hand when what a request *means* changes: a system block that moves
+/// tier, a message shape that is built differently, guidance that is prepended
+/// where it was not. Adding a field a provider ignores does not move it.
+pub const MODEL_INPUT_ASSEMBLY_VERSION: &str = "1";
+
+/// An opaque identifier for the tool set one request offered the model.
+///
+/// Folded from each tool's name, description and parameter schema, so two
+/// requests that advertised the same tools share it and two that differ anywhere
+/// do not. Order participates: a model reads the list in the order it is given.
+pub(crate) fn tool_catalog_version(tools: &[Tool]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for tool in tools {
+        tool.name.hash(&mut hasher);
+        tool.description.hash(&mut hasher);
+        tool.parameters.to_string().hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// The fingerprint of the window a request was assembled from.
+///
+/// Folded from the same per-entry digest the persistence lane computes to
+/// coalesce snapshots, so an attempt's fingerprint and a snapshot's idea of
+/// "unchanged" cannot disagree.
+pub(crate) fn source_context_digest(window: &ContextWindow, stage_name: &str) -> String {
+    let snapshot = crate::persistence::build_context_snapshot(window, stage_name);
+    leviath_core::run_archive::digest_context(&snapshot).fingerprint()
+}
+
+/// The parameters a built request really carries, after every override and
+/// clamp.
+///
+/// Read off the assembled request rather than off the stage's declaration,
+/// because the two differ routinely: the completion budget is whatever the
+/// window had room for, and a model that does not take a temperature gets zero
+/// whatever the blueprint asked.
+///
+/// `max_output_tokens` is spelled as a stage spells it, so a reader parses one
+/// vocabulary for a declared cap and an effective one.
+pub(crate) fn effective_parameters(
+    request: &InferenceRequest,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut table = std::collections::BTreeMap::new();
+    table.insert(
+        "temperature".to_string(),
+        serde_json::Value::from(request.temperature),
+    );
+    table.insert(
+        "max_output_tokens".to_string(),
+        serde_json::Value::from(request.max_tokens),
+    );
+    request.request_timeout_secs.into_iter().for_each(|secs| {
+        table.insert(
+            "request_timeout_secs".to_string(),
+            serde_json::Value::from(secs),
+        );
+    });
+    // Whatever the stage passed through for the provider (`top_p`, `stop`,
+    // `seed`, a retention knob), flattened in beside the two every provider
+    // takes. `Null` when the stage set none, which is the ordinary case.
+    request
+        .extra
+        .as_object()
+        .into_iter()
+        .flatten()
+        .for_each(|(key, value)| {
+            table.insert(key.clone(), value.clone());
+        });
+    table
+}
+
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
 /// data. Pure; no `.await` - a custom region's render hook is a bounded,
 /// synchronous Rhai eval. (Ported from `AgentEngine::build_inference_request`,
@@ -467,6 +557,7 @@ type InferenceQuery = (
     Option<&'static SystemPrefixHash>,
     Option<&'static SystemBlockHashes>,
     Option<&'static crate::pipeline::PromptCalibration>,
+    Option<&'static CaptureModelInput>,
 );
 
 /// The system prefix the last request sent, as a digest.
@@ -555,6 +646,7 @@ pub(crate) fn dispatch_inference(
             prefix,
             block_prefix,
             calibration,
+            capture,
         )| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
@@ -697,6 +789,12 @@ pub(crate) fn dispatch_inference(
                 // which is the question a retry raises; the request itself is
                 // already in the window and has no business being copied into
                 // the journal once per attempt.
+                //
+                // The exact request rides along only for a run whose operator
+                // asked for it. The window fingerprint is computed here for the
+                // same reason the digest is, and only under capture: folding it
+                // walks every entry of the window, which is a cost no run that
+                // is not being captured should pay.
                 let journal = persist.map(|lane| crate::inference_bridge::AttemptJournal {
                     run_id: state.agent_id.clone(),
                     stage: state.current_stage.clone(),
@@ -709,6 +807,14 @@ pub(crate) fn dispatch_inference(
                         tools: request.tools.len(),
                         max_tokens: request.max_tokens,
                         temperature: request.temperature,
+                    },
+                    model_input: crate::inference_bridge::ModelInputPlan {
+                        capture: capture.is_some(),
+                        source_context_digest: capture
+                            .map(|_| source_context_digest(window, &state.current_stage))
+                            .unwrap_or_default(),
+                        parameters: effective_parameters(&request),
+                        tool_catalog_version: tool_catalog_version(&request.tools),
                     },
                 });
                 let job = InferenceJob {

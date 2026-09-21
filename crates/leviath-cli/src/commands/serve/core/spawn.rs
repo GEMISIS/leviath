@@ -48,6 +48,9 @@ pub(crate) struct SpawnRequest {
     pub(crate) callback_secret: Option<String>,
     /// The shape this caller wants the answer in.
     pub(crate) output: Option<leviath_core::output::OutputSpec>,
+    /// Write this run's exact requests into its journal, whatever the machine's
+    /// own `[observability] capture_model_input` says.
+    pub(crate) capture_model_input: bool,
 }
 
 /// A run that was started.
@@ -90,9 +93,9 @@ pub(crate) async fn spawn(
             .map(|dir| dir.to_string_lossy().to_string())
             .unwrap_or_default()
     });
-    // A caller-supplied workdir used to be taken verbatim, so `"/"` pointed a
-    // tool-executing agent at the whole filesystem. `--workdir-root` is the
-    // operator's answer to "where is this API allowed to work".
+    // `--workdir-root` is the operator's answer to "where is this API allowed to
+    // work": without it, a caller-supplied `"/"` would point a tool-executing run
+    // at the whole filesystem.
     state
         .limits
         .check_workdir(std::path::Path::new(&workdir))
@@ -132,6 +135,7 @@ pub(crate) async fn spawn(
         parent_run_id: None,
         worker_stage: None,
         parts,
+        capture_model_input: request.capture_model_input,
     };
     // What this spawn tells its caller alongside the run id: the declared
     // checks that the request's own output shape retires. The daemon logs the
