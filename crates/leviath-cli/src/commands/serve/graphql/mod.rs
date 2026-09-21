@@ -125,5 +125,9 @@ pub(super) fn sdl() -> String {
 }
 
 #[cfg(test)]
+#[path = "docs_examples_tests.rs"]
+mod docs_examples;
+
+#[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
