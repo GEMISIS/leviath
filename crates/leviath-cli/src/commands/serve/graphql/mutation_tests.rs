@@ -1669,3 +1669,101 @@ fn a_spawn_input_reads_as_a_field_of_another_input() {
     broken.insert(Name::new("input"), Value::String("coder".to_string()));
     assert!(SpawnProbe::parse(Some(Value::Object(broken))).is_err());
 }
+
+// ── waiting for an act to show in the record ──
+
+/// Each act has its own idea of what landing looks like. A resume is the odd
+/// one: what the run goes back to doing is its own business, so the only thing
+/// the resume promises is that it is no longer parked.
+#[test]
+fn each_act_knows_what_landing_looks_like() {
+    use super::has_landed;
+    use crate::commands::serve::core::lifecycle::Action;
+    assert!(has_landed(Action::Pause, &RunStatus::Paused));
+    assert!(!has_landed(Action::Pause, &RunStatus::Running));
+    assert!(has_landed(Action::Cancel, &RunStatus::Cancelled));
+    assert!(!has_landed(Action::Cancel, &RunStatus::Running));
+    assert!(has_landed(Action::Resume, &RunStatus::Running));
+    assert!(has_landed(Action::Resume, &RunStatus::WaitingInput));
+    assert!(!has_landed(Action::Resume, &RunStatus::Paused));
+}
+
+/// A record that already shows the act is answered on the first look, with no
+/// waiting at all - which is what stops a pause on an already-paused run from
+/// sitting out the whole window.
+#[tokio::test]
+async fn a_record_that_already_shows_the_act_is_answered_at_once() {
+    use crate::commands::serve::core::lifecycle::Action;
+    let looks = std::cell::Cell::new(0);
+    let settled = super::settle(
+        Action::Pause,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        || {
+            looks.set(looks.get() + 1);
+            Ok(run_in("run-a", RunStatus::Paused))
+        },
+    )
+    .await
+    .expect("the record reads");
+    assert_eq!(settled.status, RunStatus::Paused);
+    assert_eq!(looks.get(), 1, "one look, no waiting");
+}
+
+/// The record catches up a moment later, which is the case the window exists
+/// for: the first look still shows the status the run held when it was asked.
+#[tokio::test]
+async fn a_record_that_catches_up_is_waited_for() {
+    use crate::commands::serve::core::lifecycle::Action;
+    let looks = std::cell::Cell::new(0);
+    let settled = super::settle(
+        Action::Cancel,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        || {
+            looks.set(looks.get() + 1);
+            Ok(match looks.get() {
+                1 => run_in("run-a", RunStatus::Running),
+                _ => run_in("run-a", RunStatus::Cancelled),
+            })
+        },
+    )
+    .await
+    .expect("the record reads");
+    assert_eq!(settled.status, RunStatus::Cancelled);
+    assert_eq!(looks.get(), 2, "looked again once the first was stale");
+}
+
+/// A window that closes before the act shows answers with the record as it
+/// stands rather than failing: the act was accepted, and the caller is told
+/// what is there.
+#[tokio::test]
+async fn a_window_that_closes_answers_with_what_is_there() {
+    use crate::commands::serve::core::lifecycle::Action;
+    let settled = super::settle(
+        Action::Pause,
+        std::time::Instant::now() - std::time::Duration::from_millis(1),
+        || Ok(run_in("run-a", RunStatus::Running)),
+    )
+    .await
+    .expect("the record reads");
+    assert_eq!(settled.status, RunStatus::Running);
+}
+
+/// A record that will not read is this server's problem, and it says so instead
+/// of answering with a run it did not read.
+#[tokio::test]
+async fn a_record_that_will_not_read_is_reported() {
+    use crate::commands::serve::core::error::ServeError;
+    use crate::commands::serve::core::lifecycle::Action;
+    let failure = super::settle(
+        Action::Pause,
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        || {
+            Err(ServeError::Internal(
+                "the record would not read".to_string(),
+            ))
+        },
+    )
+    .await
+    .expect_err("the read failed");
+    assert_eq!(failure.code(), "INTERNAL");
+}

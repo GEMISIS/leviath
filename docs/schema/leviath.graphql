@@ -6409,15 +6409,18 @@ What a lifecycle mutation answers with.
 """
 type RunPayload {
 	"""
-	The run's record, read back once the daemon accepted the act.
+	The run as the act left it.
 	
-	Acceptance and application are separate moments: the daemon applies the
-	act on its own tick and writes the record afterwards, so a run caught
-	mid-flight can still read as the status it held when asked. `PAUSED`,
-	`CANCELLED` or `RUNNING` here means the act has already landed; anything
-	else means it was accepted and has not landed yet, not that it was
-	refused - a refusal is an error, never a quiet answer. Watch
-	`RunStatusChanged`, or read the run again, to see it land.
+	The daemon applies the act to its world before it answers, and writes
+	the record a moment later, so this waits for the act to show there
+	before answering: a pause reads `PAUSED`, a cancel reads `CANCELLED`,
+	and a resume reads whatever the run went back to doing.
+	
+	A run slow to write its record is answered with the record as it stands
+	rather than held any longer. That is not a refusal - a refusal is an
+	error, never a quiet answer - so a status that does not yet show the act
+	means the act is still on its way. Watch `RunStatusChanged` to see it
+	land.
 	"""
 	run: Run!
 	"""
@@ -7430,8 +7433,9 @@ input SpawnRunInput {
 	Shared secret for signing that webhook. Write-only: never read back on
 	the run.
 	
-	Ignored without a `callbackUrl`, since there is no webhook to sign. A
-	secret sent on its own is accepted and does nothing.
+	Refused without a `callbackUrl`, since there is no webhook to sign:
+	sending one on its own means a caller believes it has set up a signed
+	callback that will never fire. Send both, or neither.
 	"""
 	callbackSecret: String
 }

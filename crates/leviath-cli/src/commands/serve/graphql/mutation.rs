@@ -96,8 +96,9 @@ pub(crate) struct SpawnRunInput {
     /// Shared secret for signing that webhook. Write-only: never read back on
     /// the run.
     ///
-    /// Ignored without a `callbackUrl`, since there is no webhook to sign. A
-    /// secret sent on its own is accepted and does nothing.
+    /// Refused without a `callbackUrl`, since there is no webhook to sign:
+    /// sending one on its own means a caller believes it has set up a signed
+    /// callback that will never fire. Send both, or neither.
     pub(crate) callback_secret: Option<String>,
 }
 
@@ -243,15 +244,18 @@ pub(crate) struct InteractionPayload {
 /// What a lifecycle mutation answers with.
 #[derive(SimpleObject)]
 pub(crate) struct RunPayload {
-    /// The run's record, read back once the daemon accepted the act.
+    /// The run as the act left it.
     ///
-    /// Acceptance and application are separate moments: the daemon applies the
-    /// act on its own tick and writes the record afterwards, so a run caught
-    /// mid-flight can still read as the status it held when asked. `PAUSED`,
-    /// `CANCELLED` or `RUNNING` here means the act has already landed; anything
-    /// else means it was accepted and has not landed yet, not that it was
-    /// refused - a refusal is an error, never a quiet answer. Watch
-    /// `RunStatusChanged`, or read the run again, to see it land.
+    /// The daemon applies the act to its world before it answers, and writes
+    /// the record a moment later, so this waits for the act to show there
+    /// before answering: a pause reads `PAUSED`, a cancel reads `CANCELLED`,
+    /// and a resume reads whatever the run went back to doing.
+    ///
+    /// A run slow to write its record is answered with the record as it stands
+    /// rather than held any longer. That is not a refusal - a refusal is an
+    /// error, never a quiet answer - so a status that does not yet show the act
+    /// means the act is still on its way. Watch `RunStatusChanged` to see it
+    /// land.
     pub(crate) run: Run,
     /// Retired checks the mutation noticed. Empty unless something was
     /// superseded.
@@ -311,6 +315,54 @@ fn read_back(run_id: &str, warnings: Vec<String>) -> Result<RunPayload, ServeErr
 }
 
 /// Carry out one lifecycle action and read the run back.
+/// How long to keep looking for the act in the run's record before answering
+/// with what is there.
+///
+/// The daemon applies the act to its world before it answers, and the record on
+/// disk is written by the persistence lane a tick later, so a read that happens
+/// straight after the answer sees the status the run held when it was asked.
+/// The window is one tick of a world that has just been woken, so this is
+/// generous rather than tuned; it exists so the answer is the run as the act
+/// left it, not so the caller waits.
+const SETTLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How often to look again inside [`SETTLE_WINDOW`].
+const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Whether `status` is what `action` leaves behind.
+///
+/// Asked per action rather than by watching for any change, so acting on a run
+/// that is already there answers at once instead of waiting out the window for
+/// a change that is never coming. A resume is the odd one: what it lands on
+/// depends on what the run goes back to doing, so the only thing it promises is
+/// that the run is no longer parked.
+fn has_landed(action: Action, status: &leviath_core::run_meta::RunStatus) -> bool {
+    use leviath_core::run_meta::RunStatus;
+    match action {
+        Action::Pause => matches!(status, RunStatus::Paused),
+        Action::Cancel => matches!(status, RunStatus::Cancelled),
+        Action::Resume => !matches!(status, RunStatus::Paused),
+    }
+}
+
+/// Read the run until the act shows in its record, or the window closes.
+///
+/// `read` is handed in so a test can decide what the record says on each look
+/// without a daemon, a disk or a real clock behind it.
+async fn settle(
+    action: Action,
+    deadline: std::time::Instant,
+    mut read: impl FnMut() -> Result<leviath_core::run_meta::RunMeta, ServeError>,
+) -> Result<leviath_core::run_meta::RunMeta, ServeError> {
+    loop {
+        let meta = read()?;
+        if has_landed(action, &meta.status) || std::time::Instant::now() >= deadline {
+            return Ok(meta);
+        }
+        tokio::time::sleep(SETTLE_POLL).await;
+    }
+}
+
 async fn act_and_read(
     ctx: &Context<'_>,
     run_id: &str,
@@ -318,8 +370,8 @@ async fn act_and_read(
 ) -> async_graphql::Result<RunPayload> {
     let state = ctx.data_unchecked::<AppState>();
     lifecycle::act(state, run_id, action).await.gql()?;
-    let meta = runstate::read_meta(run_id)
-        .map_err(|e| {
+    let meta = settle(action, std::time::Instant::now() + SETTLE_WINDOW, || {
+        runstate::read_meta(run_id).map_err(|e| {
             // The daemon accepted the act, so the run exists. A record that
             // will not read is this server's problem, not the caller's, and
             // saying so beats answering "not found" about a run that just
@@ -328,7 +380,9 @@ async fn act_and_read(
                 "Run '{run_id}' changed, but its record would not read: {e}"
             ))
         })
-        .gql()?;
+    })
+    .await
+    .gql()?;
     Ok(RunPayload {
         run: Run {
             meta: std::sync::Arc::new(meta),
