@@ -1339,11 +1339,11 @@ async fn a_delete_reports_both_halves() {
 #[tokio::test]
 async fn an_export_and_a_delete_refuse_what_the_listing_refuses() {
     crate::runstate::with_isolated_runs_dir_async("graphql-shared-refusals", |_d| async move {
-        // Two parentage filters in one export: the same contradiction the
-        // listing refuses, refused here too rather than resolved one way.
+        // A sort inside a combinator: the same shape the listing refuses,
+        // refused here too rather than quietly ignored.
         let refused = mutate(
             no_daemon_client(),
-            r#"mutation { bulkExportRuns(filter: { parent: "root", topLevelOnly: true }) { id } }"#,
+            r#"mutation { bulkExportRuns(filter: { and: [{ sort: UPDATED_AT }] }) { id } }"#,
         )
         .await;
         assert_eq!(

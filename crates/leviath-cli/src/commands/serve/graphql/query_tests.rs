@@ -1,22 +1,13 @@
 //! Tests for the read side of the schema.
 //!
-//! The filter and page-size rules are checked directly, because they are the
-//! request rejections a client has to be able to rely on. The listing itself
-//! runs whole queries against the schema over an isolated runs directory, so
+//! Whole queries run against the schema over an isolated runs directory, so
 //! what is asserted is the answer a client gets rather than the shape of an
-//! intermediate.
+//! intermediate. The filters each have their own tests beside the input they
+//! belong to.
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema, Variables};
 
-use super::{Query, RunFilter, RunSort, page_size, waiver_word};
-use crate::commands::serve::core::error::ServeError;
-use crate::commands::serve::core::runs::{
-    MAX_IDS, MAX_LIMIT, ParentFilter, RunSelection, SortKey, Source,
-};
-use crate::commands::serve::graphql::inputs::BlueprintInput;
-use crate::commands::serve::graphql::scalars::Timestamp;
-use crate::commands::serve::graphql::types::run::RunStatus;
-use crate::commands::serve::testutil::state_with_agent_paths;
+use super::{Query, waiver_word};
 use crate::runstate::{RunMeta, create_run};
 
 /// A run on disk, started at a known second so ordering is assertable.
@@ -40,19 +31,6 @@ fn named(id: &str, blueprint: &str) -> RunMeta {
     let mut meta = meta_at(id, 100);
     meta.agent_name = blueprint.to_string();
     meta
-}
-
-/// One filter resolved into the selection both surfaces list from.
-///
-/// Async because a filter may carry a digest pin, which is checked against what
-/// is installed before anything is read. None of these filters carries one.
-async fn resolved(
-    filter: RunFilter,
-    first: i32,
-    ids: Option<Vec<String>>,
-) -> Result<RunSelection, ServeError> {
-    let state = state_with_agent_paths(Vec::new());
-    filter.selection(&state, first, ids).await
 }
 
 /// Run one query against a schema wired to a daemon-less state.
@@ -93,255 +71,14 @@ fn ids_of(data: &async_graphql::Value, field: &str) -> Vec<String> {
         .collect()
 }
 
-// ─── page size ──────────────────────────────────────────────────────────────
-
-/// A page size over the cap is refused rather than quietly cut down: a client
-/// that asked for 500 and silently got 200 finds out by missing rows.
-#[test]
-fn a_page_size_is_bounded_at_both_ends() {
-    assert_eq!(page_size(50).expect("in range"), 50);
-    assert_eq!(page_size(MAX_LIMIT as i32).expect("at the cap"), MAX_LIMIT);
-    let over = page_size(MAX_LIMIT as i32 + 1).expect_err("over the cap");
-    assert!(over.to_string().contains("page-size cap"), "{over}");
-    assert!(page_size(0).is_err(), "zero is not a page");
-    assert!(page_size(-1).is_err(), "a negative page size is not a page");
-}
-
-// ─── filters ────────────────────────────────────────────────────────────────
-
-/// The defaults: newest first, fifty at a time, searching only what is already
-/// in memory.
-#[tokio::test]
-async fn the_default_filter_reads_nothing_from_disk() {
-    let selection = resolved(RunFilter::default(), 50, None)
-        .await
-        .expect("defaults resolve");
-    assert_eq!(selection.limit, 50);
-    assert_eq!(selection.sort, SortKey::Started);
-    assert!(selection.descending);
-    assert_eq!(selection.sources, vec![Source::Meta, Source::Files]);
-    assert_eq!(selection.parent, ParentFilter::Any);
-    assert!(selection.fields.is_none(), "projection is REST's, not ours");
-}
-
-/// Both status spellings feed one filter list, in the daemon's own words.
-#[tokio::test]
-async fn statuses_reach_the_core_in_the_daemons_spelling() {
-    let selection = resolved(
-        RunFilter {
-            status: Some(RunStatus::Running),
-            status_in: Some(vec![
-                RunStatus::WaitingInput,
-                RunStatus::CompleteInteractive,
-            ]),
-            ..Default::default()
-        },
-        50,
-        None,
-    )
-    .await
-    .expect("statuses resolve");
-    assert_eq!(
-        selection.statuses,
-        vec!["running", "waiting_input", "complete_interactive"]
-    );
-}
-
-/// The search scopes decide both what is read and what the cursor's digest is
-/// taken over, so the request's own spelling is what travels.
-#[tokio::test]
-async fn a_search_scope_selects_its_source_and_digests_as_written() {
-    let selection = resolved(
-        RunFilter {
-            query: Some("boom".to_string()),
-            query_in: Some(vec![super::SearchScope::Logs, super::SearchScope::Meta]),
-            ..Default::default()
-        },
-        50,
-        None,
-    )
-    .await
-    .expect("scopes resolve");
-    assert_eq!(selection.sources, vec![Source::Logs, Source::Meta]);
-    assert_eq!(selection.sources_raw, "logs,meta");
-    assert!(
-        selection
-            .sources
-            .iter()
-            .any(|source| source.reads_filesystem())
-    );
-}
-
-/// Every search scope maps to the source it reads, and digests as the request
-/// spelled it.
-///
-/// The table is checked whole because the mapping is the contract: a scope that
-/// quietly read a different source would answer a search nobody asked for.
-#[tokio::test]
-async fn every_search_scope_maps_to_one_source() {
-    use super::SearchScope;
-    let cases = [
-        (SearchScope::Meta, Source::Meta, "meta"),
-        (SearchScope::Files, Source::Files, "files"),
-        (SearchScope::Context, Source::Context, "context"),
-        (SearchScope::Logs, Source::Logs, "logs"),
-        (SearchScope::Journal, Source::Journal, "journal"),
-    ];
-    for (scope, source, word) in cases {
-        let selection = resolved(
-            RunFilter {
-                query: Some("x".to_string()),
-                query_in: Some(vec![scope]),
-                ..Default::default()
-            },
-            50,
-            None,
-        )
-        .await
-        .expect("the scope resolves");
-        assert_eq!(selection.sources, vec![source], "{word}");
-        assert_eq!(selection.sources_raw, word);
-    }
-}
-
-/// Parentage is one question with two spellings, and asking both at once is a
-/// client bug worth saying out loud.
-#[tokio::test]
-async fn parentage_is_either_one_run_or_the_top_level() {
-    let of = resolved(
-        RunFilter {
-            parent: Some("root-1".to_string()),
-            ..Default::default()
-        },
-        50,
-        None,
-    )
-    .await
-    .expect("a parent resolves");
-    assert_eq!(of.parent, ParentFilter::Of("root-1".to_string()));
-
-    let roots = resolved(
-        RunFilter {
-            top_level_only: Some(true),
-            ..Default::default()
-        },
-        50,
-        None,
-    )
-    .await
-    .expect("top level resolves");
-    assert_eq!(roots.parent, ParentFilter::Roots);
-
-    let both = resolved(
-        RunFilter {
-            parent: Some("root-1".to_string()),
-            top_level_only: Some(true),
-            ..Default::default()
-        },
-        50,
-        None,
-    )
-    .await
-    .expect_err("both at once is refused");
-    assert!(both.to_string().contains("topLevelOnly"), "{both}");
-}
-
-/// `ids` names exactly what it wants, so combining it with a filter is a
-/// request that cannot be honoured both ways.
-#[tokio::test]
-async fn a_batch_fetch_refuses_to_be_filtered() {
-    let ok = resolved(RunFilter::default(), 50, Some(vec!["run-a".to_string()]))
-        .await
-        .expect("ids alone resolve");
-    assert_eq!(ok.ids, Some(vec!["run-a".to_string()]));
-
-    let filtered = resolved(
-        RunFilter {
-            status: Some(RunStatus::Running),
-            ..Default::default()
-        },
-        50,
-        Some(vec!["run-a".to_string()]),
-    )
-    .await
-    .expect_err("ids with a filter is refused");
-    assert!(filtered.to_string().contains("`ids`"), "{filtered}");
-
-    let too_many: Vec<String> = (0..=MAX_IDS).map(|i| format!("run-{i}")).collect();
-    let over = resolved(RunFilter::default(), 50, Some(too_many))
-        .await
-        .expect_err("too many ids is refused");
-    assert!(over.to_string().contains("at most"), "{over}");
-}
-
-/// Sort and order are the two halves of one walk, and both reach the core.
-#[tokio::test]
-async fn sort_and_direction_travel_to_the_core() {
-    let selection = resolved(
-        RunFilter {
-            sort: Some(RunSort::Updated),
-            ascending: Some(true),
-            since: Some(Timestamp(1_700_000_000)),
-            ..Default::default()
-        },
-        10,
-        None,
-    )
-    .await
-    .expect("sort resolves");
-    assert_eq!(selection.sort, SortKey::Updated);
-    assert!(!selection.descending);
-    assert_eq!(selection.since, Some(1_700_000_000));
-
-    let last = resolved(
-        RunFilter {
-            sort: Some(RunSort::LastProgress),
-            ..Default::default()
-        },
-        10,
-        None,
-    )
-    .await
-    .expect("sort resolves");
-    assert_eq!(last.sort, SortKey::LastProgress);
-}
-
-/// A blueprint argument that a listing cannot act on is refused where it is
-/// read, before a single run is looked at.
+/// A blueprint argument that a field cannot act on is refused where it is
+/// read, before a single directory is walked.
 ///
 /// Every field that takes one refuses the same two shapes, so they are checked
 /// together: manifest text, which is a definition rather than a pointer, and no
 /// name at all.
 #[tokio::test]
-async fn a_blueprint_filter_that_names_nothing_is_refused() {
-    let text = resolved(
-        RunFilter {
-            blueprint: Some(BlueprintInput {
-                name: Some("coder".to_string()),
-                content: Some("[agent]".to_string()),
-                ..BlueprintInput::default()
-            }),
-            ..Default::default()
-        },
-        50,
-        None,
-    )
-    .await
-    .expect_err("a listing does not take a definition");
-    assert!(text.to_string().contains("`content`"), "{text}");
-
-    let nameless = resolved(
-        RunFilter {
-            blueprint: Some(BlueprintInput::default()),
-            ..Default::default()
-        },
-        50,
-        None,
-    )
-    .await
-    .expect_err("a filter has to say which blueprint");
-    assert!(nameless.to_string().contains("`name`"), "{nameless}");
-
+async fn a_blueprint_argument_that_names_nothing_is_refused() {
     for query in [
         r#"{ tools(blueprint: { content: "[agent]" }) { tools { name } } }"#,
         r#"{ scripts(blueprint: { content: "[agent]" }) { name } }"#,
@@ -461,7 +198,7 @@ async fn an_unknown_id_lands_in_missing() {
         create_run(&meta_at("run-real", 100)).expect("run written");
 
         let answer = run_query(
-            r#"{ runs(ids: ["run-real", "run-ghost"]) {
+            r#"{ runs(filter: { ids: ["run-real", "run-ghost"] }) {
                     edges { node { id } }
                     missing
                     total
@@ -473,6 +210,158 @@ async fn an_unknown_id_lands_in_missing() {
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         assert_eq!(json["runs"]["missing"][0], "run-ghost");
         assert_eq!(json["runs"]["total"], 1);
+    })
+    .await;
+}
+
+/// A filter reaches the listing rather than being accepted and ignored, and a
+/// cursor keeps paging correct underneath it.
+///
+/// The walk is taken a page at a time under a predicate that keeps three of
+/// five runs, so a cursor that skipped or repeated one would show up as a
+/// wrong page rather than as a wrong count.
+#[tokio::test]
+async fn a_filter_reaches_the_listing_and_pages_under_it() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-runs-filtered", |_d| async move {
+        for i in 0..5 {
+            let mut run = meta_at(&format!("run-{i}"), 100 + i);
+            run.status = match i % 2 {
+                0 => leviath_core::run_meta::RunStatus::Error,
+                _ => leviath_core::run_meta::RunStatus::Complete,
+            };
+            run.title = Some(format!("run number {i}"));
+            create_run(&run).expect("run written");
+        }
+
+        let first = run_query(
+            r#"{ runs(first: 2, filter: { status: ERROR }) {
+                    edges { node { id } } pageInfo { hasNextPage endCursor } total
+                } }"#,
+        )
+        .await;
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert_eq!(ids_of(&first.data, "runs"), vec!["run-4", "run-2"]);
+        let json = serde_json::to_value(&first.data).expect("data serializes");
+        assert_eq!(json["runs"]["total"], 3, "the count describes the filter");
+        let cursor = json["runs"]["pageInfo"]["endCursor"]
+            .as_str()
+            .expect("a cursor")
+            .to_string();
+
+        let state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+        let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+            .data(state)
+            .finish();
+        let next = schema
+            .execute(
+                Request::new(
+                    "query($after: Cursor) { runs(first: 2, after: $after,
+                       filter: { status: ERROR }) { edges { node { id } } } }",
+                )
+                .variables(Variables::from_json(
+                    serde_json::json!({ "after": cursor.clone() }),
+                )),
+            )
+            .await;
+        assert!(next.errors.is_empty(), "{:?}", next.errors);
+        assert_eq!(ids_of(&next.data, "runs"), vec!["run-0"]);
+
+        // The same cursor against a different predicate names a walk that is
+        // not the one being asked for, so it is refused rather than resumed.
+        let crossed = schema
+            .execute(
+                Request::new(
+                    "query($after: Cursor) { runs(first: 2, after: $after,
+                       filter: { status: COMPLETE }) { total } }",
+                )
+                .variables(Variables::from_json(serde_json::json!({ "after": cursor }))),
+            )
+            .await;
+        assert!(
+            crossed
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("different set of filters"),
+            "{:?}",
+            crossed.errors
+        );
+
+        // A combinator composes over the same listing.
+        let either = run_query(
+            r#"{ runs(filter: { or: [
+                   { status: ERROR },
+                   { title: { endsWith: "number 1" } }
+                 ] }) { edges { node { id } } total } }"#,
+        )
+        .await;
+        assert!(either.errors.is_empty(), "{:?}", either.errors);
+        let json = serde_json::to_value(&either.data).expect("data serializes");
+        assert_eq!(json["runs"]["total"], 4);
+
+        // And `not` around it selects exactly the rest.
+        let rest = run_query(
+            r#"{ runs(filter: { not: { or: [
+                   { status: ERROR },
+                   { title: { endsWith: "number 1" } }
+                 ] } }) { edges { node { id } } } }"#,
+        )
+        .await;
+        assert_eq!(ids_of(&rest.data, "runs"), vec!["run-3"]);
+    })
+    .await;
+}
+
+/// A batch fetch by id is still filtered, and the ids it cannot find are still
+/// reported.
+#[tokio::test]
+async fn a_batch_fetch_composes_with_the_rest_of_the_filter() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-runs-ids-filter", |_d| async move {
+        let mut failed = meta_at("run-failed", 100);
+        failed.status = leviath_core::run_meta::RunStatus::Error;
+        create_run(&failed).expect("run written");
+        create_run(&meta_at("run-fine", 200)).expect("run written");
+
+        let answer = run_query(
+            r#"{ runs(filter: { ids: ["run-failed", "run-fine", "run-ghost"], status: ERROR }) {
+                    edges { node { id } } missing total
+                } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        assert_eq!(ids_of(&answer.data, "runs"), vec!["run-failed"]);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["runs"]["missing"][0], "run-ghost");
+        assert_eq!(json["runs"]["total"], 1, "a run that was read but dropped");
+    })
+    .await;
+}
+
+/// A subtree named inside a batch fetch is resolved from the index, which is
+/// the one thing a run's own record cannot answer.
+#[tokio::test]
+async fn a_batch_fetch_can_ask_about_a_subtree() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-runs-ids-subtree", |_d| async move {
+        create_run(&meta_at("root", 100)).expect("run written");
+        let mut worker = meta_at("worker", 200);
+        worker.parent_run_id = Some("root".to_string());
+        create_run(&worker).expect("run written");
+        let mut grandchild = meta_at("grandchild", 300);
+        grandchild.parent_run_id = Some("worker".to_string());
+        create_run(&grandchild).expect("run written");
+
+        let answer = run_query(
+            r#"{ runs(filter: { ids: ["root", "worker", "grandchild"],
+                                descendantOf: "root" }) {
+                    edges { node { id } } total
+                } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let mut ids = ids_of(&answer.data, "runs");
+        ids.sort();
+        assert_eq!(ids, vec!["grandchild".to_string(), "worker".to_string()]);
     })
     .await;
 }
@@ -517,7 +406,7 @@ async fn a_parent_filter_pages_one_runs_children() {
         );
 
         let roots =
-            run_query("{ runs(filter: { topLevelOnly: true }) { edges { node { id } } } }").await;
+            run_query("{ runs(filter: { scope: TOP_LEVEL }) { edges { node { id } } } }").await;
         assert_eq!(ids_of(&roots.data, "runs"), vec!["root"]);
     })
     .await;
@@ -607,16 +496,27 @@ async fn an_unreadable_blueprint_nulls_one_field_and_keeps_the_page() {
         assert_eq!(edges.len(), 2, "both runs are still on the page");
         assert!(edges[0]["node"]["blueprint"].is_null(), "the field is null");
         assert_eq!(edges[0]["node"]["id"], "coder-1788924523-gone00");
-        let error = answer.errors.first().expect("an error names the field");
-        assert_eq!(
-            error
+        // The edges resolve side by side, so which unreadable blueprint is
+        // reported first is not fixed. Both are named, and each carries the
+        // code a client branches on.
+        assert!(
+            answer.errors.iter().all(|error| error
                 .extensions
                 .as_ref()
                 .and_then(|e| e.get("code"))
-                .map(ToString::to_string),
-            Some("\"NOT_FOUND\"".to_string())
+                .map(ToString::to_string)
+                == Some("\"NOT_FOUND\"".to_string())),
+            "{:?}",
+            answer.errors
         );
-        assert!(error.message.contains("agent.leviath"), "{}", error.message);
+        assert!(
+            answer
+                .errors
+                .iter()
+                .any(|error| error.message.contains("agent.leviath")),
+            "{:?}",
+            answer.errors
+        );
     })
     .await;
 }
@@ -686,7 +586,7 @@ async fn an_unknown_blueprint_name_lands_in_missing() {
 
         let answer = schema
             .execute(Request::new(
-                r#"{ blueprints(exact: ["alpha", "ghost"]) { edges { node { name } } missing } }"#,
+                r#"{ blueprints(filter: { names: ["alpha", "ghost"] }) { edges { node { name } } missing } }"#,
             ))
             .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -696,7 +596,7 @@ async fn an_unknown_blueprint_name_lands_in_missing() {
 
         let narrowed = schema
             .execute(Request::new(
-                r#"{ blueprints(query: "ghos") { total edges { node { name } } } }"#,
+                r#"{ blueprints(filter: { query: "ghos" }) { total edges { node { name } } } }"#,
             ))
             .await;
         let json = serde_json::to_value(&narrowed.data).expect("data serializes");
@@ -705,62 +605,106 @@ async fn an_unknown_blueprint_name_lands_in_missing() {
     .await;
 }
 
-/// Paging the listing: a page, then the rest, with `hasNextPage` marking the
-/// cut.
+/// Paging the listing: a page, then the rest, resumed from the cursor the
+/// first page handed back.
+///
+/// The cursor is a keyset on the name rather than an offset, so a blueprint
+/// installed or removed between the two requests cannot make the second page
+/// skip or repeat one.
 #[tokio::test]
 async fn the_blueprint_listing_pages() {
     crate::commands::serve::testutil::with_home(|_home| async move {
-    let agents = tempfile::tempdir().expect("a temp dir");
-    for name in ["alpha", "beta", "gamma"] {
-        let dir = agents.path().join(name);
-        std::fs::create_dir_all(&dir).expect("agent dir");
-        std::fs::write(
-            dir.join(leviath_core::files::MANIFEST_FILENAME),
-            format!("[agent]\nname = \"{name}\"\n"),
-        )
-        .expect("manifest written");
-    }
-    let state = crate::commands::serve::testutil::state_with_agent_paths(vec![
-        agents.path().to_path_buf(),
-    ]);
-    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
-        .data(state)
-        .finish();
+        let agents = tempfile::tempdir().expect("a temp dir");
+        for name in ["alpha", "beta", "gamma"] {
+            let dir = agents.path().join(name);
+            std::fs::create_dir_all(&dir).expect("agent dir");
+            std::fs::write(
+                dir.join(leviath_core::files::MANIFEST_FILENAME),
+                format!("[agent]\nname = \"{name}\"\n"),
+            )
+            .expect("manifest written");
+        }
+        let state = crate::commands::serve::testutil::state_with_agent_paths(vec![
+            agents.path().to_path_buf(),
+        ]);
+        let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+            .data(state)
+            .finish();
 
-    let first = schema
-        .execute(Request::new(
-            "{ blueprints(first: 2) { edges { node { name } } pageInfo { hasNextPage endCursor } } }",
-        ))
-        .await;
-    let json = serde_json::to_value(&first.data).expect("data serializes");
-    assert_eq!(json["blueprints"]["edges"].as_array().map(Vec::len), Some(2));
-    assert_eq!(json["blueprints"]["pageInfo"]["hasNextPage"], true);
-    assert_eq!(json["blueprints"]["pageInfo"]["endCursor"], "beta");
+        let first = schema
+            .execute(Request::new(
+                "{ blueprints(first: 2) { edges { node { name } } pageInfo { hasNextPage endCursor } } }",
+            ))
+            .await;
+        let json = serde_json::to_value(&first.data).expect("data serializes");
+        assert_eq!(json["blueprints"]["edges"].as_array().map(Vec::len), Some(2));
+        assert_eq!(json["blueprints"]["edges"][0]["node"]["name"], "alpha");
+        assert_eq!(json["blueprints"]["pageInfo"]["hasNextPage"], true);
+        let cursor = json["blueprints"]["pageInfo"]["endCursor"]
+            .as_str()
+            .expect("a cursor")
+            .to_string();
 
-    let rest = schema
-        .execute(Request::new(
-            "{ blueprints(first: 2, skip: 2) { edges { node { name } } pageInfo { hasNextPage } } }",
-        ))
-        .await;
-    let json = serde_json::to_value(&rest.data).expect("data serializes");
-    assert_eq!(json["blueprints"]["edges"][0]["node"]["name"], "gamma");
-    assert_eq!(json["blueprints"]["pageInfo"]["hasNextPage"], false);
+        let rest = schema
+            .execute(
+                Request::new(
+                    "query($after: Cursor) { blueprints(first: 2, after: $after) {
+                       edges { node { name } } pageInfo { hasNextPage endCursor } } }",
+                )
+                .variables(Variables::from_json(
+                    serde_json::json!({ "after": cursor.clone() }),
+                )),
+            )
+            .await;
+        assert!(rest.errors.is_empty(), "{:?}", rest.errors);
+        let json = serde_json::to_value(&rest.data).expect("data serializes");
+        assert_eq!(json["blueprints"]["edges"][0]["node"]["name"], "gamma");
+        assert_eq!(json["blueprints"]["pageInfo"]["hasNextPage"], false);
+        assert!(
+            json["blueprints"]["pageInfo"]["endCursor"].is_null(),
+            "no cursor is minted for a page nothing follows"
+        );
 
-    let negative = schema
-        .execute(Request::new("{ blueprints(skip: -1) { total } }"))
-        .await;
-    assert!(
-        negative
-            .errors
-            .first()
-            .expect("a refusal")
-            .message
-            .contains("negative"),
-        "{:?}",
-        negative.errors
-    );
-  })
-  .await;
+        // A cursor minted for one filter cannot resume another: the walk it
+        // names is not the walk being asked for.
+        let crossed = schema
+            .execute(
+                Request::new(
+                    r#"query($after: Cursor) { blueprints(first: 2, after: $after,
+                         filter: { query: "a" }) { total } }"#,
+                )
+                .variables(Variables::from_json(serde_json::json!({ "after": cursor }))),
+            )
+            .await;
+        assert!(
+            crossed
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("different set of filters"),
+            "{:?}",
+            crossed.errors
+        );
+
+        let mangled = schema
+            .execute(
+                Request::new("query($after: Cursor) { blueprints(after: $after) { total } }")
+                    .variables(Variables::from_json(serde_json::json!({ "after": "zzz" }))),
+            )
+            .await;
+        assert!(
+            mangled
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("Invalid cursor"),
+            "{:?}",
+            mangled.errors
+        );
+    })
+    .await;
 }
 
 /// The catalogue fields answer from what this machine has configured.
@@ -1044,7 +988,7 @@ async fn a_runs_children_are_paged() {
         }
 
         let answer = run_query(
-            r#"{ runs(ids: ["root"]) { edges { node {
+            r#"{ runs(filter: { ids: ["root"] }) { edges { node {
                    children(first: 2) { total hasNextPage edges { node { id parentId } } }
                  } } } }"#,
         )
@@ -1058,7 +1002,7 @@ async fn a_runs_children_are_paged() {
         assert_eq!(children["edges"][0]["node"]["parentId"], "root");
 
         let rest = run_query(
-            r#"{ runs(ids: ["root"]) { edges { node {
+            r#"{ runs(filter: { ids: ["root"] }) { edges { node {
                    children(first: 2, skip: 2) { hasNextPage edges { node { id } } }
                  } } } }"#,
         )
@@ -1069,7 +1013,7 @@ async fn a_runs_children_are_paged() {
         assert_eq!(children["hasNextPage"], false);
 
         let refused = run_query(
-            r#"{ runs(ids: ["root"]) { edges { node { children(skip: -1) { total } } } } }"#,
+            r#"{ runs(filter: { ids: ["root"] }) { edges { node { children(skip: -1) { total } } } } }"#,
         )
         .await;
         assert!(
@@ -1106,7 +1050,7 @@ async fn the_tree_status_rolls_up_the_whole_subtree() {
         create_run(&grandchild).expect("run written");
 
         let answer = run_query(
-            r#"{ runs(ids: ["root"]) { edges { node {
+            r#"{ runs(filter: { ids: ["root"] }) { edges { node {
                    treeStatus { depth descendantCount rollup { promptTokens } }
                  } } } }"#,
         )
@@ -1568,12 +1512,12 @@ async fn the_tree_filters_answer_different_questions() {
 
         // Roots, and its mirror.
         let answer =
-            run_query("{ runs(filter: { topLevelOnly: true }) { edges { node { id } } } }").await;
+            run_query("{ runs(filter: { scope: TOP_LEVEL }) { edges { node { id } } } }").await;
         let mut roots = ids_of(&answer.data, "runs");
         roots.sort();
         assert_eq!(roots, vec!["other".to_string(), "root".to_string()]);
         let answer =
-            run_query("{ runs(filter: { subAgentsOnly: true }) { edges { node { id } } } }").await;
+            run_query("{ runs(filter: { scope: SUB_AGENTS }) { edges { node { id } } } }").await;
         let mut subs = ids_of(&answer.data, "runs");
         subs.sort();
         assert_eq!(subs, vec!["grandchild".to_string(), "worker".to_string()]);
@@ -1585,7 +1529,7 @@ async fn the_tree_filters_answer_different_questions() {
         .await;
         assert_eq!(ids_of(&answer.data, "runs"), vec!["other".to_string()]);
         let answer = run_query(
-            r#"{ runs(filter: { blueprint: { name: "coder" }, subAgentsOnly: true })
+            r#"{ runs(filter: { blueprint: { name: "coder" }, scope: SUB_AGENTS })
                  { edges { node { id } } } }"#,
         )
         .await;
@@ -1599,27 +1543,33 @@ async fn the_tree_filters_answer_different_questions() {
     .await;
 }
 
-/// Two parentage filters at once is refused, and the message names both.
+/// Two parentage fields on one filter object intersect, because every field
+/// set on one object has to hold.
+///
+/// One run's children that are also somewhere under it is that run's children,
+/// and a scope that contradicts a parent is an empty page rather than a
+/// refusal: a predicate nothing satisfies is an answer.
 #[tokio::test]
-async fn two_parentage_filters_at_once_are_refused() {
-    let answer =
-        run_query(r#"{ runs(filter: { parent: "root", descendantOf: "root" }) { total } }"#).await;
-    let error = answer.errors.first().expect("a refusal");
-    assert!(
-        error.message.contains("parent") && error.message.contains("descendantOf"),
-        "it names both: {}",
-        error.message
-    );
-    let answer =
-        run_query("{ runs(filter: { topLevelOnly: true, subAgentsOnly: true }) { total } }").await;
-    assert!(
-        answer
-            .errors
-            .first()
-            .expect("a refusal")
-            .message
-            .contains("only one of them")
-    );
+async fn two_parentage_fields_on_one_object_intersect() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-parentage-and", |_d| async move {
+        create_run(&meta_at("root", 100)).expect("run written");
+        let mut worker = meta_at("worker", 200);
+        worker.parent_run_id = Some("root".to_string());
+        create_run(&worker).expect("run written");
+
+        let both =
+            run_query(r#"{ runs(filter: { parent: "root", descendantOf: "root" }) { edges { node { id } } } }"#)
+                .await;
+        assert!(both.errors.is_empty(), "{:?}", both.errors);
+        assert_eq!(ids_of(&both.data, "runs"), vec!["worker".to_string()]);
+
+        let contradiction =
+            run_query(r#"{ runs(filter: { parent: "root", scope: TOP_LEVEL }) { total } }"#).await;
+        assert!(contradiction.errors.is_empty(), "{:?}", contradiction.errors);
+        let json = serde_json::to_value(&contradiction.data).expect("data serializes");
+        assert_eq!(json["runs"]["total"], 0);
+    })
+    .await;
 }
 
 /// The config says whether the admin mutations will run, so a settings screen
@@ -2151,29 +2101,6 @@ async fn an_ascending_listing_mints_its_own_cursors() {
         assert_eq!(json["runs"]["edges"][0]["node"]["id"], "third");
     })
     .await;
-}
-
-/// The run filter refuses what it cannot read.
-#[test]
-fn the_run_filter_refuses_what_it_cannot_read() {
-    use async_graphql::{InputType, Name, Value, indexmap::IndexMap};
-    assert!(RunFilter::parse(Some(Value::String("nope".to_string()))).is_err());
-    let mut map = IndexMap::new();
-    map.insert(Name::new("query"), Value::Number(7.into()));
-    assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
-
-    // A first field that reads and a later one that does not: every field is
-    // read in turn, and the last one is refused as squarely as the first.
-    let mut map = IndexMap::new();
-    map.insert(Name::new("query"), Value::String("parser".to_string()));
-    map.insert(Name::new("statusIn"), Value::Number(7.into()));
-    assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
-
-    // And the last field, which is read after every other one.
-    let mut map = IndexMap::new();
-    map.insert(Name::new("query"), Value::String("parser".to_string()));
-    map.insert(Name::new("ascending"), Value::Number(7.into()));
-    assert!(RunFilter::parse(Some(Value::Object(map))).is_err());
 }
 
 /// Both values a profile's default can be.

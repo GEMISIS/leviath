@@ -208,6 +208,9 @@ fn resolve(query: &RunsQuery) -> Result<RunSpec, ServeError> {
         since: query.since,
         parent,
         blueprint: query.blueprint.clone(),
+        // The flat query parameters above are the whole filter this route
+        // takes; a composable predicate is the other surface's.
+        predicate: None,
     }
     .resolve(query.cursor.as_deref())
 }

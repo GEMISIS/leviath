@@ -86,33 +86,75 @@ What the envelope tells you:
 
 * `total` is how many runs matched. It is null when `scanTruncated` is true, because a count taken
   from a partial scan reads as fact and is not one.
-* `serverTime` is the daemon's clock when the page was built. Pass it back as `filter.since` to poll
-  for what changed.
-* `missing` lists ids from an `ids` fetch that name no run here. One dead id never costs you the
-  rest of the batch.
+* `serverTime` is the daemon's clock when the page was built. Pass it back as
+  `filter.updatedAt.gte` to poll for what changed.
+* `missing` lists ids from a `filter.ids` fetch that name no run here. One dead id never costs you
+  the rest of the batch.
 
 Reading one run is the same field:
 
 ```graphql
-{ runs(ids: ["coder-1788924523-abc123"]) { edges { node { id status error } } missing } }
+{ runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node { id status error } } missing } }
 ```
 
 ### Filtering
 
-`filter` takes the whole predicate in one place.
+`filter` takes the whole predicate in one place, and it is shaped like the run it selects. Every
+field you set has to hold, so one filter object is an `and` of its own fields.
 
 | Field | What it selects |
 |---|---|
+| `ids` | Exactly these runs. On the filter itself it also says which runs to read |
 | `status`, `statusIn` | One status, or any of several |
+| `waitReason`, `waitReasonIn` | Why a parked run is parked |
+| `title`, `task`, `blueprintName`, `yoloProfileName` | A `StringFilter` on that text |
+| `blueprint` | One installed blueprint, by name, with an optional digest pin |
+| `unattended` | A `BooleanFilter` on whether approvals resolve without a person |
+| `startedAt`, `updatedAt` | A `TimestampFilter` in unix epoch seconds |
+| `ageSecs`, `workingSecs` | An `IntFilter` in seconds |
+| `costUsd` | A `DecimalFilter` on what the run has spent |
+| `scope` | `ALL`, `TOP_LEVEL` or `SUB_AGENTS` |
+| `parent` | One run's direct children |
+| `descendantOf` | A whole subtree, at any depth, and not the run itself |
 | `query` | A case-insensitive substring. No regex, no operators |
 | `queryIn` | Where to search. `META` and `FILES` are free; `CONTEXT`, `LOGS` and `JOURNAL` read files |
-| `parent` | One run's direct children, paged |
-| `topLevelOnly` | Only runs nobody started |
-| `since` | Inclusive lower bound on whichever timestamp `sort` names |
 | `sort`, `ascending` | `STARTED_AT`, `UPDATED_AT` or `LAST_PROGRESS_AT`, newest first by default |
 
-`ids` names exactly which runs to return, so it cannot be combined with a filter. Asking for both is
-refused rather than resolved one way and silently ignored the other.
+### The scalar filters
+
+One set, used by every filter input in the schema. `StringFilter` takes `eq`, `ne`, `in`, `notIn`,
+`contains`, `startsWith` and `endsWith`. `IntFilter`, `DecimalFilter` and `TimestampFilter` take
+`eq`, `ne`, `in`, `notIn`, `lt`, `lte`, `gt` and `gte`. `BooleanFilter` takes `eq` and `ne`.
+
+The exact string comparisons are case-sensitive; `contains`, `startsWith` and `endsWith` ignore
+ASCII case, as the run search does. A `Decimal` bound travels as a decimal string, because a cost
+figure a JSON parser re-rounds is no longer the figure you sent.
+
+A field the run has no value for satisfies nothing. A run with no title matches no `title` filter
+and a run whose spend is unknown matches no `costUsd` filter, whichever comparison you asked for.
+Wrap the filter in `not` to find those runs.
+
+```graphql
+{
+  runs(filter: {
+    scope: TOP_LEVEL
+    ageSecs: { gt: 3600 }
+    costUsd: { gte: "1.00" }
+    or: [{ status: ERROR }, { blueprintName: { startsWith: "coder" } }]
+    not: { title: { contains: "scratch" } }
+  }) { edges { node { id title status cost { costUsd } } } total }
+}
+```
+
+### Combinators
+
+`and`, `or` and `not` take filters of the same type, so a predicate nests as deep as you need.
+`and` is a list every member of which has to match, `or` a list at least one member of which has
+to, and `not` one filter that must not. An empty `or` list matches no run, which is what an
+alternation with no alternatives selects.
+
+`query`, `queryIn`, `sort` and `ascending` describe the listing rather than a run, so they belong on
+the filter you pass and are refused inside a combinator.
 
 The deep search sources read two files per stage per run, so treat them as a "search inside runs"
 toggle rather than something every keystroke pays for. When the scan gives up, `scanTruncated` says
@@ -174,6 +216,22 @@ Two different questions, and the schema keeps them apart.
 * `blueprint` on a run is the manifest that run executed, read from the run's
   own copy.
 
+`blueprints` is keyset-paged on the name, like `runs`: ask for a page, render it, then pass
+`endCursor` back as `after`. Its `filter` follows the same convention the run filter does -
+`and`, `or` and `not` over `name`, `version` and `description` as `StringFilter`s, `query` as
+the shorthand for a case-insensitive prefix on the name, and `names` for exact ones.
+
+```graphql
+{
+  blueprints(first: 25, filter: {
+    version: { startsWith: "1." }
+    not: { name: { contains: "scratch" } }
+  }) { edges { node { name version } } pageInfo { hasNextPage endCursor } total }
+}
+```
+
+A name in `names` that is not installed lands in `missing` rather than failing the request.
+
 ```graphql
 {
   runs(first: 1) {
@@ -212,7 +270,7 @@ and what it would like to run unasked.
 
 ```graphql
 {
-  blueprints(exact: ["coder"]) { edges { node {
+  blueprints(filter: { names: ["coder"] }) { edges { node {
     dependencies { name kind required remedy }
     stages {
       name mode
@@ -315,7 +373,7 @@ the run's working directory.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     blobs { sha256 mimeType name size stored url }
     artifacts { name mimeType url }
     fileUrl(path: "out/report.pdf", download: true)
@@ -343,7 +401,7 @@ Two questions about files, and they are not the same one.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     recorded: files { entries { name exists } modifiedFilesTruncated }
     onDisk: files(source: WORKDIR, path: "src") {
       parent
@@ -380,7 +438,7 @@ then held, see [why a region changed](#why-a-region-changed).
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     contextHistory(first: 20, descending: true) {
       total
       pageInfo { hasNextPage endCursor }
@@ -399,7 +457,7 @@ reissued, one a restart cut off.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     executions(first: 50) {
       total
       pageInfo { hasNextPage endCursor }
@@ -447,7 +505,7 @@ yourself.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     executions(first: 20) { edges { node {
       id stageIndex iteration
       visit { id ordinal enteredAt leftAt inProgress }
@@ -492,7 +550,7 @@ One result can be a whole file, so a page of executions carries none of them.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     executions(first: 1) { edges { node {
       result { text bytes truncated parts }
     } } }
@@ -548,7 +606,7 @@ somebody at all.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     interactions(first: 50) {
       total
       pageInfo { hasNextPage endCursor }
@@ -593,7 +651,7 @@ entry per trip to a provider, in the order the run made them.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     inferences(first: 50) {
       total
       pageInfo { hasNextPage endCursor }
@@ -636,7 +694,7 @@ anything else from it.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     inferences(first: 50) { edges { node {
       attempt
       modelInput {
@@ -714,7 +772,7 @@ resume rebuilds every region there is. All of those are one change.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     contextChanges(first: 50) {
       total
       pageInfo { hasNextPage endCursor }
@@ -763,7 +821,7 @@ was minted from - never to whatever the run holds now.
 
 ```graphql
 {
-  runs(ids: ["coder-1788924523-abc123"]) { edges { node {
+  runs(filter: { ids: ["coder-1788924523-abc123"] }) { edges { node {
     context { revision totalTokens }
     contextSnapshot(revision: "cw1-4f2a9c8e5b1d7063a4e2f8c19d0b6537") {
       at stage

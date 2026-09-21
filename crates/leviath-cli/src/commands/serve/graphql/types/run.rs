@@ -380,7 +380,7 @@ impl Run {
         #[graphql(desc = "How many of this run's children to skip.", default = 0)] skip: i32,
     ) -> async_graphql::Result<ChildConnection> {
         let state = ctx.data_unchecked::<AppState>();
-        let limit = super::super::query::page_size(first).gql()?;
+        let limit = super::super::run_filter::page_size(first).gql()?;
         let skip = usize::try_from(skip)
             .map_err(|_| ServeError::BadRequest("`skip` cannot be negative".to_string()))
             .gql()?;

@@ -15,6 +15,53 @@ same list.
 
 ### Changed
 
+- **Breaking, GraphQL only.** The schema filters by shape. One set of scalar
+  filters - `StringFilter` (`eq`, `ne`, `in`, `notIn`, `contains`,
+  `startsWith`, `endsWith`), `IntFilter`, `DecimalFilter` and `TimestampFilter`
+  (`eq`, `ne`, `in`, `notIn`, `lt`, `lte`, `gt`, `gte`), and `BooleanFilter`
+  (`eq`, `ne`) - is now what every filter input in the schema is built from, so
+  a predicate nobody thought to add a field for is one you can write today.
+  `RunFilter` gains `and`, `or` and `not` over filters of its own type, plus
+  `title`, `task`, `blueprintName`, `yoloProfileName`, `unattended`,
+  `startedAt`, `updatedAt`, `ageSecs`, `workingSecs`, `costUsd`, `waitReason`
+  and `waitReasonIn`. Every field set in one filter object has to hold, and a
+  field the run has no value for satisfies nothing - wrap it in `not` to find
+  those runs.
+
+  Four things move, and a client has to be edited:
+  - `runs(ids:)` is now `runs(filter: { ids: })`, so an exact-id fetch composes
+    with the rest of the predicate instead of excluding it. Named on the filter
+    the request passes, it still says which runs to read and still reports the
+    ones it cannot find in `missing`.
+  - `topLevelOnly` and `subAgentsOnly` are gone, replaced by
+    `scope: ALL | TOP_LEVEL | SUB_AGENTS`. They were two booleans for one
+    three-way choice, and setting both was a contradiction the server had to
+    refuse.
+  - `parent` and `descendantOf` are `ID` rather than `String`, and setting two
+    parentage fields at once is no longer refused: they intersect, like every
+    other pair of fields on one filter object.
+  - `filter.since` is gone. `startedAt` and `updatedAt` take a whole
+    `TimestampFilter`, so polling is `updatedAt: { gte: <serverTime> }` and
+    every window either side of it is expressible too. `GET /api/runs?since=`
+    is unchanged.
+
+  `query`, `queryIn`, `sort` and `ascending` describe the listing rather than a
+  run, so they stay on the filter the request passes and are refused inside
+  `and`, `or` or `not` rather than quietly ignored.
+
+- **Breaking, GraphQL only.** `blueprints` takes a `BlueprintFilter` and pages
+  by cursor. `blueprints(query:, exact:, skip:)` becomes
+  `blueprints(filter: { query:, names:, name:, version:, description:, and:,
+  or:, not: }, first:, after:)`. The offset `skip` is gone: a blueprint
+  installed or removed mid-walk shifted every later page, and the cursor names
+  where you got to instead. `endCursor` is now an opaque token like every other
+  cursor in this API rather than the blueprint's name, and it is minted only
+  when another page follows. A name in `names` that is not installed still
+  lands in `missing` rather than failing the request.
+
+  The REST run listing is untouched: its query parameters, its filters and its
+  cursors are exactly what they were.
+
 - `callback_secret` without a `callback_url` is refused rather than accepted and
   dropped. The secret signs the callback body, so a request that sends one and
   no URL is asking for a signed callback that can never fire, and accepting it

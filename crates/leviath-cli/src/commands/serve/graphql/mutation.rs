@@ -558,7 +558,7 @@ impl RunMutation {
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Which runs to export. Omitted means all of them.")] filter: Option<
-            super::query::RunFilter,
+            super::run_filter::RunFilter,
         >,
         #[graphql(desc = "Which top-level run fields to keep in each row.")] fields: Option<
             Vec<String>,
