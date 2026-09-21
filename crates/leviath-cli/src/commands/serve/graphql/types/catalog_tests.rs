@@ -191,7 +191,10 @@ fn every_tool_source_has_an_origin() {
     use crate::tool_inventory::ToolSource;
     assert_eq!(ToolOrigin::from(ToolSource::Builtin), ToolOrigin::Builtin);
     assert_eq!(ToolOrigin::from(ToolSource::Subagent), ToolOrigin::Subagent);
-    assert_eq!(ToolOrigin::from(ToolSource::Agent), ToolOrigin::AgentScript);
+    assert_eq!(
+        ToolOrigin::from(ToolSource::Agent),
+        ToolOrigin::BlueprintScript
+    );
     assert_eq!(
         ToolOrigin::from(ToolSource::Global),
         ToolOrigin::GlobalScript

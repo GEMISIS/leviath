@@ -22,7 +22,7 @@ pub(crate) struct EnvEntryInput {
 /// A custom model gateway to write into the config.
 #[derive(InputObject)]
 pub(crate) struct GatewayInput {
-    /// The name an agent references, and the table key.
+    /// The name a blueprint references, and the table key.
     pub(crate) name: String,
     /// What backs it: `script`, `openai-compatible` or `openai`.
     pub(crate) kind: Option<String>,

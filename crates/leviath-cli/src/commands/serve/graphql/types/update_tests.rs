@@ -193,7 +193,7 @@ async fn the_latest_check_is_three_fields_that_move_together() {
 /// The blueprints and the migrations come through with what would happen to
 /// each.
 #[tokio::test]
-async fn the_agents_and_migrations_say_what_would_happen() {
+async fn the_blueprints_and_migrations_say_what_would_happen() {
     let mut plan = plan_with(InstallMethod::Cargo);
     let agent = crate::bundled::BUNDLED_AGENTS
         .first()
@@ -222,7 +222,7 @@ async fn the_agents_and_migrations_say_what_would_happen() {
     let json = ask(
         &plan,
         &LatestCheck::default(),
-        "{ update { configError agents { name version change changes preselected }
+        "{ update { configError blueprints { name version change changes preselected }
              migrations { name description } } }",
     )
     .await;
@@ -230,21 +230,21 @@ async fn the_agents_and_migrations_say_what_would_happen() {
         json["update"]["configError"].is_null(),
         "a config that reads has nothing to report"
     );
-    let agents = json["update"]["agents"].as_array().expect("agents");
-    assert_eq!(agents.len(), 4);
-    assert_eq!(agents[0]["name"], agent.name);
-    assert_eq!(agents[0]["changes"], true, "installing is a change");
+    let listed = json["update"]["blueprints"].as_array().expect("blueprints");
+    assert_eq!(listed.len(), 4);
+    assert_eq!(listed[0]["name"], agent.name);
+    assert_eq!(listed[0]["changes"], true, "installing is a change");
     // A copy somebody edited is a change and is not pre-checked: overwriting it
     // would throw that work away.
-    assert_eq!(agents[2]["changes"], true);
-    assert_eq!(agents[2]["preselected"], false);
-    assert_eq!(agents[3]["changes"], false, "already current");
+    assert_eq!(listed[2]["changes"], true);
+    assert_eq!(listed[2]["preselected"], false);
+    assert_eq!(listed[3]["changes"], false, "already current");
     assert!(
-        agents[1]["change"]
+        listed[1]["change"]
             .as_str()
             .is_some_and(|word| word.contains("0.0.1")),
         "an update names what it replaces: {}",
-        agents[1]["change"]
+        listed[1]["change"]
     );
     let migrations = json["update"]["migrations"].as_array().expect("migrations");
     assert_eq!(migrations.len(), crate::commands::update::MIGRATIONS.len());
@@ -338,7 +338,7 @@ async fn an_update_job_carries_its_steps() {
         job.steps.iter().map(|step| step.step).collect::<Vec<_>>(),
         vec![
             UpdateStep::Binary,
-            UpdateStep::Agents,
+            UpdateStep::Blueprints,
             UpdateStep::Keys,
             UpdateStep::Migrations
         ]
@@ -376,7 +376,7 @@ fn every_recorded_value_has_an_answer() {
 
     let steps = [
         (Step::Binary, UpdateStep::Binary),
-        (Step::Agents, UpdateStep::Agents),
+        (Step::Agents, UpdateStep::Blueprints),
         (Step::Keys, UpdateStep::Keys),
         (Step::Migrations, UpdateStep::Migrations),
     ];

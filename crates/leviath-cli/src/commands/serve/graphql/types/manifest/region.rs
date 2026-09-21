@@ -186,7 +186,7 @@ pub(crate) struct SeedFromCommand {
 ///
 /// Through the run's own tool layer rather than a shell, so each call answers to
 /// the same permissions and taint rules it would answer to mid-run. That is what
-/// makes an unrestricted list safe: a seed reaches nothing the agent was not
+/// makes an unrestricted list safe: a seed reaches nothing the run was not
 /// already granted.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedFromTools {
@@ -198,7 +198,7 @@ pub(crate) struct SeedFromTools {
 
 /// What fills a region before the first inference.
 ///
-/// A region with no seed starts empty and is filled by the agent. A union rather
+/// A region with no seed starts empty and is filled by the run. A union rather
 /// than one object with a field per source: a seed has exactly one source, and a
 /// bag of nullable fields would admit combinations no manifest can express.
 #[derive(Debug, Union)]

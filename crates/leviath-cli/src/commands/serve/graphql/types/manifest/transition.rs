@@ -139,7 +139,7 @@ pub(crate) struct TransitionGate {
     /// region does.
     pub(crate) region: Option<String>,
     /// Tools counted as modifying, beyond `write_file` and `edit_file`. For an
-    /// agent whose writes go through MCP or a script.
+    /// blueprint whose writes go through MCP or a script.
     pub(crate) tools: Vec<String>,
     /// Regions that must all hold something. Conjunctive, unlike `region`.
     pub(crate) require_regions: Vec<String>,
@@ -270,7 +270,7 @@ pub(crate) struct RegionMapping {
 
 /// How this blueprint's context maps onto another's.
 ///
-/// What a handoff needs: two agents with different memory structures cannot
+/// What a handoff needs: two blueprints with different memory structures cannot
 /// simply pass a context along, so the blueprint that hands off says which of
 /// its regions becomes which of the other's.
 ///

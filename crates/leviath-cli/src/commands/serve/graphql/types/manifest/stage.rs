@@ -31,7 +31,7 @@ pub(crate) enum StageMode {
     Interactive,
     /// Holds at each declared interaction point instead of at every step.
     InteractivePoints,
-    /// Splits work across worker agents, then continues.
+    /// Splits work across worker runs, then continues.
     FanOut,
     /// Produces the run's final answer and nothing else.
     Output,
@@ -73,7 +73,7 @@ pub(crate) struct FanOut {
     /// A stage of this same blueprint run as the worker, by name. That stage has
     /// to allow it.
     pub(crate) worker_stage: Option<String>,
-    /// A description matched against the installed agents, when the manifest
+    /// A description matched against the installed blueprints, when the manifest
     /// would rather describe the worker than name it.
     pub(crate) worker_query: Option<String>,
     /// The stage that reconciles what the workers sent back, by name.

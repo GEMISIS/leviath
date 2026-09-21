@@ -1,5 +1,5 @@
 //! What this machine can route to: the models, the providers behind them, and
-//! the tools an agent may call.
+//! the tools a run may call.
 //!
 //! These are catalogues, sized by what the operator configured rather than by
 //! what has accumulated, so they are plain lists. The house rule is the REST
@@ -158,7 +158,7 @@ impl From<&super::super::super::providers::ProviderInfo> for Provider {
     }
 }
 
-/// One tool an agent on this machine can be given.
+/// One tool a run on this machine can be given.
 ///
 /// An interface rather than one type with nullable extras: a script tool always
 /// has a file and a built-in never does, and a schema that says so lets a client
@@ -231,8 +231,8 @@ pub(crate) struct ScriptTool {
     pub(crate) description: String,
     /// The JSON Schema of its arguments, built from its `@param` lines.
     pub(crate) arguments: super::super::scalars::Json,
-    /// `AGENT_SCRIPT` or `GLOBAL_SCRIPT`, which is the difference between a
-    /// tool one agent has and one every agent here has.
+    /// `BLUEPRINT_SCRIPT` or `GLOBAL_SCRIPT`, which is the difference between a
+    /// tool one blueprint carries and one every run here has.
     pub(crate) origin: ToolOrigin,
     /// The file behind it.
     pub(crate) path: String,
@@ -284,19 +284,19 @@ impl Tool {
 
 /// What kind of thing offers a tool.
 ///
-/// A closed set, and the whole of it: this inventory is what an agent on this
+/// A closed set, and the whole of it: this inventory is what a run on this
 /// machine can be given, and an MCP server's tools are not in it. Read
 /// `mcpServers` for those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
 pub(crate) enum ToolOrigin {
-    /// Compiled into this build. Every agent has it.
+    /// Compiled into this build. Every run has it.
     Builtin,
     /// A sub-agent tool, offered to an agent that may spawn children.
     Subagent,
-    /// A `.rhai` script in one agent's own `tools/`, so it travels with that
-    /// agent and no other.
-    AgentScript,
-    /// A `.rhai` script in the machine-wide tools directory, so every agent
+    /// A `.rhai` script in one blueprint's own `tools/`, so it travels with that
+    /// blueprint and no other.
+    BlueprintScript,
+    /// A `.rhai` script in the machine-wide tools directory, so every run
     /// here gets it.
     GlobalScript,
 }
@@ -307,7 +307,7 @@ impl From<crate::tool_inventory::ToolSource> for ToolOrigin {
         match source {
             ToolSource::Builtin => Self::Builtin,
             ToolSource::Subagent => Self::Subagent,
-            ToolSource::Agent => Self::AgentScript,
+            ToolSource::Agent => Self::BlueprintScript,
             ToolSource::Global => Self::GlobalScript,
         }
     }
@@ -331,7 +331,7 @@ pub(crate) struct SkippedTool {
     pub(crate) reason: String,
 }
 
-/// The tool inventory: what an agent on this machine can call.
+/// The tool inventory: what a run on this machine can call.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ToolInventory {
     /// The tools themselves.

@@ -64,7 +64,7 @@ impl From<RunSort> for SortKey {
 /// inside runs" toggle rather than paying for on every keystroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum SearchScope {
-    /// Run metadata: title, agent name, status, task, caller metadata.
+    /// Run metadata: title, blueprint name, status, task, caller metadata.
     Meta,
     /// The run's own record of the files it changed.
     Files,
@@ -514,7 +514,7 @@ impl Query {
             .collect()
     }
 
-    /// The tools an agent on this machine can call.
+    /// The tools a run on this machine can call.
     ///
     /// Scoped to one blueprint's own directory when `blueprint` names one,
     /// which is what an editor offering an `available_tools` list wants.
@@ -815,7 +815,7 @@ impl Query {
 
     /// Whether a script compiles, without writing it.
     ///
-    /// The alternative was saving it and waiting for an agent to fail, which is
+    /// The alternative was saving it and waiting for a run to fail, which is
     /// not much of an improvement on editing the file over SSH. Ungated:
     /// compiling text in memory writes nothing and runs nothing, because every
     /// compiler here stops at the syntax tree.

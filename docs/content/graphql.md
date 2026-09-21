@@ -191,7 +191,7 @@ what a finished run says it ran, and a daemon restart resumes a run on the
 manifest it started with.
 
 Only the manifest is frozen. Scripts it names, such as hooks and validators,
-are still read from the installed agent directory.
+are still read from the installed blueprint's directory.
 
 `source` says which file a blueprint came from, `SNAPSHOT` or `INSTALLED`. A run
 recorded before this feature existed has no copy, so it reads `INSTALLED` and
@@ -206,7 +206,7 @@ run's frozen copy with whatever is installed now.
 
 The whole manifest is readable, one field at a time: a stage's model block, its
 tool routing, its checkpoints, its output shape, its hooks, its fan-out, and the
-edges out of it with their conditions and gates. So is what the agent declares
+edges out of it with their conditions and gates. So is what the blueprint declares
 run-wide: its dependencies, the mime rows it ships, its sandbox, its summarizer,
 and what it would like to run unasked.
 
@@ -969,7 +969,7 @@ an upgrade would do, and `updateJob(id:)` follows one that is running.
   update {
     version installMethod channel latest updateAvailable
     binary { __typename ... on UpgradeByCommand { shell } }
-    agents { name version change preselected }
+    blueprints { name version change preselected }
   }
 }
 ```

@@ -292,7 +292,7 @@ impl AdminMutation {
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Upgrade the binary.", default = true)] binary: bool,
-        #[graphql(desc = "Install the bundled blueprints.", default = true)] agents: bool,
+        #[graphql(desc = "Install the bundled blueprints.", default = true)] blueprints: bool,
         #[graphql(
             desc = "Respell keys that changed name in your own blueprints.",
             default = true
@@ -301,9 +301,12 @@ impl AdminMutation {
         #[graphql(desc = "Apply the config migrations.", default = true)] migrations: bool,
     ) -> async_graphql::Result<super::types::update::UpdateJob> {
         let state = ctx.data_unchecked::<AppState>();
+        // The REST route spells this part of the plan `agents`, and the record
+        // the job writes carries that word, so the field keeps it while the
+        // argument reads in the vocabulary the rest of this schema uses.
         let request = super::super::update_job::ApplyRequest {
             binary,
-            agents,
+            agents: blueprints,
             keys,
             migrations,
         };

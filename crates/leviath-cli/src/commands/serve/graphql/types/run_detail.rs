@@ -16,7 +16,7 @@ use super::run::{CostBreakdown, TokenUsage, WorkingClock};
 pub(crate) enum WaitReasonKind {
     /// Waiting on a tool-permission decision.
     ToolApproval,
-    /// Waiting on an answer to a question the agent asked.
+    /// Waiting on an answer to a question the run asked.
     UserPrompt,
     /// Waiting at a taint gate.
     TaintGate,

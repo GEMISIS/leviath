@@ -120,7 +120,7 @@ pub(crate) enum BinaryUpgrade {
 
 /// One bundled blueprint, and what an update would do to it.
 #[derive(Debug, SimpleObject)]
-pub(crate) struct UpdateAgentEntry {
+pub(crate) struct UpdateBlueprintEntry {
     /// The blueprint's name.
     pub(crate) name: String,
     /// The version this build ships.
@@ -164,7 +164,7 @@ pub(crate) struct UpdateInfo {
     /// How the binary would be upgraded.
     pub(crate) binary: BinaryUpgrade,
     /// The bundled blueprints, and what would happen to each.
-    pub(crate) agents: Vec<UpdateAgentEntry>,
+    pub(crate) blueprints: Vec<UpdateBlueprintEntry>,
     /// The config migrations that apply.
     pub(crate) migrations: Vec<UpdateMigration>,
     /// Why the config could not be read, when it could not. The plan is still
@@ -210,13 +210,13 @@ impl UpdateInfo {
                     message: message.clone(),
                 }),
             },
-            agents: plan
+            blueprints: plan
                 .agents
                 .iter()
-                .map(|(agent, action)| UpdateAgentEntry {
-                    name: agent.name.to_string(),
-                    version: agent.version.to_string(),
-                    change: action.label(agent.version),
+                .map(|(bundled, action)| UpdateBlueprintEntry {
+                    name: bundled.name.to_string(),
+                    version: bundled.version.to_string(),
+                    change: action.label(bundled.version),
                     changes: action.is_change(),
                     preselected: action.preselect(),
                 })
@@ -255,7 +255,7 @@ pub(crate) enum UpdateStep {
     /// what the new binary ships.
     Binary,
     /// The bundled blueprints in the agents directory.
-    Agents,
+    Blueprints,
     /// Keys in the reader's own blueprints that changed name.
     Keys,
     /// The config file.
@@ -323,7 +323,7 @@ impl From<super::super::super::update_job::UpdateJob> for UpdateJob {
                 .map(|step| UpdateJobStep {
                     step: match step.step {
                         Step::Binary => UpdateStep::Binary,
-                        Step::Agents => UpdateStep::Agents,
+                        Step::Agents => UpdateStep::Blueprints,
                         Step::Keys => UpdateStep::Keys,
                         Step::Migrations => UpdateStep::Migrations,
                     },

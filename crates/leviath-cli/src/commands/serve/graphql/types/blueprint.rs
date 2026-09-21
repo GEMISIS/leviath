@@ -66,7 +66,7 @@ impl From<CoreSource> for BlueprintSource {
 /// When a run looks for tools again after it started.
 ///
 /// Discovery happens either way. What this decides is whether it happens more
-/// than once - not whether the agent may install a tool, which is what the tool
+/// than once - not whether the run may install a tool, which is what the tool
 /// permissions decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum ToolRescan {
@@ -79,10 +79,10 @@ pub(crate) enum ToolRescan {
     /// As `RESCAN_AFTER_WRITES`, and the run looks at the scanned directories
     /// before each batch of tool calls.
     ///
-    /// `RESCAN_AFTER_WRITES` is told about a tool only when the agent writes one
+    /// `RESCAN_AFTER_WRITES` is told about a tool only when the run writes one
     /// with `write_file`, `edit_file` or `install_tool`. This notices one that
     /// arrived any other way: from a shell command, from a script tool, or from
-    /// another agent sharing the workdir.
+    /// another run sharing the workdir.
     RescanBeforeDispatch,
 }
 
@@ -307,7 +307,7 @@ impl Region {
     }
 
     /// What fills this region before the first inference. Null means it starts
-    /// empty, for the agent to fill.
+    /// empty, for the run to fill.
     async fn seed(&self) -> Option<RegionSeed> {
         self.region().seed.as_ref().map(RegionSeed::from)
     }
@@ -400,7 +400,7 @@ impl Region {
     }
 }
 
-/// An agent blueprint: the full manifest.
+/// A blueprint: the full manifest.
 ///
 /// From a run, this is the manifest the run executed. From the blueprint
 /// listing, it is the definition installed now. The `source` field says which,
@@ -506,7 +506,7 @@ impl Blueprint {
             .collect()
     }
 
-    /// Paths this agent declares it needs beyond its workdir. Declaring is not
+    /// Paths this blueprint declares it needs beyond its workdir. Declaring is not
     /// granting: an entry takes effect only where the host grants it.
     async fn read_paths(&self) -> &[String] {
         match self.parsed.read_paths.as_ref() {
@@ -525,8 +525,8 @@ impl Blueprint {
             .collect()
     }
 
-    /// The mime rows this blueprint ships, so an agent that works in a file type
-    /// the machine has never heard of carries the row that describes it.
+    /// The mime rows this blueprint ships, so one that works in a file type the
+    /// machine has never heard of carries the row that describes it.
     async fn mime_types(&self) -> Vec<BlueprintMimeRow> {
         BlueprintMimeRow::from_table(&self.parsed.mime_types)
     }
@@ -537,7 +537,7 @@ impl Blueprint {
         self.parsed.security.as_ref().map(BlueprintSecurity::from)
     }
 
-    /// Where this agent's tools run, unless a stage says otherwise. Null leaves
+    /// Where this blueprint's tools run, unless a stage says otherwise. Null leaves
     /// the machine's own setting.
     async fn sandbox(&self) -> Option<SandboxConfig> {
         self.parsed.sandbox.as_ref().map(SandboxConfig::from)
@@ -558,7 +558,7 @@ impl Blueprint {
             .map(CompactionConfig::from)
     }
 
-    /// Keeping the files this agent reads and writes in one region, so a tool
+    /// Keeping the files this blueprint's runs read and write in one region, so a tool
     /// result can point at the region rather than repeating the file.
     async fn file_tracking(&self) -> Option<FileTrackingConfig> {
         self.parsed
@@ -576,19 +576,19 @@ impl Blueprint {
             .map(RepetitionDetection::from)
     }
 
-    /// What this agent would like to run without being asked. A request rather
+    /// What this blueprint would like to run without being asked. A request rather
     /// than a grant: the machine's own policy decides, and this is what an
     /// operator reads when deciding whether to write it in.
     async fn safe_commands(&self) -> Option<SafeCommands> {
         self.parsed.safe_commands.as_ref().map(SafeCommands::from)
     }
 
-    /// The shape this agent's answer takes, unless a stage narrows it.
+    /// The shape this blueprint's answer takes, unless a stage narrows it.
     async fn output(&self) -> Option<OutputSpec> {
         self.parsed.output.as_ref().map(OutputSpec::from)
     }
 
-    /// How this agent's context maps onto another's, for a handoff to a
+    /// How this blueprint's context maps onto another's, for a handoff to a
     /// different blueprint.
     async fn transforms(&self) -> Vec<ContextTransform> {
         self.parsed

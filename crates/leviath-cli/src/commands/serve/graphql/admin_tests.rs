@@ -920,7 +920,7 @@ mod doing_the_work {
 
             let started = schema
                 .execute(Request::new(
-                    "mutation { startUpdate(binary: false, agents: false, migrations: false)
+                    "mutation { startUpdate(binary: false, blueprints: false, migrations: false)
                        { id status steps { step status detail } } }",
                 ))
                 .await;

@@ -11,7 +11,7 @@ use async_graphql::SimpleObject;
 /// What a validation found.
 ///
 /// `valid` is the verdict; the lists say why. A manifest can be valid and still
-/// carry warnings, which is the common case for an agent that works but names
+/// carry warnings, which is the common case for a blueprint that works but names
 /// something the engine has retired.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ValidationReport {

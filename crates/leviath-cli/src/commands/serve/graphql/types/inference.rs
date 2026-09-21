@@ -265,7 +265,7 @@ impl ModelInput {
 pub(crate) struct InferenceFailover {
     /// The stage whose call moved.
     pub(crate) stage: String,
-    /// The stage-local iteration, which the move leaves alone: the agent still
+    /// The stage-local iteration, which the move leaves alone: the run still
     /// has not had a turn.
     pub(crate) iteration: i32,
     /// The provider that would not serve.

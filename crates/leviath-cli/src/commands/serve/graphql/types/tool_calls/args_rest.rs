@@ -1,5 +1,5 @@
 //! Arguments for the tools that ask a person something, end a stage, or run
-//! another agent.
+//! another blueprint.
 //!
 //! Three small groups in one file rather than three files of five types: they
 //! are all plain mirrors of a declared schema, and splitting them further would

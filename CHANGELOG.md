@@ -309,7 +309,19 @@ same list.
   The argument that scopes a read to one blueprint is now `blueprint:` rather
   than `agent:`, on `scripts`, `tools`, `validateBlueprint`, `putScript` and
   `deleteScript`. The field that names that blueprint is now `blueprint` on both
-  `Script` and `ScriptTool`.
+  `Script` and `ScriptTool`. The tool inventory agrees with it: the
+  `ToolOrigin` value for a `.rhai` script in one blueprint's own `tools/` is now
+  `BLUEPRINT_SCRIPT` rather than `AGENT_SCRIPT`.
+
+  The self-update job names the files it installs. `startUpdate`'s `agents:`
+  argument is now `blueprints:`, `update.agents` is now `update.blueprints`,
+  `UpdateAgentEntry` is now `UpdateBlueprintEntry`, and `UpdateStep.AGENTS` is
+  now `UpdateStep.BLUEPRINTS`. `POST /api/update` still takes an `agents` flag
+  and still records a step spelled `agents`, so a REST client needs no change.
+
+  Field, type and enum descriptions throughout the schema now say blueprint for
+  the files and run for the execution, wherever they said agent for one of the
+  two. The wording is all a reader sees; nothing a client selects moved with it.
 
   In the live frames, `AgentSpawned`, `AgentStatusChanged`, `AgentSpend` and
   `AgentCompleted` are now `RunSpawned`, `RunStatusChanged`, `RunSpend` and
