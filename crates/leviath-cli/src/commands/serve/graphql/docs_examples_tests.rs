@@ -53,21 +53,29 @@ const PAGES: &[Page] = &[
     },
 ];
 
-/// The fewest examples this check is willing to call a run.
+/// Exactly the examples the pages carry, so losing one fails the build.
 ///
 /// An extractor that stops finding blocks is how a test like this rots: it keeps
-/// passing, over nothing. The number sits under what the pages carry today, so
-/// that adding an example never fails the build, and far enough over zero that
-/// losing the examples does.
-const FEWEST_EXAMPLES: usize = 26;
+/// passing, over nothing. A floor set under what is really there is the same rot
+/// more slowly, because the gap is how many examples may quietly stop being
+/// checked. This one is the count itself.
+const FEWEST_EXAMPLES: usize = 39;
 
-/// The fewest queries this check expects to find inside a request body.
+/// Exactly the queries the pages carry inside a request body.
 ///
 /// The `curl` line under Auth is the first example a reader copies, and it is a
 /// query in a shell string rather than in a fence of its own. Rewriting it into
 /// a shape the payload reader no longer knows has to fail the build, or the
 /// worst example on the page becomes the one nothing checks.
 const FEWEST_EMBEDDED: usize = 1;
+
+/// How far a count may rise above its floor before the floor is raised.
+///
+/// Zero would mean every added example fails the build until somebody edits a
+/// constant, which teaches people to distrust the check. This much slack lets a
+/// page grow by a few examples in peace, and caps at a handful how many can be
+/// lost again without anybody hearing about it.
+const HEADROOM: usize = 5;
 
 /// One fenced block, with where it sits in its page.
 struct Block {
@@ -751,59 +759,199 @@ impl Surface {
 #[test]
 fn every_documented_example_matches_the_schema() {
     let surface = Surface::parse(&sdl());
-    let mut checked = 0;
-    let mut payloads = 0;
+    let mut walked = Counted::default();
     for page in PAGES {
-        let blocks = fenced_blocks(page.text);
-        let examples: Vec<&Block> = blocks
-            .iter()
-            .filter(|block| block.language == "graphql")
-            .collect();
-        assert!(
-            !examples.is_empty(),
-            "{} contributed no examples to check",
-            page.path
-        );
-        for (index, block) in examples.iter().enumerate() {
-            if let Err(fault) = surface.check(&block.body) {
-                panic!(
-                    "{}:{}:{}: block {} of the page: {}",
-                    page.path,
-                    block.fence_line + fault.pos.line,
-                    fault.pos.column,
-                    index + 1,
-                    fault.message
-                );
-            }
-            checked += 1;
-        }
-        for payload in embedded_queries(&blocks) {
-            if let Err(fault) = surface.check(&payload.document) {
-                panic!(
-                    "{}:{}: the request body on this line carries a query the schema refuses, \
-                     at {}:{} of that query: {}",
-                    page.path, payload.line, fault.pos.line, fault.pos.column, fault.message
-                );
-            }
-            checked += 1;
-            payloads += 1;
-        }
+        let found = walk_page(&surface, page.path, page.text);
+        walked.examples += found.examples;
+        walked.payloads += found.payloads;
     }
+    in_band(
+        "FEWEST_EXAMPLES",
+        "examples",
+        walked.checked(),
+        FEWEST_EXAMPLES,
+    )
+    .unwrap_or_else(|reason| panic!("{reason}"));
+    in_band(
+        "FEWEST_EMBEDDED",
+        "queries inside a request body",
+        walked.payloads,
+        FEWEST_EMBEDDED,
+    )
+    .unwrap_or_else(|reason| panic!("{reason}"));
+}
+
+/// What one page contributed to a run of the check.
+#[derive(Default)]
+struct Counted {
+    /// Examples in a `graphql` fence.
+    examples: usize,
+    /// Queries carried inside a request body.
+    payloads: usize,
+}
+
+impl Counted {
+    /// Every query walked, wherever it was written.
+    fn checked(&self) -> usize {
+        self.examples + self.payloads
+    }
+}
+
+/// Walk every query one page carries, and say how many there were.
+///
+/// A fault is a panic rather than a returned error: it names the page, the line
+/// in that page, the column, and which block of the page it was, because that is
+/// what fixing one takes, and there is nothing for a caller to do with it but
+/// print it.
+fn walk_page(surface: &Surface, path: &str, text: &str) -> Counted {
+    let blocks = fenced_blocks(text);
+    let examples: Vec<&Block> = blocks
+        .iter()
+        .filter(|block| block.language == "graphql")
+        .collect();
     assert!(
-        checked >= FEWEST_EXAMPLES,
-        "only {checked} examples were checked, so the extractor is missing blocks"
+        !examples.is_empty(),
+        "{path} contributed no examples to check"
     );
-    assert!(
-        payloads >= FEWEST_EMBEDDED,
-        "{payloads} queries were found inside a request body, fewer than the \
-         {FEWEST_EMBEDDED} expected, so the payload reader no longer recognises the \
-         shape the documented bodies are written in"
-    );
+    let mut counted = Counted::default();
+    for (index, block) in examples.iter().enumerate() {
+        if let Err(fault) = surface.check(&block.body) {
+            panic!(
+                "{}:{}:{}: block {} of the page: {}",
+                path,
+                block.fence_line + fault.pos.line,
+                fault.pos.column,
+                index + 1,
+                fault.message
+            );
+        }
+        counted.examples += 1;
+    }
+    for payload in embedded_queries(&blocks) {
+        if let Err(fault) = surface.check(&payload.document) {
+            panic!(
+                "{}:{}: the request body on this line carries a query the schema refuses, \
+                 at {}:{} of that query: {}",
+                path, payload.line, fault.pos.line, fault.pos.column, fault.message
+            );
+        }
+        counted.payloads += 1;
+    }
+    counted
+}
+
+/// Whether the number found still sits in the band its floor opens.
+///
+/// Below the floor, something that was being checked no longer is. Further above
+/// it than [`HEADROOM`], the floor has fallen behind far enough to stop being a
+/// guard, and the message says which constant to move and what to.
+fn in_band(constant: &str, what: &str, found: usize, floor: usize) -> Result<(), String> {
+    if found < floor {
+        return Err(format!(
+            "only {found} {what} were checked, and these pages carry {floor}. Some have been \
+             lost, or the reader that finds them no longer recognises how they are written. \
+             Put them back rather than lowering {constant}."
+        ));
+    }
+    if found > floor + HEADROOM {
+        return Err(format!(
+            "{found} {what} are checked and {constant} is {floor}, which is more than \
+             {HEADROOM} behind. Raise {constant} to {found}, so that losing one is still \
+             noticed."
+        ));
+    }
+    Ok(())
 }
 
 /// The served schema, for the tests that check what the walk refuses.
 fn served() -> Surface {
     Surface::parse(&sdl())
+}
+
+/// One page's text with its first `graphql` fence taken out of it.
+///
+/// Line by line, the way the extractor itself reads a page, so that what is
+/// removed is exactly one of the things the extractor would have found.
+fn without_its_first_example(text: &str) -> String {
+    let mut kept = String::new();
+    let mut cutting = false;
+    let mut cut_one = false;
+    for line in text.lines() {
+        if cutting {
+            cutting = !line.trim_start().starts_with("```");
+            continue;
+        }
+        if !cut_one && line.trim() == "```graphql" {
+            cutting = true;
+            cut_one = true;
+            continue;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    assert!(cut_one, "the page carries an example to remove");
+    kept
+}
+
+/// Deleting one example fails the build, which is what the floor is for.
+///
+/// The pages are the real ones with a single `graphql` fence cut out, so what is
+/// counted is what the check would count on the day somebody drops an example -
+/// not a number invented for a test.
+#[test]
+fn an_example_removed_from_a_page_is_noticed() {
+    let surface = served();
+    let mut walked = Counted::default();
+    for page in PAGES {
+        let text = match page.path {
+            "docs/content/graphql.md" => without_its_first_example(page.text),
+            _ => page.text.to_string(),
+        };
+        let found = walk_page(&surface, page.path, &text);
+        walked.examples += found.examples;
+        walked.payloads += found.payloads;
+    }
+    assert_eq!(
+        walked.checked(),
+        FEWEST_EXAMPLES - 1,
+        "exactly one example fewer"
+    );
+    let reason = in_band(
+        "FEWEST_EXAMPLES",
+        "examples",
+        walked.checked(),
+        FEWEST_EXAMPLES,
+    )
+    .expect_err("one short of the floor");
+    assert!(
+        reason.contains(&format!("only {} examples", FEWEST_EXAMPLES - 1)),
+        "it says how many are left: {reason}"
+    );
+    assert!(
+        reason.contains("lost") && reason.contains("Put them back"),
+        "it says what to do about it: {reason}"
+    );
+}
+
+/// A floor left behind by a page that grew says what to raise it to, rather
+/// than sitting there checking a shrinking share of the examples.
+#[test]
+fn a_floor_that_has_fallen_behind_says_what_to_raise_it_to() {
+    let reason = in_band("FEWEST_EXAMPLES", "examples", 40, 30).expect_err("ten past the floor");
+    assert!(
+        reason.contains("Raise FEWEST_EXAMPLES to 40"),
+        "it names the constant and the number: {reason}"
+    );
+}
+
+/// A page that grows by a few examples is not a failing build.
+#[test]
+fn a_count_inside_the_headroom_is_accepted() {
+    assert!(in_band("FLOOR", "examples", 30, 30).is_ok(), "the floor");
+    assert!(
+        in_band("FLOOR", "examples", 30 + HEADROOM, 30).is_ok(),
+        "the top of the band"
+    );
 }
 
 /// What the walk says about an example it will not accept.
