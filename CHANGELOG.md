@@ -11,7 +11,7 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
-## 0.6.3 - 2026-09-19
+## Unreleased
 
 ### Added
 
@@ -338,6 +338,10 @@ same list.
   cancel, on both surfaces, rather than `404`. "Not found" about a run sitting
   in the listing reads as a wrong run id, and sent people looking for a run
   that was right there. The message names the state the run finished in.
+
+## 0.6.3 - 2026-09-19
+
+### Changed
 
 - The performance probes and the live-test harness (`harness.sh`,
   `mock.py`, `daemon_drive.py`, `dash_pty.py` and the rest of
