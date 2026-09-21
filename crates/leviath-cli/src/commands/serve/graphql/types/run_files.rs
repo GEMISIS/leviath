@@ -49,7 +49,7 @@ pub(crate) struct FileEntry {
     pub(crate) exists: bool,
     /// True for a recorded path outside the working directory, which happens
     /// when a tool was handed an absolute path. Reported rather than hidden.
-    pub(crate) outside_workdir: bool,
+    pub(crate) is_outside_workdir: bool,
     /// What the run's own mime registry makes of the name. By extension, never
     /// sniffed: a listing must not read every file. Empty for a directory.
     pub(crate) mime_type: String,
@@ -99,7 +99,7 @@ impl From<files::FileListing> for FileListing {
                     is_dir: entry.is_dir,
                     size: entry.size.map(|size| BigInt(size as i64)),
                     exists: entry.exists,
-                    outside_workdir: entry.outside_workdir,
+                    is_outside_workdir: entry.outside_workdir,
                     mime_type: entry.mime_type,
                 })
                 .collect(),

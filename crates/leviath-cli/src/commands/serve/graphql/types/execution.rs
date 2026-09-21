@@ -44,11 +44,7 @@ impl From<leviath_core::execution::ToolOutcome> for ToolOutcome {
     }
 }
 
-/// One attempt to carry out one tool call.
-///
-/// An attempt, not a call: a call the model reissued is a second execution with
-/// its own id. The provider's call id is on the call and may repeat, which is
-/// exactly why these have ids of their own.
+/// The resolver state behind the `ToolExecution` type.
 pub(crate) struct ToolExecution {
     /// The run this belongs to, for the fields that read its journal again.
     pub(crate) run_id: String,
@@ -77,6 +73,12 @@ impl ToolExecution {
     }
 }
 
+/// One attempt to carry out one tool call: what was asked for, what the tool
+/// did, and how it turned out.
+///
+/// An attempt, not a call: a call the model reissued is a second execution with
+/// its own id. The provider's call id is on the call and may repeat, which is
+/// exactly why these have ids of their own.
 #[Object]
 impl ToolExecution {
     /// This attempt's own id, minted when it was dispatched.

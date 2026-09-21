@@ -349,6 +349,17 @@ same list.
 
 ### Changed
 
+- Six GraphQL booleans read as booleans. `BlueprintMimeRow.text`,
+  `MimeRow.text` and the `text` field of the `MimeRowInput` a `putMimeRow`
+  takes are now `isText`; `SandboxConfig.network` is now `allowNetwork`;
+  `FileEntry.outsideWorkdir` is now `isOutsideWorkdir`; and
+  `UpdateBlueprintEntry.changes` is now `hasChanges`. Each answers the same
+  yes or no it always did, so updating a client is a rename in the selection
+  set and, for `putMimeRow`, in the row you send. The REST routes are
+  untouched: `GET /api/mime` still answers `text`, a sandbox block in a
+  manifest is still written `network = true`, `GET /api/runs/:id/files` still
+  answers `outside_workdir`, and `GET /api/update` still answers `changes`.
+
 - The GraphQL API names a run a run. `spawnAgent` is now `spawnRun`, and
   `pauseAgent`, `resumeAgent` and `cancelAgent` are now `pauseRun`, `resumeRun`
   and `cancelRun`. They answer with a `RunPayload`, which is what `AgentPayload`

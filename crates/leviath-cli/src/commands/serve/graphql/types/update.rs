@@ -128,7 +128,7 @@ pub(crate) struct UpdateBlueprintEntry {
     /// What would happen to the installed copy, in words.
     pub(crate) change: String,
     /// Whether that is a change at all, rather than "already current".
-    pub(crate) changes: bool,
+    pub(crate) has_changes: bool,
     /// Whether an update would install it without being asked. A copy somebody
     /// edited is not, because overwriting it would throw that work away.
     pub(crate) preselected: bool,
@@ -217,7 +217,7 @@ impl UpdateInfo {
                     name: bundled.name.to_string(),
                     version: bundled.version.to_string(),
                     change: action.label(bundled.version),
-                    changes: action.is_change(),
+                    has_changes: action.is_change(),
                     preselected: action.preselect(),
                 })
                 .collect(),

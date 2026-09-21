@@ -82,12 +82,7 @@ pub(crate) struct TransformRegions {
     pub(crate) clear: Vec<String>,
 }
 
-/// What a transform does in detail: which regions it carries, compacts and
-/// clears, and what it asks the summarizer for.
-///
-/// Set for `COMPACT`, which carries the prompt and nothing else, and for
-/// `CUSTOM`, which carries the per-region lists. Null for `DIRECT` and `CLEAR`,
-/// which have nothing to say.
+/// The resolver state behind the `TransformConfig` type.
 pub(crate) struct TransformConfig {
     /// The blueprint the region names resolve in.
     blueprint: Arc<CoreBlueprint>,
@@ -97,6 +92,12 @@ pub(crate) struct TransformConfig {
     compact_prompt: Option<String>,
 }
 
+/// What a transform does in detail: which regions it carries, compacts and
+/// clears, and what it asks the summarizer for.
+///
+/// Set for `COMPACT`, which carries the prompt and nothing else, and for
+/// `CUSTOM`, which carries the per-region lists. Null for `DIRECT` and `CLEAR`,
+/// which have nothing to say.
 #[Object]
 impl TransformConfig {
     /// Regions carried over verbatim.
@@ -145,7 +146,7 @@ impl TransformConfig {
     }
 }
 
-/// A region and the fewest entries it must hold.
+/// The resolver state behind the `RegionEntryRequirement` type.
 pub(crate) struct RegionEntryRequirement {
     /// The blueprint the region name resolves in.
     blueprint: Arc<CoreBlueprint>,
@@ -155,6 +156,7 @@ pub(crate) struct RegionEntryRequirement {
     at_least: i32,
 }
 
+/// A region and the fewest entries it must hold.
 #[Object]
 impl RegionEntryRequirement {
     /// The region counted.
@@ -206,11 +208,7 @@ impl From<&leviath_core::blueprint::StuckConfig> for StuckThresholds {
     }
 }
 
-/// What a stage must have done before an edge may be taken.
-///
-/// A gate that is not satisfied re-runs the stage with `message` instead of
-/// transitioning, up to `maxAttempts` times, and then lets the run through: an
-/// unmet gate slows a run down, it never strands one.
+/// The resolver state behind the `TransitionGate` type.
 pub(crate) struct TransitionGate {
     /// The blueprint the region names resolve in.
     blueprint: Arc<CoreBlueprint>,
@@ -218,6 +216,11 @@ pub(crate) struct TransitionGate {
     gate: leviath_core::blueprint::TransitionGate,
 }
 
+/// What a stage must have done before an edge may be taken.
+///
+/// A gate that is not satisfied re-runs the stage with `message` instead of
+/// transitioning, up to `maxAttempts` times, and then lets the run through: an
+/// unmet gate slows a run down, it never strands one.
 #[Object]
 impl TransitionGate {
     /// The stage must have modified something.
@@ -325,9 +328,7 @@ impl TransitionGate {
     }
 }
 
-/// One outgoing edge of a stage.
-///
-/// A stage with no edges is terminal.
+/// The resolver state behind the `TransitionEdge` type.
 pub(crate) struct TransitionEdge {
     /// The blueprint the target stage resolves in.
     blueprint: Arc<CoreBlueprint>,
@@ -337,6 +338,9 @@ pub(crate) struct TransitionEdge {
     edge: leviath_core::blueprint::TransitionEdge,
 }
 
+/// One outgoing edge of a stage.
+///
+/// A stage with no edges is terminal.
 #[Object]
 impl TransitionEdge {
     /// The stage this edge leads to.

@@ -53,7 +53,7 @@ impl Probe {
 async fn a_blueprint_carries_its_run_wide_settings() {
     let json = ask(r#"{ blueprint {
              security { taintTracking }
-             sandbox { kind image network mounts onUnavailable }
+             sandbox { kind image allowNetwork mounts onUnavailable }
              nudge { policy max text }
              compaction { provider model maxSummaryTokens temperature }
              fileTracking { region { name } regionName trackReads trackWrites }
@@ -139,14 +139,14 @@ async fn dependencies_carry_what_their_kind_needs() {
 #[tokio::test]
 async fn a_blueprint_carries_the_mime_rows_it_ships() {
     let json = ask(r#"{ blueprint { mimeTypes {
-             mimeType family text extensions magic standIn check
+             mimeType family isText extensions magic standIn check
              tokens { perByte perPixel max perSecond perPage fixed }
            } } }"#)
     .await;
     let row = &json["blueprint"]["mimeTypes"][0];
     assert_eq!(row["mimeType"], "model/gltf+json");
     assert_eq!(row["family"], "model");
-    assert_eq!(row["text"], true);
+    assert_eq!(row["isText"], true);
     assert_eq!(row["extensions"][0], "gltf");
     assert_eq!(row["tokens"]["fixed"], 500);
     // Exactly one rate is set, so a client reads the one that is there rather
@@ -533,7 +533,7 @@ async fn a_transform_maps_one_layout_onto_another() {
 async fn the_remaining_settings_arms_come_back() {
     let json = ask_variants(
         r#"{ blueprint {
-             sandbox { kind network keepWarm onUnavailable }
+             sandbox { kind allowNetwork keepWarm onUnavailable }
              nudge { policy text }
              dependencies { name kind var check required
                             install { script commands { os command } } }
@@ -542,7 +542,7 @@ async fn the_remaining_settings_arms_come_back() {
     .await;
     let bp = &json["blueprint"];
     assert_eq!(bp["sandbox"]["kind"], "NAMESPACE");
-    assert_eq!(bp["sandbox"]["network"], true);
+    assert_eq!(bp["sandbox"]["allowNetwork"], true);
     assert_eq!(bp["sandbox"]["keepWarm"], true);
     assert_eq!(bp["sandbox"]["onUnavailable"], "WARN");
     // Off outright, which is a different answer from inheriting: a nullable

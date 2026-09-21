@@ -378,10 +378,7 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
     }
 }
 
-/// One region of a run's live context window.
-///
-/// The declared region is on the blueprint; this is what it holds right now.
-/// Keeping them apart is what lets a client read either without the other.
+/// The resolver state behind the `ContextRegion` type.
 pub(crate) struct ContextRegion {
     /// The snapshot this region came from, shared rather than copied.
     pub(crate) snapshot: std::sync::Arc<leviath_core::run_meta::ContextSnapshot>,
@@ -389,6 +386,13 @@ pub(crate) struct ContextRegion {
     pub(crate) at: usize,
 }
 
+/// One region of a run's live context window: its name, its budget, and the
+/// text it is holding.
+///
+/// The declared region is on the blueprint; this is what that region holds
+/// right now. Keeping them apart is what lets a client read either without the
+/// other. `content` is the expensive field, so select it only for the regions
+/// you are going to show.
 #[Object]
 impl ContextRegion {
     /// The region's name, matching the blueprint's declaration.
@@ -446,12 +450,18 @@ impl ContextRegion {
     }
 }
 
-/// A run's context window as it stands right now.
+/// The resolver state behind the `ContextWindow` type.
 pub(crate) struct ContextWindow {
     /// The snapshot read from the run's directory.
     pub(crate) snapshot: std::sync::Arc<leviath_core::run_meta::ContextSnapshot>,
 }
 
+/// Everything a run is holding in mind, region by region, as of one moment.
+///
+/// A window is a reading rather than a live handle: the run keeps working and
+/// what it knows keeps changing, so every window carries a `revision` naming
+/// exactly the contents it was read at. Hold that revision to fetch the same
+/// window again, or read a fresh one to see where the run has got to.
 #[Object]
 impl ContextWindow {
     /// This window's revision: a content address of what it holds.

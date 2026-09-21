@@ -80,9 +80,16 @@ impl Types {
     }
 }
 
-/// The live frames, filtered before they are converted.
+/// The resolver state behind the `Subscription` type.
 pub(crate) struct Subscription_;
 
+/// The live side: what the fleet is doing as it does it, over a WebSocket at
+/// `/ws/graphql`.
+///
+/// One long-lived stream in place of polling, narrowed server-side to the runs
+/// and the frame types a client actually renders. Delivery is at-most-once, so
+/// a stream is how a client stays current and not how it reconstructs the
+/// past: for that, read the run.
 #[Subscription(name = "Subscription")]
 impl Subscription_ {
     /// The daemon broadcast, filtered server-side.

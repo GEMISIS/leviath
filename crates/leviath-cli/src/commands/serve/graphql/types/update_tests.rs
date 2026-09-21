@@ -222,7 +222,7 @@ async fn the_blueprints_and_migrations_say_what_would_happen() {
     let json = ask(
         &plan,
         &LatestCheck::default(),
-        "{ update { configError blueprints { name version change changes preselected }
+        "{ update { configError blueprints { name version change hasChanges preselected }
              migrations { name description } } }",
     )
     .await;
@@ -233,12 +233,12 @@ async fn the_blueprints_and_migrations_say_what_would_happen() {
     let listed = json["update"]["blueprints"].as_array().expect("blueprints");
     assert_eq!(listed.len(), 4);
     assert_eq!(listed[0]["name"], agent.name);
-    assert_eq!(listed[0]["changes"], true, "installing is a change");
+    assert_eq!(listed[0]["hasChanges"], true, "installing is a change");
     // A copy somebody edited is a change and is not pre-checked: overwriting it
     // would throw that work away.
-    assert_eq!(listed[2]["changes"], true);
+    assert_eq!(listed[2]["hasChanges"], true);
     assert_eq!(listed[2]["preselected"], false);
-    assert_eq!(listed[3]["changes"], false, "already current");
+    assert_eq!(listed[3]["hasChanges"], false, "already current");
     assert!(
         listed[1]["change"]
             .as_str()

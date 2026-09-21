@@ -65,7 +65,7 @@ pub(crate) struct BlueprintMimeRow {
     pub(crate) family: Option<String>,
     /// Whether the bytes are text, and so may travel inline and reach any model
     /// as text.
-    pub(crate) text: Option<bool>,
+    pub(crate) is_text: Option<bool>,
     /// How the part's tokens are estimated.
     pub(crate) tokens: Option<MimeTokenRates>,
     /// Extensions that imply this type, without the dot.
@@ -94,7 +94,7 @@ impl BlueprintMimeRow {
                 Some(Self {
                     mime_type: mime_type.clone(),
                     family: row.family,
-                    text: row.text,
+                    is_text: row.text,
                     tokens: row.tokens.as_ref().map(MimeTokenRates::from),
                     extensions: row.extensions.unwrap_or_default(),
                     magic: row.magic,

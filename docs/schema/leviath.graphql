@@ -373,6 +373,17 @@ type BlobEntry {
 	url: String
 }
 
+"""
+A blueprint: the manifest that says what an agent is, whole.
+
+Its stages, regions, tools and models are the declaration and nothing more.
+Nothing here belongs to any one execution: that is a `Run`, which carries
+its own frozen copy of the blueprint it started from.
+
+So read from a run, this is the manifest that run executed; read from the
+blueprint listing, it is the definition installed now. The `source` field
+says which, and the digest in the id says whether they are the same bytes.
+"""
 type Blueprint implements Node {
 	"""
 	This revision's id: `<name>@<digest prefix>`.
@@ -648,7 +659,7 @@ type BlueprintMimeRow {
 	Whether the bytes are text, and so may travel inline and reach any model
 	as text.
 	"""
-	text: Boolean
+	isText: Boolean
 	"""
 	How the part's tokens are estimated.
 	"""
@@ -1599,6 +1610,15 @@ type ContextReadCall implements ToolCall {
 	args: ContextReadArgs!
 }
 
+"""
+One region of a run's live context window: its name, its budget, and the
+text it is holding.
+
+The declared region is on the blueprint; this is what that region holds
+right now. Keeping them apart is what lets a client read either without the
+other. `content` is the expensive field, so select it only for the regions
+you are going to show.
+"""
 type ContextRegion {
 	"""
 	The region's name, matching the blueprint's declaration.
@@ -1707,6 +1727,14 @@ type ContextUpdated {
 	maxTokens: Int!
 }
 
+"""
+Everything a run is holding in mind, region by region, as of one moment.
+
+A window is a reading rather than a live handle: the run keeps working and
+what it knows keeps changing, so every window carries a `revision` naming
+exactly the contents it was read at. Hold that revision to fetch the same
+window again, or read a fresh one to see where the run has got to.
+"""
 type ContextWindow {
 	"""
 	This window's revision: a content address of what it holds.
@@ -2311,6 +2339,12 @@ type EventsDropped {
 	count: BigInt!
 }
 
+"""
+What a stage's fan-out splits into, and how.
+
+Only a `FAN_OUT` stage has one. Every other mode answers null, rather than a
+block of defaults nobody wrote.
+"""
 type FanOut {
 	"""
 	A separate installed blueprint run as the worker, by name. It has to be
@@ -2481,7 +2515,7 @@ type FileEntry {
 	True for a recorded path outside the working directory, which happens
 	when a tool was handed an absolute path. Reported rather than hidden.
 	"""
-	outsideWorkdir: Boolean!
+	isOutsideWorkdir: Boolean!
 	"""
 	What the run's own mime registry makes of the name. By extension, never
 	sniffed: a listing must not read every file. Empty for a directory.
@@ -2547,6 +2581,12 @@ enum FileSource {
 	WORKDIR
 }
 
+"""
+Keeping the files a run reads and writes in one region.
+
+So a tool result can point at the region rather than repeating a file the
+context already holds.
+"""
 type FileTrackingConfig {
 	"""
 	The key-value region the files are synced to.
@@ -2734,6 +2774,14 @@ enum HintSetting {
 	OMIT
 }
 
+"""
+One trip a run made to a provider, as the journal recorded it.
+
+Every trip is here, not just the ones that worked: a call answered on the
+third try leaves three attempts, and reading them in order is how a run's
+latency, backoff and moves between providers become visible. An attempt is
+a record of what happened, so nothing about it changes after the fact.
+"""
 type InferenceAttempt {
 	"""
 	The stage the run was in. Empty for a lane that has no stage of its own,
@@ -3000,6 +3048,15 @@ type InstallSelfToolCall implements ToolCall {
 	args: InstallSelfToolArgs!
 }
 
+"""
+One question a run put to a person: a tool call to approve, a choice to
+make, some text to write, or a document to edit.
+
+The run waits on the ask, so an unanswered one is a run going nowhere until
+somebody reads it. `settlement` says how it ended and what came back, and
+`requestId` is the handle an answer is sent against, over this API or from
+`lev respond`.
+"""
 type Interaction {
 	"""
 	The id the hub minted for this ask, which is what an answer arriving
@@ -3128,6 +3185,9 @@ type InteractionPayload {
 	accepted: Boolean!
 }
 
+"""
+A checkpoint a stage raises, where the run waits for a person.
+"""
 type InteractionPoint {
 	"""
 	The point's name, unique within the stage.
@@ -3717,7 +3777,7 @@ type MimeRow {
 	"""
 	Whether the bytes are text, and so may travel inline.
 	"""
-	text: Boolean
+	isText: Boolean
 	"""
 	The extensions this type is known by.
 	"""
@@ -3739,7 +3799,7 @@ input MimeRowInput {
 	"""
 	Whether the bytes are text, and so may travel inline.
 	"""
-	text: Boolean
+	isText: Boolean
 	"""
 	Extensions that imply this type, without the dot.
 	"""
@@ -3907,6 +3967,20 @@ type Model {
 	outputTypes: [String!]!
 }
 
+"""
+What one attempt sent the model, and what the request was assembled from.
+
+The body itself is here only for a run whose operator asked for it, because a
+captured request is the whole prompt: whatever the run's context held at that
+moment, including file contents a tool read and anything somebody pasted.
+Turn it on with `[observability] capture_model_input` for a machine, or
+`captureModelInput` on one `spawnRun`.
+
+Everything beside the body is recorded whether capture is on or off, and
+answers what a digest cannot: which parameters were really in force after
+resolution, which tools the model was offered, and which build of the
+assembly produced the shape.
+"""
 type ModelInput {
 	"""
 	Whether `request` is here, and where it went if it is not.
@@ -4605,6 +4679,9 @@ type OutputRequirement {
 	reasks: Int!
 }
 
+"""
+Where the parts a stage produces are written, by mime pattern.
+"""
 type OutputRoute {
 	"""
 	The mime pattern this rule matches: `image/png`, `image/*` or `*/*`. The
@@ -4761,6 +4838,15 @@ type Provider {
 	expiresAt: Timestamp
 }
 
+"""
+The whole read side: runs and their history, the blueprints and tools
+installed on this machine, and what the daemon itself is doing.
+
+Start from `runs` to find work, and from `node(id:)` when you already hold
+an id: anything this schema gives an id to comes back from there, whatever
+type it is. Reading never changes a run, so a query is safe to repeat and
+safe to poll.
+"""
 type Query {
 	"""
 	The blueprints installed on this machine, by name.
@@ -5135,6 +5221,15 @@ type ReadFilesCall implements ToolCall {
 	args: ReadFilesArgs!
 }
 
+"""
+One named slice of context a blueprint declares: what it is for, how large
+it may grow, and what it gives up when it fills.
+
+A blueprint's context window is cut into regions so that a stage can carry
+one part of what it knows and compact or empty another. This is the
+declaration only. What a live run's region holds is `ContextRegion`, and
+the two are read separately on purpose.
+"""
 type Region {
 	"""
 	Region name, unique within the layout that declares it.
@@ -5288,6 +5383,9 @@ enum RegionAdmission {
 	REJECT
 }
 
+"""
+A region and the fewest entries it must hold.
+"""
 type RegionEntryRequirement {
 	"""
 	The region counted.
@@ -5621,6 +5719,19 @@ enum RetryDecision {
 	RENEWED_FILES
 }
 
+"""
+One execution of a blueprint: the work itself, from the task it was given
+to whatever it finally produced.
+
+The `id` is the handle everything else in this API names a run by, and it
+outlives the run: a finished run is still readable, with its stages, its
+spend, its tool calls and the context it was holding. A run that spawns
+sub-agents is the `parent` of their runs, so a whole tree hangs off one id.
+
+Every duration on a run is measured against the moment the request was
+answered, so the numbers in one response agree with each other rather than
+each being taken at its own instant.
+"""
 type Run implements Node {
 	"""
 	Globally unique run id, and the id every REST route names this run by.
@@ -6678,7 +6789,7 @@ type SandboxConfig {
 	"""
 	Whether the sandbox reaches the network.
 	"""
-	network: Boolean!
+	allowNetwork: Boolean!
 	"""
 	Paths mounted into it, as written.
 	"""
@@ -7440,6 +7551,14 @@ input SpawnRunInput {
 	callbackSecret: String
 }
 
+"""
+One step of a blueprint: a prompt, the tools it may reach for, the slice of
+context it sees, and the edges leading out of it.
+
+Everything here is what the blueprint declares, so a stage reads the same
+however many runs have passed through it. A run occupies one stage at a
+time and leaves along an edge once that edge's gate is satisfied.
+"""
 type Stage {
 	"""
 	Stage name, unique within the blueprint.
@@ -7598,6 +7717,9 @@ type Stage {
 	transitions: [TransitionEdge!]!
 }
 
+"""
+Which regions a stage adds, hides or empties on its way in.
+"""
 type StageContext {
 	"""
 	Regions this stage declares of its own, beyond the blueprint's layout.
@@ -8015,6 +8137,15 @@ the run, which is resolved and typed either way.
 """
 union SubmittedArtifact = ArtifactByPath | ArtifactDescribed
 
+"""
+The live side: what the fleet is doing as it does it, over a WebSocket at
+`/ws/graphql`.
+
+One long-lived stream in place of polling, narrowed server-side to the runs
+and the frame types a client actually renders. Delivery is at-most-once, so
+a stream is how a client stays current and not how it reconstructs the
+past: for that, read the run.
+"""
 type Subscription {
 	"""
 	The daemon broadcast, filtered server-side.
@@ -8396,6 +8527,14 @@ type ToolCallStarted {
 	tool: String!
 }
 
+"""
+One attempt to carry out one tool call: what was asked for, what the tool
+did, and how it turned out.
+
+An attempt, not a call: a call the model reissued is a second execution with
+its own id. The provider's call id is on the call and may repeat, which is
+exactly why these have ids of their own.
+"""
 type ToolExecution {
 	"""
 	This attempt's own id, minted when it was dispatched.
@@ -8731,6 +8870,9 @@ type ToolResult {
 	parts: [String!]!
 }
 
+"""
+Where one tool's results go, in place of the stage's default region.
+"""
 type ToolRouteOverride {
 	"""
 	The tool, by the name the manifest used. A name rather than a `Tool`: an
@@ -8752,6 +8894,9 @@ type ToolRouteOverride {
 	regionName: String!
 }
 
+"""
+Where a stage's tool results land in its context.
+"""
 type ToolRouting {
 	"""
 	The region results go to when no override names another.
@@ -8819,6 +8964,14 @@ type ToolUseGuidance {
 	shellForMultiStepWork: HintSetting!
 }
 
+"""
+What a transform does in detail: which regions it carries, compacts and
+clears, and what it asks the summarizer for.
+
+Set for `COMPACT`, which carries the prompt and nothing else, and for
+`CUSTOM`, which carries the per-region lists. Null for `DIRECT` and `CLEAR`,
+which have nothing to say.
+"""
 type TransformConfig {
 	"""
 	Regions carried over verbatim.
@@ -8891,6 +9044,11 @@ enum TransitionCondition {
 	DEAD_END
 }
 
+"""
+One outgoing edge of a stage.
+
+A stage with no edges is terminal.
+"""
 type TransitionEdge {
 	"""
 	The stage this edge leads to.
@@ -8934,6 +9092,13 @@ type TransitionEdge {
 	stuck: StuckThresholds
 }
 
+"""
+What a stage must have done before an edge may be taken.
+
+A gate that is not satisfied re-runs the stage with `message` instead of
+transitioning, up to `maxAttempts` times, and then lets the run through: an
+unmet gate slows a run down, it never strands one.
+"""
 type TransitionGate {
 	"""
 	The stage must have modified something.
@@ -9117,7 +9282,7 @@ type UpdateBlueprintEntry {
 	"""
 	Whether that is a change at all, rather than "already current".
 	"""
-	changes: Boolean!
+	hasChanges: Boolean!
 	"""
 	Whether an update would install it without being asked. A copy somebody
 	edited is not, because overwriting it would throw that work away.
