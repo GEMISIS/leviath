@@ -294,6 +294,27 @@ same list.
   than a typed extension point, and the spawn input's `yolo` and `noSeedCommands`
   each say that null is `false` rather than a third state.
 
+- A run whose journal cannot be written is failed instead of carried on. The
+  daemon retries the append; if the second attempt fails too, the run ends with
+  an error naming the file that could not be written. Until now every
+  persistence failure was a log line and nothing else, so a run went on calling
+  tools and spending money while the record of what it did was being dropped -
+  and anyone reading that record afterwards saw a run that had never done any of
+  it.
+
+  **A deleted run is not a failure.** Removing a run (the dashboard's `d`,
+  `DELETE /api/runs/{id}`, `rm -rf`) makes every later write for it a no-op on
+  purpose, and that is still silent: the daemon tells the two apart by looking
+  for the run's directory, not by the error it got. Only a genuine write failure
+  - a full disk, a read-only mount, a permission - ends a run.
+
+- The daemon counts what its persistence lane writes and loses, and says so.
+  `lev doctor` runs a `journal` check that fails when anything has been lost,
+  naming the run and the file; `lev ps` prints a line under the table for the
+  same; and `POST /graphql`'s new `journal` field carries the counters, so a
+  console can show it. A daemon whose journal has been failing for an hour used
+  to answer every request and report every lane as idle.
+
 - `Tool` is an interface over `BuiltinTool`, `SubagentTool` and `ScriptTool`. A
   script always has a file and a built-in never does, so the file, the owning
   blueprint and the declared capabilities are fields on the one that has them

@@ -345,8 +345,12 @@ pub enum ControlResponse {
         finished: Vec<RunListEntry>,
         /// How the daemon itself is doing. Defaulted when absent so a listing
         /// from an older daemon still parses.
+        ///
+        /// Boxed: the reading is several hundred bytes of lane occupancy, and
+        /// every other reply on this socket is a handful, so carrying it inline
+        /// would make every frame the size of the largest one.
         #[serde(default)]
-        health: DaemonHealth,
+        health: Box<DaemonHealth>,
     },
     /// A listing of open interactions.
     Interactions {
@@ -530,7 +534,7 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
             ControlResponse::List {
                 runs: listing.runs,
                 finished: listing.finished,
-                health: listing.health,
+                health: Box::new(listing.health),
             }
         }
         ControlRequest::Message {
@@ -1428,7 +1432,7 @@ mod tests {
             ControlResponse::List {
                 runs: vec![listing_entry()],
                 finished: vec![ended],
-                health: DaemonHealth::default(),
+                health: Box::default(),
             }
         );
     }
@@ -1444,7 +1448,7 @@ mod tests {
             ControlResponse::List {
                 runs: vec![],
                 finished: vec![],
-                health: DaemonHealth::default(),
+                health: Box::default(),
             }
         );
     }
@@ -2059,7 +2063,7 @@ mod tests {
             std::mem::discriminant(&ControlResponse::List {
                 runs: vec![],
                 finished: vec![],
-                health: DaemonHealth::default(),
+                health: Box::default(),
             })
         );
 
@@ -2135,7 +2139,7 @@ mod tests {
             std::mem::discriminant(&ControlResponse::List {
                 runs: vec![],
                 finished: vec![],
-                health: DaemonHealth::default(),
+                health: Box::default(),
             })
         );
         assert_eq!(
@@ -2349,7 +2353,7 @@ mod tests {
             ControlResponse::List {
                 runs: vec![],
                 finished: vec![],
-                health: DaemonHealth::default(),
+                health: Box::default(),
             }
         );
         assert_eq!(

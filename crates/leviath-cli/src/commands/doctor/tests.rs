@@ -1913,11 +1913,11 @@ async fn run_checks_reports_a_scratch_dir_it_cannot_create() {
         .await
     })
     .await;
-    assert_eq!(checks.len(), 5, "{checks:?}");
-    assert_eq!(checks[4].name, "daemon");
-    assert_eq!(checks[4].status, CheckStatus::Fail);
+    assert_eq!(checks.len(), 6, "{checks:?}");
+    assert_eq!(checks[5].name, "daemon");
+    assert_eq!(checks[5].status, CheckStatus::Fail);
     assert!(
-        checks[4].detail.contains("scratch is read-only"),
+        checks[5].detail.contains("scratch is read-only"),
         "{checks:?}"
     );
 }
@@ -1940,8 +1940,11 @@ async fn run_checks_reports_a_daemon_that_would_not_start() {
     assert!(checks[4].detail.contains("did not start"), "{checks:?}");
 }
 
+/// Every check, in the order the report prints them, against a daemon that
+/// answers everything. `journal` rides with the other free checks, ahead of the
+/// two that bill, so a report cut short by a billing failure still carries it.
 #[tokio::test]
-async fn run_checks_runs_all_five_against_a_healthy_daemon() {
+async fn run_checks_runs_every_check_against_a_healthy_daemon() {
     let checks = with_env(|root| async move {
         // A key of the wrong shape, so the warning branch runs too.
         write_config(
@@ -1968,7 +1971,19 @@ async fn run_checks_runs_all_five_against_a_healthy_daemon() {
         .await
     })
     .await;
-    assert_eq!(checks.len(), 5, "{checks:?}");
+    let names: Vec<&str> = checks.iter().map(|c| c.name).collect();
+    assert_eq!(
+        names,
+        vec![
+            "config",
+            "search",
+            "journal",
+            "resolve",
+            "inference",
+            "daemon"
+        ],
+        "{checks:?}"
+    );
     assert!(
         checks.iter().all(|c| c.status != CheckStatus::Fail),
         "{checks:?}"

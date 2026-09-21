@@ -2314,3 +2314,98 @@ async fn validating_against_an_agent_refuses_a_name_that_could_escape() {
     })
     .await;
 }
+
+// ─── the daemon's journal ───────────────────────────────────────────────────
+
+/// Run one query against a schema wired to the given daemon.
+async fn query_daemon(
+    control: leviath_runtime::control_socket::ControlClient,
+    query: &str,
+) -> async_graphql::Response {
+    let mut state = crate::commands::serve::testutil::state_with_agent_paths(Vec::new());
+    state.control = control;
+    let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+        .data(state)
+        .finish();
+    schema.execute(Request::new(query)).await
+}
+
+const JOURNAL_QUERY: &str = "{ journal { healthy appendsAttempted appendsFailed \
+     snapshotsFailed queueDepth lastError { runId path message at } } }";
+
+/// The whole point of the field: a daemon that has lost a record says so, names
+/// the run and the file, and stops reading as healthy.
+#[tokio::test]
+async fn the_journal_field_reports_a_daemon_that_has_lost_a_record() {
+    let (control, _dir, _srv) = crate::commands::serve::testutil::fake_daemon(|_| {
+        leviath_runtime::control_socket::ControlResponse::List {
+            runs: vec![],
+            finished: vec![],
+            health: Box::new(leviath_runtime::host::DaemonHealth {
+                journal: leviath_runtime::persist_stats::JournalHealth {
+                    appends_attempted: 12,
+                    appends_failed: 3,
+                    snapshots_failed: 1,
+                    queue_depth: 4,
+                    last_error: Some(leviath_runtime::persist_stats::JournalError {
+                        run_id: "run-a".to_string(),
+                        path: "/runs/run-a/run.lvr".to_string(),
+                        message: "Permission denied".to_string(),
+                        at: 1_700_000_000,
+                    }),
+                },
+                ..Default::default()
+            }),
+        }
+    });
+
+    let answer = query_daemon(control, JOURNAL_QUERY).await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    assert_eq!(json["journal"]["healthy"], false);
+    assert_eq!(json["journal"]["appendsAttempted"], 12);
+    assert_eq!(json["journal"]["appendsFailed"], 3);
+    assert_eq!(json["journal"]["snapshotsFailed"], 1);
+    assert_eq!(json["journal"]["queueDepth"], 4);
+    assert_eq!(json["journal"]["lastError"]["runId"], "run-a");
+    assert_eq!(json["journal"]["lastError"]["path"], "/runs/run-a/run.lvr");
+    assert_eq!(json["journal"]["lastError"]["message"], "Permission denied");
+    assert_eq!(json["journal"]["lastError"]["at"], 1_700_000_000i64);
+}
+
+/// A daemon writing everything it is asked to reads as healthy, with nothing to
+/// describe.
+#[tokio::test]
+async fn a_daemon_that_has_lost_nothing_reads_as_healthy() {
+    let (control, _dir, _srv) = crate::commands::serve::testutil::fake_daemon(|_| {
+        leviath_runtime::control_socket::ControlResponse::List {
+            runs: vec![],
+            finished: vec![],
+            health: Box::default(),
+        }
+    });
+
+    let answer = query_daemon(control, JOURNAL_QUERY).await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    assert_eq!(json["journal"]["healthy"], true);
+    assert_eq!(json["journal"]["lastError"], serde_json::Value::Null);
+}
+
+/// Null when the daemon cannot be reached, and null when it answers something
+/// else: this reading exists only on the daemon, so there is nothing to fall
+/// back to.
+#[tokio::test]
+async fn an_unreachable_daemon_has_no_journal_to_report() {
+    let answer = run_query(JOURNAL_QUERY).await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    assert_eq!(json["journal"], serde_json::Value::Null);
+
+    let (control, _dir, _srv) = crate::commands::serve::testutil::fake_daemon(|_| {
+        leviath_runtime::control_socket::ControlResponse::Ok { ok: true }
+    });
+    let answer = query_daemon(control, JOURNAL_QUERY).await;
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    assert_eq!(json["journal"], serde_json::Value::Null);
+}

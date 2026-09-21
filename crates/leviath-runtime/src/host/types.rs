@@ -330,6 +330,14 @@ pub struct DaemonHealth {
     /// parses a newer daemon's response.
     #[serde(default)]
     pub providers_down: Vec<crate::pipeline::ProviderCircuitState>,
+    /// What the persistence lane has written, and what it has lost.
+    ///
+    /// A daemon whose journal is refusing writes answers every request and looks
+    /// well, so this is the only place the state shows. `#[serde(default)]` for
+    /// the same reason as the field above: an older daemon's reply has no such
+    /// object, and reads as a lane that has done nothing.
+    #[serde(default)]
+    pub journal: crate::persist_stats::JournalHealth,
 }
 
 /// The daemon-installed function that turns [`SpawnArgs`] into a live agent:

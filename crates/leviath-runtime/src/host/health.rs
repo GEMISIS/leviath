@@ -180,6 +180,7 @@ impl WorldHost {
             relief_granted: self.relief_granted,
             redrive_secs: self.redrive.as_secs(),
             providers_down: self.world.open_circuits(),
+            journal: snapshot.journal,
         }
     }
 

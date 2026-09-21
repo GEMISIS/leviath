@@ -44,13 +44,14 @@ use crate::pipeline::{
     abort_terminal_work, check_workspace_health, collect_compaction, collect_inference,
     collect_tools, collect_transition_choice, deliver_messages, detect_stuck_stage,
     dispatch_compaction, dispatch_edge_compact, dispatch_inference, dispatch_persistence,
-    dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
-    fail_wedged_runs, gate_requires_children, handle_empty_response, journal_interactions,
-    poll_dynamic_tool_refresh, process_response, reflect_interaction_status,
-    refresh_advertised_tools, require_context_regions, require_fan_out, require_final_output,
-    rescan_before_dispatch, resolve_transition, run_after_inference_hooks,
-    run_before_inference_hooks, run_stage_enter_hooks, run_stage_exit_hooks, run_terminal_hooks,
-    run_tool_call_hooks, sync_tool_stages,
+    dispatch_tools, dispatch_transition_choice, enforce_max_iterations,
+    fail_runs_with_unwritable_journals, fail_stalled_dispatch, fail_wedged_runs,
+    gate_requires_children, handle_empty_response, journal_interactions, poll_dynamic_tool_refresh,
+    process_response, reflect_interaction_status, refresh_advertised_tools,
+    require_context_regions, require_fan_out, require_final_output, rescan_before_dispatch,
+    resolve_transition, run_after_inference_hooks, run_before_inference_hooks,
+    run_stage_enter_hooks, run_stage_exit_hooks, run_terminal_hooks, run_tool_call_hooks,
+    sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -154,6 +155,8 @@ pub(crate) struct LaneSnapshot {
     pub tools_workers: usize,
     /// The lane full with batches still queued behind it.
     pub tools_saturated: bool,
+    /// What the persistence lane has written, and what it has lost.
+    pub journal: crate::persist_stats::JournalHealth,
 }
 
 impl LaneSnapshot {
@@ -360,7 +363,12 @@ impl PipelineWorld {
         // devices otherwise: it exits when the world (and thus its PersistenceStage
         // sender) is dropped.
         let blob_store = crate::blob_store::store_for(runs_dir.as_deref());
-        let persist_task = runtime.spawn(persistence_worker(runs_dir, persist_rx));
+        let persist_stats = Arc::new(crate::persist_stats::PersistLaneStats::new());
+        let persist_task = runtime.spawn(persistence_worker(
+            runs_dir,
+            persist_rx,
+            persist_stats.clone(),
+        ));
         let ip_runtime = runtime.clone();
         let gp_runtime = runtime.clone();
 
@@ -411,6 +419,7 @@ impl PipelineWorld {
         world.insert_resource(ToolStage::new(tool_job_tx, tool_stats));
         world.insert_resource(ToolResults(tool_res_rx));
         world.insert_resource(PersistenceStage(persist_tx));
+        world.insert_resource(crate::pipeline::PersistLaneHealth(persist_stats));
         world.insert_resource(MessageIntake(msg_rx));
         // Telemetry defaults to the no-op sink; a host that wants export
         // replaces the resource after construction (as `build_host` does).
@@ -445,8 +454,14 @@ impl PipelineWorld {
                 // `stuck` escape edge. Runs after the hard cap so that always wins.
                 detect_stuck_stage,
                 // Stop a run whose working directory vanished, rather than let
-                // every tool fail with ENOENT for the rest of the run.
-                check_workspace_health,
+                // every tool fail with ENOENT for the rest of the run. Beside it,
+                // the same kind of guard about the other half of the
+                // filesystem: a run whose journal the lane could not write is
+                // failed here, before anything else on this tick moves it, so it
+                // stops rather than taking one more turn its history cannot
+                // record. Paired for bevy's 20-system `.chain()` limit, like the
+                // groups below.
+                (check_workspace_health, fail_runs_with_unwritable_journals).chain(),
                 // Tag dynamic_tools agents that have pending tool changes, then
                 // apply the re-advertisement before the next request is assembled
                 // so a newly-discovered tool is visible.
@@ -899,6 +914,11 @@ impl PipelineWorld {
             tools_parked: tools.parked(),
             tools_workers: tools.workers(),
             tools_saturated: tools.is_saturated(),
+            journal: self
+                .world
+                .resource::<crate::pipeline::PersistLaneHealth>()
+                .0
+                .report(),
         }
     }
 

@@ -1078,3 +1078,61 @@ fn a_config_that_does_not_load_gets_a_line_under_the_table() {
     std::fs::write(&path, "default_provider = \"anthropic\"\n").unwrap();
     listing(&path);
 }
+
+/// A daemon that cannot write one run's journal.
+fn journal_failing() -> DaemonHealth {
+    DaemonHealth {
+        journal: leviath_runtime::persist_stats::JournalHealth {
+            appends_attempted: 40,
+            appends_failed: 1,
+            last_error: Some(leviath_runtime::persist_stats::JournalError {
+                run_id: "run-a".to_string(),
+                path: "/runs/run-a/run.lvr".to_string(),
+                message: "Permission denied".to_string(),
+                at: 100,
+            }),
+            ..Default::default()
+        },
+        ..healthy_daemon()
+    }
+}
+
+/// A journal that is refusing writes is said out loud under the table: every row
+/// above it can look perfectly healthy while nothing about them is being
+/// recorded.
+#[test]
+fn a_journal_that_cannot_be_written_is_reported_under_the_table() {
+    let out = format_runs(
+        &[entry("run-a", AgentStatus::Active)],
+        &[],
+        &journal_failing(),
+        0,
+    );
+    assert!(out.contains("journal: 1 journal append(s)"), "{out}");
+    assert!(out.contains("/runs/run-a/run.lvr"), "{out}");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(out.contains("lev doctor"), "{out}");
+}
+
+/// And on an empty listing, which is where a daemon that cannot record anything
+/// is easiest to mistake for an idle one.
+#[test]
+fn an_empty_listing_still_says_the_journal_is_failing() {
+    let out = format_runs(&[], &[], &journal_failing(), 0);
+    assert!(out.starts_with("no agent runs active"), "{out}");
+    assert!(out.contains("journal:"), "{out}");
+}
+
+/// A daemon writing everything it is asked to says nothing about it.
+#[test]
+fn a_working_journal_adds_no_footer() {
+    let out = format_runs(&[], &[], &healthy_daemon(), 0);
+    assert_eq!(out, "no agent runs active");
+    let out = format_runs(
+        &[entry("run-a", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
+    assert!(!out.contains("journal:"), "{out}");
+}

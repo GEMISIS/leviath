@@ -978,14 +978,15 @@ pub(crate) async fn run_checks_with(
     };
     checks.push(config_check(&config, &registry));
     checks.extend(yolo_check());
-    // Ask the daemon who it is before judging its environment. `List` is
-    // idempotent and local, and it is only sent to force the handshake that
-    // fills `link().daemon` - the reply itself is not the point, and a daemon
-    // that will not answer just leaves the identity unknown, which the check
-    // reports as such rather than guessing.
+    // Ask the daemon who it is, and how it is, before judging its environment.
+    // `List` is idempotent and local: it forces the handshake that fills
+    // `link().daemon`, and its reply carries the daemon's own health. A daemon
+    // that will not answer leaves both unknown, which the checks report as such
+    // rather than guessing.
+    let mut reported = None;
     let identity = match &daemon {
         DaemonTarget::Client(client) => {
-            let _ = client.request(&ControlRequest::List).await;
+            reported = reported_health(client.request(&ControlRequest::List).await);
             client.link().daemon
         }
         DaemonTarget::Skip | DaemonTarget::Unavailable(_) => None,
@@ -996,6 +997,10 @@ pub(crate) async fn run_checks_with(
     // Same shape and the same reason: it warns rather than failing, and it
     // runs before anything that could stop the report early.
     checks.extend(signin_checks(&config));
+    // Whether what the daemon has already done was recorded. Here rather than
+    // beside the `daemon` check because it costs nothing and bills nothing, and
+    // a report cut short by a billing failure should still carry it.
+    checks.extend(journal_check(reported.as_ref()));
     if !args.offline {
         checks.extend(quota_checks(&config, &registry).await);
     }
@@ -1129,8 +1134,10 @@ pub async fn execute(args: DoctorArgs, daemon: DaemonTarget<'_>) -> anyhow::Resu
     execute_with_registry(args, &build_provider_registry_from_config, daemon).await
 }
 
+mod journal;
 mod resolve;
 mod signin;
+use journal::{journal_check, reported_health};
 use resolve::{probe_model, resolve_check};
 use signin::{quota_checks, signin_checks};
 mod resolve_notes;
