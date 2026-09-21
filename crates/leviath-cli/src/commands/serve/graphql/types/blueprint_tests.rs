@@ -246,7 +246,7 @@ async fn a_stage_carries_its_own_block() {
         "{ blueprint { stages { name mode description availableTools requiredTools
                                 maxIterations acceptsMessages declaresBlockingTools
                                 outputRequirement { reasks }
-                                transitions { target hint } } } }",
+                                transitions { target { name } targetName hint } } } }",
     )
     .await;
     let stages = json["blueprint"]["stages"].as_array().expect("stages");
@@ -258,7 +258,8 @@ async fn a_stage_carries_its_own_block() {
     assert_eq!(plan["availableTools"][1], "@builtin");
     assert_eq!(plan["requiredTools"][0], "read_file");
     assert_eq!(plan["maxIterations"], 8);
-    assert_eq!(plan["transitions"][0]["target"], "build");
+    assert_eq!(plan["transitions"][0]["target"]["name"], "build");
+    assert_eq!(plan["transitions"][0]["targetName"], "build");
     assert_eq!(plan["transitions"][0]["hint"], "when the plan is settled");
     // Not required: the stage may leave without submitting.
     assert!(plan["outputRequirement"].is_null());
@@ -295,7 +296,7 @@ async fn a_stage_carries_its_limits_and_orders_its_edges() {
         text,
         CoreSource::Installed,
         "{ blueprint { stages { name maxRevisits requiresChildren allowComplete allowAsWorker
-                                availableConnectors transitions { target hint } } } }",
+                                availableConnectors transitions { target { name } hint } } } }",
     )
     .await;
     let pick = &json["blueprint"]["stages"][0];
@@ -306,9 +307,9 @@ async fn a_stage_carries_its_limits_and_orders_its_edges() {
     assert_eq!(pick["allowAsWorker"], true);
     assert_eq!(pick["availableConnectors"][0], "github");
     // Sorted by target, whatever order the manifest listed them in.
-    assert_eq!(pick["transitions"][0]["target"], "alpha");
+    assert_eq!(pick["transitions"][0]["target"]["name"], "alpha");
     assert!(pick["transitions"][0]["hint"].is_null());
-    assert_eq!(pick["transitions"][1]["target"], "zeta");
+    assert_eq!(pick["transitions"][1]["target"]["name"], "zeta");
 
     // A stage naming no revisit bound says so with a null rather than a zero.
     let alpha = &json["blueprint"]["stages"][1];

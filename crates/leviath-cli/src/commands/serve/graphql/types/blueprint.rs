@@ -205,15 +205,33 @@ impl From<&leviath_core::region::RegionKind> for RegionKind {
 pub(crate) struct Region {
     /// The blueprint this region belongs to, shared rather than copied.
     pub(crate) blueprint: Arc<CoreBlueprint>,
-    /// Which region, by position in the blueprint's layout.
+    /// The stage whose own `[context.regions]` declares it, by declaration
+    /// order. `None` for the blueprint's own layout.
+    pub(crate) stage: Option<usize>,
+    /// Which region, by position in the layout that declares it.
     pub(crate) at: usize,
 }
 
 #[Object]
 impl Region {
-    /// Region name, unique within the blueprint.
+    /// Region name, unique within the layout that declares it.
     async fn name(&self) -> &str {
         &self.region().name
+    }
+
+    /// The stage whose own `[context.regions]` declares this region. Null for a
+    /// region the blueprint declares run-wide, which is every region in
+    /// `Blueprint.regions`.
+    ///
+    /// A stage may declare a layout of its own, and a name resolved from
+    /// anywhere in the manifest can land in one of those. This says where the
+    /// declaration was read from, so a client can tell a run-wide region from
+    /// one only a single stage sets up.
+    async fn declared_by_stage(&self) -> Option<Stage> {
+        self.stage.map(|at| Stage {
+            blueprint: Arc::clone(&self.blueprint),
+            at,
+        })
     }
 
     /// What the region does when it fills.
@@ -347,14 +365,22 @@ impl Region {
         }
     }
 
-    /// The compacting region whose summaries land here, by name.
-    async fn source_region(&self) -> Option<&str> {
-        match &self.region().kind {
-            leviath_core::region::RegionKind::CompactHistory { source_region } => {
-                Some(source_region)
-            }
-            _ => None,
-        }
+    /// The compacting region whose summaries land here.
+    ///
+    /// Null for every kind but `COMPACT_HISTORY`, and also where the name this
+    /// region was given is one no layout in the blueprint declares, which is a
+    /// history region nothing will ever write to. Read `sourceRegionName` to
+    /// tell those two apart.
+    async fn source_region(&self) -> Option<Region> {
+        super::manifest::refs::region(&self.blueprint, self.declared_source_region()?)
+    }
+
+    /// The name this region's `source_region` was given, verbatim.
+    ///
+    /// Null for every kind but `COMPACT_HISTORY`. Set beside a null
+    /// `sourceRegion` when the name matches no layout in the blueprint.
+    async fn source_region_name(&self) -> Option<&str> {
+        self.declared_source_region()
     }
 
     /// The most keys a key-value region holds.
@@ -386,7 +412,24 @@ impl Region {
 impl Region {
     /// The region this object stands for.
     fn region(&self) -> &leviath_core::layout::RegionDefinition {
-        &self.blueprint.context_layout.regions[self.at]
+        &self.layout().regions[self.at]
+    }
+
+    /// The layout that declares it: one stage's own, or the blueprint's.
+    fn layout(&self) -> &leviath_core::layout::ContextLayout {
+        self.stage
+            .and_then(|at| self.blueprint.stages[at].context_layout.as_ref())
+            .unwrap_or(&self.blueprint.context_layout)
+    }
+
+    /// The `source_region` name a compacting-history region was given.
+    fn declared_source_region(&self) -> Option<&str> {
+        match &self.region().kind {
+            leviath_core::region::RegionKind::CompactHistory { source_region } => {
+                Some(source_region)
+            }
+            _ => None,
+        }
     }
 
     /// How this region makes room, for the kinds that slide.
@@ -454,16 +497,25 @@ impl Blueprint {
     }
 
     /// The stage a run starts in. Defaults to the first stage declared.
+    ///
+    /// Null for a blueprint that declares no stages, and for one whose
+    /// `entry_stage` names a stage it does not declare, which `lev validate`
+    /// refuses and the daemon will not spawn. `entryStageName` is the name it
+    /// wrote.
     async fn entry_stage(&self) -> Option<Stage> {
-        let named = self.parsed.entry_stage.as_deref();
-        let at = match named {
-            None => 0,
-            Some(name) => self.parsed.stages.iter().position(|s| s.name == name)?,
-        };
-        self.parsed.stages.get(at).map(|_| Stage {
-            blueprint: Arc::clone(&self.parsed),
-            at,
-        })
+        match self.parsed.entry_stage.as_deref() {
+            Some(name) => super::manifest::refs::stage(&self.parsed, name),
+            None => self.parsed.stages.first().map(|_| Stage {
+                blueprint: Arc::clone(&self.parsed),
+                at: 0,
+            }),
+        }
+    }
+
+    /// The name the manifest gave as its entry stage, verbatim. Null where it
+    /// names none, which starts the run in the first stage declared.
+    async fn entry_stage_name(&self) -> Option<&str> {
+        self.parsed.entry_stage.as_deref()
     }
 
     /// How deep sub-agent spawning may nest.
@@ -496,11 +548,15 @@ impl Blueprint {
             .collect()
     }
 
-    /// One entry per declared context region.
+    /// One entry per context region the blueprint declares run-wide.
+    ///
+    /// A stage may declare a layout of its own on top of this, and those regions
+    /// are on `Stage.context.regions` rather than here.
     async fn regions(&self) -> Vec<Region> {
         (0..self.parsed.context_layout.regions.len())
             .map(|at| Region {
                 blueprint: Arc::clone(&self.parsed),
+                stage: None,
                 at,
             })
             .collect()
@@ -564,7 +620,7 @@ impl Blueprint {
         self.parsed
             .file_tracking
             .as_ref()
-            .map(FileTrackingConfig::from)
+            .map(|tracking| FileTrackingConfig::of(&self.parsed, tracking))
     }
 
     /// When a run of this is stopped for going round in circles. Null leaves the

@@ -8,13 +8,13 @@
 //! Two rules hold across every type here, because the manifest is a document
 //! rather than a database.
 //!
-//! A reference the manifest guarantees resolves is an object: an edge's target
-//! stage exists, because a blueprint naming a stage it does not declare is
-//! refused at load. A reference that may dangle stays a name: a gate may name a
-//! region a later edit removed, and a stage may name a tool this machine does
-//! not have. Resolving those into objects would drop them, and a gate that
-//! quietly disappears from a client's view reads as a gate that was never
-//! written.
+//! A region or a stage the manifest names is served as the object it names,
+//! resolved through [`refs`] against the blueprint that wrote the name. Where no
+//! layout and no stage declares it the object is null and the name is served
+//! beside it, in a `missing` list for a list of names and in a `…Name` field for
+//! a single one, so a dangling reference reads as one rather than disappearing.
+//! A tool stays a name, because a manifest names tools an inventory cannot
+//! describe: an MCP server's, a group token's, and any a machine does not have.
 //!
 //! A setting the manifest leaves out is null rather than its default. What the
 //! author wrote and what the daemon resolved are different questions, and
@@ -25,6 +25,7 @@ pub(crate) mod interaction;
 pub(crate) mod mime;
 pub(crate) mod model;
 pub(crate) mod output;
+pub(crate) mod refs;
 pub(crate) mod region;
 pub(crate) mod runtime;
 pub(crate) mod stage;

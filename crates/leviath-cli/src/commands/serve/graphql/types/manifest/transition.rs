@@ -1,9 +1,16 @@
 //! How a run leaves one stage for the next: the edge, its condition, what it
 //! carries, and what has to be true first.
 
-use async_graphql::{Enum, SimpleObject};
+use std::sync::Arc;
 
+use async_graphql::{Enum, Object, SimpleObject};
+
+use leviath_core::Blueprint as CoreBlueprint;
+
+use super::super::blueprint::Region;
 use super::count;
+use super::refs;
+use super::stage::Stage;
 
 /// When an edge may be taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
@@ -64,34 +71,109 @@ impl From<&leviath_core::blueprint::EdgeTransform> for TransitionTransform {
     }
 }
 
+/// The three region lists a `CUSTOM` transform carries, as the edge wrote them.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TransformRegions {
+    /// Names carried over verbatim.
+    pub(crate) carry: Vec<String>,
+    /// Names handed to the summarizer.
+    pub(crate) compact: Vec<String>,
+    /// Names emptied.
+    pub(crate) clear: Vec<String>,
+}
+
 /// What a transform does in detail: which regions it carries, compacts and
 /// clears, and what it asks the summarizer for.
 ///
 /// Set for `COMPACT`, which carries the prompt and nothing else, and for
 /// `CUSTOM`, which carries the per-region lists. Null for `DIRECT` and `CLEAR`,
 /// which have nothing to say.
-///
-/// Region names rather than regions: a transform may name one a later edit
-/// removed, and dropping it would hide the instruction rather than the problem.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct TransformConfig {
+    /// The blueprint the region names resolve in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The names the edge wrote.
+    named: TransformRegions,
+    /// A prompt for the summarizer on this edge.
+    compact_prompt: Option<String>,
+}
+
+#[Object]
+impl TransformConfig {
     /// Regions carried over verbatim.
-    pub(crate) carry: Vec<String>,
-    /// Regions handed to the summarizer.
-    pub(crate) compact: Vec<String>,
-    /// Regions emptied.
-    pub(crate) clear: Vec<String>,
+    ///
+    /// One entry per name the edge wrote that a layout in this blueprint
+    /// declares. A name with no declaration is in `carryNames` and not here:
+    /// either a later edit removed the region, or the edge names one of the four
+    /// the runtime carries whatever a manifest says - `conversation`,
+    /// `tool_results`, `final_output` and `stage_instructions` - which exist at
+    /// run time with nothing declared to read.
+    async fn carry(&self) -> Vec<Region> {
+        refs::regions(&self.blueprint, &self.named.carry)
+    }
+
+    /// Every name the edge wrote in `carry`, verbatim and in order, declared or
+    /// not.
+    async fn carry_names(&self) -> &[String] {
+        &self.named.carry
+    }
+
+    /// Regions handed to the summarizer. Declared names only; `compactNames`
+    /// carries the whole list.
+    async fn compact(&self) -> Vec<Region> {
+        refs::regions(&self.blueprint, &self.named.compact)
+    }
+
+    /// Every name the edge wrote in `compact`, verbatim and in order.
+    async fn compact_names(&self) -> &[String] {
+        &self.named.compact
+    }
+
+    /// Regions emptied. Declared names only; `clearNames` carries the whole
+    /// list.
+    async fn clear(&self) -> Vec<Region> {
+        refs::regions(&self.blueprint, &self.named.clear)
+    }
+
+    /// Every name the edge wrote in `clear`, verbatim and in order.
+    async fn clear_names(&self) -> &[String] {
+        &self.named.clear
+    }
+
     /// A prompt for the summarizer on this edge, in place of the default.
-    pub(crate) compact_prompt: Option<String>,
+    async fn compact_prompt(&self) -> Option<&str> {
+        self.compact_prompt.as_deref()
+    }
 }
 
 /// A region and the fewest entries it must hold.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct RegionEntryRequirement {
-    /// The region counted, by name.
-    pub(crate) region: String,
+    /// The blueprint the region name resolves in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The name the gate wrote.
+    region: String,
     /// The fewest entries that satisfy the gate.
-    pub(crate) at_least: i32,
+    at_least: i32,
+}
+
+#[Object]
+impl RegionEntryRequirement {
+    /// The region counted.
+    ///
+    /// Null where no layout in this blueprint declares that name.
+    /// `regionName` carries the name either way.
+    async fn region(&self) -> Option<Region> {
+        refs::region(&self.blueprint, &self.region)
+    }
+
+    /// The region name the gate wrote, verbatim.
+    async fn region_name(&self) -> &str {
+        &self.region
+    }
+
+    /// The fewest entries that satisfy the gate.
+    async fn at_least(&self) -> i32 {
+        self.at_least
+    }
 }
 
 /// What arms a `STUCK` edge.
@@ -129,117 +211,225 @@ impl From<&leviath_core::blueprint::StuckConfig> for StuckThresholds {
 /// A gate that is not satisfied re-runs the stage with `message` instead of
 /// transitioning, up to `maxAttempts` times, and then lets the run through: an
 /// unmet gate slows a run down, it never strands one.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct TransitionGate {
+    /// The blueprint the region names resolve in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The gate as the edge wrote it.
+    gate: leviath_core::blueprint::TransitionGate,
+}
+
+#[Object]
+impl TransitionGate {
     /// The stage must have modified something.
-    pub(crate) require_modifications: bool,
+    async fn require_modifications(&self) -> bool {
+        self.gate.require_modifications
+    }
+
     /// A second way to satisfy `requireModifications`: this region holding
     /// anything also passes. It is an alternative rather than a requirement,
     /// because per-stage tool counters do not survive a daemon restart and a
     /// region does.
-    pub(crate) region: Option<String>,
+    ///
+    /// Null when the gate names no region, and also when it names one no layout
+    /// in this blueprint declares. `regionName` tells those apart: it is null
+    /// only in the first case.
+    async fn region(&self) -> Option<Region> {
+        refs::region(&self.blueprint, self.gate.region.as_deref()?)
+    }
+
+    /// The region name the gate wrote for its `requireModifications`
+    /// alternative, verbatim. Null when it names none.
+    async fn region_name(&self) -> Option<&str> {
+        self.gate.region.as_deref()
+    }
+
     /// Tools counted as modifying, beyond `write_file` and `edit_file`. For an
     /// blueprint whose writes go through MCP or a script.
-    pub(crate) tools: Vec<String>,
+    ///
+    /// Names rather than `Tool`s, because an MCP server's tool is exactly what
+    /// this list is for and an inventory does not describe one.
+    async fn tools(&self) -> &[String] {
+        &self.gate.tools
+    }
+
     /// Regions that must all hold something. Conjunctive, unlike `region`.
-    pub(crate) require_regions: Vec<String>,
+    ///
+    /// Declared names only. `requireRegionNames` carries every name the gate
+    /// wrote, which is where a name with no declaration in this blueprint stays
+    /// readable.
+    async fn require_regions(&self) -> Vec<Region> {
+        refs::regions(&self.blueprint, &self.gate.require_regions)
+    }
+
+    /// Every name the gate wrote in `requireRegions`, verbatim and in order,
+    /// declared or not.
+    async fn require_region_names(&self) -> &[String] {
+        &self.gate.require_regions
+    }
+
     /// A region that must have changed during this stage, not merely be
     /// present. What a revise loop needs: re-emitting the same content
     /// satisfies a presence check.
-    pub(crate) require_region_updated: Option<String>,
+    ///
+    /// Null when the gate asks for none, and also when it names one no layout
+    /// declares. `requireRegionUpdatedName` tells those apart.
+    async fn require_region_updated(&self) -> Option<Region> {
+        refs::region(
+            &self.blueprint,
+            self.gate.require_region_updated.as_deref()?,
+        )
+    }
+
+    /// The name the gate wrote for `requireRegionUpdated`, verbatim. Null when
+    /// it asks for none.
+    async fn require_region_updated_name(&self) -> Option<&str> {
+        self.gate.require_region_updated.as_deref()
+    }
+
     /// A checklist region that must have no open items left.
-    pub(crate) require_no_open_items: Option<String>,
+    ///
+    /// Null when the gate asks for none, and also when it names one no layout
+    /// declares. `requireNoOpenItemsName` tells those apart.
+    async fn require_no_open_items(&self) -> Option<Region> {
+        refs::region(&self.blueprint, self.gate.require_no_open_items.as_deref()?)
+    }
+
+    /// The name the gate wrote for `requireNoOpenItems`, verbatim. Null when it
+    /// asks for none.
+    async fn require_no_open_items_name(&self) -> Option<&str> {
+        self.gate.require_no_open_items.as_deref()
+    }
+
     /// A region that must hold at least so many entries.
-    pub(crate) require_region_entries: Option<RegionEntryRequirement>,
+    async fn require_region_entries(&self) -> Option<RegionEntryRequirement> {
+        self.gate
+            .require_region_entries
+            .as_ref()
+            .map(|needed| RegionEntryRequirement {
+                blueprint: Arc::clone(&self.blueprint),
+                region: needed.region.clone(),
+                at_least: count(needed.at_least),
+            })
+    }
+
     /// Sent back to the stage while the gate holds it. A default explaining the
     /// framework's change tracking is generated when this is absent.
-    pub(crate) message: Option<String>,
+    async fn message(&self) -> Option<&str> {
+        self.gate.message.as_deref()
+    }
+
     /// How many times the stage is re-asked before the gate gives up and lets
     /// the transition through with a warning.
-    pub(crate) max_attempts: Option<i32>,
-}
-
-impl From<&leviath_core::blueprint::TransitionGate> for TransitionGate {
-    fn from(gate: &leviath_core::blueprint::TransitionGate) -> Self {
-        Self {
-            require_modifications: gate.require_modifications,
-            region: gate.region.clone(),
-            tools: gate.tools.clone(),
-            require_regions: gate.require_regions.clone(),
-            require_region_updated: gate.require_region_updated.clone(),
-            require_no_open_items: gate.require_no_open_items.clone(),
-            require_region_entries: gate.require_region_entries.as_ref().map(|needed| {
-                RegionEntryRequirement {
-                    region: needed.region.clone(),
-                    at_least: count(needed.at_least),
-                }
-            }),
-            message: gate.message.clone(),
-            max_attempts: gate.max_attempts.map(count),
-        }
+    async fn max_attempts(&self) -> Option<i32> {
+        self.gate.max_attempts.map(count)
     }
 }
 
 /// One outgoing edge of a stage.
 ///
-/// A stage with no edges is terminal. The target is an object because the
-/// manifest cannot name a stage it does not declare: that is refused at load.
-#[derive(Debug, SimpleObject)]
+/// A stage with no edges is terminal.
 pub(crate) struct TransitionEdge {
-    /// The stage this edge leads to, by name. Look it up in the blueprint's
-    /// `stages`.
+    /// The blueprint the target stage resolves in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The stage name this edge leads to, as the manifest keyed it.
     pub(crate) target: String,
-    /// Told to the model when it is choosing where to go next.
-    pub(crate) hint: Option<String>,
-    /// When this edge may be taken.
-    pub(crate) condition: TransitionCondition,
-    /// What happens to the context on the way through.
-    pub(crate) transform: TransitionTransform,
-    /// The transform in detail: a `COMPACT` edge's prompt, or a `CUSTOM` edge's
-    /// per-region lists. Null for `DIRECT` and `CLEAR`.
-    pub(crate) transform_config: Option<TransformConfig>,
-    /// What must be true before this edge is taken. Null when the edge asks for
-    /// nothing beyond its condition.
-    pub(crate) gate: Option<TransitionGate>,
-    /// What arms this edge, for a `STUCK` condition. Null for every other
-    /// condition, and never null for that one.
-    pub(crate) stuck: Option<StuckThresholds>,
+    /// The edge as the manifest wrote it.
+    edge: leviath_core::blueprint::TransitionEdge,
 }
 
+#[Object]
 impl TransitionEdge {
-    /// Describe one edge of a stage.
-    pub(crate) fn from_core(edge: &leviath_core::blueprint::TransitionEdge) -> Self {
+    /// The stage this edge leads to.
+    ///
+    /// Null only where the blueprint names a stage it does not declare, which
+    /// `lev validate` refuses and the daemon will not spawn: an installed
+    /// manifest can still be in that state, and `targetName` is the name it
+    /// wrote.
+    async fn target(&self) -> Option<Stage> {
+        refs::stage(&self.blueprint, &self.target)
+    }
+
+    /// The stage name this edge was keyed by, verbatim.
+    async fn target_name(&self) -> &str {
+        &self.target
+    }
+
+    /// Told to the model when it is choosing where to go next.
+    async fn hint(&self) -> Option<&str> {
+        self.edge.hint.as_deref()
+    }
+
+    /// When this edge may be taken.
+    async fn condition(&self) -> TransitionCondition {
+        TransitionCondition::from(&self.edge.condition)
+    }
+
+    /// What happens to the context on the way through.
+    async fn transform(&self) -> TransitionTransform {
+        TransitionTransform::from(&self.edge.transform)
+    }
+
+    /// The transform in detail: a `COMPACT` edge's prompt, or a `CUSTOM` edge's
+    /// per-region lists. Null for `DIRECT` and `CLEAR`.
+    async fn transform_config(&self) -> Option<TransformConfig> {
         use leviath_core::blueprint::EdgeTransform;
-        let transform_config = match &edge.transform {
+        let (named, compact_prompt) = match &self.edge.transform {
             EdgeTransform::Custom {
                 carry,
                 compact,
                 clear,
                 compact_prompt,
-            } => Some(TransformConfig {
-                carry: carry.clone(),
-                compact: compact.clone(),
-                clear: clear.clone(),
-                compact_prompt: compact_prompt.clone(),
-            }),
+            } => (
+                TransformRegions {
+                    carry: carry.clone(),
+                    compact: compact.clone(),
+                    clear: clear.clone(),
+                },
+                compact_prompt.clone(),
+            ),
             // A compact edge takes the whole context, so it has no lists to
             // report: only what it asks the summarizer for.
-            EdgeTransform::Compact { prompt } => Some(TransformConfig {
-                carry: Vec::new(),
-                compact: Vec::new(),
-                clear: Vec::new(),
-                compact_prompt: prompt.clone(),
-            }),
-            EdgeTransform::Direct | EdgeTransform::Clear => None,
+            EdgeTransform::Compact { prompt } => (TransformRegions::default(), prompt.clone()),
+            EdgeTransform::Direct | EdgeTransform::Clear => return None,
         };
+        Some(TransformConfig {
+            blueprint: Arc::clone(&self.blueprint),
+            named,
+            compact_prompt,
+        })
+    }
+
+    /// What must be true before this edge is taken. Null when the edge asks for
+    /// nothing beyond its condition.
+    async fn gate(&self) -> Option<TransitionGate> {
+        self.edge.gate.as_ref().map(|gate| TransitionGate {
+            blueprint: Arc::clone(&self.blueprint),
+            gate: gate.clone(),
+        })
+    }
+
+    /// What arms this edge, for a `STUCK` condition. Null for every other
+    /// condition, and never null for that one.
+    async fn stuck(&self) -> Option<StuckThresholds> {
+        self.edge.stuck.as_ref().map(StuckThresholds::from)
+    }
+}
+
+impl TransitionEdge {
+    /// Describe one edge of a stage.
+    ///
+    /// The manifest keys these by target and the parser fills the edge's own
+    /// copy from that key, so the map key is passed in as the authority: an
+    /// older record can carry an empty one.
+    pub(crate) fn of(
+        blueprint: &Arc<CoreBlueprint>,
+        target: &str,
+        edge: &leviath_core::blueprint::TransitionEdge,
+    ) -> Self {
         Self {
-            target: edge.target.clone(),
-            hint: edge.hint.clone(),
-            condition: TransitionCondition::from(&edge.condition),
-            transform: TransitionTransform::from(&edge.transform),
-            transform_config,
-            gate: edge.gate.as_ref().map(TransitionGate::from),
-            stuck: edge.stuck.as_ref().map(StuckThresholds::from),
+            blueprint: Arc::clone(blueprint),
+            target: target.to_string(),
+            edge: edge.clone(),
         }
     }
 }
@@ -256,6 +446,10 @@ pub(crate) enum MappingTransform {
 }
 
 /// One region's route into another blueprint's layout.
+///
+/// Both regions are names. Each belongs to a blueprint the mapping names rather
+/// than to this one, and the receiving blueprint has to be installed for the
+/// handoff to happen at all, so neither side has a declaration to read here.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RegionMapping {
     /// The region it comes from, by name in the handing-off blueprint.

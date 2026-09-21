@@ -217,9 +217,12 @@ and what it would like to run unasked.
     stages {
       name mode
       model { models { provider model } allowUserDefault }
-      transitions { target condition gate { requireRegions maxAttempts } }
+      transitions {
+        target { name } condition
+        gate { requireRegions { name } requireRegionNames maxAttempts }
+      }
       interactionPoints { name prompt style options }
-      fanOut { workerStage maxWorkers onWorkerFailure }
+      fanOut { workerStage { name } maxWorkers onWorkerFailure }
     }
   } } }
 }
@@ -235,12 +238,23 @@ the sandbox and taint tracking, each resolved stage over blueprint over this
 machine's config. It is what a run spawned now would get, not a claim about a run
 that already started.
 
-A reference the manifest guarantees resolves is an object, and one that may
-dangle is a name. An edge's target stage exists, because a blueprint naming a
-stage it does not declare is refused at load. A gate may name a region a later
-edit removed, and a stage may name a tool this machine does not have, so those
-stay names: resolving them would drop them, and a gate that quietly disappears
-reads as a gate nobody wrote.
+A region or a stage the manifest names is served as the object it names, resolved
+against the blueprint that wrote the name. An edge's `target` is the `Stage` it
+leads to, a gate's `requireRegions` are `Region` objects, and a stage's
+`toolRouting.defaultRegion` is the region the results land in.
+
+Every one of those keeps the name beside it, because a name can resolve to
+nothing. `targetName`, `requireRegionNames` and `defaultRegionName` carry what
+the author wrote, whether or not a declaration was found. Two things put a name
+there with nothing to resolve. A later edit can remove the region, which is a
+blueprint `lev validate` refuses and the daemon will not spawn. And the runtime
+carries `conversation`, `tool_results`, `final_output` and `stage_instructions`
+whether a manifest declares them or not, so a stage that resets `conversation` is
+naming a region with no declaration to read.
+
+A tool stays a name everywhere. A manifest names tools an inventory cannot
+describe: an MCP server's, a group token such as `@builtin`, and any tool this
+machine does not have. `tools` is what describes the ones that are here.
 
 ## Anything by its id
 
@@ -802,8 +816,8 @@ up, so they are plain lists with no paging.
 * `directories(path:)` is the file picker. It is confined to `--workdir-root`
   when the operator set one, which is why `parent` is null at that fence rather
   than leading above it.
-* `tools(blueprint: "coder")` scopes the inventory to one blueprint's own tools
-  directory, which is what an editor offering an `available_tools` list wants.
+* `tools(blueprint: { name: "coder" })` scopes the inventory to one blueprint's
+  own tools directory, which is what an editor offering `available_tools` wants.
   `skipped` names scripts that were found and could not be offered, with the
   reason, because a tool an author believes exists and silently is not there is
   the failure worth reporting.
@@ -815,7 +829,9 @@ guess whether the act landed, and you do not need a second request to find out.
 
 ```graphql
 mutation {
-  spawnRun(input: { blueprint: "coder", task: "fix the parser", workdir: "/work" }) {
+  spawnRun(input: {
+    blueprint: { name: "coder" }, task: "fix the parser", workdir: "/work"
+  }) {
     run { id status task }
     warnings
   }
@@ -824,6 +840,12 @@ mutation {
 
 `warnings` names checks the blueprint declared that your own output shape
 retires. Empty when there are none.
+
+A blueprint argument is an object rather than a name, so it can carry the
+revision you mean. Add the `digest` you read off `Blueprint.digest` and the spawn
+is refused with `CONFLICT` if something else is installed under that name. Send
+the name alone and the spawn takes whatever is there, which is what a fleet view
+starting somebody's current blueprint wants.
 
 Three refusals here are the server's, not the daemon's, and each answers
 `FORBIDDEN`: a workdir outside `--workdir-root`, `yolo` on a server started with
@@ -945,7 +967,9 @@ not what it does. None of them is gated, and a read-only client can use them.
 
 `validateBlueprint` reports rather than fails. A manifest that will not install
 comes back `valid: false` with the reasons, because the request to check it
-succeeded.
+succeeded. It takes the text as `blueprint: { content: "..." }`, and a `name`
+beside it checks the text as that installed blueprint, so its own scripts
+resolve.
 
 A second group changes the machine rather than a run, and `lev serve` opens it
 only with `--allow-admin`: `addMcpServer`, `removeMcpServer`, `putMimeRow` and

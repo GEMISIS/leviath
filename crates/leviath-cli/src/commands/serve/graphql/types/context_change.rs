@@ -102,7 +102,16 @@ impl From<leviath_core::ContextCause> for ContextCause {
 /// started with.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RegionTransition {
-    /// The region this part of the transaction touched.
+    /// The region this part of the transaction touched, by the name it carries
+    /// in the run's window.
+    ///
+    /// A name rather than a `Region`, because the window is not the manifest.
+    /// The runtime carries `conversation`, `tool_results`, `final_output` and
+    /// `stage_instructions` whether a blueprint declares them or not, and those
+    /// are the regions that move most, so a manifest lookup would answer nothing
+    /// for the common case. Join on `contextHistory`'s `ContextRegion.name` for
+    /// what the region held, and on `blueprint { regions { name } }` for what
+    /// the author declared.
     pub(crate) region: String,
     /// A content address of what it held before the change. Compare it with
     /// `digestAfter`, and with the same region in another transaction; nothing

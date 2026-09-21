@@ -22,6 +22,7 @@ use super::checks::{
 };
 use super::connection::{Highlight, PageInfo, RunConnection, RunEdge};
 use super::error::IntoGraphql;
+use super::inputs::BlueprintInput;
 use super::node::Node;
 use super::scalars::{BigInt, Cursor, Timestamp};
 use super::types::blueprint::Blueprint;
@@ -132,9 +133,14 @@ pub(crate) struct RunFilter {
     /// read of a fan-out: nesting `children` walks one level per request, and
     /// this walks the whole subtree in one page at a time.
     pub(crate) descendant_of: Option<String>,
-    /// Only runs of this blueprint, by the name the run recorded. A name nothing
-    /// matches gives an empty page rather than an error.
-    pub(crate) blueprint: Option<String>,
+    /// Only runs of this blueprint, matched on the name each run recorded. A
+    /// name nothing matches gives an empty page rather than an error.
+    ///
+    /// A `digest` on it pins the revision installed now, and the request fails
+    /// where that is something else: runs are matched by name whatever is
+    /// installed, so the pin is how a client asking "this agent's runs" finds out
+    /// the agent has been edited under it.
+    pub(crate) blueprint: Option<BlueprintInput>,
     /// Inclusive lower bound on the sort value. Pass the previous page's
     /// `serverTime` to poll for what changed.
     pub(crate) since: Option<Timestamp>,
@@ -150,12 +156,17 @@ impl RunFilter {
     /// Rejections happen here, before anything is read: a page size over the
     /// cap, a batch fetch combined with a filter, or more ids than one
     /// request may name.
-    pub(crate) fn selection(
+    pub(crate) async fn selection(
         self,
+        state: &AppState,
         first: i32,
         ids: Option<Vec<String>>,
     ) -> Result<RunSelection, ServeError> {
         let limit = page_size(first)?;
+        let blueprint = match self.blueprint {
+            Some(input) => Some(input.installed(state).await?),
+            None => None,
+        };
         // One question about parentage per listing. Two of these together would
         // be two predicates for one field, and the pair a caller meant is not
         // recoverable from the pair they sent.
@@ -244,7 +255,7 @@ impl RunFilter {
             ids,
             since: self.since.map(|t| t.0),
             parent,
-            blueprint: self.blueprint,
+            blueprint,
         })
     }
 
@@ -254,8 +265,8 @@ impl RunFilter {
     /// page cap has nothing left to protect. It is built through the listing's
     /// own path all the same, so every other bound the listing enforces still
     /// holds.
-    pub(crate) fn everything(self) -> Result<RunSelection, ServeError> {
-        let mut selection = self.selection(1, None)?;
+    pub(crate) async fn everything(self, state: &AppState) -> Result<RunSelection, ServeError> {
+        let mut selection = self.selection(state, 1, None).await?;
         selection.limit = usize::MAX;
         Ok(selection)
     }
@@ -442,16 +453,18 @@ impl Query {
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Only this blueprint's own scripts, plus the global ones.")]
-        blueprint: Option<String>,
+        blueprint: Option<BlueprintInput>,
     ) -> async_graphql::Result<Vec<Script>> {
         let state = ctx.data_unchecked::<AppState>();
-        Ok(
-            super::super::scripts::registered(state, blueprint.as_deref())
-                .gql()?
-                .into_iter()
-                .map(Script::from_item)
-                .collect(),
-        )
+        let named = match blueprint {
+            Some(input) => Some(input.installed(state).await.gql()?),
+            None => None,
+        };
+        Ok(super::super::scripts::registered(state, named.as_deref())
+            .gql()?
+            .into_iter()
+            .map(Script::from_item)
+            .collect())
     }
 
     /// The directories under a path, for a file picker.
@@ -522,19 +535,23 @@ impl Query {
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Scope to this blueprint's own tools directory.")] blueprint: Option<
-            String,
+            BlueprintInput,
         >,
     ) -> async_graphql::Result<ToolInventory> {
         let state = ctx.data_unchecked::<AppState>();
+        let named = match blueprint {
+            Some(input) => Some(input.installed(state).await.gql()?),
+            None => None,
+        };
         let config = state.current_config();
-        let dir = match blueprint.as_deref() {
+        let dir = match named.as_deref() {
             Some(name) => Some(super::super::tools::agent_dir(&config, name).gql()?),
             None => None,
         };
         // The walk over a blueprint's own directory belongs on the blocking
         // pool.
         let inventory = blocking(move || {
-            crate::tool_inventory::ToolInventory::discover(dir.as_deref(), blueprint.as_deref())
+            crate::tool_inventory::ToolInventory::discover(dir.as_deref(), named.as_deref())
         })
         .await;
         Ok(ToolInventory {
@@ -711,7 +728,11 @@ impl Query {
         >,
     ) -> async_graphql::Result<RunConnection> {
         let state = ctx.data_unchecked::<AppState>();
-        let selection = filter.unwrap_or_default().selection(first, ids).gql()?;
+        let selection = filter
+            .unwrap_or_default()
+            .selection(state, first, ids)
+            .await
+            .gql()?;
         let sort = selection.sort;
         let descending = selection.descending;
         let spec = selection
@@ -777,15 +798,18 @@ impl Query {
     /// succeeded, and what it found is the answer.
     async fn validate_blueprint(
         &self,
-        #[graphql(desc = "The manifest text to check.")] manifest: String,
-        #[graphql(desc = "Check it as this installed blueprint, so its own scripts resolve.")]
-        blueprint: Option<String>,
+        #[graphql(
+            desc = "The manifest to check, as `content`. A `name` beside it checks the text \
+                    as that installed blueprint, so its own scripts resolve."
+        )]
+        blueprint: BlueprintInput,
     ) -> async_graphql::Result<ValidationReport> {
-        let dir = match blueprint.as_deref() {
+        let definition = blueprint.definition().gql()?;
+        let dir = match definition.name.as_deref() {
             Some(name) => blueprints::blueprint_dir(name).gql()?,
             None => std::path::PathBuf::new(),
         };
-        let report = super::super::blueprints::validate_manifest_text(&manifest, &dir);
+        let report = super::super::blueprints::validate_manifest_text(&definition.content, &dir);
         Ok(ValidationReport {
             valid: report.valid,
             errors: report.errors.unwrap_or_default(),

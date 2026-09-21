@@ -167,7 +167,8 @@ async fn a_script_answers_to_its_kind_its_blueprint_and_its_name() {
         assert_eq!(scoped["node"]["blueprint"], "coder");
 
         // The listing and the lookup agree on the spelling.
-        let listed = ask_fresh(r#"{ scripts(blueprint: "coder") { id blueprint } }"#).await;
+        let listed =
+            ask_fresh(r#"{ scripts(blueprint: { name: "coder" }) { id blueprint } }"#).await;
         let ids: Vec<&str> = listed["scripts"]
             .as_array()
             .expect("the scripts")
