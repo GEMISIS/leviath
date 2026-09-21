@@ -162,6 +162,44 @@ async fn a_callback_url_the_policy_refuses_is_forbidden() {
     assert_eq!(failure.code(), "FORBIDDEN");
 }
 
+/// A secret that signs a callback nobody asked for is a caller mistake worth
+/// naming: accepted, it would leave somebody believing they had set up a signed
+/// webhook that never fires, and it would swallow a credential doing it.
+#[tokio::test]
+async fn a_callback_secret_without_a_url_is_refused() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let state = with_blueprint(dir.path(), "coder");
+    let mut secret_only = request("coder", Some("/tmp"));
+    secret_only.callback_secret = Some("whsec_nothing_to_sign".to_string());
+
+    let failure = spawn(&state, secret_only, Vec::new())
+        .await
+        .expect_err("a secret with no webhook to sign for");
+    assert_eq!(failure.code(), "BAD_USER_INPUT");
+    let message = failure.to_string();
+    assert!(message.contains("callback_url"), "{message}");
+    // The secret itself never reaches the message a caller sees or a log keeps.
+    assert!(!message.contains("whsec_nothing_to_sign"), "{message}");
+}
+
+/// The pair together is the shape the refusal exists to steer callers towards,
+/// so it has to stay accepted.
+#[tokio::test]
+async fn a_callback_url_with_its_secret_is_accepted() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let state = with_blueprint(dir.path(), "coder");
+    let mut both = request("coder", Some("/tmp"));
+    both.callback_url = Some("https://example.com/hook".to_string());
+    both.callback_secret = Some("whsec_signs_the_body".to_string());
+
+    // The daemon is not listening in this test, so reaching it at all is the
+    // proof: the refusal above happens before any of that.
+    let failure = spawn(&state, both, Vec::new())
+        .await
+        .expect_err("no daemon is listening here");
+    assert_ne!(failure.code(), "BAD_USER_INPUT", "{failure}");
+}
+
 /// The daemon's own refusal, such as a manifest that will not load, reaches the
 /// caller as a bad request with what the daemon said.
 #[tokio::test]

@@ -74,6 +74,18 @@ pub(crate) async fn spawn(
     request: SpawnRequest,
     parts: Vec<InboundPart>,
 ) -> Result<Spawned, ServeError> {
+    // A secret with nowhere to go is refused rather than accepted and dropped.
+    // It signs the webhook body, so a caller that sends one and no URL believes
+    // it has set up a signed callback, and the run will never call anything: the
+    // mistake is silent for the whole life of the run, and the thing it silently
+    // loses is a credential.
+    if request.callback_secret.is_some() && request.callback_url.is_none() {
+        return Err(ServeError::BadRequest(
+            "`callback_secret` signs the callback body, so it needs a \
+             `callback_url` to sign for. Send both, or neither."
+                .to_string(),
+        ));
+    }
     let config = state.current_config();
     let roots = super::super::blueprints::blueprint_roots(&config);
     let installed =

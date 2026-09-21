@@ -13,6 +13,22 @@ same list.
 
 ## Unreleased
 
+### Changed
+
+- `callback_secret` without a `callback_url` is refused rather than accepted and
+  dropped. The secret signs the callback body, so a request that sends one and
+  no URL is asking for a signed callback that can never fire, and accepting it
+  left somebody believing they had set one up while the credential went nowhere.
+  Both `POST /api/agents` and `spawnRun` refuse it, since they are one spawn
+  underneath; the refusal names the missing field and never echoes the secret.
+
+- A lifecycle mutation answers with the run as the act left it. The daemon
+  applies a pause, resume or cancel to its world before it answers and writes
+  the record a moment later, so the answer now waits for the act to show in the
+  record: `pauseRun` reads `PAUSED`, `cancelRun` reads `CANCELLED`, and
+  `resumeRun` reads whatever the run went back to doing. A run slow to write its
+  record is answered with the record as it stands rather than held any longer.
+
 ### Added
 
 - A run can be asked to journal the exact request it sent the model, once per

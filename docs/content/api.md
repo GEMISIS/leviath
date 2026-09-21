@@ -1983,7 +1983,10 @@ learns what the run concluded without a second request. The `result` field besid
 error, which is what it has always been. See [Final outputs](/docs/outputs).
 
 **It is signed.** Verify the `X-Leviath-Signature: sha256=<hex>` header against your
-`callback_secret` before trusting the body.
+`callback_secret` before trusting the body. A `callback_secret` without a
+`callback_url` is refused with a `400`: the secret signs the callback body, so a
+request that sends one and no URL is asking for a signed callback that can never
+fire.
 
 **It carries a stable `delivery_id`**, of the form `agent_completed:<run_id>`, in both the signed
 body and the `X-Leviath-Delivery` header. Stable is the important word: a retried attempt, and a
