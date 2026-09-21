@@ -1,8 +1,20 @@
 //! What a stage may call, what it may be handed, and where the answers land.
+//!
+//! The tool in each of these is a name rather than a `Tool`. A manifest names
+//! tools no inventory can describe: an MCP server's, which this machine's
+//! inventory deliberately leaves out, a group token such as `@builtin`, and any
+//! tool an author wrote that is not installed here. `Query.tools` is what
+//! describes the ones that are.
 
-use async_graphql::{Enum, SimpleObject};
+use std::sync::Arc;
 
+use async_graphql::{Enum, Object, SimpleObject};
+
+use leviath_core::Blueprint as CoreBlueprint;
+
+use super::super::blueprint::Region;
 use super::count;
+use super::refs;
 
 /// What a stage does with one tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
@@ -16,16 +28,18 @@ pub(crate) enum ToolPermissionPolicy {
 }
 
 impl ToolPermissionPolicy {
-    /// Read the manifest's own word, or nothing for a word that is neither.
+    /// The policy a manifest's word resolves to, exactly as the daemon resolves
+    /// it.
     ///
-    /// A spelling the daemon does not recognise is left out rather than
-    /// defaulted: `ALLOW` on a typo would report a permission nobody granted.
-    fn parse(word: &str) -> Option<Self> {
+    /// The manifest parser refuses any word but `allow`, `ask` and `deny`, so a
+    /// parsed manifest only ever carries one of the three. The daemon's own
+    /// resolution reads anything else as `ASK`, and this reads it the same way,
+    /// so the schema cannot report a permission the dispatcher would not apply.
+    fn of(word: &str) -> Self {
         match word.trim().to_ascii_lowercase().as_str() {
-            "allow" => Some(Self::Allow),
-            "ask" => Some(Self::Ask),
-            "deny" => Some(Self::Deny),
-            _ => None,
+            "allow" => Self::Allow,
+            "deny" => Self::Deny,
+            _ => Self::Ask,
         }
     }
 }
@@ -33,11 +47,12 @@ impl ToolPermissionPolicy {
 /// One tool and what this level does with it.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ToolPermissionRule {
-    /// The tool, by the name the manifest used.
+    /// The tool, by the name the manifest used. A name rather than a `Tool`: a
+    /// rule may name an MCP server's tool, a group token, or one this machine
+    /// does not have, and the rule still applies to the name it wrote.
     pub(crate) tool: String,
-    /// What happens when it is called. Null when the manifest's word is one the
-    /// daemon does not recognise, which is a rule that grants nothing.
-    pub(crate) policy: Option<ToolPermissionPolicy>,
+    /// What happens when it is called.
+    pub(crate) policy: ToolPermissionPolicy,
 }
 
 impl ToolPermissionRule {
@@ -53,7 +68,7 @@ impl ToolPermissionRule {
             .iter()
             .map(|(tool, policy)| ToolPermissionRule {
                 tool: tool.clone(),
-                policy: ToolPermissionPolicy::parse(policy),
+                policy: ToolPermissionPolicy::of(policy),
             })
             .collect();
         rules.sort_by(|a, b| a.tool.cmp(&b.tool));
@@ -62,12 +77,37 @@ impl ToolPermissionRule {
 }
 
 /// Where one tool's results go, in place of the stage's default region.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct ToolRouteOverride {
-    /// The tool, by canonical name.
-    pub(crate) tool: String,
-    /// The region its results are written to, by name.
-    pub(crate) region: String,
+    /// The blueprint the region name resolves in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The tool this override is keyed by.
+    tool: String,
+    /// The region name it was written with.
+    region: String,
+}
+
+#[Object]
+impl ToolRouteOverride {
+    /// The tool, by the name the manifest used. A name rather than a `Tool`: an
+    /// override may name an MCP server's tool or one this machine does not have.
+    async fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    /// The region its results are written to.
+    ///
+    /// Null where no layout in this blueprint declares that name, which is an
+    /// override sending results nowhere the stage can read: `lev validate`
+    /// refuses it and the daemon will not spawn it. `regionName` carries the name
+    /// either way.
+    async fn region(&self) -> Option<Region> {
+        refs::region(&self.blueprint, &self.region)
+    }
+
+    /// The region name the override was written with, verbatim.
+    async fn region_name(&self) -> &str {
+        &self.region
+    }
 }
 
 /// A per-tool ceiling on one result, in place of the stage's own.
@@ -76,40 +116,69 @@ pub(crate) struct ToolRouteOverride {
 /// answer is small and wanted whole, and reads files, where it can be enormous.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ToolTokenCeiling {
-    /// The tool, by canonical name.
+    /// The tool, by the name the manifest used. A name rather than a `Tool`: a
+    /// ceiling may name an MCP server's tool or one this machine does not have.
     pub(crate) tool: String,
     /// The most tokens one of its results may take.
     pub(crate) max_result_tokens: i32,
 }
 
 /// Where a stage's tool results land in its context.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct ToolRouting {
-    /// The region results go to when no override names another.
-    pub(crate) default_region: String,
-    /// Tools whose results go somewhere else.
-    pub(crate) overrides: Vec<ToolRouteOverride>,
-    /// Whether a tool's result stays in the region it was routed to, rather
-    /// than going to `scratch` where the stage can drop it.
-    pub(crate) keep_results: bool,
-    /// The most tokens any one result may take, before truncation.
-    pub(crate) max_result_tokens: Option<i32>,
-    /// Tools with a ceiling of their own.
-    pub(crate) max_result_tokens_per_tool: Vec<ToolTokenCeiling>,
+    /// The blueprint the region names resolve in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The routing block as the stage wrote it.
+    routing: leviath_core::blueprint::ToolResultRouting,
 }
 
-impl From<&leviath_core::blueprint::ToolResultRouting> for ToolRouting {
-    fn from(routing: &leviath_core::blueprint::ToolResultRouting) -> Self {
-        let mut overrides: Vec<ToolRouteOverride> = routing
+#[Object]
+impl ToolRouting {
+    /// The region results go to when no override names another.
+    ///
+    /// Null where no layout in this blueprint declares that name, which is a
+    /// stage whose results land nowhere it can read. `defaultRegionName` carries
+    /// the name either way.
+    async fn default_region(&self) -> Option<Region> {
+        refs::region(&self.blueprint, &self.routing.default_region)
+    }
+
+    /// The default region's name, verbatim.
+    async fn default_region_name(&self) -> &str {
+        &self.routing.default_region
+    }
+
+    /// Tools whose results go somewhere else, sorted by tool name so two reads
+    /// of one blueprint cannot disagree about the order.
+    async fn overrides(&self) -> Vec<ToolRouteOverride> {
+        let mut overrides: Vec<ToolRouteOverride> = self
+            .routing
             .tool_overrides
             .iter()
             .map(|(tool, region)| ToolRouteOverride {
+                blueprint: Arc::clone(&self.blueprint),
                 tool: tool.clone(),
                 region: region.clone(),
             })
             .collect();
         overrides.sort_by(|a, b| a.tool.cmp(&b.tool));
-        let mut ceilings: Vec<ToolTokenCeiling> = routing
+        overrides
+    }
+
+    /// Whether a tool's result stays in the region it was routed to, rather
+    /// than going to `scratch` where the stage can drop it.
+    async fn keep_results(&self) -> bool {
+        self.routing.keep_results
+    }
+
+    /// The most tokens any one result may take, before truncation.
+    async fn max_result_tokens(&self) -> Option<i32> {
+        self.routing.max_result_tokens.map(count)
+    }
+
+    /// Tools with a ceiling of their own, sorted by tool name.
+    async fn max_result_tokens_per_tool(&self) -> Vec<ToolTokenCeiling> {
+        let mut ceilings: Vec<ToolTokenCeiling> = self
+            .routing
             .tool_max_result_tokens
             .iter()
             .map(|(tool, tokens)| ToolTokenCeiling {
@@ -118,24 +187,65 @@ impl From<&leviath_core::blueprint::ToolResultRouting> for ToolRouting {
             })
             .collect();
         ceilings.sort_by(|a, b| a.tool.cmp(&b.tool));
+        ceilings
+    }
+}
+
+impl ToolRouting {
+    /// Describe one stage's routing block against the blueprint that holds it.
+    pub(crate) fn of(
+        blueprint: &Arc<CoreBlueprint>,
+        routing: &leviath_core::blueprint::ToolResultRouting,
+    ) -> Self {
         Self {
-            default_region: routing.default_region.clone(),
-            overrides,
-            keep_results: routing.keep_results,
-            max_result_tokens: routing.max_result_tokens.map(count),
-            max_result_tokens_per_tool: ceilings,
+            blueprint: Arc::clone(blueprint),
+            routing: routing.clone(),
         }
     }
 }
 
 /// Where the parts a stage produces are written, by mime pattern.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct OutputRoute {
+    /// The blueprint the region name resolves in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The mime pattern this rule matches.
+    pattern: String,
+    /// The region name it was written with.
+    region: String,
+}
+
+#[Object]
+impl OutputRoute {
     /// The mime pattern this rule matches: `image/png`, `image/*` or `*/*`. The
     /// most specific match wins.
-    pub(crate) pattern: String,
-    /// The region matching parts are written to, by name.
-    pub(crate) region: String,
+    async fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// The region matching parts are written to.
+    ///
+    /// Null where no layout in this blueprint declares that name, which is a
+    /// route whose parts would land nowhere: `lev validate` refuses it and the
+    /// daemon will not spawn it. `regionName` carries the name either way.
+    async fn region(&self) -> Option<Region> {
+        refs::region(&self.blueprint, &self.region)
+    }
+
+    /// The region name the route was written with, verbatim.
+    async fn region_name(&self) -> &str {
+        &self.region
+    }
+}
+
+impl OutputRoute {
+    /// Describe one output route against the blueprint that holds it.
+    pub(crate) fn of(blueprint: &Arc<CoreBlueprint>, pattern: &str, region: &str) -> Self {
+        Self {
+            blueprint: Arc::clone(blueprint),
+            pattern: pattern.to_string(),
+            region: region.to_string(),
+        }
+    }
 }
 
 /// What one tool may be handed at this stage.
@@ -145,7 +255,8 @@ pub(crate) struct OutputRoute {
 /// text is never hidden by one.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ToolAcceptRule {
-    /// The tool, by the name the manifest used.
+    /// The tool, by the name the manifest used. A name rather than a `Tool`: a
+    /// rule may name an MCP server's tool or one this machine does not have.
     pub(crate) tool: String,
     /// The mime patterns it may be handed.
     pub(crate) patterns: Vec<String>,

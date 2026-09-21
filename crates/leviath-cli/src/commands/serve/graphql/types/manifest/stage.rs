@@ -10,11 +10,12 @@ use async_graphql::{Enum, Object, SimpleObject};
 
 use leviath_core::Blueprint as CoreBlueprint;
 
-use super::super::blueprint::ToolUseGuidance;
+use super::super::blueprint::{Region, ToolUseGuidance};
 use super::count;
 use super::interaction::InteractionPoint;
 use super::model::StageModelConfig;
 use super::output::{OutputSpec, StageInput};
+use super::refs;
 use super::runtime::{
     BlueprintSecurity, NudgeConfig, SandboxConfig, StageHooks, WorkerFailurePolicy,
 };
@@ -64,69 +65,167 @@ pub(crate) struct OutputRequirement {
 ///
 /// Only a `FAN_OUT` stage has one. Every other mode answers null, rather than a
 /// block of defaults nobody wrote.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct FanOut {
+    /// The blueprint the stage and region names resolve in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The fan-out block as the stage wrote it.
+    config: leviath_core::blueprint::FanOutConfig,
+}
+
+#[Object]
+impl FanOut {
     /// A separate installed blueprint run as the worker, by name. It has to be
     /// installed when the fan-out runs, and it may not be installed now, so this
     /// is a name rather than a blueprint.
-    pub(crate) worker_agent: Option<String>,
-    /// A stage of this same blueprint run as the worker, by name. That stage has
-    /// to allow it.
-    pub(crate) worker_stage: Option<String>,
+    async fn worker_agent(&self) -> Option<&str> {
+        self.config.worker_agent.as_deref()
+    }
+
+    /// A stage of this same blueprint run as the worker. That stage has to allow
+    /// it.
+    ///
+    /// Null when the fan-out runs a separate blueprint or a query instead, and
+    /// also when it names a stage this blueprint does not declare, which
+    /// `lev validate` refuses and the daemon will not spawn.
+    /// `workerStageName` tells those apart.
+    async fn worker_stage(&self) -> Option<Stage> {
+        refs::stage(&self.blueprint, self.config.worker_stage.as_deref()?)
+    }
+
+    /// The stage name the fan-out wrote for its worker, verbatim. Null when it
+    /// names no stage of this blueprint.
+    async fn worker_stage_name(&self) -> Option<&str> {
+        self.config.worker_stage.as_deref()
+    }
+
     /// A description matched against the installed blueprints, when the manifest
     /// would rather describe the worker than name it.
-    pub(crate) worker_query: Option<String>,
-    /// The stage that reconciles what the workers sent back, by name.
-    pub(crate) merge_stage: Option<String>,
+    async fn worker_query(&self) -> Option<&str> {
+        self.config.worker_query.as_deref()
+    }
+
+    /// The stage that reconciles what the workers sent back.
+    ///
+    /// Null when the fan-out names none, and also when it names a stage this
+    /// blueprint does not declare. `mergeStageName` tells those apart.
+    async fn merge_stage(&self) -> Option<Stage> {
+        refs::stage(&self.blueprint, self.config.merge_stage.as_deref()?)
+    }
+
+    /// The merge stage's name, verbatim. Null when the fan-out names none.
+    async fn merge_stage_name(&self) -> Option<&str> {
+        self.config.merge_stage.as_deref()
+    }
+
     /// The prompt that produces the work items.
-    pub(crate) split_prompt: String,
+    async fn split_prompt(&self) -> &str {
+        &self.config.split_prompt
+    }
+
     /// How many workers run at once. Zero means as many as the daemon's
     /// inference pool will carry.
-    pub(crate) max_workers: i32,
+    async fn max_workers(&self) -> i32 {
+        count(self.config.max_workers)
+    }
+
     /// The most work items the split may produce. Null means however many it
     /// produces. This bounds what there is at all, where `maxWorkers` bounds how
     /// many run together, and it is also what decides each worker's share of the
     /// results region.
-    pub(crate) max_items: Option<i32>,
+    async fn max_items(&self) -> Option<i32> {
+        self.config.max_items.map(count)
+    }
+
     /// How many times the stage is asked again when it ends without having
     /// fanned out, before it is let through with no workers.
-    pub(crate) max_attempts: Option<i32>,
-    /// What happens when one worker fails.
-    pub(crate) on_worker_failure: WorkerFailurePolicy,
-    /// The region the consolidated report is written to, by name. Null means the
-    /// conversation, which is a sliding window, so a bulky report is worth its
-    /// own region and its own budget.
-    pub(crate) results_region: Option<String>,
-}
+    async fn max_attempts(&self) -> Option<i32> {
+        self.config.max_attempts.map(count)
+    }
 
-impl From<&leviath_core::blueprint::FanOutConfig> for FanOut {
-    fn from(config: &leviath_core::blueprint::FanOutConfig) -> Self {
-        Self {
-            worker_agent: config.worker_agent.clone(),
-            worker_stage: config.worker_stage.clone(),
-            worker_query: config.worker_query.clone(),
-            merge_stage: config.merge_stage.clone(),
-            split_prompt: config.split_prompt.clone(),
-            max_workers: count(config.max_workers),
-            max_items: config.max_items.map(count),
-            max_attempts: config.max_attempts.map(count),
-            on_worker_failure: WorkerFailurePolicy::from(&config.on_worker_failure),
-            results_region: config.results_region.clone(),
-        }
+    /// What happens when one worker fails.
+    async fn on_worker_failure(&self) -> WorkerFailurePolicy {
+        WorkerFailurePolicy::from(&self.config.on_worker_failure)
+    }
+
+    /// The region the consolidated report is written to.
+    ///
+    /// Null where the fan-out names none, which means the conversation - a
+    /// sliding window, so a bulky report is worth its own region and its own
+    /// budget - and also where it names a region no layout declares.
+    /// `resultsRegionName` tells those apart.
+    async fn results_region(&self) -> Option<Region> {
+        refs::region(&self.blueprint, self.config.results_region.as_deref()?)
+    }
+
+    /// The results region's name, verbatim. Null when the fan-out names none.
+    async fn results_region_name(&self) -> Option<&str> {
+        self.config.results_region.as_deref()
     }
 }
 
 /// Which regions a stage adds, hides or empties on its way in.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct StageContext {
-    /// Regions this stage declares of its own, beyond the blueprint's layout, by
-    /// name. Look them up in the blueprint's `regions`.
-    pub(crate) regions: Vec<String>,
-    /// Regions kept out of this stage's prompt, by name. The contents survive;
-    /// the stage simply does not see them.
-    pub(crate) hide: Vec<String>,
-    /// Regions emptied as this stage is entered, by name.
-    pub(crate) reset: Vec<String>,
+    /// The stage this block belongs to.
+    blueprint: Arc<CoreBlueprint>,
+    /// Which stage, by declaration order.
+    at: usize,
+}
+
+#[Object]
+impl StageContext {
+    /// Regions this stage declares of its own, beyond the blueprint's layout.
+    ///
+    /// Every one is declared right here, so this list is always the whole of
+    /// what the stage wrote.
+    async fn regions(&self) -> Vec<Region> {
+        let declared = self.stage().context_layout.as_ref();
+        let declared_count = declared.map_or(0, |layout| layout.regions.len());
+        (0..declared_count)
+            .map(|at| Region {
+                blueprint: Arc::clone(&self.blueprint),
+                stage: Some(self.at),
+                at,
+            })
+            .collect()
+    }
+
+    /// Regions kept out of this stage's prompt. The contents survive; the stage
+    /// simply does not see them.
+    ///
+    /// Declared names only. `hideNames` carries every name the stage wrote,
+    /// which is where a name with no declaration stays readable.
+    async fn hide(&self) -> Vec<Region> {
+        refs::regions(&self.blueprint, &self.stage().context_hide)
+    }
+
+    /// Every name the stage wrote in `hide`, verbatim and in order, declared or
+    /// not.
+    async fn hide_names(&self) -> &[String] {
+        &self.stage().context_hide
+    }
+
+    /// Regions emptied as this stage is entered.
+    ///
+    /// Declared names only, and a stage resetting `conversation` is the ordinary
+    /// case of a name with no declaration: the runtime carries that region
+    /// whatever a manifest says. `resetNames` carries every name the stage
+    /// wrote.
+    async fn reset(&self) -> Vec<Region> {
+        refs::regions(&self.blueprint, &self.stage().context_reset)
+    }
+
+    /// Every name the stage wrote in `reset`, verbatim and in order, declared or
+    /// not.
+    async fn reset_names(&self) -> &[String] {
+        &self.stage().context_reset
+    }
+}
+
+impl StageContext {
+    /// The stage this block belongs to.
+    fn stage(&self) -> &leviath_core::blueprint::Stage {
+        &self.blueprint.stages[self.at]
+    }
 }
 
 /// One stage of a blueprint.
@@ -282,7 +381,7 @@ impl Stage {
         self.stage()
             .tool_result_routing
             .as_ref()
-            .map(ToolRouting::from)
+            .map(|routing| ToolRouting::of(&self.blueprint, routing))
     }
 
     /// Where the parts this stage produces are written, by mime pattern.
@@ -290,30 +389,15 @@ impl Stage {
         self.stage()
             .output_routing
             .iter()
-            .map(|(pattern, region)| OutputRoute {
-                pattern: pattern.clone(),
-                region: region.clone(),
-            })
+            .map(|(pattern, region)| OutputRoute::of(&self.blueprint, pattern, region))
             .collect()
     }
 
     /// Which regions this stage adds, hides or empties.
     async fn context(&self) -> StageContext {
-        let stage = self.stage();
         StageContext {
-            regions: stage
-                .context_layout
-                .as_ref()
-                .map(|layout| {
-                    layout
-                        .regions
-                        .iter()
-                        .map(|region| region.name.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            hide: stage.context_hide.clone(),
-            reset: stage.context_reset.clone(),
+            blueprint: Arc::clone(&self.blueprint),
+            at: self.at,
         }
     }
 
@@ -348,9 +432,10 @@ impl Stage {
     /// Empty for every mode but `INTERACTIVE_POINTS`.
     async fn interaction_points(&self) -> Vec<InteractionPoint> {
         match &self.stage().mode {
-            leviath_core::blueprint::StageMode::InteractivePoints { points } => {
-                points.iter().map(InteractionPoint::from).collect()
-            }
+            leviath_core::blueprint::StageMode::InteractivePoints { points } => points
+                .iter()
+                .map(|point| InteractionPoint::of(&self.blueprint, point))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -359,7 +444,10 @@ impl Stage {
     /// mode.
     async fn fan_out(&self) -> Option<FanOut> {
         match &self.stage().mode {
-            leviath_core::blueprint::StageMode::FanOut { config } => Some(FanOut::from(config)),
+            leviath_core::blueprint::StageMode::FanOut { config } => Some(FanOut {
+                blueprint: Arc::clone(&self.blueprint),
+                config: config.clone(),
+            }),
             _ => None,
         }
     }
@@ -419,14 +507,7 @@ impl Stage {
             .transitions
             .iter()
             .flatten()
-            .map(|(target, edge)| {
-                let mut mapped = TransitionEdge::from_core(edge);
-                // The manifest keys these by target and the parser fills the
-                // edge's own copy from that key, so the map key is the
-                // authority when an older record carries an empty one.
-                mapped.target = target.clone();
-                mapped
-            })
+            .map(|(target, edge)| TransitionEdge::of(&self.blueprint, target, edge))
             .collect();
         // The manifest holds these in a map, so a listing sorted by target is
         // the only order two identical requests can both produce.

@@ -6,7 +6,11 @@
 //! here is what this level declared, and null means "whatever the level above
 //! says". `Stage.effective` is where the resolved answer lives.
 
-use async_graphql::{Enum, SimpleObject};
+use std::sync::Arc;
+
+use async_graphql::{Enum, Object, SimpleObject};
+
+use leviath_core::Blueprint as CoreBlueprint;
 
 use super::count;
 
@@ -209,7 +213,10 @@ impl From<&leviath_core::blueprint::StageHooks> for StageHooks {
 /// what an operator reads when they are deciding whether to write it in.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SafeCommands {
-    /// Tools the blueprint would like allowed outright.
+    /// Tools the blueprint would like allowed outright, by the names the manifest
+    /// used. Names rather than `Tool`s: a request may name an MCP server's tool,
+    /// a group token, or one this machine does not have, and it is still the
+    /// request the author wrote.
     pub(crate) tools: Vec<String>,
     /// Shell command lines it would like allowed outright.
     pub(crate) shell: Vec<String>,
@@ -254,27 +261,55 @@ impl From<&leviath_core::blueprint::RepetitionDetectionConfig> for RepetitionDet
 ///
 /// So a tool result can point at the region rather than repeating a file the
 /// context already holds.
-#[derive(Debug, SimpleObject)]
 pub(crate) struct FileTrackingConfig {
-    /// The key-value region the files are synced to, by name.
-    pub(crate) region: String,
+    /// The blueprint the region name resolves in.
+    blueprint: Arc<CoreBlueprint>,
+    /// The tracking block as the blueprint wrote it.
+    tracking: leviath_core::blueprint::FileTrackingConfig,
+}
+
+#[Object]
+impl FileTrackingConfig {
+    /// The key-value region the files are synced to.
+    ///
+    /// Null where no layout in this blueprint declares that name, which is file
+    /// tracking with nowhere to write. `regionName` carries the name either way.
+    async fn region(&self) -> Option<super::super::blueprint::Region> {
+        super::refs::region(&self.blueprint, &self.tracking.region)
+    }
+
+    /// The region name the blueprint wrote, verbatim.
+    async fn region_name(&self) -> &str {
+        &self.tracking.region
+    }
+
     /// Whether a read updates it.
-    pub(crate) track_reads: bool,
+    async fn track_reads(&self) -> bool {
+        self.tracking.track_reads
+    }
+
     /// Whether a write updates it. An edit does not: its arguments are the old
     /// and new text, so the file's new body is not there to record without
     /// reading it again.
-    pub(crate) track_writes: bool,
+    async fn track_writes(&self) -> bool {
+        self.tracking.track_writes
+    }
+
     /// The most tokens one file may take in the region before it is truncated.
-    pub(crate) max_file_tokens: Option<i32>,
+    async fn max_file_tokens(&self) -> Option<i32> {
+        self.tracking.max_file_tokens.map(count)
+    }
 }
 
-impl From<&leviath_core::blueprint::FileTrackingConfig> for FileTrackingConfig {
-    fn from(tracking: &leviath_core::blueprint::FileTrackingConfig) -> Self {
+impl FileTrackingConfig {
+    /// Describe the tracking block against the blueprint that holds it.
+    pub(crate) fn of(
+        blueprint: &Arc<CoreBlueprint>,
+        tracking: &leviath_core::blueprint::FileTrackingConfig,
+    ) -> Self {
         Self {
-            region: tracking.region.clone(),
-            track_reads: tracking.track_reads,
-            track_writes: tracking.track_writes,
-            max_file_tokens: tracking.max_file_tokens.map(count),
+            blueprint: Arc::clone(blueprint),
+            tracking: tracking.clone(),
         }
     }
 }

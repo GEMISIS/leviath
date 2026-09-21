@@ -9,9 +9,14 @@
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema, Variables};
 
 use super::{Query, RunFilter, RunSort, page_size, waiver_word};
-use crate::commands::serve::core::runs::{MAX_IDS, MAX_LIMIT, ParentFilter, SortKey, Source};
+use crate::commands::serve::core::error::ServeError;
+use crate::commands::serve::core::runs::{
+    MAX_IDS, MAX_LIMIT, ParentFilter, RunSelection, SortKey, Source,
+};
+use crate::commands::serve::graphql::inputs::BlueprintInput;
 use crate::commands::serve::graphql::scalars::Timestamp;
 use crate::commands::serve::graphql::types::run::RunStatus;
+use crate::commands::serve::testutil::state_with_agent_paths;
 use crate::runstate::{RunMeta, create_run};
 
 /// A run on disk, started at a known second so ordering is assertable.
@@ -35,6 +40,19 @@ fn named(id: &str, blueprint: &str) -> RunMeta {
     let mut meta = meta_at(id, 100);
     meta.agent_name = blueprint.to_string();
     meta
+}
+
+/// One filter resolved into the selection both surfaces list from.
+///
+/// Async because a filter may carry a digest pin, which is checked against what
+/// is installed before anything is read. None of these filters carries one.
+async fn resolved(
+    filter: RunFilter,
+    first: i32,
+    ids: Option<Vec<String>>,
+) -> Result<RunSelection, ServeError> {
+    let state = state_with_agent_paths(Vec::new());
+    filter.selection(&state, first, ids).await
 }
 
 /// Run one query against a schema wired to a daemon-less state.
@@ -93,10 +111,10 @@ fn a_page_size_is_bounded_at_both_ends() {
 
 /// The defaults: newest first, fifty at a time, searching only what is already
 /// in memory.
-#[test]
-fn the_default_filter_reads_nothing_from_disk() {
-    let selection = RunFilter::default()
-        .selection(50, None)
+#[tokio::test]
+async fn the_default_filter_reads_nothing_from_disk() {
+    let selection = resolved(RunFilter::default(), 50, None)
+        .await
         .expect("defaults resolve");
     assert_eq!(selection.limit, 50);
     assert_eq!(selection.sort, SortKey::Started);
@@ -107,17 +125,21 @@ fn the_default_filter_reads_nothing_from_disk() {
 }
 
 /// Both status spellings feed one filter list, in the daemon's own words.
-#[test]
-fn statuses_reach_the_core_in_the_daemons_spelling() {
-    let selection = RunFilter {
-        status: Some(RunStatus::Running),
-        status_in: Some(vec![
-            RunStatus::WaitingInput,
-            RunStatus::CompleteInteractive,
-        ]),
-        ..Default::default()
-    }
-    .selection(50, None)
+#[tokio::test]
+async fn statuses_reach_the_core_in_the_daemons_spelling() {
+    let selection = resolved(
+        RunFilter {
+            status: Some(RunStatus::Running),
+            status_in: Some(vec![
+                RunStatus::WaitingInput,
+                RunStatus::CompleteInteractive,
+            ]),
+            ..Default::default()
+        },
+        50,
+        None,
+    )
+    .await
     .expect("statuses resolve");
     assert_eq!(
         selection.statuses,
@@ -127,14 +149,18 @@ fn statuses_reach_the_core_in_the_daemons_spelling() {
 
 /// The search scopes decide both what is read and what the cursor's digest is
 /// taken over, so the request's own spelling is what travels.
-#[test]
-fn a_search_scope_selects_its_source_and_digests_as_written() {
-    let selection = RunFilter {
-        query: Some("boom".to_string()),
-        query_in: Some(vec![super::SearchScope::Logs, super::SearchScope::Meta]),
-        ..Default::default()
-    }
-    .selection(50, None)
+#[tokio::test]
+async fn a_search_scope_selects_its_source_and_digests_as_written() {
+    let selection = resolved(
+        RunFilter {
+            query: Some("boom".to_string()),
+            query_in: Some(vec![super::SearchScope::Logs, super::SearchScope::Meta]),
+            ..Default::default()
+        },
+        50,
+        None,
+    )
+    .await
     .expect("scopes resolve");
     assert_eq!(selection.sources, vec![Source::Logs, Source::Meta]);
     assert_eq!(selection.sources_raw, "logs,meta");
@@ -151,8 +177,8 @@ fn a_search_scope_selects_its_source_and_digests_as_written() {
 ///
 /// The table is checked whole because the mapping is the contract: a scope that
 /// quietly read a different source would answer a search nobody asked for.
-#[test]
-fn every_search_scope_maps_to_one_source() {
+#[tokio::test]
+async fn every_search_scope_maps_to_one_source() {
     use super::SearchScope;
     let cases = [
         (SearchScope::Meta, Source::Meta, "meta"),
@@ -162,12 +188,16 @@ fn every_search_scope_maps_to_one_source() {
         (SearchScope::Journal, Source::Journal, "journal"),
     ];
     for (scope, source, word) in cases {
-        let selection = RunFilter {
-            query: Some("x".to_string()),
-            query_in: Some(vec![scope]),
-            ..Default::default()
-        }
-        .selection(50, None)
+        let selection = resolved(
+            RunFilter {
+                query: Some("x".to_string()),
+                query_in: Some(vec![scope]),
+                ..Default::default()
+            },
+            50,
+            None,
+        )
+        .await
         .expect("the scope resolves");
         assert_eq!(selection.sources, vec![source], "{word}");
         assert_eq!(selection.sources_raw, word);
@@ -176,80 +206,181 @@ fn every_search_scope_maps_to_one_source() {
 
 /// Parentage is one question with two spellings, and asking both at once is a
 /// client bug worth saying out loud.
-#[test]
-fn parentage_is_either_one_run_or_the_top_level() {
-    let of = RunFilter {
-        parent: Some("root-1".to_string()),
-        ..Default::default()
-    }
-    .selection(50, None)
+#[tokio::test]
+async fn parentage_is_either_one_run_or_the_top_level() {
+    let of = resolved(
+        RunFilter {
+            parent: Some("root-1".to_string()),
+            ..Default::default()
+        },
+        50,
+        None,
+    )
+    .await
     .expect("a parent resolves");
     assert_eq!(of.parent, ParentFilter::Of("root-1".to_string()));
 
-    let roots = RunFilter {
-        top_level_only: Some(true),
-        ..Default::default()
-    }
-    .selection(50, None)
+    let roots = resolved(
+        RunFilter {
+            top_level_only: Some(true),
+            ..Default::default()
+        },
+        50,
+        None,
+    )
+    .await
     .expect("top level resolves");
     assert_eq!(roots.parent, ParentFilter::Roots);
 
-    let both = RunFilter {
-        parent: Some("root-1".to_string()),
-        top_level_only: Some(true),
-        ..Default::default()
-    }
-    .selection(50, None)
+    let both = resolved(
+        RunFilter {
+            parent: Some("root-1".to_string()),
+            top_level_only: Some(true),
+            ..Default::default()
+        },
+        50,
+        None,
+    )
+    .await
     .expect_err("both at once is refused");
     assert!(both.to_string().contains("topLevelOnly"), "{both}");
 }
 
 /// `ids` names exactly what it wants, so combining it with a filter is a
 /// request that cannot be honoured both ways.
-#[test]
-fn a_batch_fetch_refuses_to_be_filtered() {
-    let ok = RunFilter::default()
-        .selection(50, Some(vec!["run-a".to_string()]))
+#[tokio::test]
+async fn a_batch_fetch_refuses_to_be_filtered() {
+    let ok = resolved(RunFilter::default(), 50, Some(vec!["run-a".to_string()]))
+        .await
         .expect("ids alone resolve");
     assert_eq!(ok.ids, Some(vec!["run-a".to_string()]));
 
-    let filtered = RunFilter {
-        status: Some(RunStatus::Running),
-        ..Default::default()
-    }
-    .selection(50, Some(vec!["run-a".to_string()]))
+    let filtered = resolved(
+        RunFilter {
+            status: Some(RunStatus::Running),
+            ..Default::default()
+        },
+        50,
+        Some(vec!["run-a".to_string()]),
+    )
+    .await
     .expect_err("ids with a filter is refused");
     assert!(filtered.to_string().contains("`ids`"), "{filtered}");
 
     let too_many: Vec<String> = (0..=MAX_IDS).map(|i| format!("run-{i}")).collect();
-    let over = RunFilter::default()
-        .selection(50, Some(too_many))
+    let over = resolved(RunFilter::default(), 50, Some(too_many))
+        .await
         .expect_err("too many ids is refused");
     assert!(over.to_string().contains("at most"), "{over}");
 }
 
 /// Sort and order are the two halves of one walk, and both reach the core.
-#[test]
-fn sort_and_direction_travel_to_the_core() {
-    let selection = RunFilter {
-        sort: Some(RunSort::Updated),
-        ascending: Some(true),
-        since: Some(Timestamp(1_700_000_000)),
-        ..Default::default()
-    }
-    .selection(10, None)
+#[tokio::test]
+async fn sort_and_direction_travel_to_the_core() {
+    let selection = resolved(
+        RunFilter {
+            sort: Some(RunSort::Updated),
+            ascending: Some(true),
+            since: Some(Timestamp(1_700_000_000)),
+            ..Default::default()
+        },
+        10,
+        None,
+    )
+    .await
     .expect("sort resolves");
     assert_eq!(selection.sort, SortKey::Updated);
     assert!(!selection.descending);
     assert_eq!(selection.since, Some(1_700_000_000));
 
-    let last = RunFilter {
-        sort: Some(RunSort::LastProgress),
-        ..Default::default()
-    }
-    .selection(10, None)
+    let last = resolved(
+        RunFilter {
+            sort: Some(RunSort::LastProgress),
+            ..Default::default()
+        },
+        10,
+        None,
+    )
+    .await
     .expect("sort resolves");
     assert_eq!(last.sort, SortKey::LastProgress);
+}
+
+/// A blueprint argument that a listing cannot act on is refused where it is
+/// read, before a single run is looked at.
+///
+/// Every field that takes one refuses the same two shapes, so they are checked
+/// together: manifest text, which is a definition rather than a pointer, and no
+/// name at all.
+#[tokio::test]
+async fn a_blueprint_filter_that_names_nothing_is_refused() {
+    let text = resolved(
+        RunFilter {
+            blueprint: Some(BlueprintInput {
+                name: Some("coder".to_string()),
+                content: Some("[agent]".to_string()),
+                ..BlueprintInput::default()
+            }),
+            ..Default::default()
+        },
+        50,
+        None,
+    )
+    .await
+    .expect_err("a listing does not take a definition");
+    assert!(text.to_string().contains("`content`"), "{text}");
+
+    let nameless = resolved(
+        RunFilter {
+            blueprint: Some(BlueprintInput::default()),
+            ..Default::default()
+        },
+        50,
+        None,
+    )
+    .await
+    .expect_err("a filter has to say which blueprint");
+    assert!(nameless.to_string().contains("`name`"), "{nameless}");
+
+    for query in [
+        r#"{ tools(blueprint: { content: "[agent]" }) { tools { name } } }"#,
+        r#"{ scripts(blueprint: { content: "[agent]" }) { name } }"#,
+        r#"{ tools(blueprint: {}) { tools { name } } }"#,
+        r#"{ scripts(blueprint: {}) { name } }"#,
+    ] {
+        let answer = run_query(query).await;
+        let error = answer.errors.first().expect("a refusal");
+        assert_eq!(
+            error
+                .extensions
+                .as_ref()
+                .and_then(|e| e.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string()),
+            "{query}: {}",
+            error.message
+        );
+    }
+}
+
+/// A check needs the text to check, and a pin has nothing to pin against it.
+#[tokio::test]
+async fn validating_a_blueprint_with_no_text_is_refused() {
+    for (query, field) in [
+        (
+            r#"query { validateBlueprint(blueprint: { name: "coder" }) { valid } }"#,
+            "`content`",
+        ),
+        (
+            r#"query { validateBlueprint(blueprint: { content: "[agent]",
+                 digest: "abc" }) { valid } }"#,
+            "`digest`",
+        ),
+    ] {
+        let answer = run_query(query).await;
+        let error = answer.errors.first().expect("a refusal");
+        assert!(error.message.contains(field), "{query}: {}", error.message);
+    }
 }
 
 // ─── the listing ────────────────────────────────────────────────────────────
@@ -703,7 +834,8 @@ async fn a_script_that_cannot_be_offered_is_reported() {
         .expect("script written");
 
         let answer =
-            run_query(r#"{ tools(blueprint: "coder") { skipped { path reason } } }"#).await;
+            run_query(r#"{ tools(blueprint: { name: "coder" }) { skipped { path reason } } }"#)
+                .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         let skipped = json["tools"]["skipped"].as_array().expect("skipped");
@@ -730,7 +862,8 @@ async fn a_script_that_cannot_be_offered_is_reported() {
 #[tokio::test]
 async fn a_tool_scope_refuses_an_unsafe_agent_name() {
     crate::commands::serve::testutil::with_home(|_home| async move {
-        let answer = run_query(r#"{ tools(blueprint: "../etc") { tools { name } } }"#).await;
+        let answer =
+            run_query(r#"{ tools(blueprint: { name: "../etc" }) { tools { name } } }"#).await;
         let error = answer.errors.first().expect("a refusal");
         assert!(
             error.message.contains("Invalid agent name"),
@@ -1447,19 +1580,19 @@ async fn the_tree_filters_answer_different_questions() {
 
         // By blueprint, which composes with the rest.
         let answer = run_query(
-            r#"{ runs(filter: { blueprint: "researcher" }) { edges { node { id } } total } }"#,
+            r#"{ runs(filter: { blueprint: { name: "researcher" } }) { edges { node { id } } total } }"#,
         )
         .await;
         assert_eq!(ids_of(&answer.data, "runs"), vec!["other".to_string()]);
         let answer = run_query(
-            r#"{ runs(filter: { blueprint: "coder", subAgentsOnly: true })
+            r#"{ runs(filter: { blueprint: { name: "coder" }, subAgentsOnly: true })
                  { edges { node { id } } } }"#,
         )
         .await;
         assert_eq!(ids_of(&answer.data, "runs").len(), 2);
         // A blueprint nothing matches is an empty page, not a refusal: a
         // blueprint with no runs yet is an ordinary answer.
-        let answer = run_query(r#"{ runs(filter: { blueprint: "nope" }) { total } }"#).await;
+        let answer = run_query(r#"{ runs(filter: { blueprint: { name: "nope" } }) { total } }"#).await;
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         assert_eq!(json["runs"]["total"], 0);
     })
@@ -1552,7 +1685,7 @@ mod machine_listings {
 
             // An agent nothing knows about is not a refusal: the global scripts
             // are still the answer, and that agent simply has none.
-            let scoped = run_query(r#"{ scripts(blueprint: "coder") { name } }"#).await;
+            let scoped = run_query(r#"{ scripts(blueprint: { name: "coder" }) { name } }"#).await;
             assert!(scoped.errors.is_empty(), "{:?}", scoped.errors);
         })
         .await;
@@ -1847,7 +1980,7 @@ mod the_awkward_shapes {
             .expect("a tool");
 
             let answer = run_query(
-                r#"{ tools(blueprint: "coder") { tools { name origin
+                r#"{ tools(blueprint: { name: "coder" }) { tools { name origin
                      ... on ScriptTool { path blueprint requires } } } }"#,
             )
             .await;
@@ -1964,7 +2097,7 @@ async fn an_unparseable_config_is_reported_rather_than_read_as_empty() {
 /// way out of the agents directory. An empty list would look like an answer.
 #[tokio::test]
 async fn scripts_of_an_unsafe_blueprint_name_are_refused() {
-    let answer = run_query(r#"{ scripts(blueprint: "../../etc") { name } }"#).await;
+    let answer = run_query(r#"{ scripts(blueprint: { name: "../../etc" }) { name } }"#).await;
     let message = &answer.errors.first().expect("a refusal").message;
     assert!(message.contains("Invalid agent name"), "{message}");
 }
@@ -2109,7 +2242,7 @@ async fn validation_reports_rather_than_fails() {
             .replace('\n', "\\n")
             .replace('"', "\\\"");
         let answer = run_query(&format!(
-            r#"query {{ validateBlueprint(manifest: "{good}") {{ valid errors warnings }} }}"#
+            r#"query {{ validateBlueprint(blueprint: {{ content: "{good}" }}) {{ valid errors warnings }} }}"#
         ))
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -2121,7 +2254,7 @@ async fn validation_reports_rather_than_fails() {
         );
 
         let bad = run_query(
-            r#"query { validateBlueprint(manifest: "not a manifest") { valid errors } }"#,
+            r#"query { validateBlueprint(blueprint: { content: "not a manifest" }) { valid errors } }"#,
         )
         .await;
         assert!(bad.errors.is_empty(), "a finding is not a request failure");
@@ -2272,7 +2405,7 @@ async fn a_yolo_profile_decides_about_one_call() {
 async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let report = run_query(
-            r#"query { validateBlueprint(manifest: "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\nentry_stage = \"nope\"\n\n[stages.only]\nmode = \"autonomous\"\n")
+            r#"query { validateBlueprint(blueprint: { content: "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\nentry_stage = \"nope\"\n\n[stages.only]\nmode = \"autonomous\"\n" })
                  { valid errors warnings } }"#,
         )
         .await;
@@ -2296,8 +2429,8 @@ async fn a_blueprint_that_will_not_parse_is_reported_not_written() {
 async fn validating_against_an_agent_refuses_a_name_that_could_escape() {
     crate::commands::serve::testutil::with_home(|_home| async move {
         let answer = run_query(
-            r#"query { validateBlueprint(manifest: "[agent]\nname = \"x\"\n",
-                 blueprint: "../elsewhere") { valid } }"#,
+            r#"query { validateBlueprint(blueprint: { content: "[agent]\nname = \"x\"\n",
+                 name: "../elsewhere" }) { valid } }"#,
         )
         .await;
         let error = answer.errors.first().expect("a refusal");

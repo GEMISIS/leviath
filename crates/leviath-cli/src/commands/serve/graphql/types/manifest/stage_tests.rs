@@ -117,6 +117,11 @@ kind = "hashmap"
 max_tokens = 1000
 max_entries = 50
 
+[context.regions.files]
+kind = "hashmap"
+max_tokens = 800
+max_entries = 20
+
 [context.regions.env]
 kind = "temporary"
 max_tokens = 400
@@ -283,10 +288,10 @@ async fn a_stage_carries_what_its_tools_may_do() {
     let json = ask(r#"{ stage(name: "plan") {
              toolPermissions { tool policy }
              toolAccepts { tool patterns }
-             outputRouting { pattern region }
+             outputRouting { pattern region { name } regionName }
              toolRouting {
-               defaultRegion keepResults maxResultTokens
-               overrides { tool region }
+               defaultRegion { name } defaultRegionName keepResults maxResultTokens
+               overrides { tool region { name } regionName }
                maxResultTokensPerTool { tool maxResultTokens }
              }
            } }"#)
@@ -301,9 +306,11 @@ async fn a_stage_carries_what_its_tools_may_do() {
     assert_eq!(stage["toolAccepts"][0]["tool"], "spawn_agent");
     assert_eq!(stage["toolAccepts"][0]["patterns"][0], "image/*");
     assert_eq!(stage["outputRouting"][0]["pattern"], "image/*");
-    assert_eq!(stage["outputRouting"][0]["region"], "notes");
+    assert_eq!(stage["outputRouting"][0]["region"]["name"], "notes");
+    assert_eq!(stage["outputRouting"][0]["regionName"], "notes");
     let routing = &stage["toolRouting"];
-    assert_eq!(routing["defaultRegion"], "notes");
+    assert_eq!(routing["defaultRegion"]["name"], "notes");
+    assert_eq!(routing["defaultRegionName"], "notes");
     assert_eq!(routing["keepResults"], false);
     assert_eq!(routing["maxResultTokens"], 4000);
     assert_eq!(routing["overrides"][0]["tool"], "shell");
@@ -322,10 +329,12 @@ async fn a_stage_carries_what_its_tools_may_do() {
 #[tokio::test]
 async fn an_edge_carries_its_condition_transform_and_gate() {
     let json = ask(r#"{ stage(name: "plan") { transitions {
-             target condition transform
-             transformConfig { carry compact clear compactPrompt }
+             target { name } targetName condition transform
+             transformConfig { carry { name } carryNames compact { name } compactNames
+                              clear { name } clearNames compactPrompt }
              gate {
-               requireModifications requireRegions requireRegionUpdated
+               requireModifications requireRegions { name } requireRegionNames
+               requireRegionUpdated { name } requireRegionUpdatedName
                maxAttempts message
              }
              stuck { afterIterations afterMinutes }
@@ -335,18 +344,23 @@ async fn an_edge_carries_its_condition_transform_and_gate() {
     assert_eq!(edges.len(), 2);
     // Sorted by target: `build` before `stuck_out`.
     let build = &edges[0];
-    assert_eq!(build["target"], "build");
+    assert_eq!(build["target"]["name"], "build");
+    assert_eq!(build["targetName"], "build");
     assert_eq!(build["condition"], "LLM_CHOICE");
     assert_eq!(build["transform"], "CUSTOM");
-    assert_eq!(build["transformConfig"]["carry"][0], "plan");
-    assert_eq!(build["transformConfig"]["clear"][0], "env");
+    assert_eq!(build["transformConfig"]["carry"][0]["name"], "plan");
+    assert_eq!(build["transformConfig"]["carryNames"][0], "plan");
+    assert_eq!(build["transformConfig"]["clear"][0]["name"], "env");
+    assert_eq!(build["transformConfig"]["clearNames"][0], "env");
     assert_eq!(
         build["transformConfig"]["compactPrompt"],
         "keep the decisions"
     );
     assert_eq!(build["gate"]["requireModifications"], true);
-    assert_eq!(build["gate"]["requireRegions"][0], "plan");
-    assert_eq!(build["gate"]["requireRegionUpdated"], "plan");
+    assert_eq!(build["gate"]["requireRegions"][0]["name"], "plan");
+    assert_eq!(build["gate"]["requireRegionNames"][0], "plan");
+    assert_eq!(build["gate"]["requireRegionUpdated"]["name"], "plan");
+    assert_eq!(build["gate"]["requireRegionUpdatedName"], "plan");
     assert_eq!(build["gate"]["maxAttempts"], 2);
     assert!(build["stuck"].is_null(), "not a stuck edge");
 
@@ -361,7 +375,8 @@ async fn an_edge_carries_its_condition_transform_and_gate() {
 #[tokio::test]
 async fn a_stage_carries_its_checkpoints() {
     let json = ask(r#"{ stage(name: "plan") { interactionPoints {
-             name prompt required style options unattended documentRegion
+             name prompt required style options unattended
+             documentRegion { name } documentRegionName
              directives { option instruction }
            } } }"#)
     .await;
@@ -369,7 +384,8 @@ async fn a_stage_carries_its_checkpoints() {
     assert_eq!(point["name"], "review");
     assert_eq!(point["style"], "MULTIPLE_CHOICE");
     assert_eq!(point["unattended"], "ASK");
-    assert_eq!(point["documentRegion"], "plan");
+    assert_eq!(point["documentRegion"]["name"], "plan");
+    assert_eq!(point["documentRegionName"], "plan");
     assert_eq!(point["options"][1], "Revise");
     assert_eq!(point["directives"][0]["option"], "Revise");
     assert_eq!(point["directives"][0]["instruction"], "ask what to change");
@@ -383,8 +399,10 @@ async fn a_stage_carries_its_checkpoints() {
 async fn fan_out_is_null_on_a_stage_that_does_not_fan_out() {
     let json = ask(r#"{
              build: stage(name: "build") { mode fanOut {
-               workerStage mergeStage splitPrompt maxWorkers maxItems
-               onWorkerFailure resultsRegion
+               workerStage { name } workerStageName
+               mergeStage { name } mergeStageName
+               splitPrompt maxWorkers maxItems
+               onWorkerFailure resultsRegion { name } resultsRegionName
              } }
              plan: stage(name: "plan") { fanOut { splitPrompt } interactionPoints { name } }
              worker: stage(name: "worker") { fanOut { splitPrompt } interactionPoints { name } }
@@ -392,12 +410,14 @@ async fn fan_out_is_null_on_a_stage_that_does_not_fan_out() {
     .await;
     let fan = &json["build"]["fanOut"];
     assert_eq!(json["build"]["mode"], "FAN_OUT");
-    assert_eq!(fan["workerStage"], "worker");
-    assert_eq!(fan["mergeStage"], "merge");
+    assert_eq!(fan["workerStage"]["name"], "worker");
+    assert_eq!(fan["workerStageName"], "worker");
+    assert_eq!(fan["mergeStage"]["name"], "merge");
     assert_eq!(fan["maxWorkers"], 4);
     assert_eq!(fan["maxItems"], 20);
     assert_eq!(fan["onWorkerFailure"], "FAIL_ALL");
-    assert_eq!(fan["resultsRegion"], "notes");
+    assert_eq!(fan["resultsRegion"]["name"], "notes");
+    assert_eq!(fan["resultsRegionName"], "notes");
     assert!(json["plan"]["fanOut"].is_null());
     assert!(json["worker"]["fanOut"].is_null());
     // And the mirror image: checkpoints belong to the stage that raises them.
@@ -466,12 +486,15 @@ async fn an_ordinary_stage_is_nudged_where_a_reviewed_one_is_not() {
 #[tokio::test]
 async fn a_stage_says_what_it_does_to_the_context() {
     let json = ask(
-        r#"{ stage(name: "plan") { context { regions hide reset } input { accepts asText } } }"#,
+        r#"{ stage(name: "plan") { context { regions { name } hide { name } hideNames
+         reset { name } resetNames } input { accepts asText } } }"#,
     )
     .await;
     let context = &json["stage"]["context"];
-    assert_eq!(context["hide"][0], "facts");
-    assert_eq!(context["reset"][0], "env");
+    assert_eq!(context["hide"][0]["name"], "facts");
+    assert_eq!(context["hideNames"][0], "facts");
+    assert_eq!(context["reset"][0]["name"], "env");
+    assert_eq!(context["resetNames"][0], "env");
     assert_eq!(
         json["stage"]["input"]["accepts"].as_array().map(Vec::len),
         Some(0),
@@ -518,13 +541,18 @@ hide = ["shared"]
     .finish();
     let answer = schema
         .execute(Request::new(
-            r#"{ stage(name: "only") { context { regions hide reset } } }"#,
+            r#"{ stage(name: "only") { context { regions { name declaredByStage { name } }
+           hide { name } hideNames reset { name } resetNames } } }"#,
         ))
         .await;
     assert!(answer.errors.is_empty(), "{:?}", answer.errors);
     let json = serde_json::to_value(&answer.data).expect("data serializes");
     let context = &json["stage"]["context"];
-    assert_eq!(context["regions"][0], "scratch");
-    assert_eq!(context["hide"][0], "shared");
+    assert_eq!(context["regions"][0]["name"], "scratch");
+    assert_eq!(
+        context["regions"][0]["declaredByStage"]["name"], "only",
+        "a region a stage declares says which stage declared it"
+    );
+    assert_eq!(context["hideNames"][0], "shared");
     assert_eq!(context["reset"].as_array().map(Vec::len), Some(0));
 }

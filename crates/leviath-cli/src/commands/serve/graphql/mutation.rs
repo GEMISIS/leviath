@@ -14,6 +14,7 @@ use super::super::core::runs as run_core;
 use super::super::core::spawn as spawn_core;
 use super::super::types::AppState;
 use super::error::{IntoGraphql, graphql_error};
+use super::inputs::{BlueprintInput, RegionInput};
 use super::scalars::Timestamp;
 use super::types::blueprint::Blueprint;
 use super::types::run::Run;
@@ -28,11 +29,11 @@ pub(crate) struct MetadataEntryInput {
     pub(crate) value: String,
 }
 
-/// Seed text for one named context region at spawn.
+/// Seed text for one context region at spawn.
 #[derive(InputObject)]
 pub(crate) struct RegionSeedInput {
-    /// The region to seed, by name.
-    pub(crate) region: String,
+    /// The region to seed.
+    pub(crate) region: RegionInput,
     /// The text it starts with.
     pub(crate) text: String,
 }
@@ -40,8 +41,10 @@ pub(crate) struct RegionSeedInput {
 /// Everything about a new run.
 #[derive(InputObject)]
 pub(crate) struct SpawnRunInput {
-    /// The blueprint to start, by name.
-    pub(crate) blueprint: String,
+    /// The blueprint to start. A `digest` on it refuses the spawn where what is
+    /// installed under that name is a different revision, which is how a client
+    /// starts the blueprint it read rather than whatever is there now.
+    pub(crate) blueprint: BlueprintInput,
     /// The initial ask.
     pub(crate) task: String,
     /// Override the blueprint's model for this run, as `provider/model` or a
@@ -92,6 +95,9 @@ pub(crate) struct SpawnRunInput {
     pub(crate) callback_url: Option<String>,
     /// Shared secret for signing that webhook. Write-only: never read back on
     /// the run.
+    ///
+    /// Ignored without a `callbackUrl`, since there is no webhook to sign. A
+    /// secret sent on its own is accepted and does nothing.
     pub(crate) callback_secret: Option<String>,
 }
 
@@ -388,8 +394,9 @@ impl RunMutation {
             ),
         };
         let output = output_spec(&input);
+        let blueprint = input.blueprint.installed(state).await.gql()?;
         let request = spawn_core::SpawnRequest {
-            blueprint: input.blueprint,
+            blueprint,
             task: input.task,
             model: input.model,
             max_depth,
@@ -403,7 +410,7 @@ impl RunMutation {
                 .regions
                 .into_iter()
                 .flatten()
-                .map(|seed| (seed.region, seed.text))
+                .map(|seed| (seed.region.name, seed.text))
                 .collect(),
             metadata: input
                 .metadata
@@ -433,9 +440,10 @@ impl RunMutation {
         #[graphql(desc = "The run to message.")] run_id: String,
         #[graphql(desc = "What to say to it.")] message: String,
         #[graphql(desc = "Deliver into this context region instead of the default one.")]
-        target_region: Option<String>,
+        target_region: Option<RegionInput>,
     ) -> async_graphql::Result<RunPayload> {
         let state = ctx.data_unchecked::<AppState>();
+        let target_region = target_region.map(|region| region.name);
         spawn_core::send_message(state, &run_id, message, target_region, Vec::new())
             .await
             .gql()?;
@@ -505,7 +513,7 @@ impl RunMutation {
         let state = ctx.data_unchecked::<AppState>();
         // An export is not a page, so the page cap does not apply: the whole
         // point is everything at once. The listing's own scan bounds still do.
-        let mut selection = filter.unwrap_or_default().everything().gql()?;
+        let mut selection = filter.unwrap_or_default().everything(state).await.gql()?;
         selection.fields = fields.map(|named| named.into_iter().collect());
         // No cursor to decode: an export is not a page, so the one failure
         // `resolve` has here cannot happen.

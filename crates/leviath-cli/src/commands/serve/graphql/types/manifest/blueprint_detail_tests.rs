@@ -56,7 +56,7 @@ async fn a_blueprint_carries_its_run_wide_settings() {
              sandbox { kind image network mounts onUnavailable }
              nudge { policy max text }
              compaction { provider model maxSummaryTokens temperature }
-             fileTracking { region trackReads trackWrites }
+             fileTracking { region { name } regionName trackReads trackWrites }
              repetitionDetection { enabled maxRepeatCalls maxReadonlyStreak }
              safeCommands { tools shell }
              output { format instructions validator onValidatorError
@@ -78,7 +78,8 @@ async fn a_blueprint_carries_its_run_wide_settings() {
     assert!(bp["nudge"]["text"].is_null());
     assert_eq!(bp["compaction"]["model"], "claude-haiku-4-5");
     assert_eq!(bp["compaction"]["maxSummaryTokens"], 800);
-    assert_eq!(bp["fileTracking"]["region"], "files");
+    assert_eq!(bp["fileTracking"]["region"]["name"], "files");
+    assert_eq!(bp["fileTracking"]["regionName"], "files");
     assert_eq!(bp["fileTracking"]["trackWrites"], false);
     assert_eq!(bp["repetitionDetection"]["maxRepeatCalls"], 4);
     assert!(bp["repetitionDetection"]["enabled"].is_null(), "inherited");
@@ -446,7 +447,7 @@ async fn each_region_kind_reports_its_own_numbers() {
     let json = ask_variants(
         r#"{ blueprint { regions {
              name kind strategy compactCount overflow thresholdTokens
-             sourceRegion script pinned
+             sourceRegion { name } sourceRegionName script pinned
            } } }"#,
     )
     .await;
@@ -468,7 +469,8 @@ async fn each_region_kind_reports_its_own_numbers() {
     assert_eq!(work["thresholdTokens"], 1500);
     let history = by_name("history");
     assert_eq!(history["kind"], "COMPACT_HISTORY");
-    assert_eq!(history["sourceRegion"], "work");
+    assert_eq!(history["sourceRegion"]["name"], "work");
+    assert_eq!(history["sourceRegionName"], "work");
     let own = by_name("script_region");
     assert_eq!(own["kind"], "CUSTOM");
     assert_eq!(own["script"], "context_hooks/own.rhai");
@@ -572,8 +574,8 @@ async fn the_remaining_settings_arms_come_back() {
 async fn the_remaining_edge_transforms_come_back() {
     let json = ask_variants(
         r#"{ blueprint { stages { name
-             transitions { target condition transform
-                           transformConfig { compactPrompt carry } } } } }"#,
+             transitions { targetName condition transform
+                           transformConfig { compactPrompt carry { name } carryNames } } } } }"#,
     )
     .await;
     let stages = json["blueprint"]["stages"].as_array().expect("stages");
@@ -584,7 +586,7 @@ async fn the_remaining_edge_transforms_come_back() {
     let edges = only["transitions"].as_array().expect("edges");
     let done = edges
         .iter()
-        .find(|edge| edge["target"] == "done")
+        .find(|edge| edge["targetName"] == "done")
         .expect("an edge");
     assert_eq!(done["condition"], "DEAD_END");
     assert_eq!(done["transform"], "COMPACT");
@@ -598,7 +600,7 @@ async fn the_remaining_edge_transforms_come_back() {
     );
     let other = edges
         .iter()
-        .find(|edge| edge["target"] == "other")
+        .find(|edge| edge["targetName"] == "other")
         .expect("an edge");
     assert_eq!(other["condition"], "MAX_ITERATIONS");
     assert_eq!(other["transform"], "CLEAR");
@@ -608,14 +610,14 @@ async fn the_remaining_edge_transforms_come_back() {
     );
 }
 
-/// A permission word the daemon does not recognise reads as null.
+/// A permission word the daemon does not recognise reads as `ASK`.
 ///
 /// The manifest parser refuses such a word, so this builds the stage directly:
-/// the path exists for a record that reached the server another way, and
-/// answering `ALLOW` on a word nobody recognises would report a permission
-/// nobody granted, while the run would not behave that way either.
+/// the path exists for a record that reached the server another way. `ASK` is
+/// what the daemon's own resolution makes of it, and reporting `ALLOW` or `DENY`
+/// would describe a dispatch that will not happen.
 #[tokio::test]
-async fn a_permission_word_that_is_not_one_reads_as_null() {
+async fn a_permission_word_that_is_not_one_reads_as_ask() {
     use super::super::manifest::stage::Stage as StageObject;
 
     let mut stage = leviath_core::blueprint::Stage::new(
@@ -653,9 +655,9 @@ async fn a_permission_word_that_is_not_one_reads_as_null() {
     assert!(answer.errors.is_empty(), "{:?}", answer.errors);
     let json = serde_json::to_value(&answer.data).expect("data serializes");
     assert_eq!(json["stage"]["toolPermissions"][0]["tool"], "shell");
-    assert!(
-        json["stage"]["toolPermissions"][0]["policy"].is_null(),
-        "a word that is not a policy grants nothing"
+    assert_eq!(
+        json["stage"]["toolPermissions"][0]["policy"], "ASK",
+        "a word that is not a policy is what the daemon reads it as"
     );
 }
 

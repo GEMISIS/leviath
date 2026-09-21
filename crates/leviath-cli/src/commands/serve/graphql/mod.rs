@@ -34,6 +34,7 @@ mod config_input;
 mod connection;
 mod error;
 mod events;
+mod inputs;
 mod mutation;
 mod node;
 mod query;

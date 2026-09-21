@@ -352,7 +352,8 @@ same list.
   what becomes of the key it is handed. A region seed's tool arguments say why
   they have no fixed shape. `metadata` says it is for a caller's own labels rather
   than a typed extension point, and the spawn input's `yolo` and `noSeedCommands`
-  each say that null is `false` rather than a third state.
+  each say that null is `false` rather than a third state. `callbackSecret` says
+  it is ignored without a `callbackUrl`, since there is no webhook to sign.
 
 - A run whose journal cannot be written is failed instead of carried on. The
   daemon retries the append; if the second attempt fails too, the run ends with
@@ -374,6 +375,51 @@ same list.
   same; and `POST /graphql`'s new `journal` field carries the counters, so a
   console can show it. A daemon whose journal has been failing for an hour used
   to answer every request and report every lane as idle.
+
+- **GraphQL:** a region or a stage a manifest names is served as the object it
+  names, rather than as a string. `TransitionEdge.target` is the `Stage` the edge
+  leads to; `TransitionGate.requireRegions`, `TransformConfig.carry`, `compact`
+  and `clear`, `StageContext.regions`, `hide` and `reset`,
+  `ToolRouting.defaultRegion`, `ToolRouteOverride.region`, `OutputRoute.region`,
+  `FileTrackingConfig.region`, `Region.sourceRegion`, `FanOut.resultsRegion`,
+  `FanOut.workerStage`, `FanOut.mergeStage`, `InteractionPoint.documentRegion`
+  and the gate's `region`, `requireRegionUpdated`, `requireNoOpenItems` and
+  `requireRegionEntries.region` all resolve now.
+
+  Each one keeps the name beside it, because a name can resolve to nothing: read
+  `targetName`, `regionName`, `requireRegionNames`, `carryNames`, `hideNames` and
+  their siblings for what the author wrote. A resolved field is null and its name
+  field is set where the blueprint declares no such region or stage, which
+  happens for a reference a later edit broke, and for the four regions the
+  runtime always carries (`conversation`, `tool_results`, `final_output`,
+  `stage_instructions`) when no layout declares them. A region also says which
+  stage declared it, through `Region.declaredByStage`, which is null for one the
+  blueprint declares run-wide.
+
+  A tool stays a name on every one of these, and each field's description says
+  why: a manifest names MCP server tools, group tokens such as `@builtin`, and
+  tools a machine does not have, none of which the `Tool` interface describes.
+  Read `tools` for what this machine offers. `ToolPermissionRule.policy` is
+  non-null, and a word the manifest parser would refuse reads as `ASK`, which is
+  what the dispatcher makes of it.
+
+  To migrate: add `{ name }` under each field listed above, or switch to the
+  `…Name` field beside it where a bare string is what your client wants.
+
+- **GraphQL:** a blueprint argument is a `BlueprintInput` rather than a name, and
+  a region argument is a `RegionInput`. `spawnRun(input:)` takes
+  `blueprint: { name: "coder" }`, `RunFilter` and `bulkExportRuns` take
+  `blueprint: { name: "coder" }`, `tools` and `scripts` take
+  a `BlueprintInput` on `blueprint:`, and `validateBlueprint` takes
+  `blueprint: { content: "<manifest>" }` in place of a `manifest:` argument.
+  `sendMessage(targetRegion:)` and `SpawnRunInput.regions[].region` take
+  `{ name: "plan" }`.
+
+  A `BlueprintInput` may also carry a `digest`, which is the revision the caller
+  believes is installed. A digest that does not match answers `CONFLICT` naming
+  both, and a digest on a name nothing is installed under answers `NOT_FOUND`, so
+  a blueprint edited under a client is loud rather than silent. Without a digest
+  nothing is read on the way in, and the behaviour is exactly what it was.
 
 - `Tool` is an interface over `BuiltinTool`, `SubagentTool` and `ScriptTool`. A
   script always has a file and a built-in never does, so the file, the owning

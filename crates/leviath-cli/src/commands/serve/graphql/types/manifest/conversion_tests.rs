@@ -10,7 +10,9 @@
 //! daemon that gains a state has to name it here, and an arm that quietly
 //! reported the wrong word would read as the feature not working.
 
-use super::super::blueprint::HintSetting;
+use std::sync::Arc;
+
+use super::super::blueprint::{Blueprint, BlueprintSource, HintSetting};
 use super::interaction::{InteractionPointStyle, UnattendedPolicy};
 use super::model::MaxOutputTokens;
 use super::output::ValidatorErrorPolicy;
@@ -21,8 +23,48 @@ use super::runtime::{
     BlueprintSecurity, NudgePolicy, SandboxKind, SandboxUnavailable, TaintTracking,
     WorkerFailurePolicy,
 };
-use super::tools::{ToolPermissionRule, ToolRouting};
+use super::tools::{ToolPermissionPolicy, ToolPermissionRule};
 use super::transition::{MappingTransform, TransitionCondition, TransitionTransform};
+
+/// A root handing out one parsed manifest, so the types that resolve a name
+/// against their blueprint can be asked for through the schema that serves them.
+struct Probe {
+    /// The manifest under test.
+    blueprint: Arc<leviath_core::Blueprint>,
+}
+
+#[async_graphql::Object]
+impl Probe {
+    /// The blueprint under test.
+    async fn blueprint(&self) -> Blueprint {
+        Blueprint {
+            parsed: Arc::clone(&self.blueprint),
+            digest: "0".repeat(64),
+            source: BlueprintSource::Installed,
+        }
+    }
+}
+
+/// Ask the schema about one manifest.
+async fn ask(manifest: &str, query: &str) -> serde_json::Value {
+    use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
+
+    let parsed = leviath_core::manifest::parse_manifest(manifest).expect("the manifest parses");
+    let schema = Schema::build(
+        Probe {
+            blueprint: Arc::new(parsed),
+        },
+        EmptyMutation,
+        EmptySubscription,
+    )
+    .data(crate::commands::serve::testutil::state_with_agent_paths(
+        Vec::new(),
+    ))
+    .finish();
+    let answer = schema.execute(Request::new(query)).await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    serde_json::to_value(&answer.data).expect("data serializes")
+}
 
 /// Every condition an edge can carry has its own value.
 #[test]
@@ -70,35 +112,219 @@ fn every_edge_transform_is_translated() {
     );
 }
 
+/// A manifest with one gate that sets every requirement, and one region a later
+/// edit would have removed.
+///
+/// `stray` is named by the gate and declared nowhere, which is the case the
+/// resolved fields and their `…Name` twins exist to tell apart.
+fn gated_manifest() -> &'static str {
+    r#"
+[agent]
+name = "gated"
+version = "1.0.0"
+description = "one gate, every requirement"
+
+[context.regions.plan]
+kind = "pinned"
+max_tokens = 1000
+
+[context.regions.notes]
+kind = "temporary"
+max_tokens = 1000
+
+[context.regions.views]
+kind = "temporary"
+max_tokens = 1000
+
+[context.regions.todo]
+kind = "checklist"
+max_tokens = 1000
+
+[stages.plan]
+mode = "autonomous"
+max_revisits = 2
+
+[stages.plan.transitions.build.gate]
+require_modifications = true
+region = "plan"
+tools = ["write_note"]
+require_regions = ["plan", "notes", "stray"]
+require_region_updated = "plan"
+require_no_open_items = "todo"
+require_region_entries = { region = "views", at_least = 4 }
+message = "write it first"
+max_attempts = 2
+
+[stages.build]
+mode = "autonomous"
+"#
+}
+
 /// A gate carries every requirement it was given, including the ones a manifest
-/// rarely sets together.
-#[test]
-fn a_gate_carries_every_requirement() {
-    let gate = leviath_core::blueprint::TransitionGate {
-        require_modifications: true,
-        message: Some("write it first".to_string()),
-        region: Some("plan".to_string()),
-        tools: vec!["write_note".to_string()],
-        max_attempts: Some(2),
-        require_region_updated: Some("plan".to_string()),
-        require_regions: vec!["plan".to_string(), "notes".to_string()],
-        require_no_open_items: Some("todo".to_string()),
-        require_region_entries: Some(leviath_core::blueprint::RegionCount {
-            region: "views".to_string(),
-            at_least: 4,
-        }),
-    };
-    let mapped = super::transition::TransitionGate::from(&gate);
-    assert!(mapped.require_modifications);
-    assert_eq!(mapped.region.as_deref(), Some("plan"));
-    assert_eq!(mapped.tools, vec!["write_note".to_string()]);
-    assert_eq!(mapped.require_regions.len(), 2);
-    assert_eq!(mapped.require_region_updated.as_deref(), Some("plan"));
-    assert_eq!(mapped.require_no_open_items.as_deref(), Some("todo"));
-    let counted = mapped.require_region_entries.expect("a count");
-    assert_eq!(counted.region, "views");
-    assert_eq!(counted.at_least, 4);
-    assert_eq!(mapped.max_attempts, Some(2));
+/// rarely sets together, with each region resolved to the region it names.
+#[tokio::test]
+async fn a_gate_carries_every_requirement() {
+    let json = ask(
+        gated_manifest(),
+        r#"{ blueprint { stages { name transitions {
+               targetName
+               gate {
+                 requireModifications
+                 region { name } regionName
+                 tools
+                 requireRegions { name } requireRegionNames
+                 requireRegionUpdated { name } requireRegionUpdatedName
+                 requireNoOpenItems { name } requireNoOpenItemsName
+                 requireRegionEntries { region { name } regionName atLeast }
+                 message maxAttempts
+               }
+             } } } }"#,
+    )
+    .await;
+    let gate = &json["blueprint"]["stages"][0]["transitions"][0]["gate"];
+    assert_eq!(gate["requireModifications"], true);
+    assert_eq!(gate["region"]["name"], "plan");
+    assert_eq!(gate["regionName"], "plan");
+    assert_eq!(gate["tools"][0], "write_note");
+    let required: Vec<&str> = gate["requireRegions"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|region| region["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(
+        required,
+        vec!["plan", "notes"],
+        "only the regions a layout declares"
+    );
+    assert_eq!(
+        gate["requireRegionNames"],
+        serde_json::json!(["plan", "notes", "stray"]),
+        "and every name the gate wrote, so the stray one is still readable"
+    );
+    assert_eq!(gate["requireRegionUpdated"]["name"], "plan");
+    assert_eq!(gate["requireRegionUpdatedName"], "plan");
+    assert_eq!(gate["requireNoOpenItems"]["name"], "todo");
+    assert_eq!(gate["requireNoOpenItemsName"], "todo");
+    assert_eq!(gate["requireRegionEntries"]["region"]["name"], "views");
+    assert_eq!(gate["requireRegionEntries"]["regionName"], "views");
+    assert_eq!(gate["requireRegionEntries"]["atLeast"], 4);
+    assert_eq!(gate["message"], "write it first");
+    assert_eq!(gate["maxAttempts"], 2);
+}
+
+/// A gate that asks for nothing answers null for each region, and null for each
+/// name beside it: the pair is what tells "asks for none" from "names one that
+/// is not declared".
+#[tokio::test]
+async fn a_gate_that_names_no_region_answers_null_for_both_halves() {
+    let manifest = gated_manifest()
+        .replace("region = \"plan\"\n", "")
+        .replace("require_region_updated = \"plan\"\n", "")
+        .replace("require_no_open_items = \"todo\"\n", "")
+        .replace(
+            "require_region_entries = { region = \"views\", at_least = 4 }\n",
+            "",
+        );
+    let json = ask(
+        &manifest,
+        r#"{ blueprint { stages { transitions { gate {
+               region { name } regionName
+               requireRegionUpdated { name } requireRegionUpdatedName
+               requireNoOpenItems { name } requireNoOpenItemsName
+               requireRegionEntries { regionName }
+             } } } } }"#,
+    )
+    .await;
+    let gate = &json["blueprint"]["stages"][0]["transitions"][0]["gate"];
+    for field in [
+        "region",
+        "regionName",
+        "requireRegionUpdated",
+        "requireRegionUpdatedName",
+        "requireNoOpenItems",
+        "requireNoOpenItemsName",
+        "requireRegionEntries",
+    ] {
+        assert!(gate[field].is_null(), "{field}: {gate}");
+    }
+}
+
+/// A gate naming a region no layout declares answers null for the region and the
+/// name for the twin, which is the difference a client branches on.
+#[tokio::test]
+async fn a_gate_naming_an_undeclared_region_keeps_the_name() {
+    let manifest = gated_manifest().replace("region = \"plan\"", "region = \"stray\"");
+    let json = ask(
+        &manifest,
+        "{ blueprint { stages { transitions { gate { region { name } regionName } } } } }",
+    )
+    .await;
+    let gate = &json["blueprint"]["stages"][0]["transitions"][0]["gate"];
+    assert!(gate["region"].is_null(), "nothing declares it: {gate}");
+    assert_eq!(gate["regionName"], "stray", "and the name is still there");
+}
+
+/// A name a stage declares in its own layout resolves, and says which stage.
+///
+/// A region another stage set up exists, which is why the lookup walks every
+/// stage's own layout after the blueprint's. `declaredByStage` is how a client
+/// tells that from a region the blueprint declares run-wide.
+#[tokio::test]
+async fn a_region_only_a_stage_declares_still_resolves() {
+    // `plan` declares a layout of its own that does not hold `stray`, so the
+    // walk has to pass over a stage that has one before it reaches the stage
+    // that declares it.
+    let manifest = format!(
+        "{}\n[stages.plan.context.regions.local]\nkind = \"temporary\"\nmax_tokens = 100\n\n\
+         [stages.build.context.regions.stray]\nkind = \"temporary\"\nmax_tokens = 200\n",
+        gated_manifest()
+    );
+    let json = ask(
+        &manifest,
+        "{ blueprint { regions { name } stages { transitions { gate {
+             requireRegions { name declaredByStage { name } } } } } } }",
+    )
+    .await;
+    let run_wide: Vec<&str> = json["blueprint"]["regions"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|region| region["name"].as_str().expect("a name"))
+        .collect();
+    assert!(
+        !run_wide.contains(&"stray"),
+        "a stage's own region is not in the run-wide layout: {run_wide:?}"
+    );
+    let required = &json["blueprint"]["stages"][0]["transitions"][0]["gate"]["requireRegions"];
+    let stray = required
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|region| region["name"] == "stray")
+        .expect("the gate's third region resolves now");
+    assert_eq!(stray["declaredByStage"]["name"], "build");
+}
+
+/// An `entry_stage` naming a stage the blueprint does not declare answers null,
+/// with the name it wrote beside it.
+#[tokio::test]
+async fn an_entry_stage_that_is_not_declared_answers_null_and_keeps_its_name() {
+    let manifest = gated_manifest().replace(
+        "description = \"one gate, every requirement\"",
+        "description = \"one gate, every requirement\"\nentry_stage = \"nope\"",
+    );
+    let json = ask(
+        &manifest,
+        "{ blueprint { entryStage { name } entryStageName } }",
+    )
+    .await;
+    assert!(
+        json["blueprint"]["entryStage"].is_null(),
+        "no stage is declared under that name: {}",
+        json["blueprint"]
+    );
+    assert_eq!(json["blueprint"]["entryStageName"], "nope");
 }
 
 /// A handoff's mappings carry each content transform, and `EXTRACT` carries the
@@ -171,25 +397,62 @@ fn a_checkpoints_words_are_translated() {
     );
 }
 
-/// A checkpoint with no directives carries none, rather than an empty entry.
-#[test]
-fn a_checkpoint_with_no_directives_carries_none() {
-    let point = leviath_core::blueprint::InteractionPoint {
-        name: "review".to_string(),
-        prompt: "ok?".to_string(),
-        required: true,
-        unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
-        style: leviath_core::blueprint::InteractionStyle::Confirm,
-        options: Vec::new(),
-        directives: std::collections::HashMap::new(),
-        abort_options: Vec::new(),
-        edit_options: Vec::new(),
-        document_region: None,
-    };
-    let mapped = super::interaction::InteractionPoint::from(&point);
-    assert_eq!(mapped.name, "review");
-    assert!(mapped.directives.is_empty());
-    assert!(mapped.document_region.is_none());
+/// A manifest with two checkpoints: one bare, one with directives and a document
+/// region.
+fn checkpointed_manifest() -> &'static str {
+    r#"
+[agent]
+name = "checked"
+version = "1.0.0"
+description = "two checkpoints"
+
+[context.regions.plan]
+kind = "pinned"
+max_tokens = 1000
+
+[stages.review]
+mode = "interactive_points"
+
+[[stages.review.interaction_points]]
+name = "review"
+prompt = "ok?"
+style = "confirm"
+
+[[stages.review.interaction_points]]
+name = "decide"
+prompt = "which way?"
+style = "multiple_choice"
+options = ["ship", "hold"]
+document_region = "plan"
+directives = { ship = "go to the next stage", hold = "ask again later", abort = "stop the run" }
+"#
+}
+
+/// A checkpoint with no directives carries none, rather than an empty entry, and
+/// names no document region.
+#[tokio::test]
+async fn a_checkpoint_with_no_directives_carries_none() {
+    let json = ask(
+        checkpointed_manifest(),
+        r#"{ blueprint { stages { interactionPoints {
+               name prompt required unattended style options abortOptions editOptions
+               directives { option instruction }
+               documentRegion { name } documentRegionName
+             } } } }"#,
+    )
+    .await;
+    let bare = &json["blueprint"]["stages"][0]["interactionPoints"][0];
+    assert_eq!(bare["name"], "review");
+    assert_eq!(bare["prompt"], "ok?");
+    assert_eq!(bare["style"], "CONFIRM");
+    assert_eq!(bare["directives"], serde_json::json!([]));
+    assert!(bare["documentRegion"].is_null());
+    assert!(bare["documentRegionName"].is_null());
+
+    let full = &json["blueprint"]["stages"][0]["interactionPoints"][1];
+    assert_eq!(full["documentRegion"]["name"], "plan");
+    assert_eq!(full["documentRegionName"], "plan");
+    assert_eq!(full["options"], serde_json::json!(["ship", "hold"]));
 }
 
 /// Every region policy word, and the numbers each eviction strategy carries.
@@ -329,10 +592,14 @@ fn every_output_cap_shape_is_translated() {
     }
 }
 
-/// A permission table comes back sorted, and a word the daemon does not know
-/// grants nothing rather than something.
+/// A permission table comes back sorted, and every rule carries a policy.
+///
+/// The manifest parser refuses a word that is not one of the three, so the only
+/// spelling that reaches the last arm is `ask` itself. It resolves to `ASK` here
+/// because that is what the daemon's own resolution does with it: the schema must
+/// not report a permission the dispatcher would not apply.
 #[test]
-fn a_permission_table_is_sorted_and_honest() {
+fn a_permission_table_is_sorted_and_resolves_as_the_daemon_does() {
     let table = std::collections::HashMap::from([
         ("shell".to_string(), "deny".to_string()),
         ("read_file".to_string(), "allow".to_string()),
@@ -342,39 +609,79 @@ fn a_permission_table_is_sorted_and_honest() {
     let rules = ToolPermissionRule::from_table(&table);
     let tools: Vec<&str> = rules.iter().map(|rule| rule.tool.as_str()).collect();
     assert_eq!(tools, ["ask_user_text", "read_file", "shell", "write_file"]);
-    assert!(rules[3].policy.is_none(), "a word that is not a policy");
-    assert!(rules[0].policy.is_some());
+    assert_eq!(rules[0].policy, ToolPermissionPolicy::Ask);
+    assert_eq!(rules[1].policy, ToolPermissionPolicy::Allow);
+    assert_eq!(rules[2].policy, ToolPermissionPolicy::Deny);
+    assert_eq!(
+        rules[3].policy,
+        ToolPermissionPolicy::Ask,
+        "the daemon reads anything else as a prompt"
+    );
 }
 
-/// Tool routing carries its overrides and ceilings, each sorted by tool.
-#[test]
-fn tool_routing_carries_its_tables() {
-    let routing = leviath_core::blueprint::ToolResultRouting {
-        default_region: "tool_results".to_string(),
-        tool_overrides: std::collections::HashMap::from([
-            ("shell".to_string(), "logs".to_string()),
-            ("read_file".to_string(), "files".to_string()),
-        ]),
-        keep_results: true,
-        max_result_tokens: Some(4_000),
-        tool_max_result_tokens: std::collections::HashMap::from([
-            ("shell".to_string(), 500usize),
-            ("read_file".to_string(), 2_000usize),
-        ]),
-    };
-    let mapped = ToolRouting::from(&routing);
-    assert_eq!(mapped.default_region, "tool_results");
-    assert_eq!(mapped.max_result_tokens, Some(4_000));
-    let overridden: Vec<&str> = mapped
-        .overrides
+/// Tool routing carries its overrides and ceilings, each sorted by tool, with
+/// every region resolved to the region it names.
+#[tokio::test]
+async fn tool_routing_carries_its_tables() {
+    let manifest = r#"
+[agent]
+name = "routed"
+version = "1.0.0"
+description = "one routing block"
+
+[context.regions.files]
+kind = "hashmap"
+max_tokens = 1000
+
+[context.regions.logs]
+kind = "temporary"
+max_tokens = 1000
+
+[stages.work]
+mode = "autonomous"
+
+[stages.work.tool_routing]
+default_region = "logs"
+keep_results = true
+max_result_tokens = 4000
+overrides = { shell = "logs", read_file = "files", grep = "gone" }
+max_result_tokens_per_tool = { shell = 500, read_file = 2000 }
+"#;
+    let json = ask(
+        manifest,
+        r#"{ blueprint { stages { toolRouting {
+               defaultRegion { name } defaultRegionName
+               keepResults maxResultTokens
+               overrides { tool region { name } regionName }
+               maxResultTokensPerTool { tool maxResultTokens }
+             } } } }"#,
+    )
+    .await;
+    let routing = &json["blueprint"]["stages"][0]["toolRouting"];
+    assert_eq!(routing["defaultRegion"]["name"], "logs");
+    assert_eq!(routing["defaultRegionName"], "logs");
+    assert_eq!(routing["keepResults"], true);
+    assert_eq!(routing["maxResultTokens"], 4000);
+
+    let overrides = routing["overrides"].as_array().expect("a list");
+    let tools: Vec<&str> = overrides
         .iter()
-        .map(|entry| entry.tool.as_str())
+        .map(|entry| entry["tool"].as_str().expect("a tool"))
         .collect();
-    assert_eq!(overridden, ["read_file", "shell"]);
-    let ceilings: Vec<&str> = mapped
-        .max_result_tokens_per_tool
+    assert_eq!(tools, ["grep", "read_file", "shell"], "by tool, always");
+    assert!(
+        overrides[0]["region"].is_null(),
+        "nothing declares 'gone': {}",
+        overrides[0]
+    );
+    assert_eq!(overrides[0]["regionName"], "gone", "and the name is kept");
+    assert_eq!(overrides[1]["region"]["name"], "files");
+
+    let ceilings: Vec<&str> = routing["maxResultTokensPerTool"]
+        .as_array()
+        .expect("a list")
         .iter()
-        .map(|entry| entry.tool.as_str())
+        .map(|entry| entry["tool"].as_str().expect("a tool"))
         .collect();
     assert_eq!(ceilings, ["read_file", "shell"]);
 }
@@ -430,31 +737,19 @@ fn a_mime_row_that_will_not_read_is_left_out() {
 /// The manifest holds them in a hash map, so two reads of one blueprint would
 /// otherwise disagree about the order, and a console diffing them would show
 /// changes nobody made.
-#[test]
-fn a_checkpoints_directives_are_ordered() {
-    let point = leviath_core::blueprint::InteractionPoint {
-        name: "review".to_string(),
-        prompt: "ok?".to_string(),
-        required: true,
-        unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
-        style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
-        options: vec!["ship".to_string(), "hold".to_string()],
-        directives: [
-            ("ship".to_string(), "go to the next stage".to_string()),
-            ("hold".to_string(), "ask again later".to_string()),
-            ("abort".to_string(), "stop the run".to_string()),
-        ]
-        .into_iter()
-        .collect(),
-        abort_options: Vec::new(),
-        edit_options: Vec::new(),
-        document_region: None,
-    };
-    let mapped = super::interaction::InteractionPoint::from(&point);
-    let options: Vec<&str> = mapped
-        .directives
+#[tokio::test]
+async fn a_checkpoints_directives_are_ordered() {
+    let json = ask(
+        checkpointed_manifest(),
+        "{ blueprint { stages { interactionPoints { directives { option } } } } }",
+    )
+    .await;
+    let directives = &json["blueprint"]["stages"][0]["interactionPoints"][1]["directives"];
+    let options: Vec<&str> = directives
+        .as_array()
+        .expect("a list")
         .iter()
-        .map(|entry| entry.option.as_str())
+        .map(|entry| entry["option"].as_str().expect("an option"))
         .collect();
     assert_eq!(options, vec!["abort", "hold", "ship"], "by option, always");
 }

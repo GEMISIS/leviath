@@ -12,6 +12,7 @@ use super::{
     MetadataEntryInput, Mutation, RegionSeedInput, SpawnRunInput,
 };
 use crate::commands::serve::graphql::checks::YoloTestInput;
+use crate::commands::serve::graphql::inputs::{BlueprintInput, RegionInput};
 use crate::commands::serve::graphql::query::Query;
 use crate::commands::serve::testutil::{fake_daemon, no_daemon_client, state_with_agent_paths};
 use crate::runstate::{RunMeta, RunStatus, create_run};
@@ -223,7 +224,7 @@ async fn a_spawn_answers_with_the_run_it_started() {
         let answer = schema
             .execute(Request::new(
                 r#"mutation { spawnRun(input: {
-                     blueprint: "coder", task: "write the thing", workdir: "/tmp",
+                     blueprint: { name: "coder" }, task: "write the thing", workdir: "/tmp",
                      metadata: [{ key: "ticket", value: "42" }]
                    }) { run { id task status metadata { key value } } warnings } }"#,
             ))
@@ -238,6 +239,66 @@ async fn a_spawn_answers_with_the_run_it_started() {
         assert_eq!(run["task"], "write the thing");
         assert_eq!(run["status"], "STARTING");
         assert_eq!(run["metadata"][0]["key"], "ticket");
+    })
+    .await;
+}
+
+/// A spawn whose input arrives as a variable, which is how a client built in
+/// code sends one.
+///
+/// Variable coercion reads the input object through its own path rather than out
+/// of the query text, so an input that has only ever arrived inline is one whose
+/// other half nobody has checked.
+#[tokio::test]
+async fn a_spawn_reads_its_input_from_a_variable() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-variable", |_d| async move {
+        let agents = tempfile::tempdir().expect("a temp dir");
+        let agent = agents.path().join("coder");
+        std::fs::create_dir_all(&agent).expect("the agent dir");
+        std::fs::write(
+            agent.join(leviath_core::files::MANIFEST_FILENAME),
+            "[agent]\nname = \"coder\"\n\n[context.regions.plan]\nkind = \"pinned\"\n\
+             max_tokens = 100\n\n[stages.only]\nmode = \"autonomous\"\n",
+        )
+        .expect("manifest written");
+        let (control, _socket, _srv) = fake_daemon(|req| match req {
+            leviath_runtime::control_socket::ControlRequest::Spawn { args } => {
+                let mut meta = run_in(&args.run_id, RunStatus::Starting);
+                meta.task = args.task.clone();
+                create_run(&meta).expect("run written");
+                ControlResponse::Spawned {
+                    run_id: args.run_id,
+                }
+            }
+            other => panic!("the spawn is what reaches the daemon: {other:?}"),
+        });
+        let mut state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
+        state.control = control;
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
+            .data(state)
+            .finish();
+
+        let answer = schema
+            .execute(
+                Request::new(
+                    "mutation Start($input: SpawnRunInput!) { \
+                       spawnRun(input: $input) { run { id task } } }",
+                )
+                .variables(async_graphql::Variables::from_json(
+                    serde_json::json!({
+                        "input": {
+                            "blueprint": { "name": "coder" },
+                            "task": "write it again",
+                            "workdir": "/tmp",
+                            "regions": [{ "region": { "name": "plan" }, "text": "start here" }],
+                        }
+                    }),
+                )),
+            )
+            .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["spawnRun"]["run"]["task"], "write it again");
     })
     .await;
 }
@@ -266,7 +327,7 @@ async fn a_spawn_the_server_refuses_is_forbidden() {
         let answer = schema
             .execute(Request::new(
                 r#"mutation { spawnRun(input: {
-                     blueprint: "coder", task: "t", workdir: "/tmp", yolo: true
+                     blueprint: { name: "coder" }, task: "t", workdir: "/tmp", yolo: true
                    }) { run { id } } }"#,
             ))
             .await;
@@ -283,7 +344,7 @@ async fn a_spawn_the_server_refuses_is_forbidden() {
         let negative = schema
             .execute(Request::new(
                 r#"mutation { spawnRun(input: {
-                     blueprint: "coder", task: "t", maxDepth: -1
+                     blueprint: { name: "coder" }, task: "t", maxDepth: -1
                    }) { run { id } } }"#,
             ))
             .await;
@@ -296,6 +357,26 @@ async fn a_spawn_the_server_refuses_is_forbidden() {
                 .contains("negative"),
             "{:?}",
             negative.errors
+        );
+
+        // A spawn starts an installed blueprint, so manifest text on the
+        // argument is a request that cannot be honoured either way.
+        let definition = schema
+            .execute(Request::new(
+                r#"mutation { spawnRun(input: {
+                     blueprint: { name: "coder", content: "[agent]" }, task: "t"
+                   }) { run { id } } }"#,
+            ))
+            .await;
+        assert!(
+            definition
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("`content`"),
+            "{:?}",
+            definition.errors
         );
     })
     .await;
@@ -1059,10 +1140,10 @@ async fn a_spawn_carries_every_field_it_was_given() {
             control,
             agents.path(),
             r#"mutation { spawnRun(input: {
-                 blueprint: "coder", task: "fix the parser", model: "gpt-5.6",
+                 blueprint: { name: "coder" }, task: "fix the parser", model: "gpt-5.6",
                  workdir: "/work", maxDepth: 3, yolo: true, yoloProfile: "cautious",
                  outputFormat: "json", outputInstructions: "one object",
-                 regions: [{ region: "plan", text: "start here" }],
+                 regions: [{ region: { name: "plan" }, text: "start here" }],
                  metadata: [{ key: "ticket", value: "42" }]
                }) { run { id } warnings } }"#,
         )
@@ -1086,7 +1167,7 @@ async fn a_record_that_will_not_read_after_a_spawn_is_internal() {
         let answer = mutate_with_agents(
             control,
             agents.path(),
-            r#"mutation { spawnRun(input: { blueprint: "coder", task: "t" }) { run { id } } }"#,
+            r#"mutation { spawnRun(input: { blueprint: { name: "coder" }, task: "t" }) { run { id } } }"#,
         )
         .await;
         let error = answer.errors.first().expect("a refusal");
@@ -1309,7 +1390,10 @@ fn every_input_object_round_trips() {
     use async_graphql::InputType;
 
     let spawn = SpawnRunInput {
-        blueprint: "coder".to_string(),
+        blueprint: BlueprintInput {
+            name: Some("coder".to_string()),
+            ..BlueprintInput::default()
+        },
         task: "fix the parser".to_string(),
         model: Some("gpt-5.6".to_string()),
         max_depth: Some(3),
@@ -1319,7 +1403,9 @@ fn every_input_object_round_trips() {
         allow: Some(vec!["shell".to_string()]),
         no_seed_commands: Some(true),
         regions: Some(vec![RegionSeedInput {
-            region: "plan".to_string(),
+            region: RegionInput {
+                name: "plan".to_string(),
+            },
             text: "start here".to_string(),
         }]),
         metadata: Some(vec![MetadataEntryInput {
@@ -1335,7 +1421,7 @@ fn every_input_object_round_trips() {
     let Ok(read_back) = SpawnRunInput::parse(Some(spawn.to_value())) else {
         panic!("a spawn input reads back from its own value");
     };
-    assert_eq!(read_back.blueprint, "coder");
+    assert_eq!(read_back.blueprint.name.as_deref(), Some("coder"));
     assert_eq!(read_back.max_depth, Some(3));
     assert_eq!(
         read_back.regions.as_ref().map(Vec::len),
@@ -1420,6 +1506,18 @@ fn every_input_object_refuses_what_it_cannot_read() {
     }
     let scalar = || Some(Value::String("nope".to_string()));
     let number = || Value::Number(7.into());
+    /// A region argument, as the wire carries one.
+    fn region_value(name: &str) -> Value {
+        let mut map = IndexMap::new();
+        map.insert(Name::new("name"), Value::String(name.to_string()));
+        Value::Object(map)
+    }
+    /// A blueprint pointer, as the wire carries one.
+    fn blueprint_value(name: &str) -> Value {
+        let mut map = IndexMap::new();
+        map.insert(Name::new("name"), Value::String(name.to_string()));
+        Value::Object(map)
+    }
 
     assert!(MetadataEntryInput::parse(scalar()).is_err());
     assert!(MetadataEntryInput::parse(None).is_err());
@@ -1458,12 +1556,16 @@ fn every_input_object_refuses_what_it_cannot_read() {
         "no value"
     );
     assert!(
-        RegionSeedInput::parse(one("region", text("plan"))).is_err(),
+        RegionSeedInput::parse(one("region", region_value("plan"))).is_err(),
         "no text"
     );
     assert!(
-        SpawnRunInput::parse(one("blueprint", text("coder"))).is_err(),
+        SpawnRunInput::parse(one("blueprint", blueprint_value("coder"))).is_err(),
         "no task"
+    );
+    assert!(
+        SpawnRunInput::parse(one("task", text("t"))).is_err(),
+        "no blueprint"
     );
     assert!(
         AnswerChoiceInput::parse(one("requestId", text("a"))).is_err(),
@@ -1498,7 +1600,7 @@ fn every_input_object_refuses_what_it_cannot_read() {
 
     // And the last field of each, which is read after every other one.
     let mut spawn = IndexMap::new();
-    spawn.insert(Name::new("blueprint"), text("coder"));
+    spawn.insert(Name::new("blueprint"), blueprint_value("coder"));
     spawn.insert(Name::new("task"), text("fix it"));
     spawn.insert(Name::new("callbackSecret"), number());
     assert!(SpawnRunInput::parse(Some(Value::Object(spawn))).is_err());
@@ -1514,4 +1616,56 @@ fn every_input_object_refuses_what_it_cannot_read() {
     yolo.insert(Name::new("tool"), text("shell"));
     yolo.insert(Name::new("allowed"), number());
     assert!(YoloTestInput::parse(Some(Value::Object(yolo))).is_err());
+}
+
+/// A spawn input read as a field of another input object.
+///
+/// An input object on a field is read by the field's own type, which hands the
+/// value to the object's reader. That is the path a client takes when it sends a
+/// spawn inside a larger document, and it is a different path from an argument
+/// read straight off the query, so it is worth its own assertion.
+#[test]
+fn a_spawn_input_reads_as_a_field_of_another_input() {
+    use async_graphql::{InputType, Name, Value, indexmap::IndexMap};
+
+    /// One input object with a spawn input on a field.
+    #[derive(async_graphql::InputObject)]
+    struct SpawnProbe {
+        /// The spawn being carried.
+        input: SpawnRunInput,
+    }
+
+    let spawn = SpawnRunInput {
+        blueprint: BlueprintInput {
+            name: Some("coder".to_string()),
+            ..BlueprintInput::default()
+        },
+        task: "fix the parser".to_string(),
+        model: None,
+        max_depth: None,
+        workdir: None,
+        yolo: None,
+        yolo_profile: None,
+        allow: None,
+        no_seed_commands: None,
+        regions: None,
+        metadata: None,
+        output_format: None,
+        output_instructions: None,
+        callback_url: None,
+        callback_secret: None,
+        capture_model_input: None,
+    };
+    let mut carried = IndexMap::new();
+    carried.insert(Name::new("input"), spawn.to_value());
+    let Ok(probe) = SpawnProbe::parse(Some(Value::Object(carried))) else {
+        panic!("a spawn input reads back as a carried field");
+    };
+    assert_eq!(probe.input.task, "fix the parser");
+    assert_eq!(probe.input.blueprint.name.as_deref(), Some("coder"));
+
+    // And a carried value the reader refuses is refused through the field too.
+    let mut broken = IndexMap::new();
+    broken.insert(Name::new("input"), Value::String("coder".to_string()));
+    assert!(SpawnProbe::parse(Some(Value::Object(broken))).is_err());
 }
