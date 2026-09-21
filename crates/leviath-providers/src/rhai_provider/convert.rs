@@ -144,11 +144,14 @@ fn parse_tool_calls(json: &Value) -> Vec<ToolCall> {
         .map(|arr| {
             arr.iter()
                 .map(|tc| ToolCall {
-                    id: tc
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
+                    // A script that names its calls keeps its own ids. One that
+                    // does not gets minted ones rather than empty strings: an
+                    // empty id pairs with every result and answers every
+                    // prompt.
+                    id: match tc.get("id").and_then(|v| v.as_str()) {
+                        Some(id) if !id.is_empty() => id.to_string(),
+                        _ => crate::call_ids::mint("rhai_call"),
+                    },
                     name: tc
                         .get("name")
                         .and_then(|v| v.as_str())

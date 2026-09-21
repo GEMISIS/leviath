@@ -633,11 +633,15 @@ pub(crate) fn dispatch_persistence(
         // flipped the agent to `Waiting`. If the request isn't registered yet, skip
         // this tick; the next persist captures it (removing any stale sidecar).
         let interactions = awaiting_point.and_then(|_| {
+            // By prefix rather than by substring: every id this run raises
+            // starts with the run id, and a blueprint whose name holds `point`
+            // would let an approval request read as a point.
+            let point_ids = leviath_core::interaction::request_id_prefix(&state.agent_id, "point");
             let request = hub
                 .as_ref()?
                 .pending()
                 .into_iter()
-                .find(|(aid, req)| aid == &state.agent_id && req.id.contains("-point-"))?;
+                .find(|(aid, req)| aid == &state.agent_id && req.id.starts_with(&point_ids))?;
             let ip_state = crate::interaction_points::InteractionPointState {
                 cursor: ip_cursor.map_or(0, |c| c.0),
                 round: ip_rounds.map_or(0, |r| r.0),

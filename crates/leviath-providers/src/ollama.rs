@@ -34,35 +34,12 @@ pub struct OllamaProvider {
     warned_guessed: crate::provider::ModelMemo,
 }
 
-/// A tool-call id unique for the life of a conversation.
+/// A tool-call id for a reply that carries none.
 ///
-/// Ollama sends no ids of its own, so these are minted here, and they have to
-/// be unique across the conversation rather than within one response: a
-/// per-response index restarts at 0 every turn, so a window ten turns deep
-/// holds ten distinct calls all named `ollama_0`.
-///
-/// That is not cosmetic. `drop_unpaired_tool_turns` pairs a call with its
-/// response *by id*, to keep a window that has evicted half a pair from putting
-/// a malformed conversation on the wire. With every id equal, every call looks
-/// answered and every response looks called, the guard removes nothing, and a
-/// response stranded by eviction survives at the head of the conversation,
-/// where it suppresses the inserted user turn.
-///
-/// The sequence is process-wide rather than per-response, and carries a prefix
-/// minted once per process, because a run outlives the daemon: a pause and
-/// resume restores a window full of ids from the previous process, and a bare
-/// counter would start again at zero and collide with them. The sequence is
-/// still monotonic within a process, so a transcript reads in call order.
+/// Ollama sends no ids of its own. What the minted one has to guarantee, and
+/// why, is in [`crate::call_ids`].
 fn next_tool_call_id() -> String {
-    static PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    let prefix = PREFIX.get_or_init(|| {
-        use rand::RngExt as _;
-        format!("{:08x}", rand::rng().random::<u32>())
-    });
-    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("ollama_{prefix}_{sequence}")
+    crate::call_ids::mint("ollama")
 }
 
 /// The effective serving window named in an `/api/show` response, if it names one.

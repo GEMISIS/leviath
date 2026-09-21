@@ -12,6 +12,7 @@
 
 pub mod anthropic;
 pub mod bedrock;
+pub(crate) mod call_ids;
 pub mod capabilities;
 pub mod capability_cache;
 pub mod claude_code;

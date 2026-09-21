@@ -706,6 +706,7 @@ pub(crate) async fn dispatch_tools(
         };
         if let Some((text, attached)) = dispatch_dynamic_interaction_with_parts(
             interaction,
+            state.interaction.agent_id(),
             &tc.name,
             &tc.id,
             &tc.arguments,
@@ -852,7 +853,11 @@ pub(crate) async fn dispatch_tools(
             }
             ToolPolicy::Ask => {
                 let req = InteractionRequest::tool_approval(
-                    format!("approve-{}", tc.id),
+                    leviath_core::interaction::request_id(
+                        state.interaction.agent_id(),
+                        "approve",
+                        &tc.id,
+                    ),
                     &tc.name,
                     tc.arguments.clone(),
                     &stage_name,

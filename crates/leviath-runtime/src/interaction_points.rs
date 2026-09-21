@@ -308,9 +308,13 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
         outcomes,
         wake,
     } = lane;
-    // Request ids are prefixed with the run id so concurrent runs at the same
-    // point (same name/round) never collide in the shared hub.
-    let ask_id = format!("{agent_id}-point-{}-{round}", point.name);
+    // The run id leads, so concurrent runs at the same point (same name, same
+    // round) never collide in the shared hub.
+    let ask_id = leviath_core::interaction::request_id(
+        &agent_id,
+        "point",
+        &format!("{}-{round}", point.name),
+    );
     let backend = hub.backend_for(agent_id);
     let req = build_point_request(&point, ask_id.clone(), &body);
     let resp = backend.ask(req).await;

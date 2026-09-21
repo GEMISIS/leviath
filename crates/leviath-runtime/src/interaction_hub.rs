@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bevy_ecs::prelude::Resource;
-use leviath_core::interaction::{InteractionRequest, InteractionResponse};
+use leviath_core::interaction::{InteractionRequest, InteractionResponse, Settlement};
 use tokio::sync::{Notify, oneshot};
 
 use crate::dynamic_interaction::InteractionBackend;
@@ -129,15 +129,41 @@ impl InteractionHub {
     async fn submit(&self, agent_id: &str, request: InteractionRequest) -> InteractionResponse {
         let id = request.id.clone();
         let (responder, rx) = oneshot::channel();
-        leviath_core::sync::lock(&self.pending).insert(
-            id.clone(),
-            PendingEntry {
-                agent_id: agent_id.to_string(),
-                request,
-                responder,
-                asked_at: leviath_core::duration::now_secs(),
-            },
-        );
+        let asked_at = leviath_core::duration::now_secs();
+        {
+            // One lock for the look and the insert, so two requests arriving
+            // together cannot both find the id free.
+            let mut pending = leviath_core::sync::lock(&self.pending);
+            // Every id carries the run that raised it, so two requests can only
+            // meet here if something minted one wrong. The one already open
+            // wins: a person may be reading it, and the answer they give names
+            // this id and nothing else, so replacing it would hand their answer
+            // to whatever arrived last.
+            if let Some(open) = pending.get(&id) {
+                let already_open_for = open.agent_id.clone();
+                tracing::error!(
+                    request = %id,
+                    already_open_for = %already_open_for,
+                    arriving_from = %agent_id,
+                    "an interaction request id is already open; refusing the arriving request \
+                     rather than replacing the one open"
+                );
+                // Takes the `settled` lock while holding this one. Nothing goes
+                // the other way round: `take_settled` reaches for `settled`
+                // alone.
+                self.record_one(agent_id, &request, asked_at, Settlement::Refused);
+                return InteractionResponse::text(id, "");
+            }
+            pending.insert(
+                id.clone(),
+                PendingEntry {
+                    agent_id: agent_id.to_string(),
+                    request,
+                    responder,
+                    asked_at,
+                },
+            );
+        }
         // Wake the driver so it ticks and reflects this open request into the
         // agent's status (Active → Waiting) for the dashboard to surface.
         self.nudge();
@@ -187,7 +213,7 @@ impl InteractionHub {
         // entry already gone is one somebody else accounted for - an answer that
         // landed in this same instant, or a cancel.
         entry.inspect(|entry| {
-            self.record(entry, leviath_core::interaction::Settlement::TimedOut);
+            self.record(entry, Settlement::TimedOut);
         });
         tracing::warn!(
             agent = %agent_id,
@@ -223,7 +249,7 @@ impl InteractionHub {
         let entry = leviath_core::sync::lock(&self.pending).remove(&response.request_id);
         let entry = entry?;
         let agent_id = entry.agent_id.clone();
-        self.record(&entry, leviath_core::interaction::Settlement::of(&response));
+        self.record(&entry, Settlement::of(&response));
         // The awaiting `submit` may have gone away (agent despawned); a
         // failed send is harmless.
         let _ = entry.responder.send(response);
@@ -241,7 +267,7 @@ impl InteractionHub {
         let Some(entry) = entry else {
             return false;
         };
-        self.record(&entry, leviath_core::interaction::Settlement::Cancelled);
+        self.record(&entry, Settlement::Cancelled);
         self.nudge();
         true
     }
@@ -268,7 +294,7 @@ impl InteractionHub {
         drop(pending);
         let removed = mine.len();
         for entry in &mine {
-            self.record(entry, leviath_core::interaction::Settlement::Cancelled);
+            self.record(entry, Settlement::Cancelled);
         }
         if removed > 0 {
             self.nudge();
@@ -283,24 +309,32 @@ impl InteractionHub {
     /// time, and one withdrawn when the run was cancelled all hand the caller
     /// the same neutral response, and only this record tells them apart.
     ///
-    /// One way out is deliberately not settlement and so records nothing: a
-    /// second request arriving under an id already open replaces the first in
-    /// `pending`, and the replaced entry's dropped responder resolves its
-    /// caller with the neutral response. That is not a decision anybody made,
-    /// so writing it down as one would put a settlement in the history that
-    /// never happened. It also cannot arise from any provider that supplies
-    /// its own tool-call ids, which is every API-backed one.
-    fn record(&self, entry: &PendingEntry, settlement: leviath_core::interaction::Settlement) {
+    /// A request refused before it opened is recorded too, under
+    /// [`Settlement::Refused`]: its caller was handed the neutral response, and
+    /// a run that reads as having denied a tool call needs the journal to say
+    /// that nobody denied anything.
+    fn record(&self, entry: &PendingEntry, settlement: Settlement) {
+        self.record_one(&entry.agent_id, &entry.request, entry.asked_at, settlement);
+    }
+
+    /// [`record`](Self::record) for a request with no entry behind it.
+    fn record_one(
+        &self,
+        agent_id: &str,
+        request: &InteractionRequest,
+        asked_at: i64,
+        settlement: Settlement,
+    ) {
         leviath_core::sync::lock(&self.settled).push((
-            entry.agent_id.clone(),
+            agent_id.to_string(),
             leviath_core::run_archive::InteractionRecord {
-                request_id: entry.request.id.clone(),
-                kind: entry.request.kind.clone(),
-                tool: entry.request.tool_name.clone(),
-                prompt: entry.request.prompt.clone(),
-                stage: entry.request.stage_name.clone(),
+                request_id: request.id.clone(),
+                kind: request.kind.clone(),
+                tool: request.tool_name.clone(),
+                prompt: request.prompt.clone(),
+                stage: request.stage_name.clone(),
                 settlement,
-                asked_at: entry.asked_at,
+                asked_at,
                 at: leviath_core::duration::now_secs(),
             },
         ));
@@ -336,6 +370,16 @@ impl HubInteractionBackend {
     /// a caller can say in its own words how long an unanswered prompt waited.
     pub fn timeout_secs(&self) -> Option<u64> {
         self.hub.timeout_secs()
+    }
+
+    /// The run this backend asks on behalf of.
+    ///
+    /// What a caller minting a request id needs: the id has to carry the run,
+    /// because the hub behind this backend is shared with every other run in
+    /// the daemon. See
+    /// [`request_id`](leviath_core::interaction::request_id).
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
     }
 }
 

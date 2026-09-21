@@ -54,13 +54,21 @@ pub(crate) enum SettlementOutcome {
     /// The request was withdrawn: the run was cancelled, or the agent that
     /// asked it went away.
     Cancelled,
+    /// It never opened, because a request was already open under the same id,
+    /// and the daemon keeps the one somebody may already be reading.
+    ///
+    /// Not a denial: the run was handed the neutral answer, which a tool
+    /// approval and a taint gate both read as not-approved. Its own outcome
+    /// because it means two runs minted one id, which is a fault in this
+    /// server rather than a decision about the call.
+    Refused,
 }
 
 /// How a question this run asked ended up, and what the answer was.
 ///
 /// `approved`, `scope`, `choice`, `text` and `feedback` are null unless
-/// `outcome` is `ANSWERED`. Nobody answered a `TIMED_OUT` or `CANCELLED` ask,
-/// so there is nothing for any of them to carry.
+/// `outcome` is `ANSWERED`. Nobody answered a `TIMED_OUT`, `CANCELLED` or
+/// `REFUSED` ask, so there is nothing for any of them to carry.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct Settlement {
     /// How it ended.
@@ -83,7 +91,7 @@ pub(crate) struct Settlement {
 impl From<&leviath_core::interaction::Settlement> for Settlement {
     fn from(settlement: &leviath_core::interaction::Settlement) -> Self {
         use leviath_core::interaction::Settlement as Core;
-        // Every field but `outcome` stays null off the two arms that carry no
+        // Every field but `outcome` stays null on the arms that carry no
         // answer: a client switching on `outcome` first never needs to check
         // whether an unrelated field is meaningful before reading it.
         match settlement {
@@ -111,6 +119,14 @@ impl From<&leviath_core::interaction::Settlement> for Settlement {
             },
             Core::Cancelled => Self {
                 outcome: SettlementOutcome::Cancelled,
+                approved: None,
+                scope: None,
+                choice: None,
+                text: None,
+                feedback: None,
+            },
+            Core::Refused => Self {
+                outcome: SettlementOutcome::Refused,
                 approved: None,
                 scope: None,
                 choice: None,

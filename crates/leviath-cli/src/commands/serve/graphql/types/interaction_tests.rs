@@ -222,6 +222,41 @@ async fn a_cancelled_ask_carries_no_answer_detail() {
     .await;
 }
 
+/// A refused ask is its own outcome, not a denial: nobody decided anything, so
+/// a reader who saw `ANSWERED` with `approved: false` would read a decision
+/// into a fault in the server.
+#[tokio::test]
+async fn a_refused_ask_is_told_apart_from_a_denial() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-interactions-refused",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            write_journal(vec![asked(
+                "r1",
+                InteractionKind::ToolApproval,
+                Some("bash"),
+                "Allow tool call: `bash`?",
+                Settlement::Refused,
+            )]);
+
+            let json = data(
+                "{ run { interactions(first: 10) { edges { node { settlement { outcome approved \
+             scope choice text feedback } } } } } }",
+            )
+            .await;
+            let settlement = &json["run"]["interactions"]["edges"][0]["node"]["settlement"];
+            assert_eq!(settlement["outcome"], "REFUSED");
+            for field in ["approved", "scope", "choice", "text", "feedback"] {
+                assert!(
+                    settlement[field].is_null(),
+                    "{field} is null on an ask nobody answered: {settlement}"
+                );
+            }
+        },
+    )
+    .await;
+}
+
 /// A denial with feedback carries the redirect, and no approval.
 #[tokio::test]
 async fn a_denial_with_feedback_carries_it() {

@@ -300,6 +300,10 @@ lev respond <request-id> "the arm is still wrong, see @marked_up.png"    # a tex
 lev respond <request-id> "here" --attach sketch.png:sprites                # or attached by flag
 ```
 
+A request id is opaque, and it names the run that asked: two runs stopped on the same tool call are
+two questions with two ids, and answering one says nothing about the other. Copy it from the listing
+rather than typing it.
+
 A text answer carries files the way a message does. Every `--attach` and every `@path` in the
 words become typed [parts](/docs/mime) stored by the run, and written beside the answer in the
 tool result. The model reads the file where the words mention it. A choice or an approval has

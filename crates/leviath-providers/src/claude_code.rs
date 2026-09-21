@@ -43,7 +43,6 @@ use crate::text_tools;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt as _;
 
 /// Reasoning effort passed to the CLI when the caller configures none.
@@ -70,10 +69,6 @@ pub struct ClaudeCodeProvider {
     effort: String,
     /// Model capability overrides
     capability_overrides: HashMap<String, ModelCapabilityOverride>,
-    /// Source of tool-call ids. The CLI gives us no ids of its own, and ids must
-    /// stay unique for the life of a transcript, so they are handed out
-    /// monotonically rather than restarting at zero each response.
-    next_call_id: AtomicU64,
 }
 
 impl ClaudeCodeProvider {
@@ -105,7 +100,6 @@ impl ClaudeCodeProvider {
             binary_path: binary,
             effort,
             capability_overrides: overrides.unwrap_or_default(),
-            next_call_id: AtomicU64::new(1),
         }
     }
 
@@ -176,14 +170,17 @@ impl ClaudeCodeProvider {
     }
 
     /// Assign runtime-owned ids to the calls parsed out of a reply.
+    ///
+    /// The CLI names none of its calls, so every id comes from
+    /// [`crate::call_ids`], which is where what it has to guarantee is
+    /// written down. It is not this object's own counter: two of these can be
+    /// alive at once, since a provider-credential edit rebuilds the registry
+    /// while the runs that were already going keep asking.
     fn assign_ids(&self, calls: Vec<(String, serde_json::Value)>) -> Vec<ToolCall> {
         calls
             .into_iter()
             .map(|(name, arguments)| ToolCall {
-                id: format!(
-                    "cc_call_{}",
-                    self.next_call_id.fetch_add(1, Ordering::Relaxed)
-                ),
+                id: crate::call_ids::mint("cc_call"),
                 name,
                 arguments,
                 thought_signature: None,
@@ -767,11 +764,35 @@ mod tests {
             ("b".to_string(), serde_json::json!({})),
         ]);
         let second = provider.assign_ids(vec![("c".to_string(), serde_json::json!({}))]);
-        assert_eq!(first[0].id, "cc_call_1");
-        assert_eq!(first[1].id, "cc_call_2");
-        // Not restarted at 1 - a transcript pairs results to ids by name.
-        assert_eq!(second[0].id, "cc_call_3");
+        let ids = [&first[0].id, &first[1].id, &second[0].id];
+        assert!(ids.iter().all(|id| id.starts_with("cc_call_")), "{ids:?}");
+        // Distinct across responses too - a transcript pairs each result to its
+        // call by id, so a counter that restarts strands both halves.
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), 3, "three calls, three ids: {ids:?}");
         assert_eq!(second[0].name, "c");
+    }
+
+    /// Two of these exist at once whenever a provider-credential edit rebuilds
+    /// the registry under runs that are already going, so the ids cannot come
+    /// from a counter this object owns.
+    #[test]
+    fn two_providers_never_hand_out_the_same_tool_call_id() {
+        let first = ClaudeCodeProvider::new().assign_ids(vec![
+            ("a".to_string(), serde_json::json!({})),
+            ("b".to_string(), serde_json::json!({})),
+        ]);
+        let second = ClaudeCodeProvider::new().assign_ids(vec![
+            ("a".to_string(), serde_json::json!({})),
+            ("b".to_string(), serde_json::json!({})),
+        ]);
+        for one in &first {
+            assert!(
+                second.iter().all(|other| other.id != one.id),
+                "{} was minted twice",
+                one.id
+            );
+        }
     }
 
     // ─── parse_response ─────────────────────────────────────────────────────

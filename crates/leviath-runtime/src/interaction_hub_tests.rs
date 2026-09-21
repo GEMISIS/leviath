@@ -384,7 +384,11 @@ fn the_timeout_reads_back_through_the_hub_and_its_backends() {
     assert_eq!(hub.timeout_secs(), None, "a fresh hub waits indefinitely");
     hub.set_timeout_secs(Some(7));
     assert_eq!(hub.timeout_secs(), Some(7));
-    assert_eq!(hub.backend_for("agent-a").timeout_secs(), Some(7));
+    let backend = hub.backend_for("agent-a");
+    assert_eq!(backend.timeout_secs(), Some(7));
+    // A caller minting a request id asks the backend whose run it is: the id
+    // has to carry it, and the backend is what the caller holds.
+    assert_eq!(backend.agent_id(), "agent-a");
     hub.set_timeout_secs(None);
     assert_eq!(hub.timeout_secs(), None, "cleared again");
 }
@@ -589,4 +593,126 @@ async fn cancelling_a_run_records_each_open_question() {
     let mut ids: Vec<&str> = settled.iter().map(|(_, r)| r.request_id.as_str()).collect();
     ids.sort_unstable();
     assert_eq!(ids, ["ask-a", "ask-b"]);
+}
+
+/// Two runs, one provider that names both their tool calls `call_1`, and both
+/// asking at once. Each gets its own answer.
+///
+/// This is the shape that used to lose one: the hub holds every run's open
+/// requests under one key space, so with ids that carried only the tool-call id
+/// the second ask replaced the first, the first run was handed the neutral
+/// answer nobody gave it, and the answer a person then gave to "that" id went
+/// to the second run.
+#[tokio::test]
+async fn two_runs_whose_provider_repeats_a_tool_call_id_each_keep_their_own_prompt() {
+    use leviath_core::interaction::ApprovalScope;
+
+    let hub = InteractionHub::new();
+    // What the two runs' providers minted. Identical, which is what a
+    // per-conversation counter produces and what the mock provider does.
+    let tool_call_id = "call_1";
+
+    let mut asks = Vec::new();
+    for run in ["run-a", "run-b"] {
+        let asked = hub.clone();
+        let id = leviath_core::interaction::request_id(run, "approve", tool_call_id);
+        asks.push((
+            run,
+            id.clone(),
+            tokio::spawn(async move {
+                asked
+                    .submit(
+                        run,
+                        InteractionRequest::tool_approval(
+                            id,
+                            "shell",
+                            serde_json::json!({"command": "echo hello"}),
+                            "main",
+                            &[],
+                        ),
+                    )
+                    .await
+            }),
+        ));
+    }
+    settle().await;
+
+    // Both are open, and they are two different requests.
+    let open = hub.pending();
+    assert_eq!(open.len(), 2, "both runs are waiting: {open:?}");
+    assert_eq!(
+        asks[0].1, "run-a-approve-call_1",
+        "the id names the run that asked"
+    );
+    assert_ne!(asks[0].1, asks[1].1, "two runs, two ids");
+
+    // Answering one names one. `run-a` is denied, `run-b` approved, and neither
+    // gets the other's answer.
+    for (run, id, _) in &asks {
+        let approved = *run == "run-b";
+        assert!(
+            hub.answer(InteractionResponse {
+                request_id: id.clone(),
+                value: None,
+                choice_index: None,
+                approved: Some(approved),
+                scope: Some(ApprovalScope::Once),
+                feedback: None,
+                parts: Vec::new(),
+            }),
+            "{id} is open"
+        );
+    }
+    for (run, _, task) in asks {
+        let answer = task.await.expect("the ask completes");
+        assert_eq!(
+            answer.approved,
+            Some(run == "run-b"),
+            "{run} got its own answer"
+        );
+    }
+    assert!(hub.pending().is_empty(), "nothing is left open");
+}
+
+/// An id that is somehow already open refuses the arriving request instead of
+/// replacing the one open.
+///
+/// Unreachable through the ids this daemon mints, which is why it is an error
+/// in the log and a settlement of its own in the journal rather than a quiet
+/// replacement: the request already open may be on somebody's screen.
+#[tokio::test]
+async fn a_second_request_under_an_open_id_is_refused_not_swapped_in() {
+    use leviath_core::interaction::Settlement;
+
+    let hub = InteractionHub::new();
+    let asked = hub.clone();
+    let first = tokio::spawn(async move { asked.submit("run-a", req("same-id")).await });
+    settle().await;
+
+    // The arriving one is answered immediately, with the neutral response an
+    // approval reads as not-approved.
+    let arriving = hub.submit("run-b", req("same-id")).await;
+    assert_eq!(arriving.request_id, "same-id");
+    assert_eq!(arriving.value.as_deref(), Some(""), "the neutral answer");
+    assert_eq!(arriving.approved, None, "nothing was approved");
+
+    // The one already open is untouched, and still belongs to the run that
+    // opened it.
+    let open = hub.pending();
+    assert_eq!(open.len(), 1, "the open request stayed: {open:?}");
+    assert_eq!(open[0].0, "run-a", "and it is still run-a's");
+    assert!(!first.is_finished(), "run-a is still waiting");
+
+    // The refusal is in the journal, against the run that was refused, and it
+    // is not a denial and not a cancellation.
+    let settled = hub.take_settled();
+    assert_eq!(settled.len(), 1, "one record: {settled:?}");
+    assert_eq!(settled[0].0, "run-b", "recorded against the run refused");
+    assert_eq!(settled[0].1.request_id, "same-id");
+    assert_eq!(settled[0].1.settlement, Settlement::Refused);
+
+    // And the run that kept its prompt can still be answered.
+    assert!(hub.answer(InteractionResponse::text("same-id", "go on")));
+    let answer = first.await.expect("the ask completes");
+    assert_eq!(answer.value.as_deref(), Some("go on"));
 }

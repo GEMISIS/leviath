@@ -130,9 +130,16 @@ pub(crate) fn parse_event(
         "step.stop" => {
             record_usage(turn, json.get("usage"));
             let call = turn.calls.remove(&index)?;
+            // The API names its calls; a reply that arrives without one still
+            // has to be answerable, and an empty id is the one value that
+            // cannot be.
+            let id = match call.id.is_empty() {
+                true => crate::call_ids::mint("gemini_call"),
+                false => call.id,
+            };
             let delta = ToolCallDelta {
                 index: turn.finished_calls,
-                id: Some(call.id),
+                id: Some(id),
                 name: Some(call.name),
                 arguments_delta: Value::Object(call.arguments).to_string(),
                 thought_signature: turn.signature.clone(),

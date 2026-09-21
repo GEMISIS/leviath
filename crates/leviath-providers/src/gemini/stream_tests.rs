@@ -257,3 +257,26 @@ async fn the_framer_reads_a_whole_stream() {
         .unwrap();
     assert_eq!(response.content, "ok");
 }
+
+/// A call the stream never named still comes back answerable.
+///
+/// The API names its calls, so this is the defensive path: an empty id pairs
+/// with every result the window holds and answers every open prompt, so it is
+/// the one value a call must not have.
+#[test]
+fn a_call_that_arrives_with_no_id_is_given_one() {
+    let chunks = run(&[
+        json!({ "event_type": "step.start", "index": 0, "step": { "type": "function_call", "name": "set" } }),
+        json!({ "event_type": "step.stop", "index": 0 }),
+        json!({ "event_type": "interaction.completed", "interaction": { "status": "completed" } }),
+    ]);
+    let chunks: Vec<StreamChunk> = chunks.into_iter().map(Result::unwrap).collect();
+    let call = chunks
+        .iter()
+        .flat_map(|c| c.tool_calls.iter())
+        .next()
+        .expect("the call");
+    let id = call.id.as_deref().expect("an id");
+    assert!(id.starts_with("gemini_call_"), "{id}");
+    assert_eq!(call.name.as_deref(), Some("set"));
+}
