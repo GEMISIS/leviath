@@ -56,7 +56,8 @@ pub struct ResumeArgs {
 /// daemon is holding, or (with no `request_id`) list the open interactions.
 #[derive(clap::Args, Debug, Clone)]
 pub struct RespondArgs {
-    /// The interaction request id to answer. Omit to list open interactions.
+    /// The interaction request id to answer, or enough of its start to name
+    /// one open interaction. Omit to list open interactions.
     pub request_id: Option<String>,
     /// Free-text (or edited) answer value.
     pub value: Option<String>,
@@ -267,16 +268,22 @@ fn kind_label(kind: &InteractionKind) -> &'static str {
     }
 }
 
-/// Render one open interaction as a multi-line listing entry.
-fn format_interaction(agent_id: &str, req: &InteractionRequest) -> String {
-    let mut s = format!(
-        "{}  [{}]  agent={}  stage={}\n  {}",
+/// The line that identifies one open interaction: its id and where it came
+/// from. Heads its listing entry, and is what a refusal lists its candidates
+/// as, so the two read the same.
+fn interaction_headline(agent_id: &str, req: &InteractionRequest) -> String {
+    format!(
+        "{}  [{}]  agent={}  stage={}",
         req.id,
         kind_label(&req.kind),
         agent_id,
-        req.stage_name,
-        req.prompt
-    );
+        req.stage_name
+    )
+}
+
+/// Render one open interaction as a multi-line listing entry.
+fn format_interaction(agent_id: &str, req: &InteractionRequest) -> String {
+    let mut s = format!("{}\n  {}", interaction_headline(agent_id, req), req.prompt);
     for (i, opt) in req.options.iter().enumerate() {
         s.push_str(&format!("\n    {i}) {opt}"));
     }
@@ -341,35 +348,120 @@ fn check_feedback_flag(args: &RespondArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// List the interactions the daemon is currently holding.
-async fn list_interactions(client: &ControlClient, json: bool) -> anyhow::Result<()> {
+/// Every interaction the daemon is currently holding.
+async fn open_interactions(
+    client: &ControlClient,
+) -> anyhow::Result<Vec<(String, InteractionRequest)>> {
     match client.request(&ControlRequest::ListInteractions).await {
-        Ok(ControlResponse::Interactions { interactions }) => {
-            if json {
-                let open: Vec<OpenInteraction<'_>> = interactions
-                    .iter()
-                    .map(|(agent_id, request)| OpenInteraction { agent_id, request })
-                    .collect();
-                // Nothing open is an empty array, not a sentence: a caller
-                // polling this branches on length, not on prose.
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&open).expect("an interaction listing serializes")
-                );
-                return Ok(());
-            }
-            if interactions.is_empty() {
-                println!("no open interactions");
-            } else {
-                for (agent_id, req) in &interactions {
-                    println!("{}", format_interaction(agent_id, req));
-                }
-            }
-            Ok(())
-        }
+        Ok(ControlResponse::Interactions { interactions }) => Ok(interactions),
         Ok(other) => bail!("unexpected daemon response: {other:?}"),
         Err(e) => bail!("the leviath daemon is not reachable ({e}); start it with `lev daemon`"),
     }
+}
+
+/// List the interactions the daemon is currently holding.
+async fn list_interactions(client: &ControlClient, json: bool) -> anyhow::Result<()> {
+    let interactions = open_interactions(client).await?;
+    if json {
+        let open: Vec<OpenInteraction<'_>> = interactions
+            .iter()
+            .map(|(agent_id, request)| OpenInteraction { agent_id, request })
+            .collect();
+        // Nothing open is an empty array, not a sentence: a caller
+        // polling this branches on length, not on prose.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&open).expect("an interaction listing serializes")
+        );
+        return Ok(());
+    }
+    if interactions.is_empty() {
+        println!("no open interactions");
+    } else {
+        for (agent_id, req) in &interactions {
+            println!("{}", format_interaction(agent_id, req));
+        }
+    }
+    Ok(())
+}
+
+/// Which open interaction `typed` names.
+///
+/// A request id given in full is that interaction, whatever longer ids it
+/// happens to start: a full id names one request by construction, so there is
+/// nothing to weigh. Anything shorter is read as the start of an id, and it
+/// has to leave exactly one candidate. Several is refused with all of them
+/// listed - a request id carries the run that raised it, so a prompt answered
+/// against the wrong one lets work nobody looked at through, and four more
+/// characters is the cheaper of the two.
+fn resolve_request_id(
+    typed: &str,
+    open: &[(String, InteractionRequest)],
+) -> anyhow::Result<String> {
+    if typed.is_empty() {
+        bail!("name the interaction to answer; `lev respond` with no id lists the open ones");
+    }
+    if open.iter().any(|(_, req)| req.id == typed) {
+        return Ok(typed.to_string());
+    }
+    let named: Vec<&(String, InteractionRequest)> = open
+        .iter()
+        .filter(|(_, req)| req.id.starts_with(typed))
+        .collect();
+    match named.as_slice() {
+        [] => bail!("no such open interaction"),
+        [(_, req)] => Ok(req.id.clone()),
+        several => {
+            let candidates = several
+                .iter()
+                .map(|(agent_id, req)| format!("  {}", interaction_headline(agent_id, req)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "'{typed}' is the start of {} open interactions, so nothing was answered; \
+                 give enough of an id to name just one:\n{candidates}",
+                several.len()
+            )
+        }
+    }
+}
+
+/// The success line for an answer: a request id typed in full says nothing a
+/// bare `answered` doesn't, but one grown from a prefix names what it reached.
+fn answered_line(typed: &str, request_id: &str) -> String {
+    match typed == request_id {
+        true => "answered".to_string(),
+        false => format!("answered {request_id}"),
+    }
+}
+
+/// `lev respond <id>`: answer the interaction `typed` names.
+async fn answer_interaction(
+    client: &ControlClient,
+    args: &RespondArgs,
+    typed: &str,
+) -> anyhow::Result<()> {
+    // The files the answer carries are read first, so a path that does not
+    // exist is the file's error rather than whatever the daemon says next.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut response = attach_answer(build_response(typed, args), &args.attach, &cwd)?;
+    let request_id = resolve_request_id(typed, &open_interactions(client).await?)?;
+    response.request_id = request_id.clone();
+    // A failed answer stays an error (non-zero exit plus the message on
+    // stderr), so `--json` only changes the success line.
+    let applied = match args.json {
+        // Serialized, not interpolated: a request id carrying a quote
+        // would otherwise emit JSON that does not parse.
+        true => serde_json::json!({ "answered": true, "request_id": request_id }).to_string(),
+        false => answered_line(typed, &request_id),
+    };
+    send_bool(
+        client,
+        ControlRequest::AnswerInteraction { response },
+        &applied,
+        "no such open interaction",
+    )
+    .await
 }
 
 /// `lev respond`: answer a pending interaction, or list open ones when no
@@ -378,841 +470,10 @@ pub async fn respond(client: &ControlClient, args: &RespondArgs) -> anyhow::Resu
     check_feedback_flag(args)?;
     match &args.request_id {
         None => list_interactions(client, args.json).await,
-        Some(request_id) => {
-            // A failed answer stays an error (non-zero exit plus the message on
-            // stderr), so `--json` only changes the success line.
-            let applied = match args.json {
-                // Serialized, not interpolated: a request id carrying a quote
-                // would otherwise emit JSON that does not parse.
-                true => {
-                    serde_json::json!({ "answered": true, "request_id": request_id }).to_string()
-                }
-                false => "answered".to_string(),
-            };
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let response = attach_answer(build_response(request_id, args), &args.attach, &cwd)?;
-            send_bool(
-                client,
-                ControlRequest::AnswerInteraction { response },
-                &applied,
-                "no such open interaction",
-            )
-            .await
-        }
+        Some(typed) => answer_interaction(client, args, typed).await,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::fixtures;
-    use leviath_runtime::control_socket::{ControlId, bind_control_listener, control_id};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::task::JoinHandle;
-
-    /// Bind a control listener at a fresh id under `dir` and serve one canned
-    /// response, returning the id clients connect to and the server task.
-    fn fake_daemon(dir: &std::path::Path, response_line: String) -> (ControlId, JoinHandle<()>) {
-        let id = control_id(dir);
-        let mut listener = bind_control_listener(&id).unwrap();
-        let handle = tokio::spawn(async move {
-            let stream = listener
-                .accept()
-                .await
-                .expect("accept succeeds")
-                .expect("our own connection is admitted");
-            let (read_half, mut write_half) = tokio::io::split(stream);
-            let mut lines = BufReader::new(read_half).lines();
-            let _request = lines.next_line().await.unwrap();
-            write_half
-                .write_all(response_line.as_bytes())
-                .await
-                .unwrap();
-            write_half.write_all(b"\n").await.unwrap();
-        });
-        (id, handle)
-    }
-
-    /// Run `op` against a fake daemon that replies `response_line`.
-    async fn with_daemon<F, Fut>(response_line: impl Into<String>, op: F) -> anyhow::Result<()>
-    where
-        F: FnOnce(ControlClient) -> Fut,
-        Fut: std::future::Future<Output = anyhow::Result<()>>,
-    {
-        let dir = tempfile::tempdir().unwrap();
-        let (id, server) = fake_daemon(dir.path(), response_line.into());
-        let result = op(ControlClient::new(id)).await;
-        server.await.unwrap();
-        result
-    }
-
-    fn msg_args() -> MsgArgs {
-        MsgArgs {
-            agent_id: "a".to_string(),
-            content: "hi".to_string(),
-            attach: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn message_parts_take_attachments_and_named_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.png"), b"\x89PNG\r\n\x1a\n").unwrap();
-        std::fs::write(dir.path().join("b.txt"), b"notes").unwrap();
-        let (text, parts) = message_parts(
-            "see @a.png and @gone.png",
-            &["b.txt:notes".into()],
-            dir.path(),
-        )
-        .unwrap();
-        assert_eq!(text, "see @a.png and @gone.png");
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].name, "b.txt");
-        assert_eq!(parts[0].region.as_deref(), Some("notes"));
-        assert_eq!(parts[1].name, "a.png");
-        assert!(message_parts("x", &["missing.bin".into()], dir.path()).is_err());
-        std::fs::write(dir.path().join("empty.png"), b"").unwrap();
-        let err = message_parts("see @empty.png", &[], dir.path()).unwrap_err();
-        assert!(err.to_string().contains("nothing to attach"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn message_with_an_unreadable_attachment_never_dials() {
-        // No daemon behind this id: the attachment fails first, so nothing
-        // is ever dialled, and a daemon that never hears from us is right.
-        let dir = tempfile::tempdir().unwrap();
-        let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
-        let mut args = msg_args();
-        args.attach = vec!["/no/such/file.png".to_string()];
-        let err = send_message(&client, &args).await.unwrap_err();
-        assert!(err.to_string().contains("could not read"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn message_applied() {
-        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
-            send_message(&c, &msg_args()).await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn message_not_delivered() {
-        let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
-            send_message(&c, &msg_args()).await
-        })
-        .await;
-        assert!(r.unwrap_err().to_string().contains("no agent accepted"));
-    }
-
-    #[tokio::test]
-    async fn pause_applied() {
-        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
-            pause_run(
-                &c,
-                &PauseArgs {
-                    run_id: "r".to_string(),
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn pause_refused() {
-        let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
-            pause_run(
-                &c,
-                &PauseArgs {
-                    run_id: "r".to_string(),
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.unwrap_err().to_string().contains("not pausable"));
-    }
-
-    #[tokio::test]
-    async fn resume_applied() {
-        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
-            resume_run(
-                &c,
-                &ResumeArgs {
-                    run_id: "r".to_string(),
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn resume_refused() {
-        let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
-            resume_run(
-                &c,
-                &ResumeArgs {
-                    run_id: "r".to_string(),
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.unwrap_err().to_string().contains("not paused"));
-    }
-
-    #[tokio::test]
-    async fn cancel_applied() {
-        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
-            cancel_run(
-                &c,
-                &CancelArgs {
-                    run_id: "r".to_string(),
-                    force: false,
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn cancel_unknown_run() {
-        let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
-            cancel_run(
-                &c,
-                &CancelArgs {
-                    run_id: "r".to_string(),
-                    force: false,
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.unwrap_err().to_string().contains("no such run"));
-    }
-
-    #[tokio::test]
-    async fn unexpected_response_is_an_error() {
-        // Both the `send_bool` path (`lev msg`) and `cancel_run`'s own match
-        // reject a response shape they didn't ask for.
-        let r = with_daemon(r#"{"result":"spawned","run_id":"x"}"#, |c| async move {
-            send_message(&c, &msg_args()).await
-        })
-        .await;
-        assert!(r.unwrap_err().to_string().contains("unexpected"));
-
-        let r = with_daemon(r#"{"result":"spawned","run_id":"x"}"#, |c| async move {
-            cancel_run(
-                &c,
-                &CancelArgs {
-                    run_id: "r".to_string(),
-                    force: false,
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.unwrap_err().to_string().contains("unexpected"));
-    }
-
-    /// `lev msg` has no on-disk fallback - an unreachable daemon is simply an
-    /// error, unlike `lev cancel`.
-    #[tokio::test]
-    async fn message_to_an_unreachable_daemon_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
-        let err = send_message(&client, &msg_args()).await.unwrap_err();
-        assert!(err.to_string().contains("not reachable"));
-    }
-
-    /// A run directory that cannot be rewritten is reported as such, rather than
-    /// as a successful cancel.
-    #[tokio::test]
-    async fn forcing_a_run_whose_metadata_cannot_be_written_reports_the_failure() {
-        crate::runstate::with_isolated_runs_dir_async("ctl-force-unwritable", |_base| async {
-            let dir = crate::runstate::run_dir("blocked-1");
-            std::fs::create_dir_all(dir.join("meta.json")).unwrap();
-
-            let err = cancel_run(
-                &ControlClient::new(control_id(std::path::Path::new("/nonexistent"))),
-                &CancelArgs {
-                    run_id: "blocked-1".to_string(),
-                    force: true,
-                },
-            )
-            .await
-            .unwrap_err();
-            assert!(err.to_string().contains("could not write"), "got: {err}");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn not_reachable_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
-        let err = cancel_run(
-            &client,
-            &CancelArgs {
-                run_id: "r".to_string(),
-                force: false,
-            },
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("not reachable"));
-    }
-
-    /// Write a live-looking run into the (isolated) runs dir.
-    fn seed_live_run(run_id: &str) {
-        crate::runstate::create_run(&crate::runstate::RunMeta {
-            status: crate::runstate::RunStatus::Running,
-            ..fixtures::run_meta(run_id)
-        })
-        .unwrap();
-    }
-
-    fn status_of(run_id: &str) -> crate::runstate::RunStatus {
-        crate::runstate::read_meta(run_id).unwrap().status
-    }
-
-    /// `--force` never contacts the daemon, so a kill stays possible when the
-    /// daemon is dead, wedged, or was never started.
-    #[tokio::test]
-    async fn force_cancels_on_disk_without_a_daemon() {
-        crate::runstate::with_isolated_runs_dir_async("ctl-force-cancel", |_base| async {
-            seed_live_run("stuck-1");
-            let dir = tempfile::tempdir().unwrap();
-            // A socket path with nothing listening on it.
-            let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
-
-            cancel_run(
-                &client,
-                &CancelArgs {
-                    run_id: "stuck-1".to_string(),
-                    force: true,
-                },
-            )
-            .await
-            .expect("forced cancel succeeds with no daemon");
-
-            assert_eq!(status_of("stuck-1"), crate::runstate::RunStatus::Cancelled);
-        })
-        .await;
-    }
-
-    /// Without `--force`, an unreachable daemon falls back to the on-disk write
-    /// rather than leaving the user with an error and a run still marked live.
-    #[tokio::test]
-    async fn an_unreachable_daemon_falls_back_to_cancelling_on_disk() {
-        crate::runstate::with_isolated_runs_dir_async("ctl-fallback-cancel", |_base| async {
-            seed_live_run("stuck-2");
-            let dir = tempfile::tempdir().unwrap();
-            let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
-
-            cancel_run(
-                &client,
-                &CancelArgs {
-                    run_id: "stuck-2".to_string(),
-                    force: false,
-                },
-            )
-            .await
-            .expect("the fallback succeeds");
-
-            assert_eq!(status_of("stuck-2"), crate::runstate::RunStatus::Cancelled);
-        })
-        .await;
-    }
-
-    /// Forcing a run that already finished is reported, not treated as a failure.
-    #[tokio::test]
-    async fn forcing_an_already_finished_run_is_not_an_error() {
-        crate::runstate::with_isolated_runs_dir_async("ctl-force-terminal", |_base| async {
-            crate::runstate::create_run(&crate::runstate::RunMeta {
-                status: crate::runstate::RunStatus::Complete,
-                ..fixtures::run_meta("done-1")
-            })
-            .unwrap();
-
-            cancel_run(
-                &ControlClient::new(control_id(std::path::Path::new("/nonexistent"))),
-                &CancelArgs {
-                    run_id: "done-1".to_string(),
-                    force: true,
-                },
-            )
-            .await
-            .expect("already-finished is reported, not an error");
-
-            assert_eq!(
-                status_of("done-1"),
-                crate::runstate::RunStatus::Complete,
-                "and the recorded outcome is left intact"
-            );
-        })
-        .await;
-    }
-
-    /// Forcing an id that names no run at all is still an honest failure.
-    #[tokio::test]
-    async fn forcing_an_unknown_run_reports_no_such_run() {
-        crate::runstate::with_isolated_runs_dir_async("ctl-force-missing", |_base| async {
-            let err = cancel_run(
-                &ControlClient::new(control_id(std::path::Path::new("/nonexistent"))),
-                &CancelArgs {
-                    run_id: "never-existed".to_string(),
-                    force: true,
-                },
-            )
-            .await
-            .unwrap_err();
-            assert!(err.to_string().contains("no such run"), "got: {err}");
-        })
-        .await;
-    }
-
-    // ─── lev respond ──────────────────────────────────────────────────────────
-
-    fn respond_args() -> RespondArgs {
-        RespondArgs {
-            request_id: Some("q1".to_string()),
-            value: None,
-            choice: None,
-            approve: false,
-            deny: false,
-            feedback: None,
-            session: false,
-            stage: false,
-            json: false,
-            attach: Vec::new(),
-        }
-    }
-
-    /// A text answer takes its files from `--attach` and from `@path` in
-    /// the words; anything else refuses `--attach` outright.
-    #[test]
-    fn a_text_answer_carries_its_files_and_a_choice_refuses_them() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("mark.png"), b"\x89PNG\r\n\x1a\nmark").unwrap();
-        std::fs::write(dir.path().join("notes.md"), "# n").unwrap();
-        let attach = vec!["notes.md:brief".to_string()];
-        let answered = attach_answer(
-            InteractionResponse::text("q1", "the arm is wrong, see @mark.png"),
-            &attach,
-            dir.path(),
-        )
-        .unwrap();
-        assert_eq!(
-            answered.value.as_deref(),
-            Some("the arm is wrong, see @mark.png")
-        );
-        assert_eq!(answered.parts.len(), 2);
-        assert_eq!(answered.parts[0].name, "notes.md");
-        assert_eq!(answered.parts[0].region.as_deref(), Some("brief"));
-        assert_eq!(answered.parts[1].name, "mark.png");
-        assert!(answered.parts[1].region.is_none());
-
-        let bare = attach_answer(InteractionResponse::choice("q1", 1), &[], dir.path()).unwrap();
-        assert!(bare.parts.is_empty());
-        let err =
-            attach_answer(InteractionResponse::choice("q1", 1), &attach, dir.path()).unwrap_err();
-        assert!(err.to_string().contains("text answer"), "{err}");
-        let err = attach_answer(
-            InteractionResponse::text("q1", "x"),
-            &["/no/such/file.png".to_string()],
-            dir.path(),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("file.png"), "{err}");
-    }
-
-    /// An attachment that cannot be read fails the answer before any daemon
-    /// is dialled: there is none behind this id, and the error is the file's.
-    #[tokio::test]
-    async fn respond_refuses_a_bad_attachment_before_contacting_the_daemon() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = ControlClient::new(control_id(dir.path()));
-        let err = respond(
-            &client,
-            &RespondArgs {
-                value: Some("here".to_string()),
-                attach: vec!["/no/such/file.png".to_string()],
-                ..respond_args()
-            },
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("file.png"), "{err}");
-    }
-
-    /// `lev respond <id> --deny --feedback TEXT` is a deny carrying the text;
-    /// blank text is the plain deny, the same rule every other client follows.
-    #[test]
-    fn build_response_deny_with_feedback() {
-        let r = build_response(
-            "q1",
-            &RespondArgs {
-                deny: true,
-                feedback: Some("use git log, not git show".to_string()),
-                ..respond_args()
-            },
-        );
-        assert_eq!(
-            r,
-            InteractionResponse::deny_with_feedback("q1", "use git log, not git show")
-        );
-        let blank = build_response(
-            "q1",
-            &RespondArgs {
-                deny: true,
-                feedback: Some("  ".to_string()),
-                ..respond_args()
-            },
-        );
-        assert_eq!(
-            blank,
-            InteractionResponse::approval("q1", false, ApprovalScope::Once)
-        );
-    }
-
-    /// `--feedback` without `--deny` is refused at the parser, with `--deny`
-    /// named in the message, and it never combines with `--approve`.
-    #[test]
-    fn feedback_flag_is_only_valid_with_deny() {
-        use clap::Parser;
-        #[derive(Parser, Debug)]
-        struct Cli {
-            #[command(flatten)]
-            respond: RespondArgs,
-        }
-        let ok = Cli::try_parse_from(["lev", "q1", "--deny", "--feedback", "why"]).unwrap();
-        assert!(ok.respond.deny);
-        assert_eq!(ok.respond.feedback.as_deref(), Some("why"));
-
-        let alone = Cli::try_parse_from(["lev", "q1", "--feedback", "why"]).unwrap_err();
-        assert!(alone.to_string().contains("--deny"), "{alone}");
-
-        // clap lets `--approve --feedback` through, so the command checks.
-        let with_approve =
-            Cli::try_parse_from(["lev", "q1", "--approve", "--feedback", "why"]).unwrap();
-        let err = check_feedback_flag(&with_approve.respond).unwrap_err();
-        assert!(err.to_string().contains("--deny"), "{err}");
-        assert!(check_feedback_flag(&ok.respond).is_ok());
-        assert!(check_feedback_flag(&respond_args()).is_ok());
-    }
-
-    /// The check runs before anything is sent: a bad flag combination is an
-    /// error with no daemon involved.
-    #[tokio::test]
-    async fn respond_refuses_feedback_without_deny_before_contacting_the_daemon() {
-        let client = ControlClient::new(leviath_runtime::control_socket::control_id(
-            std::path::Path::new("/no/such/daemon"),
-        ));
-        let err = respond(
-            &client,
-            &RespondArgs {
-                approve: true,
-                feedback: Some("why".to_string()),
-                ..respond_args()
-            },
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("--deny"), "{err}");
-    }
-
-    #[test]
-    fn build_response_free_text_uses_value_or_empty() {
-        let with_value = build_response(
-            "q1",
-            &RespondArgs {
-                value: Some("hello".to_string()),
-                ..respond_args()
-            },
-        );
-        assert_eq!(with_value, InteractionResponse::text("q1", "hello"));
-        // Missing value → empty string.
-        assert_eq!(
-            build_response("q1", &respond_args()),
-            InteractionResponse::text("q1", "")
-        );
-    }
-
-    #[test]
-    fn build_response_choice_selects_index() {
-        let r = build_response(
-            "q1",
-            &RespondArgs {
-                choice: Some(2),
-                ..respond_args()
-            },
-        );
-        assert_eq!(r, InteractionResponse::choice("q1", 2));
-    }
-
-    #[test]
-    fn build_response_approve_and_deny_and_session_scope() {
-        let approved = build_response(
-            "q1",
-            &RespondArgs {
-                approve: true,
-                ..respond_args()
-            },
-        );
-        assert_eq!(
-            approved,
-            InteractionResponse::approval("q1", true, ApprovalScope::Once)
-        );
-        let session = build_response(
-            "q1",
-            &RespondArgs {
-                approve: true,
-                session: true,
-                json: false,
-                ..respond_args()
-            },
-        );
-        assert_eq!(
-            session,
-            InteractionResponse::approval("q1", true, ApprovalScope::Run)
-        );
-        let stage = build_response(
-            "q1",
-            &RespondArgs {
-                approve: true,
-                stage: true,
-                ..respond_args()
-            },
-        );
-        assert_eq!(
-            stage,
-            InteractionResponse::approval("q1", true, ApprovalScope::Stage)
-        );
-        let denied = build_response(
-            "q1",
-            &RespondArgs {
-                deny: true,
-                ..respond_args()
-            },
-        );
-        assert_eq!(
-            denied,
-            InteractionResponse::approval("q1", false, ApprovalScope::Once)
-        );
-    }
-
-    #[test]
-    fn kind_label_covers_every_kind() {
-        for (kind, label) in [
-            (InteractionKind::FreeText, "free-text"),
-            (InteractionKind::MultipleChoice, "choice"),
-            (InteractionKind::Confirm, "confirm"),
-            (InteractionKind::ToolApproval, "tool-approval"),
-            (InteractionKind::EditText, "edit-text"),
-        ] {
-            assert_eq!(kind_label(&kind), label);
-        }
-    }
-
-    #[test]
-    fn format_interaction_renders_options_and_tool() {
-        let mut req = InteractionRequest::multiple_choice(
-            "q1",
-            "Pick",
-            vec!["a".to_string(), "b".to_string()],
-            "plan",
-        );
-        req.tool_name = Some("bash".to_string());
-        let out = format_interaction("agent-x", &req);
-        assert!(out.contains("q1  [choice]  agent=agent-x  stage=plan"));
-        assert!(out.contains("Pick"));
-        assert!(out.contains("0) a"));
-        assert!(out.contains("1) b"));
-        assert!(out.contains("tool: bash"));
-    }
-
-    #[tokio::test]
-    async fn respond_answers_an_interaction() {
-        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
-            respond(&c, &respond_args()).await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn respond_reports_no_open_interaction() {
-        let r = with_daemon(r#"{"result":"ok","ok":false}"#, |c| async move {
-            respond(&c, &respond_args()).await
-        })
-        .await;
-        assert!(r.unwrap_err().to_string().contains("no such open"));
-    }
-
-    // ─── --json ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn open_interaction_serializes_the_agent_id_alongside_the_request() {
-        // `#[serde(flatten)]` is what puts `id` and `prompt` at the top level
-        // next to `agent_id`. Losing it would nest the request under a key no
-        // caller expects.
-        let mut request = InteractionRequest::multiple_choice(
-            "q1",
-            "Pick",
-            vec!["a".to_string(), "b".to_string()],
-            "plan",
-        );
-        request.tool_name = Some("bash".to_string());
-        let open = OpenInteraction {
-            agent_id: "agent-x",
-            request: &request,
-        };
-        let value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&open).unwrap()).unwrap();
-        assert_eq!(value["agent_id"], serde_json::json!("agent-x"));
-        assert_eq!(value["id"], serde_json::json!("q1"));
-        assert_eq!(value["stage_name"], serde_json::json!("plan"));
-        assert_eq!(value["options"], serde_json::json!(["a", "b"]));
-        assert_eq!(value["tool_name"], serde_json::json!("bash"));
-    }
-
-    #[tokio::test]
-    async fn respond_lists_open_interactions_as_json() {
-        let req = InteractionRequest::free_text("q1", "What now?", "plan", true);
-        let line = serde_json::to_string(&ControlResponse::Interactions {
-            interactions: vec![("agent-a".to_string(), req)],
-        })
-        .unwrap();
-        let r = with_daemon(line, |c| async move {
-            respond(
-                &c,
-                &RespondArgs {
-                    request_id: None,
-                    json: true,
-                    ..respond_args()
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn respond_lists_nothing_open_as_json() {
-        let line = serde_json::to_string(&ControlResponse::Interactions {
-            interactions: Vec::new(),
-        })
-        .unwrap();
-        let r = with_daemon(line, |c| async move {
-            respond(
-                &c,
-                &RespondArgs {
-                    request_id: None,
-                    json: true,
-                    ..respond_args()
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn respond_answers_an_interaction_as_json() {
-        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
-            respond(
-                &c,
-                &RespondArgs {
-                    json: true,
-                    ..respond_args()
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn respond_lists_open_interactions() {
-        let req = InteractionRequest::free_text("q1", "What now?", "plan", true);
-        let line = serde_json::to_string(&ControlResponse::Interactions {
-            interactions: vec![("agent-a".to_string(), req)],
-        })
-        .unwrap();
-        let r = with_daemon(line, |c| async move {
-            respond(
-                &c,
-                &RespondArgs {
-                    request_id: None,
-                    ..respond_args()
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn respond_lists_when_none_open() {
-        let line = serde_json::to_string(&ControlResponse::Interactions {
-            interactions: vec![],
-        })
-        .unwrap();
-        let r = with_daemon(line, |c| async move {
-            respond(
-                &c,
-                &RespondArgs {
-                    request_id: None,
-                    ..respond_args()
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.is_ok());
-    }
-
-    #[tokio::test]
-    async fn respond_list_rejects_unexpected_response() {
-        let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
-            respond(
-                &c,
-                &RespondArgs {
-                    request_id: None,
-                    ..respond_args()
-                },
-            )
-            .await
-        })
-        .await;
-        assert!(r.unwrap_err().to_string().contains("unexpected"));
-    }
-
-    #[tokio::test]
-    async fn respond_list_errors_when_daemon_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
-        let err = respond(
-            &client,
-            &RespondArgs {
-                request_id: None,
-                ..respond_args()
-            },
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("not reachable"));
-    }
-}
+#[path = "ctl_tests.rs"]
+mod tests;
