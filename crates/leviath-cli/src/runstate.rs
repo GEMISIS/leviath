@@ -2190,6 +2190,17 @@ mod tests {
     /// The listing asks a finished run once a second and a live one every
     /// time: a rename of a finished run shows up within the window, a live
     /// run's progress immediately.
+    /// Give `path` a modification time comfortably in the future, so a rewrite
+    /// that lands inside one filesystem clock tick still reads as a change.
+    fn touch_newer(path: &std::path::Path) {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the record is there to touch");
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .expect("the modification time is ours to set");
+    }
+
     #[test]
     fn a_cached_listing_settles_finished_runs() {
         with_isolated_runs_dir("cached-listing-settles", |_d| {
@@ -2225,6 +2236,12 @@ mod tests {
             write_meta(&done).unwrap();
             live.iteration = 7;
             write_meta(&live).unwrap();
+            // Written with a strictly newer mtime, the way `save_config` does:
+            // the cache re-reads on a changed stat, and `iteration: 0` becomes
+            // `iteration: 7` without the file changing length, so a rewrite
+            // inside one filesystem clock tick is a stat the cache cannot tell
+            // from the one it already holds.
+            touch_newer(&run_dir("live").join(leviath_core::files::META_FILE));
             let listed = list_runs_cached(&mut metas, &mut listing);
             let by_id = |id: &str| listed.iter().find(|m| m.run_id == id).unwrap().clone();
             assert_eq!(by_id("live").iteration, 7, "a live run is read every tick");
