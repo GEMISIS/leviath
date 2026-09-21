@@ -297,6 +297,40 @@ same list.
   compaction took it, a transform cleared it, or the model deleted it. Announced
   as `graphql.context_changes`.
 
+### Fixed
+
+- An answer to a question could reach the wrong run. Two runs in one daemon
+  asking about the same tool call raised the same request id, because the id was
+  the provider's tool-call id with a word in front of it and nothing about the
+  run. The daemon holds every run's open questions in one place keyed by that id,
+  so the second question replaced the first: the first run was handed the neutral
+  answer, which a tool approval and a taint gate both read as not-approved, and
+  the person who then answered what they were looking at answered the second run
+  instead. Nothing was written down either way, so a run that had quietly been
+  refused looked like one somebody refused.
+
+  A request id now leads with the run that raised it, the way an interaction
+  point's already did, so two runs cannot produce one id whatever their provider
+  names its calls. Ids are longer; they were always opaque, and `lev respond`,
+  the REST and GraphQL answer routes, the dashboard and the ACP bridge all echo
+  the one they were given.
+
+  Behind that, two ways a provider could hand out a colliding call id in the
+  first place are closed. `claude-code` minted `cc_call_1`, `cc_call_2` from a
+  counter on the provider object, and a provider-credential edit rebuilds that
+  object while the runs already going keep asking, so two of them handed out the
+  same ids; it now mints from the same process-wide source `ollama` uses, which
+  survives both a second provider and a restart. A Gemini reply with the id
+  missing, and a Rhai provider script that names no call, used to leave the id
+  empty, which pairs with every result and answers every prompt; both now get a
+  minted one.
+
+  Two questions meeting under one id is now refused rather than resolved
+  silently: the question already open is the one kept, because somebody may be
+  reading it, the arriving one is answered neutrally, the daemon logs an error,
+  and the journal records the refusal as its own settlement (`REFUSED` over
+  GraphQL) rather than as a denial nobody made.
+
 ### Changed
 
 - The GraphQL API names a run a run. `spawnAgent` is now `spawnRun`, and

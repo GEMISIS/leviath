@@ -339,3 +339,29 @@ fn map_err_defaults_message_when_absent() {
     )));
     assert!(matches!(e, ProviderError::RequestFailed(msg) if msg == "provider script error"));
 }
+
+#[test]
+fn a_script_that_names_no_call_gets_an_id_rather_than_an_empty_one() {
+    // An empty id pairs with every result in the window and answers every open
+    // prompt, so a script that leaves it out is given one. A script that names
+    // its calls keeps its own.
+    let d = dyn_from_json(
+        r#"{"content":"","tool_calls":[{"name":"f","arguments":{}},
+            {"id":"","name":"g","arguments":{}},
+            {"id":"mine","name":"h","arguments":{}}],
+            "finish_reason":"tool_calls"}"#,
+    );
+    let r = parse_inference_dynamic(d).unwrap();
+    assert!(
+        r.tool_calls[0].id.starts_with("rhai_call_"),
+        "{}",
+        r.tool_calls[0].id
+    );
+    assert!(
+        r.tool_calls[1].id.starts_with("rhai_call_"),
+        "an empty id is no id: {}",
+        r.tool_calls[1].id
+    );
+    assert_ne!(r.tool_calls[0].id, r.tool_calls[1].id);
+    assert_eq!(r.tool_calls[2].id, "mine", "a named call keeps its name");
+}

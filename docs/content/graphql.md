@@ -563,9 +563,16 @@ somebody at all.
 
 Every field on `settlement` but `outcome` is null unless `outcome` is
 `ANSWERED`. Nobody answered a `TIMED_OUT` ask (the hub answered for them once
-the run's interaction timeout ran out) or a `CANCELLED` one (the run was
-cancelled, or the agent that asked it went away), so there is nothing for any
-of the rest to carry.
+the run's interaction timeout ran out), a `CANCELLED` one (the run was
+cancelled, or the agent that asked it went away), or a `REFUSED` one, so there
+is nothing for any of the rest to carry.
+
+`REFUSED` should never appear. It means a request never opened because another
+was already open under the same id, so the run was handed the same neutral
+answer a cancellation gives it, which a tool approval reads as not-approved. An
+id carries the run that raised it, so two of them meeting is a fault in the
+server rather than anything about the call. If you see one, the daemon logged it
+as an error at the same moment.
 
 `scope` is the one field worth a note against REST. This spells the widest
 grant `RUN`; the REST journal and the answer routes write `session` for the
@@ -937,7 +944,8 @@ walk of the run store.
 Answer with exactly one variant, and which one the request's `kind` decides.
 
 ```graphql
-mutation { answerInteraction(input: { approval: { requestId: "approve-call_1", approved: false,
+mutation { answerInteraction(input: { approval: {
+  requestId: "coder-1788924523-abc123-approve-call_1", approved: false,
   feedback: "read the file instead" } }) { requestId accepted } }
 ```
 

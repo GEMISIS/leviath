@@ -41,7 +41,11 @@ pub enum BodyFormat {
 /// A pending interaction request written by the worker.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InteractionRequest {
-    /// Unique ID for this request (uuid-lite: timestamp + stage index).
+    /// What an answer names this request by, and nothing else names.
+    ///
+    /// Minted by [`request_id`], which leads with the run: one daemon holds
+    /// every run's open requests in one place, so an id unique within a run is
+    /// not unique enough.
     pub id: String,
     /// What kind of answer is expected.
     pub kind: InteractionKind,
@@ -418,6 +422,14 @@ pub enum Settlement {
     /// The request was withdrawn: the run was cancelled, or the agent that
     /// asked went away.
     Cancelled,
+    /// The request never opened, because one was already open under the same
+    /// id, and the hub keeps the one a person may already be reading.
+    ///
+    /// Not a decision anybody made, and not a denial either: the caller was
+    /// handed the neutral answer, which an approval or a taint gate reads as
+    /// not-approved. Its own settlement because it means the id scheme failed,
+    /// and a reader who cannot tell it from a denial cannot tell that either.
+    Refused,
 }
 
 impl Settlement {
@@ -570,9 +582,62 @@ pub fn make_interaction_id(stage_idx: usize, iteration: usize) -> String {
     format!("{}-{}", stage_idx, iteration)
 }
 
+/// The id one interaction request answers to: `<run id>-<kind>-<tail>`.
+///
+/// The run id leads because the id has to be unique across every request the
+/// daemon holds open at once, not just within one run: the hub that keeps them
+/// is one per daemon and keyed by this id alone, and an answer arriving over
+/// the API or from `lev respond` names nothing else. The tail is usually a
+/// provider's tool-call id, which is only unique within the conversation that
+/// produced it, and for two providers it is a counter that starts again at one.
+///
+/// `kind` is the word that says which question this is: `approve`, `gate`,
+/// `ask`, `review`, `edit` or `point`.
+pub fn request_id(run_id: &str, kind: &str, tail: &str) -> String {
+    format!("{run_id}-{kind}-{tail}")
+}
+
+/// What every id of one kind, for one run, starts with.
+///
+/// For the one reader that has to tell a run's requests apart by kind rather
+/// than by answering them. Built here so it cannot drift from
+/// [`request_id`]: a reader matching a hand-written prefix would still match
+/// after the scheme moved, on the wrong requests.
+pub fn request_id_prefix(run_id: &str, kind: &str) -> String {
+    format!("{run_id}-{kind}-")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The run leads, so the same tool-call id in two runs is two requests.
+    ///
+    /// That is the whole point of the scheme: one daemon holds every run's open
+    /// requests in one place, and an answer names the request and nothing else.
+    #[test]
+    fn a_request_id_is_unique_to_the_run_that_raised_it() {
+        assert_eq!(
+            request_id("coder-1788924523-abc123", "approve", "call_1"),
+            "coder-1788924523-abc123-approve-call_1"
+        );
+        assert_ne!(
+            request_id("run-a", "approve", "call_1"),
+            request_id("run-b", "approve", "call_1"),
+            "one provider id, two runs, two requests"
+        );
+        assert_ne!(
+            request_id("run-a", "approve", "call_1"),
+            request_id("run-a", "gate", "call_1"),
+            "one call can be asked about twice, for different reasons"
+        );
+        // What a reader telling one run's kinds apart matches on, built from the
+        // same pieces in the same order.
+        let prefix = request_id_prefix("run-a", "point");
+        assert_eq!(prefix, "run-a-point-");
+        assert!(request_id("run-a", "point", "plan-0").starts_with(&prefix));
+        assert!(!request_id("run-a", "approve", "call_1").starts_with(&prefix));
+    }
 
     /// "Allow tool call: `bash`?" asks whether to run a shell command without
     /// saying which one - the only safe answer is no and the only practical one
