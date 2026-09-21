@@ -606,6 +606,54 @@ type BlueprintEdge {
 }
 
 """
+Which installed blueprints a listing is about.
+
+Every field set has to hold, so a filter object is an `and` of its own
+fields. `and`, `or` and `not` take filters of this same type.
+"""
+input BlueprintFilter {
+	"""
+	Every one of these has to match.
+	"""
+	and: [BlueprintFilter!]
+	"""
+	At least one of these has to match. An empty list matches no blueprint,
+	which is what an alternation with no alternatives selects.
+	"""
+	or: [BlueprintFilter!]
+	"""
+	This must not match.
+	"""
+	not: BlueprintFilter
+	"""
+	Case-insensitive prefix match on the blueprint name, for a search box.
+	The same thing as `name: { startsWith: }`, spelled shorter.
+	"""
+	query: String
+	"""
+	The blueprint's name, which is also its key: one name is one installed
+	blueprint.
+	"""
+	name: StringFilter
+	"""
+	Exactly these names.
+	
+	Passed on the filter a request makes rather than inside a combinator,
+	this also says which blueprints to read, and a name nothing is
+	installed under lands in `missing` instead of failing the request.
+	"""
+	names: [String!]
+	"""
+	The version the manifest declares.
+	"""
+	version: StringFilter
+	"""
+	The description the manifest declares.
+	"""
+	description: StringFilter
+}
+
+"""
 Which blueprint an operation is about.
 
 A pointer at an installed blueprint, as `name` with an optional `digest`
@@ -708,6 +756,23 @@ enum BlueprintSource {
 	file may have changed since it ran.
 	"""
 	INSTALLED
+}
+
+"""
+Comparisons on one boolean field.
+
+Two fields rather than one because `ne` reads as itself beside every other
+filter in the schema. `eq: false` and `ne: true` select the same runs.
+"""
+input BooleanFilter {
+	"""
+	Exactly this.
+	"""
+	eq: Boolean
+	"""
+	Anything but this.
+	"""
+	ne: Boolean
 }
 
 """
@@ -1996,6 +2061,48 @@ shortest round-tripping form rather than inventing precision.
 scalar Decimal
 
 """
+Comparisons on one exact-decimal field, such as spend.
+
+The bounds travel as decimal strings, the way every `Decimal` in this
+schema does, so a cost bound a JSON parser would re-round is written out
+rather than rounded. Every field set here has to hold.
+"""
+input DecimalFilter {
+	"""
+	Exactly this amount.
+	"""
+	eq: Decimal
+	"""
+	Anything but this amount.
+	"""
+	ne: Decimal
+	"""
+	Exactly one of these amounts.
+	"""
+	in: [Decimal!]
+	"""
+	None of these amounts.
+	"""
+	notIn: [Decimal!]
+	"""
+	Strictly below this.
+	"""
+	lt: Decimal
+	"""
+	At or below this.
+	"""
+	lte: Decimal
+	"""
+	Strictly above this.
+	"""
+	gt: Decimal
+	"""
+	At or above this.
+	"""
+	gte: Decimal
+}
+
+"""
 What a delete removed, and what it left.
 
 Partial success is the normal outcome rather than an edge case: a sweep
@@ -3046,6 +3153,48 @@ type InstallSelfToolCall implements ToolCall {
 	The call's arguments.
 	"""
 	args: InstallSelfToolArgs!
+}
+
+"""
+Comparisons on one whole-number field.
+
+The range fields are what "older than", "ran longer than" and every bound
+between are asked with. Every field set here has to hold, so `gte` and `lt`
+together are a half-open range.
+"""
+input IntFilter {
+	"""
+	Exactly this number.
+	"""
+	eq: Int
+	"""
+	Anything but this number.
+	"""
+	ne: Int
+	"""
+	Exactly one of these numbers.
+	"""
+	in: [Int!]
+	"""
+	None of these numbers.
+	"""
+	notIn: [Int!]
+	"""
+	Strictly below this.
+	"""
+	lt: Int
+	"""
+	At or below this.
+	"""
+	lte: Int
+	"""
+	Strictly above this.
+	"""
+	gt: Int
+	"""
+	At or above this.
+	"""
+	gte: Int
 }
 
 """
@@ -4855,26 +5004,26 @@ type Query {
 	`blueprint` on the run, which answers from the run's own snapshot. The
 	digests tell you whether the two are the same bytes.
 	
-	`exact` fetches blueprints by name. A name that is not installed lands
-	in `missing` rather than failing the request.
+	`filter.names` fetches blueprints by name. A name that is not installed
+	lands in `missing` rather than failing the request.
+	
+	Keyset-paged on the name, which is the order the catalogue is read in.
+	A cursor names where you got to, so a blueprint installed or removed
+	mid-walk cannot make a page skip or repeat one.
 	"""
 	blueprints(
 		"""
-		Case-insensitive prefix match on the blueprint name.
+		Which blueprints to list. Omitted means all of them.
 		"""
-		query: String,
-		"""
-		Exact names to fetch; unknown ones land in missing.
-		"""
-		exact: [String!],
+		filter: BlueprintFilter,
 		"""
 		Page size; capped by the server's page-size cap.
 		"""
 		first: Int! = 50,
 		"""
-		How many to skip, for the page after the first.
+		Cursor from the previous page's pageInfo.
 		"""
-		skip: Int! = 0
+		after: Cursor
 	): BlueprintConnection!
 	"""
 	How this server is configured, with every secret left out.
@@ -5063,14 +5212,14 @@ type Query {
 	"""
 	Keyset-paged run listing.
 	
-	`ids` fetches exact runs, which is also how a client reads one run:
-	`runs(ids: ["..."])`. An id that names nothing lands in `missing`
-	rather than failing the request, so one dead id in a batch of fifty
-	does not cost the other forty-nine.
+	`filter.ids` fetches exact runs, which is also how a client reads one
+	run: `runs(filter: { ids: ["..."] })`. An id that names nothing lands
+	in `missing` rather than failing the request, so one dead id in a batch
+	of fifty does not cost the other forty-nine.
 	"""
 	runs(
 		"""
-		Status, search, parentage and time filters.
+		Which runs to list. Omitted means all of them.
 		"""
 		filter: RunFilter,
 		"""
@@ -5080,11 +5229,7 @@ type Query {
 		"""
 		Cursor from the previous page's pageInfo.
 		"""
-		after: Cursor,
-		"""
-		Exact ids to fetch; unknown ones land in missing.
-		"""
-		ids: [String!]
+		after: Cursor
 	): RunConnection!
 	"""
 	Check a manifest without installing it.
@@ -6388,19 +6533,129 @@ enum RunEventType {
 }
 
 """
-Which runs a listing is about: status, search, parentage and time, in one
-place.
+Which runs a listing is about.
+
+Every field set has to hold, so a filter object is an `and` of its own
+fields. `and`, `or` and `not` take filters of this same type, so a client
+composes whatever predicate it needs rather than waiting for a field that
+spells it.
+
+`query`, `queryIn`, `sort` and `ascending` describe the listing rather than
+a run, so they are read from the filter a request passes and refused inside
+a combinator, where there is no one listing for them to describe.
 """
 input RunFilter {
+	"""
+	Every one of these has to match.
+	"""
+	and: [RunFilter!]
+	"""
+	At least one of these has to match. An empty list matches no run, which
+	is what an alternation with no alternatives selects.
+	"""
+	or: [RunFilter!]
+	"""
+	This must not match.
+	"""
+	not: RunFilter
+	"""
+	Exactly these runs, by id.
+	
+	Passed on the filter a request makes rather than inside a combinator,
+	this also says which runs to read: the listing fetches them by id and
+	reports the ones it cannot find in `missing`, instead of walking the
+	store. Everything else in the filter still applies to what comes back.
+	"""
+	ids: [ID!]
 	"""
 	Only runs in this status.
 	"""
 	status: RunStatus
 	"""
-	Runs in any of these statuses. Prefer this over one request per status
-	when a client wants "everything active" as a single predicate.
+	Runs in any of these statuses. Set beside `status`, the two name one
+	set and a run in any of them matches.
 	"""
 	statusIn: [RunStatus!]
+	"""
+	The run's human title, absent until the titling pass lands one. A run
+	with no title yet matches nothing here.
+	"""
+	title: StringFilter
+	"""
+	The initial ask the run was given.
+	"""
+	task: StringFilter
+	"""
+	The blueprint name the run recorded.
+	"""
+	blueprintName: StringFilter
+	"""
+	Only runs of this installed blueprint, matched on the name each run
+	recorded.
+	
+	A `digest` on it pins the revision installed now, and the request fails
+	where that is something else: runs are matched by name whatever is
+	installed, so the pin is how a client asking "this agent's runs" finds
+	out the agent has been edited under it.
+	"""
+	blueprint: BlueprintInput
+	"""
+	Whether the run was spawned unattended.
+	"""
+	unattended: BooleanFilter
+	"""
+	The yolo profile the run named at spawn. A run that named none matches
+	nothing here.
+	"""
+	yoloProfileName: StringFilter
+	"""
+	Why a parked run is parked. A run that is not parked matches nothing
+	here.
+	"""
+	waitReason: WaitReasonKind
+	"""
+	Runs parked for any of these reasons. Set beside `waitReason`, the two
+	name one set.
+	"""
+	waitReasonIn: [WaitReasonKind!]
+	"""
+	When the run was spawned, in unix epoch seconds.
+	"""
+	startedAt: TimestampFilter
+	"""
+	When the run last changed state, in unix epoch seconds.
+	"""
+	updatedAt: TimestampFilter
+	"""
+	Wall-clock seconds since the run started. "Older than an hour" is
+	`{ gt: 3600 }`.
+	"""
+	ageSecs: IntFilter
+	"""
+	Seconds the run spent actually working, parked time excluded.
+	"""
+	workingSecs: IntFilter
+	"""
+	What the run has spent, in US dollars. A run whose spend is unknown
+	because some call in it went unpriced matches nothing here.
+	"""
+	costUsd: DecimalFilter
+	"""
+	Which part of the run tree to include.
+	"""
+	scope: RunScope
+	"""
+	Direct children of this run id. A run id naming nothing gives an empty
+	page rather than an error: a run with no children yet is a normal
+	answer.
+	"""
+	parent: ID
+	"""
+	Every run under this one, at any depth, and not the run itself. The
+	flat read of a fan-out: nesting `children` walks one level per request,
+	and this walks the whole subtree one page at a time.
+	"""
+	descendantOf: ID
 	"""
 	Case-insensitive substring. No regex, no boolean operators.
 	"""
@@ -6409,42 +6664,6 @@ input RunFilter {
 	Where to look. Defaults to metadata and files, which are free.
 	"""
 	queryIn: [SearchScope!]
-	"""
-	Direct children of this run id. A run id naming nothing gives an empty
-	page rather than an error: a run with no children yet is a normal
-	answer.
-	"""
-	parent: String
-	"""
-	Only runs nobody started, when true.
-	"""
-	topLevelOnly: Boolean
-	"""
-	Only runs somebody started, at any depth, when true. The mirror of
-	`topLevelOnly`, and what a "workers only" view asks for.
-	"""
-	subAgentsOnly: Boolean
-	"""
-	Every run under this one, at any depth, and not the run itself. The flat
-	read of a fan-out: nesting `children` walks one level per request, and
-	this walks the whole subtree in one page at a time.
-	"""
-	descendantOf: String
-	"""
-	Only runs of this blueprint, matched on the name each run recorded. A
-	name nothing matches gives an empty page rather than an error.
-	
-	A `digest` on it pins the revision installed now, and the request fails
-	where that is something else: runs are matched by name whatever is
-	installed, so the pin is how a client asking "this agent's runs" finds out
-	the agent has been edited under it.
-	"""
-	blueprint: BlueprintInput
-	"""
-	Inclusive lower bound on the sort value. Pass the previous page's
-	`serverTime` to poll for what changed.
-	"""
-	since: Timestamp
 	"""
 	Newest spawns or most recently active first.
 	"""
@@ -6557,6 +6776,27 @@ type RunRenamed {
 	The new title.
 	"""
 	title: String!
+}
+
+"""
+Which part of the run tree a listing is about.
+
+One three-way choice, because a run either was started by another run or
+was not. `ALL` is every run on the machine, sub-agents included.
+"""
+enum RunScope {
+	"""
+	Every run, sub-agents included.
+	"""
+	ALL
+	"""
+	Only runs nobody started.
+	"""
+	TOP_LEVEL
+	"""
+	Only runs somebody started, at any depth.
+	"""
+	SUB_AGENTS
 }
 
 """
@@ -8040,6 +8280,44 @@ type StageVisit {
 }
 
 """
+Text comparisons on one field.
+
+`eq`, `ne`, `in` and `notIn` compare the whole string exactly, case
+included. `contains`, `startsWith` and `endsWith` ignore ASCII case, as the
+run search does. Every field set here has to hold.
+"""
+input StringFilter {
+	"""
+	Exactly this string.
+	"""
+	eq: String
+	"""
+	Anything but this string.
+	"""
+	ne: String
+	"""
+	Exactly one of these strings.
+	"""
+	in: [String!]
+	"""
+	None of these strings.
+	"""
+	notIn: [String!]
+	"""
+	Holds this substring, ignoring ASCII case.
+	"""
+	contains: String
+	"""
+	Begins with this, ignoring ASCII case.
+	"""
+	startsWith: String
+	"""
+	Ends with this, ignoring ASCII case.
+	"""
+	endsWith: String
+}
+
+"""
 What arms a `STUCK` edge.
 
 At least one threshold is always set: an edge with none could never fire, so
@@ -8223,6 +8501,48 @@ Unix epoch seconds, as the daemon stores them. No string dates, so no
 timezone maths over a number that never had a timezone.
 """
 scalar Timestamp
+
+"""
+Comparisons on one timestamp field, in unix epoch seconds.
+
+"Started before this", "touched since that" and every window between.
+Every field set here has to hold, so `gte` and `lt` together are a
+half-open window.
+"""
+input TimestampFilter {
+	"""
+	Exactly this second.
+	"""
+	eq: Timestamp
+	"""
+	Anything but this second.
+	"""
+	ne: Timestamp
+	"""
+	Exactly one of these seconds.
+	"""
+	in: [Timestamp!]
+	"""
+	None of these seconds.
+	"""
+	notIn: [Timestamp!]
+	"""
+	Strictly before this second.
+	"""
+	lt: Timestamp
+	"""
+	At or before this second.
+	"""
+	lte: Timestamp
+	"""
+	Strictly after this second.
+	"""
+	gt: Timestamp
+	"""
+	At or after this second.
+	"""
+	gte: Timestamp
+}
 
 """
 Arguments for the `todo_add` tool.

@@ -95,27 +95,42 @@ pub(crate) struct WaitReason {
     pub(crate) needs_a_person: bool,
 }
 
+impl WaitReasonKind {
+    /// The kind behind one of the daemon's own reasons.
+    ///
+    /// Separate from the whole-reason conversion below because the run filter
+    /// matches on the kind alone, and one exhaustive match is what keeps the
+    /// two vocabularies from drifting.
+    pub(crate) fn of(reason: &leviath_core::run_meta::WaitReason) -> Self {
+        use leviath_core::run_meta::WaitReason as Core;
+        match reason {
+            Core::ToolApproval => Self::ToolApproval,
+            Core::UserPrompt => Self::UserPrompt,
+            Core::TaintGate => Self::TaintGate,
+            Core::InteractionPoint => Self::InteractionPoint,
+            Core::FanOutWorkers { .. } => Self::FanOutWorkers,
+            Core::Children { .. } => Self::Children,
+            Core::NeedsSetup { .. } => Self::NeedsSetup,
+        }
+    }
+}
+
 impl From<&leviath_core::run_meta::WaitReason> for WaitReason {
     fn from(reason: &leviath_core::run_meta::WaitReason) -> Self {
         use leviath_core::run_meta::WaitReason as Core;
-        let needs_a_person = reason.needs_a_person();
+        let plain = Self::plain(WaitReasonKind::of(reason), reason.needs_a_person());
         match reason {
-            Core::ToolApproval => Self::plain(WaitReasonKind::ToolApproval, needs_a_person),
-            Core::UserPrompt => Self::plain(WaitReasonKind::UserPrompt, needs_a_person),
-            Core::TaintGate => Self::plain(WaitReasonKind::TaintGate, needs_a_person),
-            Core::InteractionPoint => Self::plain(WaitReasonKind::InteractionPoint, needs_a_person),
-            Core::FanOutWorkers { outstanding } => Self {
+            Core::ToolApproval | Core::UserPrompt | Core::TaintGate | Core::InteractionPoint => {
+                plain
+            }
+            Core::FanOutWorkers { outstanding } | Core::Children { outstanding } => Self {
                 outstanding: Some(i32::try_from(*outstanding).unwrap_or(i32::MAX)),
-                ..Self::plain(WaitReasonKind::FanOutWorkers, needs_a_person)
-            },
-            Core::Children { outstanding } => Self {
-                outstanding: Some(i32::try_from(*outstanding).unwrap_or(i32::MAX)),
-                ..Self::plain(WaitReasonKind::Children, needs_a_person)
+                ..plain
             },
             Core::NeedsSetup { blocker, remedy } => Self {
                 blocker: Some(blocker.into()),
                 remedy: Some(remedy.clone()),
-                ..Self::plain(WaitReasonKind::NeedsSetup, needs_a_person)
+                ..plain
             },
         }
     }

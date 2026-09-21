@@ -63,7 +63,7 @@ impl ScalarType for BigInt {
 }
 
 /// An exact decimal. The schema description is on the impl below.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub(crate) struct Decimal(pub(crate) f64);
 
 /// An exact decimal, serialized as a JSON string. Money is never a `Float` on

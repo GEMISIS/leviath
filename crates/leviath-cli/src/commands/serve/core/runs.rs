@@ -13,7 +13,7 @@
 //! per live run rather than a parse of every run on the machine.
 //! [`MAX_SEARCH_SCAN`] bounds the half of search that reads files.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::super::cursor::{self, Cursor, CursorKey};
@@ -22,7 +22,9 @@ use super::super::types::{AppState, Highlight, status_matches};
 use crate::runstate::{self, RunMeta};
 
 pub(crate) mod matching;
+pub(crate) mod predicate;
 use matching::*;
+use predicate::{MatchContext, RunPredicate};
 
 /// Largest page size served. A larger `limit` is clamped rather than refused: a
 /// client asking for 1000 wants as much as it can get, and the real value is
@@ -243,6 +245,9 @@ pub(crate) struct RunSpec {
     pub(crate) parent: ParentFilter,
     /// Only runs of this blueprint, by recorded name.
     pub(crate) blueprint: Option<String>,
+    /// A composable predicate the surface built, consulted per run beside the
+    /// filters above.
+    pub(crate) predicate: Option<Arc<dyn RunPredicate>>,
     pub(crate) digest: String,
 }
 
@@ -335,6 +340,79 @@ pub(crate) struct RunListing {
     pub(crate) server_time: i64,
 }
 
+/// The descendants of every run a predicate asks about, walked once.
+///
+/// Empty for a listing with no predicate, which is every REST one: an absent
+/// filter walks no trees.
+fn subtrees_in(
+    spec: &RunSpec,
+    snapshot: &super::super::run_index::RunSnapshot,
+) -> HashMap<String, HashSet<String>> {
+    let mut roots = Vec::new();
+    if let Some(ref predicate) = spec.predicate {
+        predicate.subtree_roots(&mut roots);
+    }
+    roots
+        .into_iter()
+        .map(|root| {
+            let under = snapshot.descendants_of(&root);
+            (root, under)
+        })
+        .collect()
+}
+
+/// Read exactly the runs a batch fetch names.
+///
+/// Unpaged and in the order the ids were given: the caller already said which
+/// runs it wants and how many, so there is nothing left for a sort or a cursor
+/// to decide. Ids that name no run on this machine are reported rather than
+/// thrown, so one dead id costs a client nothing else in the batch. A
+/// predicate still applies, which is what makes "these ids, and only the ones
+/// that failed" a single request.
+async fn by_ids(state: &AppState, spec: &RunSpec, ids: &[String], server_time: i64) -> RunListing {
+    let mut found: Vec<Arc<RunMeta>> = Vec::new();
+    let mut missing = Vec::new();
+    for id in ids {
+        match runstate::read_meta(id) {
+            Ok(meta) => found.push(Arc::new(meta)),
+            Err(_) => missing.push(id.clone()),
+        }
+    }
+    if let Some(ref predicate) = spec.predicate {
+        // The index is read only for a predicate that asks about a subtree,
+        // which a batch fetch rarely does and a REST one never can.
+        let mut roots = Vec::new();
+        predicate.subtree_roots(&mut roots);
+        let subtrees = match roots.is_empty() {
+            true => HashMap::new(),
+            false => {
+                let snapshot = state.caches.run_index.snapshot().await;
+                subtrees_in(spec, &snapshot)
+            }
+        };
+        let ctx = MatchContext {
+            now: server_time,
+            subtrees,
+        };
+        found.retain(|meta| predicate.matches(meta, &ctx));
+    }
+    let total = found.len();
+    RunListing {
+        hits: found
+            .into_iter()
+            .map(|meta| RunHit {
+                meta,
+                highlights: Vec::new(),
+            })
+            .collect(),
+        next_cursor: None,
+        total: Some(total),
+        scan_truncated: false,
+        missing,
+        server_time,
+    }
+}
+
 /// Answer a listing request.
 ///
 /// A batch fetch by id reads exactly the runs it names. Everything else walks
@@ -346,26 +424,7 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
     let server_time = leviath_core::duration::now_secs();
 
     if let Some(ref ids) = spec.ids {
-        let mut hits = Vec::new();
-        let mut missing = Vec::new();
-        for id in ids {
-            match runstate::read_meta(id) {
-                Ok(meta) => hits.push(RunHit {
-                    meta: Arc::new(meta),
-                    highlights: Vec::new(),
-                }),
-                Err(_) => missing.push(id.clone()),
-            }
-        }
-        let total = hits.len();
-        return RunListing {
-            hits,
-            next_cursor: None,
-            total: Some(total),
-            scan_truncated: false,
-            missing,
-            server_time,
-        };
+        return by_ids(state, spec, ids, server_time).await;
     }
 
     let snapshot = state.caches.run_index.snapshot().await;
@@ -375,10 +434,17 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
         ParentFilter::Under(root) => snapshot.descendants_of(root),
         _ => HashSet::new(),
     };
+    let ctx = MatchContext {
+        now: server_time,
+        subtrees: subtrees_in(spec, &snapshot),
+    };
     let mut runs = snapshot.into_runs();
     // Before the sort and before `total`, like every other filter here, so the
     // count describes what was asked for rather than what is on the machine.
     runs.retain(|meta| spec.parent.keeps_in(meta, &descendants));
+    if let Some(ref predicate) = spec.predicate {
+        runs.retain(|meta| predicate.matches(meta, &ctx));
+    }
     if let Some(ref blueprint) = spec.blueprint {
         runs.retain(|meta| &meta.agent_name == blueprint);
     }
@@ -468,6 +534,11 @@ pub(crate) struct RunSelection {
     pub(crate) since: Option<i64>,
     /// Which runs the listing is about.
     pub(crate) parent: ParentFilter,
+    /// A composable predicate, for a surface that builds one.
+    ///
+    /// `GET /api/runs` leaves it absent and filters with the fields above;
+    /// GraphQL's `runs` field puts its whole filter tree here.
+    pub(crate) predicate: Option<Arc<dyn RunPredicate>>,
 }
 
 impl RunSelection {
@@ -502,6 +573,12 @@ impl RunSelection {
         if let Some(ref blueprint) = self.blueprint {
             parts.push(format!("blueprint:{blueprint}"));
         }
+        // Appended only when there is one, for the same reason: a surface that
+        // builds no predicate digests exactly as it would without this, so a
+        // cursor either surface minted resumes on the other.
+        if let Some(ref predicate) = self.predicate {
+            parts.push(format!("predicate:{}", predicate.digest_part()));
+        }
         let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
         let digest = cursor::filter_digest(&refs);
 
@@ -527,6 +604,7 @@ impl RunSelection {
             since: self.since,
             parent: self.parent,
             blueprint: self.blueprint,
+            predicate: self.predicate,
             digest,
         })
     }

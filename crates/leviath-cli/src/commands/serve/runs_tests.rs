@@ -728,6 +728,59 @@ async fn the_handler_pages_and_reports_a_total_and_a_server_time() {
     .await;
 }
 
+/// `descendant_of=` reads a whole subtree, at any depth, and not the run
+/// itself.
+///
+/// The one filter that cannot be decided from a single record: a grandchild
+/// names its parent and not its ancestor, so the handler walks the index's own
+/// parent map once before it filters.
+#[tokio::test]
+async fn the_handler_reads_a_whole_subtree() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-subtree", |_d| async move {
+        create_run(&meta_at("root", 100)).unwrap();
+        let mut worker = meta_at("worker", 200);
+        worker.parent_run_id = Some("root".to_string());
+        create_run(&worker).unwrap();
+        let mut grandchild = meta_at("grandchild", 300);
+        grandchild.parent_run_id = Some("worker".to_string());
+        create_run(&grandchild).unwrap();
+        create_run(&meta_at("stranger", 400)).unwrap();
+
+        let page = page_of(&[("descendant_of", "root")]).await;
+        let mut ids = item_ids(&page);
+        ids.sort();
+        assert_eq!(ids, vec!["grandchild".to_string(), "worker".to_string()]);
+        assert_eq!(page.total, Some(2), "the count describes the subtree");
+    })
+    .await;
+}
+
+/// `blueprint=` keeps only the runs of that blueprint, by the name each run
+/// recorded.
+///
+/// A name nothing matches is an empty page rather than an error: a blueprint
+/// with no runs yet is an ordinary answer.
+#[tokio::test]
+async fn the_handler_keeps_one_blueprints_runs() {
+    crate::runstate::with_isolated_runs_dir_async("runs-handler-blueprint", |_d| async move {
+        let mut coded = meta_at("run-coder", 100);
+        coded.agent_name = "coder".to_string();
+        create_run(&coded).unwrap();
+        let mut wrote = meta_at("run-writer", 200);
+        wrote.agent_name = "writer".to_string();
+        create_run(&wrote).unwrap();
+
+        let page = page_of(&[("blueprint", "coder")]).await;
+        assert_eq!(item_ids(&page), vec!["run-coder".to_string()]);
+        assert_eq!(page.total, Some(1));
+
+        let none = page_of(&[("blueprint", "nobody")]).await;
+        assert!(none.items.is_empty());
+        assert_eq!(none.total, Some(0));
+    })
+    .await;
+}
+
 /// Every run this API serves carries the two computed spans, and they are
 /// projectable like any other key.
 ///
