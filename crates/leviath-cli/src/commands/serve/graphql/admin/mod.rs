@@ -10,14 +10,40 @@
 //! invisible to introspection without the flag, so a client cannot discover it,
 //! and the guard refuses it during execution, so a client that knows the name
 //! anyway gets `FORBIDDEN` rather than the act.
+//!
+//! One file per concern: [`config`] for the one write onto the daemon's own
+//! config, [`mcp`] for an MCP server's config entry, [`mime`] for the mime
+//! registry, [`scripts`] for a registered script, [`yolo`] for the profiles
+//! file, [`providers`] for subscription sign-in and endpoint probing, and
+//! [`system`] for the acts that touch the machine itself: updates, live
+//! diagnostics, and making a directory. `AdminMutation` stays one
+//! `#[Object] impl` with one field per method, for the same reason `Query`
+//! does: this schema's field order does not sort into those seven groups, so
+//! `MergedObject` cannot reproduce it, and each method here is a one-line
+//! delegation into its group's module instead.
 
-use async_graphql::{Context, Guard, Object, SimpleObject};
+use async_graphql::{Context, Guard, Object};
 
-use super::super::types::AppState;
-use super::config_input::ConfigInput;
+use super::config_input::{ConfigInput, EnvEntryInput};
+use super::error::graphql_error;
+use super::types::machine::{Config, DoctorReport, YoloProfiles};
+use super::types::update::UpdateJob;
 
 use super::super::core::error::ServeError;
-use super::error::{IntoGraphql, graphql_error};
+
+pub(crate) mod config;
+pub(crate) mod mcp;
+pub(crate) mod mime;
+pub(crate) mod providers;
+pub(crate) mod scripts;
+pub(crate) mod system;
+pub(crate) mod yolo;
+
+use mcp::McpLoginStatus;
+use mime::{MimeRowInput, MimeRowWritten};
+use providers::SignInStarted;
+use scripts::ScriptWritten;
+use system::MadeDirectory;
 
 /// Whether this server was started with `--allow-admin`.
 ///
@@ -51,15 +77,6 @@ impl Guard for AdminGuard {
     }
 }
 
-/// What writing a mime row did.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct MimeRowWritten {
-    /// The row's key.
-    pub(crate) mime_type: String,
-    /// True when the row is new, false when an existing one was updated.
-    pub(crate) created: bool,
-}
-
 /// The acts that change the machine.
 ///
 /// Merged into the mutation root, so these read as ordinary mutations to a
@@ -84,21 +101,9 @@ impl AdminMutation {
         #[graphql(desc = "Headers sent with every request to an HTTP server. An \
                     `Authorization` header here is a credential, so the server \
                     needs no separate sign-in.")]
-        headers: Option<Vec<super::config_input::EnvEntryInput>>,
+        headers: Option<Vec<EnvEntryInput>>,
     ) -> async_graphql::Result<bool> {
-        super::super::mcp::install_server(
-            name,
-            command,
-            url,
-            args.unwrap_or_default(),
-            headers
-                .unwrap_or_default()
-                .into_iter()
-                .map(|entry| (entry.name, entry.value))
-                .collect(),
-        )
-        .gql()?;
-        Ok(true)
+        mcp::add_mcp_server(name, command, url, args, headers).await
     }
 
     /// Remove an MCP server from the config.
@@ -107,8 +112,7 @@ impl AdminMutation {
         &self,
         #[graphql(desc = "The server to remove.")] name: String,
     ) -> async_graphql::Result<bool> {
-        super::super::mcp::uninstall_server(&name).gql()?;
-        Ok(true)
+        mcp::remove_mcp_server(name).await
     }
 
     /// Add or update one row of the mime registry.
@@ -121,27 +125,7 @@ impl AdminMutation {
         &self,
         #[graphql(desc = "The row to write.")] row: MimeRowInput,
     ) -> async_graphql::Result<MimeRowWritten> {
-        let tokens = match row.tokens {
-            None => None,
-            Some(rates) => Some(rates.into_spec().gql()?),
-        };
-        let written = super::super::mime::write_edit(
-            &row.mime_type,
-            crate::commands::mime_rows::RowEdit {
-                family: row.family,
-                text: row.is_text,
-                tokens,
-                extensions: row.extensions,
-                magic: row.magic,
-                stand_in: row.stand_in,
-                check: row.check,
-            },
-        )
-        .gql()?;
-        Ok(MimeRowWritten {
-            mime_type: written.mime_type,
-            created: written.created,
-        })
+        mime::put_mime_row(row).await
     }
 
     /// Remove a row from the mime registry.
@@ -153,7 +137,7 @@ impl AdminMutation {
         &self,
         #[graphql(desc = "The row to remove.")] mime_type: String,
     ) -> async_graphql::Result<bool> {
-        super::super::mime::remove_row_named(&mime_type).gql()
+        mime::delete_mime_row(mime_type).await
     }
 
     /// Change the machine's config.
@@ -168,22 +152,8 @@ impl AdminMutation {
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "What to change.")] input: ConfigInput,
-    ) -> async_graphql::Result<super::types::machine::Config> {
-        let state = ctx.data_unchecked::<AppState>();
-        let written = super::super::core::config::write(input.into_request()).gql()?;
-        // The models a settings page asks for next are the new config's, so the
-        // catalogue starts on them now rather than when that request arrives.
-        state
-            .caches
-            .model_catalog
-            .request_refresh(state.current_config(), true);
-        Ok(super::query::config_of(
-            &written,
-            &state.limits.request_limits,
-            &state.config.health(),
-            // True by construction: this mutation is behind the guard.
-            true,
-        ))
+    ) -> async_graphql::Result<Config> {
+        config::update_config(ctx, input).await
     }
 
     /// Write a Rhai script.
@@ -207,20 +177,7 @@ impl AdminMutation {
         )]
         blueprint: Option<String>,
     ) -> async_graphql::Result<ScriptWritten> {
-        let state = ctx.data_unchecked::<AppState>();
-        let written = super::super::scripts::write_one(
-            &state.current_config(),
-            &kind,
-            &name,
-            blueprint.as_deref(),
-            &content,
-        )
-        .gql()?;
-        Ok(ScriptWritten {
-            path: written.path,
-            compiles: written.compiles,
-            error: written.error,
-        })
+        scripts::put_script(ctx, kind, name, content, blueprint).await
     }
 
     /// Remove a script.
@@ -232,15 +189,7 @@ impl AdminMutation {
         #[graphql(desc = "The script to remove.")] name: String,
         #[graphql(desc = "The blueprint whose directory it is in.")] blueprint: Option<String>,
     ) -> async_graphql::Result<bool> {
-        let state = ctx.data_unchecked::<AppState>();
-        super::super::scripts::remove_one(
-            &state.current_config(),
-            &kind,
-            &name,
-            blueprint.as_deref(),
-        )
-        .gql()?;
-        Ok(true)
+        scripts::delete_script(ctx, kind, name, blueprint).await
     }
 
     /// Run the diagnostics that reach the network.
@@ -250,13 +199,8 @@ impl AdminMutation {
     /// costs a few seconds and is why it is a mutation rather than a field: it is
     /// an act with a cost, and one runs at a time.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn run_doctor_live(
-        &self,
-        ctx: &Context<'_>,
-    ) -> async_graphql::Result<super::types::machine::DoctorReport> {
-        let state = ctx.data_unchecked::<AppState>();
-        let checks = super::super::doctor::live_checks(state).await.gql()?;
-        Ok(super::query::doctor_report(checks))
+    async fn run_doctor_live(&self, ctx: &Context<'_>) -> async_graphql::Result<DoctorReport> {
+        system::run_doctor_live(ctx).await
     }
 
     /// Make one directory, so a picker can offer "New Folder" rather than one
@@ -272,12 +216,7 @@ impl AdminMutation {
         #[graphql(desc = "The existing directory to make it in, absolute.")] path: String,
         #[graphql(desc = "One directory name, not a path.")] name: String,
     ) -> async_graphql::Result<MadeDirectory> {
-        let state = ctx.data_unchecked::<AppState>();
-        let made = super::super::fs::made(state, &path, &name).gql()?;
-        Ok(MadeDirectory {
-            path: made.path,
-            parent: made.parent,
-        })
+        system::make_directory(ctx, path, name).await
     }
 
     /// Start a self-update, and hand back the job.
@@ -299,26 +238,8 @@ impl AdminMutation {
         )]
         keys: bool,
         #[graphql(desc = "Apply the config migrations.", default = true)] migrations: bool,
-    ) -> async_graphql::Result<super::types::update::UpdateJob> {
-        let state = ctx.data_unchecked::<AppState>();
-        // The REST route spells this part of the plan `agents`, and the record
-        // the job writes carries that word, so the field keeps it while the
-        // argument reads in the vocabulary the rest of this schema uses.
-        let request = super::super::update_job::ApplyRequest {
-            binary,
-            agents: blueprints,
-            keys,
-            migrations,
-        };
-        // The record the registry wrote, rather than an id read back from it:
-        // what a client sees now is the same record `updateJob` will answer
-        // with in a moment, and there is no absent case to invent an answer for.
-        let job = state
-            .update_jobs
-            .spawn(request, &state.event_tx)
-            .map_err(|running| ServeError::Conflict(format!("update {running} is already running")))
-            .gql()?;
-        Ok(super::types::update::UpdateJob::from(job))
+    ) -> async_graphql::Result<UpdateJob> {
+        system::start_update(ctx, binary, blueprints, keys, migrations).await
     }
 
     /// Sign in to a subscription provider.
@@ -336,16 +257,7 @@ impl AdminMutation {
         ctx: &Context<'_>,
         #[graphql(desc = "The provider, by name.")] provider: String,
     ) -> async_graphql::Result<SignInStarted> {
-        let state = ctx.data_unchecked::<AppState>();
-        let name = super::super::providers::canonical(&provider).gql()?;
-        let started = super::super::providers::sign_in_started(state, name)
-            .await
-            .gql()?;
-        Ok(SignInStarted {
-            provider: started.provider,
-            authorize_url: started.authorize_url,
-            already_waiting: started.already_waiting,
-        })
+        providers::provider_sign_in(ctx, provider).await
     }
 
     /// Forget a provider's stored sign-in.
@@ -358,12 +270,7 @@ impl AdminMutation {
         ctx: &Context<'_>,
         #[graphql(desc = "The provider, by name.")] provider: String,
     ) -> async_graphql::Result<bool> {
-        let state = ctx.data_unchecked::<AppState>();
-        let name = super::super::providers::canonical(&provider).gql()?;
-        super::super::providers::signed_out(state, name)
-            .await
-            .gql()?;
-        Ok(true)
+        providers::provider_sign_out(ctx, provider).await
     }
 
     /// Ask a provider whether the stored sign-in works.
@@ -377,9 +284,7 @@ impl AdminMutation {
         ctx: &Context<'_>,
         #[graphql(desc = "The provider, by name.")] provider: String,
     ) -> async_graphql::Result<Vec<String>> {
-        let state = ctx.data_unchecked::<AppState>();
-        let name = super::super::providers::canonical(&provider).gql()?;
-        super::super::providers::checked(state, name).await.gql()
+        providers::check_provider(ctx, provider).await
     }
 
     /// Connect to an MCP server and list what it advertises.
@@ -392,8 +297,7 @@ impl AdminMutation {
         ctx: &Context<'_>,
         #[graphql(desc = "The server, by name.")] name: String,
     ) -> async_graphql::Result<Vec<String>> {
-        let state = ctx.data_unchecked::<AppState>();
-        super::super::mcp::tools_of(state, &name).await.gql()
+        mcp::test_mcp_server(ctx, name).await
     }
 
     /// Sign in to an MCP server that wants OAuth.
@@ -407,9 +311,7 @@ impl AdminMutation {
         ctx: &Context<'_>,
         #[graphql(desc = "The server, by name.")] name: String,
     ) -> async_graphql::Result<McpLoginStatus> {
-        let state = ctx.data_unchecked::<AppState>();
-        let status = super::super::mcp::signed_in(state, &name).await.gql()?;
-        Ok(McpLoginStatus::from(status))
+        mcp::login_mcp_server(ctx, name).await
     }
 
     /// Ask an OpenAI-compatible endpoint what models it serves.
@@ -426,25 +328,9 @@ impl AdminMutation {
                     dropped: never written to the config, and this server logs no \
                     request body, so it reaches nothing on disk.")]
         api_key: Option<String>,
-        #[graphql(desc = "Extra headers the request carries.")] headers: Option<
-            Vec<super::config_input::EnvEntryInput>,
-        >,
+        #[graphql(desc = "Extra headers the request carries.")] headers: Option<Vec<EnvEntryInput>>,
     ) -> async_graphql::Result<Vec<String>> {
-        super::super::config::probed(
-            super::super::config_types::ProbeModelsReq {
-                base_url,
-                api_key,
-                headers: headers.map(|headers| {
-                    headers
-                        .into_iter()
-                        .map(|entry| (entry.name, entry.value))
-                        .collect()
-                }),
-            },
-            &leviath_providers::provider::build_http_client,
-        )
-        .await
-        .gql()
+        providers::probe_models(base_url, api_key, headers).await
     }
 
     /// Replace the yolo profiles file.
@@ -458,125 +344,16 @@ impl AdminMutation {
     async fn put_yolo_profiles(
         &self,
         #[graphql(desc = "The whole file, as TOML.")] text: String,
-    ) -> async_graphql::Result<super::types::machine::YoloProfiles> {
-        super::super::yolo::write_profiles(&text).gql()?;
-        Ok(super::query::yolo_profiles())
+    ) -> async_graphql::Result<YoloProfiles> {
+        yolo::put_yolo_profiles(text).await
     }
 }
 
-/// One row of the mime registry, as a write sends it.
-#[derive(async_graphql::InputObject)]
-pub(crate) struct MimeRowInput {
-    /// The type or pattern this row covers: `image/png`, or `image/*`.
-    pub(crate) mime_type: String,
-    /// The family providers key their encoders on.
-    pub(crate) family: Option<String>,
-    /// Whether the bytes are text, and so may travel inline.
-    pub(crate) is_text: Option<bool>,
-    /// Extensions that imply this type, without the dot.
-    pub(crate) extensions: Option<Vec<String>>,
-    /// A hex prefix that identifies the bytes.
-    pub(crate) magic: Option<String>,
-    /// What a consumer that cannot take the type sees in the part's place.
-    pub(crate) stand_in: Option<String>,
-    /// A script the bytes must pass to be stored as this type. An empty string
-    /// lifts a check a broader row put on the type.
-    pub(crate) check: Option<String>,
-    /// How the tokens are counted.
-    pub(crate) tokens: Option<MimeTokensInput>,
-}
-
-/// How the tokens of a mime type are counted. Name exactly one rate.
-#[derive(async_graphql::InputObject)]
-pub(crate) struct MimeTokensInput {
-    /// Tokens per byte of the stored file.
-    pub(crate) per_byte: Option<f64>,
-    /// Pixels one token buys. Pair it with `max`.
-    pub(crate) per_pixel: Option<i32>,
-    /// The most one part may cost, and the answer when the dimensions are
-    /// unknown. Only with `perPixel`.
-    pub(crate) max: Option<i32>,
-    /// Tokens per second of audio or video.
-    pub(crate) per_second: Option<i32>,
-    /// Tokens per page of a document.
-    pub(crate) per_page: Option<i32>,
-    /// A flat charge, whatever the size.
-    pub(crate) fixed: Option<i32>,
-}
-
-impl MimeTokensInput {
-    /// The rule these rates describe, or why they describe none.
-    ///
-    /// Through the same reader the REST route uses, so "exactly one rate" means
-    /// the same thing on both surfaces.
-    fn into_spec(self) -> Result<crate::commands::mime_rows::TokenSpec, ServeError> {
-        super::super::mime::TokenRuleReq {
-            per_byte: self.per_byte,
-            per_pixel: self.per_pixel.map(i64::from),
-            per_second: self.per_second.map(i64::from),
-            per_page: self.per_page.map(i64::from),
-            fixed: self.fixed.map(i64::from),
-            max: self.max.map(i64::from),
-        }
-        .into_spec()
-        .map_err(ServeError::BadRequest)
-    }
-}
-
-/// What writing a script did.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct ScriptWritten {
-    /// Where it was written.
-    pub(crate) path: String,
-    /// Whether it compiles. A script that does not is still written: an editor
-    /// saves work in progress, and the run is what refuses to use it.
-    pub(crate) compiles: bool,
-    /// Why it does not compile, when it does not.
-    pub(crate) error: Option<String>,
-}
-
-/// A directory that was made.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct MadeDirectory {
-    /// The new directory.
-    pub(crate) path: String,
-    /// The directory it was made in.
-    pub(crate) parent: String,
-}
+// Re-exported for the tests below, which build these inputs and read this
+// status directly rather than through a query document.
+#[cfg(test)]
+use mime::MimeTokensInput;
 
 #[cfg(test)]
-#[path = "admin_tests.rs"]
+#[path = "tests.rs"]
 mod tests;
-
-/// A provider sign-in that is waiting for the person to finish it.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct SignInStarted {
-    /// The provider, by its canonical name.
-    pub(crate) provider: String,
-    /// Where the person has to go, on the serving host.
-    pub(crate) authorize_url: String,
-    /// Whether this is the sign-in somebody already started rather than a new
-    /// one. The URL is the same either way, which is what a client needs.
-    pub(crate) already_waiting: bool,
-}
-
-/// What signing in to an MCP server ended as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
-pub(crate) enum McpLoginStatus {
-    /// A grant was obtained and stored.
-    Authenticated,
-    /// The server wants no OAuth, so there was nothing to store. A success: the
-    /// question was whether a sign-in was needed.
-    NotRequired,
-}
-impl From<super::super::mcp::LoginStatus> for McpLoginStatus {
-    /// Its own impl rather than a match inside the resolver: reaching that
-    /// resolver means completing an OAuth handshake against a real server, and
-    /// the mapping is worth checking without one.
-    fn from(status: super::super::mcp::LoginStatus) -> Self {
-        match status {
-            super::super::mcp::LoginStatus::Authenticated => Self::Authenticated,
-            super::super::mcp::LoginStatus::NotRequired => Self::NotRequired,
-        }
-    }
-}

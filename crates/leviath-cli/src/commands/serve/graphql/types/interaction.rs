@@ -11,10 +11,92 @@ use async_graphql::{Enum, Object, SimpleObject};
 use leviath_core::run_archive::InteractionRecord;
 
 use super::super::error::IntoGraphql;
-use super::super::events::InteractionKind;
 use super::super::scalars::{Cursor, Timestamp};
 use crate::commands::serve::blocking::blocking;
 use crate::commands::serve::core::interactions;
+
+/// What kind of answer a parked run is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub(crate) enum InteractionKind {
+    /// The person writes anything.
+    FreeText,
+    /// The person picks from options.
+    MultipleChoice,
+    /// The person confirms or denies.
+    Confirm,
+    /// The person approves or denies a tool call.
+    ToolApproval,
+    /// The person edits a document directly.
+    EditText,
+}
+
+impl From<&leviath_core::interaction::InteractionKind> for InteractionKind {
+    fn from(kind: &leviath_core::interaction::InteractionKind) -> Self {
+        use leviath_core::interaction::InteractionKind as Core;
+        match kind {
+            Core::FreeText => Self::FreeText,
+            Core::MultipleChoice => Self::MultipleChoice,
+            Core::Confirm => Self::Confirm,
+            Core::ToolApproval => Self::ToolApproval,
+            Core::EditText => Self::EditText,
+        }
+    }
+}
+
+/// One pending ask, parked on a run.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct InteractionRequest {
+    /// The request's id, which is what an answer names.
+    pub(crate) id: String,
+    /// What kind of answer it takes.
+    pub(crate) kind: InteractionKind,
+    /// What the person is asked.
+    pub(crate) prompt: String,
+    /// A longer document shown alongside the prompt, such as a plan to review.
+    pub(crate) body: Option<String>,
+    /// The choices, for a multiple-choice ask.
+    pub(crate) options: Vec<String>,
+    /// The call awaiting approval, for an approval ask: the tool and the
+    /// arguments it would run with, paired and typed.
+    ///
+    /// Null for every other kind of ask. An approval that names a tool whose
+    /// arguments do not fit its shape comes through untyped rather than tidied:
+    /// deciding whether to approve a call means seeing what it actually says.
+    // Boxed because a typed call is as large as the largest tool's arguments,
+    // and every live frame would otherwise carry that much room for one it
+    // almost never holds. An implementation detail, so not part of the
+    // description a client reads.
+    pub(crate) tool_call: Option<Box<super::tool_calls::ToolCall>>,
+    /// The stage the run is in.
+    pub(crate) stage_name: String,
+    /// Whether the run holds until this is answered.
+    pub(crate) required: bool,
+}
+
+impl From<leviath_core::interaction::InteractionRequest> for InteractionRequest {
+    fn from(request: leviath_core::interaction::InteractionRequest) -> Self {
+        Self {
+            id: request.id,
+            kind: (&request.kind).into(),
+            prompt: request.prompt,
+            body: request.body,
+            options: request.options,
+            tool_call: request.tool_name.map(|tool| {
+                Box::new(super::tool_calls::from_value(
+                    &tool,
+                    None,
+                    // A request that names a tool and no arguments is a call with
+                    // none, which is what an empty object says.
+                    request
+                        .tool_arguments
+                        .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
+                ))
+            }),
+            stage_name: request.stage_name,
+            required: request.required,
+        }
+    }
+}
 
 /// How far an approval that settled an ask reached.
 ///
