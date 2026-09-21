@@ -727,14 +727,19 @@ impl Run {
         super::execution::page(self.meta.run_id.clone(), first, after).await
     }
 
-    /// Every question this run put to a person, in the order it asked them,
-    /// paged.
+    /// Every question this run put to a person and got an outcome for, in the
+    /// order it asked them, paged.
     ///
     /// The only record that this run stopped for somebody. `executions` says
     /// what the run tried; this says what it needed a person for, and what
     /// came back - including a scope that only ever lived here, since a
     /// granted approval reads no differently from a call no policy ever
     /// stopped once the tool has read it.
+    ///
+    /// A question is written down when it settles, so one the run is parked on
+    /// right now is not here yet: `interaction` carries that one while it is
+    /// open. A run reading as `WAITING_INPUT` with nothing on its last page has
+    /// asked something nobody has answered, rather than asked nothing.
     ///
     /// Empty for an unattended run, which asks nobody: `--yolo` answers before
     /// the question reaches a person, so an empty list on a run that plainly

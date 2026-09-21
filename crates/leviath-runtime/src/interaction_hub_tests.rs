@@ -454,7 +454,7 @@ fn a_deny_with_feedback_survives_the_wire_and_the_journal() {
 
 // ─── The record of what a person answered ─────────────────────────────────────
 
-/// Every way a request can end is recorded, and the three are told apart.
+/// Each way a request settles is recorded, and the three are told apart.
 ///
 /// They have to be: an answer, a request nobody answered in time, and one
 /// withdrawn when the run was cancelled all hand the waiting caller the same
