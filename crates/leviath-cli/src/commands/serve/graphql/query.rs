@@ -20,13 +20,13 @@ use super::checks::{
 };
 use super::connection::{Highlight, PageInfo, RunConnection, RunEdge};
 use super::error::IntoGraphql;
+use super::node::Node;
 use super::scalars::{BigInt, Cursor, Timestamp};
 use super::types::blueprint::Blueprint;
 use super::types::catalog::{Model, Provider, SkippedTool, Tool, ToolGroup, ToolInventory};
 use super::types::machine::{
-    Config, ConfigError, Directory, DoctorCheck, DoctorReport, Gateway, McpAuth, McpServer,
-    McpServerTransport, MimeRow, Script, ServeLimits, YoloHuman, YoloProfile, YoloProfiles,
-    YoloWaiver,
+    Config, ConfigError, Directory, DoctorCheck, DoctorReport, Gateway, McpServer, MimeRow, Script,
+    ServeLimits, YoloHuman, YoloProfile, YoloProfiles, YoloWaiver,
 };
 use super::types::run::{Run, RunStatus};
 use super::types::update::{DaemonStatus, UpdateInfo, UpdateJob};
@@ -411,13 +411,7 @@ impl Query {
         Ok(super::super::mcp::server_infos(state)
             .gql()?
             .into_iter()
-            .map(|server| McpServer {
-                name: server.name,
-                transport: McpServerTransport::from_wire(&server.transport),
-                endpoint: server.endpoint,
-                config_error: server.config_error,
-                auth: McpAuth::from_wire(&server.auth),
-            })
+            .map(McpServer::from_info)
             .collect())
     }
 
@@ -453,12 +447,7 @@ impl Query {
             super::super::scripts::registered(state, blueprint.as_deref())
                 .gql()?
                 .into_iter()
-                .map(|script| Script {
-                    kind: script.kind,
-                    name: script.name,
-                    found_at: script.source,
-                    blueprint: script.agent,
-                })
+                .map(Script::from_item)
                 .collect(),
         )
     }
@@ -596,6 +585,35 @@ impl Query {
             super::super::config_types::API_VERSION,
             &state.update_check.peek(),
         )
+    }
+
+    /// Anything with a globally unique id, from that id alone.
+    ///
+    /// For a client that holds an id and no type: a webhook payload, a cache
+    /// key, a link somebody pasted. Ask for the fields on `Node` and narrow
+    /// with `... on Run { }` for the rest.
+    ///
+    /// How an id routes, in order. An id tagged `mcpServer:`, `yoloProfile:` or
+    /// `script:` names that kind of thing; a tag this server does not know
+    /// answers null. An id carrying an `@` is a blueprint revision. Anything
+    /// else is a minted id, and the two job registries are asked before the run
+    /// store, which is the only one of the three that reads a file.
+    ///
+    /// Null rather than an error for an id that names nothing: a deleted run, an
+    /// expired export and a typo are the same answer, and all three mean the
+    /// thing is not here. A read that could not answer the question at all, such
+    /// as a config file that will not parse, fails the way the listing it would
+    /// have come from fails.
+    ///
+    /// `Model` is not a `Node`, because a model id is the provider's own and two
+    /// providers can serve the same one; read `models` and key on provider and
+    /// id together.
+    async fn node(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The id, as whatever holds it spelled it.")] id: async_graphql::ID,
+    ) -> async_graphql::Result<Option<Node>> {
+        super::node::resolve(ctx, id.as_str()).await
     }
 
     /// One update run, by id.
@@ -863,6 +881,7 @@ pub(crate) fn yolo_profiles() -> YoloProfiles {
             .profiles
             .into_iter()
             .map(|profile| YoloProfile {
+                id: super::node::yolo_profile_id(&profile.name),
                 name: profile.name,
                 default: waiver_word(profile.default),
                 questions: human_word(profile.questions),
@@ -976,8 +995,11 @@ fn count(value: usize) -> i32 {
 /// An export job, as a client polls it.
 #[derive(async_graphql::SimpleObject)]
 pub(crate) struct BulkExport {
-    /// The job's id.
-    pub(crate) id: String,
+    /// The job's id, which `bulkExport` and `node` both take. Unique to this
+    /// server: the jobs live in memory, so nothing answers to it after a
+    /// restart.
+    #[graphql(owned)]
+    pub(crate) id: async_graphql::ID,
     /// Where it has got to: `queued`, `running`, `complete` or `failed`.
     pub(crate) status: String,
     /// How many runs have been written.
@@ -994,7 +1016,7 @@ impl BulkExport {
     pub(crate) fn from_job(state: &AppState, job: &super::super::core::export::ExportJob) -> Self {
         let complete = job.status == super::super::core::export::ExportStatus::Complete;
         Self {
-            id: job.id.clone(),
+            id: async_graphql::ID(job.id.clone()),
             status: job.status.wire().to_string(),
             written: count(job.written),
             error: job.error.clone(),

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use async_graphql::{Context, Enum, Object, SimpleObject};
+use async_graphql::{Context, Enum, ID, Object, SimpleObject};
 
 use super::super::super::blocking::blocking;
 use super::super::super::core::blueprints;
@@ -144,9 +144,9 @@ pub(crate) struct Run {
 
 #[Object]
 impl Run {
-    /// Globally unique run id.
-    async fn id(&self) -> &str {
-        &self.meta.run_id
+    /// Globally unique run id, and the id every REST route names this run by.
+    pub(crate) async fn id(&self) -> ID {
+        ID(self.meta.run_id.clone())
     }
 
     /// The name of the blueprint this run was spawned from.
@@ -449,6 +449,9 @@ impl Run {
     /// neither reads more than `tail` bytes from the end of each stream. The cap
     /// is the server's, because `allStages` multiplies whatever the client asks
     /// for by the stage count.
+    ///
+    /// Empty is not null: a stage that has written nothing, an index no stage
+    /// answers to and a file this server cannot read all read as no text.
     async fn logs(
         &self,
         #[graphql(desc = "One stage by index; omitted means the stage the run is on now.")]
@@ -578,6 +581,9 @@ impl Run {
     /// The byte route verifies the signature, so this works in an `<img src>` or
     /// a download link, where a header cannot be set. It is good for a few
     /// minutes and for that one path.
+    ///
+    /// Minted without resolving the path, so a file this run never wrote is a
+    /// 404 from the byte route rather than nothing here.
     async fn file_url(
         &self,
         ctx: &Context<'_>,
@@ -850,9 +856,10 @@ impl Run {
 
     /// A short-lived signed link to one stored part's bytes.
     ///
-    /// The same kind of link `fileUrl` mints. `blobs` carries one per part
-    /// already; this is for asking about a hash a client already holds, and for
-    /// the download form of a part it is showing inline.
+    /// The same kind of link `fileUrl` mints, and minted without asking the
+    /// store whether the hash is held. `blobs` carries one per part already and
+    /// nulls it for bytes that are gone; this is for a hash a client holds, and
+    /// for the download form of a part it is showing inline.
     async fn blob_url(
         &self,
         ctx: &Context<'_>,
@@ -869,6 +876,9 @@ impl Run {
     }
 
     /// A short-lived signed link to one artifact's bytes.
+    ///
+    /// Minted without reading what the run produced, so an unknown name is a
+    /// 404 from the byte route rather than nothing here.
     async fn artifact_url(
         &self,
         ctx: &Context<'_>,
@@ -915,6 +925,10 @@ impl Run {
     }
 
     /// Caller-supplied metadata from spawn. Values are always strings.
+    ///
+    /// Labels for whoever started the run, such as a ticket or a tenant. They
+    /// are searched by `filter.query` and read back unchanged, and nothing in
+    /// the run reads them: not a typed extension point.
     ///
     /// Sorted by key: the daemon keeps these in a hash map, and a listing
     /// whose order changes between two identical requests is a diff nobody

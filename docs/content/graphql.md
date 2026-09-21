@@ -242,6 +242,57 @@ edit removed, and a stage may name a tool this machine does not have, so those
 stay names: resolving them would drop them, and a gate that quietly disappears
 reads as a gate nobody wrote.
 
+## Anything by its id
+
+Some things arrive as an id with no type attached: a run id in a webhook payload, a cache key, a
+link somebody pasted into a ticket. `node` takes that id on its own and hands back whatever it
+names.
+
+```graphql
+{
+  node(id: "coder-1788924523-abc123") {
+    id
+    ... on Run { title status ageSecs }
+    ... on Blueprint { name version source }
+    ... on UpdateJob { status }
+  }
+}
+```
+
+Everything that implements `Node` promises one thing: the id is unique across the whole API, so no
+two nodes anywhere share one. That is what lets `node` work out the type for you, and what makes an
+id safe to use as a cache key. Seven types make that promise.
+
+| Type | Its id | Example |
+|---|---|---|
+| `Run` | The run id, the same one every REST route takes | `coder-1788924523-abc123` |
+| `Blueprint` | `<name>@<digest prefix>`, one id per revision | `coder@3f9a1c0d8e77` |
+| `Script` | `script:<kind>:<name>`, with `@<blueprint>` on the kind for one blueprint's own | `script:tool@coder:summarise` |
+| `McpServer` | `mcpServer:<name>` | `mcpServer:docs` |
+| `YoloProfile` | `yoloProfile:<name>` | `yoloProfile:careful` |
+| `UpdateJob` | The job id `startUpdate` handed back | `update-1788924523-1` |
+| `BulkExport` | The job id `bulkExportRuns` handed back | `export-1788924523-0` |
+
+A name on its own is never an id here. A server, a profile and a script are each unique only within
+their own kind, so their ids carry the kind as a tag, and a script's carries the blueprint it belongs
+to as well. The two job ids belong to the server that minted them, which keeps its jobs in memory, so
+nothing answers to them after a restart.
+
+`Model` is deliberately not a `Node`. A model id is the provider's own, and two providers can both
+serve `gpt-5.5` and bill to different places, so `openai` and `codex` would answer to one id. Read
+`models` and key on the provider and the id together.
+
+An id that names nothing answers `null` rather than an error. A deleted run, an export that expired
+past its hour, a blueprint revision this machine no longer has installed and a typo are the same
+answer, and all four mean the same thing: it is not here. A tagged id whose tag this server does not
+know answers `null` too, so a client written against a newer build degrades rather than breaking.
+What does fail is a read that could not answer at all, such as a config file that will not parse,
+and it fails the way the listing it would have come from fails.
+
+One thing `node` does not do is reach inside a run. A blueprint revision only a run's own frozen
+copy carries is read through that run, and so is an interaction request, whose id is what an answer
+names rather than something unique across the fleet.
+
 ## Bytes
 
 Bytes never ride a query answer. A run's parts and artifacts come back as

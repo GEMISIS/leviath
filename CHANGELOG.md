@@ -34,6 +34,19 @@ same list.
   from context regions to places in the request, because assembly keeps none and
   an inferred one would not be evidence.
 
+- `node(id:)` over GraphQL fetches anything with a globally unique id from that
+  id alone: a run, one revision of a blueprint, a registered script, a
+  configured MCP server, a yolo profile, an update job or an export. Each of the
+  seven implements the new `Node` interface, so an id that arrived with no type
+  attached, from a webhook payload or a pasted link, is one request rather than a
+  guess at which field to ask. The three that are keyed by a name carry the kind
+  in the id (`mcpServer:docs`, `yoloProfile:careful`, `script:tool@coder:redact`)
+  and a script's carries the blueprint it belongs to, because a name alone is
+  unique only within its own kind. An id that names nothing answers null rather
+  than failing: a deleted run, an expired export and a typo are the same answer.
+  `Model` is deliberately not a `Node`, because a model id is the provider's own
+  and two providers can both serve `gpt-5.5`.
+
 - The journal records why a context window changed, not only what it then held.
   Every write that can name its cause records one beside the snapshot: a region
   seeded at spawn or on stage entry, a message delivered into the run, the
@@ -260,6 +273,26 @@ same list.
   untouched, on every one of those frames included: it is that handle, and
   nothing else names it. The REST routes, their JSON and the `/ws` frames are
   unchanged, `agent_status` and its siblings included.
+
+- The `id` field on `Run`, `Blueprint`, `UpdateJob` and `BulkExport` is `ID!`
+  rather than `String!`, which is what implementing `Node` takes. The value is
+  the same string it always was, so nothing on the wire moves; a generated
+  client sees the id type it would see for any other id.
+
+- `submit_output`'s recorded `artifacts` are typed. The tool takes a bare path or
+  an object with a name and a type, and each entry now comes back as whichever of
+  the two the model wrote, rather than as raw JSON a client had to sniff. A
+  fan-out item's `context` stays raw JSON, and its description says why: the shape
+  is a contract between one blueprint's own stages.
+
+- Descriptions on the GraphQL fields where what they leave out mattered. `logs`
+  says that empty covers a stage that has written nothing and a stage that is not
+  there. `fileUrl`, `blobUrl` and `artifactUrl` say they mint a link without
+  looking for what it names, so a 404 comes from following it. `probeModels` says
+  what becomes of the key it is handed. A region seed's tool arguments say why
+  they have no fixed shape. `metadata` says it is for a caller's own labels rather
+  than a typed extension point, and the spawn input's `yolo` and `noSeedCommands`
+  each say that null is `false` rather than a third state.
 
 - `Tool` is an interface over `BuiltinTool`, `SubagentTool` and `ScriptTool`. A
   script always has a file and a built-in never does, so the file, the owning

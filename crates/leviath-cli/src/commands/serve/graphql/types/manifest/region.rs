@@ -122,9 +122,15 @@ impl From<leviath_core::layout::SeedRefresh> for SeedRefresh {
 /// One tool call a seed makes.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedToolCall {
-    /// The tool to call, by the name the manifest used.
+    /// The tool to call, by the name the manifest used, so an MCP tool keeps
+    /// its `<server>__<tool>` qualification.
     pub(crate) tool: String,
     /// Its arguments, as the manifest wrote them.
+    ///
+    /// Raw JSON, and not because nothing has typed it yet: a seed may name any
+    /// tool this machine can offer, including an MCP tool and a script tool, so
+    /// the shape is whatever that one tool's schema is. `tools` carries the
+    /// schema a name resolves to. Empty for the many tools that take none.
     pub(crate) args: Json,
 }
 

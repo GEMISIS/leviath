@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use async_graphql::{Enum, Object, SimpleObject};
+use async_graphql::{Enum, ID, Object, SimpleObject};
 
 use super::super::super::core::blueprints::BlueprintSource as CoreSource;
 use super::manifest::count;
@@ -33,6 +33,15 @@ use leviath_core::Blueprint as CoreBlueprint;
 /// colliding is not a thing that happens, and short enough to read in a log
 /// line or a URL.
 const ID_DIGEST_CHARS: usize = 12;
+
+/// The id one blueprint revision answers to: `<name>@<digest prefix>`.
+///
+/// One place mints it, so the id a listing hands out and the id `node` looks
+/// up cannot drift apart on how much of the digest they carry.
+pub(crate) fn revision_id(name: &str, digest: &str) -> ID {
+    let short: String = digest.chars().take(ID_DIGEST_CHARS).collect();
+    ID(format!("{name}@{short}"))
+}
 
 /// Where a blueprint was read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
@@ -412,9 +421,11 @@ impl Blueprint {
     /// The digest is part of the identity on purpose. A run's frozen copy and
     /// the installed blueprint share a name and may differ in every other way,
     /// and a client that caches by type and id would otherwise merge the two.
-    async fn id(&self) -> String {
-        let short: String = self.digest.chars().take(ID_DIGEST_CHARS).collect();
-        format!("{}@{short}", self.parsed.name)
+    ///
+    /// `node` answers with the installed revision. A revision only a run
+    /// carries is read through that run, so its id answers with nothing there.
+    pub(crate) async fn id(&self) -> ID {
+        revision_id(&self.parsed.name, &self.digest)
     }
 
     /// Unique within the installed set.

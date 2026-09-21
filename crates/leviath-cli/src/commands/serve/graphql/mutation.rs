@@ -54,6 +54,9 @@ pub(crate) struct SpawnRunInput {
     pub(crate) workdir: Option<String>,
     /// Run unattended: approvals resolve without a person. Refused outright on
     /// a server started with `--no-remote-yolo`.
+    ///
+    /// Null is `false`, not a third state: the run asks a person. Only
+    /// `yoloProfile` says which prompts are waived rather than all of them.
     pub(crate) yolo: Option<bool>,
     /// A named yolo profile, which is a kind of yolo and refused with it.
     pub(crate) yolo_profile: Option<String>,
@@ -61,6 +64,8 @@ pub(crate) struct SpawnRunInput {
     pub(crate) allow: Option<Vec<String>>,
     /// Refuse this blueprint's command seeds, which run before any approval
     /// prompt exists.
+    ///
+    /// Null is `false`, not a third state: the seeds the blueprint declares run.
     pub(crate) no_seed_commands: Option<bool>,
     /// Write this run's exact requests into its journal, once per provider
     /// attempt, whatever this machine is configured to do for other runs.
@@ -73,7 +78,10 @@ pub(crate) struct SpawnRunInput {
     pub(crate) capture_model_input: Option<bool>,
     /// Seed text for named context regions.
     pub(crate) regions: Option<Vec<RegionSeedInput>>,
-    /// Caller-supplied metadata. Values are always strings.
+    /// Caller-supplied metadata: labels for whoever started the run, such as a
+    /// ticket or a tenant. Values are always strings, the run reads none of
+    /// them, and `filter.query` searches them. Not a typed extension point. A
+    /// key given twice keeps the last value.
     pub(crate) metadata: Option<Vec<MetadataEntryInput>>,
     /// The output format label to ask the run for.
     pub(crate) output_format: Option<String>,

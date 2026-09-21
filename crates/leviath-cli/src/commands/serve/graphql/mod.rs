@@ -35,6 +35,7 @@ mod connection;
 mod error;
 mod events;
 mod mutation;
+mod node;
 mod query;
 mod scalars;
 mod subscription;

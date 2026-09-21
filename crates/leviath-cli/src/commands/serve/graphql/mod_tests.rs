@@ -23,8 +23,12 @@ fn the_sdl_carries_the_documentation() {
     let sdl = sdl();
     assert!(sdl.contains("type Run "), "the run type is exposed");
     assert!(
-        sdl.contains("Globally unique run id."),
+        sdl.contains("Globally unique run id"),
         "field descriptions travel"
+    );
+    assert!(
+        sdl.contains("type Run implements Node"),
+        "a run is fetchable from its id alone"
     );
     assert!(
         sdl.contains("scalar Timestamp") && sdl.contains("scalar Decimal"),
