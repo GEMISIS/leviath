@@ -1290,6 +1290,7 @@ async fn a_panicking_inference_job_reports_an_error_instead_of_vanishing() {
 fn agent_state() -> AgentState {
     AgentState {
         agent_id: "a".to_string(),
+        current_visit: String::new(),
         current_stage: "s".to_string(),
         iteration: 0,
         status: AgentStatus::Active,
@@ -1344,6 +1345,7 @@ fn collect_applies_ok_and_advances_to_process_response() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -1376,6 +1378,7 @@ fn collect_holds_a_success_that_lands_on_a_paused_agent() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
     })
@@ -1423,6 +1426,7 @@ fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::RequestFailed(
             "reading response body: error decoding response body".to_string(),
         )),
@@ -1464,6 +1468,7 @@ fn collect_choice_parks_without_a_stage_log_to_write_to() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::labelled(
             leviath_providers::FailureKind::ConnectionRefused,
             "sending the request",
@@ -1521,6 +1526,7 @@ fn collect_parks_a_run_whose_provider_is_unreachable() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::RequestFailed(
             "reading response body: error decoding response body".to_string(),
         )),
@@ -1581,6 +1587,7 @@ fn a_run_with_no_stage_log_still_parks_on_an_unreachable_provider() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::RequestFailed(
             "reading response body: error decoding response body".to_string(),
         )),
@@ -1604,6 +1611,7 @@ fn collect_marks_error_on_failure() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
     })
@@ -1661,6 +1669,7 @@ fn an_unusable_provider_fails_over_instead_of_killing_the_run() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
     })
@@ -1701,6 +1710,7 @@ fn failover_is_recorded_in_the_stage_log() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
     })
@@ -1736,6 +1746,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
         // Reached, and classified, so the record carries a kind as well as a
         // reason: a run that failed over because the socket went quiet is not
         // the same story as one whose account ran out of credits.
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::RequestFailed(
             "[timeout] the provider went quiet".to_string(),
         )),
@@ -1781,6 +1792,7 @@ fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
     })
@@ -1820,6 +1832,7 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
     })
@@ -1875,6 +1888,7 @@ fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
     })
@@ -1913,6 +1927,7 @@ fn a_credits_pause_records_the_remedy_on_the_run() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
     })
@@ -1942,6 +1957,7 @@ fn the_credits_pause_copes_without_a_stage_log_buffer() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
     })
@@ -1968,6 +1984,7 @@ fn an_exhausted_fallback_list_still_terminates_on_a_dead_key() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Unavailable {
             reason: leviath_providers::UnavailableReason::AuthFailed,
             detail: "HTTP 401 Unauthorized".to_string(),
@@ -1997,6 +2014,7 @@ fn an_ordinary_error_does_not_burn_a_fallback() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::ApiError(
             "HTTP 400: bad request".to_string(),
         )),
@@ -2032,6 +2050,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
         tx.send(InferenceOutcome {
             latency: std::time::Duration::ZERO,
             entity: e,
+            attempt_id: String::new(),
             result: Err(credits_exhausted()),
             pricing: None,
         })
@@ -2052,6 +2071,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
     })
@@ -2098,6 +2118,7 @@ fn a_success_between_failures_clears_the_count_end_to_end() {
         tx.send(InferenceOutcome {
             latency: std::time::Duration::ZERO,
             entity: e,
+            attempt_id: String::new(),
             result,
             pricing: None,
         })
@@ -2160,6 +2181,7 @@ fn a_slow_provider_keeps_its_place_where_a_refused_one_loses_it() {
             tx.send(InferenceOutcome {
                 latency: std::time::Duration::ZERO,
                 entity: e,
+                attempt_id: String::new(),
                 result: Err(fail_with(label)),
                 pricing: None,
             })
@@ -2203,6 +2225,7 @@ fn an_ordinary_error_does_not_count_against_the_provider() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::ApiError(
             "HTTP 400: bad request".to_string(),
         )),
@@ -2230,6 +2253,7 @@ fn collect_works_without_the_breaker_installed() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
     })
@@ -2254,6 +2278,7 @@ fn an_unusable_provider_without_a_stage_component_still_terminates() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Unavailable {
             reason: leviath_providers::UnavailableReason::AuthFailed,
             detail: "HTTP 401 Unauthorized".to_string(),
@@ -2495,6 +2520,7 @@ fn collect_inference_logs_a_produced_part_the_run_dropped() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -2543,6 +2569,7 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -2779,6 +2806,7 @@ fn collect_does_not_learn_the_cost_of_the_bytes_a_request_sent() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -2806,6 +2834,7 @@ fn collect_learns_the_drift_between_what_was_believed_and_what_was_charged() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -2840,6 +2869,7 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -2870,6 +2900,7 @@ fn collect_learns_from_a_refused_request_too() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::TokenLimitExceeded {
             used: 1_300,
             reply_budget: 100,
@@ -2899,6 +2930,7 @@ fn collect_calibrates_nothing_when_there_was_no_estimate() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -3014,6 +3046,7 @@ fn collect_inference_drops_a_response_for_a_cancelled_run() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("too late")),
         pricing: None,
     })
@@ -3048,6 +3081,7 @@ fn collect_inference_skips_empty_output_but_logs_tokens() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("   ")), // whitespace-only ⇒ no output line
         pricing: None,
     })
@@ -3074,6 +3108,7 @@ fn collect_inference_error_buffers_error_line() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
     })
@@ -3100,6 +3135,7 @@ fn collect_inference_tolerates_cursor_beyond_ledger() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
     })
@@ -3928,7 +3964,7 @@ fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
 
-    let job = snapshot_job(prx.try_recv().expect("persist job"));
+    let job = next_snapshot(&mut prx);
     let (idx, json) = job.taint_audit.expect("taint audit persisted");
     assert_eq!(idx, 1);
     assert!(json.contains("shell"));
@@ -3960,7 +3996,7 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
     s.add_systems(dispatch_tools);
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
-    let first = snapshot_job(prx.try_recv().expect("first job"));
+    let first = next_snapshot(&mut prx);
     assert!(first.taint_audit.is_some(), "first write carries the audit");
 
     // Force a heartbeat snapshot with no new gate events: the audit rides
@@ -4013,7 +4049,7 @@ fn dispatch_persistence_resends_the_taint_audit_on_the_terminal_snapshot() {
     run_dispatch_persistence(&mut world);
     // This is the snapshot the lane would coalesce away: it carried the audit,
     // and it advanced the watermark past it.
-    let coalesced = snapshot_job(prx.try_recv().expect("first job"));
+    let coalesced = next_snapshot(&mut prx);
     assert!(coalesced.taint_audit.is_some());
 
     // The run finishes with no further gate events.
@@ -4449,6 +4485,7 @@ fn collect_drops_outcome_for_non_awaiting_agent() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
     })
@@ -4483,6 +4520,7 @@ fn collect_inference_accumulates_token_totals() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(r),
         pricing: None,
     })
@@ -4513,6 +4551,7 @@ fn infer_result(with_tools: bool) -> (StageInference, crate::components::Inferen
 fn infer_result_only(with_tools: bool) -> crate::components::InferenceResult {
     crate::components::InferenceResult {
         parts: Vec::new(),
+        attempt_id: String::new(),
         response: "r".to_string(),
         tool_calls: if with_tools {
             vec![crate::components::ToolCall {
@@ -4592,6 +4631,7 @@ fn process_response_counts_edits_by_path() {
     let e = world
         .spawn((
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: "r".to_string(),
                 tool_calls: vec![
                     call("edit_file", Some("where.py")),
@@ -4716,8 +4756,12 @@ fn a_reply_and_the_nudge_answering_it_record_different_causes() {
 
     let mut moved = Vec::new();
     while let Ok(crate::persistence_bridge::PersistMsg::Append { record, .. }) = rx.try_recv() {
-        if let leviath_core::run_archive::RunRecord::ContextChange { region, cause, .. } = *record {
-            moved.push((region, cause));
+        if let leviath_core::run_archive::RunRecord::ContextTransaction { regions, cause, .. } =
+            *record
+        {
+            for region in regions {
+                moved.push((region.region, cause));
+            }
         }
     }
     assert_eq!(
@@ -5829,22 +5873,150 @@ async fn dispatch_journals_the_batch_then_each_completion() {
     assert_eq!(result, "ran read_file");
 }
 
+/// The files a submission produced are journaled against the execution that
+/// produced them, one record per execution.
+///
+/// `output.json` keeps only the latest answer's files and says nothing about
+/// which call made any of them, so a submission a later one replaces leaves no
+/// trace there. This record is what keeps it attributable.
+#[test]
+fn produced_files_are_journaled_against_the_call_that_made_them() {
+    let (ptx, mut prx) = mpsc::unbounded_channel();
+    let stage = PersistenceStage(ptx);
+    let made = |name: &str| leviath_core::output::Artifact {
+        name: name.to_string(),
+        path: format!("out/{name}"),
+        mime_type: leviath_core::mime::MimeType::parse("text/plain").expect("a type"),
+        size: 12,
+        sha256: "abc".to_string(),
+    };
+    super::tools::journal_artifacts(
+        &stage,
+        "run-a",
+        &[
+            ("x-one".to_string(), vec![made("report"), made("chart")]),
+            ("x-two".to_string(), vec![made("revision")]),
+        ],
+    );
+
+    let mut produced = Vec::new();
+    while let Ok(PersistMsg::Append { run_id, record, .. }) = prx.try_recv() {
+        assert_eq!(run_id, "run-a");
+        if let leviath_core::run_archive::RunRecord::ArtifactsProduced {
+            execution_id,
+            artifacts,
+            ..
+        } = *record
+        {
+            produced.push((
+                execution_id,
+                artifacts.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+            ));
+        }
+    }
+    assert_eq!(
+        produced,
+        vec![
+            (
+                "x-one".to_string(),
+                vec!["report".to_string(), "chart".to_string()]
+            ),
+            ("x-two".to_string(), vec!["revision".to_string()]),
+        ]
+    );
+    // Nothing produced is nothing written: a run whose answer named no file has
+    // no artifact records rather than an empty one.
+    super::tools::journal_artifacts(&stage, "run-a", &[]);
+    assert!(prx.try_recv().is_err());
+}
+
+/// A dispatched batch records the stay it belongs to, the trip to the provider
+/// whose answer asked for it, and the execution that committed each context
+/// change.
+///
+/// None of the three is recoverable afterwards. A stage entered three times has
+/// one index; the attempt number restarts at every call and a failover means the
+/// answer came from a provider the previous attempt did not go to; and nothing in
+/// a change record says which call made it unless the dispatcher writes it down.
 #[tokio::test]
-async fn dispatch_all_inline_batch_is_not_journaled() {
-    // A batch the dispatcher fully resolves inline never reaches the lane; its
-    // results land in the window, which the snapshot path persists - a batch
-    // record would be pure noise.
-    //
-    // Deliberate, and worth stating why, because it looks like an omission:
-    // `restore_pending_batch` replays a journaled batch by landing its recorded
-    // results in the conversation, and it does *not* re-apply a context tool's
-    // write. Journaling this batch would mean a crash between the append and
-    // the next snapshot restores a turn saying `context_write: ok` over a
-    // region that never got the content - a silent divergence far worse than
-    // the missing record. Unjournaled, the batch is simply re-issued.
-    //
-    // The observability half of that gap is closed by the `[tool]` lines the
-    // test below asserts, which carry no recovery meaning at all.
+async fn a_dispatched_batch_records_what_it_belongs_to() {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let (ptx, mut prx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    world.insert_resource(PersistenceStage(ptx.clone()));
+    let stage = PersistenceStage(ptx);
+    let mut state = agent_state();
+    state.current_visit = "v-second-stay".to_string();
+    let (offers, mut result) = infer_with(vec![ctx_call("c1", "notes", "hi")]);
+    result.attempt_id = "a-the-one-that-answered".to_string();
+    let mut window = notes_window();
+    window.attach_journal("run-c", Some(&stage));
+    world.spawn((
+        state,
+        offers,
+        result,
+        window,
+        StageCursor { index: 0 },
+        run_metadata(),
+        ReadyForTools,
+    ));
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    let mut batch = None;
+    let mut committed = Vec::new();
+    while let Ok(PersistMsg::Append { record, .. }) = prx.try_recv() {
+        match *record {
+            leviath_core::run_archive::RunRecord::ToolBatch {
+                calls,
+                visit_id,
+                requested_by,
+                ..
+            } => batch = Some((calls, visit_id, requested_by)),
+            leviath_core::run_archive::RunRecord::ContextTransaction {
+                execution_id,
+                cause,
+                ..
+            } => committed.push((execution_id, cause)),
+            _ => {}
+        }
+    }
+    let (calls, visit_id, requested_by) = batch.expect("a batch record");
+    assert_eq!(visit_id, "v-second-stay");
+    assert_eq!(requested_by, "a-the-one-that-answered");
+    let execution = calls[0].execution_id.clone();
+    assert!(!execution.is_empty(), "the call was identified");
+    // The tool's own write names the call that made it. What the batch writes
+    // afterwards - the assistant turn, the routed result - names none, because
+    // those are the batch's work rather than any one call's, and an attribution
+    // wider than the call it belongs to would be a join nobody recorded.
+    assert_eq!(
+        committed,
+        vec![
+            (execution, leviath_core::ContextCause::ContextTool),
+            (String::new(), leviath_core::ContextCause::ModelReply),
+            (String::new(), leviath_core::ContextCause::ToolResult),
+        ]
+    );
+}
+
+/// A batch the dispatcher resolves entirely by itself is still journaled.
+///
+/// It never reaches the tool lane, and a run's executions have to be every call
+/// the model made rather than only the ones something ran asynchronously: a turn
+/// of nothing but `context_write` is a turn, and the transactions those writes
+/// commit name executions a reader must be able to find.
+///
+/// Safe because such a batch is not a *pending* batch. A replay lands recorded
+/// results in the conversation without redoing a context tool's write, so
+/// replaying one would restore a turn saying `context_write: ok` over a region
+/// that never got the content. `fold` refuses to make one pending for exactly
+/// that reason, and the batch is re-issued instead.
+#[tokio::test]
+async fn dispatch_journals_a_batch_it_resolved_itself() {
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
@@ -5865,8 +6037,22 @@ async fn dispatch_all_inline_batch_is_not_journaled() {
     s.add_systems(dispatch_tools);
     s.run(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
-    assert!(jrx.try_recv().is_err());
-    assert!(prx.try_recv().is_err(), "no batch record for inline-only");
+    assert!(jrx.try_recv().is_err(), "nothing went to the lane");
+    let PersistMsg::Append { record, .. } = prx.try_recv().expect("a batch record") else {
+        panic!("the dispatcher appends, it does not snapshot")
+    };
+    let leviath_core::run_archive::RunRecord::ToolBatch { calls, .. } = *record else {
+        panic!("a batch record")
+    };
+    assert_eq!(calls.len(), 1);
+    assert!(
+        calls[0].result.is_some(),
+        "answered at dispatch, so nothing is waiting on it"
+    );
+    assert!(
+        !calls[0].execution_id.is_empty(),
+        "the call the window's transaction names is in the journal"
+    );
 }
 
 /// A batch of only inline-resolved calls still says what it did.
@@ -6139,6 +6325,7 @@ fn infer_with(
     (
         offers,
         crate::components::InferenceResult {
+            attempt_id: String::new(),
             response: "r".to_string(),
             tool_calls: calls,
             tokens_used: 0,
@@ -6998,6 +7185,7 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
             agent_state(),
             offers,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: "r".to_string(),
                 tool_calls: vec![
                     submit_call("o1", r#"{"answer":"good"}"#),
@@ -7313,6 +7501,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
     let result = crate::components::InferenceResult {
+        attempt_id: String::new(),
         response: "r".to_string(),
         tool_calls: vec![
             fcall("c1", "read_file", serde_json::json!({"path": 42})),
@@ -7362,6 +7551,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
     let result = crate::components::InferenceResult {
+        attempt_id: String::new(),
         response: "r".to_string(),
         tool_calls: vec![fcall("c1", "typod", serde_json::json!({"whatever": true}))],
         tokens_used: 0,
@@ -7409,6 +7599,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         "required": ["command"]
     });
     let result = crate::components::InferenceResult {
+        attempt_id: String::new(),
         response: "r".to_string(),
         tool_calls: vec![fcall("c1", canonical, serde_json::json!({}))],
         tokens_used: 0,
@@ -7452,6 +7643,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
         "required": ["mode"]
     });
     let result = crate::components::InferenceResult {
+        attempt_id: String::new(),
         response: "r".to_string(),
         tool_calls: vec![
             fcall(
@@ -8513,6 +8705,7 @@ fn collect_tools_applies_and_loops_back_to_infer() {
         .spawn((
             ctx(&[("conversation", 10_000)]),
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: "r".to_string(),
                 tool_calls: vec![tc("c1", "read")],
                 tokens_used: 0,
@@ -9728,6 +9921,7 @@ fn collect_choice_errors_when_system_prompt_overflows() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
     })
@@ -13866,6 +14060,19 @@ fn snapshot_job(msg: PersistMsg) -> PersistJob {
     }
 }
 
+/// The first snapshot on the lane, stepping over the appends a dispatch leaves.
+///
+/// A test that runs `dispatch_tools` before persisting has the batch record and
+/// any change records ahead of the snapshot, and it is the snapshot it is about.
+fn next_snapshot(rx: &mut mpsc::UnboundedReceiver<PersistMsg>) -> PersistJob {
+    loop {
+        match rx.try_recv().expect("a snapshot on the lane") {
+            PersistMsg::Snapshot(job) => return *job,
+            PersistMsg::Append { .. } | PersistMsg::StageLines { .. } => continue,
+        }
+    }
+}
+
 fn run_dispatch_persistence(world: &mut World) {
     let mut s = Schedule::default();
     s.add_systems(dispatch_persistence);
@@ -14660,7 +14867,7 @@ fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
         leviath_core::run_meta::StageRecord::new("a".to_string(), 0),
         leviath_core::run_meta::StageRecord::new("b".to_string(), 1),
     ]);
-    ledger.0[0].begin_visit(100);
+    ledger.0[0].begin_visit(100, leviath_core::execution::mint_visit_id());
     world.entity_mut(e).insert(ledger);
 
     let mut response = resp("b");
@@ -14668,6 +14875,7 @@ fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: Some(leviath_providers::ModelPricing::flat(1_000_000.0, 0.0)),
     })
@@ -14704,12 +14912,13 @@ fn a_self_transition_starts_a_second_visit_of_the_same_stage() {
         "a".to_string(),
         0,
     )]);
-    ledger.0[0].begin_visit(100);
+    ledger.0[0].begin_visit(100, leviath_core::execution::mint_visit_id());
     world.entity_mut(e).insert(ledger);
 
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("a")),
         pricing: None,
     })
@@ -14745,6 +14954,7 @@ fn collect_choice_holds_an_outcome_that_lands_on_a_paused_agent() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
     })
@@ -14800,6 +15010,7 @@ fn collect_choice_parks_a_run_the_provider_could_not_be_reached_for() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::labelled(
             leviath_providers::FailureKind::Timeout,
             "sending the request",
@@ -14866,6 +15077,7 @@ fn collect_choice_still_fails_a_stage_on_an_error_nobody_can_resume_past() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::InvalidResponse(
             "not JSON".to_string(),
         )),
@@ -14898,6 +15110,7 @@ fn collect_choice_enters_chosen_stage() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
     })
@@ -14943,6 +15156,7 @@ fn a_routing_call_is_counted_against_the_run() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -14982,6 +15196,7 @@ fn collect_choice_does_not_resurrect_or_complete_a_cancelled_run() {
         tx.send(InferenceOutcome {
             latency: std::time::Duration::ZERO,
             entity: e,
+            attempt_id: String::new(),
             result: Ok(resp(choice)),
             pricing: None,
         })
@@ -15021,6 +15236,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
     })
@@ -15055,6 +15271,7 @@ fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("review")),
         pricing: None,
     })
@@ -15098,6 +15315,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
         tx.send(InferenceOutcome {
             latency: std::time::Duration::ZERO,
             entity,
+            attempt_id: String::new(),
             result: Ok(resp("review")),
             pricing: None,
         })
@@ -15126,6 +15344,7 @@ fn collect_choice_done_completes() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("DONE")),
         pricing: None,
     })
@@ -15151,6 +15370,7 @@ fn collect_choice_unknown_target_falls_back_to_first_stage() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("ghost")),
         pricing: None,
     })
@@ -15171,6 +15391,7 @@ fn collect_choice_marks_error_on_failure() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
     })
@@ -15194,6 +15415,7 @@ fn collect_choice_drops_stale_outcome() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: ghost,
+        attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
     })
@@ -15225,6 +15447,7 @@ fn collect_inference_records_activity_with_provider_and_latency() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::from_millis(1500),
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
     })
@@ -15263,6 +15486,7 @@ fn collect_inference_records_a_failed_call_without_stage_inference() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::from_millis(20),
         entity: e,
+        attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
     })
@@ -15295,6 +15519,7 @@ fn collect_tools_records_one_activity_per_call_with_error_detection() {
         .spawn((
             ctx(&[("conversation", 10_000)]),
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: "r".to_string(),
                 tool_calls: vec![tc("c1", "read_file"), tc("c2", "write_file")],
                 tokens_used: 0,
@@ -15467,6 +15692,7 @@ fn collect_choice_emits_a_stage_transition_event() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
     })
@@ -16769,6 +16995,7 @@ fn spawn_after(world: &mut World, src: &str) -> Entity {
             StageCursor { index: 0 },
             ProcessResponse,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: "the raw answer".to_string(),
                 tool_calls: vec![],
                 tokens_used: 7,
@@ -17043,6 +17270,7 @@ fn after_inference_sees_tool_call_names_but_cannot_change_them() {
             StageCursor { index: 0 },
             ProcessResponse,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: String::new(),
                 tool_calls: vec![crate::components::ToolCall {
                     tool_id: "c1".to_string(),
@@ -17085,6 +17313,7 @@ fn after_inference_skips_an_out_of_range_stage() {
             StageCursor { index: 99 },
             ProcessResponse,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: "x".to_string(),
                 tool_calls: vec![],
                 tokens_used: 0,
@@ -17116,6 +17345,7 @@ fn after_inference_skips_a_stage_that_declared_none() {
             StageCursor { index: 0 },
             ProcessResponse,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: "x".to_string(),
                 tool_calls: vec![],
                 tokens_used: 0,
@@ -17176,6 +17406,7 @@ fn spawn_tool_hooked(
             StageCursor { index: 0 },
             ReadyForTools,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: String::new(),
                 tool_calls: calls,
                 tokens_used: 0,
@@ -17263,6 +17494,7 @@ fn on_tool_call_cannot_mark_its_own_calls_approved() {
             StageCursor { index: 0 },
             ReadyForTools,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: String::new(),
                 tool_calls: vec![call("shell", serde_json::json!({"command": "ls"}))],
                 tokens_used: 0,
@@ -17465,6 +17697,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
             StageCursor { index: 99 },
             ReadyForTools,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: String::new(),
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
@@ -17489,6 +17722,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
             StageCursor { index: 0 },
             ReadyForTools,
             crate::components::InferenceResult {
+                attempt_id: String::new(),
                 response: String::new(),
                 tool_calls: vec![call("shell", serde_json::json!({}))],
                 tokens_used: 0,
@@ -19363,11 +19597,11 @@ fn to_inference_result_records_where_a_cut_off_reply_stopped() {
     response.tokens_used.completion_tokens = 23_050;
     response.finish_reason = leviath_providers::FinishReason::TokenLimit;
     assert_eq!(
-        to_inference_result(&response, Vec::new()).cut_off_at,
+        to_inference_result(&response, Vec::new(), "a1").cut_off_at,
         Some(23_050)
     );
     assert_eq!(
-        to_inference_result(&resp("done"), Vec::new()).cut_off_at,
+        to_inference_result(&resp("done"), Vec::new(), "a1").cut_off_at,
         None
     );
 }
@@ -19528,6 +19762,7 @@ async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
     let result = crate::components::InferenceResult {
+        attempt_id: String::new(),
         parts: Vec::new(),
         response: String::new(),
         tool_calls: vec![fcall(
@@ -19667,6 +19902,7 @@ async fn a_refused_cut_off_call_assembles_as_an_object_the_provider_accepts() {
     let raw = "{\"path\": \"report.md\", \"content\": \"# Local LLM hardw";
     let result = crate::components::InferenceResult {
         parts: Vec::new(),
+        attempt_id: String::new(),
         response: String::new(),
         tool_calls: vec![fcall("c1", "write_file", serde_json::json!(raw))],
         tokens_used: 0,
@@ -19737,6 +19973,7 @@ fn cut_off_batch(
 ) -> crate::components::InferenceResult {
     crate::components::InferenceResult {
         parts: Vec::new(),
+        attempt_id: String::new(),
         response: String::new(),
         tool_calls: vec![fcall("c1", "write_file", arguments)],
         tokens_used: 0,
@@ -20127,6 +20364,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: e,
+        attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
     })
@@ -20146,6 +20384,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,
         entity: plain,
+        attempt_id: String::new(),
         result: Ok(resp("done")),
         pricing: None,
     })

@@ -167,6 +167,7 @@ fn run_metadata(run_id: &str, started_at: i64) -> RunMetadata {
 fn agent_state(agent_id: &str) -> AgentState {
     AgentState {
         agent_id: agent_id.to_string(),
+        current_visit: String::new(),
         current_stage: "s".to_string(),
         iteration: 0,
         status: AgentStatus::Active,
@@ -1307,6 +1308,7 @@ async fn a_paused_run_holding_a_landed_response_is_not_parked() {
             outcome: crate::inference_bridge::InferenceOutcome {
                 entity: e.entity(),
                 latency: std::time::Duration::ZERO,
+                attempt_id: String::new(),
                 result: Err(leviath_providers::ProviderError::Other("held".to_string())),
                 pricing: None,
             },

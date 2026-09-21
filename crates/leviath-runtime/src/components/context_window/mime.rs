@@ -460,7 +460,7 @@ impl super::ContextWindow {
             kind,
             taint,
         } = write;
-        let before = self.region_shape(region_name);
+        let before = self.begin_change(region_name);
         let rendered = content.as_str().to_string();
         let (text, tokens, key_override) = match origin {
             super::WriteOrigin::Agent => {

@@ -312,17 +312,16 @@ pub(crate) fn collect_compaction(
                         summary_tokens,
                     );
                 }
-                let before = window.region_shape(&region_name);
+                let before = window.begin_change(&region_name);
                 if let Some(region) = window.get_region_mut(&region_name) {
                     region.clear();
                 }
                 // The source region emptying is half of what a compaction did,
                 // and the half a reader is most likely to be looking for.
-                window.journal_change(
+                window.commit_change(
                     leviath_core::ContextCause::Compaction,
-                    &region_name,
                     before,
-                    0,
+                    crate::components::Pushed::Nothing,
                 );
             }
             window.current_tokens = window.calculate_tokens();
@@ -421,18 +420,27 @@ pub(crate) fn apply_edge_transform(
             clear,
             ..
         } => {
-            clear
+            // One transaction over every region the edge clears. The edge clears
+            // them as one act, and recording each on its own would leave a
+            // reader to guess from the timestamps which of them went together.
+            let cleared: Vec<&str> = clear
                 .iter()
                 .filter(|n| !carry.contains(n))
-                .for_each(|name| {
-                    let before = window.region_shape(name);
-                    window
-                        .get_region_mut(name)
-                        .into_iter()
-                        .for_each(|r| r.clear());
-                    window.journal_change(leviath_core::ContextCause::Transform, name, before, 0);
-                });
+                .map(String::as_str)
+                .collect();
+            let emptying = window.begin_changes(cleared.iter().copied());
+            for name in &cleared {
+                window
+                    .get_region_mut(name)
+                    .into_iter()
+                    .for_each(|r| r.clear());
+            }
             window.current_tokens = window.calculate_tokens();
+            window.commit_change(
+                leviath_core::ContextCause::Transform,
+                emptying,
+                crate::components::Pushed::Nothing,
+            );
             compact
                 .iter()
                 .filter(|n| !carry.contains(n))

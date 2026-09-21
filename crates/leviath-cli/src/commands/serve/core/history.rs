@@ -114,6 +114,39 @@ pub(crate) struct HistoryPage {
     pub(crate) total: usize,
 }
 
+/// The point at which this run held the window named by `revision`.
+///
+/// Immutable by construction, and that is the property the whole debugger rests
+/// on. A revision is derived from a window's contents, and the journal it is
+/// looked up in is append-only, so a revision resolves to the content it was
+/// minted from and to nothing else: no later write can change what it means, and
+/// a read of one can never come back with what the run holds now. A run that never
+/// held that window answers `None` rather than answering with something near it.
+///
+/// The earliest point holding the content, where a run held it more than once.
+/// The content is the same either way - that is what content addressing means -
+/// and the first time it appeared is the answer to "where did this come from".
+///
+/// Streamed, so the whole journal is never materialized, and stopped at the
+/// match.
+pub(crate) fn at_revision(run_id: &str, revision: &str) -> Option<RunPoint> {
+    let mut found = None;
+    runstate::visit_run_archive(run_id, &mut |point| {
+        if leviath_core::run_meta::revision::context_revision(point.context) != revision {
+            return ControlFlow::Continue(());
+        }
+        found = Some(RunPoint {
+            // Redacted for the same reason the paged read redacts: the journal
+            // stores the run's record whole, secret and all.
+            meta: point.meta.redacted(),
+            context: point.context.clone(),
+            at: point.at,
+        });
+        ControlFlow::Break(())
+    })?;
+    found
+}
+
 /// Read one page of a run's history.
 pub(crate) fn page(run_id: &str, spec: &HistorySpec) -> Result<HistoryPage, ServeError> {
     // One streamed pass to count, so `total` is honest and a descending window

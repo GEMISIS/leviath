@@ -150,6 +150,21 @@ pub(crate) fn page(run_id: &str, spec: &InferencesSpec) -> Result<InferencesPage
     })
 }
 
+/// One attempt of a run's, by the id it was minted under.
+///
+/// `None` when the run's journal holds no attempt under that id, which is what an
+/// id from another run looks like and what every attempt in a journal written
+/// before attempts had identity looks like. An empty id matches nothing rather
+/// than matching the unidentified ones.
+pub(crate) fn attempt(run_id: &str, attempt_id: &str) -> Result<Option<Attempt>, ServeError> {
+    if attempt_id.is_empty() {
+        return Ok(None);
+    }
+    Ok(read(run_id)?
+        .into_iter()
+        .find(|held| held.record.id == attempt_id))
+}
+
 /// Every trip to a provider a run's journal records, in the order it made them,
 /// each carrying the move that followed it.
 ///

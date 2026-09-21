@@ -3402,10 +3402,10 @@ system_prompt = "Plan the work"
             cost_usd: Some(usd),
             cost_reported: false,
         };
-        plan.begin_visit(1_000);
+        plan.begin_visit(1_000, leviath_core::execution::mint_visit_id());
         plan.record_call(&call(600, 80, 300, 40, 0.03), 1_001);
         plan.close_visit(1_100);
-        plan.begin_visit(1_200);
+        plan.begin_visit(1_200, leviath_core::execution::mint_visit_id());
         plan.record_call(&call(300, 40, 100, 20, 0.01), 1_201);
 
         let mut recovery = StageRecord::new("error_recovery".to_string(), 1);

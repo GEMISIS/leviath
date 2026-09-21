@@ -47,6 +47,54 @@ same list.
   `Model` is deliberately not a `Node`, because a model id is the provider's own
   and two providers can both serve `gpt-5.5`.
 
+- A context change is recorded as the transaction it is. One write to one region
+  is the smallest thing that happens and rarely the whole of what happened: a
+  compaction summarises one region and empties another, a stage edge clears four,
+  a resume rebuilds every region there is. Each of those is now one record,
+  carrying every region it touched with that region's contents digested before
+  and after and its token count either side, and naming the window's revision
+  before and after the whole transaction. The cause vocabulary is unchanged. A
+  change also names the tool execution that committed it, where one was being
+  handled - a `context_*` or `todo_*` tool, a mime tool, a submission - and names
+  none for the writes that happen outside any call. `contextChanges` serves all of
+  it, with the journal position of each record.
+
+- A context window has a revision: a content address of what it holds, derived
+  from every region's contents and budgets. It is the same value a change record
+  carries either side of itself, so a change joins to the windows it moved
+  between, and `contextSnapshot(revision:)` reads one back. That read is
+  immutable by construction. A revision is derived from content and the journal is
+  append-only, so it resolves to exactly the content it was minted from - no later
+  write can change what a revision means, and asking for one can never come back
+  with what the run holds now.
+
+- A tool execution says what it is connected to. `visit` is the stay in a stage it
+  belongs to, which is the key to correlate on: a stage entered three times has
+  one index, and the iteration restarts on every entry. `requestedBy` is the trip
+  to the provider whose answer asked for the call, which no client could work out
+  for itself - a failover means the answer came from a provider the attempt before
+  it did not go to. `contextChanges` is what the call committed to the window, and
+  is independent of how the call ended: one that succeeded may have committed
+  nothing, and one that failed may have committed something first.
+  `producedArtifacts` is the files it produced, read from the journal as it
+  produced them rather than from the run's answer, which keeps only the latest
+  submission's files and says nothing about which call made them. Each is null or
+  empty where the journal did not record the connection, never a guess.
+
+- A stay in a stage has an id minted when the run enters it, and a trip to a
+  provider has one minted before its request goes out. Both were identified by
+  position until now, which nothing outside the file they sit in could rely on: the
+  per-stage visit list keeps the earliest 128 stays, so the hundred and
+  twenty-ninth visit took the first one's identity, and an attempt's number
+  restarts at every call.
+
+- A batch of calls the dispatcher answers without the tool lane - context tools,
+  refusals, gate denials - is journaled like any other, so a run's `executions`
+  are every call the model made rather than only the ones something ran
+  asynchronously. Such a batch is never a *pending* batch: a resume re-issues it
+  rather than replaying it, because a replay lands recorded results in the
+  conversation without redoing a context tool's write.
+
 - The journal records why a context window changed, not only what it then held.
   Every write that can name its cause records one beside the snapshot: a region
   seeded at spawn or on stage entry, a message delivered into the run, the

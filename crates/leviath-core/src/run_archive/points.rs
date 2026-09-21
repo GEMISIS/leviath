@@ -195,12 +195,14 @@ impl PointFolder {
             | RunRecord::InferenceUsage { .. }
             | RunRecord::ToolBatch { .. }
             | RunRecord::ToolCallDone { .. }
+            | RunRecord::ArtifactsProduced { .. }
             | RunRecord::Interaction { .. }
             // A change record adds no point either, and for the plainest
             // reason: it carries no content. The snapshot or diff recorded
             // beside it is the window this change produced, so a point here
             // would show that same window twice.
             | RunRecord::ContextChange { .. }
+            | RunRecord::ContextTransaction { .. }
             | RunRecord::Message { .. } => return ControlFlow::Continue(()),
         };
         let flow = visit(PointRef {

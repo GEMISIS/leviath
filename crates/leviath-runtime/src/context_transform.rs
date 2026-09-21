@@ -606,6 +606,7 @@ mod tests {
     fn agent_state(status: AgentStatus) -> AgentState {
         AgentState {
             agent_id: "child".to_string(),
+            current_visit: String::new(),
             current_stage: "s".to_string(),
             iteration: 0,
             status,

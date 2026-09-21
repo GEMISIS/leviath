@@ -1214,6 +1214,8 @@ fn plant_rich_journal(run_id: &str) {
             at: 2,
             stage_index: 3,
             iteration: 0,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         },
     );

@@ -86,7 +86,7 @@ fn apply_modify(window: &mut ContextWindow, value: &serde_json::Value) -> Result
                 "on_stage_enter: region '{name}' must be given a string, got: {content}"
             ));
         };
-        let before = window.region_shape(name);
+        let before = window.begin_change(name);
         let Some(region) = window.get_region_mut(name) else {
             return Err(format!(
                 "on_stage_enter: no region '{name}' in this stage's layout"
@@ -101,11 +101,10 @@ fn apply_modify(window: &mut ContextWindow, value: &serde_json::Value) -> Result
                 .add_entry(text.to_string(), leviath_core::estimate_tokens(text))
                 .map_err(|e| format!("on_stage_enter: writing region '{name}': {e}"))?;
         }
-        window.journal_change(
+        window.commit_change(
             leviath_core::ContextCause::Hook,
-            name,
             before,
-            usize::from(!text.is_empty()),
+            crate::components::Pushed::Into(usize::from(!text.is_empty())),
         );
     }
     Ok(())

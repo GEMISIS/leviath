@@ -508,6 +508,7 @@ mod tests {
     fn state(status: AgentStatus) -> AgentState {
         AgentState {
             agent_id: "a".to_string(),
+            current_visit: String::new(),
             current_stage: "plan".to_string(),
             iteration: 4,
             status,

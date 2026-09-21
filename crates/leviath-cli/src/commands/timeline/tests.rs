@@ -92,6 +92,8 @@ fn journal() -> Vec<RunRecord> {
             at: 1_010,
             stage_index: 0,
             iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
             response: String::new(),
         },
         tool_done(1_012),

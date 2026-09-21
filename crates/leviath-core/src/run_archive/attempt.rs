@@ -175,6 +175,17 @@ pub enum AttemptOutcome {
 /// simply always used the second provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttemptRecord {
+    /// This attempt's own id, minted before the request went out.
+    ///
+    /// What anything the attempt produced names it by: a tool batch the model
+    /// asked for in its answer records the attempt that carried the answer, and
+    /// the stage and the attempt number cannot serve for that - a stage makes
+    /// hundreds of attempts and the number restarts at every call.
+    ///
+    /// Empty in a journal written before attempts had identity, where the number
+    /// within a call was all there was.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     /// The stage the run was in. Empty for a lane that has no stage of its own.
     pub stage: String,
     /// Which attempt this was, from 1, counting every trip to the provider. The

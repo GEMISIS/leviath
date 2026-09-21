@@ -1195,6 +1195,7 @@ mod tests {
                 .spawn((
                     AgentState {
                         agent_id: format!("worker-{item_id}"),
+                        current_visit: String::new(),
                         current_stage: "w".to_string(),
                         iteration: 0,
                         status: AgentStatus::Active,
@@ -1312,6 +1313,7 @@ mod tests {
     fn parent_state() -> AgentState {
         AgentState {
             agent_id: "parent".to_string(),
+            current_visit: String::new(),
             current_stage: "fan".to_string(),
             iteration: 0,
             status: AgentStatus::Active,
@@ -1335,6 +1337,7 @@ mod tests {
                 VisitCounts::default(),
                 window(),
                 InferenceResult {
+                    attempt_id: String::new(),
                     response: response.to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,
@@ -1426,6 +1429,7 @@ mod tests {
     fn complete_worker(world: &mut World, worker: Entity, content: &str) {
         set_status(world, worker, AgentStatus::Complete);
         world.entity_mut(worker).insert(InferenceResult {
+            attempt_id: String::new(),
             response: content.to_string(),
             tool_calls: vec![],
             tokens_used: 0,
@@ -2740,6 +2744,7 @@ mod tests {
                 InferenceResult {
                     // What the last-turn fallback alone would hand the merge
                     // stage: the trailing aside, not the deliverable.
+                    attempt_id: String::new(),
                     response: "Let me run the tests one more time.".to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,
@@ -2773,6 +2778,7 @@ mod tests {
             .spawn((
                 parent_state(),
                 InferenceResult {
+                    attempt_id: String::new(),
                     response: "the old behaviour".to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,
@@ -2912,6 +2918,7 @@ mod tests {
             .spawn((
                 parent_state(),
                 InferenceResult {
+                    attempt_id: String::new(),
                     response: "done text".to_string(),
                     tool_calls: vec![],
                     tokens_used: 0,

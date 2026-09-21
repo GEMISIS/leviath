@@ -320,6 +320,10 @@ pub(crate) fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
             | RunRecord::InferenceUsage { .. }
             | RunRecord::ToolCallDone { .. }
             | RunRecord::ContextChange { .. }
+            | RunRecord::ContextTransaction { .. }
+            // An artifact's name and path are on the run's answer, which is
+            // already searchable as run metadata.
+            | RunRecord::ArtifactsProduced { .. }
             | RunRecord::Message { .. } => None,
         }
     }

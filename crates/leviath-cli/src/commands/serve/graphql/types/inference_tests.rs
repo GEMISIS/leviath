@@ -81,6 +81,7 @@ async fn error(query: &str) -> String {
 /// One attempt record.
 fn attempt(n: u32, provider: &str, model: &str, outcome: AttemptOutcome) -> RunRecord {
     RunRecord::InferenceAttempt(AttemptRecord {
+        id: format!("a{n:08x}"),
         stage: "plan".to_string(),
         attempt: n,
         provider: provider.to_string(),

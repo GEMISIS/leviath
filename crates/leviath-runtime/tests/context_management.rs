@@ -297,6 +297,7 @@ fn test_parent_ref_and_children_components() {
         .spawn((
             AgentState {
                 agent_id: "coder-01".to_string(),
+                current_visit: String::new(),
                 current_stage: "analyze".to_string(),
                 iteration: 0,
                 status: AgentStatus::Active,
@@ -313,6 +314,7 @@ fn test_parent_ref_and_children_components() {
         .spawn((
             AgentState {
                 agent_id: "researcher-01".to_string(),
+                current_visit: String::new(),
                 current_stage: "research".to_string(),
                 iteration: 0,
                 status: AgentStatus::Active,
@@ -385,6 +387,7 @@ fn test_child_completion_notifies_parent() {
         .spawn((
             AgentState {
                 agent_id: "parent-01".to_string(),
+                current_visit: String::new(),
                 current_stage: "main".to_string(),
                 iteration: 0,
                 status: AgentStatus::Active,
@@ -402,6 +405,7 @@ fn test_child_completion_notifies_parent() {
         .spawn((
             AgentState {
                 agent_id: "child-01".to_string(),
+                current_visit: String::new(),
                 current_stage: "main".to_string(),
                 iteration: 5,
                 status: AgentStatus::Complete,
@@ -444,6 +448,7 @@ fn test_stage_gating_with_requires_children() {
     // stage_gating_system should set status to Waiting
     let mut state = AgentState {
         agent_id: "test-01".to_string(),
+        current_visit: String::new(),
         current_stage: "analyze".to_string(),
         iteration: 3,
         status: AgentStatus::Active,

@@ -86,12 +86,22 @@ fn minted_suffix() -> String {
 
 /// Mint an id for one stay in a stage.
 ///
-/// The correlation key for everything that happened during that stay. A visit
-/// was identified by its position in a capped list until now, so the hundred and
-/// twenty-ninth visit took the first one's identity and every execution
-/// correlated to it moved with it.
+/// The correlation key for everything that happened during that stay. It has to
+/// be minted rather than taken from a visit's position in the stage ledger,
+/// because that list is capped: the hundred and twenty-ninth visit would take
+/// the first one's identity, and everything correlated to it would move.
 pub fn mint_visit_id() -> String {
     format!("v{}", minted_suffix())
+}
+
+/// Mint an id for one trip to a provider.
+///
+/// What the answer's consequences name it by. A tool batch records the attempt
+/// whose answer asked for it, and neither the stage nor the attempt number can
+/// serve: a stage makes hundreds of trips, and the number restarts at every
+/// call.
+pub fn mint_attempt_id() -> String {
+    format!("a{}", minted_suffix())
 }
 
 #[cfg(test)]
@@ -122,12 +132,13 @@ mod tests {
         assert_eq!(seq.len(), 8, "{seq}");
     }
 
-    /// A visit id and an execution id are told apart by their first character,
-    /// so one pasted where the other belongs is visibly wrong.
+    /// Each kind of id is told apart by its first character, so one pasted
+    /// where another belongs is visibly wrong.
     #[test]
-    fn the_two_kinds_of_id_are_told_apart_on_sight() {
+    fn the_kinds_of_id_are_told_apart_on_sight() {
         assert!(mint_execution_id().starts_with('x'));
         assert!(mint_visit_id().starts_with('v'));
+        assert!(super::mint_attempt_id().starts_with('a'));
     }
 
     /// Every outcome has its own word.

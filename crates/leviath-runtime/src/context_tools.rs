@@ -9,7 +9,7 @@
 
 use leviath_core::RegionKind;
 
-use crate::components::ContextWindow;
+use crate::components::{ContextWindow, Pushed};
 
 /// What every change this module makes is recorded as: the model called a tool
 /// and the region moved because of it. Named once because a dozen call sites
@@ -110,7 +110,7 @@ pub(crate) fn handle_context_tool(
                 return missing("item");
             };
             let tokens = leviath_core::estimate_tokens(item);
-            let before = window.region_shape(region_name);
+            let before = window.begin_change(region_name);
             let (result, added) = match checklist_region(window, region_name) {
                 Err(e) => (e, 0),
                 Ok(region) => match region.add_checklist_item(item.to_string(), tokens) {
@@ -118,7 +118,7 @@ pub(crate) fn handle_context_tool(
                     Err(e) => (format!("[error] {e}"), 0),
                 },
             };
-            window.journal_change(TOOL_CAUSE, region_name, before, added);
+            window.commit_change(TOOL_CAUSE, before, Pushed::Into(added));
             result
         }
         "todo_done" | "todo_note" => {
@@ -132,7 +132,7 @@ pub(crate) fn handle_context_tool(
             if name == "todo_note" && note.is_none() {
                 return "[error] missing 'note' argument".to_string();
             }
-            let before = window.region_shape(region_name);
+            let before = window.begin_change(region_name);
             let result = match checklist_region(window, region_name) {
                 Err(e) => e,
                 Ok(region) => {
@@ -154,7 +154,7 @@ pub(crate) fn handle_context_tool(
             };
             // An id that matched one changes the item where it stands, so the
             // entry count holds and only the tokens move.
-            window.journal_change(TOOL_CAUSE, region_name, before, 0);
+            window.commit_change(TOOL_CAUSE, before, Pushed::Nothing);
             result
         }
         "context_write" => {
@@ -170,7 +170,7 @@ pub(crate) fn handle_context_tool(
             let Some(is_hashmap) = is_hashmap_region(window, region_name) else {
                 return region_not_found(region_name, window);
             };
-            let before = window.region_shape(region_name);
+            let before = window.begin_change(region_name);
             let region = window.get_region_mut(region_name).expect("region present");
             if is_hashmap {
                 let Some(k) = key else {
@@ -180,7 +180,7 @@ pub(crate) fn handle_context_tool(
                     Ok(()) => format!("Stored in '{region_name}' section under key '{k}'."),
                     Err(e) => format!("[error] {e}"),
                 };
-                window.journal_upsert(TOOL_CAUSE, region_name, before);
+                window.commit_change(TOOL_CAUSE, before, Pushed::Upsert);
                 result
             } else {
                 // Through the window method (not region.clear + add directly)
@@ -215,7 +215,7 @@ pub(crate) fn handle_context_tool(
             let Some(is_hashmap) = is_hashmap_region(window, region_name) else {
                 return region_not_found(region_name, window);
             };
-            let before = window.region_shape(region_name);
+            let before = window.begin_change(region_name);
             let region = window.get_region_mut(region_name).expect("region present");
             if is_hashmap {
                 let Some(k) = key else {
@@ -239,7 +239,7 @@ pub(crate) fn handle_context_tool(
                         Err(e) => format!("[error] {e}"),
                     }
                 };
-                window.journal_upsert(TOOL_CAUSE, region_name, before);
+                window.commit_change(TOOL_CAUSE, before, Pushed::Upsert);
                 result
             } else {
                 // Same routing rationale as context_write above. The key is
@@ -327,7 +327,7 @@ pub(crate) fn handle_context_tool(
             let key = args.get("key").and_then(|v| v.as_str());
             let index = args.get("index").and_then(serde_json::Value::as_u64);
             let oldest = args.get("oldest").and_then(serde_json::Value::as_u64);
-            let before = window.region_shape(region_name);
+            let before = window.begin_change(region_name);
             let region = window.get_region_mut(region_name).expect("region present");
             // One selector at a time, checked in the order an agent is most
             // likely to have meant. Naming none of them is the interesting
@@ -359,7 +359,7 @@ pub(crate) fn handle_context_tool(
                 }
             };
             window.current_tokens = window.calculate_tokens();
-            window.journal_change(TOOL_CAUSE, region_name, before, 0);
+            window.commit_change(TOOL_CAUSE, before, Pushed::Nothing);
             result
         }
         "context_list" => {

@@ -373,6 +373,86 @@ type DispatchToolsQuery = (
     Option<&'static crate::pipeline::transition::AgentBlueprint>,
 );
 
+/// One dispatched batch, in the shape the journal records it.
+///
+/// Gathered once and borrowed, because two paths write the same record and
+/// neither can see the other's: a batch with lane work journals it with an ack
+/// the exec waits on, and a batch the dispatcher resolved entirely journals it
+/// on its way out. Two copies of the field list would be two chances for one of
+/// them to stop carrying something.
+struct BatchDispatch<'a> {
+    /// The calls, in the order the model asked for them.
+    calls: &'a [crate::components::ToolCall],
+    /// The execution id minted for each, by provider call id.
+    executions: &'a std::collections::HashMap<String, String>,
+    /// The results the dispatcher already has, by provider call id. A call with
+    /// one here never reaches the lane and no completion record will follow it.
+    inline: &'a [(String, String)],
+    /// The stage the batch was dispatched in.
+    stage_index: usize,
+    /// The stage-local iteration that produced it.
+    iteration: usize,
+    /// The stay in the stage it was dispatched during.
+    visit_id: &'a str,
+    /// The provider attempt whose answer asked for the calls.
+    requested_by: &'a str,
+    /// The assistant text of the turn that issued them.
+    response: &'a str,
+}
+
+impl BatchDispatch<'_> {
+    /// The record.
+    fn record(&self) -> leviath_core::run_archive::RunRecord {
+        leviath_core::run_archive::RunRecord::ToolBatch {
+            calls: self
+                .calls
+                .iter()
+                .map(|c| leviath_core::run_archive::ToolCallRecord {
+                    id: c.tool_id.clone(),
+                    execution_id: self.executions.get(&c.tool_id).cloned().unwrap_or_default(),
+                    name: c.name.clone(),
+                    arguments: c.arguments.to_string(),
+                    result: self
+                        .inline
+                        .iter()
+                        .find(|(id, _)| id == &c.tool_id)
+                        .map(|(_, r)| r.clone().into()),
+                    thought_signature: c.thought_signature.clone(),
+                })
+                .collect(),
+            at: chrono::Utc::now().timestamp(),
+            stage_index: self.stage_index,
+            iteration: self.iteration,
+            visit_id: self.visit_id.to_string(),
+            requested_by: self.requested_by.to_string(),
+            response: self.response.to_string(),
+        }
+    }
+}
+
+/// Journal the files each execution produced, one record per execution.
+///
+/// Fire and forget, like the change records: nothing waits on it, and a run with
+/// no lane writes nothing. Called from the same place the batch record is written
+/// so the artifacts cannot land before the dispatch that made them.
+pub(super) fn journal_artifacts(
+    persist: &PersistenceStage,
+    run_id: &str,
+    produced: &[(String, Vec<leviath_core::output::Artifact>)],
+) {
+    for (execution_id, artifacts) in produced {
+        let _ = persist.0.send(PersistMsg::Append {
+            run_id: run_id.to_string(),
+            record: Box::new(leviath_core::run_archive::RunRecord::ArtifactsProduced {
+                execution_id: execution_id.clone(),
+                artifacts: artifacts.clone(),
+                at: chrono::Utc::now().timestamp(),
+            }),
+            ack: None,
+        });
+    }
+}
+
 /// The resources the daemon installs, which a bare world does not have.
 ///
 /// Every field is optional because `lev run` drives these same systems with no
@@ -487,7 +567,33 @@ pub(crate) fn dispatch_tools(
             leviath_core::TaintLevel,
             leviath_core::TaintLevel,
         )> = Vec::new();
+        // One execution id per call, minted before anything runs. The provider's
+        // own id travels beside it: a provider may reuse one across a retry, and
+        // two attempts under one id cannot be told apart afterwards.
+        //
+        // Minted ahead of the loop rather than beside the journal write below,
+        // because the calls this dispatcher resolves itself need theirs while it
+        // is resolving them: a context tool's whole job is to move the window,
+        // and the transaction it commits says which execution moved it.
+        let executions: std::collections::HashMap<String, String> = result
+            .tool_calls
+            .iter()
+            .map(|c| {
+                (
+                    c.tool_id.clone(),
+                    leviath_core::execution::mint_execution_id(),
+                )
+            })
+            .collect();
+        // Files an accepted submission produced, by the execution that produced
+        // them. Journaled after the loop, which is also where the batch record
+        // that dispatched them goes.
+        let mut produced: Vec<(String, Vec<leviath_core::output::Artifact>)> = Vec::new();
         for c in &result.tool_calls {
+            // Everything this call commits to the window is this call's, and
+            // nothing after the loop is. Re-set per call, so a change can never
+            // be attributed to the call before it.
+            window.attribute_to(executions.get(&c.tool_id).map_or("", String::as_str));
             // Layer 1, enforced rather than merely advertised.
             //
             // A stage's `available_tools` was applied only when building the
@@ -707,6 +813,16 @@ pub(crate) fn dispatch_tools(
                 // A refused submission leaves any earlier one alone: a bad
                 // correction must not erase a good answer.
                 if let Some(output) = output {
+                    // Recorded against this call while it is still in hand.
+                    // `output.json` keeps only the latest answer's files and says
+                    // nothing about which call made any of them, so a submission
+                    // a later one replaces would otherwise leave no trace.
+                    if !output.artifacts.is_empty() {
+                        produced.push((
+                            executions.get(&c.tool_id).cloned().unwrap_or_default(),
+                            output.artifacts.clone(),
+                        ));
+                    }
                     submitted = Some(output);
                 }
                 context_results.push((c.tool_id.clone(), text));
@@ -719,6 +835,10 @@ pub(crate) fn dispatch_tools(
                 thought_signature: c.thought_signature.clone(),
             });
         }
+        // Past the last call, so nothing the paths below write is attributed to
+        // one: the assistant turn, the routed results and the nudges are the
+        // batch's work, not any single call's.
+        window.attribute_to("");
 
         // Commit a submitted output before any of the paths below can take an
         // early exit, so an answer is recorded whether the rest of the batch
@@ -822,7 +942,36 @@ pub(crate) fn dispatch_tools(
             continue;
         }
 
+        // What the journal is told about this batch, once, whoever runs it.
+        // Built here because both paths below need it and neither can see the
+        // other's copy: a batch with lane work waits on an ack, one without goes
+        // straight into the file.
+        let dispatch = BatchDispatch {
+            calls: &result.tool_calls,
+            executions: &executions,
+            inline: &context_results,
+            stage_index: cursor.map_or(0, |c| c.index),
+            iteration: state.iteration,
+            visit_id: &state.current_visit,
+            requested_by: &result.attempt_id,
+            response: &result.response,
+        };
+
         if lane_calls.is_empty() {
+            // Every call resolved without the lane: context tools, refusals,
+            // gate denials. Journaled all the same, so the run's executions are
+            // every call the model made rather than only the ones something ran
+            // asynchronously - and so a transaction a context tool committed
+            // names an execution a reader can find. No ack, because nothing is
+            // about to run that could outrace the record.
+            if let (Some(persist), Some(md)) = (persist.as_ref(), metadata) {
+                let _ = persist.0.send(PersistMsg::Append {
+                    run_id: md.run_id.clone(),
+                    record: Box::new(dispatch.record()),
+                    ack: None,
+                });
+                journal_artifacts(persist, &md.run_id, &produced);
+            }
             // Nothing async to run - apply the context results now and loop back.
             let merged = merge_in_call_order(&result.tool_calls, &typed_results(&context_results));
             // Log the calls here, because this batch never reaches
@@ -869,48 +1018,15 @@ pub(crate) fn dispatch_tools(
         // plus a per-call progress hook that records each completion. Worlds
         // without a persistence lane or run metadata (tests, unpersisted
         // agents) dispatch unjournaled with a no-op progress.
-        // One execution id per call, minted here, before anything runs. The
-        // provider's own id travels beside it: a provider may reuse one across a
-        // retry, and two attempts under one id cannot be told apart afterwards.
-        let executions: std::collections::HashMap<String, String> = result
-            .tool_calls
-            .iter()
-            .map(|c| {
-                (
-                    c.tool_id.clone(),
-                    leviath_core::execution::mint_execution_id(),
-                )
-            })
-            .collect();
         let (progress, ack) = match (persist.as_ref(), metadata) {
             (Some(persist), Some(md)) => {
-                let record = leviath_core::run_archive::RunRecord::ToolBatch {
-                    calls: result
-                        .tool_calls
-                        .iter()
-                        .map(|c| leviath_core::run_archive::ToolCallRecord {
-                            id: c.tool_id.clone(),
-                            execution_id: executions.get(&c.tool_id).cloned().unwrap_or_default(),
-                            name: c.name.clone(),
-                            arguments: c.arguments.to_string(),
-                            result: context_results
-                                .iter()
-                                .find(|(id, _)| id == &c.tool_id)
-                                .map(|(_, r)| r.clone().into()),
-                            thought_signature: c.thought_signature.clone(),
-                        })
-                        .collect(),
-                    at: chrono::Utc::now().timestamp(),
-                    stage_index: cursor.map_or(0, |c| c.index),
-                    iteration: state.iteration,
-                    response: result.response.clone(),
-                };
                 let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                 let _ = persist.0.send(PersistMsg::Append {
                     run_id: md.run_id.clone(),
-                    record: Box::new(record),
+                    record: Box::new(dispatch.record()),
                     ack: Some(ack_tx),
                 });
+                journal_artifacts(persist, &md.run_id, &produced);
                 let sender = persist.0.clone();
                 let run_id = md.run_id.clone();
                 let iteration = state.iteration;

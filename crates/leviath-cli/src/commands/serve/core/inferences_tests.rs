@@ -36,6 +36,7 @@ fn digest() -> RequestDigest {
 /// One attempt record.
 fn attempt(stage: &str, n: u32, provider: &str, model: &str, outcome: AttemptOutcome) -> RunRecord {
     RunRecord::InferenceAttempt(AttemptRecord {
+        id: format!("a{n:08x}"),
         stage: stage.to_string(),
         attempt: n,
         provider: provider.to_string(),
@@ -325,6 +326,45 @@ fn an_unreadable_journal_is_an_error() {
         assert!(
             failed.to_string().contains("unreadable journal"),
             "{failed}"
+        );
+    });
+}
+
+/// One attempt by the id it was minted under, which is what a tool batch names.
+///
+/// A batch records the attempt whose answer asked for its calls, and nothing in
+/// the timeline could stand in for the lookup: a failover means the answer came
+/// from a provider the previous attempt did not go to.
+#[test]
+fn one_attempt_is_found_by_the_id_it_was_minted_under() {
+    crate::runstate::with_isolated_runs_dir("inferences-by-id", |_dir| {
+        create_run(&meta("named-attempts")).expect("run written");
+        write_journal(
+            "named-attempts",
+            vec![
+                attempt("plan", 1, "anthropic", "claude", AttemptOutcome::Succeeded),
+                attempt("plan", 2, "openai", "gpt", AttemptOutcome::Succeeded),
+            ],
+        );
+
+        // The fixture names each attempt after its number.
+        let found = super::attempt("named-attempts", "a00000002")
+            .expect("reads")
+            .expect("the second attempt");
+        assert_eq!(found.record.provider, "openai");
+        assert_eq!(found.record.attempt, 2);
+
+        // An id nothing was minted under matches nothing, and an empty one does
+        // not match the attempts a journal recorded without identity.
+        assert!(
+            super::attempt("named-attempts", "a-from-another-build")
+                .expect("reads")
+                .is_none()
+        );
+        assert!(
+            super::attempt("named-attempts", "")
+                .expect("reads")
+                .is_none()
         );
     });
 }
