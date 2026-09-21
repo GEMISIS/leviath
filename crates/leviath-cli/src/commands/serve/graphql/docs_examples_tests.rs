@@ -20,6 +20,13 @@
 //! is written - while a string where an input object belongs, a list where one
 //! value belongs, an enum value the enum does not name and a null the schema
 //! refuses are each caught here rather than by a reader.
+//!
+//! Among the five scalars the spec defines, the literal itself is read too:
+//! [`coercion`] holds what each of them takes, and a pairing no coercion
+//! reaches - `"50"` for an `Int`, `4.0` for an `ID` - is a failure. Only those.
+//! A walk stricter than the server would refuse correct documentation and teach
+//! people to distrust it, which is worse than one with a gap, so every pairing
+//! the server would coerce is walked through.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -666,6 +673,47 @@ impl Walk<'_> {
     }
 }
 
+/// Whether a built-in scalar takes this literal, and what it does take.
+///
+/// The spec's input coercion rules for the five scalars it defines, which are
+/// asymmetric and worth writing out. `Float` takes an integer, with the empty
+/// fraction added, and `Int` does not take a float. `ID` takes a string or an
+/// integer, because a service is free to key its ids either way, and refuses a
+/// float outright. Nothing else crosses: a string holding digits is a string,
+/// and the only value a `Boolean` takes is a boolean.
+///
+/// The second half of the answer is the whole point of the first: it is what a
+/// refusal has to say, and holding the two together is what keeps the words in
+/// a message from drifting away from the rule that produced it.
+fn coercion(name: &str, value: &Value) -> (bool, &'static str) {
+    let number = matches!(value, Value::Number(_));
+    let integer = matches!(value, Value::Number(given) if !given.is_f64());
+    let string = matches!(value, Value::String(_));
+    match name {
+        "Int" => (integer, "an integer"),
+        "Float" => (number, "a number"),
+        "String" => (string, "a string"),
+        "Boolean" => (matches!(value, Value::Boolean(_)), "a boolean"),
+        // `ID` is the one left: the five are registered together, and no
+        // schema may redeclare any of them.
+        _ => (string || integer, "a string or an integer"),
+    }
+}
+
+/// What a literal is, in the words a refusal uses for it.
+fn literal_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Number(given) if given.is_f64() => "a float",
+        Value::Number(_) => "an integer",
+        Value::String(_) => "a string",
+        Value::Boolean(_) => "a boolean",
+        // A null, a list and an object are each answered before a literal
+        // reaches this, and a variable never reaches it at all. What is left of
+        // what the parser can write is the enum value.
+        _ => "an enum value",
+    }
+}
+
 impl Surface {
     /// Walk one argument value against the type it is given for.
     ///
@@ -742,7 +790,19 @@ impl Surface {
                 pos,
                 format!("`{name}` is a scalar, and `{value}` is an object (at {path})"),
             )),
-            (Kind::Builtin, _) => Ok(()),
+            (Kind::Builtin, other) => {
+                let (coerces, takes) = coercion(name, other);
+                match coerces {
+                    true => Ok(()),
+                    false => Err(Fault::at(
+                        pos,
+                        format!(
+                            "`{name}` takes {takes}, and `{other}` is {} (at {path})",
+                            literal_kind(other)
+                        ),
+                    )),
+                }
+            }
             (Kind::Composite, _) => Err(Fault::at(
                 pos,
                 format!("`{name}` is not an input type (at {path})"),
@@ -1387,4 +1447,153 @@ fn a_request_body_with_a_field_the_schema_lacks_is_refused() {
         message, "1:25: `Run` has no field `nope` (at Query.runs.edges.node)",
         "{message}"
     );
+}
+
+/// Every built-in scalar, and the literals a server can coerce into it.
+///
+/// Written out because the list is short and asymmetric. `Float` takes an
+/// integer and `Int` does not take a float; `ID` takes a string or an integer
+/// and nothing else, so `4.0` is refused where `4` and `"4"` are both fine. A
+/// pairing this table does not name is one no coercion reaches, whatever the
+/// letters inside the literal spell.
+const COERCIONS: [(&str, &[&str]); 5] = [
+    ("Int", &["1"]),
+    ("Float", &["1", "1.5"]),
+    ("String", &["\"x\""]),
+    ("Boolean", &["true"]),
+    ("ID", &["1", "\"x\""]),
+];
+
+/// One literal of every kind a constant value can be written as.
+const LITERALS: [&str; 5] = ["1", "1.5", "\"x\"", "true", "NAME"];
+
+/// The walk reaches the same verdict as the table on all twenty-five pairings.
+///
+/// Every disagreement is collected rather than the first one asserted, so a run
+/// against a walk that does not read literals at all names each pairing it lets
+/// through instead of stopping at the first.
+#[test]
+fn every_literal_reaches_only_the_scalars_that_can_take_it() {
+    let mut wrong: Vec<String> = Vec::new();
+    for (scalar, taken) in COERCIONS {
+        let surface = Surface::parse(&format!("type Query {{ ping(at: {scalar}): String }}"));
+        for literal in LITERALS {
+            let accepted = surface.check(&format!("{{ ping(at: {literal}) }}")).is_ok();
+            if accepted != taken.contains(&literal) {
+                let verdict = match accepted {
+                    true => "accepted",
+                    false => "refused",
+                };
+                wrong.push(format!("`{scalar}` given `{literal}` was {verdict}"));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the walk and the coercion table disagree: {}",
+        wrong.join(", ")
+    );
+}
+
+/// A string of digits where a number belongs, which is what a JSON habit
+/// leaves behind.
+#[test]
+fn a_string_where_an_int_belongs_is_refused() {
+    let message = refusal(&served(), "{ runs(first: \"50\") { total } }");
+    assert_eq!(
+        message, "1:15: `Int` takes an integer, and `\"50\"` is a string (at Query.runs(first:))",
+        "{message}"
+    );
+}
+
+/// A float where a whole number belongs.
+#[test]
+fn a_float_where_an_int_belongs_is_refused() {
+    let message = refusal(&served(), "{ runs(first: 2.5) { total } }");
+    assert_eq!(
+        message, "1:15: `Int` takes an integer, and `2.5` is a float (at Query.runs(first:))",
+        "{message}"
+    );
+}
+
+/// A boolean where a number belongs.
+#[test]
+fn a_boolean_where_an_int_belongs_is_refused() {
+    let message = refusal(&served(), "{ runs(first: true) { total } }");
+    assert_eq!(
+        message, "1:15: `Int` takes an integer, and `true` is a boolean (at Query.runs(first:))",
+        "{message}"
+    );
+}
+
+/// A bare name where a scalar belongs, which is what an enum value written for
+/// the wrong argument looks like.
+#[test]
+fn an_enum_value_where_a_scalar_belongs_is_refused() {
+    let message = refusal(&served(), "{ runs(first: RUNNING) { total } }");
+    assert_eq!(
+        message,
+        "1:15: `Int` takes an integer, and `RUNNING` is an enum value (at Query.runs(first:))",
+        "{message}"
+    );
+}
+
+/// A number where a string belongs, the mirror of the first one.
+#[test]
+fn a_number_where_a_string_belongs_is_refused() {
+    let message = refusal(&served(), "{ runs(filter: { query: 7 }) { total } }");
+    assert_eq!(
+        message,
+        "1:16: `String` takes a string, and `7` is an integer (at Query.runs(filter:).query)",
+        "{message}"
+    );
+}
+
+/// A float where an id belongs. An id takes a string or an integer, and the
+/// float is the one number both the spec and this server refuse.
+#[test]
+fn a_float_where_an_id_belongs_is_refused() {
+    let message = refusal(&served(), "{ runs(filter: { parent: 1.5 }) { total } }");
+    assert_eq!(
+        message,
+        "1:16: `ID` takes a string or an integer, and `1.5` is a float \
+         (at Query.runs(filter:).parent)",
+        "{message}"
+    );
+}
+
+/// The pairings the server does coerce, walked on the served schema rather than
+/// on one written for a test.
+///
+/// This is the half of the rule that matters: a walk stricter than the server
+/// refuses correct documentation, so each of these has to stay accepted.
+#[test]
+fn the_pairings_the_server_coerces_are_accepted() {
+    let surface = served();
+    for example in [
+        // An integer where a float belongs, and a float there too.
+        "mutation { putMimeRow(row: { mimeType: \"image/png\", tokens: { perByte: 1 } }) \
+         { mimeType } }",
+        "mutation { putMimeRow(row: { mimeType: \"image/png\", tokens: { perByte: 0.25 } }) \
+         { mimeType } }",
+        // An integer and a string are both ids.
+        "{ runs(filter: { parent: 7 }) { total } }",
+        "{ runs(filter: { parent: \"run-1\" }) { total } }",
+        "{ runs(filter: { ids: [\"run-1\"] }) { total } }",
+        // A scalar the schema defines reads whatever it is handed, and a
+        // `Decimal` in this schema travels as a string.
+        "{ runs(filter: { costUsd: { gte: \"1.00\" } }) { total } }",
+        "{ runs(filter: { costUsd: { gte: 1.5 } }) { total } }",
+        // `JSON` takes an object, which no built-in scalar would.
+        "{ testYoloProfile(call: { profile: \"p\", tool: \"shell\", \
+         arguments: { path: \"x\" } }) { profile } }",
+        // A boolean where a boolean belongs.
+        "{ runs(filter: { ascending: true }) { total } }",
+    ] {
+        assert!(
+            surface.check(example).is_ok(),
+            "{example}: {:?}",
+            surface.check(example).err().map(|fault| fault.to_string())
+        );
+    }
 }
