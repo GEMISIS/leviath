@@ -675,6 +675,7 @@ mod tests {
         let dir = runs_dir.join(run_id);
         std::fs::create_dir_all(&dir).unwrap();
         let meta = RunMeta {
+            stage_models: Vec::new(),
             // A span still open when the daemon died at `updated_at`, so a
             // reload has something to settle rather than carry forward.
             active: Some(leviath_core::run_meta::ActiveClock {

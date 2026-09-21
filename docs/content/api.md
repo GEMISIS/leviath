@@ -692,6 +692,10 @@ order:
           "cost_priced_usd": 0.0412,
           "active": { "banked_secs": 181, "since": null } }
       ],
+      "models": [
+        { "provider": "anthropic",  "model": "claude-opus-5" },
+        { "provider": "openrouter", "model": "anthropic/claude-opus-5" }
+      ],
       "region_tokens": { "task": 24, "data_preview": 4004 },
       "runaway_warned": false },
     { "name": "error_recovery", "status": "skipped",  "entered": false },
@@ -700,7 +704,7 @@ order:
 }
 ```
 
-Four things here are not derivable from any other route.
+Five things here are not derivable from any other route.
 
 **`entered` says whether the run was ever in that stage.** The alternative is to
 fetch `context/history` and diff consecutive snapshots to see which stages
@@ -757,6 +761,21 @@ accumulated figures on the record are the complete ones. `visits` is empty on a
 stage the run never entered, and on records written by a daemon older than this
 field, which is the other reason to keep falling back to the stage record itself.
 
+**`models` is what that stage actually ran on.** The run's own `model` is the
+entry stage's resolution and is never rewritten to follow the stages after it,
+so it answers for one stage of the run and no other. This answers for each.
+
+It is a list because a stage that fails over runs on more than one. The first
+entry is where the stage started, the last is where it ended up, and one entry
+means it never moved. A pair appears once however many calls it served, so read
+it as what ran rather than as how often.
+
+A stage lists a pair once a call against it came back. So `models` is absent on
+a stage the run never entered, on a stage whose first call is still in flight,
+and on a stage whose only provider could not be reached at all. Choosing a model
+is not running on one, and there is nothing here to read as a stage's intended
+model.
+
 **`region_tokens` is what decides whether a region is earning its place.** It is
 the largest each region reached while that stage was active. This is the number to
 look at before trimming a layout.
@@ -775,7 +794,9 @@ stage into its stays, and `--json` is this shape read straight off disk.
 > `entered` is `false` for every stage of a run recorded before Leviath tracked
 > it, because the field is not in those files at all. Read it together with
 > `status`: a stage recorded `complete` with tokens against its name ran,
-> whatever `entered` says on an old run.
+> whatever `entered` says on an old run. `models` is absent on every stage of
+> such a run for the same reason, and must not be filled in from the run's
+> `model`, which is the entry stage's and wrong for every stage after it.
 
 ## Attaching files
 
@@ -1723,6 +1744,7 @@ than that feature, not broken.
 | `mime.write` | `PUT /api/mime` and `DELETE /api/mime`, admin-gated, write a row into `mime_types.toml` or take one out |
 | `runs.stages` | `GET /api/agents/{id}/stages`, the per-stage ledger |
 | `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them |
+| `runs.stages.models` | `models` on each stage record: the provider and model pairs that stage ran on, oldest first |
 | `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |
 | `runs.delete` | `DELETE /api/runs/{id}`, which removes the record rather than cancelling the run |
 | `runs.delete.bulk` | `DELETE /api/runs` with `before` or `ids`, bounded by `max_ids` |
@@ -1777,7 +1799,8 @@ response, and `?refresh=1` to ask the providers again. It is safe to call when a
 directory.
 
 Without `runs.stages.cost`, a stage record carries tokens and no price, and the missing field is
-not a zero. `scripts.mime_checks` puts the byte checks beside the config for the operator's rows,
+not a zero. Without `runs.stages.models`, no stage record says what it ran on, which is not the
+same as a stage that has yet to run. `scripts.mime_checks` puts the byte checks beside the config for the operator's rows,
 and beside the agent for a blueprint's. `config.gateways.kinds` is how you tell that a gateway can
 be an OpenAI-compatible endpoint rather than a script.
 

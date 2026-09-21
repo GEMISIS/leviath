@@ -91,6 +91,29 @@ same list.
 
 ### Added
 
+- A stage records what it actually ran on. Each entry in the stage ledger gains
+  `models`, the provider and model pairs that stage ran an inference against, in
+  the order it first reached each. A list rather than one value because a stage
+  that fails over runs on more than one: the first entry is where it started, the
+  last is where it ended up, and one entry means it never moved. It is on the
+  GraphQL `StageRecord` as `models { provider model }`, on
+  `GET /api/agents/{id}/stages` as `models`, and announced as
+  `runs.stages.models`.
+
+  A pair is recorded where a call is billed rather than where a stage picks its
+  model, so choosing a model is not running on one. A stage the run never
+  entered, a stage whose first call has not come back, and a stage whose only
+  provider could not be reached all answer null rather than an empty list. So
+  does every stage of a run that finished before this, and none of them is
+  filled in from the run's own `model`, which is the entry stage's resolution
+  and wrong for every stage after it.
+
+  `RunFilter` gains `stageProvider` and `stageModel`, each a `StringFilter`, and
+  a run matches when any one of its stages ran on something the filter accepts.
+  They compose inside `and`, `or` and `not` like every other field, and they are
+  answered from the run's own record, so filtering ten thousand runs by model
+  opens no more files than listing them does.
+
 - A run can be asked to journal the exact request it sent the model, once per
   provider attempt. **Off by default**, because a captured request is the whole
   prompt: it holds whatever the run's context held, including file contents a

@@ -357,6 +357,17 @@ async fn every_field_keeps_what_it_names() {
     run.status = leviath_core::run_meta::RunStatus::Running;
     run.waiting_on = None;
 
+    run.stage_models = vec![
+        leviath_core::run_meta::StageModelUse {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-5".to_string(),
+        },
+        leviath_core::run_meta::StageModelUse {
+            provider: "openai".to_string(),
+            model: "gpt-5.5".to_string(),
+        },
+    ];
+
     let mut other = meta("writer-1");
     other.agent_name = "writer".to_string();
     other.task = "write the notes".to_string();
@@ -472,6 +483,23 @@ async fn every_field_keeps_what_it_names() {
                     lte: Some(Decimal(0.25)),
                     ..DecimalFilter::default()
                 }),
+                ..Default::default()
+            },
+        ),
+        // The second stage's provider, not the first: the question is about
+        // any stage of the run, so matching only the entry stage would pass a
+        // filter that reads the run-level `model` by another name.
+        (
+            "stageProvider",
+            RunFilter {
+                stage_provider: Some(text("openai")),
+                ..Default::default()
+            },
+        ),
+        (
+            "stageModel",
+            RunFilter {
+                stage_model: Some(text("gpt-5.5")),
                 ..Default::default()
             },
         ),
@@ -715,6 +743,111 @@ async fn the_combinators_compose_and_nest() {
     })
     .await;
     assert!(!nothing.matches(&running, &at(2_000)));
+}
+
+/// A run matches when *any* of its stages ran on what was asked for, the
+/// filter nests like every other field, and a run with nothing recorded
+/// matches nothing rather than falling back to its entry stage.
+#[tokio::test]
+async fn a_stage_model_filter_asks_about_every_stage() {
+    use leviath_core::run_meta::StageModelUse;
+
+    let used = |provider: &str, model: &str| StageModelUse {
+        provider: provider.to_string(),
+        model: model.to_string(),
+    };
+
+    let mut moved = meta("coder-1");
+    moved.model = Some("anthropic/claude-opus-5".to_string());
+    moved.stage_models = vec![
+        used("anthropic", "claude-opus-5"),
+        used("openai", "gpt-5.5"),
+    ];
+
+    let mut stayed = meta("coder-2");
+    stayed.model = Some("anthropic/claude-opus-5".to_string());
+    stayed.stage_models = vec![used("anthropic", "claude-opus-5")];
+
+    // A run from a build that never recorded this: it names a model at the run
+    // level and has nothing to say about its stages.
+    let mut older = meta("coder-3");
+    older.model = Some("openai/gpt-5.5".to_string());
+    assert!(older.stage_models.is_empty());
+
+    let on = |model: &str| RunFilter {
+        stage_model: Some(StringFilter {
+            eq: Some(model.to_string()),
+            ..StringFilter::default()
+        }),
+        ..Default::default()
+    };
+
+    // The second stage counts as much as the first.
+    let late = compiled(on("gpt-5.5")).await;
+    assert!(late.matches(&moved, &at(2_000)));
+    assert!(!late.matches(&stayed, &at(2_000)));
+    assert!(
+        !late.matches(&older, &at(2_000)),
+        "the run-level model is the entry stage's and is not evidence here"
+    );
+
+    // `ne` is existential too: it keeps a run with a stage on something else,
+    // which is not the same as a run no stage of which ran on this.
+    let not_opus = compiled(RunFilter {
+        stage_model: Some(StringFilter {
+            ne: Some("claude-opus-5".to_string()),
+            ..StringFilter::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    assert!(not_opus.matches(&moved, &at(2_000)), "its second stage is");
+    assert!(!not_opus.matches(&stayed, &at(2_000)));
+
+    // Which makes `not` the way to ask the other question.
+    let never_opus = compiled(RunFilter {
+        not: Some(Box::new(on("claude-opus-5"))),
+        ..Default::default()
+    })
+    .await;
+    assert!(!never_opus.matches(&moved, &at(2_000)));
+    assert!(!never_opus.matches(&stayed, &at(2_000)));
+    assert!(never_opus.matches(&older, &at(2_000)));
+
+    // And it composes inside the combinators like every other field.
+    let either = compiled(RunFilter {
+        or: Some(vec![
+            on("gpt-5.4"),
+            RunFilter {
+                stage_provider: Some(StringFilter {
+                    eq: Some("openai".to_string()),
+                    ..StringFilter::default()
+                }),
+                ..Default::default()
+            },
+        ]),
+        ..Default::default()
+    })
+    .await;
+    assert!(either.matches(&moved, &at(2_000)));
+    assert!(!either.matches(&stayed, &at(2_000)));
+
+    // The two fields are separate conditions, not one pair: a run whose
+    // provider came from one stage and model from another satisfies both.
+    let split = compiled(RunFilter {
+        stage_provider: Some(StringFilter {
+            eq: Some("anthropic".to_string()),
+            ..StringFilter::default()
+        }),
+        stage_model: Some(StringFilter {
+            eq: Some("gpt-5.5".to_string()),
+            ..StringFilter::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+    assert!(split.matches(&moved, &at(2_000)));
+    assert!(!split.matches(&stayed, &at(2_000)));
 }
 
 /// Two fields set on one object both have to hold, which is what makes `and`

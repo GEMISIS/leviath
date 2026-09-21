@@ -2305,6 +2305,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
                 let run_dir = runs.path().join("resumed");
                 std::fs::create_dir_all(&run_dir).unwrap();
                 let meta = leviath_core::run_meta::RunMeta {
+                    stage_models: Vec::new(),
                     active: Default::default(),
                     run_id: "resumed".to_string(),
                     agent_name: "coder".to_string(),
@@ -2423,6 +2424,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         let run_dir = runs.path().join("late");
         std::fs::create_dir_all(&run_dir).unwrap();
         let meta = leviath_core::run_meta::RunMeta {
+            stage_models: Vec::new(),
             active: Default::default(),
             run_id: "late".to_string(),
             agent_name: "coder".to_string(),

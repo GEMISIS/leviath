@@ -4263,6 +4263,13 @@
             "type": "number",
             "description": "The priced subtotal, kept even while cost_usd is null so a resumed run does not restart from zero. Not a substitute for cost_usd: showing it while calls went unpriced is the partial total that looks authoritative and is not."
           },
+          "models": {
+            "type": "array",
+            "description": "Every provider and model this stage ran an inference on, in the order it first reached each. A list because a stage that fails over runs on more than one: the first entry is where it started, the last is where it ended up, and one entry means it never moved. Each pair appears once however many calls it served, so this says what ran rather than how often. Absent on a stage that has run no inference - one the run never entered, one whose first call has not come back, one whose only provider could not be reached - and on every stage of a run recorded before Leviath kept it. Absent too on a daemon without the runs.stages.models capability, which is why an empty array is never written here.",
+            "items": {
+              "$ref": "#/components/schemas/StageModelUse"
+            }
+          },
           "visit_count": {
             "type": "integer",
             "minimum": 0,
@@ -4328,6 +4335,24 @@
                 "description": "Unix seconds when the span in progress began, or null while the clock is stopped. The working total is banked_secs plus now - since when since is set."
               }
             }
+          }
+        }
+      },
+      "StageModelUse": {
+        "type": "object",
+        "description": "One provider and model a stage ran an inference on. Both halves, because neither identifies what ran on its own: one provider serves many models, and one model is spelled differently by each provider that routes to it.",
+        "required": [
+          "provider",
+          "model"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "The registered provider that served the call."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model the call named, spelled as that provider spells it. The same model reached through two providers is two different strings here."
           }
         }
       },

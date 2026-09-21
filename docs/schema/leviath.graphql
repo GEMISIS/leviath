@@ -6594,6 +6594,27 @@ input RunFilter {
 	"""
 	blueprint: BlueprintInput
 	"""
+	Runs where some stage ran an inference on a provider this accepts.
+	
+	The question is about the run's stages, so one stage matching keeps the
+	run. That makes `ne` "a stage ran on something else" rather than "no
+	stage ran on this"; wrap the filter in `not` for the second. A run that
+	has billed no call, and a run recorded before Leviath kept this, match
+	nothing here.
+	"""
+	stageProvider: StringFilter
+	"""
+	Runs where some stage ran an inference on a model this accepts, matched
+	as the serving provider spells it.
+	
+	Quantified over the run's stages exactly as `stageProvider` is, with
+	the same reading of `ne`. Set beside `stageProvider`, the two are
+	separate conditions rather than one pair: a run whose first stage ran
+	on one provider and whose second ran on another provider's model
+	satisfies both.
+	"""
+	stageModel: StringFilter
+	"""
 	Whether the run was spawned unattended.
 	"""
 	unattended: BooleanFilter
@@ -8117,6 +8138,24 @@ type StageModelRoute {
 }
 
 """
+One provider and model a stage ran an inference on.
+
+Both halves, because neither identifies what ran on its own: one provider
+serves many models, and one model is spelled differently by each provider
+that routes to it.
+"""
+type StageModelUse {
+	"""
+	The registered provider that served the call.
+	"""
+	provider: String!
+	"""
+	The model the call named, spelled as that provider spells it.
+	"""
+	model: String!
+}
+
+"""
 One stage's record within a run: what it cost, and how often it ran.
 """
 type StageRecord {
@@ -8144,6 +8183,22 @@ type StageRecord {
 	Spend roll-up for this stage, across every visit.
 	"""
 	cost: CostBreakdown!
+	"""
+	What this stage actually ran on, in the order it first reached each
+	entry.
+	
+	A list because a stage that fails over runs on more than one: the first
+	entry is where it started, the last is where it ended up, and one entry
+	means it never moved. Each pair appears once however many calls it
+	served, so this is what ran and not how often.
+	
+	Null when the stage has run no inference at all - one the run never
+	entered, one whose first call has not come back, one whose provider
+	could not be reached, and every stage of a run that finished before
+	Leviath recorded this. Choosing a model is not running on one, so there
+	is nothing here to read as the stage's intended model.
+	"""
+	models: [StageModelUse!]
 	"""
 	How many times the run entered this stage.
 	"""
