@@ -220,8 +220,15 @@ pub(crate) struct InteractionPayload {
 /// What a lifecycle mutation answers with.
 #[derive(SimpleObject)]
 pub(crate) struct RunPayload {
-    /// The run, read back after the act, so its status is what the act made
-    /// it rather than what the caller hoped.
+    /// The run's record, read back once the daemon accepted the act.
+    ///
+    /// Acceptance and application are separate moments: the daemon applies the
+    /// act on its own tick and writes the record afterwards, so a run caught
+    /// mid-flight can still read as the status it held when asked. `PAUSED`,
+    /// `CANCELLED` or `RUNNING` here means the act has already landed; anything
+    /// else means it was accepted and has not landed yet, not that it was
+    /// refused - a refusal is an error, never a quiet answer. Watch
+    /// `RunStatusChanged`, or read the run again, to see it land.
     pub(crate) run: Run,
     /// Retired checks the mutation noticed. Empty unless something was
     /// superseded.
