@@ -100,7 +100,12 @@ pub(crate) fn init_window_seeded(
                 .unwrap_or(0);
             let fitted = fit_seed_to_budget(content, budget);
             let tokens = leviath_core::estimate_tokens(&fitted);
-            let _ = window.add_to_region(&region_name, fitted, tokens);
+            let _ = window.add_to_region_caused(
+                leviath_core::ContextCause::Seed,
+                &region_name,
+                fitted,
+                tokens,
+            );
         }
     }
 }

@@ -73,7 +73,8 @@ pub(crate) fn store_routed(window: &mut ContextWindow, routed: &RoutedParts) {
             let key = part.name.clone();
             let content = leviath_core::region::EntryContent::from_parts(vec![part.clone()]);
             let tokens = content.tokens(None);
-            if let Err(e) = window.add_assistant_turn_content(
+            if let Err(e) = window.add_turn(
+                Some(leviath_core::ContextCause::ProducedPart),
                 region,
                 leviath_core::EntryKind::Text,
                 content,

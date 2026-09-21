@@ -38,9 +38,6 @@
 //! region). [`diff_context`]/[`apply_delta`] compute and replay those diffs, and
 //! [`fold`] reconstructs the current state from the whole journal.
 
-use std::io::{self, Read};
-use std::ops::ControlFlow;
-
 use serde::{Deserialize, Serialize};
 
 use crate::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus};
@@ -363,10 +360,67 @@ pub enum RunRecord {
         /// Unix seconds.
         at: i64,
     },
+    /// A question this run put to a person, and what came back.
+    ///
+    /// The only record that a run stopped for someone. Without it an approved
+    /// call is indistinguishable from one no policy ever stopped, and the scope
+    /// a person chose - this call, this stage, the rest of the run - is gone the
+    /// moment the tool reads its answer.
+    Interaction {
+        /// The request id the hub minted, which is what an answer arriving over
+        /// the API or from `lev respond` carries.
+        request_id: String,
+        /// What was asked for.
+        kind: crate::interaction::InteractionKind,
+        /// The tool an approval was for. `None` for every other kind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        /// The question as the person saw it.
+        prompt: String,
+        /// The stage the run was in when it asked.
+        stage: String,
+        /// How it ended.
+        settlement: crate::interaction::Settlement,
+        /// Unix seconds when the question was asked.
+        asked_at: i64,
+        /// Unix seconds when it settled.
+        at: i64,
+    },
+    /// One trip to a provider, whether or not it produced an answer.
+    ///
+    /// The usage records say what the calls that worked cost. These say what the
+    /// run spent getting them, which is the half a retry or a failover otherwise
+    /// leaves no trace of at all.
+    InferenceAttempt(AttemptRecord),
+    /// One provider judged unusable, and the model being tried instead.
+    InferenceFailover(FailoverRecord),
     /// A full context-window snapshot that subsequent diffs rebase on.
     ContextCheckpoint {
         /// The full window snapshot.
         snapshot: ContextSnapshot,
+        /// Unix seconds.
+        at: i64,
+    },
+    /// Why a region changed, recorded as it changed.
+    ///
+    /// The snapshots beside this say what the window held; they cannot say what
+    /// moved it, and a region that lost its plan looks identical whether a
+    /// compaction took it, a stage-edge transform cleared it, or the model
+    /// called `context_delete`. Carries no content: the snapshot recorded on the
+    /// same tick already holds the window, so repeating the text here would
+    /// double the journal to say nothing new.
+    ContextChange {
+        /// The region that changed.
+        region: String,
+        /// What changed it.
+        cause: crate::ContextCause,
+        /// Entries the change added.
+        entries_added: usize,
+        /// Entries it removed, the eviction the change itself triggered
+        /// included.
+        entries_removed: usize,
+        /// How the region's token count moved; negative when it shrank.
+        token_delta: i64,
         /// Unix seconds.
         at: i64,
     },
@@ -660,14 +714,18 @@ pub fn apply_delta(base: &mut ContextSnapshot, delta: &ContextDelta) {
     }
 }
 
+mod attempt;
 mod codec;
 mod executions;
+mod points;
 
+pub use attempt::{AttemptOutcome, AttemptRecord, FailoverRecord, RequestDigest, Retry};
 pub use codec::{
     Frame, Frames, RUN_ARCHIVE_MAGIC, RUN_ARCHIVE_VERSION, read_archive, read_archive_lenient,
     read_archive_start, read_frame, read_record, write_archive_start, write_record,
 };
 pub use executions::{Execution, SeekRead, read_archive_executions, read_result_at};
+pub use points::{PointRef, RunPoint, replay_points, visit_archive_points, visit_points};
 
 // ─── fold ───────────────────────────────────────────────────────────────────
 
@@ -690,6 +748,31 @@ pub struct PendingToolBatch {
 /// One provider call's cost, as folded out of the journal.
 ///
 /// The flattened form of [`RunRecord::InferenceUsage`], so a consumer walking a
+/// One question this run asked a person, folded out of the journal.
+///
+/// The record that a run stopped for somebody. A reader listing these can say
+/// which calls a person allowed, at what scope, and which ones nobody answered
+/// - none of which is recoverable from the tool results alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InteractionRecord {
+    /// The request id the hub minted.
+    pub request_id: String,
+    /// What was asked for.
+    pub kind: crate::interaction::InteractionKind,
+    /// The tool an approval was for.
+    pub tool: Option<String>,
+    /// The question as the person saw it.
+    pub prompt: String,
+    /// The stage the run was in when it asked.
+    pub stage: String,
+    /// How it ended.
+    pub settlement: crate::interaction::Settlement,
+    /// Unix seconds when it was asked.
+    pub asked_at: i64,
+    /// Unix seconds when it settled.
+    pub at: i64,
+}
+
 /// folded run does not have to match the record enum to read a number.
 // `Eq` is not derivable once a cost is present: `f64` has no total equality.
 // `PartialEq` is what the tests compare with anyway.
@@ -722,6 +805,26 @@ pub struct InferenceUsageRecord {
     pub at: i64,
 }
 
+/// One region's change, as folded out of the journal.
+///
+/// The flattened form of [`RunRecord::ContextChange`], so a consumer reading a
+/// folded run does not have to match the record enum to ask why a region moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextChangeRecord {
+    /// The region that changed.
+    pub region: String,
+    /// What changed it.
+    pub cause: crate::ContextCause,
+    /// Entries the change added.
+    pub entries_added: usize,
+    /// Entries it removed.
+    pub entries_removed: usize,
+    /// How the region's token count moved; negative when it shrank.
+    pub token_delta: i64,
+    /// Unix seconds.
+    pub at: i64,
+}
+
 /// The state reconstructed from a run journal - enough to resume or inspect the
 /// run at its latest recorded point.
 #[derive(Debug, Clone, PartialEq)]
@@ -745,6 +848,21 @@ pub struct FoldedRun {
     pub inference_usage: Vec<InferenceUsageRecord>,
     /// Number of tool calls recorded.
     pub tool_call_count: usize,
+    /// Every question this run put to a person, in the order it asked them.
+    pub interactions: Vec<InteractionRecord>,
+    /// Every trip this run made to a provider, in order, the failed ones
+    /// included. Read beside `inference_usage`, which holds only the calls that
+    /// produced an answer, this is what the retries cost.
+    pub attempts: Vec<AttemptRecord>,
+    /// Every move from one provider to another, in order.
+    pub failovers: Vec<FailoverRecord>,
+    /// Why each region changed, in the order the changes landed.
+    ///
+    /// Read beside the window itself, this is the half a snapshot cannot carry:
+    /// which path in the runtime moved a region, rather than only what it holds
+    /// now. Empty for a journal written before causes were recorded, and for the
+    /// write paths that still cannot name one.
+    pub context_changes: Vec<ContextChangeRecord>,
     /// A dispatched tool batch whose results never made it into the context
     /// window (the run crashed mid-batch). `None` when the run has no batch in
     /// flight or the batch's turn already landed in `context`.
@@ -790,6 +908,10 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
         inference_count: 0,
         inference_usage: Vec::new(),
         tool_call_count: 0,
+        interactions: Vec::new(),
+        attempts: Vec::new(),
+        failovers: Vec::new(),
+        context_changes: Vec::new(),
         pending_batch: None,
     };
     for record in iter {
@@ -807,6 +929,27 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                 folded.identity.world_id = world_id.clone();
             }
             RunRecord::Inference { .. } => folded.inference_count += 1,
+            RunRecord::InferenceAttempt(attempt) => folded.attempts.push(attempt.clone()),
+            RunRecord::InferenceFailover(failover) => folded.failovers.push(failover.clone()),
+            RunRecord::Interaction {
+                request_id,
+                kind,
+                tool,
+                prompt,
+                stage,
+                settlement,
+                asked_at,
+                at,
+            } => folded.interactions.push(InteractionRecord {
+                request_id: request_id.clone(),
+                kind: kind.clone(),
+                tool: tool.clone(),
+                prompt: prompt.clone(),
+                stage: stage.clone(),
+                settlement: settlement.clone(),
+                asked_at: *asked_at,
+                at: *at,
+            }),
             RunRecord::InferenceUsage {
                 kind,
                 stage,
@@ -874,6 +1017,21 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                     call.result = Some(result.clone());
                 }
             }
+            RunRecord::ContextChange {
+                region,
+                cause,
+                entries_added,
+                entries_removed,
+                token_delta,
+                at,
+            } => folded.context_changes.push(ContextChangeRecord {
+                region: region.clone(),
+                cause: *cause,
+                entries_added: *entries_added,
+                entries_removed: *entries_removed,
+                token_delta: *token_delta,
+                at: *at,
+            }),
             RunRecord::ContextCheckpoint { snapshot, .. } => folded.context = snapshot.clone(),
             RunRecord::ContextDiff { delta, .. } => apply_delta(&mut folded.context, delta),
             RunRecord::Message { message, .. } => folded.messages.push(message.clone()),
@@ -901,221 +1059,15 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
     Some(folded)
 }
 
-/// A run's context window at one recorded point in time, with the metadata
-/// (stage, iteration, status, …) in effect then. Produced by [`replay_points`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RunPoint {
-    /// The run metadata at this point.
-    pub meta: RunMeta,
-    /// The full context window at this point.
-    pub context: ContextSnapshot,
-    /// Unix seconds this point was recorded.
-    pub at: i64,
-}
-
-/// One replayed point, lent to a [`visit_points`] visitor rather than handed
-/// over. Borrowing is the whole purpose: see that function.
-#[derive(Debug)]
-pub struct PointRef<'a> {
-    /// Position in the timeline, counting only records that produce a point.
-    /// Stable for a given journal prefix, because the journal is append-only -
-    /// which is what makes it usable as a pagination cursor.
-    pub index: usize,
-    /// Unix seconds this point was recorded.
-    pub at: i64,
-    /// The run metadata in effect at this point.
-    pub meta: &'a RunMeta,
-    /// The full context window at this point.
-    pub context: &'a ContextSnapshot,
-}
-
-/// Replay a run journal, calling `visit` once per record that changes the
-/// context (a checkpoint, diff, or progress step), in order. Stops early if the
-/// visitor returns [`ControlFlow::Break`]. Does nothing if the records don't
-/// start with a [`RunRecord::Header`].
-///
-/// The point of lending each point instead of collecting them: replaying a run
-/// means carrying one running window and mutating it, so materializing the
-/// timeline costs a **full deep copy of the context window per point** - and a
-/// window holds every region's entry text. On a megabyte-scale journal that is
-/// hundreds of whole-window clones, which is why anything that wants a slice of
-/// the timeline, or just an answer to "does any point contain this text",
-/// should come through here rather than [`replay_points`].
-///
-/// `&mut dyn FnMut` rather than a generic parameter, deliberately: this is
-/// called from a handful of places with unrelated closure types, and one
-/// monomorphization keeps both the compiled size and the coverage instantiation
-/// count at one - the same reasoning `execute_with_shutdown` documents in the
-/// serve module.
-pub fn visit_points(records: &[RunRecord], visit: &mut dyn FnMut(PointRef<'_>) -> ControlFlow<()>) {
-    let mut iter = records.iter();
-    let Some(mut folder) = (match iter.next() {
-        Some(first) => PointFolder::start(first),
-        None => None,
-    }) else {
-        return;
-    };
-    for record in iter {
-        if folder.push(record, visit).is_break() {
-            return;
-        }
-    }
-}
-
-/// Streaming [`visit_points`] over a framed archive: validate the preamble,
-/// then read one record at a time and fold it into the running window - so a
-/// multi-megabyte `run.lvr` is walked holding one record and one window in
-/// memory, instead of the whole parsed journal (`read_archive` materializes
-/// every record first, typically 2-4x the file's bytes as structs).
-///
-/// Errors only on a bad preamble. Like [`read_archive_lenient`], a torn or
-/// unreadable frame ends the walk with the points already visited: the tail of
-/// a live run's journal can legitimately be mid-append.
-pub fn visit_archive_points(
-    r: &mut dyn Read,
-    visit: &mut dyn FnMut(PointRef<'_>) -> ControlFlow<()>,
-) -> io::Result<()> {
-    read_archive_start(r)?;
-    // The first record has to be a Header, and a Header is a kind every build
-    // knows - so an unreadable frame here means this is not a foldable archive.
-    let mut folder = match read_frame(r) {
-        Ok(Some(Frame::Record(first))) => match PointFolder::start(&first) {
-            Some(folder) => folder,
-            None => return Ok(()),
-        },
-        _ => return Ok(()),
-    };
-    // A record kind from a later build is stepped over rather than ending the
-    // walk: it carries no context change this build can apply, and everything
-    // after it still does.
-    while let Ok(Some(frame)) = read_frame(r) {
-        let Frame::Record(record) = frame else {
-            continue;
-        };
-        if folder.push(&record, visit).is_break() {
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
-/// The running state of a point replay: the metadata and window in effect,
-/// folded record by record. Shared by [`visit_points`] (in-memory records) and
-/// [`visit_archive_points`] (streamed records) so the two can never disagree
-/// about what a record means.
-struct PointFolder {
-    meta: RunMeta,
-    context: ContextSnapshot,
-    index: usize,
-}
-
-impl PointFolder {
-    /// Start a replay from the first record, which must be the Header -
-    /// anything else means this isn't a run journal, and the replay visits
-    /// nothing (`None`).
-    fn start(first: &RunRecord) -> Option<Self> {
-        match first {
-            RunRecord::Header { meta, .. } => Some(Self {
-                meta: (**meta).clone(),
-                context: ContextSnapshot {
-                    stage_name: String::new(),
-                    total_tokens: 0,
-                    max_tokens: 0,
-                    regions: Vec::new(),
-                },
-                index: 0,
-            }),
-            _ => None,
-        }
-    }
-
-    /// Fold one record; when it produces a timeline point, lend it to `visit`.
-    fn push(
-        &mut self,
-        record: &RunRecord,
-        visit: &mut dyn FnMut(PointRef<'_>) -> ControlFlow<()>,
-    ) -> ControlFlow<()> {
-        let at = match record {
-            RunRecord::Header { meta: m, .. } => {
-                self.meta = (**m).clone();
-                return ControlFlow::Continue(());
-            }
-            RunRecord::StatusChanged { status, .. } => {
-                self.meta.status = status.clone();
-                return ControlFlow::Continue(());
-            }
-            RunRecord::ContextCheckpoint { snapshot, at } => {
-                self.context = snapshot.clone();
-                *at
-            }
-            RunRecord::ContextDiff { delta, at } => {
-                apply_delta(&mut self.context, delta);
-                *at
-            }
-            RunRecord::Checkpoint {
-                meta: m,
-                context: c,
-                at,
-            } => {
-                self.meta = (**m).clone();
-                self.context = c.clone();
-                *at
-            }
-            RunRecord::Progress { meta: m, delta, at } => {
-                self.meta = (**m).clone();
-                apply_delta(&mut self.context, delta);
-                *at
-            }
-            // Non-context records don't add a timeline point. Usage included:
-            // it says what a call cost, not what the window then held, and
-            // emitting a point per call would double the timeline with entries
-            // whose context is identical to their neighbour's.
-            RunRecord::OwnershipChanged { .. }
-            | RunRecord::Inference { .. }
-            | RunRecord::InferenceUsage { .. }
-            | RunRecord::ToolBatch { .. }
-            | RunRecord::ToolCallDone { .. }
-            | RunRecord::Message { .. } => return ControlFlow::Continue(()),
-        };
-        let flow = visit(PointRef {
-            index: self.index,
-            at,
-            meta: &self.meta,
-            context: &self.context,
-        });
-        self.index += 1;
-        flow
-    }
-}
-
-/// Replay a run journal into the sequence of context-window snapshots over time,
-/// one [`RunPoint`] per record that changes the context (a checkpoint, diff, or
-/// progress step). This is what the context-history views (TUI/CLI/API) consume
-/// to show the window "at each stage and point". Returns an empty vec if the
-/// records don't start with a [`RunRecord::Header`].
-///
-/// Materializes every point, so it deep-copies the whole context window once per
-/// point. Prefer [`visit_points`] when only part of the timeline is wanted, or
-/// when the answer is a predicate rather than the points themselves.
-pub fn replay_points(records: &[RunRecord]) -> Vec<RunPoint> {
-    let mut points = Vec::new();
-    visit_points(records, &mut |point| {
-        points.push(RunPoint {
-            meta: point.meta.clone(),
-            context: point.context.clone(),
-            at: point.at,
-        });
-        ControlFlow::Continue(())
-    });
-    points
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Only the tests write through the trait now; the codec moved out.
+    // The tests are the only writers through the trait; the codec is its own
+    // module and writes through its own.
+    use crate::ContextCause;
     use crate::run_meta::RunStatus;
-    use std::io::Write;
+    use std::io::{self, Read, Write};
+    use std::ops::ControlFlow;
 
     fn identity() -> RunIdentity {
         RunIdentity {
@@ -1632,6 +1584,39 @@ mod tests {
                 cost_reported_by_provider: None,
                 at: 102,
             },
+            RunRecord::InferenceAttempt(AttemptRecord {
+                stage: "plan".to_string(),
+                attempt: 1,
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-5".to_string(),
+                outcome: AttemptOutcome::Failed {
+                    kind: "server-error".to_string(),
+                    transient: true,
+                    capacity: false,
+                    next: Retry::SameModel,
+                },
+                duration_ms: 1_200,
+                backoff_ms: 0,
+                digest: RequestDigest {
+                    system_hash: 99,
+                    messages: 4,
+                    tools: 1,
+                    max_tokens: 1024,
+                    temperature: 0.7,
+                },
+                at: 102,
+            }),
+            RunRecord::InferenceFailover(FailoverRecord {
+                stage: "plan".to_string(),
+                iteration: 2,
+                from_provider: "anthropic".to_string(),
+                from_model: "claude-sonnet-5".to_string(),
+                to_provider: "openai".to_string(),
+                to_model: "gpt-5.5".to_string(),
+                reason: "unreachable".to_string(),
+                kind: "timeout".to_string(),
+                at: 102,
+            }),
             RunRecord::ToolBatch {
                 calls: vec![ToolCallRecord {
                     execution_id: String::new(),
@@ -1962,6 +1947,15 @@ mod tests {
         assert_eq!(folded.inference_count, 2);
         assert_eq!(folded.inference_usage.len(), 1);
         assert_eq!(folded.tool_call_count, 1);
+        // The trips to the provider, and the one move to another. Kept beside
+        // the usage rather than merged into it: the usage record is the invoice
+        // for the call that worked, and these are what it took to get it.
+        assert_eq!(folded.attempts.len(), 1);
+        assert_eq!(folded.attempts[0].attempt, 1);
+        assert_eq!(folded.attempts[0].digest.messages, 4);
+        assert_eq!(folded.failovers.len(), 1);
+        assert_eq!(folded.failovers[0].from_provider, "anthropic");
+        assert_eq!(folded.failovers[0].to_provider, "openai");
         // One inbound message recorded.
         assert_eq!(folded.messages.len(), 1);
         assert_eq!(folded.messages[0].content, "another");
@@ -2176,6 +2170,155 @@ mod tests {
         assert_eq!(pending.calls[1].result.as_deref(), Some("inline"));
         assert_eq!(pending.calls[2].result, None);
         assert_eq!(folded.tool_call_count, 3);
+    }
+
+    /// Folding a journal gathers why each region moved, in order.
+    ///
+    /// The snapshots beside these say what a region held; only this says what
+    /// moved it, and a reader asking "what emptied the plan" has nothing else
+    /// to go on.
+    #[test]
+    fn folding_gathers_why_each_region_moved() {
+        use crate::ContextCause;
+
+        let changed = |region: &str, cause, added, removed, delta, at| RunRecord::ContextChange {
+            region: region.to_string(),
+            cause,
+            entries_added: added,
+            entries_removed: removed,
+            token_delta: delta,
+            at,
+        };
+        let records = vec![
+            header(),
+            changed("plan", ContextCause::Seed, 1, 0, 40, 20),
+            changed("conversation", ContextCause::ToolResult, 2, 0, 900, 21),
+            // A compaction is the case the record exists for: it takes entries
+            // away, and nothing else in the journal says who did.
+            changed("plan", ContextCause::Compaction, 1, 6, -380, 22),
+        ];
+        let folded = fold(&records).expect("a journal with a header folds");
+
+        assert_eq!(folded.context_changes.len(), 3);
+        assert_eq!(folded.context_changes[0].region, "plan");
+        assert_eq!(folded.context_changes[0].cause, ContextCause::Seed);
+        assert_eq!(folded.context_changes[0].entries_added, 1);
+        assert_eq!(folded.context_changes[0].token_delta, 40);
+        assert_eq!(folded.context_changes[0].at, 20);
+        assert_eq!(folded.context_changes[1].cause, ContextCause::ToolResult);
+        let compacted = &folded.context_changes[2];
+        assert_eq!(compacted.cause, ContextCause::Compaction);
+        assert_eq!(compacted.entries_removed, 6);
+        assert_eq!(
+            compacted.token_delta, -380,
+            "a region that shrank reads as a loss, not as an absence"
+        );
+        // A change is not a turn: neither counter above moves for one.
+        assert_eq!(folded.inference_count, 0);
+        assert_eq!(folded.tool_call_count, 0);
+    }
+
+    /// Folding a journal gathers every question the run asked, in order.
+    ///
+    /// The fold is how a reader lists them, and the only reason the record is
+    /// worth writing: a granted approval leaves nothing else behind.
+    #[test]
+    fn folding_gathers_every_question_the_run_asked() {
+        use crate::interaction::{ApprovalScope, InteractionKind, Settlement};
+
+        let asked = |id: &str, settlement: Settlement, at: i64| RunRecord::Interaction {
+            request_id: id.to_string(),
+            kind: InteractionKind::ToolApproval,
+            tool: Some("shell".to_string()),
+            prompt: format!("Run {id}?"),
+            stage: "plan".to_string(),
+            settlement,
+            asked_at: at,
+            at: at + 1,
+        };
+        let records = vec![
+            header(),
+            asked(
+                "approve-1",
+                Settlement::Answered {
+                    approved: Some(true),
+                    scope: Some(ApprovalScope::Stage),
+                    choice: Some(0),
+                    text: None,
+                    feedback: None,
+                },
+                20,
+            ),
+            asked("approve-2", Settlement::TimedOut, 30),
+            asked("approve-3", Settlement::Cancelled, 40),
+        ];
+        let folded = fold(&records).expect("a journal with a header folds");
+
+        assert_eq!(folded.interactions.len(), 3);
+        assert_eq!(folded.interactions[0].request_id, "approve-1");
+        assert_eq!(folded.interactions[0].tool.as_deref(), Some("shell"));
+        assert_eq!(folded.interactions[0].stage, "plan");
+        assert_eq!(folded.interactions[0].prompt, "Run approve-1?");
+        assert_eq!(folded.interactions[0].asked_at, 20);
+        assert_eq!(folded.interactions[0].at, 21);
+        assert!(matches!(
+            folded.interactions[0].settlement,
+            Settlement::Answered {
+                approved: Some(true),
+                scope: Some(ApprovalScope::Stage),
+                ..
+            }
+        ));
+        // The three ways one can end stay three, because a caller cannot tell
+        // them apart from the answer it was handed.
+        assert_eq!(folded.interactions[1].settlement, Settlement::TimedOut);
+        assert_eq!(folded.interactions[2].settlement, Settlement::Cancelled);
+        // And a question is not a tool call, however much it looks like one.
+        assert_eq!(folded.tool_call_count, 0);
+    }
+
+    /// Folding gathers why each region moved, in order, with the causes intact.
+    ///
+    /// The whole point of the record: the window the snapshots rebuild shows the
+    /// plan region empty either way, and only these say a compaction took it
+    /// rather than the model releasing it.
+    #[test]
+    fn folding_gathers_why_each_region_changed() {
+        let changed = |region: &str, cause: ContextCause, added, removed, delta, at| {
+            RunRecord::ContextChange {
+                region: region.to_string(),
+                cause,
+                entries_added: added,
+                entries_removed: removed,
+                token_delta: delta,
+                at,
+            }
+        };
+        let records = vec![
+            header(),
+            changed("plan", ContextCause::Seed, 1, 0, 40, 10),
+            changed("plan", ContextCause::ContextTool, 1, 1, -5, 20),
+            changed("plan", ContextCause::Compaction, 0, 3, -120, 30),
+        ];
+        let folded = fold(&records).expect("a journal with a header folds");
+
+        let causes: Vec<ContextCause> = folded.context_changes.iter().map(|c| c.cause).collect();
+        assert_eq!(
+            causes,
+            vec![
+                ContextCause::Seed,
+                ContextCause::ContextTool,
+                ContextCause::Compaction
+            ]
+        );
+        assert_eq!(folded.context_changes[2].region, "plan");
+        assert_eq!(folded.context_changes[2].entries_added, 0);
+        assert_eq!(folded.context_changes[2].entries_removed, 3);
+        assert_eq!(folded.context_changes[2].token_delta, -120);
+        assert_eq!(folded.context_changes[2].at, 30);
+        // A change is not a point in the timeline: the snapshot beside it
+        // already carries the window it produced.
+        assert!(replay_points(&records).is_empty());
     }
 
     #[test]
@@ -2720,6 +2863,46 @@ mod tests {
                 .all(|u| u.prompt_tokens < 32_000),
             "no single call exceeded the window, and the journal can now prove it"
         );
+    }
+
+    /// Every way an attempt can end, and every way the loop can follow a
+    /// failure, under the name a reader outside this build actually sees. These
+    /// names are the archive's wire format, so they are pinned here rather than
+    /// left to whatever the variant happens to be called in Rust.
+    #[test]
+    fn an_attempts_outcomes_and_follow_ups_keep_their_wire_names() {
+        for (outcome, json) in [
+            (AttemptOutcome::Succeeded, "\"succeeded\"".to_string()),
+            (
+                AttemptOutcome::Failed {
+                    kind: "timeout".to_string(),
+                    transient: true,
+                    capacity: false,
+                    next: Retry::Reported,
+                },
+                "{\"failed\":{\"kind\":\"timeout\",\"transient\":true,\"capacity\":false,\
+                 \"next\":\"reported\"}}"
+                    .to_string(),
+            ),
+        ] {
+            let wire = serde_json::to_string(&outcome).expect("an outcome serializes");
+            assert_eq!(wire, json);
+            assert_eq!(
+                serde_json::from_str::<AttemptOutcome>(&wire).expect("and reads back"),
+                outcome
+            );
+        }
+        for (next, json) in [
+            (Retry::Reported, "\"reported\""),
+            (Retry::SameModel, "\"same_model\""),
+            (Retry::RenewedFiles, "\"renewed_files\""),
+        ] {
+            assert_eq!(serde_json::to_string(&next).expect("serializes"), json);
+            assert_eq!(
+                serde_json::from_str::<Retry>(json).expect("and reads back"),
+                next
+            );
+        }
     }
 
     /// The heavy variant and the light one both name one provider call, so a

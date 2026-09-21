@@ -48,7 +48,8 @@ pub(crate) fn deliver_messages(
                 .unwrap_or_else(|| "conversation".to_string());
             if msg.parts.is_empty() {
                 let tokens = leviath_core::estimate_tokens(&msg.content);
-                let _ = window.add_typed_entry(
+                let _ = window.add_typed_entry_caused(
+                    leviath_core::ContextCause::Message,
                     &region,
                     leviath_core::EntryKind::UserMessage,
                     msg.content.clone(),
@@ -83,7 +84,8 @@ fn deliver_with_parts(
             msg.parts.len()
         );
         let tokens = leviath_core::estimate_tokens(&msg.content);
-        let _ = window.add_typed_entry(
+        let _ = window.add_typed_entry_caused(
+            leviath_core::ContextCause::Message,
             region,
             leviath_core::EntryKind::UserMessage,
             msg.content.clone(),
@@ -118,6 +120,7 @@ fn deliver_with_parts(
     let content = leviath_core::region::EntryContent::from_parts(parts);
     let tokens = sink.tokens_for(&content);
     if let Err(e) = window.add_content_entry(
+        leviath_core::ContextCause::Message,
         region,
         leviath_core::EntryKind::UserMessage,
         content,
@@ -132,6 +135,7 @@ fn deliver_with_parts(
             let tokens = sink.tokens_for(&content);
             window
                 .add_content_entry(
+                    leviath_core::ContextCause::Message,
                     &target,
                     leviath_core::EntryKind::UserMessage,
                     content,

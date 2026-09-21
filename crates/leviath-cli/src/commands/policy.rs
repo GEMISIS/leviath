@@ -292,7 +292,13 @@ fn window_with_taint(
     window.add_region(region);
     if taint != leviath_core::TaintLevel::Public {
         window
-            .add_tainted_to_region("scenario", "sample".to_string(), 8, taint)
+            .add_tainted_to_region(
+                leviath_core::ContextCause::ToolResult,
+                "scenario",
+                "sample".to_string(),
+                8,
+                taint,
+            )
             .expect("infallible: the region was just added");
     }
     window

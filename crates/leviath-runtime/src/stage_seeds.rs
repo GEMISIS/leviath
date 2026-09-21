@@ -194,7 +194,7 @@ pub(crate) fn apply_stage_seeds(
 ) {
     for (region, content) in seeded_content(&pending.sites, results) {
         let tokens = leviath_core::estimate_tokens(&content);
-        window.replace_region(&region, content, tokens);
+        window.replace_region(leviath_core::ContextCause::Seed, &region, content, tokens);
     }
     commands
         .entity(entity)

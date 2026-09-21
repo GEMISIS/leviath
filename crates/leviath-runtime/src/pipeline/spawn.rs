@@ -444,6 +444,15 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
     let prompts: Vec<Option<String>> = setups.iter().map(|s| s.system_prompt.clone()).collect();
     crate::context_setup::ensure_stage_instructions_region(&mut window, &prompts);
     apply_stage_context(&setups[0], &mut window)?;
+    // Now that the window is built, not before it: this is the one place both
+    // halves of a change record are in hand (the run id the archive is named
+    // after, and the lane every other record goes down), and the seeding above
+    // has to stay off the lane. An append is the one message that cannot create
+    // a run directory, so an append arriving ahead of the first snapshot stakes
+    // the run without establishing it - and the snapshot behind it then reads as
+    // a write to a run somebody deleted. A world that persists nothing leaves
+    // the window detached, and it records nothing.
+    window.attach_journal(&agent_id, world.get_resource::<PersistenceStage>());
 
     let stage0_name = blueprint.stages[0].name.clone();
     let stage0_inf = stage_infs[0].clone();

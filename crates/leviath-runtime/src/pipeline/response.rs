@@ -443,6 +443,40 @@ pub(crate) fn collect_inference(
                             ),
                         ));
                     }
+                    // Journaled from here rather than from the lane, because
+                    // here is where the decision is made: the job reported a
+                    // failure and knew nothing about a second candidate. Without
+                    // this record the run's attempts change provider between one
+                    // and the next with nothing saying who moved them, which
+                    // reads as a run that was always configured this way.
+                    //
+                    // Keyed on the agent id, which is the run id, so it lands in
+                    // the same journal as the attempts it sits between. A world
+                    // with no lane writes nothing, exactly as the attempts do.
+                    if let Some(persist) = persist.as_deref() {
+                        let record = leviath_core::run_archive::FailoverRecord {
+                            stage: state.current_stage.clone(),
+                            iteration: state.iteration,
+                            from_provider: called_provider.clone(),
+                            from_model: called_model.clone(),
+                            to_provider: next.provider.clone(),
+                            to_model: next.model.clone(),
+                            reason: err
+                                .unavailable_reason()
+                                .map(leviath_providers::UnavailableReason::label)
+                                .expect("a failover only happens for an unusable provider")
+                                .to_string(),
+                            kind: crate::inference_bridge::failure_label(&err),
+                            at: now,
+                        };
+                        let _ = persist.0.send(PersistMsg::Append {
+                            run_id: state.agent_id.clone(),
+                            record: Box::new(
+                                leviath_core::run_archive::RunRecord::InferenceFailover(record),
+                            ),
+                            ack: None,
+                        });
+                    }
                     let si = inference
                         .as_deref_mut()
                         .expect("the failover branch only runs with a StageInference");
@@ -1094,7 +1128,8 @@ fn store_reply(
     let routed = super::part_routing::split(stage, &infer.parts);
     if let Some(content) = reply_content(&infer.response, &routed.kept, sink) {
         let tokens = content.tokens(sink.map(|s| s.registry));
-        let _ = window.add_assistant_turn_content(
+        let _ = window.add_turn(
+            Some(leviath_core::ContextCause::ModelReply),
             "conversation",
             leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
             content,
@@ -1130,5 +1165,10 @@ pub(crate) fn reply_content(
 pub(crate) fn inject_system_nudge(window: &mut ContextWindow, text: &str) {
     let content = format!("[System] {text}");
     let tokens = leviath_core::estimate_tokens(&content);
-    let _ = window.add_to_region("conversation", content, tokens);
+    let _ = window.add_to_region_caused(
+        leviath_core::ContextCause::Framework,
+        "conversation",
+        content,
+        tokens,
+    );
 }

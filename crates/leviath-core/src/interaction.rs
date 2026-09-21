@@ -379,6 +379,60 @@ pub enum ApprovalScope {
     Run,
 }
 
+/// How a question this run asked ended up.
+///
+/// Recorded in the journal, because nothing else records it: the hub hands an
+/// answer to the caller that was waiting and forgets it, so an approved tool
+/// call looked exactly like one no policy ever stopped, and a run that paused
+/// for a person looked exactly like one that never asked.
+///
+/// The decision rather than the whole response: an answer may carry files, and
+/// those are already stored as parts and named by the tool result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Settlement {
+    /// A person answered.
+    Answered {
+        /// Whether a tool approval was granted. `None` for every other kind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved: Option<bool>,
+        /// The scope they chose for an approval: this call, this stage, or the
+        /// rest of the run. `None` where they were not offered one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<ApprovalScope>,
+        /// Which option they picked, for a question that offered a list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choice: Option<usize>,
+        /// What they typed, for a question that took text. An edited document
+        /// comes back here too, which is why it is not capped: the point of
+        /// recording it is that the run acted on exactly these words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        /// What they told the model to do instead, on a denial.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+    },
+    /// Nobody answered before `[limits] interaction_timeout_secs` ran out, so
+    /// the hub answered for them.
+    TimedOut,
+    /// The request was withdrawn: the run was cancelled, or the agent that
+    /// asked went away.
+    Cancelled,
+}
+
+impl Settlement {
+    /// The settlement of one response, as the journal records it.
+    pub fn of(response: &InteractionResponse) -> Self {
+        Self::Answered {
+            approved: response.approved,
+            scope: response.scope,
+            choice: response.choice_index,
+            text: response.value.clone(),
+            feedback: response.feedback.clone(),
+        }
+    }
+}
+
 /// A response written by the dashboard (or `lev respond`) to answer the worker.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InteractionResponse {
@@ -883,6 +937,49 @@ mod tests {
         assert!(r.choice_index.is_none());
         assert!(r.approved.is_none());
         assert!(r.scope.is_none());
+    }
+
+    /// Every part of an answer a reader would ask about reaches the record, and
+    /// the files attached to one deliberately do not.
+    ///
+    /// A journal record is read long after the run; the parts are already stored
+    /// and named by the tool result, and copying their bytes into the journal
+    /// once per answer is the one thing this record must not do.
+    #[test]
+    fn a_settlement_carries_the_decision_and_not_the_files() {
+        let denied = InteractionResponse {
+            request_id: "approve-1".to_string(),
+            value: Some("go ahead".to_string()),
+            choice_index: Some(2),
+            approved: Some(false),
+            scope: Some(ApprovalScope::Stage),
+            feedback: Some("try the safe one".to_string()),
+            parts: vec![],
+        };
+        assert_eq!(
+            Settlement::of(&denied),
+            Settlement::Answered {
+                approved: Some(false),
+                scope: Some(ApprovalScope::Stage),
+                choice: Some(2),
+                text: Some("go ahead".to_string()),
+                feedback: Some("try the safe one".to_string()),
+            }
+        );
+
+        // A plain text answer carries no approval and no scope: there was
+        // nothing to approve and nothing to scope.
+        let text = InteractionResponse::text("ask-1", "the second one");
+        assert_eq!(
+            Settlement::of(&text),
+            Settlement::Answered {
+                approved: None,
+                scope: None,
+                choice: None,
+                text: Some("the second one".to_string()),
+                feedback: None,
+            }
+        );
     }
 
     #[test]

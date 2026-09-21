@@ -302,6 +302,9 @@ fn mirror_into_region(
     // Read the budget and clear in one borrow. Asking for the region twice
     // leaves a second "what if it is missing" branch that the first check has
     // already ruled out, so nothing can ever take it.
+    // Measured before the clear, so the record below describes what the clear
+    // took as well as what replaced it.
+    let before = window.region_shape(FINAL_OUTPUT_REGION);
     let budget = {
         let Some(region) = window.get_region_mut(FINAL_OUTPUT_REGION) else {
             return;
@@ -312,9 +315,22 @@ fn mirror_into_region(
     let mirrored = fit_to_region(content, budget);
     let tokens = leviath_core::estimate_tokens(&mirrored);
     window.current_tokens = window.calculate_tokens();
+    // The clear is recorded on its own because it happens outside any write: a
+    // reader seeing only the entry that followed would think nothing left.
+    window.journal_change(
+        leviath_core::ContextCause::ToolResult,
+        FINAL_OUTPUT_REGION,
+        before,
+        0,
+    );
     // Through the window method rather than the region directly, so a custom
     // region's `on_write` hook fires - the same reason `context_write` does it.
-    let _ = window.add_to_region(FINAL_OUTPUT_REGION, mirrored, tokens);
+    let _ = window.add_to_region_caused(
+        leviath_core::ContextCause::ToolResult,
+        FINAL_OUTPUT_REGION,
+        mirrored,
+        tokens,
+    );
     // Each stored artifact as its own entry, so a later stage sees the file
     // the way it sees any other part: by stand-in, or natively when its
     // model takes the type.
@@ -326,6 +342,7 @@ fn mirror_into_region(
         ]);
         let tokens = content.tokens(registry);
         let _ = window.add_content_entry(
+            leviath_core::ContextCause::ProducedPart,
             FINAL_OUTPUT_REGION,
             leviath_core::EntryKind::Text,
             content,

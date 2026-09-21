@@ -179,7 +179,12 @@ pub(crate) fn track_stage_progress(mut commands: Commands, mut agents: Query<Pro
             let tokens = leviath_core::estimate_tokens(&text);
             // Best-effort, like the stuck and error notes: an overflowing
             // region drops it rather than failing the stage.
-            let _ = window.add_to_region(region, text, tokens);
+            let _ = window.add_to_region_caused(
+                leviath_core::ContextCause::Framework,
+                region,
+                text,
+                tokens,
+            );
         }
 
         commands

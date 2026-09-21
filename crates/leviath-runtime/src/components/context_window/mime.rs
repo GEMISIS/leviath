@@ -416,18 +416,22 @@ impl super::ContextWindow {
     /// Write an entry that carries typed parts, on the system's behalf.
     pub(crate) fn add_content_entry(
         &mut self,
+        cause: leviath_core::ContextCause,
         region_name: &str,
         kind: leviath_core::EntryKind,
         content: EntryContent,
         tokens: usize,
     ) -> leviath_core::Result<()> {
         self.typed_write_content(
-            super::WriteOrigin::System,
-            region_name,
-            kind,
+            super::TypedWrite {
+                cause: Some(cause),
+                origin: super::WriteOrigin::System,
+                region: region_name,
+                kind,
+                taint: None,
+            },
             content,
             tokens,
-            None,
         )
     }
 
@@ -439,15 +443,24 @@ impl super::ContextWindow {
     /// it always has. When the hook hands the same text back the parts are
     /// kept exactly; when it rewrites the text, the rewrite replaces the text
     /// parts and the stored parts follow it unchanged.
+    ///
+    /// `cause` rides along to the journal, and is `None` only for the two write
+    /// paths that cannot yet name one (see
+    /// [`add_to_region`](Self::add_to_region)).
     pub(crate) fn typed_write_content(
         &mut self,
-        origin: super::WriteOrigin,
-        region_name: &str,
-        kind: leviath_core::EntryKind,
+        write: super::TypedWrite<'_>,
         content: EntryContent,
         tokens: usize,
-        taint: Option<leviath_core::TaintLevel>,
     ) -> leviath_core::Result<()> {
+        let super::TypedWrite {
+            cause,
+            origin,
+            region: region_name,
+            kind,
+            taint,
+        } = write;
+        let before = self.region_shape(region_name);
         let rendered = content.as_str().to_string();
         let (text, tokens, key_override) = match origin {
             super::WriteOrigin::Agent => {
@@ -462,7 +475,7 @@ impl super::ContextWindow {
         } else {
             rewritten(content, text)
         };
-        self.write_to_region(region_name, tokens, &mut |region, tokens| {
+        self.write_to_region(cause, region_name, before, tokens, &mut |region, tokens| {
             match taint {
                 Some(level) => {
                     region.add_typed_tainted_entry(content.clone(), tokens, kind.clone(), level)?;
@@ -524,8 +537,14 @@ mod writer_tests {
         let content = EntryContent::from_parts(vec![Part::text("keep"), stored_png()]);
         let mut same =
             custom_window("fn render(ctx) { \"\" }\nfn on_write(ctx) { ctx.entry.content }");
-        same.add_content_entry("brain", EntryKind::Text, content.clone(), 10)
-            .unwrap();
+        same.add_content_entry(
+            leviath_core::ContextCause::ProducedPart,
+            "brain",
+            EntryKind::Text,
+            content.clone(),
+            10,
+        )
+        .unwrap();
         let entry = &same.get_region("brain").unwrap().content[0];
         assert_eq!(entry.content, content);
         assert_eq!(entry.key, None);
@@ -534,7 +553,13 @@ mod writer_tests {
             "fn render(ctx) { \"\" }\nfn on_write(ctx) { #{ content: ctx.entry.content.to_upper(), key: \"k\" } }",
         );
         upper
-            .add_content_entry("brain", EntryKind::Text, content, 10)
+            .add_content_entry(
+                leviath_core::ContextCause::ProducedPart,
+                "brain",
+                EntryKind::Text,
+                content,
+                10,
+            )
             .unwrap();
         let entry = &upper.get_region("brain").unwrap().content[0];
         assert_eq!(entry.content.parts().len(), 2);
@@ -548,7 +573,13 @@ mod writer_tests {
         let mut plain = ContextWindow::new(100);
         plain.add_region(Region::new("t".into(), RegionKind::Pinned, 100));
         let err = plain
-            .add_content_entry("missing", EntryKind::Text, EntryContent::text("x"), 1)
+            .add_content_entry(
+                leviath_core::ContextCause::ProducedPart,
+                "missing",
+                EntryKind::Text,
+                EntryContent::text("x"),
+                1,
+            )
             .unwrap_err();
         assert_eq!(
             err.to_string(),

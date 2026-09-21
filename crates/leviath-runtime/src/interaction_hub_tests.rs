@@ -451,3 +451,142 @@ fn a_deny_with_feedback_survives_the_wire_and_the_journal() {
         RunRecord::ToolCallDone { result, .. } if result.ends_with("Feedback: use the API")
     ));
 }
+
+// ─── The record of what a person answered ─────────────────────────────────────
+
+/// Every way a request can end is recorded, and the three are told apart.
+///
+/// They have to be: an answer, a request nobody answered in time, and one
+/// withdrawn when the run was cancelled all hand the waiting caller the same
+/// neutral response, so the record is the only thing that distinguishes them.
+#[tokio::test]
+async fn each_way_a_request_ends_is_recorded_as_itself() {
+    use leviath_core::interaction::{ApprovalScope, Settlement};
+
+    let hub = InteractionHub::new();
+
+    // Answered: an approval, with the scope the person chose.
+    let asked = hub.clone();
+    let answered = tokio::spawn(async move {
+        asked
+            .submit(
+                "run-1",
+                InteractionRequest::tool_approval(
+                    "approve-1",
+                    "shell",
+                    serde_json::json!({"command": "rm -rf build"}),
+                    "implement",
+                    &[],
+                ),
+            )
+            .await
+    });
+    settle().await;
+    hub.answer(InteractionResponse {
+        request_id: "approve-1".to_string(),
+        value: None,
+        choice_index: Some(1),
+        approved: Some(true),
+        scope: Some(ApprovalScope::Run),
+        feedback: None,
+        parts: Vec::new(),
+    });
+    answered.await.expect("the ask completes");
+
+    // Cancelled: the run went away with the question still open.
+    let asked = hub.clone();
+    let cancelled = tokio::spawn(async move { asked.submit("run-1", req("ask-2")).await });
+    settle().await;
+    assert!(hub.cancel("ask-2"));
+    cancelled.await.expect("the ask completes");
+
+    let settled = hub.take_settled();
+    assert_eq!(settled.len(), 2, "one record per question: {settled:?}");
+
+    let (run, first) = &settled[0];
+    assert_eq!(run, "run-1", "the record names the run that asked");
+    assert_eq!(first.request_id, "approve-1");
+    assert_eq!(first.tool.as_deref(), Some("shell"));
+    assert_eq!(first.stage, "implement");
+    assert!(
+        first.prompt.contains("rm -rf build"),
+        "the prompt is what the person saw: {}",
+        first.prompt
+    );
+    let Settlement::Answered {
+        approved,
+        scope,
+        choice,
+        ..
+    } = &first.settlement
+    else {
+        panic!("an answered approval is answered: {:?}", first.settlement);
+    };
+    assert_eq!(*approved, Some(true));
+    assert_eq!(*scope, Some(ApprovalScope::Run), "and at which scope");
+    assert_eq!(*choice, Some(1));
+    assert!(first.asked_at <= first.at, "asked before it settled");
+
+    assert_eq!(settled[1].1.settlement, Settlement::Cancelled);
+
+    // Drained, so the next tick does not write them again.
+    assert!(hub.take_settled().is_empty());
+}
+
+/// A request nobody answers in time is recorded as the timeout it was.
+///
+/// On a paused clock, because `Some(0)` means "no deadline" here: a deadline
+/// that fires has to be a real one, advanced past.
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_request_is_recorded_as_a_timeout() {
+    use leviath_core::interaction::Settlement;
+
+    let hub = InteractionHub::new();
+    hub.set_timeout_secs(Some(2));
+    let asked = hub.clone();
+    let expired = tokio::spawn(async move { asked.submit("run-2", req("ask-late")).await });
+    settle().await;
+    tokio::time::advance(Duration::from_secs(3)).await;
+    settle().await;
+    expired.await.expect("the ask completes");
+
+    let settled = hub.take_settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].1.settlement, Settlement::TimedOut);
+    assert_eq!(settled[0].0, "run-2");
+    assert!(
+        settled[0].1.asked_at <= settled[0].1.at,
+        "asked before it gave up"
+    );
+}
+
+/// Cancelling a run records every question it still had open, so a cancelled
+/// run does not look like one nobody ever asked anything.
+#[tokio::test]
+async fn cancelling_a_run_records_each_open_question() {
+    use leviath_core::interaction::Settlement;
+
+    let hub = InteractionHub::new();
+    for id in ["ask-a", "ask-b"] {
+        let asked = hub.clone();
+        tokio::spawn(async move { asked.submit("run-3", req(id)).await });
+    }
+    // Somebody else's question, which a cancel of run-3 must not touch.
+    let other = hub.clone();
+    tokio::spawn(async move { other.submit("run-4", req("ask-c")).await });
+    settle().await;
+
+    assert_eq!(hub.cancel_for_agent("run-3"), 2);
+
+    let settled = hub.take_settled();
+    assert_eq!(settled.len(), 2);
+    assert!(
+        settled
+            .iter()
+            .all(|(run, r)| run == "run-3" && r.settlement == Settlement::Cancelled),
+        "{settled:?}"
+    );
+    let mut ids: Vec<&str> = settled.iter().map(|(_, r)| r.request_id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["ask-a", "ask-b"]);
+}

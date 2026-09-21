@@ -155,7 +155,13 @@ mod tests {
         let content = leviath_core::region::EntryContent::from_parts(vec![part]);
         let tokens = content.tokens(None);
         window
-            .add_content_entry(region, leviath_core::EntryKind::Text, content, tokens)
+            .add_content_entry(
+                leviath_core::ContextCause::ProducedPart,
+                region,
+                leviath_core::EntryKind::Text,
+                content,
+                tokens,
+            )
             .unwrap();
         window
     }
@@ -282,7 +288,13 @@ mod tests {
         let content = leviath_core::region::EntryContent::from_parts(vec![part]);
         let tokens = content.tokens(None);
         window
-            .add_content_entry("preview", leviath_core::EntryKind::Text, content, tokens)
+            .add_content_entry(
+                leviath_core::ContextCause::ProducedPart,
+                "preview",
+                leviath_core::EntryKind::Text,
+                content,
+                tokens,
+            )
             .unwrap();
         let output = try_emit(&stage, Some(&spec), 42, &mut window).expect("should emit");
         assert_eq!(output.artifacts.len(), 2);

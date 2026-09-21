@@ -227,7 +227,12 @@ pub(crate) fn note_stuck(window: &mut ContextWindow, stage: &str, reason: &str) 
          that made things worse."
     );
     let tokens = leviath_core::estimate_tokens(&content);
-    let _ = window.add_to_region(region, content, tokens);
+    let _ = window.add_to_region_caused(
+        leviath_core::ContextCause::Framework,
+        region,
+        content,
+        tokens,
+    );
 }
 
 /// Write an abnormal-ending note where the next stage will read it: the
@@ -240,7 +245,12 @@ fn note_abnormal_ending(window: &mut ContextWindow, content: String) {
         "conversation"
     };
     let tokens = leviath_core::estimate_tokens(&content);
-    let _ = window.add_to_region(region, content, tokens);
+    let _ = window.add_to_region_caused(
+        leviath_core::ContextCause::Framework,
+        region,
+        content,
+        tokens,
+    );
 }
 
 /// Write the inference error that ended a stage into context, so the recovery

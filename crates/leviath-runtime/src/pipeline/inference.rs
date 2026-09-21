@@ -495,6 +495,10 @@ pub(crate) struct DispatchTuning<'w, 's> {
     pub policy: Option<Res<'w, CircuitPolicy>>,
     /// The retry schedule.
     pub retry: Option<Res<'w, InferenceRetryTuning>>,
+    /// The journal lane, so each attempt the job makes is recorded where the
+    /// rest of the run is. Absent in an in-memory world, which then records
+    /// nothing rather than failing to dispatch.
+    pub persist: Option<Res<'w, PersistenceStage>>,
     /// The mime store, registry and limits.
     pub mime: crate::blob_store::MimeParams<'w, 's>,
 }
@@ -515,6 +519,7 @@ pub(crate) fn dispatch_inference(
         circuits,
         policy,
         retry,
+        persist,
         mime,
     } = tuning;
     // Fan out across ready agents: request assembly (`build_request`) is the
@@ -536,6 +541,7 @@ pub(crate) fn dispatch_inference(
     // embedded host, and most tests) gets the built-in schedule.
     let retry_tuning = retry.map(|r| *r).unwrap_or_default();
     let circuits = circuits.as_deref();
+    let persist = persist.as_deref();
     agents.par_iter().for_each(
         |(
             entity,
@@ -680,6 +686,31 @@ pub(crate) fn dispatch_inference(
                         why_inline,
                     }
                 });
+                // What every attempt at this call has in common, worked out
+                // here because this is the last place the run, the stage, the
+                // configured provider name and the assembled request exist
+                // together: the job reports only an outcome, and by the time a
+                // retry happens the stage has moved on.
+                //
+                // The digest is the request's identity rather than its content.
+                // Two attempts that share one are the same request sent twice,
+                // which is the question a retry raises; the request itself is
+                // already in the window and has no business being copied into
+                // the journal once per attempt.
+                let journal = persist.map(|lane| crate::inference_bridge::AttemptJournal {
+                    run_id: state.agent_id.clone(),
+                    stage: state.current_stage.clone(),
+                    provider: si.provider_name.clone(),
+                    model: si.model.clone(),
+                    lane: lane.0.clone(),
+                    digest: leviath_core::run_archive::RequestDigest {
+                        system_hash,
+                        messages: request.messages.len(),
+                        tools: request.tools.len(),
+                        max_tokens: request.max_tokens,
+                        temperature: request.temperature,
+                    },
+                });
                 let job = InferenceJob {
                     entity,
                     // Checked here, against the registry's live settings,
@@ -692,6 +723,7 @@ pub(crate) fn dispatch_inference(
                     calibration: calibration.copied(),
                     stream,
                     hydration,
+                    journal,
                 };
                 let cancel = crate::cancel::CancelToken::new();
                 // Supervised: this agent is about to become `AwaitingInference`,

@@ -13,6 +13,7 @@
 pub mod blueprint;
 pub mod cache;
 pub mod config;
+pub mod context_cause;
 pub mod credentials;
 pub mod duration;
 pub mod error;
@@ -46,6 +47,7 @@ pub use blueprint::{
     TransitionCondition, TransitionEdge, resolve_nudge,
 };
 pub use cache::CacheHint;
+pub use context_cause::ContextCause;
 pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
 };

@@ -111,6 +111,14 @@ pub fn restore_agent(
         let mut window = world
             .get_mut::<ContextWindow>(entity)
             .expect("a spawned agent has a context window");
+        // What each region held before the overlay, so the resume can say what
+        // it put back. Taken in one pass because the overlay below holds the
+        // region mutably and nothing can be measured through that borrow.
+        let before: Vec<(String, crate::components::RegionShape)> = snapshot
+            .regions
+            .iter()
+            .map(|r| (r.name.clone(), window.region_shape(&r.name)))
+            .collect();
         for snap_region in &snapshot.regions {
             if let Some(region) = window
                 .regions
@@ -146,6 +154,14 @@ pub fn restore_agent(
             }
         }
         window.current_tokens = window.calculate_tokens();
+        // A resume rebuilds the window by assignment rather than by writing, so
+        // every entry it puts back is invisible to the write paths. Recorded per
+        // region here, and counted as arrivals: from the journal's point of view
+        // this is where the window came from after the restart.
+        for (name, before) in before {
+            let added = window.region_shape(&name).entries();
+            window.journal_change(leviath_core::ContextCause::Resume, &name, before, added);
+        }
     }
 
     // 2. Jump to the persisted stage, swapping in its inference config and

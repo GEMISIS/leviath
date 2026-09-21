@@ -67,7 +67,12 @@ pub(crate) fn apply_context_transforms(
     if let Some(mut child_window) = world.get_mut::<ContextWindow>(child) {
         for (to_region, content) in writes {
             let tokens = leviath_core::estimate_tokens(&content);
-            let _ = child_window.add_to_region(&to_region, content, tokens);
+            let _ = child_window.add_to_region_caused(
+                leviath_core::ContextCause::Transform,
+                &to_region,
+                content,
+                tokens,
+            );
         }
         wrote_to_child = true;
     }
@@ -195,7 +200,12 @@ pub(crate) fn collect_content_summary(
         if let Ok(summaries) = outcome.result {
             for (region, summary) in summaries {
                 let tokens = leviath_core::estimate_tokens(&summary);
-                window.replace_region(&region, summary, tokens);
+                window.replace_region(
+                    leviath_core::ContextCause::Transform,
+                    &region,
+                    summary,
+                    tokens,
+                );
             }
         }
         commands

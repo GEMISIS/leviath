@@ -385,7 +385,13 @@ mod tests {
         window.add_region(region);
         if taint != TaintLevel::Public {
             window
-                .add_tainted_to_region("conv", "data".to_string(), 10, taint)
+                .add_tainted_to_region(
+                    leviath_core::ContextCause::ToolResult,
+                    "conv",
+                    "data".to_string(),
+                    10,
+                    taint,
+                )
                 .unwrap();
         }
         window
@@ -637,10 +643,22 @@ clearance = "public"
         window.add_region(r2);
 
         window
-            .add_tainted_to_region("clean", "ok".to_string(), 5, TaintLevel::Public)
+            .add_tainted_to_region(
+                leviath_core::ContextCause::ToolResult,
+                "clean",
+                "ok".to_string(),
+                5,
+                TaintLevel::Public,
+            )
             .unwrap();
         window
-            .add_tainted_to_region("dirty", "secret".to_string(), 5, TaintLevel::Private)
+            .add_tainted_to_region(
+                leviath_core::ContextCause::ToolResult,
+                "dirty",
+                "secret".to_string(),
+                5,
+                TaintLevel::Private,
+            )
             .unwrap();
 
         let decision = gate.check_traditional("agent-1", "shell", &window);

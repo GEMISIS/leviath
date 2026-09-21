@@ -242,7 +242,12 @@ mod tests {
             leviath_core::RegionKind::Pinned,
             400,
         ));
-        window.replace_region("notes", "some content".to_string(), 120);
+        window.replace_region(
+            leviath_core::ContextCause::Seed,
+            "notes",
+            "some content".to_string(),
+            120,
+        );
         let after = describe_runtime(&facts(), &window);
         assert_eq!(after["context"]["used_tokens"], 120);
         assert_eq!(after["context"]["remaining_tokens"], 380);
@@ -258,7 +263,12 @@ mod tests {
             leviath_core::RegionKind::Pinned,
             1000,
         ));
-        window.replace_region("notes", "lots".to_string(), 250);
+        window.replace_region(
+            leviath_core::ContextCause::Seed,
+            "notes",
+            "lots".to_string(),
+            250,
+        );
         let v = describe_runtime(&facts(), &window);
         assert_eq!(v["context"]["remaining_tokens"], 0);
     }

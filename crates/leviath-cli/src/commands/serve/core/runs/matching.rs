@@ -274,14 +274,52 @@ pub(crate) fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
                 .regions
                 .iter()
                 .find_map(|region| in_entries(&region.name, &region.entries, q)),
+            // A question and the words somebody answered it with. Searchable
+            // because "which run asked me about that" is a question people
+            // actually have, and the prompt is where the tool's own arguments
+            // were shown to them.
+            RunRecord::Interaction {
+                prompt,
+                settlement,
+                tool,
+                ..
+            } => {
+                let answered = match settlement {
+                    leviath_core::interaction::Settlement::Answered { text, feedback, .. } => {
+                        [text.as_deref(), feedback.as_deref()]
+                    }
+                    _ => [None, None],
+                };
+                [Some(prompt.as_str())]
+                    .into_iter()
+                    .chain(answered)
+                    .flatten()
+                    .find_map(|text| {
+                        search::find_ignore_ascii_case(text, q).map(|at| Highlight {
+                            field: match tool {
+                                Some(name) => format!("journal.asked.{name}"),
+                                None => "journal.asked".to_string(),
+                            },
+                            snippet: search::snippet(text, at),
+                            stage: None,
+                        })
+                    })
+            }
             // Carry no searchable content of their own - only the metadata this
-            // function must not cut a snippet from.
+            // function must not cut a snippet from. An attempt and a failover
+            // are here on purpose: every string they hold is a provider name, a
+            // model name or a classification label, and all three are already
+            // searchable as run metadata, where one hit means the run rather
+            // than one moment in it.
             RunRecord::Header { .. }
             | RunRecord::OwnershipChanged { .. }
             | RunRecord::StatusChanged { .. }
             | RunRecord::Inference { .. }
+            | RunRecord::InferenceAttempt(_)
+            | RunRecord::InferenceFailover(_)
             | RunRecord::InferenceUsage { .. }
             | RunRecord::ToolCallDone { .. }
+            | RunRecord::ContextChange { .. }
             | RunRecord::Message { .. } => None,
         }
     }

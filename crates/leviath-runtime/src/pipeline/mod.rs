@@ -93,7 +93,9 @@ pub use persist::PersistWatermark;
 pub(crate) use persist::{
     BROADCAST_LOG_LINE_MAX_BYTES, PERSIST_HEARTBEAT_SECS, reconcile_stage_ledger,
 };
-pub(crate) use persist::{PersistenceStage, dispatch_persistence, reflect_interaction_status};
+pub(crate) use persist::{
+    PersistenceStage, dispatch_persistence, journal_interactions, reflect_interaction_status,
+};
 mod compaction;
 pub(crate) use compaction::{
     AwaitingCompaction, CompactionResults, PendingEdgeCompact, apply_edge_transform,
