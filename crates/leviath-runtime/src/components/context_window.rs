@@ -13,9 +13,17 @@ use super::block_cache::{
 use super::*;
 
 mod eviction;
+/// The journal side of a write: the handle a window records through, what one
+/// change moved, and the record it becomes.
+mod journal;
 /// Typed parts as provider content blocks: stand-ins, mime blocks, and the
 /// lifted message a system region's stored parts ride in.
 mod mime;
+/// Every path that puts something into a region, and the cause it states.
+mod writes;
+
+pub(crate) use journal::{ContextJournal, RegionShape};
+pub(crate) use writes::TypedWrite;
 
 /// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.
 #[derive(Debug, Clone)]
@@ -170,6 +178,15 @@ pub struct ContextWindow {
     pub unstable_declarations:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
 
+    /// Where this window's change records go, when the run has an archive to
+    /// put them in.
+    ///
+    /// Held here rather than passed per write because the writers do not have
+    /// it: a write happens wherever a `&mut ContextWindow` does, and most of
+    /// those places are several calls below the system that can see the world's
+    /// resources. See [`Self::attach_journal`].
+    pub(crate) journal: Option<ContextJournal>,
+
     /// Regions the current stage does not attend to.
     ///
     /// Held, not deleted. Dropping an omitted region from the window entirely
@@ -218,140 +235,8 @@ impl ContextWindow {
             max_tokens,
             region_scripts: std::collections::HashMap::new(),
             unstable_declarations: Default::default(),
+            journal: None,
         }
-    }
-
-    /// The compiled script backing `region_name`, when it is a custom region
-    /// whose script path has an entry in [`Self::region_scripts`].
-    fn custom_script_for(
-        &self,
-        region_name: &str,
-    ) -> Option<std::sync::Arc<leviath_scripting::region_hook::RegionScript>> {
-        let region = self.get_region(region_name)?;
-        let leviath_core::RegionKind::Custom { script, .. } = &region.kind else {
-            return None;
-        };
-        self.region_scripts.get(script).cloned()
-    }
-
-    /// Run a custom region's `on_write` hook (when defined) for an incoming
-    /// entry. Non-custom regions, missing scripts, and hook failures all
-    /// store the entry unchanged; what a `Refused` decision does is the
-    /// origin adapters' business ([`Self::on_write_agent`],
-    /// [`Self::on_write_system`]).
-    ///
-    /// Deliberately NOT invoked by the layout-swap carry or restore overlay:
-    /// those re-add entries the hook already accepted once.
-    fn on_write_decision(
-        &self,
-        region_name: &str,
-        content: String,
-        tokens: usize,
-        kind: &leviath_core::EntryKind,
-        key: Option<&str>,
-    ) -> HookDecision {
-        let Some(script) = self.custom_script_for(region_name) else {
-            return HookDecision::Store(content, tokens, None);
-        };
-        if !script.has_on_write() {
-            return HookDecision::Store(content, tokens, None);
-        }
-        // The region exists - custom_script_for resolved through it.
-        let region = self
-            .get_region(region_name)
-            .expect("custom_script_for resolved through this region");
-        let incoming = crate::custom_region::IncomingEntry {
-            content: &content,
-            tokens,
-            kind,
-            key,
-        };
-        match crate::custom_region::apply_on_write(&script, region, incoming) {
-            crate::custom_region::OnWriteOutcome::Accept {
-                content,
-                tokens,
-                key_override,
-            } => HookDecision::Store(content, tokens, key_override),
-            crate::custom_region::OnWriteOutcome::Reject(reason) => HookDecision::Refused {
-                content,
-                tokens,
-                reason,
-            },
-        }
-    }
-
-    /// [`Self::on_write_decision`] for an agent-origin write: a refusal
-    /// becomes an error carrying the hook's reason, which the tool result
-    /// reports back to the model.
-    fn on_write_agent(
-        &self,
-        region_name: &str,
-        content: String,
-        tokens: usize,
-        kind: &leviath_core::EntryKind,
-        key: Option<&str>,
-    ) -> leviath_core::Result<(String, usize, Option<String>)> {
-        match self.on_write_decision(region_name, content, tokens, kind, key) {
-            HookDecision::Store(content, tokens, key_override) => {
-                Ok((content, tokens, key_override))
-            }
-            HookDecision::Refused { reason, .. } => Err(leviath_core::Error::RegionRefusedWrite {
-                region: region_name.to_string(),
-                reason: reason
-                    .unwrap_or_else(|| "the region's on_write hook declined it".to_string()),
-            }),
-        }
-    }
-
-    /// [`Self::on_write_decision`] for a system-origin write: a refusal is
-    /// downgraded to store-unchanged plus a warning, because these writes are
-    /// framework records (assistant turns, delivered messages, nudges) that a
-    /// script must never be able to silently delete.
-    fn on_write_system(
-        &self,
-        region_name: &str,
-        content: String,
-        tokens: usize,
-        kind: &leviath_core::EntryKind,
-        key: Option<&str>,
-    ) -> (String, usize, Option<String>) {
-        match self.on_write_decision(region_name, content, tokens, kind, key) {
-            HookDecision::Store(content, tokens, key_override) => (content, tokens, key_override),
-            HookDecision::Refused {
-                content,
-                tokens,
-                reason,
-            } => {
-                tracing::warn!(
-                    region = %region_name,
-                    reason = reason.as_deref().unwrap_or("none given"),
-                    "on_write rejected a system-origin write; storing unchanged \
-                     (a script cannot drop framework records)"
-                );
-                (content, tokens, None)
-            }
-        }
-    }
-
-    /// Retry hook for a custom-region write that hit `TokenBudgetExceeded`:
-    /// let the script's `on_overflow` free room, then report whether a single
-    /// retry is worthwhile. Non-custom regions and hook failures leave the
-    /// original error standing (the callers' existing truncation ladders
-    /// apply).
-    fn try_custom_overflow(&mut self, region_name: &str, incoming_tokens: usize) -> bool {
-        let Some(script) = self.custom_script_for(region_name) else {
-            return false;
-        };
-        if !script.has_on_overflow() {
-            return false;
-        }
-        let region = self
-            .get_region_mut(region_name)
-            .expect("custom_script_for resolved through this region");
-        let needed = (region.current_tokens + incoming_tokens).saturating_sub(region.max_tokens);
-        let freed = crate::custom_region::apply_overflow(&script, region, needed);
-        self.current_tokens = self.calculate_tokens();
-        freed >= needed && needed > 0
     }
 
     /// Get a region by name.
@@ -368,242 +253,6 @@ impl ContextWindow {
     pub fn add_region(&mut self, region: Region) {
         self.regions.push(region);
         self.current_tokens = self.calculate_tokens();
-    }
-
-    /// Add content to a specific region.
-    pub fn add_to_region(
-        &mut self,
-        region_name: &str,
-        content: String,
-        tokens: usize,
-    ) -> leviath_core::Result<()> {
-        self.add_to_region_keyed(WriteOrigin::System, region_name, None, content, tokens)
-    }
-
-    /// Add an entry that may carry a key, so the agent can name it again to
-    /// release it.
-    ///
-    /// Routed through the same private `write_to_region` tail
-    /// as the unkeyed path, so a keyed write still passes the region's
-    /// `on_write` hook and still gets `on_overflow` a chance to make room.
-    /// Writing keys through a shortcut instead is how they came to be honoured
-    /// on one region kind and dropped on the rest.
-    pub(crate) fn add_to_region_keyed(
-        &mut self,
-        origin: WriteOrigin,
-        region_name: &str,
-        key: Option<&str>,
-        content: String,
-        tokens: usize,
-    ) -> leviath_core::Result<()> {
-        let (content, tokens, key_override) = match origin {
-            WriteOrigin::Agent => self.on_write_agent(
-                region_name,
-                content,
-                tokens,
-                &leviath_core::EntryKind::Text,
-                key,
-            )?,
-            WriteOrigin::System => self.on_write_system(
-                region_name,
-                content,
-                tokens,
-                &leviath_core::EntryKind::Text,
-                key,
-            ),
-        };
-        let key = key_override.as_deref().or(key);
-        self.write_to_region(region_name, tokens, &mut |region, tokens| match key {
-            Some(k) => region.add_keyed_entry(k, content.clone(), tokens),
-            None => region.add_entry(content.clone(), tokens),
-        })
-    }
-
-    /// Replace a region's content with a single (possibly keyed) entry on the
-    /// agent's own behalf: `context_write`'s non-hashmap arm.
-    ///
-    /// The `on_write` hook runs BEFORE anything is cleared, so a rejection
-    /// leaves the region exactly as it was - refusing the replacement and
-    /// clearing anyway would be a second way to lose content.
-    pub(crate) fn agent_replace_region(
-        &mut self,
-        region_name: &str,
-        key: Option<&str>,
-        content: String,
-        tokens: usize,
-    ) -> leviath_core::Result<()> {
-        let (content, tokens, key_override) = self.on_write_agent(
-            region_name,
-            content,
-            tokens,
-            &leviath_core::EntryKind::Text,
-            key,
-        )?;
-        let Some(region) = self.get_region_mut(region_name) else {
-            return Err(leviath_core::Error::RegionNotFound(region_name.to_string()));
-        };
-        region.clear();
-        self.current_tokens = self.calculate_tokens();
-        let key = key_override.as_deref().or(key);
-        self.write_to_region(region_name, tokens, &mut |region, tokens| match key {
-            Some(k) => region.add_keyed_entry(k, content.clone(), tokens),
-            None => region.add_entry(content.clone(), tokens),
-        })
-    }
-
-    /// Replace a region's entire content with a single entry (clear, then add).
-    /// Returns `false` (no-op) if the region does not exist. Used to keep an
-    /// authoritative document region (e.g. the plan) holding only its current
-    /// version, so revisions build on it instead of accumulating stale copies.
-    pub(crate) fn replace_region(
-        &mut self,
-        region_name: &str,
-        content: String,
-        tokens: usize,
-    ) -> bool {
-        // The replacement passes through on_write like any incoming entry - a
-        // custom region's script sees (and may transform) it. These callers
-        // are all framework lanes (stage seeds, transforms, interaction
-        // answers), so a hook rejection is downgraded inside the adapter to
-        // store-unchanged plus a warning: a script that could veto the
-        // replacement could silently delete an interaction answer.
-        let (content, tokens, key_override) = self.on_write_system(
-            region_name,
-            content,
-            tokens,
-            &leviath_core::EntryKind::Text,
-            None,
-        );
-        if let Some(region) = self.get_region_mut(region_name) {
-            region.clear();
-            let _ = match key_override.as_deref() {
-                Some(k) => region.add_keyed_entry(k, content, tokens),
-                None => region.add_entry(content, tokens),
-            };
-            self.current_tokens = self.calculate_tokens();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Add a typed entry to a specific region.
-    ///
-    /// Like [`add_to_region`](Self::add_to_region) but the entry carries an
-    /// `EntryKind` so message roles are determined by type, not text-prefix
-    /// parsing.
-    pub(crate) fn add_typed_entry(
-        &mut self,
-        region_name: &str,
-        kind: leviath_core::EntryKind,
-        content: String,
-        tokens: usize,
-    ) -> leviath_core::Result<()> {
-        self.add_assistant_turn(region_name, kind, content, tokens, None)
-    }
-
-    /// [`add_typed_entry`](Self::add_typed_entry) for a turn that carries an
-    /// opaque provider token to replay.
-    ///
-    /// A separate method rather than a parameter on the shared one: only the
-    /// two writers that record an assistant turn have such a token, and the
-    /// other twenty callers would carry a `None` that means nothing to them.
-    pub(crate) fn add_assistant_turn(
-        &mut self,
-        region_name: &str,
-        kind: leviath_core::EntryKind,
-        content: String,
-        tokens: usize,
-        reasoning: Option<String>,
-    ) -> leviath_core::Result<()> {
-        self.add_assistant_turn_content(
-            region_name,
-            kind,
-            leviath_core::region::EntryContent::text(content),
-            tokens,
-            reasoning,
-        )
-    }
-
-    /// [`add_assistant_turn`](Self::add_assistant_turn) for a turn that
-    /// carries parts beside its text: what a model that draws or speaks
-    /// handed back.
-    pub(crate) fn add_assistant_turn_content(
-        &mut self,
-        region_name: &str,
-        kind: leviath_core::EntryKind,
-        content: leviath_core::region::EntryContent,
-        tokens: usize,
-        reasoning: Option<String>,
-    ) -> leviath_core::Result<()> {
-        self.typed_write_content(
-            WriteOrigin::System,
-            region_name,
-            kind,
-            content,
-            tokens,
-            None,
-        )?;
-        // On success the entry just written is the last one: the region may
-        // have evicted to make room, but it appends what it accepted. Same
-        // after-the-push attachment the core's reasoning-carrying add uses.
-        if reasoning.is_some()
-            && let Some(region) = self.get_region_mut(region_name)
-            && let Some(entry) = region.content.last_mut()
-        {
-            entry.reasoning = reasoning;
-        }
-        Ok(())
-    }
-
-    /// Shared core of the typed write methods: run the `on_write` seam with
-    /// the caller's origin, then insert the entry with its kind and (when
-    /// given) taint level, honouring a key override from the hook.
-    pub(crate) fn typed_write(
-        &mut self,
-        origin: WriteOrigin,
-        region_name: &str,
-        kind: leviath_core::EntryKind,
-        content: String,
-        tokens: usize,
-        taint: Option<leviath_core::TaintLevel>,
-    ) -> leviath_core::Result<()> {
-        let content = leviath_core::region::EntryContent::text(content);
-        self.typed_write_content(origin, region_name, kind, content, tokens, taint)
-    }
-
-    /// Shared tail of every region write: run the insert, give a custom
-    /// region's `on_overflow` one shot at freeing room when the budget
-    /// rejects it, and recount the window. A `&mut dyn FnMut` (not generic)
-    /// keeps one instantiation for the coverage gate.
-    fn write_to_region(
-        &mut self,
-        region_name: &str,
-        tokens: usize,
-        insert: &mut dyn FnMut(&mut Region, usize) -> leviath_core::Result<()>,
-    ) -> leviath_core::Result<()> {
-        if self.get_region(region_name).is_none() {
-            return Err(leviath_core::Error::RegionNotFound(region_name.to_string()));
-        }
-        let first = {
-            let region = self.get_region_mut(region_name).expect("checked above");
-            insert(region, tokens)
-        };
-        match first {
-            Ok(()) => {
-                self.current_tokens = self.calculate_tokens();
-                Ok(())
-            }
-            Err(leviath_core::Error::TokenBudgetExceeded { .. })
-                if self.try_custom_overflow(region_name, tokens) =>
-            {
-                let region = self.get_region_mut(region_name).expect("checked above");
-                let retried = insert(region, tokens);
-                self.current_tokens = self.calculate_tokens();
-                retried
-            }
-            Err(e) => Err(e),
-        }
     }
 
     /// Calculate current token usage across all regions.
@@ -1148,24 +797,6 @@ impl ContextWindow {
         }
     }
 
-    /// Add tainted content to a specific region.
-    pub fn add_tainted_to_region(
-        &mut self,
-        region_name: &str,
-        content: String,
-        tokens: usize,
-        taint_level: leviath_core::TaintLevel,
-    ) -> leviath_core::Result<()> {
-        self.typed_write(
-            WriteOrigin::System,
-            region_name,
-            leviath_core::EntryKind::Text,
-            content,
-            tokens,
-            Some(taint_level),
-        )
-    }
-
     /// Get the overall taint level (max across all regions).
     /// Returns None if no region has taint tracking enabled.
     pub fn overall_taint(&self) -> Option<leviath_core::TaintLevel> {
@@ -1420,6 +1051,7 @@ mod tests {
         ));
         window
             .add_assistant_turn(
+                None,
                 "conversation",
                 leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
                 "the answer".to_string(),
@@ -1452,6 +1084,7 @@ mod tests {
         ));
         window
             .add_assistant_turn(
+                None,
                 "conversation",
                 leviath_core::EntryKind::AssistantTurn {
                     tool_calls: vec![leviath_core::SerializedToolCall {
@@ -1489,6 +1122,7 @@ mod tests {
         ));
         window
             .add_assistant_turn(
+                None,
                 "conversation",
                 leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
                 "plain".to_string(),

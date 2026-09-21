@@ -121,7 +121,12 @@ pub(super) fn merge_worker_sources(
     // is handed. Passing the checked number is what makes the write fit by
     // construction, so there is no failure here to handle - re-estimating would
     // reintroduce two numbers for one quantity and a branch to reconcile them.
-    let _ = window.add_to_region(SOURCES_REGION, taking.join("\n"), used);
+    let _ = window.add_to_region_caused(
+        leviath_core::ContextCause::FanOut,
+        SOURCES_REGION,
+        taking.join("\n"),
+        used,
+    );
 }
 
 /// A bibliography line without its leading `[n]` citation marker.

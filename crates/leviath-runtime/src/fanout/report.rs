@@ -134,7 +134,8 @@ pub(super) fn inject_results(
     // charged its stand-in, like every stored part.
     let content = leviath_core::region::EntryContent::text(fitted).with_parts(parts);
     let tokens = content.tokens(None);
-    let _ = window.add_assistant_turn_content(
+    let _ = window.add_turn(
+        Some(leviath_core::ContextCause::FanOut),
         region,
         leviath_core::EntryKind::UserMessage,
         content,

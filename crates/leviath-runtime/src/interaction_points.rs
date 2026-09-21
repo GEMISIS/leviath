@@ -570,7 +570,12 @@ pub(crate) fn dispatch_interaction_point(
                 body.clone()
             };
             let tokens = leviath_core::estimate_tokens(&content);
-            window.replace_region(region, content, tokens);
+            window.replace_region(
+                leviath_core::ContextCause::Interaction,
+                region,
+                content,
+                tokens,
+            );
         }
         // An unattended run (`--yolo`) approves the checkpoint instead of
         // opening a prompt nobody will answer. The document was published to its
@@ -800,7 +805,12 @@ fn inject(window: &mut ContextWindow, name: &str, prefix: &str, text: &str) {
     }
     let content = format!("User [{name}] {prefix}{text}");
     let tokens = leviath_core::estimate_tokens(&content);
-    let _ = window.add_to_region("conversation", content, tokens);
+    let _ = window.add_to_region_caused(
+        leviath_core::ContextCause::Interaction,
+        "conversation",
+        content,
+        tokens,
+    );
 }
 
 #[cfg(test)]

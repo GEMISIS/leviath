@@ -45,12 +45,12 @@ use crate::pipeline::{
     collect_tools, collect_transition_choice, deliver_messages, detect_stuck_stage,
     dispatch_compaction, dispatch_edge_compact, dispatch_inference, dispatch_persistence,
     dispatch_tools, dispatch_transition_choice, enforce_max_iterations, fail_stalled_dispatch,
-    fail_wedged_runs, gate_requires_children, handle_empty_response, poll_dynamic_tool_refresh,
-    process_response, reflect_interaction_status, refresh_advertised_tools,
-    require_context_regions, require_fan_out, require_final_output, rescan_before_dispatch,
-    resolve_transition, run_after_inference_hooks, run_before_inference_hooks,
-    run_stage_enter_hooks, run_stage_exit_hooks, run_terminal_hooks, run_tool_call_hooks,
-    sync_tool_stages,
+    fail_wedged_runs, gate_requires_children, handle_empty_response, journal_interactions,
+    poll_dynamic_tool_refresh, process_response, reflect_interaction_status,
+    refresh_advertised_tools, require_context_regions, require_fan_out, require_final_output,
+    rescan_before_dispatch, resolve_transition, run_after_inference_hooks,
+    run_before_inference_hooks, run_stage_enter_hooks, run_stage_exit_hooks, run_terminal_hooks,
+    run_tool_call_hooks, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::ToolLane;
@@ -588,7 +588,12 @@ impl PipelineWorld {
                 // Mirror open interaction-hub requests into agent status
                 // (Active ↔ Waiting) so the dashboard surfaces blocked prompts;
                 // must run before persistence so the status change is written.
-                reflect_interaction_status,
+                // Paired with the record of what a person answered, which runs
+                // every tick: that record is the only trace a run stopped for
+                // somebody, and a run whose last act was answering a prompt
+                // changes nothing else for the snapshot to carry. One tuple
+                // member because this group is at bevy's limit.
+                (reflect_interaction_status, journal_interactions).chain(),
                 // Fail a run nothing can drive at all. After every dispatch and
                 // collect system, so a marker set anywhere on this tick counts;
                 // after the interaction reflection, so an agent that just parked

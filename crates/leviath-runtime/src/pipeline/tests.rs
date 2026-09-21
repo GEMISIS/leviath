@@ -891,6 +891,62 @@ async fn dispatch_uses_the_configured_retry_schedule() {
     assert!(outcome.result.is_ok());
 }
 
+/// A dispatched job journals its attempt, carrying the run, the stage and the
+/// name the run calls the provider by - none of which the retry loop knows on
+/// its own, which is why the dispatch system hands them over with the request.
+///
+/// A world with no persistence lane journals nothing and dispatches exactly as
+/// it always did, which every other test in this section exercises.
+#[tokio::test]
+async fn a_dispatched_call_journals_the_attempt_it_makes() {
+    let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let (lane, mut journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::PersistenceStage(lane.clone()));
+    world.spawn((
+        agent_state(),
+        window(),
+        stage("m", vec![tool("read_file")], None),
+        ReadyToInfer,
+    ));
+
+    run(&mut world);
+    assert!(rx.recv().await.expect("outcome").result.is_ok());
+
+    // One lane carries every kind of record the run makes - a usage record lands
+    // on this one from the response system, a context change from the window - so
+    // reading the attempts back has to skip the rest rather than trip over it.
+    lane.send(crate::persistence_bridge::PersistMsg::Append {
+        run_id: "r".to_string(),
+        record: Box::new(leviath_core::run_archive::RunRecord::Message {
+            message: leviath_core::run_archive::MessageRecord {
+                role: "user".to_string(),
+                content: "not an attempt".to_string(),
+            },
+            at: 0,
+        }),
+        ack: None,
+    })
+    .expect("the journal is still open");
+
+    // The attempt record is appended before the outcome is reported, so the
+    // outcome arriving means the append has already been sent.
+    let records = crate::inference_bridge::journaled_attempts(&mut journal);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(record.attempt, 1);
+    assert_eq!(record.stage, "s");
+    assert_eq!(record.provider, "cfg");
+    assert_eq!(record.model, "m");
+    assert_eq!(
+        record.outcome,
+        leviath_core::run_archive::AttemptOutcome::Succeeded
+    );
+    // The digest is what the request was, counted rather than copied: one tool
+    // was advertised and the stage's own budget was asked for.
+    assert_eq!(record.digest.tools, 1);
+    assert!(record.digest.max_tokens > 0, "{:?}", record.digest);
+}
+
 #[tokio::test]
 async fn dispatch_skips_when_pool_full() {
     let mut cfg = InferencePoolConfig::new();
@@ -1534,6 +1590,89 @@ fn failover_is_recorded_in_the_stage_log() {
         .expect("the swap is written to the stage log");
     assert!(line.contains("dead/model-a"), "{line}");
     assert!(line.contains("alive/model-b"), "{line}");
+}
+
+/// The move to another provider is journaled, so a reader of the attempts can
+/// see who decided the run changed model. Without it the attempts simply name a
+/// different provider from one record to the next, which reads as a run that was
+/// always configured that way.
+#[test]
+fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
+    let (mut world, tx) = world_with_results();
+    let (lane, mut journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    let e = world
+        .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        // Reached, and classified, so the record carries a kind as well as a
+        // reason: a run that failed over because the socket went quiet is not
+        // the same story as one whose account ran out of credits.
+        result: Err(leviath_providers::ProviderError::RequestFailed(
+            "[timeout] the provider went quiet".to_string(),
+        )),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let mut records = Vec::new();
+    while let Ok(msg) = journal.try_recv() {
+        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
+            && let leviath_core::run_archive::RunRecord::InferenceFailover(failover) = *record
+        {
+            records.push(failover);
+        }
+    }
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(record.stage, "s");
+    assert_eq!(record.from_provider, "dead");
+    assert_eq!(record.from_model, "model-a");
+    assert_eq!(record.to_provider, "alive");
+    assert_eq!(record.to_model, "model-b");
+    assert_eq!(record.reason, "unreachable");
+    assert_eq!(record.kind, "timeout");
+    // The agent never had a turn, so the iteration the record names is the one
+    // the failed call was made under.
+    assert_eq!(record.iteration, 0);
+}
+
+/// And a failure the provider classified not at all still journals the move:
+/// the reason is always there, the kind is empty, and neither absence is allowed
+/// to cost the record.
+#[test]
+fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
+    let (mut world, tx) = world_with_results();
+    let (lane, mut journal) = mpsc::unbounded_channel();
+    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    let e = world
+        .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        result: Err(credits_exhausted()),
+        pricing: None,
+    })
+    .unwrap();
+
+    run_collect(&mut world);
+
+    let mut records = Vec::new();
+    while let Ok(msg) = journal.try_recv() {
+        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
+            && let leviath_core::run_archive::RunRecord::InferenceFailover(failover) = *record
+        {
+            records.push(failover);
+        }
+    }
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].reason, "credits-exhausted");
+    assert_eq!(records[0].kind, "");
 }
 
 #[test]
@@ -4425,6 +4564,51 @@ fn empty_response_finishes_when_agent_made_tool_calls() {
     assert!(world.get::<ReadyForTransition>(e).is_none());
 }
 
+/// The reply and the nudge that answers it land in the same region one after
+/// the other, and the journal has to tell them apart: one is what the model
+/// said, the other is what the framework said back. A reader of the history
+/// otherwise sees two entries arrive in `conversation` with no way to know
+/// whose words they were.
+#[test]
+fn a_reply_and_the_nudge_answering_it_record_different_causes() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut window = ctx(&[("conversation", 10_000)]);
+    // Held for the test: a window's handle on the lane is weak, exactly so that
+    // it cannot keep the lane open past the world that owns it.
+    let stage = crate::pipeline::PersistenceStage(tx);
+    window.attach_journal("run-r", Some(&stage));
+    let mut world = World::new();
+    world.spawn((
+        window,
+        infer_result_only(false),
+        StageProgress::default(),
+        nudge_bp(false),
+        StageCursor { index: 0 },
+        ReadyForTransition,
+    ));
+    run_empty(&mut world);
+
+    let mut moved = Vec::new();
+    while let Ok(crate::persistence_bridge::PersistMsg::Append { record, .. }) = rx.try_recv() {
+        if let leviath_core::run_archive::RunRecord::ContextChange { region, cause, .. } = *record {
+            moved.push((region, cause));
+        }
+    }
+    assert_eq!(
+        moved,
+        vec![
+            (
+                "conversation".to_string(),
+                leviath_core::ContextCause::ModelReply
+            ),
+            (
+                "conversation".to_string(),
+                leviath_core::ContextCause::Framework
+            ),
+        ],
+    );
+}
+
 #[test]
 fn empty_response_finishes_after_max_nudges() {
     let mut world = World::new();
@@ -6185,7 +6369,12 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
     ));
     // What the previous stage left behind, so "kept" and "replaced" are
     // distinguishable rather than both looking like an empty region.
-    window.replace_region("environment", "--- current_time ---\nSTALE".to_string(), 10);
+    window.replace_region(
+        leviath_core::ContextCause::Seed,
+        "environment",
+        "--- current_time ---\nSTALE".to_string(),
+        10,
+    );
 
     let e = world
         .spawn((
@@ -7212,12 +7401,15 @@ fn tainted_conv_window() -> ContextWindow {
     let mut w = conv_window();
     w.enable_taint_tracking();
     let _ = w.typed_write(
-        crate::components::WriteOrigin::System,
-        "conversation",
-        leviath_core::EntryKind::UserMessage,
+        crate::components::TypedWrite {
+            cause: None,
+            origin: crate::components::WriteOrigin::System,
+            region: "conversation",
+            kind: leviath_core::EntryKind::UserMessage,
+            taint: Some(leviath_core::TaintLevel::Internal),
+        },
         "secret".to_string(),
         5,
-        Some(leviath_core::TaintLevel::Internal),
     );
     w
 }
@@ -8805,7 +8997,13 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
     let content = leviath_core::region::EntryContent::from_parts(vec![part]);
     let tokens = content.tokens(None);
     window
-        .add_content_entry("model", leviath_core::EntryKind::Text, content, tokens)
+        .add_content_entry(
+            leviath_core::ContextCause::ProducedPart,
+            "model",
+            leviath_core::EntryKind::Text,
+            content,
+            tokens,
+        )
         .unwrap();
 
     // The resolved output spec is carried on StageInference, the way dispatch

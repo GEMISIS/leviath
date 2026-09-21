@@ -140,19 +140,27 @@ fn attach(
     let key = arg(args, "key");
     // A keyed attach replaces the previous version: the region never holds
     // two of the same sprite.
+    let before = window.region_shape(region);
     if let Some(k) = key
         && let Some(r) = window.get_region_mut(region)
         && r.remove_by_key(k)
     {
         window.current_tokens = window.calculate_tokens();
+        // Recorded apart from the write that follows: the release happens
+        // outside it, and a history showing only the arrival would say the
+        // region grew when it held steady.
+        window.journal_change(leviath_core::ContextCause::ProducedPart, region, before, 0);
     }
     let written = window.typed_write_content(
-        WriteOrigin::Agent,
-        region,
-        leviath_core::EntryKind::Text,
+        crate::components::TypedWrite {
+            cause: Some(leviath_core::ContextCause::ProducedPart),
+            origin: WriteOrigin::Agent,
+            region,
+            kind: leviath_core::EntryKind::Text,
+            taint: None,
+        },
         content.clone(),
         tokens,
-        None,
     );
     if let Err(e) = written {
         return format!("[error] region '{region}' refused '{name}': {e}");

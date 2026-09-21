@@ -105,6 +105,37 @@ impl PersistWatermark {
 #[derive(Resource)]
 pub(crate) struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 
+/// Put every settled interaction in the journal.
+///
+/// The hub is answered from outside the tick - over the control socket, by `lev
+/// respond`, by a dashboard - so it cannot reach the lane itself; it buffers
+/// what settled and this drains the buffer. Every tick, unconditionally: an
+/// append is never coalesced, and a run whose last act was answering a prompt
+/// must not lose the record because nothing else about it changed.
+///
+/// The record carries the run it belongs to, so this needs no per-agent query
+/// and works for an agent that has already gone.
+pub(crate) fn journal_interactions(hub: Option<Res<InteractionHub>>, stage: Res<PersistenceStage>) {
+    crate::tick_scope::clear();
+    let Some(hub) = hub else { return };
+    for (run_id, record) in hub.take_settled() {
+        let _ = stage.0.send(PersistMsg::Append {
+            run_id,
+            record: Box::new(leviath_core::run_archive::RunRecord::Interaction {
+                request_id: record.request_id,
+                kind: record.kind,
+                tool: record.tool,
+                prompt: record.prompt,
+                stage: record.stage,
+                settlement: record.settlement,
+                asked_at: record.asked_at,
+                at: record.at,
+            }),
+            ack: None,
+        });
+    }
+}
+
 /// What `reflect_interaction_status` selects.
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about

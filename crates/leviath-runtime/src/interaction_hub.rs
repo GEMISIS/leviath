@@ -38,6 +38,9 @@ struct PendingEntry {
     request: InteractionRequest,
     /// Fulfilled by [`InteractionHub::answer`]; dropped by [`InteractionHub::cancel`].
     responder: oneshot::Sender<InteractionResponse>,
+    /// Unix seconds when it was asked, so the record can say how long somebody
+    /// was kept waiting - or how long the run was.
+    asked_at: i64,
 }
 
 /// A process-wide registry of open interactions, keyed by request id. Cheap to
@@ -59,6 +62,14 @@ pub struct InteractionHub {
     /// read when a request opens, so one already waiting keeps the deadline it
     /// opened with.
     timeout_secs: Arc<AtomicU64>,
+    /// Interactions that have settled and are not in the journal yet, each with
+    /// the run that asked.
+    ///
+    /// A buffer rather than a journal handle, because the hub is answered from
+    /// outside the tick - over the control socket, from `lev respond` - and the
+    /// persistence lane is reached from inside one. `journal_interactions`
+    /// drains this every tick.
+    settled: Arc<Mutex<Vec<(String, leviath_core::run_archive::InteractionRecord)>>>,
 }
 
 impl InteractionHub {
@@ -124,6 +135,7 @@ impl InteractionHub {
                 agent_id: agent_id.to_string(),
                 request,
                 responder,
+                asked_at: leviath_core::duration::now_secs(),
             },
         );
         // Wake the driver so it ticks and reflects this open request into the
@@ -164,10 +176,19 @@ impl InteractionHub {
         id: &str,
         rx: &mut oneshot::Receiver<InteractionResponse>,
     ) -> InteractionResponse {
-        leviath_core::sync::lock(&self.pending).remove(id);
+        let entry = leviath_core::sync::lock(&self.pending).remove(id);
+        // A person did answer, a moment late. Nothing is recorded here:
+        // `answer_for` took the entry out and recorded the answer before
+        // sending it, so this would be a second record of one decision.
         if let Ok(answered) = rx.try_recv() {
             return answered;
         }
+        // Nothing takes a pending entry without recording how it settled, so an
+        // entry already gone is one somebody else accounted for - an answer that
+        // landed in this same instant, or a cancel.
+        entry.inspect(|entry| {
+            self.record(entry, leviath_core::interaction::Settlement::TimedOut);
+        });
         tracing::warn!(
             agent = %agent_id,
             request = %id,
@@ -202,6 +223,7 @@ impl InteractionHub {
         let entry = leviath_core::sync::lock(&self.pending).remove(&response.request_id);
         let entry = entry?;
         let agent_id = entry.agent_id.clone();
+        self.record(&entry, leviath_core::interaction::Settlement::of(&response));
         // The awaiting `submit` may have gone away (agent despawned); a
         // failed send is harmless.
         let _ = entry.responder.send(response);
@@ -215,13 +237,13 @@ impl InteractionHub {
     /// Returns `false` if no such request is open.
     pub(crate) fn cancel(&self, request_id: &str) -> bool {
         // Dropping the entry drops its responder, waking `submit` with an error.
-        let removed = leviath_core::sync::lock(&self.pending)
-            .remove(request_id)
-            .is_some();
-        if removed {
-            self.nudge();
-        }
-        removed
+        let entry = leviath_core::sync::lock(&self.pending).remove(request_id);
+        let Some(entry) = entry else {
+            return false;
+        };
+        self.record(&entry, leviath_core::interaction::Settlement::Cancelled);
+        self.nudge();
+        true
     }
 
     /// Cancel every open request belonging to `agent_id`, returning how many were
@@ -235,14 +257,53 @@ impl InteractionHub {
     pub(crate) fn cancel_for_agent(&self, agent_id: &str) -> usize {
         // Dropping each entry drops its responder, waking `submit` with an error.
         let mut pending = leviath_core::sync::lock(&self.pending);
-        let before = pending.len();
-        pending.retain(|_, entry| entry.agent_id != agent_id);
-        let removed = before - pending.len();
+        let mine: Vec<PendingEntry> = pending
+            .keys()
+            .filter(|id| pending[*id].agent_id == agent_id)
+            .cloned()
+            .collect::<Vec<String>>()
+            .into_iter()
+            .filter_map(|id| pending.remove(&id))
+            .collect();
         drop(pending);
+        let removed = mine.len();
+        for entry in &mine {
+            self.record(entry, leviath_core::interaction::Settlement::Cancelled);
+        }
         if removed > 0 {
             self.nudge();
         }
         removed
+    }
+
+    /// Put one settled interaction where the journal will find it.
+    ///
+    /// Called on every way a request can end, because the ways are not
+    /// interchangeable to a reader: an answer, a request nobody answered in
+    /// time, and one withdrawn when the run was cancelled all hand the caller
+    /// the same neutral response, and only this record tells them apart.
+    fn record(&self, entry: &PendingEntry, settlement: leviath_core::interaction::Settlement) {
+        leviath_core::sync::lock(&self.settled).push((
+            entry.agent_id.clone(),
+            leviath_core::run_archive::InteractionRecord {
+                request_id: entry.request.id.clone(),
+                kind: entry.request.kind.clone(),
+                tool: entry.request.tool_name.clone(),
+                prompt: entry.request.prompt.clone(),
+                stage: entry.request.stage_name.clone(),
+                settlement,
+                asked_at: entry.asked_at,
+                at: leviath_core::duration::now_secs(),
+            },
+        ));
+    }
+
+    /// Every settled interaction since the last drain, and the run each belongs
+    /// to. What `journal_interactions` sends to the lane.
+    pub(crate) fn take_settled(
+        &self,
+    ) -> Vec<(String, leviath_core::run_archive::InteractionRecord)> {
+        std::mem::take(&mut *leviath_core::sync::lock(&self.settled))
     }
 
     /// A per-agent [`InteractionBackend`] backed by this hub.
@@ -277,7 +338,6 @@ impl InteractionBackend for HubInteractionBackend {
     }
 }
 
-#[cfg(test)]
 #[cfg(test)]
 #[path = "interaction_hub_tests.rs"]
 mod tests;

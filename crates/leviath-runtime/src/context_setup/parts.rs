@@ -163,7 +163,13 @@ pub(crate) fn ingest_parts(
         let content = sink.entry_for(&inbound)?;
         let tokens = sink.tokens_for(&content);
         window
-            .add_content_entry(&region, leviath_core::EntryKind::Text, content, tokens)
+            .add_content_entry(
+                leviath_core::ContextCause::Seed,
+                &region,
+                leviath_core::EntryKind::Text,
+                content,
+                tokens,
+            )
             .map_err(|e| {
                 format!(
                     "part '{}' was refused by region '{region}': {e}",

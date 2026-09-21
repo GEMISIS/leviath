@@ -252,7 +252,8 @@ pub(crate) fn dispatch_transition_choice(
         let current = &bp.0.stages[cursor.index];
         let prompt = build_transition_prompt(current, &choice.0);
         let tokens = leviath_core::estimate_tokens(&prompt);
-        let _ = window.add_typed_entry(
+        let _ = window.add_typed_entry_caused(
+            leviath_core::ContextCause::Framework,
             "conversation",
             leviath_core::EntryKind::UserMessage,
             prompt,
@@ -294,6 +295,14 @@ pub(crate) fn dispatch_transition_choice(
             // this call is never long enough for that to arise.
             stream: false,
             hydration: None,
+            // The routing question's attempts are not journaled, and the stage
+            // lane's are. A routing call is one deterministic sentence with a
+            // 256-token budget and no fallbacks to move to, so its retries are
+            // measured in seconds and the run's provider never changes under it.
+            // An attempt record exists to explain a turn that took a long time
+            // or ended up on a different model, and neither is a thing this call
+            // does.
+            journal: None,
         };
         let cancel = crate::cancel::CancelToken::new();
         // Supervised for the same reason as the inference lane: the agent is
@@ -503,7 +512,10 @@ pub(crate) fn collect_transition_choice(
 
         let choice = response.content.trim().to_string();
         let tokens = leviath_core::estimate_tokens(&choice);
-        let _ = window.add_typed_entry(
+        // The framework's own phrasing of the decision, not the model's text:
+        // the reply was a bare stage name.
+        let _ = window.add_typed_entry_caused(
+            leviath_core::ContextCause::Framework,
             "conversation",
             leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
             format!("Transitioning to: {choice}"),

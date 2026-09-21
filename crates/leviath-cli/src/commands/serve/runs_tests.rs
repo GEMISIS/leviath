@@ -1267,6 +1267,43 @@ fn plant_rich_journal(run_id: &str) {
             at: 7,
         },
     );
+    // A question a person was asked, and the words they answered it with. The
+    // prompt is where the tool's own arguments were shown to them, so it is
+    // where "which run asked me about that" is answered.
+    write(
+        &mut buf,
+        &RunRecord::Interaction {
+            request_id: "approve-1".to_string(),
+            kind: leviath_core::interaction::InteractionKind::ToolApproval,
+            tool: Some("shell".to_string()),
+            prompt: "Run `rm -rf promptneedle`?".to_string(),
+            stage: "implement".to_string(),
+            settlement: leviath_core::interaction::Settlement::Answered {
+                approved: Some(false),
+                scope: None,
+                choice: None,
+                text: None,
+                feedback: Some("answerneedle instead".to_string()),
+            },
+            asked_at: 8,
+            at: 9,
+        },
+    );
+    // One nobody answered, which carries a prompt and no answer: the arm that
+    // reads a settlement with nothing in it has to be reachable too.
+    write(
+        &mut buf,
+        &RunRecord::Interaction {
+            request_id: "ask-2".to_string(),
+            kind: leviath_core::interaction::InteractionKind::FreeText,
+            tool: None,
+            prompt: "Which of these, unanswerneedle?".to_string(),
+            stage: "plan".to_string(),
+            settlement: leviath_core::interaction::Settlement::TimedOut,
+            asked_at: 10,
+            at: 11,
+        },
+    );
     std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
 }
 
@@ -1288,6 +1325,22 @@ async fn journal_highlights_name_the_record_the_match_came_from() {
             assert_eq!(page.items.len(), 1, "{needle} should match");
             assert_eq!(page.items[0].highlights[0].field, field);
             assert_eq!(page.items[0].highlights[0].stage, stage);
+        }
+
+        // A question names the tool it was about, so a client can jump to the
+        // call somebody stopped. One with no tool is named for the asking.
+        for (needle, field) in [
+            ("promptneedle", "journal.asked.shell"),
+            ("answerneedle", "journal.asked.shell"),
+            ("unanswerneedle", "journal.asked"),
+        ] {
+            let page = page_of(&[("q", needle), ("q_in", "journal")]).await;
+            assert_eq!(page.items.len(), 1, "{needle} should match");
+            assert_eq!(page.items[0].highlights[0].field, field);
+            assert_eq!(
+                page.items[0].highlights[0].stage, None,
+                "a question is not a stage's own text"
+            );
         }
 
         // Context text is named by the region it lived in, whether it arrived

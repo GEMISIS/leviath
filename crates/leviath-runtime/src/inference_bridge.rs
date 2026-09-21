@@ -314,6 +314,103 @@ pub(crate) struct InferenceJob {
     /// Set from `[limits] stream_inference` and off for a model whose provider
     /// does not advertise streaming.
     pub stream: bool,
+    /// Where to journal each attempt this job makes, or `None` for a world with
+    /// no persistence lane at all.
+    pub journal: Option<AttemptJournal>,
+}
+
+/// What the retry loop needs to record each of its attempts.
+///
+/// The loop knows the attempt and the error and nothing else: not the run, not
+/// the stage, and not the name the run calls this provider by. Those travel with
+/// the job, because the dispatch system that built the request is the last place
+/// they exist together.
+pub(crate) struct AttemptJournal {
+    /// The run whose journal these records belong to.
+    pub run_id: String,
+    /// The stage that asked for the call. Empty for a lane with no stage.
+    pub stage: String,
+    /// The provider, named as the run's configuration names it rather than as
+    /// the handle names itself, so an attempt record joins to the usage record
+    /// for the same call.
+    pub provider: String,
+    /// The model, likewise as configured.
+    pub model: String,
+    /// The persistence lane. Every attempt is a fire-and-forget append: nothing
+    /// waits on one, and a world with no journal answers
+    /// [`Appended::NoJournal`](crate::persistence_bridge::Appended::NoJournal).
+    pub lane: UnboundedSender<crate::persistence_bridge::PersistMsg>,
+    /// What went out, computed once because every attempt sends the same
+    /// request. Even a file renewal leaves it untouched: it replaces the ids
+    /// stored parts are named by, and the digest counts messages and tools
+    /// rather than looking inside them.
+    pub digest: leviath_core::run_archive::RequestDigest,
+}
+
+impl AttemptJournal {
+    /// Append one attempt's record.
+    fn record(
+        &self,
+        attempt: u32,
+        outcome: leviath_core::run_archive::AttemptOutcome,
+        took: Duration,
+        waited: Duration,
+    ) {
+        let _ = self
+            .lane
+            .send(crate::persistence_bridge::PersistMsg::Append {
+                run_id: self.run_id.clone(),
+                record: Box::new(leviath_core::run_archive::RunRecord::InferenceAttempt(
+                    leviath_core::run_archive::AttemptRecord {
+                        stage: self.stage.clone(),
+                        attempt,
+                        provider: self.provider.clone(),
+                        model: self.model.clone(),
+                        outcome,
+                        duration_ms: millis(took),
+                        backoff_ms: millis(waited),
+                        digest: self.digest.clone(),
+                        at: chrono::Utc::now().timestamp(),
+                    },
+                )),
+                ack: None,
+            });
+    }
+}
+
+/// A duration as whole milliseconds, saturating rather than wrapping.
+///
+/// A journal record is telemetry, so a figure no `u64` can hold is reported as
+/// the largest one that fits: the alternative is a wrapped number that reads as
+/// a fast call.
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A stable label for what a failed call was, or empty when the error carried no
+/// classification at all.
+///
+/// One function rather than one per record, so an attempt record and the
+/// failover record that follows it cannot describe the same failure two
+/// different ways.
+pub(crate) fn failure_label(error: &ProviderError) -> String {
+    error
+        .failure_kind()
+        .map_or_else(String::new, |kind| kind.label().to_string())
+}
+
+/// How a failed attempt is journaled: what went wrong, how the policy reads it,
+/// and what the loop did next.
+fn failed(
+    error: &ProviderError,
+    next: leviath_core::run_archive::Retry,
+) -> leviath_core::run_archive::AttemptOutcome {
+    leviath_core::run_archive::AttemptOutcome::Failed {
+        kind: failure_label(error),
+        transient: error.is_transient(),
+        capacity: error.retry_advice().capacity,
+        next,
+    }
 }
 
 /// The share of the model's window below which a request goes out unmeasured.
@@ -509,6 +606,7 @@ pub(crate) async fn run_inference_job(
         calibration,
         stream,
         hydration,
+        journal,
     } = job;
     // Refused before anything leaves the machine, uploads included.
     if let Some(refusal) = refused {
@@ -549,6 +647,20 @@ pub(crate) async fn run_inference_job(
         let mut attempt = 1u32;
         let mut spent = Duration::ZERO;
         let mut renewed_files = false;
+        // What the journal records, and what neither counter above can give it.
+        // `made` counts trips to the provider, which `attempt` does not: a file
+        // renewal spends none of the retry budget, and two records for one call
+        // still have to be told apart. `waited` is the one sleep before this
+        // attempt, where `spent` is the running total.
+        let mut made = 0u32;
+        let mut waited = Duration::ZERO;
+        // Nothing waits on these appends, so a world with no lane simply writes
+        // nothing and the loop behaves exactly as it does with one.
+        let record = |attempt, outcome, took, waited| {
+            if let Some(journal) = journal.as_ref() {
+                journal.record(attempt, outcome, took, waited);
+            }
+        };
         loop {
             // Both arms produce the same finished `InferenceResponse`; the
             // difference is entirely in how the bytes crossed the wire. A
@@ -564,8 +676,25 @@ pub(crate) async fn run_inference_job(
                     false => provider.infer(&request).await,
                 }
             };
-            match call.await {
-                Ok(response) => break Ok(response),
+            // Timed around the call alone. The job's own latency covers the
+            // backoff as well, which is the figure the run is billed against;
+            // what a record needs is how long this one trip took, so that a
+            // provider answering slowly reads differently from a run sitting
+            // out a backoff.
+            let call_started = std::time::Instant::now();
+            let answer = call.await;
+            let took = call_started.elapsed();
+            made += 1;
+            match answer {
+                Ok(response) => {
+                    record(
+                        made,
+                        leviath_core::run_archive::AttemptOutcome::Succeeded,
+                        took,
+                        waited,
+                    );
+                    break Ok(response);
+                }
                 // A file the request named is gone (expired, deleted, or held
                 // by another account): upload again and retry once, at once.
                 Err(e)
@@ -574,7 +703,17 @@ pub(crate) async fn run_inference_job(
                         && crate::provider_files::names_files(&request)
                         && hydration.as_ref().is_some() =>
                 {
+                    record(
+                        made,
+                        failed(&e, leviath_core::run_archive::Retry::RenewedFiles),
+                        took,
+                        waited,
+                    );
                     renewed_files = true;
+                    // Taken at once, so the next attempt's record says it waited
+                    // for nothing - which is the point of recording the wait
+                    // separately from the attempt number.
+                    waited = Duration::ZERO;
                     let renewed = hydration
                         .as_ref()
                         .expect("the guard checked a hydration is present")
@@ -584,11 +723,26 @@ pub(crate) async fn run_inference_job(
                 }
                 Err(e) => match backoff_after(&retry, &e, attempt, spent) {
                     Some(delay) => {
+                        record(
+                            made,
+                            failed(&e, leviath_core::run_archive::Retry::SameModel),
+                            took,
+                            waited,
+                        );
                         tokio::time::sleep(delay).await;
                         spent = spent.saturating_add(delay);
+                        waited = delay;
                         attempt += 1;
                     }
-                    None => break Err(e),
+                    None => {
+                        record(
+                            made,
+                            failed(&e, leviath_core::run_archive::Retry::Reported),
+                            took,
+                            waited,
+                        );
+                        break Err(e);
+                    }
                 },
             }
         }
@@ -596,8 +750,10 @@ pub(crate) async fn run_inference_job(
     // A cancel drops the whole retry-and-backoff future - aborting the in-flight
     // HTTP request rather than waiting out the job timeout (up to 15 minutes) -
     // and reports nothing: the agent is already terminal, so there is no outcome
-    // to apply. Releasing the permit here is the point; a cancelled run used to
-    // hold its model's pool slot for as long as the provider took to answer.
+    // to apply. Releasing the permit here is the point: without it a cancelled
+    // run holds its model's pool slot for as long as the provider takes to
+    // answer, and every agent queued on that model waits for a run nobody is
+    // waiting for.
     //
     // Note this arm sends no outcome and so never reaches the `wake` below: the
     // tick loop learns the slot is free from the permit's own `Drop` (see
@@ -644,6 +800,7 @@ pub(crate) async fn run_inference_job(
 mod tests {
     use super::*;
     use crate::inference_pool::{InferencePoolConfig, InferencePools};
+    use leviath_core::run_archive::{AttemptOutcome, Retry};
     use tokio::sync::mpsc;
 
     fn test_request() -> InferenceRequest {
@@ -721,6 +878,7 @@ mod tests {
             calibration: None,
             stream: false,
             hydration: None,
+            journal: None,
         }
     }
 
@@ -751,6 +909,7 @@ mod tests {
             calibration: None,
             stream: false,
             hydration: None,
+            journal: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let cancel = crate::cancel::CancelToken::new();
@@ -834,6 +993,7 @@ mod tests {
             calibration: None,
             stream: false,
             hydration: None,
+            journal: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let policy = RetryPolicy {
@@ -983,6 +1143,7 @@ mod tests {
             calibration,
             stream: false,
             hydration: None,
+            journal: None,
         }
     }
 
@@ -1206,6 +1367,9 @@ mod tests {
         /// error, which is a capacity refusal rather than a blip.
         Overloaded,
         Permanent,
+        /// A transport failure the provider was reached through: transient, and
+        /// classified, which is what an attempt record reports as its kind.
+        WentQuiet,
         /// Never returns - a stalled/hung call, for the job-timeout test.
         Hang,
     }
@@ -1235,6 +1399,12 @@ mod tests {
                     Err(ProviderError::ApiError("HTTP 529 Overloaded".to_string()))
                 }
                 Some(Step::Permanent) => Err(ProviderError::Other("permanent".to_string())),
+                // Classified, and transient without being a capacity refusal:
+                // the one combination the other steps cannot produce, and what a
+                // record has to be able to say.
+                Some(Step::WentQuiet) => Err(ProviderError::RequestFailed(
+                    "[timeout] the provider went quiet".to_string(),
+                )),
                 Some(Step::Hang) => std::future::pending().await,
                 None => Err(ProviderError::Other("exhausted".to_string())),
             }
@@ -1316,6 +1486,7 @@ mod tests {
             calibration: None,
             stream: true,
             hydration: None,
+            journal: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_inference_job(
@@ -1353,6 +1524,7 @@ mod tests {
             calibration: None,
             stream: false,
             hydration: None,
+            journal: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_inference_job(
@@ -1464,6 +1636,136 @@ mod tests {
         let outcome = rx.try_recv().expect("outcome sent");
         assert!(outcome.result.is_err());
         assert_eq!(*provider.calls.lock().unwrap(), 1); // no retry on a permanent error
+    }
+
+    // ── one record per attempt ──
+
+    /// [`job`] with somewhere to journal its attempts, and the lane to read them
+    /// back from. The identity is the dispatch system's to supply, so a test
+    /// asserts on the values it was given rather than on anything the loop knows.
+    fn journaled_job(
+        provider: Arc<dyn Provider>,
+    ) -> (
+        InferenceJob,
+        mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+    ) {
+        let (lane, records) = mpsc::unbounded_channel();
+        let mut job = job(provider);
+        job.journal = Some(AttemptJournal {
+            run_id: "run-a".to_string(),
+            stage: "draft".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt".to_string(),
+            lane,
+            digest: leviath_core::run_archive::RequestDigest {
+                system_hash: 11,
+                messages: 0,
+                tools: 0,
+                max_tokens: 100,
+                temperature: 0.0,
+            },
+        });
+        (job, records)
+    }
+
+    /// What one failed attempt reads as.
+    fn failure(kind: &str, transient: bool, capacity: bool, next: Retry) -> AttemptOutcome {
+        AttemptOutcome::Failed {
+            kind: kind.to_string(),
+            transient,
+            capacity,
+            next,
+        }
+    }
+
+    /// Two refusals and an answer produce three records, not one. Until they did,
+    /// a call that spent a minute being refused was journaled exactly like one
+    /// that was answered at once.
+    #[tokio::test]
+    async fn every_attempt_at_one_call_is_journaled() {
+        let provider = Arc::new(Scripted {
+            steps: std::sync::Mutex::new(
+                vec![
+                    Step::WentQuiet,
+                    Step::Transient,
+                    Step::Ok("done".to_string()),
+                ]
+                .into(),
+            ),
+            calls: std::sync::Mutex::new(0),
+        });
+        let (job, mut lane) = journaled_job(provider);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            job,
+            tx,
+            Arc::new(Notify::new()),
+            no_delay(4),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+        assert_eq!(
+            rx.try_recv().expect("outcome").result.unwrap().content,
+            "done"
+        );
+
+        let records = journaled_attempts(&mut lane);
+        assert_eq!(records.len(), 3, "{records:?}");
+        assert_eq!(
+            records.iter().map(|r| r.attempt).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+        );
+        // A timeout is transient and is not a capacity refusal, so it buys the
+        // reached-the-provider schedule; a 429 is both.
+        assert_eq!(
+            records[0].outcome,
+            failure("timeout", true, false, Retry::SameModel)
+        );
+        assert_eq!(
+            records[1].outcome,
+            failure("", true, true, Retry::SameModel)
+        );
+        assert_eq!(records[2].outcome, AttemptOutcome::Succeeded);
+        // The identity the dispatch system handed over, on every record.
+        for record in &records {
+            assert_eq!(record.stage, "draft");
+            assert_eq!(record.provider, "openai");
+            assert_eq!(record.model, "gpt");
+            assert_eq!(record.digest.system_hash, 11);
+            // Every wait is zero under this policy, which is the point of it:
+            // what the records show is three trips, not three sleeps.
+            assert_eq!(record.backoff_ms, 0);
+        }
+        // One request, three attempts at it.
+        assert_eq!(records[0].digest, records[2].digest);
+    }
+
+    /// A failure nobody retried says so, rather than leaving a reader to work
+    /// out from the absence of a fourth record whether the loop gave up or the
+    /// run was killed part-way.
+    #[tokio::test]
+    async fn an_attempt_nobody_retried_records_that_it_was_reported() {
+        let (job, mut lane) = journaled_job(Arc::new(Scripted {
+            steps: std::sync::Mutex::new(vec![Step::Permanent].into()),
+            calls: std::sync::Mutex::new(0),
+        }));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            job,
+            tx,
+            Arc::new(Notify::new()),
+            no_delay(4),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+        assert!(rx.try_recv().expect("outcome").result.is_err());
+
+        let records = journaled_attempts(&mut lane);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(
+            records[0].outcome,
+            failure("", false, false, Retry::Reported)
+        );
     }
 
     // ── the retry schedule (issue #417) ──
@@ -1845,6 +2147,25 @@ mod tests {
         );
         assert_eq!(leviath_providers::mime::mime_tokens(&request), 1600);
     }
+}
+
+/// The attempt records a job appended, in order, draining the lane.
+///
+/// At module scope rather than inside one test module because this file's tests
+/// and the file-renewal tests beside them read the same lane for the same thing.
+#[cfg(test)]
+pub(crate) fn journaled_attempts(
+    lane: &mut tokio::sync::mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+) -> Vec<leviath_core::run_archive::AttemptRecord> {
+    let mut records = Vec::new();
+    while let Ok(msg) = lane.try_recv() {
+        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
+            && let leviath_core::run_archive::RunRecord::InferenceAttempt(attempt) = *record
+        {
+            records.push(attempt);
+        }
+    }
+    records
 }
 
 #[cfg(test)]

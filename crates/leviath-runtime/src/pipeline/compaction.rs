@@ -305,11 +305,25 @@ pub(crate) fn collect_compaction(
                     })
                     .map(|r| r.name.clone());
                 if let Some(history_name) = history {
-                    let _ = window.add_to_region(&history_name, summary, summary_tokens);
+                    let _ = window.add_to_region_caused(
+                        leviath_core::ContextCause::Compaction,
+                        &history_name,
+                        summary,
+                        summary_tokens,
+                    );
                 }
+                let before = window.region_shape(&region_name);
                 if let Some(region) = window.get_region_mut(&region_name) {
                     region.clear();
                 }
+                // The source region emptying is half of what a compaction did,
+                // and the half a reader is most likely to be looking for.
+                window.journal_change(
+                    leviath_core::ContextCause::Compaction,
+                    &region_name,
+                    before,
+                    0,
+                );
             }
             window.current_tokens = window.calculate_tokens();
         }
@@ -411,10 +425,12 @@ pub(crate) fn apply_edge_transform(
                 .iter()
                 .filter(|n| !carry.contains(n))
                 .for_each(|name| {
+                    let before = window.region_shape(name);
                     window
                         .get_region_mut(name)
                         .into_iter()
                         .for_each(|r| r.clear());
+                    window.journal_change(leviath_core::ContextCause::Transform, name, before, 0);
                 });
             window.current_tokens = window.calculate_tokens();
             compact

@@ -217,7 +217,7 @@ pub(crate) async fn persistence_worker(
                     if newest_snapshot.get(job.run_id.as_str()) != Some(&i) {
                         continue; // superseded by a newer snapshot in this batch
                     }
-                    if !may_write(&runs_dir, &job.run_id, &mut staked) {
+                    if !may_write(&runs_dir, &job.run_id, &mut staked, true) {
                         // Deleted. Forget what was cached about it too, so the
                         // maps stay bounded by the runs still being written.
                         last_context.remove(&job.run_id);
@@ -272,7 +272,7 @@ pub(crate) async fn persistence_worker(
                     record,
                     ack,
                 } => {
-                    let landed = if may_write(&runs_dir, &run_id, &mut staked) {
+                    let landed = if may_write(&runs_dir, &run_id, &mut staked, false) {
                         append_record(&runs_dir, &run_id, &record).await
                     } else {
                         Appended::NoJournal
@@ -291,7 +291,7 @@ pub(crate) async fn persistence_worker(
                     output_appends,
                     log_appends,
                 } => {
-                    if !may_write(&runs_dir, &run_id, &mut staked) {
+                    if !may_write(&runs_dir, &run_id, &mut staked, false) {
                         continue;
                     }
                     let dir = runs_dir.join(&run_id);
@@ -308,7 +308,18 @@ pub(crate) async fn persistence_worker(
 }
 
 /// Whether the lane should still write for `run_id`, remembering the run the
-/// first time it is asked about it.
+/// first time a message that can establish it is asked about.
+///
+/// `establishes` says whether this message is one that creates the run
+/// directory. Only a snapshot does; an appended record needs an archive file
+/// that is already there, and a stage line needs the directory. So only a
+/// snapshot may claim a run the lane has not seen before, and a record that
+/// arrives ahead of the first snapshot is dropped rather than counted as the
+/// run's arrival. Letting one claim the run meant the snapshot behind it -
+/// the write that would have made the directory - found the run already
+/// claimed, no directory on disk, and dropped itself as a write to a deleted
+/// run. The run then never appeared at all: no `meta.json`, nothing to list,
+/// and anyone waiting for it waited for ever.
 ///
 /// A run directory is created **once**, by whoever starts the run: the CLI
 /// spawner before the world is built, or - for an embedded world with no CLI
@@ -328,10 +339,15 @@ pub(crate) async fn persistence_worker(
 /// One `stat` per message, taken inline rather than through the blocking pool:
 /// the hop would cost more than the syscall it is avoiding, and the lane is
 /// already doing far heavier work per message than this.
-fn may_write(runs_dir: &Path, run_id: &str, staked: &mut HashSet<String>) -> bool {
-    // First message for this run. The directory is normally already there, and
+fn may_write(
+    runs_dir: &Path,
+    run_id: &str,
+    staked: &mut HashSet<String>,
+    establishes: bool,
+) -> bool {
+    // First snapshot for this run. The directory is normally already there, and
     // creating it is a no-op; the embedded case is the one that needs it made.
-    if staked.insert(run_id.to_string()) {
+    if establishes && staked.insert(run_id.to_string()) {
         return true;
     }
     if runs_dir.join(run_id).is_dir() {
@@ -339,7 +355,7 @@ fn may_write(runs_dir: &Path, run_id: &str, staked: &mut HashSet<String>) -> boo
     }
     tracing::info!(
         run_id = %run_id,
-        "persistence: the run directory is gone, so it was deleted; dropping its writes"
+        "persistence: no run directory, so the run was deleted or has not started yet; dropping this write"
     );
     false
 }

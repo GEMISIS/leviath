@@ -811,7 +811,12 @@ pub(crate) fn apply_stage_context(
         let content = format!("[Stage instructions: {sp}]");
         let tokens = leviath_core::estimate_tokens(&content);
         window
-            .add_to_region(&target, content, tokens)
+            .add_to_region_caused(
+                leviath_core::ContextCause::Transform,
+                &target,
+                content,
+                tokens,
+            )
             .map_err(|e| {
                 format!(
                     "stage system prompt (~{tokens} tokens) does not fit context region \

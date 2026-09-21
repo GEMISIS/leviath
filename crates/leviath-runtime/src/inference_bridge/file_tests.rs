@@ -73,6 +73,9 @@ struct Setup {
     vendor: Arc<Vendor>,
     job: InferenceJob,
     _pools: InferencePools,
+    /// The journal the job appends its attempts to, so a test can read what the
+    /// renewal recorded rather than only what the vendor was sent.
+    journal: mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
 }
 
 fn setup(lost: usize, with_route: bool) -> Setup {
@@ -100,6 +103,7 @@ fn setup(lost: usize, with_route: bool) -> Setup {
         ttl_secs: 3_600,
     });
     let pools = InferencePools::new(InferencePoolConfig::new());
+    let (lane, journal) = mpsc::unbounded_channel();
     let job = InferenceJob {
         entity: Entity::from_raw_u32(7).expect("a small literal index is a valid entity id"),
         refused: None,
@@ -133,12 +137,27 @@ fn setup(lost: usize, with_route: bool) -> Setup {
             files,
             why_inline: "",
         }),
+        journal: Some(AttemptJournal {
+            run_id: "run-1".into(),
+            stage: "read".into(),
+            provider: "anthropic".into(),
+            model: "claude".into(),
+            lane,
+            digest: leviath_core::run_archive::RequestDigest {
+                system_hash: 7,
+                messages: 1,
+                tools: 0,
+                max_tokens: 100,
+                temperature: 0.0,
+            },
+        }),
     };
     Setup {
         _dir: dir,
         vendor,
         job,
         _pools: pools,
+        journal,
     }
 }
 
@@ -166,6 +185,7 @@ async fn a_gone_file_is_uploaded_again_and_the_call_retried_once() {
         job,
         _dir,
         _pools,
+        mut journal,
     } = setup(1, true);
     let answer = run(job).await.expect("the retry answers");
     assert_eq!(answer.content, "read it");
@@ -174,6 +194,35 @@ async fn a_gone_file_is_uploaded_again_and_the_call_retried_once() {
     assert_eq!(seen.len(), 2);
     assert!(seen[0].contains("file-0"), "{}", seen[0]);
     assert!(seen[1].contains("file-1"), "{}", seen[1]);
+
+    // Two trips, two records, and the second numbered separately from the
+    // first: the renewal spends none of the retry budget, so the attempt number
+    // is the only thing that tells the two apart.
+    let records = crate::inference_bridge::journaled_attempts(&mut journal);
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records[0].attempt, 1);
+    assert_eq!(
+        records[0].outcome,
+        leviath_core::run_archive::AttemptOutcome::Failed {
+            kind: String::new(),
+            transient: false,
+            capacity: false,
+            next: leviath_core::run_archive::Retry::RenewedFiles,
+        },
+    );
+    assert_eq!(records[1].attempt, 2);
+    assert_eq!(
+        records[1].outcome,
+        leviath_core::run_archive::AttemptOutcome::Succeeded
+    );
+    // Taken at once, so nothing was slept before it.
+    assert_eq!(records[1].backoff_ms, 0);
+    // And both describe the same request, which is the question a reader of two
+    // attempts is asking.
+    assert_eq!(records[0].digest, records[1].digest);
+    assert_eq!(records[0].stage, "read");
+    assert_eq!(records[0].provider, "anthropic");
+    assert_eq!(records[0].model, "claude");
 }
 
 #[tokio::test]
@@ -183,6 +232,7 @@ async fn a_file_gone_twice_is_the_error_and_no_route_means_no_renewal() {
         job,
         _dir,
         _pools,
+        ..
     } = setup(2, true);
     let err = run(job).await.unwrap_err();
     assert!(err.to_string().contains("not found"), "{err}");
@@ -197,6 +247,7 @@ async fn a_file_gone_twice_is_the_error_and_no_route_means_no_renewal() {
         job,
         _dir,
         _pools,
+        ..
     } = setup(1, false);
     assert!(run(job).await.is_err());
     assert_eq!(vendor.uploads.load(Ordering::SeqCst), 0);

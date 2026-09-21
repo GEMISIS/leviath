@@ -196,7 +196,8 @@ pub(crate) fn apply_tool_results_with_parts(
             thought_signature: tc.thought_signature.clone(),
         })
         .collect();
-    let _ = window.add_assistant_turn_content(
+    let _ = window.add_turn(
+        Some(leviath_core::ContextCause::ModelReply),
         "conversation",
         leviath_core::EntryKind::AssistantTurn {
             tool_calls: serialized,
@@ -327,7 +328,17 @@ pub(crate) fn apply_one_tool_result(
                     origin: crate::components::WriteOrigin|
      -> Stored {
         let put = |w: &mut ContextWindow, c: leviath_core::region::EntryContent, t: usize| {
-            w.typed_write_content(origin, region, kind.clone(), c, t, taint_level)
+            w.typed_write_content(
+                crate::components::TypedWrite {
+                    cause: Some(leviath_core::ContextCause::ToolResult),
+                    origin,
+                    region,
+                    kind: kind.clone(),
+                    taint: taint_level,
+                },
+                c,
+                t,
+            )
         };
         match put(window, content.clone(), tokens) {
             Ok(()) => return Stored::Whole,
@@ -527,11 +538,13 @@ pub(crate) fn apply_file_tracking(
         };
         let body = truncate_file(body, ft.max_file_tokens);
         let tokens = leviath_core::estimate_tokens(&body);
+        let before = window.region_shape(&ft.region);
         window
             .get_region_mut(&ft.region)
             .expect("region presence checked above")
             .upsert_by_key(path, body, tokens)
             .ok();
+        window.journal_upsert(leviath_core::ContextCause::ToolResult, &ft.region, before);
         *result = format!(
             "File {verb} in [{}] → ### [{}] ({} tokens). Reference it there; do not re-read this path.",
             ft.region, path, tokens
@@ -975,7 +988,12 @@ pub(crate) fn collect_tools(
             for nudge in nudges {
                 let content = format!("[System] {nudge}");
                 let tokens = leviath_core::estimate_tokens(&content);
-                let _ = window.add_to_region("conversation", content, tokens);
+                let _ = window.add_to_region_caused(
+                    leviath_core::ContextCause::Framework,
+                    "conversation",
+                    content,
+                    tokens,
+                );
             }
         }
         commands
