@@ -212,7 +212,7 @@ and what it would like to run unasked.
 
 ```graphql
 {
-  blueprints(exact: ["coder"]) { blueprints {
+  blueprints(exact: ["coder"]) { edges { node {
     dependencies { name kind required remedy }
     stages {
       name mode
@@ -221,7 +221,7 @@ and what it would like to run unasked.
       interactionPoints { name prompt style options }
       fanOut { workerStage maxWorkers onWorkerFailure }
     }
-  } }
+  } } }
 }
 ```
 
@@ -617,6 +617,9 @@ Three refusals here are the server's, not the daemon's, and each answers
 
 ```graphql
 mutation { sendMessage(runId: "coder-1788924523-abc123", message: "keep going") { run { status } } }
+```
+
+```graphql
 mutation { pauseAgent(runId: "coder-1788924523-abc123") { run { id status } } }
 ```
 
@@ -692,7 +695,7 @@ is parked on. The daemon holds these in memory, so it is one read rather than a
 walk of the run store.
 
 ```graphql
-{ openInteractions { runId request { id kind prompt options tool body } } }
+{ openInteractions { runId request { id kind prompt options body toolCall { toolName } } } }
 ```
 
 Answer with exactly one variant, and which one the request's `kind` decides.
