@@ -320,24 +320,44 @@ pub(super) async fn listing_with(
 /// The refusal is boxed because an axum response is a large value and this
 /// returns a small one beside it.
 fn resolve(name: &str) -> Result<&'static str, Box<axum::response::Response>> {
-    canonical(name).map_err(|e| Box::new(super::core::error::as_api_error(&e).into_response()))
+    canonical(name)
+        .map(|(id, _)| id)
+        .map_err(|e| Box::new(super::core::error::as_api_error(&e).into_response()))
 }
 
-/// The canonical name of a provider that can be signed in to in a browser.
+/// The catalog's own entry for a provider that can be signed in to in a
+/// browser: its id and the name to show.
 ///
 /// The table's own id, not the caller's string: everything downstream keys on
 /// the id, and a caller's spelling that merely matched would key a grant under a
-/// name nothing reads back.
-pub(super) fn canonical(name: &str) -> Result<&'static str, super::core::error::ServeError> {
+/// name nothing reads back. The display name comes with it so a caller that has
+/// to describe the provider has no second lookup to make, and so no miss to
+/// report about a provider this one already vouched for.
+pub(super) fn canonical(
+    name: &str,
+) -> Result<(&'static str, &'static str), super::core::error::ServeError> {
     signin_providers()
         .iter()
         .find(|(id, _)| *id == name)
-        .map(|(id, _)| *id)
+        .copied()
         .ok_or_else(|| {
             super::core::error::ServeError::NotFound(format!(
                 "no browser sign-in provider named '{name}'"
             ))
         })
+}
+
+/// One provider's row, for a name [`canonical`] has already vouched for.
+///
+/// [`provider_infos`] for one provider rather than all of them, built from the
+/// catalog entry the caller is holding: there is nothing to search, and so no
+/// absent case to invent an answer for.
+pub(super) fn described(state: &AppState, id: &str, display: &str) -> ProviderInfo {
+    let config = state.current_config();
+    let paths = super::mcp::admin_paths();
+    let store = leviath_providers::oauth::ProviderAuthStore::load(&paths.grants).ok();
+    let in_flight = leviath_core::sync::lock(&state.providers.in_flight).clone();
+    describe(id, display, &config, store.as_ref(), &in_flight)
 }
 
 /// `POST /api/providers/{name}/login` - start the browser sign-in.

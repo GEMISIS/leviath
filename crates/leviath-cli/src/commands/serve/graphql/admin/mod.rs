@@ -13,8 +13,9 @@
 //!
 //! One file per concern: [`config`] for the one write onto the daemon's own
 //! config, [`mcp`] for an MCP server's config entry, [`mime`] for the mime
-//! registry, [`scripts`] for a registered script, [`yolo`] for the profiles
-//! file, [`providers`] for subscription sign-in and endpoint probing, and
+//! registry, [`scripts`] for a registered script, [`yolo`] for one profile in
+//! the profiles file, [`providers`] for subscription sign-in and endpoint
+//! checks, and
 //! [`system`] for the acts that touch the machine itself: updates, live
 //! diagnostics, and making a directory. `AdminMutation` stays one
 //! `#[Object] impl` with one field per method, for the same reason `Query`
@@ -24,10 +25,8 @@
 
 use async_graphql::{Context, Guard, Object};
 
-use super::config_input::{ConfigInput, EnvEntryInput};
+use super::config_input::UpdateConfigRequest;
 use super::error::graphql_error;
-use super::types::machine::{Config, DoctorReport, YoloProfiles};
-use super::types::update::UpdateJob;
 
 use super::super::core::error::ServeError;
 
@@ -39,11 +38,26 @@ pub(crate) mod scripts;
 pub(crate) mod system;
 pub(crate) mod yolo;
 
-use mcp::McpLoginStatus;
-use mime::{MimeRowInput, MimeRowWritten};
-use providers::SignInStarted;
-use scripts::ScriptWritten;
-use system::MadeDirectory;
+use config::UpdateConfigResult;
+use mcp::{
+    CheckMcpServerRequest, CheckMcpServerResult, CreateMcpServerRequest, CreateMcpServerResult,
+    DeleteMcpServerRequest, DeleteMcpServerResult, SignInMcpServerRequest, SignInMcpServerResult,
+    UpdateMcpServerRequest, UpdateMcpServerResult,
+};
+use mime::{DeleteMimeRowRequest, DeleteMimeRowResult, UpsertMimeRowRequest, UpsertMimeRowResult};
+use providers::{
+    CheckEndpointRequest, CheckEndpointResult, CheckProviderRequest, CheckProviderResult,
+    SignInProviderRequest, SignInProviderResult, SignOutProviderRequest, SignOutProviderResult,
+};
+use scripts::{DeleteScriptRequest, DeleteScriptResult, UpsertScriptRequest, UpsertScriptResult};
+use system::{
+    CheckMachineResult, CreateDirectoryRequest, CreateDirectoryResult, StartUpdateRequest,
+    StartUpdateResult,
+};
+use yolo::{
+    DeleteYoloProfileRequest, DeleteYoloProfileResult, UpsertYoloProfileRequest,
+    UpsertYoloProfileResult,
+};
 
 /// Whether this server was started with `--allow-admin`.
 ///
@@ -92,27 +106,36 @@ impl AdminMutation {
     /// Leviath spawns, for this run and every future one. That is why the whole
     /// group is behind a flag rather than behind the API token alone.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn add_mcp_server(
+    async fn create_mcp_server(
         &self,
-        #[graphql(desc = "Unique server name.")] name: String,
-        #[graphql(desc = "The command, for a stdio server.")] command: Option<String>,
-        #[graphql(desc = "The URL, for an HTTP server.")] url: Option<String>,
-        #[graphql(desc = "Arguments for a stdio server.")] args: Option<Vec<String>>,
-        #[graphql(desc = "Headers sent with every request to an HTTP server. An \
-                    `Authorization` header here is a credential, so the server \
-                    needs no separate sign-in.")]
-        headers: Option<Vec<EnvEntryInput>>,
-    ) -> async_graphql::Result<bool> {
-        mcp::add_mcp_server(name, command, url, args, headers).await
+        ctx: &Context<'_>,
+        #[graphql(desc = "The server to write.")] request: CreateMcpServerRequest,
+    ) -> async_graphql::Result<CreateMcpServerResult> {
+        mcp::create_mcp_server(ctx, request).await
     }
 
-    /// Remove an MCP server from the config.
+    /// Replace an MCP server's configuration, whole.
+    ///
+    /// Whole rather than field by field: the entry is what gets spawned, and an
+    /// edit that left half of a previous transport behind would describe a
+    /// server nobody wrote.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn remove_mcp_server(
+    async fn update_mcp_server(
         &self,
-        #[graphql(desc = "The server to remove.")] name: String,
-    ) -> async_graphql::Result<bool> {
-        mcp::remove_mcp_server(name).await
+        ctx: &Context<'_>,
+        #[graphql(desc = "The server, named by the name it is already under.")]
+        request: UpdateMcpServerRequest,
+    ) -> async_graphql::Result<UpdateMcpServerResult> {
+        mcp::update_mcp_server(ctx, request).await
+    }
+
+    /// Remove an MCP server from the config, and its stored credential with it.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn delete_mcp_server(
+        &self,
+        #[graphql(desc = "The server to remove.")] request: DeleteMcpServerRequest,
+    ) -> async_graphql::Result<DeleteMcpServerResult> {
+        mcp::delete_mcp_server(request).await
     }
 
     /// Add or update one row of the mime registry.
@@ -121,39 +144,41 @@ impl AdminMutation {
     /// changes: what a field leaves out stays as whatever broader row already
     /// covers the type.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn put_mime_row(
+    async fn upsert_mime_row(
         &self,
-        #[graphql(desc = "The row to write.")] row: MimeRowInput,
-    ) -> async_graphql::Result<MimeRowWritten> {
-        mime::put_mime_row(row).await
+        ctx: &Context<'_>,
+        #[graphql(desc = "The row to write.")] request: UpsertMimeRowRequest,
+    ) -> async_graphql::Result<UpsertMimeRowResult> {
+        mime::upsert_mime_row(ctx, request).await
     }
 
     /// Remove a row from the mime registry.
     ///
-    /// False when there was no such row, which is a fact about the registry
-    /// rather than a failed request.
+    /// A key nothing has a row for is a miss: the caller named a row, and
+    /// there was none to take out.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
     async fn delete_mime_row(
         &self,
-        #[graphql(desc = "The row to remove.")] mime_type: String,
-    ) -> async_graphql::Result<bool> {
-        mime::delete_mime_row(mime_type).await
+        #[graphql(desc = "The row to remove.")] request: DeleteMimeRowRequest,
+    ) -> async_graphql::Result<DeleteMimeRowResult> {
+        mime::delete_mime_row(request).await
     }
 
     /// Change the machine's config.
     ///
-    /// A partial edit: a field left out leaves the setting alone, `null` clears
-    /// it, and a value sets it. An empty string is refused rather than read as a
-    /// clear, because a form that posts its empty box should be told rather than
-    /// obeyed. Every refusal happens before anything is written, so a request
-    /// that is going to fail leaves the file as it was.
+    /// A partial edit in four parts: `set` names the settings to change,
+    /// `clear` the ones to take back to nothing, `providers` the per-provider
+    /// settings, and the two gateway lists what to add and what to remove.
+    /// What none of them mentions is left alone. Every refusal happens before
+    /// anything is written, so a request that is going to fail leaves the file
+    /// as it was.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
     async fn update_config(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "What to change.")] input: ConfigInput,
-    ) -> async_graphql::Result<Config> {
-        config::update_config(ctx, input).await
+        #[graphql(desc = "What to change.")] request: UpdateConfigRequest,
+    ) -> async_graphql::Result<UpdateConfigResult> {
+        config::update_config(ctx, request).await
     }
 
     /// Write a Rhai script.
@@ -162,22 +187,13 @@ impl AdminMutation {
     /// written here is what a run then executes. The answer says whether it
     /// compiles, so an editor does not have to save and wait for a run to fail.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn put_script(
+    async fn upsert_script(
         &self,
         ctx: &Context<'_>,
-        #[graphql(
-            desc = "Which registry: tool, region_hook, stage_hook, output_validator, \
-                          mime_check or provider."
-        )]
-        kind: String,
-        #[graphql(desc = "Its name, unique within that kind.")] name: String,
-        #[graphql(desc = "The script's source.")] content: String,
-        #[graphql(
-            desc = "The blueprint whose directory it belongs to, for a blueprint-scoped script."
-        )]
-        blueprint: Option<String>,
-    ) -> async_graphql::Result<ScriptWritten> {
-        scripts::put_script(ctx, kind, name, content, blueprint).await
+        #[graphql(desc = "The script to write, and what to put in it.")]
+        request: UpsertScriptRequest,
+    ) -> async_graphql::Result<UpsertScriptResult> {
+        scripts::upsert_script(ctx, request).await
     }
 
     /// Remove a script.
@@ -185,11 +201,9 @@ impl AdminMutation {
     async fn delete_script(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Which registry it belongs to.")] kind: String,
-        #[graphql(desc = "The script to remove.")] name: String,
-        #[graphql(desc = "The blueprint whose directory it is in.")] blueprint: Option<String>,
-    ) -> async_graphql::Result<bool> {
-        scripts::delete_script(ctx, kind, name, blueprint).await
+        #[graphql(desc = "The script to remove.")] request: DeleteScriptRequest,
+    ) -> async_graphql::Result<DeleteScriptResult> {
+        scripts::delete_script(ctx, request).await
     }
 
     /// Run the diagnostics that reach the network.
@@ -198,9 +212,12 @@ impl AdminMutation {
     /// provider whether a key works and the daemon whether it is there, which
     /// costs a few seconds and is why it is a mutation rather than a field: it is
     /// an act with a cost, and one runs at a time.
+    ///
+    /// The one mutation with no request, because there is nothing to say: the
+    /// checks are the checks.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn run_doctor_live(&self, ctx: &Context<'_>) -> async_graphql::Result<DoctorReport> {
-        system::run_doctor_live(ctx).await
+    async fn check_machine(&self, ctx: &Context<'_>) -> async_graphql::Result<CheckMachineResult> {
+        system::check_machine(ctx).await
     }
 
     /// Make one directory, so a picker can offer "New Folder" rather than one
@@ -210,13 +227,12 @@ impl AdminMutation {
     /// `--workdir-root`, a parent that is not there, and a name already taken are
     /// three different things to show somebody.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn make_directory(
+    async fn create_directory(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The existing directory to make it in, absolute.")] path: String,
-        #[graphql(desc = "One directory name, not a path.")] name: String,
-    ) -> async_graphql::Result<MadeDirectory> {
-        system::make_directory(ctx, path, name).await
+        #[graphql(desc = "Where to make it, and what to call it.")] request: CreateDirectoryRequest,
+    ) -> async_graphql::Result<CreateDirectoryResult> {
+        system::create_directory(ctx, request).await
     }
 
     /// Start a self-update, and hand back the job.
@@ -230,16 +246,10 @@ impl AdminMutation {
     async fn start_update(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Upgrade the binary.", default = true)] binary: bool,
-        #[graphql(desc = "Install the bundled blueprints.", default = true)] blueprints: bool,
-        #[graphql(
-            desc = "Respell keys that changed name in your own blueprints.",
-            default = true
-        )]
-        keys: bool,
-        #[graphql(desc = "Apply the config migrations.", default = true)] migrations: bool,
-    ) -> async_graphql::Result<UpdateJob> {
-        system::start_update(ctx, binary, blueprints, keys, migrations).await
+        #[graphql(desc = "Which steps to run. Omitted means all of them.")]
+        request: StartUpdateRequest,
+    ) -> async_graphql::Result<StartUpdateResult> {
+        system::start_update(ctx, request).await
     }
 
     /// Sign in to a subscription provider.
@@ -252,12 +262,12 @@ impl AdminMutation {
     /// port there, so a browser anywhere else cannot complete it, and one sign-in
     /// runs at a time because a second could not bind that port.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn provider_sign_in(
+    async fn sign_in_provider(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The provider, by name.")] provider: String,
-    ) -> async_graphql::Result<SignInStarted> {
-        providers::provider_sign_in(ctx, provider).await
+        #[graphql(desc = "The provider to sign in to.")] request: SignInProviderRequest,
+    ) -> async_graphql::Result<SignInProviderResult> {
+        providers::sign_in_provider(ctx, request).await
     }
 
     /// Forget a provider's stored sign-in.
@@ -265,12 +275,12 @@ impl AdminMutation {
     /// The config is untouched: signing out is not turning the provider off, and
     /// doing both would surprise anybody who meant to sign in again.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn provider_sign_out(
+    async fn sign_out_provider(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The provider, by name.")] provider: String,
-    ) -> async_graphql::Result<bool> {
-        providers::provider_sign_out(ctx, provider).await
+        #[graphql(desc = "The provider to forget.")] request: SignOutProviderRequest,
+    ) -> async_graphql::Result<SignOutProviderResult> {
+        providers::sign_out_provider(ctx, request).await
     }
 
     /// Ask a provider whether the stored sign-in works.
@@ -282,9 +292,9 @@ impl AdminMutation {
     async fn check_provider(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The provider, by name.")] provider: String,
-    ) -> async_graphql::Result<Vec<String>> {
-        providers::check_provider(ctx, provider).await
+        #[graphql(desc = "The provider to ask.")] request: CheckProviderRequest,
+    ) -> async_graphql::Result<CheckProviderResult> {
+        providers::check_provider(ctx, request).await
     }
 
     /// Connect to an MCP server and list what it advertises.
@@ -292,12 +302,12 @@ impl AdminMutation {
     /// The only honest answer to "does this server work": a config that parses
     /// proves nothing about a program that will not start.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn test_mcp_server(
+    async fn check_mcp_server(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The server, by name.")] name: String,
-    ) -> async_graphql::Result<Vec<String>> {
-        mcp::test_mcp_server(ctx, name).await
+        #[graphql(desc = "The server to connect to.")] request: CheckMcpServerRequest,
+    ) -> async_graphql::Result<CheckMcpServerResult> {
+        mcp::check_mcp_server(ctx, request).await
     }
 
     /// Sign in to an MCP server that wants OAuth.
@@ -306,53 +316,59 @@ impl AdminMutation {
     /// sign-in was needed, and the answer is no. Opens a browser on the serving
     /// host, like the provider sign-in.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn login_mcp_server(
+    async fn sign_in_mcp_server(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The server, by name.")] name: String,
-    ) -> async_graphql::Result<McpLoginStatus> {
-        mcp::login_mcp_server(ctx, name).await
+        #[graphql(desc = "The server to sign in to.")] request: SignInMcpServerRequest,
+    ) -> async_graphql::Result<SignInMcpServerResult> {
+        mcp::sign_in_mcp_server(ctx, request).await
     }
 
     /// Ask an OpenAI-compatible endpoint what models it serves.
     ///
     /// Makes this host open a connection to an address the caller names, which is
-    /// the same act as testing an MCP server, and it exists to precede writing a
+    /// the same act as checking an MCP server, and it exists to precede writing a
     /// gateway for it: a person picks a default from what the endpoint really
     /// serves rather than typing a model id and hoping.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn probe_models(
+    async fn check_endpoint(
         &self,
-        #[graphql(desc = "Where the endpoint is.")] base_url: String,
-        #[graphql(desc = "Its API key, when it wants one. Used for this one call and \
-                    dropped: never written to the config, and this server logs no \
-                    request body, so it reaches nothing on disk.")]
-        api_key: Option<String>,
-        #[graphql(desc = "Extra headers the request carries.")] headers: Option<Vec<EnvEntryInput>>,
-    ) -> async_graphql::Result<Vec<String>> {
-        providers::probe_models(base_url, api_key, headers).await
+        #[graphql(desc = "Where to look, and what to send.")] request: CheckEndpointRequest,
+    ) -> async_graphql::Result<CheckEndpointResult> {
+        providers::check_endpoint(request).await
     }
 
-    /// Replace the yolo profiles file.
+    /// Write one yolo profile.
     ///
-    /// The whole file, because the file is the unit: `--yolo=<name>` names a
-    /// profile inside it and the profiles refer to each other, so writing one at a
-    /// time would let a save leave the set inconsistent. Parsed before it is
-    /// written, so a file that would not load is refused rather than saved and
-    /// discovered at the next spawn.
+    /// The whole profile, because a profile is a grant of permissions: an edit
+    /// that left half of a previous list behind would describe a set of rules
+    /// nobody wrote. Only that one table of `yolo.toml` is touched, so comments
+    /// and formatting around it survive; the comments inside the table being
+    /// written do not.
+    ///
+    /// The whole file is checked before anything is written, so a save that
+    /// would leave the set unloadable is refused rather than discovered at the
+    /// next spawn.
     #[graphql(visible = "admin_visible", guard = "AdminGuard")]
-    async fn put_yolo_profiles(
+    async fn upsert_yolo_profile(
         &self,
-        #[graphql(desc = "The whole file, as TOML.")] text: String,
-    ) -> async_graphql::Result<YoloProfiles> {
-        yolo::put_yolo_profiles(text).await
+        #[graphql(desc = "The profile to write.")] request: UpsertYoloProfileRequest,
+    ) -> async_graphql::Result<UpsertYoloProfileResult> {
+        yolo::upsert_yolo_profile(request).await
+    }
+
+    /// Remove one yolo profile.
+    ///
+    /// A name the file has no table for is a miss: the caller named a profile,
+    /// and there was none to take out.
+    #[graphql(visible = "admin_visible", guard = "AdminGuard")]
+    async fn delete_yolo_profile(
+        &self,
+        #[graphql(desc = "The profile to remove.")] request: DeleteYoloProfileRequest,
+    ) -> async_graphql::Result<DeleteYoloProfileResult> {
+        yolo::delete_yolo_profile(request).await
     }
 }
-
-// Re-exported for the tests below, which build these inputs and read this
-// status directly rather than through a query document.
-#[cfg(test)]
-use mime::MimeTokensInput;
 
 #[cfg(test)]
 #[path = "tests.rs"]

@@ -448,6 +448,15 @@ pub(super) struct MimeTypeEntry {
     /// The check script the bytes must pass, when one applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) check: Option<String>,
+    /// The hex prefix this row identifies its bytes by, from the row itself
+    /// rather than from what the type inherits: a magic number belongs to one
+    /// key, and a pattern row's prefix is not its family's.
+    ///
+    /// Skipped on the wire. `GET /api/mime` is the effective registry as `lev
+    /// mime list` shows it, and a client reading it byte for byte has never
+    /// been sent this. GraphQL reads it off this struct instead.
+    #[serde(skip)]
+    pub(super) magic: Option<String>,
 }
 
 /// The registry listing.
@@ -467,9 +476,11 @@ pub(super) fn registry_rows(registry: &MimeRegistry) -> Vec<MimeTypeEntry> {
         .filter_map(|(key, source)| {
             MimeType::parse(&key).ok().map(|mime_type| {
                 let info = registry.info(&mime_type);
+                let magic = registry.row(&key).and_then(|row| row.magic.clone());
                 MimeTypeEntry {
                     mime_type: key,
                     source,
+                    magic,
                     family: Some(info.family),
                     text: Some(info.text),
                     tokens: Some(info.tokens),
@@ -493,6 +504,29 @@ pub(super) async fn list_mime(State(state): State<AppState>) -> Json<MimeListing
 /// read them here.
 pub(super) fn mime_rows(state: &AppState) -> Vec<MimeTypeEntry> {
     registry_rows(&state.current_config().mime_registry_or_defaults())
+}
+
+/// One row of the effective registry, by its key.
+///
+/// Total rather than a search that can miss: every caller has just written the
+/// row it is asking about, so the registry carries the key. A key it does not
+/// carry reads back as the key on its own, which says the same thing an empty
+/// registry says about it and is something a client can render.
+pub(super) fn mime_row_named(state: &AppState, mime_type: &str) -> MimeTypeEntry {
+    mime_rows(state)
+        .into_iter()
+        .find(|row| row.mime_type == mime_type)
+        .unwrap_or(MimeTypeEntry {
+            mime_type: mime_type.to_string(),
+            source: crate::config::MIME_TYPES_FILE.to_string(),
+            family: None,
+            text: None,
+            tokens: None,
+            extensions: None,
+            stand_in: None,
+            check: None,
+            magic: None,
+        })
 }
 
 #[cfg(test)]
@@ -856,6 +890,39 @@ mod tests {
             assert_eq!(status, StatusCode::NOT_FOUND);
         })
         .await;
+    }
+
+    /// `GET /api/mime` carries exactly the keys it always has.
+    ///
+    /// `MimeTypeEntry` grew a `magic` field for GraphQL to read. This route is
+    /// the effective registry as `lev mime list` shows it, and a client
+    /// reading it key by key has never been sent one, so the field is skipped
+    /// on the wire and this is what holds it there.
+    #[tokio::test]
+    async fn the_registry_listing_carries_no_new_keys() {
+        let (_, _, body) = call("/api/mime").await;
+        let listing: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let png = listing["types"]
+            .as_array()
+            .expect("the rows")
+            .iter()
+            .find(|row| row["mime_type"] == "image/png")
+            .expect("the built-in rows are there");
+        // Sorted, because the JSON is read back through a map that sorts: what
+        // is being held here is the set of keys, not their order on the wire.
+        let keys: Vec<&String> = png.as_object().expect("an object").keys().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "extensions",
+                "family",
+                "mime_type",
+                "source",
+                "text",
+                "tokens"
+            ],
+            "the row's JSON is what it has always been"
+        );
     }
 
     #[tokio::test]

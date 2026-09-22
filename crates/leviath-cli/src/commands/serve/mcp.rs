@@ -110,6 +110,35 @@ pub(super) struct McpServerInfo {
     /// only way to find out. Null for a server that resolves.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) config_error: Option<String>,
+    /// The program a stdio server is, as the entry spells it.
+    ///
+    /// Skipped on the wire, with the four below. `GET /api/mcp/servers`
+    /// answers `endpoint`, one string for either transport, and a client
+    /// reading that field would be shown two spellings of one server if these
+    /// joined it. GraphQL reads them off this struct instead.
+    #[serde(skip)]
+    pub(super) command: Option<String>,
+    /// Where an HTTP server is, as the entry spells it.
+    #[serde(skip)]
+    pub(super) url: Option<String>,
+    /// The arguments a stdio server is spawned with, in order.
+    #[serde(skip)]
+    pub(super) args: Vec<String>,
+    /// The names of the headers an HTTP server is sent, sorted, without their
+    /// values: a header is where a credential goes.
+    #[serde(skip)]
+    pub(super) header_names: Vec<String>,
+    /// The names of the variables a stdio server is spawned with, sorted,
+    /// without their values, for the same reason.
+    #[serde(skip)]
+    pub(super) env_names: Vec<String>,
+}
+
+/// The keys of a map, sorted, without their values.
+fn names_of(map: &std::collections::HashMap<String, String>) -> Vec<String> {
+    let mut names: Vec<String> = map.keys().cloned().collect();
+    names.sort();
+    names
 }
 
 impl McpServerInfo {
@@ -129,6 +158,11 @@ impl McpServerInfo {
             endpoint,
             auth: auth_status(server, store, now),
             config_error,
+            command: server.command.clone(),
+            url: server.url.clone(),
+            args: server.args.clone(),
+            header_names: names_of(&server.headers),
+            env_names: names_of(&server.env),
         }
     }
 }
@@ -196,17 +230,29 @@ pub(super) struct AddServerRequest {
 
 /// `POST /api/mcp/servers` - add a server.
 pub(super) async fn add_server(Json(req): Json<AddServerRequest>) -> impl IntoResponse {
-    match install_server(req.name, req.command, req.url, req.args, req.headers) {
-        Ok(name) => (
+    match install_server(
+        req.name,
+        req.command,
+        req.url,
+        req.args,
+        std::collections::HashMap::new(),
+        req.headers,
+    ) {
+        Ok(written) => (
             StatusCode::CREATED,
-            Json(serde_json::json!({ "name": name })),
+            Json(serde_json::json!({ "name": written.name })),
         )
             .into_response(),
         Err(e) => super::core::error::as_api_error(&e).into_response(),
     }
 }
 
-/// Write an MCP server into the config.
+/// Write an MCP server into the config, and hand back the entry that was
+/// written.
+///
+/// The entry rather than its name: a caller that has to describe what it wrote
+/// would otherwise read the file back and have a miss to invent an answer for,
+/// when the entry it is asking about is the one in its hand.
 ///
 /// Remote code execution by construction: the command written here is what
 /// Leviath spawns, for this run and every future one. Both surfaces gate the
@@ -216,23 +262,13 @@ pub(super) fn install_server(
     command: Option<String>,
     url: Option<String>,
     args: Vec<String>,
+    env: std::collections::HashMap<String, String>,
     headers: std::collections::HashMap<String, String>,
-) -> Result<String, super::core::error::ServeError> {
+) -> Result<MCPServerConfig, super::core::error::ServeError> {
     use super::core::error::ServeError;
 
     let paths = admin_paths();
-    let server = MCPServerConfig {
-        name,
-        command,
-        url,
-        args,
-        headers,
-        ..Default::default()
-    };
-    server
-        .validate()
-        .map_err(|e| ServeError::BadRequest(e.to_string()))?;
-
+    let server = checked(name, command, url, args, env, headers)?;
     let mut config = Config::load_from_path_public(&paths.config)
         .map_err(|e| ServeError::Internal(e.to_string()))?;
     if config.mcp_servers.iter().any(|s| s.name == server.name) {
@@ -241,12 +277,84 @@ pub(super) fn install_server(
             server.name
         )));
     }
-    let name = server.name.clone();
-    config.mcp_servers.push(server);
+    config.mcp_servers.push(server.clone());
     config
         .save_to_path_public(&paths.config)
         .map_err(|e| ServeError::Internal(e.to_string()))?;
-    Ok(name)
+    Ok(server)
+}
+
+/// One server's state, described from an entry the caller is already holding.
+///
+/// The counterpart of [`server_infos`] for a caller that has just written or
+/// just resolved the entry: there is no name to look up, and so no miss to
+/// report about a server it is looking at.
+pub(super) fn described(state: &AppState, server: &MCPServerConfig) -> McpServerInfo {
+    let store = AuthStore::load(&admin_paths().store).unwrap_or_default();
+    McpServerInfo::describe(server, &store, (state.mcp.clock)())
+}
+
+/// Replace an MCP server's entry, whole, and hand back what now stands there.
+///
+/// Whole rather than field by field: the entry is what gets spawned, and an
+/// edit that left half of a previous transport behind would describe a server
+/// nobody wrote. A name nothing is configured under is a miss, because
+/// creating one here would turn a typo into a second server.
+pub(super) fn update_server(
+    name: String,
+    command: Option<String>,
+    url: Option<String>,
+    args: Vec<String>,
+    env: std::collections::HashMap<String, String>,
+    headers: std::collections::HashMap<String, String>,
+) -> Result<MCPServerConfig, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
+    let paths = admin_paths();
+    let server = checked(name, command, url, args, env, headers)?;
+    let mut config = Config::load_from_path_public(&paths.config)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
+    let Some(at) = config
+        .mcp_servers
+        .iter()
+        .position(|s| s.name == server.name)
+    else {
+        return Err(ServeError::NotFound(format!(
+            "no MCP server named '{}'",
+            server.name
+        )));
+    };
+    config.mcp_servers[at] = server.clone();
+    config
+        .save_to_path_public(&paths.config)
+        .map_err(|e| ServeError::Internal(e.to_string()))?;
+    Ok(server)
+}
+
+/// The entry a write describes, refused here when it describes nothing
+/// reachable, so neither writer touches the file with a server that could not
+/// be spawned.
+fn checked(
+    name: String,
+    command: Option<String>,
+    url: Option<String>,
+    args: Vec<String>,
+    env: std::collections::HashMap<String, String>,
+    headers: std::collections::HashMap<String, String>,
+) -> Result<MCPServerConfig, super::core::error::ServeError> {
+    let server = MCPServerConfig {
+        name,
+        command,
+        url,
+        args,
+        env,
+        headers,
+        ..Default::default()
+    };
+    server
+        .validate()
+        .map_err(|e| super::core::error::ServeError::BadRequest(e.to_string()))?;
+    Ok(server)
 }
 
 pub(super) async fn remove_server(AxumPath(name): AxumPath<String>) -> impl IntoResponse {
@@ -292,7 +400,7 @@ pub(super) async fn login(
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
     match signed_in(&state, &name).await {
-        Ok(status) => {
+        Ok((status, _server)) => {
             Json(serde_json::json!({ "status": status.wire(), "server": name })).into_response()
         }
         Err(e) => super::core::error::as_api_error(&e).into_response(),
@@ -319,14 +427,18 @@ impl LoginStatus {
     }
 }
 
-/// Sign in to one MCP server, for whichever surface asked.
+/// Sign in to one MCP server, for whichever surface asked, and hand back the
+/// entry it signed in to.
+///
+/// The entry travels with the answer for the reason [`install_server`] gives:
+/// the caller that has to describe the server is holding it already.
 ///
 /// Opens a browser on the host, which is why it is an act rather than a read: a
 /// server reached over SSH cannot do this, and the refusal says so.
 pub(super) async fn signed_in(
     state: &AppState,
     name: &str,
-) -> Result<LoginStatus, super::core::error::ServeError> {
+) -> Result<(LoginStatus, MCPServerConfig), super::core::error::ServeError> {
     use super::core::error::ServeError;
 
     let admin = &state.mcp;
@@ -337,7 +449,8 @@ pub(super) async fn signed_in(
         .mcp_servers
         .iter()
         .find(|s| s.name == name)
-        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))?;
+        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))?
+        .clone();
     let url = match server.resolve() {
         Ok(leviath_mcp::ResolvedTransport::Http { url, .. }) => url.to_string(),
         _ => {
@@ -361,13 +474,13 @@ pub(super) async fn signed_in(
         .await
         .map_err(|e| ServeError::Upstream(e.to_string()))?;
     let LoginOutcome::Authenticated(auth) = outcome else {
-        return Ok(LoginStatus::NotRequired);
+        return Ok((LoginStatus::NotRequired, server));
     };
     store.set(name, *auth);
     store
         .save(&paths.store)
         .map_err(|e| ServeError::Internal(e.to_string()))?;
-    Ok(LoginStatus::Authenticated)
+    Ok((LoginStatus::Authenticated, server))
 }
 
 /// `GET /api/mcp/servers/{name}/status` - one server's transport and auth state.
@@ -398,20 +511,24 @@ pub(super) async fn test_server(
     AxumPath(name): AxumPath<String>,
 ) -> impl IntoResponse {
     match tools_of(&state, &name).await {
-        Ok(tools) => Json(serde_json::json!({ "server": name, "tools": tools })).into_response(),
+        Ok((tools, _server)) => {
+            Json(serde_json::json!({ "server": name, "tools": tools })).into_response()
+        }
         Err(e) => super::core::error::as_api_error(&e).into_response(),
     }
 }
 
-/// What one MCP server advertises, for whichever surface asked.
+/// What one MCP server advertises, for whichever surface asked, and the entry
+/// that was asked.
 ///
 /// Connects and lists, which is the only honest answer to "does this server
 /// work": a config that parses proves nothing about a program that will not
-/// start.
+/// start. The entry travels with the answer for the reason
+/// [`install_server`] gives.
 pub(super) async fn tools_of(
     state: &AppState,
     name: &str,
-) -> Result<Vec<String>, super::core::error::ServeError> {
+) -> Result<(Vec<String>, MCPServerConfig), super::core::error::ServeError> {
     use super::core::error::ServeError;
 
     let admin = &state.mcp;
@@ -422,14 +539,16 @@ pub(super) async fn tools_of(
         .mcp_servers
         .iter()
         .find(|s| s.name == name)
-        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))?;
+        .ok_or_else(|| ServeError::NotFound(format!("no MCP server named '{name}'")))?
+        .clone();
     let auth_header = OAuthClient::new()
         .authorization_header(name, &paths.store, (admin.clock)())
         .await
         .map_err(|e| ServeError::Upstream(e.to_string()))?;
-    connect_and_list(server, auth_header, &config.security.allow_env_vars)
+    let tools = connect_and_list(&server, auth_header, &config.security.allow_env_vars)
         .await
-        .map_err(|e| ServeError::Upstream(e.to_string()))
+        .map_err(|e| ServeError::Upstream(e.to_string()))?;
+    Ok((tools, server))
 }
 
 /// The tools `server` advertises, for a caller with no request to answer:
@@ -478,7 +597,6 @@ async fn connect_and_list(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::serve::events::ServerEvent;
     use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
@@ -497,7 +615,7 @@ mod tests {
 
     /// An app state with a test browser opener and a fixed clock.
     fn state_at(opener: impl Fn(&str) -> bool + Send + Sync + 'static) -> AppState {
-        let (tx, _) = broadcast::channel::<ServerEvent>(16);
+        let (tx, _) = broadcast::channel(16);
         AppState {
             caches: Default::default(),
             signer: Default::default(),
@@ -606,6 +724,103 @@ mod tests {
         assert_eq!(status_code, StatusCode::NO_CONTENT);
         let (_, body) = send(&app, "GET", "/api/mcp/servers", None).await;
         assert_eq!(body.as_array().unwrap().len(), 0);
+    }
+
+    /// `GET /api/mcp/servers` carries exactly the keys it always has.
+    ///
+    /// `McpServerInfo` grew five fields for GraphQL to read a server back the
+    /// way it was written. This route answers `endpoint`, one string for
+    /// either transport, and a client reading it key by key has never been
+    /// sent the other spelling, so the five are skipped on the wire and this
+    /// is what holds them there.
+    #[tokio::test]
+    async fn the_server_listing_carries_no_new_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_at(dir.path(), never_opens);
+        send(
+            &app,
+            "POST",
+            "/api/mcp/servers",
+            Some(serde_json::json!({
+                "name": "remote",
+                "url": "https://e.com/mcp",
+                "headers": { "Authorization": "Bearer t" },
+            })),
+        )
+        .await;
+        let (_, body) = send(&app, "GET", "/api/mcp/servers", None).await;
+        // Sorted, because the JSON is read back through a map that sorts: what
+        // is being held here is the set of keys, not their order on the wire.
+        let keys: Vec<&String> = body[0].as_object().expect("an object").keys().collect();
+        assert_eq!(
+            keys,
+            vec!["auth", "endpoint", "name", "transport"],
+            "the server's JSON is what it has always been"
+        );
+    }
+
+    /// Replacing a server writes the new entry whole, and a name nothing is
+    /// configured under is a miss rather than a second server.
+    #[tokio::test]
+    async fn update_replaces_an_entry_and_refuses_an_unknown_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        std::fs::write(&paths.config, "").unwrap();
+        TEST_PATHS.sync_scope(paths, || {
+            install_server(
+                "docs".to_string(),
+                Some("/bin/echo".to_string()),
+                None,
+                vec!["one".to_string()],
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+            .expect("the server is written");
+
+            update_server(
+                "docs".to_string(),
+                None,
+                Some("https://docs.example/mcp".to_string()),
+                Vec::new(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer t".to_string(),
+                )]),
+            )
+            .expect("the server is replaced");
+
+            let config = Config::load_from_path_public(&admin_paths().config).unwrap();
+            assert_eq!(config.mcp_servers.len(), 1, "replaced, not added beside");
+            let server = &config.mcp_servers[0];
+            assert_eq!(server.url.as_deref(), Some("https://docs.example/mcp"));
+            assert!(
+                server.command.is_none() && server.args.is_empty(),
+                "the previous transport is gone, whole"
+            );
+
+            let missing = update_server(
+                "ghost".to_string(),
+                Some("/bin/echo".to_string()),
+                None,
+                Vec::new(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+            .expect_err("nothing is configured under that name");
+            assert_eq!(missing.code(), "NOT_FOUND");
+
+            let nowhere = update_server(
+                "docs".to_string(),
+                None,
+                None,
+                Vec::new(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+            .expect_err("neither a command nor a URL reaches anything");
+            assert_eq!(nowhere.code(), "BAD_USER_INPUT");
+        });
     }
 
     #[tokio::test]
@@ -954,7 +1169,7 @@ for line in sys.stdin:
         let store = dir.join("store-dir");
         std::fs::create_dir(&cfg).unwrap();
         std::fs::create_dir(&store).unwrap();
-        let (tx, _) = broadcast::channel::<ServerEvent>(16);
+        let (tx, _) = broadcast::channel(16);
         AppState {
             caches: Default::default(),
             signer: Default::default(),
@@ -1031,7 +1246,7 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a-file");
         std::fs::write(&file, b"x").unwrap();
-        let (tx, _) = broadcast::channel::<ServerEvent>(16);
+        let (tx, _) = broadcast::channel(16);
         let state = AppState {
             caches: Default::default(),
             signer: Default::default(),
@@ -1260,5 +1475,71 @@ for line in sys.stdin:
             },
         );
         assert_eq!(auth_status(&http, &store, 1_000), "expired");
+    }
+
+    /// Replacing an entry surfaces both file failures it can meet: a config it
+    /// cannot read, and one it can read and cannot write back.
+    ///
+    /// Two different answers for a caller: the first is a machine that cannot
+    /// be configured at all, the second is an edit refused after the entry it
+    /// names was found.
+    #[tokio::test]
+    async fn update_surfaces_a_config_it_cannot_read_or_write() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A directory where the config file belongs, so loading it fails.
+        let unreadable = dir.path().join("cfg-dir");
+        std::fs::create_dir(&unreadable).unwrap();
+        TEST_PATHS.sync_scope(
+            AdminPaths {
+                config: unreadable,
+                store: dir.path().join("s.json"),
+                grants: dir.path().join("g.json"),
+            },
+            || {
+                let failed = update_server(
+                    "docs".to_string(),
+                    Some("/bin/echo".to_string()),
+                    None,
+                    Vec::new(),
+                    std::collections::HashMap::new(),
+                    std::collections::HashMap::new(),
+                )
+                .expect_err("a config that will not load");
+                assert_eq!(failed.code(), "INTERNAL");
+            },
+        );
+
+        // And a config that reads fine, with the entry in it, that cannot be
+        // written back.
+        let paths = paths_in(dir.path());
+        std::fs::write(&paths.config, "").unwrap();
+        TEST_PATHS.sync_scope(paths, || {
+            install_server(
+                "docs".to_string(),
+                Some("/bin/echo".to_string()),
+                None,
+                Vec::new(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+            .expect("the server is written");
+
+            let config = admin_paths().config;
+            let mut perms = std::fs::metadata(&config).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&config, perms).unwrap();
+
+            let failed = update_server(
+                "docs".to_string(),
+                None,
+                Some("https://docs.example/mcp".to_string()),
+                Vec::new(),
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
+            .expect_err("a config that will not save");
+            assert_eq!(failed.code(), "INTERNAL");
+        });
     }
 }
