@@ -727,7 +727,9 @@ fn a_mime_row_that_will_not_read_is_left_out() {
     let table: toml::Table =
         toml::from_str("[\"image/png\"]\nfamily = \"image\"\n\n[\"broken/thing\"]\nfamily = 7\n")
             .expect("the table parses");
-    let rows = super::mime::BlueprintMimeRow::from_table(&table);
+    let rows = crate::commands::serve::graphql::types::machine::mime::MimeRow::from_table(
+        &table, "sculptor",
+    );
     assert_eq!(rows.len(), 1, "only the row that reads: {rows:?}");
     assert_eq!(rows[0].mime_type, "image/png");
 }

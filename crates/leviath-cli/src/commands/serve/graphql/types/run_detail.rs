@@ -6,12 +6,15 @@
 //! the difference between a run listing that costs one stat per run and one
 //! that reads four files per run to answer a question nobody asked.
 
-use async_graphql::{Enum, Object, SimpleObject};
+use async_graphql::{Enum, ID, Object, SimpleObject};
+use leviath_graphql_derive::mirror;
 
+use super::super::connection::Paged;
 use super::super::scalars::{BigInt, Decimal, Timestamp};
 use super::run::{CostBreakdown, TokenUsage, WorkingClock};
 
 /// Why a run is parked.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum WaitReasonKind {
     /// Waiting on a tool-permission decision.
@@ -35,6 +38,7 @@ pub(crate) enum WaitReasonKind {
 /// One value per remedy, not per error: topping up an account, adding a
 /// provider and replacing a rejected key are three different screens, and a
 /// client with only the sentence would have to match on its wording.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum SetupBlocker {
     /// The stage names a provider this install has not configured.
@@ -76,6 +80,7 @@ impl From<&leviath_core::run_meta::SetupBlocker> for SetupBlocker {
 /// Present only while the run is in `WAITING_INPUT`. A run waiting on a person
 /// carries the prompt in `interaction`; a run parked on its own sub-agents
 /// carries the reason here and needs nobody.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct WaitReason {
     /// The machine-readable cause.
@@ -151,6 +156,7 @@ impl WaitReason {
 
 /// Post-hoc diagnostics: an empty or degraded run told from a healthy one
 /// without reading logs.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RunFlags {
     /// The run finished with nothing to show.
@@ -203,6 +209,7 @@ impl From<&leviath_core::run_meta::RunFlags> for RunFlags {
 }
 
 /// The answer a run submitted.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct FinalOutput {
     /// The answer itself.
@@ -230,6 +237,7 @@ impl From<leviath_core::FinalOutput> for FinalOutput {
 }
 
 /// A stage's own lifecycle state within a run.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum StageStatus {
     /// Declared but not yet entered.
@@ -261,6 +269,7 @@ impl From<&leviath_core::run_meta::StageRunStatus> for StageStatus {
 }
 
 /// One visit to a stage.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageVisit {
     /// This visit's own id, as the ledger recorded it.
@@ -269,7 +278,7 @@ pub(crate) struct StageVisit {
     /// a record written before visits had identity, where a visit was identified
     /// by its position in the stage's list and so changed identity as soon as
     /// that list was capped.
-    pub(crate) id: Option<String>,
+    pub(crate) id: Option<ID>,
     /// Which entry into this stage this is, counting from one. The same number
     /// the `stageTransition` frame carries as `iteration`.
     pub(crate) ordinal: i32,
@@ -288,6 +297,7 @@ pub(crate) struct StageVisit {
 }
 
 /// The most one region reached while a stage was active.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RegionPeak {
     /// The region's name.
@@ -301,6 +311,7 @@ pub(crate) struct RegionPeak {
 /// Both halves, because neither identifies what ran on its own: one provider
 /// serves many models, and one model is spelled differently by each provider
 /// that routes to it.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageModelUse {
     /// The registered provider that served the call.
@@ -310,11 +321,13 @@ pub(crate) struct StageModelUse {
 }
 
 /// One stage's record within a run: what it cost, and how often it ran.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageRecord {
     /// The stage's name.
     pub(crate) name: String,
     /// Visit order within the blueprint.
+    #[filter(orderable)]
     pub(crate) index: i32,
     /// The stage's own lifecycle state.
     pub(crate) status: StageStatus,
@@ -406,7 +419,9 @@ impl From<&leviath_core::run_meta::StageRecord> for StageRecord {
                 .iter()
                 .enumerate()
                 .map(|(at, visit)| StageVisit {
-                    id: Some(visit.id.clone()).filter(|id| !id.is_empty()),
+                    id: Some(visit.id.clone())
+                        .filter(|id| !id.is_empty())
+                        .map(ID::from),
                     ordinal: count(at + 1),
                     entered_at: Timestamp(visit.entered_at),
                     left_at: visit.left_at.map(Timestamp),
@@ -452,6 +467,7 @@ pub(crate) struct ContextRegion {
 /// right now. Keeping them apart is what lets a client read either without the
 /// other. `content` is the expensive field, so select it only for the regions
 /// you are going to show.
+#[mirror(list)]
 #[Object]
 impl ContextRegion {
     /// The region's name, matching the blueprint's declaration.
@@ -521,6 +537,7 @@ pub(crate) struct ContextWindow {
 /// what it knows keeps changing, so every window carries a `revision` naming
 /// exactly the contents it was read at. Hold that revision to fetch the same
 /// window again, or read a fresh one to see where the run has got to.
+#[mirror]
 #[Object]
 impl ContextWindow {
     /// This window's revision: a content address of what it holds.
@@ -574,9 +591,11 @@ impl ContextWindow {
 /// The bytes are not here. They are behind `url`, which is a short-lived signed
 /// link the byte route verifies: bytes never ride a query answer, and a page can
 /// put that link straight in an `<img src>`.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct BlobEntry {
     /// The store's key: the bytes' SHA-256.
+    #[filter(orderable)]
     pub(crate) sha256: String,
     /// The type the bytes were stored as.
     pub(crate) mime_type: String,
@@ -598,13 +617,60 @@ pub(crate) struct BlobEntry {
     /// file was too large to keep, or that a pruned run directory lost.
     pub(crate) stored: bool,
     /// A short-lived signed link to the bytes. Null when they are not on disk.
+    ///
+    /// Minted per request from the server's own key, so it is not something a
+    /// filter compares and `BlobEntryInput` has no field for it.
+    #[filter(skip)]
     pub(crate) url: Option<String>,
 }
 
+/// A short-lived signed link to one stored part's bytes.
+///
+/// Null for a part whose bytes are not on disk: a context can name one whose
+/// file was too large to keep, and a link to nothing is worse than none.
+pub(crate) fn blob_link(
+    state: &crate::commands::serve::AppState,
+    run_id: &str,
+    blob: &crate::blobs::BlobEntry,
+) -> Option<String> {
+    blob.stored.then(|| {
+        super::super::super::signed_url::signed_path(
+            &state.signer,
+            &format!("/api/agents/{run_id}/blobs/{}", blob.sha256),
+            &[],
+            leviath_core::duration::now_secs(),
+        )
+    })
+}
+
+impl BlobEntry {
+    /// One stored part, as the run's listing and a filter both read it.
+    ///
+    /// The listing passes the link it minted for the part; a filter, which has
+    /// no key to sign with and no field to compare it against, passes none.
+    pub(crate) fn of(stored: crate::blobs::BlobEntry, url: Option<String>) -> Self {
+        Self {
+            sha256: stored.sha256,
+            mime_type: stored.mime_type,
+            name: stored.name,
+            size: BigInt(stored.size as i64),
+            width: stored.width.and_then(|width| i32::try_from(width).ok()),
+            height: stored.height.and_then(|height| i32::try_from(height).ok()),
+            duration_ms: stored.duration_ms.and_then(|ms| i32::try_from(ms).ok()),
+            tokens: count(stored.tokens),
+            regions: stored.regions,
+            stored: stored.stored,
+            url,
+        }
+    }
+}
+
 /// One file a run handed back beside its answer.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct Artifact {
     /// What the submission called it.
+    #[filter(orderable)]
     pub(crate) name: String,
     /// Its declared mime type.
     pub(crate) mime_type: String,
@@ -617,7 +683,29 @@ pub(crate) struct Artifact {
     /// link is what fetches the bytes that were handed back.
     pub(crate) path: String,
     /// A short-lived signed link to the bytes.
+    ///
+    /// Minted per request from the server's own key, so it is not something a
+    /// filter compares and `ArtifactInput` has no field for it.
+    #[filter(skip)]
     pub(crate) url: String,
+}
+
+impl Artifact {
+    /// One recorded artifact as a filter reads it: the record, and no link.
+    ///
+    /// A filter has no key to sign a link with, and `url` is out of the mirror
+    /// precisely because a value minted per request is not one to compare, so
+    /// what a filter reads carries the empty string in its place.
+    pub(crate) fn unlinked(artifact: &leviath_core::output::Artifact) -> Self {
+        Self {
+            url: String::new(),
+            name: artifact.name.clone(),
+            mime_type: artifact.mime_type.to_string(),
+            size: Some(BigInt(artifact.size as i64)),
+            sha256: Some(artifact.sha256.clone()).filter(|hash| !hash.is_empty()),
+            path: artifact.path.clone(),
+        }
+    }
 }
 
 /// One recorded artifact, with a signed link to its bytes.
@@ -636,11 +724,7 @@ pub(crate) fn artifact(
             &[],
             leviath_core::duration::now_secs(),
         ),
-        name: artifact.name.clone(),
-        mime_type: artifact.mime_type.to_string(),
-        size: Some(BigInt(artifact.size as i64)),
-        sha256: Some(artifact.sha256.clone()).filter(|hash| !hash.is_empty()),
-        path: artifact.path.clone(),
+        ..Artifact::unlinked(artifact)
     }
 }
 
@@ -650,6 +734,18 @@ pub(crate) fn artifact(
 /// implausible ceiling, not as a small number that looks fine.
 fn count(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+impl Paged for StageRecord {
+    const NAME: &'static str = "StageRecord";
+}
+
+impl Paged for BlobEntry {
+    const NAME: &'static str = "BlobEntry";
+}
+
+impl Paged for Artifact {
+    const NAME: &'static str = "Artifact";
 }
 
 #[cfg(test)]

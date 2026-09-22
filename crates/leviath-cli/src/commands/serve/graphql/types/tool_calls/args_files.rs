@@ -6,9 +6,11 @@
 //! quietly turn every call of that tool into an untyped one.
 
 use async_graphql::SimpleObject;
+use leviath_graphql_derive::mirror;
 use serde::Deserialize;
 
 /// Arguments for the `read_file` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ReadFileArgs {
     /// Path to the file, relative to the working directory.
@@ -16,6 +18,7 @@ pub(crate) struct ReadFileArgs {
 }
 
 /// Arguments for the `write_file` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct WriteFileArgs {
     /// Path to the file, relative to the working directory.
@@ -28,6 +31,7 @@ pub(crate) struct WriteFileArgs {
 }
 
 /// Arguments for the `edit_file` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct EditFileArgs {
     /// Path to the file, relative to the working directory.
@@ -39,6 +43,7 @@ pub(crate) struct EditFileArgs {
 }
 
 /// Arguments for the `list_dir` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ListDirArgs {
     /// Path to the directory, relative to the working directory. Left out means
@@ -48,6 +53,7 @@ pub(crate) struct ListDirArgs {
 }
 
 /// Arguments for the `read_files` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ReadFilesArgs {
     /// The file paths, relative to the working directory.
@@ -55,6 +61,7 @@ pub(crate) struct ReadFilesArgs {
 }
 
 /// Arguments for the `shell` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ShellArgs {
     /// The command, as the model wrote it.
@@ -62,6 +69,7 @@ pub(crate) struct ShellArgs {
 }
 
 /// Arguments for the `which_command` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct WhichCommandArgs {
     /// The program name to look up, such as `git` or `python3`.
@@ -70,6 +78,7 @@ pub(crate) struct WhichCommandArgs {
 
 /// Arguments for `install_self_tool`, which writes into the blueprint's own
 /// `tools/` directory.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct InstallSelfToolArgs {
     /// The tool's name, which must match the script's own `@tool` directive.
@@ -84,6 +93,7 @@ pub(crate) struct InstallSelfToolArgs {
 /// Arguments for `install_global_tool`, which writes into the machine-wide
 /// tools directory. The same three arguments; what differs is who sees the
 /// result.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct InstallGlobalToolArgs {
     /// The tool's name, which must match the script's own `@tool` directive.

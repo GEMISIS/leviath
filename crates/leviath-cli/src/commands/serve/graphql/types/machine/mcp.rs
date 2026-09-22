@@ -2,26 +2,52 @@
 //! where it stands on credentials.
 
 use async_graphql::{ID, SimpleObject};
+use leviath_graphql_derive::mirror;
+
+use super::super::manifest::dependency::McpTransport;
 
 /// One MCP server in the config.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct McpServer {
     /// `mcpServer:<name>`. A machine holds one server per name, so the name is
     /// the whole key.
     #[graphql(owned)]
+    #[filter(orderable)]
     pub(crate) id: ID,
     /// Unique server name.
+    #[filter(orderable)]
     pub(crate) name: String,
-    /// How it is reached.
-    pub(crate) transport: McpServerTransport,
+    /// How it is reached. Null when the configuration does not resolve to
+    /// either transport, and `configError` says why.
+    pub(crate) transport: Option<McpTransport>,
     /// The command for a stdio server, the URL for an HTTP one. Empty when the
     /// configuration does not resolve.
+    #[filter(orderable)]
     pub(crate) endpoint: String,
+    /// The program a stdio server is, as the config spells it. Null for an
+    /// HTTP server, and for an entry that names neither.
+    pub(crate) command: Option<String>,
+    /// Where an HTTP server is. Null for a stdio server.
+    pub(crate) url: Option<String>,
+    /// The arguments a stdio server is spawned with, in order. Empty for an
+    /// HTTP one.
+    pub(crate) args: Vec<String>,
+    /// The names of the headers an HTTP server is sent, without their values:
+    /// an `Authorization` header here is a credential.
+    pub(crate) header_names: Vec<String>,
+    /// The names of the environment variables a stdio server is spawned with,
+    /// without their values, for the same reason.
+    pub(crate) env_names: Vec<String>,
     /// Why the configuration does not resolve, when it does not. Null for a
     /// server that does.
     pub(crate) config_error: Option<String>,
     /// Where it stands on credentials.
     pub(crate) auth: McpAuth,
+}
+
+impl super::super::super::connection::Paged for McpServer {
+    const NAME: &'static str = "McpServer";
 }
 
 impl McpServer {
@@ -30,45 +56,35 @@ impl McpServer {
         Self {
             id: super::super::super::node::mcp_server_id(&info.name),
             name: info.name,
-            transport: McpServerTransport::from_wire(&info.transport),
+            transport: transport_of(&info.transport),
             endpoint: info.endpoint,
+            command: info.command,
+            url: info.url,
+            args: info.args,
+            header_names: info.header_names,
+            env_names: info.env_names,
             config_error: info.config_error,
             auth: McpAuth::from_wire(&info.auth),
         }
     }
 }
 
-/// How a configured MCP server on this machine is reached.
+/// The transport word the server description carries, as a value.
 ///
-/// Its own type rather than the manifest's `McpTransport`: a blueprint
-/// declares what it wants, and this answers what a configuration on this
-/// machine resolved to - including `INVALID`, which no blueprint can declare.
-/// `configError` says why it did not resolve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
-pub(crate) enum McpServerTransport {
-    /// A command this daemon spawns and talks to over its pipes.
-    Stdio,
-    /// A URL this daemon calls.
-    Http,
-    /// Neither: the configuration did not resolve.
-    Invalid,
-}
-
-impl McpServerTransport {
-    /// Read the word the server description carries.
-    ///
-    /// Anything else is `INVALID`, which is what a word this build does not
-    /// know amounts to: a transport it cannot use.
-    pub(crate) fn from_wire(word: &str) -> Self {
-        match word {
-            "stdio" => Self::Stdio,
-            "http" => Self::Http,
-            _ => Self::Invalid,
-        }
+/// One enum for both sides of the schema: a blueprint declares the same two
+/// transports a configured server is reached over. "Neither" is not a third
+/// transport, it is the absence of one, so it is `None` here and the reason is
+/// on `configError`.
+pub(crate) fn transport_of(word: &str) -> Option<McpTransport> {
+    match word {
+        "stdio" => Some(McpTransport::Stdio),
+        "http" => Some(McpTransport::Http),
+        _ => None,
     }
 }
 
 /// Where a server stands on credentials.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
 pub(crate) enum McpAuth {
     /// A stdio server, which has nobody to log in to.

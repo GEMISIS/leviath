@@ -5,12 +5,14 @@
 //! are all plain mirrors of a declared schema, and splitting them further would
 //! only add places to look.
 
-use async_graphql::SimpleObject;
+use async_graphql::{ID, SimpleObject};
+use leviath_graphql_derive::mirror;
 use serde::Deserialize;
 
 use super::super::super::scalars::Json;
 
 /// Arguments for the `present_for_review` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct PresentForReviewArgs {
     /// The short title shown above the review prompt.
@@ -20,6 +22,7 @@ pub(crate) struct PresentForReviewArgs {
 }
 
 /// Arguments for the `ask_user_text` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct AskUserTextArgs {
     /// The question asked.
@@ -27,6 +30,7 @@ pub(crate) struct AskUserTextArgs {
 }
 
 /// Arguments for the `ask_user_choice` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct AskUserChoiceArgs {
     /// The question asked.
@@ -37,6 +41,7 @@ pub(crate) struct AskUserChoiceArgs {
 }
 
 /// Arguments for the `ask_user_confirm` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct AskUserConfirmArgs {
     /// The yes or no question asked.
@@ -44,6 +49,7 @@ pub(crate) struct AskUserConfirmArgs {
 }
 
 /// Arguments for the `edit_document` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct EditDocumentArgs {
     /// The document handed over for editing.
@@ -54,6 +60,7 @@ pub(crate) struct EditDocumentArgs {
 }
 
 /// Arguments for the `submit_output` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct SubmitOutputArgs {
     /// The final answer, in full.
@@ -80,6 +87,7 @@ pub(crate) enum SubmittedArtifact {
 }
 
 /// An artifact the model named by path alone.
+#[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ArtifactByPath {
     /// The file, relative to the run's working directory.
@@ -87,6 +95,7 @@ pub(crate) struct ArtifactByPath {
 }
 
 /// An artifact the model named and described.
+#[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ArtifactDescribed {
     /// The file, relative to the run's working directory.
@@ -135,10 +144,11 @@ impl From<ArtifactWire> for SubmittedArtifact {
 }
 
 /// One unit of work handed to a fan-out worker.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct FanOutItem {
     /// The item's own id, which names its child run.
-    pub(crate) id: String,
+    pub(crate) id: ID,
     /// Everything the worker gets, which the blueprint's author defines.
     ///
     /// Raw JSON because the tool declares it as an object and nothing more: the
@@ -148,6 +158,7 @@ pub(crate) struct FanOutItem {
 }
 
 /// Arguments for the `fan_out` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct FanOutArgs {
     /// The blueprint each item runs. Left out inside a fan-out stage, which
@@ -163,6 +174,7 @@ pub(crate) struct FanOutArgs {
 }
 
 /// Arguments for the `spawn_agent` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct SpawnAgentArgs {
     /// The blueprint to run, by name.
@@ -192,24 +204,27 @@ pub(crate) struct SpawnAgentArgs {
 }
 
 /// Arguments for the `check_agent` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct CheckAgentArgs {
     /// The agent asked about, by its live id.
-    pub(crate) agent_id: String,
+    pub(crate) agent_id: ID,
 }
 
 /// Arguments for the `wait_for_agent` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct WaitForAgentArgs {
     /// The agent waited for, by its live id.
-    pub(crate) agent_id: String,
+    pub(crate) agent_id: ID,
 }
 
 /// Arguments for the `send_to_agent` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct SendToAgentArgs {
     /// The agent written to, by its live id.
-    pub(crate) agent_id: String,
+    pub(crate) agent_id: ID,
     /// What was sent.
     pub(crate) message: String,
     /// The region it was delivered to. Left out means the conversation.
@@ -218,8 +233,9 @@ pub(crate) struct SendToAgentArgs {
 }
 
 /// Arguments for the `kill_agent` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct KillAgentArgs {
     /// The agent killed, by its live id.
-    pub(crate) agent_id: String,
+    pub(crate) agent_id: ID,
 }

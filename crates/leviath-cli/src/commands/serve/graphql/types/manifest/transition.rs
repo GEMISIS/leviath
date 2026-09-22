@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use async_graphql::{Enum, Object, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use leviath_core::Blueprint as CoreBlueprint;
 
@@ -13,6 +14,7 @@ use super::refs;
 use super::stage::Stage;
 
 /// When an edge may be taken.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum TransitionCondition {
     /// Taken as soon as the stage finishes.
@@ -45,6 +47,7 @@ impl From<&leviath_core::blueprint::TransitionCondition> for TransitionCondition
 }
 
 /// What happens to the context on the way through an edge.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum TransitionTransform {
     /// Everything carries over untouched.
@@ -98,6 +101,7 @@ pub(crate) struct TransformConfig {
 /// Set for `COMPACT`, which carries the prompt and nothing else, and for
 /// `CUSTOM`, which carries the per-region lists. Null for `DIRECT` and `CLEAR`,
 /// which have nothing to say.
+#[mirror]
 #[Object]
 impl TransformConfig {
     /// Regions carried over verbatim.
@@ -157,6 +161,7 @@ pub(crate) struct RegionEntryRequirement {
 }
 
 /// A region and the fewest entries it must hold.
+#[mirror]
 #[Object]
 impl RegionEntryRequirement {
     /// The region counted.
@@ -184,6 +189,7 @@ impl RegionEntryRequirement {
 /// the manifest parser refuses that shape rather than building a dead edge.
 /// Every one counts against the current visit to the stage, so the same
 /// blueprint can arm two stages differently.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StuckThresholds {
     /// Inferences run in this stage without finishing it.
@@ -221,6 +227,7 @@ pub(crate) struct TransitionGate {
 /// A gate that is not satisfied re-runs the stage with `message` instead of
 /// transitioning, up to `maxAttempts` times, and then lets the run through: an
 /// unmet gate slows a run down, it never strands one.
+#[mirror]
 #[Object]
 impl TransitionGate {
     /// The stage must have modified something.
@@ -341,6 +348,7 @@ pub(crate) struct TransitionEdge {
 /// One outgoing edge of a stage.
 ///
 /// A stage with no edges is terminal.
+#[mirror(list)]
 #[Object]
 impl TransitionEdge {
     /// The stage this edge leads to.
@@ -439,6 +447,7 @@ impl TransitionEdge {
 }
 
 /// What happens to one region's content as it crosses between blueprints.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
 pub(crate) enum MappingTransform {
     /// Carried verbatim.
@@ -454,6 +463,7 @@ pub(crate) enum MappingTransform {
 /// Both regions are names. Each belongs to a blueprint the mapping names rather
 /// than to this one, and the receiving blueprint has to be installed for the
 /// handoff to happen at all, so neither side has a declaration to read here.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RegionMapping {
     /// The region it comes from, by name in the handing-off blueprint.
@@ -475,6 +485,7 @@ pub(crate) struct RegionMapping {
 /// The blueprints are named rather than resolved. The receiving one has to be
 /// installed for the handoff to happen, and it may not be installed now, so
 /// naming it is the answer that stays true.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ContextTransform {
     /// The blueprint handing off, by name.
@@ -511,3 +522,7 @@ impl From<&leviath_core::blueprint::ContextTransform> for ContextTransform {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "transition_tests.rs"]
+mod tests;

@@ -440,3 +440,38 @@ fn a_snapshots_region_kind_reads_back_under_either_spelling() {
     assert_eq!(RegionKind::from_snapshot("something-else"), None);
     assert_eq!(RegionKind::from_snapshot(""), None);
 }
+
+/// Every function `#[mirror]` wrote for this file's types runs at least once.
+///
+/// The mirrors are straight lines of delegation, so running each of them once
+/// is enough to measure all of them. One test per file rather than per query:
+/// what a query happens to select is not what the mirror is made of.
+#[tokio::test]
+async fn every_mirrored_function_runs() {
+    use crate::commands::serve::graphql::filter::testkit::{
+        exercise, exercise_enum, exercise_list, exercise_order,
+    };
+
+    let one = blueprint(&manifest(), CoreSource::Installed);
+    let regions: Vec<super::Region> = (0..one.parsed.context_layout.regions.len())
+        .map(|at| super::Region {
+            blueprint: Arc::clone(&one.parsed),
+            stage: None,
+            at,
+        })
+        .collect();
+
+    exercise(std::slice::from_ref(&one)).await;
+    exercise_order(&one, super::BlueprintOrderField::ALL);
+    exercise(&regions).await;
+    exercise_list(&regions).await;
+    exercise(&[super::ToolUseGuidance {
+        batch_independent_calls: HintSetting::Include,
+        shell_for_multi_step_work: HintSetting::Inherit,
+    }])
+    .await;
+    exercise_enum(&[BlueprintSource::Installed, BlueprintSource::Snapshot]).await;
+    exercise_enum(&[ToolRescan::AtSpawnOnly, ToolRescan::RescanBeforeDispatch]).await;
+    exercise_enum(&[HintSetting::Inherit, HintSetting::Omit]).await;
+    exercise_enum(&[RegionKind::Pinned, RegionKind::SlidingWindow]).await;
+}

@@ -1,6 +1,7 @@
 //! What fills a region at spawn, and how it behaves once full.
 
 use async_graphql::{Enum, SimpleObject, Union};
+use leviath_graphql_derive::mirror;
 
 use super::count;
 use crate::commands::serve::graphql::scalars::Json;
@@ -9,6 +10,7 @@ use crate::commands::serve::graphql::scalars::Json;
 ///
 /// A prompt cache keys on an unchanged prefix, so this is what decides where a
 /// region sits in the assembled prompt.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum RegionVolatility {
     /// Written once and left alone.
@@ -31,6 +33,7 @@ impl From<leviath_core::region::Volatility> for RegionVolatility {
 }
 
 /// What happens to a write that does not fit.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum RegionAdmission {
     /// The oldest entries roll off to make room.
@@ -54,6 +57,7 @@ impl From<leviath_core::region::Admission> for RegionAdmission {
 /// It decides more than eviction: `PER_ITEM` shifts the prompt's prefix every
 /// turn, which costs the prompt cache, while the other two keep it still
 /// between eviction events.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum RegionStrategy {
     /// One entry at a time, as soon as the region is over.
@@ -100,6 +104,7 @@ impl From<leviath_core::region::EvictionStrategy> for RegionEviction {
 }
 
 /// When a seed that runs tools runs again.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum SeedRefresh {
     /// Once, at spawn. What every other kind of seed does.
@@ -120,6 +125,7 @@ impl From<leviath_core::layout::SeedRefresh> for SeedRefresh {
 }
 
 /// One tool call a seed makes.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedToolCall {
     /// The tool to call, by the name the manifest used, so an MCP tool keeps
@@ -135,6 +141,7 @@ pub(crate) struct SeedToolCall {
 }
 
 /// Filled at run time by whoever starts the run.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedFromCaller {
     /// The caller-input key this region is filled from. The key `task` is the
@@ -143,6 +150,7 @@ pub(crate) struct SeedFromCaller {
 }
 
 /// Filled from the working-directory files matching a pattern.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedFromGlob {
     /// The pattern, resolved against the run's working directory.
@@ -150,6 +158,7 @@ pub(crate) struct SeedFromGlob {
 }
 
 /// Filled from a list of files.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedFromFiles {
     /// The paths, resolved against the run's working directory.
@@ -157,6 +166,7 @@ pub(crate) struct SeedFromFiles {
 }
 
 /// Filled with text written into the blueprint.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedFromLiteral {
     /// The text, verbatim.
@@ -164,6 +174,7 @@ pub(crate) struct SeedFromLiteral {
 }
 
 /// Filled with what a Rhai script returns.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedFromScript {
     /// The script, relative to the blueprint.
@@ -176,6 +187,7 @@ pub(crate) struct SeedFromScript {
 /// first inference, so before any approval prompt could exist. It runs inside
 /// the entry stage's sandbox when one is configured, and the `allow_seed_commands`
 /// switch turns the whole feature off.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedFromCommand {
     /// The command line, run with the platform shell in the working directory.
@@ -188,6 +200,7 @@ pub(crate) struct SeedFromCommand {
 /// the same permissions and taint rules it would answer to mid-run. That is what
 /// makes an unrestricted list safe: a seed reaches nothing the run was not
 /// already granted.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SeedFromTools {
     /// The calls, in order. Each writes its own headed block into the region.
@@ -201,6 +214,7 @@ pub(crate) struct SeedFromTools {
 /// A region with no seed starts empty and is filled by the run. A union rather
 /// than one object with a field per source: a seed has exactly one source, and a
 /// bag of nullable fields would admit combinations no manifest can express.
+#[mirror]
 #[derive(Debug, Union)]
 pub(crate) enum RegionSeed {
     /// From the caller.
@@ -250,3 +264,7 @@ impl From<&leviath_core::layout::RegionSeed> for RegionSeed {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "region_tests.rs"]
+mod tests;

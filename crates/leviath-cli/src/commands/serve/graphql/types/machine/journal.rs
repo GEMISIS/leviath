@@ -1,14 +1,16 @@
 //! What the daemon has recorded about its runs, and what it has lost.
 
-use async_graphql::SimpleObject;
+use async_graphql::{ID, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use super::super::super::scalars::{BigInt, Timestamp};
 
 /// One write the daemon attempted and lost.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct JournalWriteError {
     /// The run whose write it was.
-    pub(crate) run_id: String,
+    pub(crate) run_id: ID,
     /// The file that could not be written, as the daemon resolved it.
     pub(crate) path: String,
     /// What the operating system said about it.
@@ -23,6 +25,7 @@ pub(crate) struct JournalWriteError {
 /// every lane as idle, so this is the only field that says so. A run whose
 /// journal record cannot be written is failed, rather than carried on with a
 /// history that cannot record what it did.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct JournalHealth {
     /// Whether every write the daemon has attempted reached the disk. Once
@@ -56,7 +59,7 @@ impl JournalHealth {
             snapshots_failed: BigInt(i64::try_from(health.snapshots_failed).unwrap_or(i64::MAX)),
             queue_depth: i32::try_from(health.queue_depth).unwrap_or(i32::MAX),
             last_error: health.last_error.as_ref().map(|error| JournalWriteError {
-                run_id: error.run_id.clone(),
+                run_id: ID::from(error.run_id.clone()),
                 path: error.path.clone(),
                 message: error.message.clone(),
                 at: Timestamp(error.at),

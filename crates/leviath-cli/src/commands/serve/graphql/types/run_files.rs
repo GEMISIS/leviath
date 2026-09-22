@@ -7,11 +7,14 @@
 //! which is where the fence and the caps live.
 
 use async_graphql::{Enum, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use super::super::super::core::files;
+use super::super::connection::Paged;
 use super::super::scalars::BigInt;
 
 /// Which question a file listing answers.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum FileSource {
     /// What the run recorded modifying. Free, and a claim about the run rather
@@ -32,6 +35,7 @@ impl From<FileSource> for files::FileSource {
 }
 
 /// One entry of a run's file listing.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct FileEntry {
     /// The entry's own name.
@@ -55,62 +59,60 @@ pub(crate) struct FileEntry {
     pub(crate) mime_type: String,
 }
 
-/// A run's files, one directory level at a time.
+impl Paged for FileEntry {
+    const NAME: &'static str = "FileEntry";
+}
+
+/// What a run's file listing says beyond the three fields every listing has.
 #[derive(Debug, SimpleObject)]
-pub(crate) struct FileListing {
-    /// Which question this answers.
-    pub(crate) source: FileSource,
+pub(crate) struct FileListingExtras {
     /// The directory listed, or the working directory for a recorded listing.
     pub(crate) path: String,
-    /// Where "up one level" goes. Null at the working directory's root: a client
-    /// is never led above the fence.
+    /// Where "up one level" goes. Null at the working directory's root: a
+    /// client is never led above the fence.
     pub(crate) parent: Option<String>,
     /// The run's working directory, which the paths are relative to.
     pub(crate) workdir: String,
-    /// The entries, directories first and then by name.
-    pub(crate) entries: Vec<FileEntry>,
     /// Whether this listing stops short of the directory's real contents.
-    pub(crate) truncated: bool,
+    pub(crate) is_truncated: bool,
     /// Whether the run hit the tracked-file cap, so its record is a prefix and
     /// the rest of the names were never stored anywhere. Read `WORKDIR` for the
     /// truth when this is true.
-    pub(crate) modified_files_truncated: bool,
+    pub(crate) is_modified_files_truncated: bool,
     /// Successful modifying tool calls, which is not a file count: a run that
     /// edits one file three times records three.
-    pub(crate) modifying_tool_calls: i32,
+    pub(crate) modifying_tool_call_count: i32,
 }
 
-impl From<files::FileListing> for FileListing {
-    fn from(listed: files::FileListing) -> Self {
-        Self {
-            source: match listed.source {
-                files::FileSource::Modified => FileSource::Modified,
-                files::FileSource::Workdir => FileSource::Workdir,
-            },
-            path: listed.path,
-            parent: listed.parent,
-            workdir: listed.workdir,
-            entries: listed
-                .entries
-                .into_iter()
-                .map(|entry| FileEntry {
-                    name: entry.name,
-                    path: entry.path,
-                    is_dir: entry.is_dir,
-                    size: entry.size.map(|size| BigInt(size as i64)),
-                    exists: entry.exists,
-                    is_outside_workdir: entry.outside_workdir,
-                    mime_type: entry.mime_type,
-                })
-                .collect(),
-            truncated: listed.truncated,
-            modified_files_truncated: listed.modified_files_truncated,
-            modifying_tool_calls: i32::try_from(listed.modifying_tool_calls).unwrap_or(i32::MAX),
-        }
-    }
+/// One core listing, split into the entries a connection pages and the extras
+/// it carries beside them.
+pub(crate) fn split(listed: files::FileListing) -> (Vec<FileEntry>, FileListingExtras) {
+    let entries = listed
+        .entries
+        .into_iter()
+        .map(|entry| FileEntry {
+            name: entry.name,
+            path: entry.path,
+            is_dir: entry.is_dir,
+            size: entry.size.map(|size| BigInt(size as i64)),
+            exists: entry.exists,
+            is_outside_workdir: entry.outside_workdir,
+            mime_type: entry.mime_type,
+        })
+        .collect();
+    let extras = FileListingExtras {
+        path: listed.path,
+        parent: listed.parent,
+        workdir: listed.workdir,
+        is_truncated: listed.truncated,
+        is_modified_files_truncated: listed.modified_files_truncated,
+        modifying_tool_call_count: i32::try_from(listed.modifying_tool_calls).unwrap_or(i32::MAX),
+    };
+    (entries, extras)
 }
 
 /// One window of one file's text.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct FileWindow {
     /// The resolved absolute path that was read.

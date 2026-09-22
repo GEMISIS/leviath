@@ -197,8 +197,8 @@ async fn the_attempts_read_back_typed_with_their_outcome() {
 
         let json = data(
             r#"{ run { inferences(first: 10) {
-                 total pageInfo { hasNextPage }
-                 edges { node {
+                 total cursor
+                 results {
                    stage attempt provider model durationMs backoffMs at
                    outcome { kind failureKind transient capacity retry }
                    digest { systemHash messages tools maxTokens temperature }
@@ -206,15 +206,15 @@ async fn the_attempts_read_back_typed_with_their_outcome() {
                      stage iteration fromProvider fromModel toProvider toModel
                      reason failureKind at
                    }
-                 } }
+                 }
                } } }"#,
         )
         .await;
         let page = &json["run"]["inferences"];
         assert_eq!(page["total"], 2, "a move is not an attempt of its own");
-        assert_eq!(page["pageInfo"]["hasNextPage"], false);
+        assert!(page["cursor"].is_null(), "the only page");
 
-        let first = &page["edges"][0]["node"];
+        let first = &page["results"][0];
         assert_eq!(first["stage"], "plan");
         assert_eq!(first["attempt"], 1);
         assert_eq!(first["provider"], "anthropic");
@@ -247,7 +247,7 @@ async fn the_attempts_read_back_typed_with_their_outcome() {
 
         // The call that worked has no failure to classify, and nothing
         // followed it.
-        let second = &page["edges"][1]["node"];
+        let second = &page["results"][1];
         assert_eq!(second["provider"], "openai");
         assert_eq!(second["outcome"]["kind"], "SUCCEEDED");
         assert!(second["outcome"]["failureKind"].is_null());
@@ -283,12 +283,12 @@ async fn an_unclassified_failure_has_no_kind() {
             ]);
 
             let json = data(
-                "{ run { inferences(first: 10) { edges { node { \
+                "{ run { inferences(first: 10) { results { \
                  outcome { kind failureKind transient capacity retry } \
-                 failover { failureKind reason } } } } } }",
+                 failover { failureKind reason } } } } }",
             )
             .await;
-            let node = &json["run"]["inferences"]["edges"][0]["node"];
+            let node = &json["run"]["inferences"]["results"][0];
             assert_eq!(node["outcome"]["kind"], "FAILED");
             assert!(node["outcome"]["failureKind"].is_null());
             assert_eq!(node["outcome"]["transient"], true);
@@ -325,33 +325,30 @@ async fn the_attempts_page_carries_on_from_its_cursor() {
         );
 
         let json = data(
-            "{ run { inferences(first: 2) { total pageInfo { hasNextPage endCursor } \
-             edges { node { attempt outcome { retry } } } } } }",
+            "{ run { inferences(first: 2) { total cursor \
+             results { attempt outcome { retry } } } } }",
         )
         .await;
         let page = &json["run"]["inferences"];
         assert_eq!(page["total"], 5);
-        assert_eq!(page["pageInfo"]["hasNextPage"], true);
-        assert_eq!(page["edges"][0]["node"]["attempt"], 1);
-        assert_eq!(
-            page["edges"][0]["node"]["outcome"]["retry"],
-            "RENEWED_FILES"
-        );
-        let cursor = page["pageInfo"]["endCursor"].as_str().expect("a cursor");
+        assert!(page["cursor"].as_str().is_some(), "more to come");
+        assert_eq!(page["results"][0]["attempt"], 1);
+        assert_eq!(page["results"][0]["outcome"]["retry"], "RENEWED_FILES");
+        let cursor = page["cursor"].as_str().expect("a cursor");
 
         let json = data(&format!(
             r#"{{ run {{ inferences(first: 10, after: "{cursor}") {{
-                 pageInfo {{ hasNextPage }} edges {{ node {{ attempt }} }}
+                 cursor results {{ attempt }}
                }} }} }}"#
         ))
         .await;
         let page = &json["run"]["inferences"];
-        assert_eq!(page["pageInfo"]["hasNextPage"], false, "that was the rest");
-        let numbers: Vec<i64> = page["edges"]
+        assert!(page["cursor"].is_null(), "that was the rest");
+        let numbers: Vec<i64> = page["results"]
             .as_array()
-            .expect("edges")
+            .expect("results")
             .iter()
-            .filter_map(|edge| edge["node"]["attempt"].as_i64())
+            .filter_map(|node| node["attempt"].as_i64())
             .collect();
         assert_eq!(numbers, vec![3, 4, 5], "no attempt read twice");
     })
@@ -384,17 +381,68 @@ async fn a_cursor_from_elsewhere_is_refused() {
     .await;
 }
 
+/// Naming `orderBy` explicitly reverses the order the attempts were made in.
+#[tokio::test]
+async fn an_explicit_order_by_walks_backwards() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-inferences-orderby",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            write_journal(vec![
+                attempt(1, "anthropic", "claude", AttemptOutcome::Succeeded),
+                attempt(2, "openai", "gpt-5", AttemptOutcome::Succeeded),
+            ]);
+
+            let json = data(
+                "{ run { inferences(orderBy: [{ field: SEQUENCE, direction: DESC }]) { \
+             results { attempt } } } }",
+            )
+            .await;
+            let attempts: Vec<i64> = json["run"]["inferences"]["results"]
+                .as_array()
+                .expect("results")
+                .iter()
+                .filter_map(|node| node["attempt"].as_i64())
+                .collect();
+            assert_eq!(attempts, vec![2, 1], "descending reverses the order made");
+        },
+    )
+    .await;
+}
+
+/// A filter nested past the depth limit is refused rather than walked.
+#[tokio::test]
+async fn a_filter_past_the_depth_limit_is_refused() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-inferences-filter-depth",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            let mut filter = r#"{ provider: { eq: "x" } }"#.to_string();
+            for _ in 0..20 {
+                filter = format!("{{ not: {filter} }}");
+            }
+            let message = error(&format!(
+                "{{ run {{ inferences(filter: {filter}) {{ total }} }} }}"
+            ))
+            .await;
+            assert!(message.contains("flatten it"), "{message}");
+        },
+    )
+    .await;
+}
+
 /// A run that never called a provider has no attempts, and says so with an
 /// empty page rather than an error.
 #[tokio::test]
 async fn a_run_that_never_called_a_provider_has_no_attempts() {
     crate::runstate::with_isolated_runs_dir_async("graphql-inferences-empty", |_dir| async move {
         create_run(&meta()).expect("run written");
-        let json =
-            data("{ run { inferences(first: 10) { total edges { node { provider } } } } }").await;
+        let json = data("{ run { inferences(first: 10) { total results { provider } } } }").await;
         assert_eq!(json["run"]["inferences"]["total"], 0);
         assert_eq!(
-            json["run"]["inferences"]["edges"].as_array().map(Vec::len),
+            json["run"]["inferences"]["results"]
+                .as_array()
+                .map(Vec::len),
             Some(0)
         );
     })
@@ -469,18 +517,18 @@ async fn a_captured_attempt_serves_the_request_it_sent() {
         )]);
 
         let json = data(
-            r#"{ run { inferences(first: 10) { edges { node { modelInput {
+            r#"{ run { inferences(first: 10) { results { modelInput {
                  captureStatus request bytes sourceContextDigest
                  toolCatalogVersion assemblyVersion
                  parameters {
                    temperature
-                   maxOutputTokens { __typename ... on MaxTokensCount { tokens } }
+                   maxOutputTokens { __typename ... on MaxTokensCountOutput { tokens } }
                    providerParams
                  }
-               } } } } } }"#,
+               } } } } }"#,
         )
         .await;
-        let input = &json["run"]["inferences"]["edges"][0]["node"]["modelInput"];
+        let input = &json["run"]["inferences"]["results"][0]["modelInput"];
         assert_eq!(input["captureStatus"], "RETAINED");
         assert_eq!(input["request"]["model"], "claude-sonnet-4-5");
         assert_eq!(input["bytes"], 43);
@@ -494,7 +542,7 @@ async fn a_captured_attempt_serves_the_request_it_sent() {
         assert_eq!(parameters["temperature"], 0.25);
         assert_eq!(
             parameters["maxOutputTokens"]["__typename"],
-            "MaxTokensCount"
+            "MaxTokensCountOutput"
         );
         assert_eq!(parameters["maxOutputTokens"]["tokens"], 2048);
         assert_eq!(parameters["providerParams"]["top_p"], 0.9);
@@ -514,19 +562,105 @@ async fn an_uncaptured_attempt_carries_no_body_and_no_window_fingerprint() {
         ]);
 
         let json = data(
-            r#"{ run { inferences(first: 10) { edges { node { modelInput {
+            r#"{ run { inferences(first: 10) { results { modelInput {
                  captureStatus request toolCatalogVersion
-               } } } } } }"#,
+               } } } } }"#,
         )
         .await;
-        let edges = &json["run"]["inferences"]["edges"];
-        let input = &edges[0]["node"]["modelInput"];
+        let results = &json["run"]["inferences"]["results"];
+        let input = &results[0]["modelInput"];
         assert_eq!(input["captureStatus"], "NOT_CAPTURED");
         assert!(input["request"].is_null(), "{input}");
         assert_eq!(input["toolCatalogVersion"], "fedcba9876543210");
         // And an attempt whose journal recorded no model input at all is null
         // rather than an invented uncaptured one.
-        assert!(edges[1]["node"]["modelInput"].is_null(), "{edges}");
+        assert!(results[1]["modelInput"].is_null(), "{results}");
     })
     .await;
+}
+
+/// Every function `#[mirror]` wrote for this file's types runs at least once.
+///
+/// The mirrors are straight lines of delegation, so running each of them once
+/// is enough to measure all of them. One test per file rather than per query:
+/// what a query happens to select is not what the mirror is made of.
+#[tokio::test]
+async fn every_mirrored_function_runs() {
+    use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum};
+
+    exercise_enum(&[
+        super::RetryDecision::Reported,
+        super::RetryDecision::RenewedFiles,
+    ])
+    .await;
+    exercise_enum(&[
+        super::AttemptOutcomeKind::Succeeded,
+        super::AttemptOutcomeKind::Failed,
+    ])
+    .await;
+    exercise_enum(&[
+        super::CaptureStatus::Retained,
+        super::CaptureStatus::Expired,
+    ])
+    .await;
+
+    exercise(&[
+        super::AttemptOutcome::from(&AttemptOutcome::Succeeded),
+        super::AttemptOutcome::from(&AttemptOutcome::Failed {
+            kind: "insufficient_credits".to_string(),
+            transient: true,
+            capacity: false,
+            next: Retry::Reported,
+        }),
+    ])
+    .await;
+
+    exercise(&[super::RequestDigest::from(&RequestDigest {
+        system_hash: 0x1234_5678_9abc_def0,
+        messages: 4,
+        tools: 2,
+        max_tokens: 1024,
+        temperature: 0.2,
+    })])
+    .await;
+
+    exercise(&[super::InferenceFailover::from(&FailoverRecord {
+        stage: "plan".to_string(),
+        iteration: 3,
+        from_provider: "anthropic".to_string(),
+        from_model: "claude-sonnet-4-5".to_string(),
+        to_provider: "openai".to_string(),
+        to_model: "gpt-5".to_string(),
+        reason: "credits_exhausted".to_string(),
+        kind: "insufficient_credits".to_string(),
+        at: 201,
+    })])
+    .await;
+
+    exercise(&[super::ModelRequest {
+        record: run_archive::ModelInput {
+            capture_status: run_archive::CaptureStatus::Retained,
+            request: Some(serde_json::json!({ "model": "claude-sonnet-4-5" })),
+            bytes: 43,
+            source_context_digest: "0f0f0f0f0f0f0f0f".to_string(),
+            parameters: std::collections::BTreeMap::new(),
+            tool_catalog_version: "fedcba9876543210".to_string(),
+            assembly_version: "1".to_string(),
+        },
+    }])
+    .await;
+
+    let RunRecord::InferenceAttempt(record) = attempt(
+        1,
+        "anthropic",
+        "claude-sonnet-4-5",
+        AttemptOutcome::Succeeded,
+    ) else {
+        unreachable!("attempt builds an attempt record")
+    };
+    let inference_attempt = super::InferenceAttempt {
+        record,
+        failover: None,
+    };
+    exercise(std::slice::from_ref(&inference_attempt)).await;
 }

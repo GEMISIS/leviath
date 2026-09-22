@@ -1,14 +1,20 @@
 //! Self-update, and who is on the other end of the control socket.
 //!
-//! Both are about this machine rather than a run, and neither grows, so they are
-//! plain values.
+//! Both are about this machine rather than about a run. The plan and the daemon
+//! status are one value each; the update runs are a listing, because a server
+//! that has been up for months has done more of them than one page holds.
 
-use async_graphql::{Enum, SimpleObject, Union};
+use async_graphql::{ComplexObject, Context, Enum, SimpleObject, Union};
+use leviath_graphql_derive::mirror;
+use leviath_runtime::control_socket::ControlResponse;
 
 use super::super::scalars::Timestamp;
+use super::machine::JournalHealth;
 
 /// Who is on the other end of the control socket.
+#[mirror]
 #[derive(Debug, SimpleObject)]
+#[graphql(complex)]
 pub(crate) struct DaemonStatus {
     /// Whether the last attempt to reach the daemon worked.
     ///
@@ -72,7 +78,32 @@ impl DaemonStatus {
     }
 }
 
+/// What only the daemon itself can answer.
+#[ComplexObject]
+impl DaemonStatus {
+    /// Whether the daemon is still recording what its runs do.
+    ///
+    /// Null when the daemon cannot be reached, because this is its own reading
+    /// and no other copy of it exists - `reachable` beside this says whether
+    /// that is why. Everything else about a run is read from disk and keeps
+    /// working while the daemon is down; this does not.
+    ///
+    /// Worth asking on any page that shows runs as healthy. A daemon whose
+    /// journal is refusing writes serves every field here exactly as it did
+    /// before, and a run whose journal record cannot be written is failed
+    /// rather than carried on. It costs a control call, so it is asked only
+    /// where it is selected.
+    async fn journal(&self, ctx: &Context<'_>) -> Option<JournalHealth> {
+        let state = ctx.data_unchecked::<super::super::super::types::AppState>();
+        match state.control.list().await {
+            Ok(ControlResponse::List { health, .. }) => Some(JournalHealth::of(&health.journal)),
+            Ok(_) | Err(_) => None,
+        }
+    }
+}
+
 /// How this copy of Leviath was installed, which decides how it upgrades.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum InstallMethod {
     /// Homebrew, under a formula that carries the channel.
@@ -93,6 +124,7 @@ pub(crate) enum InstallMethod {
 /// A list rather than one command because a package manager will not see a
 /// release published minutes ago until its own index is refreshed, so the
 /// refresh and the upgrade only make sense together.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UpgradeByCommand {
     /// Each command's own words, in order. They stop at the first failure.
@@ -103,6 +135,7 @@ pub(crate) struct UpgradeByCommand {
 }
 
 /// There is nothing to run, and this is why.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UpgradeByAdvice {
     /// What to tell the person instead.
@@ -110,6 +143,7 @@ pub(crate) struct UpgradeByAdvice {
 }
 
 /// How the binary would be upgraded.
+#[mirror]
 #[derive(Debug, Union)]
 pub(crate) enum BinaryUpgrade {
     /// By running commands.
@@ -119,6 +153,7 @@ pub(crate) enum BinaryUpgrade {
 }
 
 /// One bundled blueprint, and what an update would do to it.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UpdateBlueprintEntry {
     /// The blueprint's name.
@@ -135,6 +170,7 @@ pub(crate) struct UpdateBlueprintEntry {
 }
 
 /// One config migration that applies to the config as it stands.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UpdateMigration {
     /// The migration's name.
@@ -144,8 +180,9 @@ pub(crate) struct UpdateMigration {
 }
 
 /// What an update would do, and whether there is anything newer to get.
+#[mirror]
 #[derive(Debug, SimpleObject)]
-pub(crate) struct UpdateInfo {
+pub(crate) struct UpdatePlan {
     /// The version running now.
     pub(crate) version: String,
     /// How this copy was installed.
@@ -173,7 +210,7 @@ pub(crate) struct UpdateInfo {
     pub(crate) config_error: Option<String>,
 }
 
-impl UpdateInfo {
+impl UpdatePlan {
     /// Describe a plan and the last answer to "is there anything newer".
     pub(crate) fn from_plan(
         plan: &crate::commands::update::UpdatePlan,
@@ -238,6 +275,7 @@ impl UpdateInfo {
 }
 
 /// One step of an update run.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UpdateJobStep {
     /// Which step this is.
@@ -249,6 +287,7 @@ pub(crate) struct UpdateJobStep {
 }
 
 /// The steps an update runs, in order.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
 pub(crate) enum UpdateStep {
     /// Leviath itself. First, because what the other steps do is decided by
@@ -263,6 +302,7 @@ pub(crate) enum UpdateStep {
 }
 
 /// Where one step of an update got to.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
 pub(crate) enum UpdateStepStatus {
     /// Not reached yet.
@@ -281,6 +321,7 @@ pub(crate) enum UpdateStepStatus {
 }
 
 /// Where an update run as a whole got to.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
 pub(crate) enum UpdateJobStatus {
     /// Still going.
@@ -292,12 +333,17 @@ pub(crate) enum UpdateJobStatus {
 }
 
 /// One update run.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UpdateJob {
     /// The job's id, which `updateJob` and `node` both take. Unique to this
     /// server: the jobs live in memory, so nothing answers to it after a
     /// restart.
+    ///
+    /// It carries the second the job was started, so ordering by it is
+    /// ordering by when it ran.
     #[graphql(owned)]
+    #[filter(orderable)]
     pub(crate) id: async_graphql::ID,
     /// Where the run as a whole got to.
     pub(crate) status: UpdateJobStatus,
@@ -305,6 +351,10 @@ pub(crate) struct UpdateJob {
     /// `SKIPPED` rather than absent, so a client renders the same rows
     /// whatever the request was.
     pub(crate) steps: Vec<UpdateJobStep>,
+}
+
+impl super::super::connection::Paged for UpdateJob {
+    const NAME: &'static str = "UpdateJob";
 }
 
 impl From<super::super::super::update_job::UpdateJob> for UpdateJob {

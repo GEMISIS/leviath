@@ -139,8 +139,8 @@ async fn dependencies_carry_what_their_kind_needs() {
 #[tokio::test]
 async fn a_blueprint_carries_the_mime_rows_it_ships() {
     let json = ask(r#"{ blueprint { mimeTypes {
-             mimeType family isText extensions magic standIn check
-             tokens { perByte perPixel max perSecond perPage fixed }
+             mimeType origin blueprintName family isText extensions magic standIn check
+             tokens { __typename ... on FixedOutput { tokens } }
            } } }"#)
     .await;
     let row = &json["blueprint"]["mimeTypes"][0];
@@ -148,12 +148,18 @@ async fn a_blueprint_carries_the_mime_rows_it_ships() {
     assert_eq!(row["family"], "model");
     assert_eq!(row["isText"], true);
     assert_eq!(row["extensions"][0], "gltf");
-    assert_eq!(row["tokens"]["fixed"], 500);
-    // Exactly one rate is set, so a client reads the one that is there rather
-    // than working out which applies.
-    assert!(row["tokens"]["perByte"].is_null());
-    assert!(row["tokens"]["perPixel"].is_null());
+    // The rate is the member that says it, so a client matches on the type
+    // rather than working out which of five fields applies.
+    assert_eq!(row["tokens"]["__typename"], "FixedOutput");
+    assert_eq!(row["tokens"]["tokens"], 500);
     assert!(row["magic"].is_null());
+    assert_eq!(row["origin"], "BLUEPRINT");
+    assert!(
+        row["blueprintName"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty()),
+        "a row says which blueprint ships it"
+    );
 }
 
 /// A region carries its budget, its policies and what fills it.
@@ -163,7 +169,7 @@ async fn a_region_carries_its_budget_and_policies() {
              name kind maxTokens budgetPercent minTokens budgetMaxTokens
              required requiredMessage volatility admission summarizable accepts
              maxItems strategy overflow compactCount maxEntries thresholdTokens
-             seed { __typename ... on SeedFromLiteral { text } }
+             seed { __typename ... on SeedFromLiteralOutput { text } }
            } } }"#)
     .await;
     let regions = json["blueprint"]["regions"].as_array().expect("regions");
@@ -183,7 +189,7 @@ async fn a_region_carries_its_budget_and_policies() {
     assert_eq!(plan["volatility"], "REWRITTEN");
     assert_eq!(plan["admission"], "REJECT");
     assert_eq!(plan["accepts"][0], "text/*");
-    assert_eq!(plan["seed"]["__typename"], "SeedFromLiteral");
+    assert_eq!(plan["seed"]["__typename"], "SeedFromLiteralOutput");
     assert_eq!(plan["seed"]["text"], "start here");
     // A pinned region does not slide, so the sliding numbers are null rather
     // than zero: zero would read as a ceiling of none.
@@ -218,7 +224,7 @@ async fn a_region_carries_its_budget_and_policies() {
 async fn a_tool_seed_carries_its_calls_and_its_refresh() {
     let json = ask(r#"{ blueprint { regions { name seed {
              __typename
-             ... on SeedFromTools { refresh calls { tool args } }
+             ... on SeedFromToolsOutput { refresh calls { tool args } }
            } } } }"#)
     .await;
     let env = json["blueprint"]["regions"]
@@ -227,7 +233,7 @@ async fn a_tool_seed_carries_its_calls_and_its_refresh() {
         .iter()
         .find(|region| region["name"] == "env")
         .expect("the env region");
-    assert_eq!(env["seed"]["__typename"], "SeedFromTools");
+    assert_eq!(env["seed"]["__typename"], "SeedFromToolsOutput");
     assert_eq!(env["seed"]["refresh"], "EACH_STAGE");
     assert_eq!(env["seed"]["calls"][0]["tool"], "which_command");
     assert_eq!(env["seed"]["calls"][0]["args"]["command"], "git");
@@ -403,12 +409,12 @@ async fn each_kind_of_seed_is_its_own_type() {
     let json = ask_variants(
         r#"{ blueprint { regions { name seed {
              __typename
-             ... on SeedFromCaller { key }
-             ... on SeedFromGlob { pattern }
-             ... on SeedFromFiles { paths }
-             ... on SeedFromScript { script }
-             ... on SeedFromCommand { command }
-             ... on SeedFromTools { calls { tool } refresh }
+             ... on SeedFromCallerOutput { key }
+             ... on SeedFromGlobOutput { pattern }
+             ... on SeedFromFilesOutput { paths }
+             ... on SeedFromScriptOutput { script }
+             ... on SeedFromCommandOutput { command }
+             ... on SeedFromToolsOutput { calls { tool } refresh }
            } } } }"#,
     )
     .await;
@@ -421,21 +427,33 @@ async fn each_kind_of_seed_is_its_own_type() {
             .expect("the region")
             .clone()
     };
-    assert_eq!(by_name("task")["seed"]["__typename"], "SeedFromCaller");
+    assert_eq!(
+        by_name("task")["seed"]["__typename"],
+        "SeedFromCallerOutput"
+    );
     assert_eq!(by_name("task")["seed"]["key"], "task");
-    assert_eq!(by_name("sources")["seed"]["__typename"], "SeedFromGlob");
+    assert_eq!(
+        by_name("sources")["seed"]["__typename"],
+        "SeedFromGlobOutput"
+    );
     assert_eq!(by_name("sources")["seed"]["pattern"], "*.md");
-    assert_eq!(by_name("files")["seed"]["__typename"], "SeedFromFiles");
+    assert_eq!(
+        by_name("files")["seed"]["__typename"],
+        "SeedFromFilesOutput"
+    );
     assert_eq!(by_name("files")["seed"]["paths"][1], "b.txt");
     assert_eq!(
         by_name("script_region")["seed"]["__typename"],
-        "SeedFromScript"
+        "SeedFromScriptOutput"
     );
-    assert_eq!(by_name("env")["seed"]["__typename"], "SeedFromCommand");
+    assert_eq!(
+        by_name("env")["seed"]["__typename"],
+        "SeedFromCommandOutput"
+    );
     assert_eq!(by_name("env")["seed"]["command"], "git status --short");
     // The single-tool shorthand is a one-entry list here: one shape for one
     // idea, so a client reads `calls` whichever way the manifest wrote it.
-    assert_eq!(by_name("work")["seed"]["__typename"], "SeedFromTools");
+    assert_eq!(by_name("work")["seed"]["__typename"], "SeedFromToolsOutput");
     assert_eq!(by_name("work")["seed"]["calls"][0]["tool"], "which_command");
     assert_eq!(by_name("work")["seed"]["refresh"], "ONCE");
     assert!(by_name("notes")["seed"].is_null(), "no seed at all");
@@ -482,7 +500,12 @@ async fn each_region_kind_reports_its_own_numbers() {
 async fn each_token_rule_sets_one_field() {
     let json = ask_variants(
         r#"{ blueprint { mimeTypes { mimeType magic standIn check
-             tokens { perByte perPixel max perSecond perPage fixed } } } }"#,
+             tokens { __typename
+               ... on PerByteOutput { tokensPerByte }
+               ... on PerPixelOutput { pixelsPerToken max }
+               ... on PerSecondOutput { tokensPerSecond }
+               ... on PerPageOutput { tokensPerPage }
+               ... on FixedOutput { tokens } } } } }"#,
     )
     .await;
     let rows = json["blueprint"]["mimeTypes"].as_array().expect("rows");
@@ -493,14 +516,15 @@ async fn each_token_rule_sets_one_field() {
             .clone()
     };
     let webp = by_type("image/webp");
-    assert_eq!(webp["tokens"]["perPixel"], 750);
+    assert_eq!(webp["tokens"]["__typename"], "PerPixelOutput");
+    assert_eq!(webp["tokens"]["pixelsPerToken"], 750);
     assert_eq!(webp["tokens"]["max"], 1600);
     assert_eq!(webp["magic"], "52494646");
     assert_eq!(webp["standIn"], "[a picture: {name}]");
     assert_eq!(webp["check"], "checks/webp.rhai");
-    assert_eq!(by_type("audio/mpeg")["tokens"]["perSecond"], 32);
-    assert_eq!(by_type("application/pdf")["tokens"]["perPage"], 600);
-    assert_eq!(by_type("text/x-thing")["tokens"]["perByte"], 0.25);
+    assert_eq!(by_type("audio/mpeg")["tokens"]["tokensPerSecond"], 32);
+    assert_eq!(by_type("application/pdf")["tokens"]["tokensPerPage"], 600);
+    assert_eq!(by_type("text/x-thing")["tokens"]["tokensPerByte"], 0.25);
     // Sorted by type, so two reads of one blueprint agree.
     assert_eq!(rows[0]["mimeType"], "application/pdf");
 }

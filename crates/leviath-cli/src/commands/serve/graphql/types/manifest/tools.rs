@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use async_graphql::{Enum, Object, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use leviath_core::Blueprint as CoreBlueprint;
 
@@ -17,6 +18,7 @@ use super::count;
 use super::refs;
 
 /// What a stage does with one tool.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum ToolPermissionPolicy {
     /// Runs without asking.
@@ -35,7 +37,7 @@ impl ToolPermissionPolicy {
     /// parsed manifest only ever carries one of the three. The daemon's own
     /// resolution reads anything else as `ASK`, and this reads it the same way,
     /// so the schema cannot report a permission the dispatcher would not apply.
-    fn of(word: &str) -> Self {
+    pub(crate) fn of(word: &str) -> Self {
         match word.trim().to_ascii_lowercase().as_str() {
             "allow" => Self::Allow,
             "deny" => Self::Deny,
@@ -45,6 +47,7 @@ impl ToolPermissionPolicy {
 }
 
 /// One tool and what this level does with it.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ToolPermissionRule {
     /// The tool, by the name the manifest used. A name rather than a `Tool`: a
@@ -87,6 +90,7 @@ pub(crate) struct ToolRouteOverride {
 }
 
 /// Where one tool's results go, in place of the stage's default region.
+#[mirror(list)]
 #[Object]
 impl ToolRouteOverride {
     /// The tool, by the name the manifest used. A name rather than a `Tool`: an
@@ -115,6 +119,7 @@ impl ToolRouteOverride {
 ///
 /// One number for a whole stage cannot fit a stage that both greps, where the
 /// answer is small and wanted whole, and reads files, where it can be enormous.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ToolTokenCeiling {
     /// The tool, by the name the manifest used. A name rather than a `Tool`: a
@@ -133,6 +138,7 @@ pub(crate) struct ToolRouting {
 }
 
 /// Where a stage's tool results land in its context.
+#[mirror]
 #[Object]
 impl ToolRouting {
     /// The region results go to when no override names another.
@@ -217,6 +223,7 @@ pub(crate) struct OutputRoute {
 }
 
 /// Where the parts a stage produces are written, by mime pattern.
+#[mirror(list)]
 #[Object]
 impl OutputRoute {
     /// The mime pattern this rule matches: `image/png`, `image/*` or `*/*`. The
@@ -256,6 +263,7 @@ impl OutputRoute {
 /// A stored part outside a tool's list is out of that tool's reach here. A tool
 /// absent from the table has no limit beyond what it takes itself, and inline
 /// text is never hidden by one.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ToolAcceptRule {
     /// The tool, by the name the manifest used. A name rather than a `Tool`: a
@@ -264,3 +272,7 @@ pub(crate) struct ToolAcceptRule {
     /// The mime patterns it may be handed.
     pub(crate) patterns: Vec<String>,
 }
+
+#[cfg(test)]
+#[path = "tools_tests.rs"]
+mod tests;

@@ -136,43 +136,40 @@ async fn the_changes_read_back_typed_with_their_cause() {
 
         let json = data(
             r#"{ run { contextChanges(first: 10) {
-                 total pageInfo { hasNextPage }
-                 edges { cursor node {
+                 total cursor
+                 results {
                    cause revisionBefore revisionAfter executionId journalPosition at
                    regions {
                      region digestBefore digestAfter tokensBefore tokensAfter
                      tokenDelta entriesBefore entriesAfter entriesAdded entriesRemoved
                    }
-                 } }
+                 }
                } } }"#,
         )
         .await;
         let page = &json["run"]["contextChanges"];
         assert_eq!(page["total"], 2);
-        assert_eq!(page["pageInfo"]["hasNextPage"], false);
+        assert!(page["cursor"].is_null(), "the only page");
 
-        let first = &page["edges"][0];
-        assert_eq!(first["cursor"], "0");
-        assert_eq!(first["node"]["cause"], "SEED");
-        assert_eq!(first["node"]["at"], 20);
-        assert_eq!(first["node"]["regions"][0]["region"], "plan");
-        assert_eq!(first["node"]["regions"][0]["entriesAdded"], 1);
-        assert_eq!(first["node"]["regions"][0]["entriesRemoved"], 0);
-        assert_eq!(first["node"]["regions"][0]["tokenDelta"], 40);
+        let first = &page["results"][0];
+        assert_eq!(first["cause"], "SEED");
+        assert_eq!(first["at"], 20);
+        assert_eq!(first["regions"][0]["region"], "plan");
+        assert_eq!(first["regions"][0]["entriesAdded"], 1);
+        assert_eq!(first["regions"][0]["entriesRemoved"], 0);
+        assert_eq!(first["regions"][0]["tokenDelta"], 40);
         // A change recorded one region at a time named no window and digested
         // nothing, and says so rather than inventing either.
-        assert!(first["node"]["revisionBefore"].is_null());
-        assert!(first["node"]["revisionAfter"].is_null());
-        assert!(first["node"]["executionId"].is_null());
-        assert!(first["node"]["regions"][0]["digestBefore"].is_null());
-        assert!(first["node"]["regions"][0]["tokensAfter"].is_null());
-        assert!(first["node"]["regions"][0]["entriesBefore"].is_null());
+        assert!(first["revisionBefore"].is_null());
+        assert!(first["revisionAfter"].is_null());
+        assert!(first["executionId"].is_null());
+        assert!(first["regions"][0]["digestBefore"].is_null());
+        assert!(first["regions"][0]["tokensAfter"].is_null());
+        assert!(first["regions"][0]["entriesBefore"].is_null());
         // The position of the record that carries it, which only climbs.
-        let position = first["node"]["journalPosition"]
-            .as_i64()
-            .expect("a position");
+        let position = first["journalPosition"].as_i64().expect("a position");
 
-        let second = &page["edges"][1]["node"];
+        let second = &page["results"][1];
         assert_eq!(second["cause"], "COMPACTION");
         assert_eq!(second["regions"][0]["entriesRemoved"], 3);
         assert_eq!(second["regions"][0]["tokenDelta"], -120);
@@ -205,17 +202,17 @@ async fn the_snapshots_and_the_reasons_are_separate_fields() {
             ]);
 
             let json = data(
-                "{ run { contextChanges(first: 10) { total edges { node { cause } } } \
+                "{ run { contextChanges(first: 10) { total results { cause } } \
                  contextHistory(first: 10) { total } } }",
             )
             .await;
             assert_eq!(json["run"]["contextChanges"]["total"], 2);
             assert_eq!(
-                json["run"]["contextChanges"]["edges"][0]["node"]["cause"],
+                json["run"]["contextChanges"]["results"][0]["cause"],
                 "TOOL_RESULT"
             );
             assert_eq!(
-                json["run"]["contextChanges"]["edges"][1]["node"]["cause"],
+                json["run"]["contextChanges"]["results"][1]["cause"],
                 "MODEL_REPLY"
             );
             // The window was snapshotted once, so the history holds one point
@@ -240,29 +237,29 @@ async fn the_changes_page_carries_on_from_its_cursor() {
             );
 
             let json = data(
-                "{ run { contextChanges(first: 2) { total pageInfo { hasNextPage endCursor } \
-                 edges { node { at } } } } }",
+                "{ run { contextChanges(first: 2) { total cursor \
+                 results { at } } } }",
             )
             .await;
             let page = &json["run"]["contextChanges"];
             assert_eq!(page["total"], 5);
-            assert_eq!(page["pageInfo"]["hasNextPage"], true);
-            assert_eq!(page["edges"][0]["node"]["at"], 20);
-            let cursor = page["pageInfo"]["endCursor"].as_str().expect("a cursor");
+            assert!(page["cursor"].as_str().is_some(), "more to come");
+            assert_eq!(page["results"][0]["at"], 20);
+            let cursor = page["cursor"].as_str().expect("a cursor");
 
             let json = data(&format!(
                 r#"{{ run {{ contextChanges(first: 10, after: "{cursor}") {{
-                     pageInfo {{ hasNextPage }} edges {{ node {{ at }} }}
+                     cursor results {{ at }}
                    }} }} }}"#
             ))
             .await;
             let page = &json["run"]["contextChanges"];
-            assert_eq!(page["pageInfo"]["hasNextPage"], false, "that was the rest");
-            let times: Vec<i64> = page["edges"]
+            assert!(page["cursor"].is_null(), "that was the rest");
+            let times: Vec<i64> = page["results"]
                 .as_array()
-                .expect("edges")
+                .expect("results")
                 .iter()
-                .filter_map(|edge| edge["node"]["at"].as_i64())
+                .filter_map(|node| node["at"].as_i64())
                 .collect();
             assert_eq!(times, vec![22, 23, 24], "no change read twice");
         },
@@ -303,6 +300,56 @@ async fn a_cursor_from_elsewhere_is_refused() {
     .await;
 }
 
+/// Naming `orderBy` explicitly reverses the order the changes landed in.
+#[tokio::test]
+async fn an_explicit_order_by_walks_backwards() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-context-changes-orderby",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            write_journal(vec![
+                changed("plan", ContextCause::Seed, 1, 0, 10, 20),
+                changed("plan", ContextCause::ContextTool, 1, 0, 10, 21),
+            ]);
+
+            let json = data(
+                "{ run { contextChanges(orderBy: [{ field: JOURNAL_POSITION, direction: DESC }]) \
+                 { results { at } } } }",
+            )
+            .await;
+            let times: Vec<i64> = json["run"]["contextChanges"]["results"]
+                .as_array()
+                .expect("results")
+                .iter()
+                .filter_map(|node| node["at"].as_i64())
+                .collect();
+            assert_eq!(times, vec![21, 20], "descending reverses the order landed");
+        },
+    )
+    .await;
+}
+
+/// A filter nested past the depth limit is refused rather than walked.
+#[tokio::test]
+async fn a_filter_past_the_depth_limit_is_refused() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-context-changes-filter-depth",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            let mut filter = r#"{ cause: { eq: SEED } }"#.to_string();
+            for _ in 0..20 {
+                filter = format!("{{ not: {filter} }}");
+            }
+            let message = error(&format!(
+                "{{ run {{ contextChanges(filter: {filter}) {{ total }} }} }}"
+            ))
+            .await;
+            assert!(message.contains("flatten it"), "{message}");
+        },
+    )
+    .await;
+}
+
 /// A run whose writes named no cause has no changes, and says so with an empty
 /// page rather than an error.
 #[tokio::test]
@@ -312,11 +359,10 @@ async fn a_run_with_no_recorded_causes_has_no_changes() {
         |_dir| async move {
             create_run(&meta()).expect("run written");
             let json =
-                data("{ run { contextChanges(first: 10) { total edges { node { cause } } } } }")
-                    .await;
+                data("{ run { contextChanges(first: 10) { total results { cause } } } }").await;
             assert_eq!(json["run"]["contextChanges"]["total"], 0);
             assert_eq!(
-                json["run"]["contextChanges"]["edges"]
+                json["run"]["contextChanges"]["results"]
                     .as_array()
                     .map(Vec::len),
                 Some(0)
@@ -416,19 +462,19 @@ async fn a_transaction_reads_back_with_the_windows_either_side() {
 
             let json = data(
                 r#"{ run { contextChanges(first: 10) {
-                     total edges { node {
+                     total results {
                        cause revisionBefore revisionAfter executionId
                        regions {
                          region digestBefore digestAfter tokensBefore tokensAfter
                          tokenDelta entriesBefore entriesAfter entriesAdded entriesRemoved
                        }
-                     } }
+                     }
                    } } }"#,
             )
             .await;
             let page = &json["run"]["contextChanges"];
             assert_eq!(page["total"], 1, "one transaction, one change");
-            let node = &page["edges"][0]["node"];
+            let node = &page["results"][0];
             assert_eq!(node["cause"], "COMPACTION");
             assert_eq!(node["revisionBefore"], "cw1-before");
             assert_eq!(node["revisionAfter"], "cw1-after");
@@ -452,5 +498,46 @@ async fn a_transaction_reads_back_with_the_windows_either_side() {
             assert_eq!(summarised["entriesRemoved"], 0);
         },
     )
+    .await;
+}
+
+/// Every function `#[mirror]` wrote for this file's types runs at least once.
+///
+/// The mirrors are straight lines of delegation, so running each of them once
+/// is enough to measure all of them.
+#[tokio::test]
+async fn every_mirrored_function_runs() {
+    use super::{ContextCause as Served, ContextChange, RegionTransition};
+    use crate::commands::serve::graphql::filter::testkit::{
+        exercise, exercise_enum, exercise_list,
+    };
+    use crate::commands::serve::graphql::scalars::{BigInt, Timestamp};
+
+    exercise_enum(&[Served::Seed, Served::Framework]).await;
+
+    let region = RegionTransition {
+        region: "plan".to_string(),
+        digest_before: Some("before".to_string()),
+        digest_after: Some("after".to_string()),
+        tokens_before: Some(BigInt(400)),
+        tokens_after: Some(BigInt(0)),
+        token_delta: BigInt(-400),
+        entries_before: Some(4),
+        entries_after: Some(0),
+        entries_added: 0,
+        entries_removed: 4,
+    };
+    exercise(std::slice::from_ref(&region)).await;
+    exercise_list(std::slice::from_ref(&region)).await;
+
+    exercise(&[ContextChange {
+        cause: Served::Compaction,
+        revision_before: Some("cw1-before".to_string()),
+        revision_after: Some("cw1-after".to_string()),
+        execution_id: Some(async_graphql::ID::from("x-one")),
+        regions: vec![region],
+        journal_position: BigInt(10),
+        at: Timestamp(90),
+    }])
     .await;
 }

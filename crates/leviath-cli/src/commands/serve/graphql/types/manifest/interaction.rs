@@ -3,12 +3,14 @@
 use std::sync::Arc;
 
 use async_graphql::{Enum, Object, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use leviath_core::Blueprint as CoreBlueprint;
 
 use super::super::blueprint::Region;
 
 /// What a checkpoint does when nobody is watching.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum UnattendedPolicy {
     /// Taken as approved, and the run carries on.
@@ -29,6 +31,7 @@ impl From<leviath_core::blueprint::UnattendedPolicy> for UnattendedPolicy {
 }
 
 /// What the person is asked for.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum InteractionPointStyle {
     /// Anything they type.
@@ -51,6 +54,7 @@ impl From<&leviath_core::blueprint::InteractionStyle> for InteractionPointStyle 
 }
 
 /// One option, and what the stage is told when it is picked.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct DirectiveEntry {
     /// The option label this applies to.
@@ -70,6 +74,7 @@ pub(crate) struct InteractionPoint {
 }
 
 /// A checkpoint a stage raises, where the run waits for a person.
+#[mirror(list)]
 #[Object]
 impl InteractionPoint {
     /// The point's name, unique within the stage.
@@ -160,3 +165,7 @@ impl InteractionPoint {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "interaction_tests.rs"]
+mod tests;

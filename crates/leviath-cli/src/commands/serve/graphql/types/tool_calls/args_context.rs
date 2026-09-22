@@ -4,9 +4,11 @@
 //! and their ids are positions in one.
 
 use async_graphql::SimpleObject;
+use leviath_graphql_derive::mirror;
 use serde::Deserialize;
 
 /// Arguments for the `context_write` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ContextWriteArgs {
     /// The region written to, by name.
@@ -19,6 +21,7 @@ pub(crate) struct ContextWriteArgs {
 }
 
 /// Arguments for the `context_attach` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ContextAttachArgs {
     /// The region the part goes in, by name.
@@ -43,6 +46,7 @@ pub(crate) struct ContextAttachArgs {
 }
 
 /// Arguments for the `context_export` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ContextExportArgs {
     /// The part's file name, or the start of its sha256.
@@ -54,6 +58,7 @@ pub(crate) struct ContextExportArgs {
 }
 
 /// Arguments for the `context_append` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ContextAppendArgs {
     /// The region appended to, by name.
@@ -66,6 +71,7 @@ pub(crate) struct ContextAppendArgs {
 }
 
 /// Arguments for the `context_read` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ContextReadArgs {
     /// The region read, by name.
@@ -79,6 +85,7 @@ pub(crate) struct ContextReadArgs {
 }
 
 /// Arguments for the `context_delete` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ContextDeleteArgs {
     /// The region released from, by name.
@@ -95,6 +102,7 @@ pub(crate) struct ContextDeleteArgs {
 }
 
 /// Arguments for the `context_list` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct ContextListArgs {
     /// One region to list, or left out for all of them.
@@ -103,6 +111,7 @@ pub(crate) struct ContextListArgs {
 }
 
 /// Arguments for the `todo_add` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct TodoAddArgs {
     /// The checklist region, by name.
@@ -112,6 +121,7 @@ pub(crate) struct TodoAddArgs {
 }
 
 /// Arguments for the `todo_done` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct TodoDoneArgs {
     /// The checklist region, by name.
@@ -121,6 +131,7 @@ pub(crate) struct TodoDoneArgs {
 }
 
 /// Arguments for the `todo_note` tool.
+#[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct TodoNoteArgs {
     /// The checklist region, by name.

@@ -1,8 +1,10 @@
 //! One directory listing, for a file picker.
 
 use async_graphql::SimpleObject;
+use leviath_graphql_derive::mirror;
 
 /// One directory, for a file picker.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct Directory {
     /// The absolute directory that was listed.

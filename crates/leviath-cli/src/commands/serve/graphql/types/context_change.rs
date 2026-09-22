@@ -13,13 +13,20 @@
 //! window's revision either side, so a change is anchored to exact content
 //! rather than to a moment.
 
-use async_graphql::{Enum, SimpleObject};
+use async_graphql::{Enum, ID, SimpleObject};
 use leviath_core::run_archive::IndexedChange;
+use leviath_graphql_derive::mirror;
 
+use super::super::connection::{
+    Connection, Paged, PositionQuery, Total, position_order, position_page,
+};
 use super::super::error::IntoGraphql;
+use super::super::filter::MatchCx;
+use super::super::paging::page::page;
 use super::super::scalars::{BigInt, Cursor, Timestamp};
 use crate::commands::serve::blocking::blocking;
 use crate::commands::serve::core::context_changes;
+use crate::commands::serve::cursor;
 
 /// What changed a region of a context window.
 ///
@@ -28,6 +35,7 @@ use crate::commands::serve::core::context_changes;
 /// them ran is the question being asked. A write whose path has no cause of its
 /// own records nothing at all rather than borrowing the nearest neighbour, so
 /// this vocabulary never mislabels a change.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum ContextCause {
     /// A region seeded from the blueprint or from caller input, at spawn or on
@@ -100,6 +108,7 @@ impl From<leviath_core::ContextCause> for ContextCause {
 /// what tell you whether you need to go and read it - `digestBefore` equal to
 /// `digestAfter` means this region ended the transaction holding exactly what it
 /// started with.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RegionTransition {
     /// The region this part of the transaction touched, by the name it carries
@@ -152,6 +161,7 @@ pub(crate) struct RegionTransition {
 /// `revisionBefore` and `revisionAfter` anchor it to exact content rather than to
 /// a moment: they are the revisions of `contextSnapshot`, so a transaction says
 /// which window it started from and which one it produced.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ContextChange {
     /// What made the change.
@@ -172,7 +182,7 @@ pub(crate) struct ContextChange {
     /// A call the dispatcher answers without the tool lane - a `context_*` tool,
     /// a refusal, a gate denial - is journaled as a dispatch like any other, so
     /// an id here names an execution `executions` lists.
-    pub(crate) execution_id: Option<String>,
+    pub(crate) execution_id: Option<ID>,
     /// Every region the transaction touched, in the order the write path named
     /// them.
     pub(crate) regions: Vec<RegionTransition>,
@@ -192,7 +202,7 @@ impl From<IndexedChange> for ContextChange {
             cause: ContextCause::from(record.cause),
             revision_before: record.revision_before,
             revision_after: record.revision_after,
-            execution_id: record.execution_id,
+            execution_id: record.execution_id.map(ID::from),
             regions: record
                 .regions
                 .into_iter()
@@ -227,25 +237,17 @@ fn tokens(value: usize) -> BigInt {
     BigInt(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
-/// One page of a run's context changes.
-#[derive(SimpleObject)]
-pub(crate) struct ContextChangeConnection {
-    /// The changes on this page, in the order they landed.
-    pub(crate) edges: Vec<ContextChangeEdge>,
-    /// Where the next page starts.
-    pub(crate) page_info: super::super::connection::PageInfo,
-    /// How many the run's journal holds altogether.
-    pub(crate) total: i32,
+impl Paged for ContextChange {
+    const NAME: &'static str = "ContextChange";
 }
 
-/// One change and its cursor.
-#[derive(SimpleObject)]
-pub(crate) struct ContextChangeEdge {
-    /// Where this change sits among the run's own.
-    pub(crate) cursor: Cursor,
-    /// The change.
-    pub(crate) node: ContextChange,
-}
+position_order!(
+    ContextChangeOrder,
+    ContextChangeOrderField,
+    JournalPosition,
+    "The one sort key `contextChanges` may be ordered by.",
+    "Where the record that carries this change sits in the run's journal."
+);
 
 /// Narrow a journal counter to the 32 bits GraphQL's `Int` carries.
 ///
@@ -259,56 +261,56 @@ fn count(value: usize) -> i32 {
 /// Read one page of a run's context changes.
 ///
 /// Shared by the field on a run and by anything else that grows one later, the
-/// same way `interactions::page` is.
-pub(crate) async fn page(
+/// same way `interactions` is.
+///
+/// The whole journal is already read to answer this, so a file-backed filter
+/// is confirmed across every change once, up front - though today no field on
+/// `ContextChange` reads a second file.
+pub(crate) async fn context_changes(
     run_id: String,
+    filter: Option<ContextChangeFilter>,
+    order_by: Option<Vec<ContextChangeOrder>>,
     first: i32,
     after: Option<Cursor>,
-) -> async_graphql::Result<ContextChangeConnection> {
-    use crate::commands::serve::core::error::ServeError;
-    let limit = usize::try_from(first)
-        .ok()
-        .filter(|n| *n > 0)
-        .ok_or_else(|| ServeError::BadRequest("`first` must be at least 1".to_string()))
-        .gql()?;
-    if limit > context_changes::CONTEXT_CHANGES_MAX_LIMIT {
-        return Err(ServeError::BadRequest(format!(
-            "`first` may be at most {}, the context changes page cap",
-            context_changes::CONTEXT_CHANGES_MAX_LIMIT
-        )))
-        .gql();
-    }
-    let cursor = after.map(|cursor| cursor.0);
+) -> async_graphql::Result<Connection<ContextChange>> {
+    let limit = page(
+        first,
+        context_changes::CONTEXT_CHANGES_MAX_LIMIT,
+        "the context changes page cap",
+    )
+    .gql()?;
+    let filter = filter.unwrap_or_default();
+    let rendered = super::super::paging::digest::canonical(&filter).gql()?;
+    let digest = cursor::filter_digest(&["context_changes", &run_id, rendered.as_str()]);
+    let descending = order_by
+        .unwrap_or_default()
+        .first()
+        .is_some_and(|term| term.direction.descending());
+
     let for_read = run_id.clone();
-    let page = blocking(move || {
-        let spec = context_changes::ContextChangesSpec::resolve(
-            &for_read,
-            Some(limit),
-            cursor.as_deref(),
-        )?;
-        context_changes::page(&for_read, &spec)
-    })
+    let changes = blocking(move || context_changes::read(&for_read))
+        .await
+        .gql()?;
+    let items: Vec<ContextChange> = changes.into_iter().map(ContextChange::from).collect();
+    let cx = MatchCx::at(leviath_core::duration::now_secs());
+    let walked = position_page(
+        items,
+        &filter,
+        &cx,
+        PositionQuery {
+            digest: &digest,
+            after: after.as_ref().map(|token| token.0.as_str()),
+            descending,
+            limit,
+        },
+    )
     .await
     .gql()?;
-    let total = i32::try_from(page.total).unwrap_or(i32::MAX);
-    let end_cursor = page.next_cursor.clone().map(Cursor);
-    Ok(ContextChangeConnection {
-        edges: page
-            .changes
-            .into_iter()
-            .map(|indexed| ContextChangeEdge {
-                // The index among the run's own changes: several regions can
-                // change on one tick, so a timestamp could not name one of them.
-                cursor: Cursor(indexed.index.to_string()),
-                node: ContextChange::from(indexed.change),
-            })
-            .collect(),
-        page_info: super::super::connection::PageInfo {
-            end_cursor: end_cursor.clone(),
-            has_next_page: end_cursor.is_some(),
-        },
-        total,
-    })
+    Ok(Connection::plain(
+        walked.items,
+        walked.cursor,
+        Total::known(walked.total),
+    ))
 }
 
 #[cfg(test)]

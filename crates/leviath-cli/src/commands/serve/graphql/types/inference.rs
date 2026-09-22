@@ -14,14 +14,22 @@
 
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_core::run_archive::{AttemptRecord, FailoverRecord};
+use leviath_graphql_derive::mirror;
 
+use super::super::connection::{
+    Connection, Paged, PositionQuery, Total, position_order, position_page,
+};
 use super::super::error::IntoGraphql;
+use super::super::filter::MatchCx;
+use super::super::paging::page::page;
 use super::super::scalars::{BigInt, Cursor, Json, Timestamp};
 use super::manifest::model::ModelParameters;
 use crate::commands::serve::blocking::blocking;
 use crate::commands::serve::core::inferences;
+use crate::commands::serve::cursor;
 
 /// What the retry loop did after an attempt failed.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum RetryDecision {
     /// Nothing. The failure went back to the run, either because it was
@@ -49,6 +57,7 @@ impl From<leviath_core::run_archive::Retry> for RetryDecision {
 }
 
 /// How one trip to a provider ended.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum AttemptOutcomeKind {
     /// The provider answered.
@@ -63,6 +72,7 @@ pub(crate) enum AttemptOutcomeKind {
 /// `failureKind`, `transient`, `capacity` and `retry` are null unless `kind` is
 /// `FAILED`: an attempt that worked has no failure to classify. What the answer
 /// cost is on the run's `usage` and `cost`, not here.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct AttemptOutcome {
     /// Whether the provider answered.
@@ -118,6 +128,7 @@ impl From<&leviath_core::run_archive::AttemptOutcome> for AttemptOutcome {
 /// differently from a request that kept changing underneath the run. No bodies,
 /// because a digest that grew with the prompt would put a copy of the whole
 /// window in the journal once per retry.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RequestDigest {
     /// The assembled system prefix, as an opaque lowercase-hex digest. Compare
@@ -152,6 +163,7 @@ impl From<&leviath_core::run_archive::RequestDigest> for RequestDigest {
 /// it: a body that is here can be read, a body that was never taken cannot be
 /// recovered, and a body that was taken and then removed is a different fact
 /// from one that never existed.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum CaptureStatus {
     /// The request is on this record, as the provider adapter received it.
@@ -177,8 +189,8 @@ impl From<leviath_core::run_archive::CaptureStatus> for CaptureStatus {
     }
 }
 
-/// The resolver state behind the `ModelInput` type.
-pub(crate) struct ModelInput {
+/// The resolver state behind the `ModelRequest` type.
+pub(crate) struct ModelRequest {
     /// What the journal recorded about the request.
     pub(crate) record: leviath_core::run_archive::ModelInput,
 }
@@ -195,8 +207,9 @@ pub(crate) struct ModelInput {
 /// answers what a digest cannot: which parameters were really in force after
 /// resolution, which tools the model was offered, and which build of the
 /// assembly produced the shape.
+#[mirror]
 #[Object]
-impl ModelInput {
+impl ModelRequest {
     /// Whether `request` is here, and where it went if it is not.
     async fn capture_status(&self) -> CaptureStatus {
         CaptureStatus::from(self.record.capture_status)
@@ -262,6 +275,7 @@ impl ModelInput {
 }
 
 /// One provider judged unusable, and the model tried in its place.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct InferenceFailover {
     /// The stage whose call moved.
@@ -316,6 +330,7 @@ pub(crate) struct InferenceAttempt {
 /// third try leaves three attempts, and reading them in order is how a run's
 /// latency, backoff and moves between providers become visible. An attempt is
 /// a record of what happened, so nothing about it changes after the fact.
+#[mirror]
 #[Object]
 impl InferenceAttempt {
     /// The stage the run was in. Empty for a lane that has no stage of its own,
@@ -371,11 +386,11 @@ impl InferenceAttempt {
     /// set, `captureStatus` says whether the request body itself is there:
     /// capture is off unless an operator asked for it, and everything beside the
     /// body is recorded either way.
-    async fn model_input(&self) -> Option<ModelInput> {
+    async fn model_input(&self) -> Option<ModelRequest> {
         self.record
             .model_input
             .clone()
-            .map(|record| ModelInput { record })
+            .map(|record| ModelRequest { record })
     }
 
     /// When the attempt finished.
@@ -394,25 +409,17 @@ impl InferenceAttempt {
     }
 }
 
-/// One page of a run's provider attempts.
-#[derive(SimpleObject)]
-pub(crate) struct InferenceAttemptConnection {
-    /// The attempts on this page, in the order they were made.
-    pub(crate) edges: Vec<InferenceAttemptEdge>,
-    /// Where the next page starts.
-    pub(crate) page_info: super::super::connection::PageInfo,
-    /// How many the run's journal holds altogether.
-    pub(crate) total: i32,
+impl Paged for InferenceAttempt {
+    const NAME: &'static str = "InferenceAttempt";
 }
 
-/// One attempt and its cursor.
-#[derive(SimpleObject)]
-pub(crate) struct InferenceAttemptEdge {
-    /// Where this attempt sits among the run's own.
-    pub(crate) cursor: Cursor,
-    /// The attempt.
-    pub(crate) node: InferenceAttempt,
-}
+position_order!(
+    InferenceAttemptOrder,
+    InferenceAttemptOrderField,
+    Sequence,
+    "The one sort key `inferences` may be ordered by.",
+    "Where this attempt sits among the run's own, in the order it was made."
+);
 
 /// A stable failure label, or nothing where the error carried none.
 ///
@@ -434,56 +441,60 @@ fn count(value: usize) -> i32 {
 /// Read one page of a run's provider attempts.
 ///
 /// Shared by the field on a run and by anything else that grows one later, the
-/// same way `interactions::page` is.
-pub(crate) async fn page(
+/// same way `interactions` is.
+///
+/// The whole journal is already read to answer this, so a file-backed filter
+/// is confirmed across every attempt once, up front, the same way `executions`
+/// does - though today no field on `InferenceAttempt` reads a second file.
+pub(crate) async fn inferences(
     run_id: String,
+    filter: Option<InferenceAttemptFilter>,
+    order_by: Option<Vec<InferenceAttemptOrder>>,
     first: i32,
     after: Option<Cursor>,
-) -> async_graphql::Result<InferenceAttemptConnection> {
-    use crate::commands::serve::core::error::ServeError;
-    let limit = usize::try_from(first)
-        .ok()
-        .filter(|n| *n > 0)
-        .ok_or_else(|| ServeError::BadRequest("`first` must be at least 1".to_string()))
-        .gql()?;
-    if limit > inferences::INFERENCES_MAX_LIMIT {
-        return Err(ServeError::BadRequest(format!(
-            "`first` may be at most {}, the inferences page cap",
-            inferences::INFERENCES_MAX_LIMIT
-        )))
-        .gql();
-    }
-    let cursor = after.map(|cursor| cursor.0);
+) -> async_graphql::Result<Connection<InferenceAttempt>> {
+    let limit = page(
+        first,
+        inferences::INFERENCES_MAX_LIMIT,
+        "the inferences page cap",
+    )
+    .gql()?;
+    let filter = filter.unwrap_or_default();
+    let rendered = super::super::paging::digest::canonical(&filter).gql()?;
+    let digest = cursor::filter_digest(&["inferences", &run_id, rendered.as_str()]);
+    let descending = order_by
+        .unwrap_or_default()
+        .first()
+        .is_some_and(|term| term.direction.descending());
+
     let for_read = run_id.clone();
-    let page = blocking(move || {
-        let spec = inferences::InferencesSpec::resolve(&for_read, Some(limit), cursor.as_deref())?;
-        inferences::page(&for_read, &spec)
-    })
+    let attempts = blocking(move || inferences::read(&for_read)).await.gql()?;
+    let items: Vec<InferenceAttempt> = attempts
+        .into_iter()
+        .map(|attempt| InferenceAttempt {
+            record: attempt.record,
+            failover: attempt.failover,
+        })
+        .collect();
+    let cx = MatchCx::at(leviath_core::duration::now_secs());
+    let walked = position_page(
+        items,
+        &filter,
+        &cx,
+        PositionQuery {
+            digest: &digest,
+            after: after.as_ref().map(|token| token.0.as_str()),
+            descending,
+            limit,
+        },
+    )
     .await
     .gql()?;
-    let total = i32::try_from(page.total).unwrap_or(i32::MAX);
-    let end_cursor = page.next_cursor.clone().map(Cursor);
-    Ok(InferenceAttemptConnection {
-        edges: page
-            .attempts
-            .into_iter()
-            .map(|indexed| InferenceAttemptEdge {
-                // The index among the run's own attempts: stable for as long as
-                // the run exists, and the only handle one needs since nothing
-                // about an attempt is ever fetched separately.
-                cursor: Cursor(indexed.index.to_string()),
-                node: InferenceAttempt {
-                    record: indexed.attempt.record,
-                    failover: indexed.attempt.failover,
-                },
-            })
-            .collect(),
-        page_info: super::super::connection::PageInfo {
-            end_cursor: end_cursor.clone(),
-            has_next_page: end_cursor.is_some(),
-        },
-        total,
-    })
+    Ok(Connection::plain(
+        walked.items,
+        walked.cursor,
+        Total::known(walked.total),
+    ))
 }
 
 #[cfg(test)]

@@ -160,7 +160,10 @@ fn each_arguments_type_matches_the_declared_schema() {
             .map(|key| (camel(key), required.contains(&key.as_str())))
             .collect();
         declared.sort();
-        let mut served = sdl_fields(&sdl, args_type);
+        // A type outside the mirror still carries the suffix every output type
+        // has, so the lookup has to ask for the name it was actually served
+        // under.
+        let mut served = sdl_fields(&sdl, &format!("{args_type}Output"));
         served.sort();
         assert_eq!(
             served, declared,
