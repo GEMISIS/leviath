@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use super::artifact_types::ArtifactResp;
-use super::events::ServerEvent;
+use super::events::Stamped;
 use crate::config::Config;
 use crate::daemon::config_reload::ConfigReloader;
 
@@ -52,7 +52,10 @@ pub(crate) struct AppState {
     /// config: mtime-checked, last-good on a parse failure. Read it through
     /// [`AppState::current_config`].
     pub(super) config: Arc<ConfigReloader>,
-    pub(super) event_tx: broadcast::Sender<ServerEvent>,
+    /// The event fan-out every producer sends through
+    /// [`events::send`](super::events::send), which is what stamps a frame
+    /// with its place in the stream.
+    pub(super) event_tx: broadcast::Sender<Stamped>,
     /// Client for the shared-world daemon's control socket. Agent actions
     /// (spawn/cancel/message/interactions) go through this; read endpoints still
     /// observe the runs dir the daemon persists to.

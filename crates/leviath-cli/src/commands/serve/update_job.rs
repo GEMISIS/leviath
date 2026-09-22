@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use super::events::ServerEvent;
+use super::events::{ServerEvent, Stamped};
 use crate::bundled::install_bundled;
 use crate::commands::update::{
     BinaryStep, CommandRunner, ConfigState, UpdateArgs, UpdateEnv, UpdatePlan, plan,
@@ -55,7 +55,7 @@ const KEEP_JOBS: usize = 8;
 /// REST route and the event frames have always carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum Step {
+pub(crate) enum Step {
     /// Leviath itself. First, because what the other steps do is decided by
     /// what the *new* binary ships.
     Binary,
@@ -73,7 +73,7 @@ pub(super) const STEPS: [Step; 4] = [Step::Binary, Step::Agents, Step::Keys, Ste
 /// Where one step got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum StepStatus {
+pub(crate) enum StepStatus {
     /// Not reached yet.
     Pending,
     /// Happening now.
@@ -93,7 +93,7 @@ pub(super) enum StepStatus {
 /// Where the run as a whole got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum JobStatus {
+pub(crate) enum JobStatus {
     /// Still going.
     Running,
     /// Every step finished and none failed.
@@ -102,46 +102,9 @@ pub(super) enum JobStatus {
     Failed,
 }
 
-impl Step {
-    /// The word this step carries on the wire.
-    pub(super) fn wire(self) -> &'static str {
-        match self {
-            Self::Binary => "binary",
-            Self::Agents => "agents",
-            Self::Keys => "keys",
-            Self::Migrations => "migrations",
-        }
-    }
-}
-
-impl StepStatus {
-    /// The word this status carries on the wire.
-    pub(super) fn wire(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Running => "running",
-            Self::Done => "done",
-            Self::Skipped => "skipped",
-            Self::Advised => "advised",
-            Self::Failed => "failed",
-        }
-    }
-}
-
-impl JobStatus {
-    /// The word this status carries on the wire.
-    pub(super) fn wire(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Complete => "complete",
-            Self::Failed => "failed",
-        }
-    }
-}
-
 /// What became of one step of an update run.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(super) struct UpdateStep {
+pub(crate) struct UpdateStep {
     /// One of [`STEPS`].
     pub(super) step: Step,
     /// Where it got to.
@@ -153,7 +116,7 @@ pub(super) struct UpdateStep {
 /// One run of `POST /api/update`, as the poll route and the finish frame report
 /// it.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct UpdateJob {
+pub(crate) struct UpdateJob {
     /// What `POST /api/update` answered with, and what the frames carry.
     pub(super) id: String,
     /// Where the run as a whole got to.
@@ -391,7 +354,7 @@ impl UpdateJobs {
         step: Step,
         status: StepStatus,
         detail: String,
-        events: &broadcast::Sender<ServerEvent>,
+        events: &broadcast::Sender<Stamped>,
     ) {
         {
             let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -410,12 +373,15 @@ impl UpdateJobs {
         }
         // Send outside the lock: a subscriber's slow socket must not hold up the
         // update it is watching.
-        let _ = events.send(ServerEvent::UpdateProgress {
-            job_id: id.to_string(),
-            step: step.wire().to_string(),
-            status: status.wire().to_string(),
-            detail,
-        });
+        super::events::send(
+            events,
+            ServerEvent::UpdateProgress {
+                job_id: id.to_string(),
+                step,
+                status,
+                detail,
+            },
+        );
     }
 
     /// Close a job out, and announce the whole record.
@@ -423,7 +389,7 @@ impl UpdateJobs {
     /// The finish frame carries the record rather than a summary so a console
     /// that connected mid-run, or dropped a frame, needs no follow-up request
     /// to render the result.
-    fn finish(&self, id: &str, restart_required: bool, events: &broadcast::Sender<ServerEvent>) {
+    fn finish(&self, id: &str, restart_required: bool, events: &broadcast::Sender<Stamped>) {
         let finished = {
             let mut jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
             let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
@@ -442,13 +408,15 @@ impl UpdateJobs {
             job.finished_at = Some((self.clock)());
             job.clone()
         };
-        let _ = events.send(ServerEvent::UpdateFinished {
-            job_id: finished.id.clone(),
-            status: finished.status.wire().to_string(),
-            restart_required: finished.restart_required,
-            job: serde_json::to_value(&finished)
-                .expect("an update job is plain data and always serializes"),
-        });
+        super::events::send(
+            events,
+            ServerEvent::UpdateFinished {
+                job_id: finished.id.clone(),
+                status: finished.status,
+                restart_required: finished.restart_required,
+                job: finished,
+            },
+        );
     }
 
     /// Start a job and carry `req` out on a blocking thread.
@@ -459,7 +427,7 @@ impl UpdateJobs {
     pub(super) fn spawn(
         &self,
         req: ApplyRequest,
-        events: &broadcast::Sender<ServerEvent>,
+        events: &broadcast::Sender<Stamped>,
     ) -> Result<UpdateJob, String> {
         let job = self.start()?;
         let (store, events, job_id) = (self.clone(), events.clone(), job.id.clone());
@@ -472,7 +440,7 @@ impl UpdateJobs {
     /// The plan is built here rather than passed in: a caller that planned,
     /// waited for a queue, and then acted on the older answer is exactly the
     /// surprise `lev update` prints its plan to avoid.
-    fn apply(&self, id: &str, req: ApplyRequest, events: &broadcast::Sender<ServerEvent>) {
+    fn apply(&self, id: &str, req: ApplyRequest, events: &broadcast::Sender<Stamped>) {
         let env = (self.env)();
         let plan = plan(&UpdateArgs::default(), &env);
         let installed = self.binary_step(id, req, &plan, &env, events);
@@ -489,7 +457,7 @@ impl UpdateJobs {
         req: ApplyRequest,
         plan: &UpdatePlan,
         env: &UpdateEnv,
-        events: &broadcast::Sender<ServerEvent>,
+        events: &broadcast::Sender<Stamped>,
     ) -> Binary {
         let step = Step::Binary;
         if !req.binary {
@@ -539,7 +507,7 @@ impl UpdateJobs {
         req: ApplyRequest,
         plan: &UpdatePlan,
         env: &UpdateEnv,
-        events: &broadcast::Sender<ServerEvent>,
+        events: &broadcast::Sender<Stamped>,
         binary: Binary,
     ) {
         let step = Step::Agents;
@@ -617,7 +585,7 @@ impl UpdateJobs {
         id: &str,
         req: ApplyRequest,
         plan: &UpdatePlan,
-        events: &broadcast::Sender<ServerEvent>,
+        events: &broadcast::Sender<Stamped>,
         binary: Binary,
     ) {
         let step = Step::Keys;
@@ -664,7 +632,7 @@ impl UpdateJobs {
         req: ApplyRequest,
         plan: &UpdatePlan,
         env: &UpdateEnv,
-        events: &broadcast::Sender<ServerEvent>,
+        events: &broadcast::Sender<Stamped>,
         binary: Binary,
     ) {
         let step = Step::Migrations;
@@ -722,7 +690,7 @@ impl UpdateJobs {
         step: Step,
         asked_for: bool,
         binary: Binary,
-        events: &broadcast::Sender<ServerEvent>,
+        events: &broadcast::Sender<Stamped>,
     ) -> Option<()> {
         let reason = match (asked_for, binary) {
             (false, _) => "not asked for",

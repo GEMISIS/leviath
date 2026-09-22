@@ -94,9 +94,10 @@ impl LinkWatch {
         if let Some(mismatch) = state.control.code_mismatch() {
             tracing::warn!("{mismatch}");
         }
-        let _ = state
-            .event_tx
-            .send(ServerEvent::daemon_link(&state.control, true, restarted));
+        super::events::send(
+            &state.event_tx,
+            ServerEvent::daemon_link(&state.control, true, restarted),
+        );
     }
 
     /// The stream is down. Announced once per outage.
@@ -106,9 +107,10 @@ impl LinkWatch {
         }
         self.connected = false;
         tracing::warn!("lost the daemon's event stream; reconnecting");
-        let _ = state
-            .event_tx
-            .send(ServerEvent::daemon_link(&state.control, false, false));
+        super::events::send(
+            &state.event_tx,
+            ServerEvent::daemon_link(&state.control, false, false),
+        );
     }
 }
 
@@ -144,7 +146,7 @@ fn handle_event(state: &AppState, client: &reqwest::Client, event: WorldEvent) {
             final_output.as_ref(),
         );
     }
-    let _ = state.event_tx.send(to_server_event(event));
+    super::events::send(&state.event_tx, to_server_event(event));
 }
 
 /// One status, in the vocabulary every route on this server speaks.
@@ -510,6 +512,7 @@ async fn fire_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::serve::events::Stamped;
     use crate::commands::serve::testutil::no_daemon_client;
     use crate::config::Config;
     use crate::runstate::{RunMeta, create_run};
@@ -519,7 +522,7 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::broadcast;
 
-    fn state_with(control: ControlClient) -> (AppState, broadcast::Receiver<ServerEvent>) {
+    fn state_with(control: ControlClient) -> (AppState, broadcast::Receiver<Stamped>) {
         let (tx, rx) = broadcast::channel(64);
         (
             AppState {
@@ -574,15 +577,18 @@ mod tests {
 
     /// The `type` tag of a serialized [`ServerEvent`] (avoids `matches!` whose
     /// always-taken arm leaves the other arm uncovered).
-    fn tag(event: &ServerEvent) -> String {
-        serde_json::to_value(event).unwrap()["type"]
+    fn tag(frame: &Stamped) -> String {
+        serde_json::to_value(&frame.event).unwrap()["type"]
             .as_str()
             .unwrap()
             .to_string()
     }
 
     fn mapped_tag(event: WorldEvent) -> String {
-        tag(&to_server_event(event))
+        serde_json::to_value(to_server_event(event)).unwrap()["type"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -940,7 +946,7 @@ mod tests {
         // the JSON is what a subscriber actually receives: this pins the field
         // name and the tagging a client parses, not just that the value made it
         // into the enum.
-        let sent = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        let sent = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
         assert_eq!(sent["type"], "agent_status");
         assert_eq!(
             sent["wait_reason"],
@@ -982,7 +988,7 @@ mod tests {
                 let ev = rx.try_recv().unwrap();
                 assert_eq!(tag(&ev), "agent_completed");
                 assert_eq!(
-                    serde_json::to_value(&ev).unwrap()["result"].as_str(),
+                    serde_json::to_value(&ev.event).unwrap()["result"].as_str(),
                     Some("boom")
                 );
             },
@@ -1375,10 +1381,10 @@ mod tests {
         let (state, mut rx) = state_with(control);
         let handle = tokio::spawn(event_loop(state, Duration::ZERO));
         assert_eq!(tag(&rx.recv().await.unwrap()), "agent_status");
-        let down = serde_json::to_value(rx.recv().await.unwrap()).unwrap();
+        let down = serde_json::to_value(rx.recv().await.unwrap().event).unwrap();
         assert_eq!(down["type"], "daemon_link");
         assert_eq!(down["connected"], false);
-        let up = serde_json::to_value(rx.recv().await.unwrap()).unwrap();
+        let up = serde_json::to_value(rx.recv().await.unwrap().event).unwrap();
         assert_eq!(up["type"], "daemon_link");
         assert_eq!(up["connected"], true);
         // A tokenless test daemon never introduces itself, so this reconnect
@@ -1399,7 +1405,7 @@ mod tests {
         let mut link = LinkWatch::new(&state);
         consume_once(&state, &client, &mut link).await;
         consume_once(&state, &client, &mut link).await;
-        let down = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        let down = serde_json::to_value(rx.try_recv().unwrap().event).unwrap();
         assert_eq!(down["type"], "daemon_link");
         assert_eq!(down["connected"], false);
         assert!(rx.try_recv().is_err(), "the second failure is not news");
@@ -1424,8 +1430,8 @@ mod tests {
         let (state, mut rx) = state_with(control);
         let client = reqwest::Client::new();
         let mut link = LinkWatch::new(&state);
-        let next = |rx: &mut broadcast::Receiver<ServerEvent>| {
-            serde_json::to_value(rx.try_recv().expect("an announcement")).unwrap()
+        let next = |rx: &mut broadcast::Receiver<Stamped>| {
+            serde_json::to_value(rx.try_recv().expect("an announcement").event).unwrap()
         };
 
         // Pass 1: nothing listening.
