@@ -19,6 +19,8 @@
 //! read one out of a bug report with `xxd`, which a compressed binary format
 //! would not allow.
 
+use std::cmp::Ordering;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -28,15 +30,23 @@ use sha2::{Digest, Sha256};
 /// in order and takes the first that parses, so a text key that happens to look
 /// numeric would silently decode as an integer, and the fallthrough arm would be
 /// unreachable in a way no test could distinguish.
-/// Ordered so a keyset comparison is one tuple compare. A given route uses one
-/// variant throughout, so the cross-variant ordering the derive produces is
-/// never exercised against real data - it exists to make the derive total.
+///
+/// The declaration order is the ordering: [`Null`](Self::Null) sits after the
+/// two value arms, so a listing ordered by a field some items have no value for
+/// puts those items last going up and first going down. Mixing a value arm with
+/// [`Tuple`](Self::Tuple) is not something a listing does - one order produces
+/// one shape for every item - and the derive covers it only so the ordering is
+/// total.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(super) enum CursorKey {
     /// A unix-seconds timestamp, for run listings.
     Int(i64),
     /// A name, for the blueprint catalog.
     Text(String),
+    /// No value for the ordering field: an untitled run ordered by title.
+    Null,
+    /// One component per key of a multi-key order, in priority order.
+    Tuple(Vec<CursorKey>),
 }
 
 /// Everything needed to resume a walk, and to prove the walk is the same one.
@@ -80,6 +90,9 @@ pub(super) enum CursorError {
     OrderMismatch { minted: String, requested: String },
     /// Presented against a different filter set than it was minted for.
     FilterMismatch,
+    /// Minted for a keyed listing and presented to a positional one, so its
+    /// key is not a place in a run's journal.
+    NotPositional,
 }
 
 impl CursorError {
@@ -102,6 +115,9 @@ impl CursorError {
                  restart the walk from the first page"
             ),
             CursorError::FilterMismatch => "Cursor was minted for a different set of filters; \
+                 restart the walk from the first page"
+                .to_string(),
+            CursorError::NotPositional => "Cursor does not name a position in this listing; \
                  restart the walk from the first page"
                 .to_string(),
         }
@@ -174,20 +190,100 @@ pub(super) fn decode(
     Ok(cursor)
 }
 
+/// The word a cursor records for a direction.
+pub(super) fn order_name(descending: bool) -> &'static str {
+    match descending {
+        true => "desc",
+        false => "asc",
+    }
+}
+
+/// Reverse an ordering when the direction runs the other way.
+fn flip(ord: Ordering, descending: bool) -> Ordering {
+    match descending {
+        true => ord.reverse(),
+        false => ord,
+    }
+}
+
+/// Where `a` sits relative to `b` in the walk itself.
+///
+/// `descending[i]` governs component `i` of a [`CursorKey::Tuple`]; a key that
+/// is not a tuple reads `descending[0]`, and an empty `descending` reads as
+/// ascending throughout. The id tie-break follows the first direction, which
+/// is what makes the order total: sort values collide freely, and a keyset walk
+/// over a non-total order loses whichever colliding item it resumed past.
+pub(super) fn compare(
+    a: (&CursorKey, &str),
+    b: (&CursorKey, &str),
+    descending: &[bool],
+) -> Ordering {
+    let primary = descending.first().copied().unwrap_or(false);
+    compare_keys(a.0, b.0, descending).then_with(|| flip(a.1.cmp(b.1), primary))
+}
+
+/// Order two keys, reading each tuple component in its own direction.
+fn compare_keys(a: &CursorKey, b: &CursorKey, descending: &[bool]) -> Ordering {
+    let primary = descending.first().copied().unwrap_or(false);
+    match (a, b) {
+        (CursorKey::Tuple(left), CursorKey::Tuple(right)) => {
+            for (at, (l, r)) in left.iter().zip(right.iter()).enumerate() {
+                let ord = flip(l.cmp(r), descending.get(at).copied().unwrap_or(false));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            // Only a shorter order compiled against a longer one gets here, and
+            // it cannot happen twice in one walk; the length decides so the
+            // comparison stays total.
+            flip(left.len().cmp(&right.len()), primary)
+        }
+        _ => flip(a.cmp(b), primary),
+    }
+}
+
 impl Cursor {
     /// Does `(key, id)` fall strictly after this cursor's position, walking in
     /// `descending` order?
-    ///
-    /// The tie-break follows the primary direction, so this is one tuple
-    /// comparison rather than a special case per direction.
     pub(super) fn precedes(&self, key: &CursorKey, id: &str, descending: bool) -> bool {
-        let here = (&self.key, self.id.as_str());
-        let there = (key, id);
-        if descending {
-            there < here
-        } else {
-            there > here
-        }
+        self.precedes_in(key, id, &[descending])
+    }
+
+    /// Does `(key, id)` fall strictly after this cursor's position, with each
+    /// key component read in its own direction?
+    pub(super) fn precedes_in(&self, key: &CursorKey, id: &str, descending: &[bool]) -> bool {
+        compare((key, id), (&self.key, self.id.as_str()), descending) == Ordering::Greater
+    }
+}
+
+/// The sort name a listing paged by position mints its cursors under.
+pub(super) const POSITION_SORT: &str = "position";
+
+/// Mint a cursor for a listing whose key is a place in a run's journal.
+///
+/// A run's executions, inferences, interactions, context changes and history
+/// points are ordered by where they sit in what the run recorded, so the
+/// position is the whole key and there is no tie left to break.
+pub(super) fn encode_position(digest: &str, position: usize, descending: bool) -> String {
+    encode(
+        POSITION_SORT,
+        order_name(descending),
+        digest,
+        CursorKey::Int(i64::try_from(position).unwrap_or(i64::MAX)),
+        "",
+    )
+}
+
+/// Read back the position a cursor from [`encode_position`] names.
+pub(super) fn decode_position(
+    raw: &str,
+    digest: &str,
+    descending: bool,
+) -> Result<usize, CursorError> {
+    let cursor = decode(raw, POSITION_SORT, order_name(descending), digest)?;
+    match cursor.key {
+        CursorKey::Int(at) => usize::try_from(at).map_err(|_| CursorError::NotPositional),
+        _ => Err(CursorError::NotPositional),
     }
 }
 
