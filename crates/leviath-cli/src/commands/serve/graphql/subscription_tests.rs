@@ -330,6 +330,74 @@ async fn a_run_filter_is_resolved_when_the_subscription_starts() {
     .await;
 }
 
+/// The greeting's number sits below every frame the subscription can carry,
+/// even when the filter took a while to resolve.
+///
+/// The receiver is registered before the filter is walked, so a frame sent
+/// during the walk is buffered and delivered. A greeting numbered after that
+/// walk would claim a number at or above one of those frames, and a client
+/// following the field's own promise - "every frame on this subscription has a
+/// number above it" - would throw them away.
+#[tokio::test]
+async fn the_greeting_is_numbered_below_every_frame_the_stream_can_carry() {
+    with_isolated_runs_dir_async("sub-greeting-seq", |_runs| async move {
+        write_run("run-a", None, "coder", RunStatus::Running);
+        let dir = tempfile::tempdir().expect("an agents dir");
+        let state = test_state(dir.path());
+        let tx = state.event_tx.clone();
+        let schema = crate::commands::serve::graphql::build_schema(state, false);
+        let mut stream = schema.execute_stream(Request::new(
+            r#"subscription { runEvents(filter: { blueprintName: { eq: "coder" } }) {
+                 __typename
+                 ... on SubscriptionOpenedEvent { seq }
+                 ... on LogLineWrittenEvent { seq } } }"#,
+        ));
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while out.len() < 2 {
+                match stream.next().await {
+                    Some(response) => {
+                        assert!(response.errors.is_empty(), "{:?}", response.errors);
+                        out.push(serde_json::to_value(&response.data).expect("serializes"));
+                    }
+                    None => break,
+                }
+            }
+            out
+        });
+        // The receiver exists from the moment the resolver starts, and the
+        // filter's walk awaits after that, so this frame goes out while the
+        // subscription is still working out which runs it is about.
+        for _ in 0..500 {
+            if tx.receiver_count() > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        crate::commands::serve::events::send(&tx, log("run-a", "sent during the walk"));
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(10), collector)
+            .await
+            .expect("the frames arrive")
+            .expect("the collector finishes");
+        assert_eq!(
+            field(&out[0], "runEvents", "__typename"),
+            "SubscriptionOpenedEvent"
+        );
+        let greeting = field(&out[0], "runEvents", "seq")
+            .as_i64()
+            .expect("the greeting's number");
+        let first = field(&out[1], "runEvents", "seq")
+            .as_i64()
+            .expect("the frame's number");
+        assert!(
+            greeting < first,
+            "the greeting is numbered {greeting} and the first frame {first}"
+        );
+    })
+    .await;
+}
+
 /// A run that starts matching joins the scope on its next status change.
 ///
 /// The one thing a subscribe-time set cannot do on its own: a run that was not
@@ -382,6 +450,69 @@ async fn a_run_that_starts_matching_joins_on_a_status_change() {
             "RunStatusChangedEvent"
         );
         assert_eq!(field(&out[1], "runEvents", "runId"), "run-a");
+    })
+    .await;
+}
+
+/// A filter nothing about a run's status can flip is not asked again on every
+/// status frame.
+///
+/// The re-check reads the whole run index and links it into a tree, so running
+/// it per frame per subscriber is the store over again for every heartbeat a
+/// fleet sends. A filter that names ids says nothing a status change can alter,
+/// so there is nothing to look at.
+#[tokio::test]
+async fn a_filter_no_status_change_can_flip_is_not_re_read_per_frame() {
+    with_isolated_runs_dir_async("sub-status-recheck", |_runs| async move {
+        write_run("sub6-a", None, "coder", RunStatus::Running);
+        write_run("sub6-b", None, "coder", RunStatus::Running);
+        let dir = tempfile::tempdir().expect("an agents dir");
+        let before = crate::commands::serve::testutil::trees_built_over("sub6-");
+        let out = frames_on(
+            test_state(dir.path()),
+            r#"subscription { runEvents(filter: { id: { in: ["sub6-a"] } })
+                 { ... on RunEvent { runId } } }"#,
+            vec![
+                status("sub6-b"),
+                status("sub6-b"),
+                status("sub6-b"),
+                log("sub6-a", "mine"),
+            ],
+            2,
+        )
+        .await;
+        let built = crate::commands::serve::testutil::trees_built_over("sub6-") - before;
+        assert_eq!(
+            built, 1,
+            "the scope is resolved once, and not looked up again per frame"
+        );
+        assert_eq!(field(&out[1], "runEvents", "runId"), "sub6-a");
+    })
+    .await;
+}
+
+/// A filter a status change can flip is still asked again, which is what puts
+/// a run that starts matching into scope.
+#[tokio::test]
+async fn a_filter_a_status_change_can_flip_is_still_re_read() {
+    with_isolated_runs_dir_async("sub-status-recheck-on", |_runs| async move {
+        write_run("sub6c-a", None, "coder", RunStatus::Error);
+        write_run("sub6c-b", None, "coder", RunStatus::Running);
+        let dir = tempfile::tempdir().expect("an agents dir");
+        let before = crate::commands::serve::testutil::trees_built_over("sub6c-");
+        let out = frames_on(
+            test_state(dir.path()),
+            r#"subscription { runEvents(filter: { status: { eq: ERROR } })
+                 { ... on RunEvent { runId } } }"#,
+            // The second run is outside the scope, so its status frame is the
+            // moment the filter is asked whether it has joined.
+            vec![status("sub6c-b"), log("sub6c-a", "mine")],
+            2,
+        )
+        .await;
+        let built = crate::commands::serve::testutil::trees_built_over("sub6c-") - before;
+        assert!(built > 1, "the filter was asked again: {built} readings");
+        assert_eq!(field(&out[1], "runEvents", "runId"), "sub6c-a");
     })
     .await;
 }
@@ -833,11 +964,13 @@ async fn a_subscription_runs_over_a_real_websocket() {
 /// The stamp a subscription opens on is the one the bus last handed out.
 #[test]
 fn the_opening_stamp_follows_the_bus() {
+    use crate::commands::serve::events::latest_seq;
+
     let dir = tempfile::tempdir().expect("an agents dir");
     let state = test_state(dir.path());
-    let before = super::super::events::opened(&state);
+    let before = super::super::events::opened(&state, latest_seq());
     crate::commands::serve::events::send(&state.event_tx, log("run-a", "one frame goes past"));
-    let after = super::super::events::opened(&state);
+    let after = super::super::events::opened(&state, latest_seq());
     assert!(
         after.seq.0 > before.seq.0,
         "{} then {}",

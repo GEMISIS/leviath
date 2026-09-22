@@ -108,6 +108,7 @@ fn rest_selection() -> run_core::RunSelection {
         since: None,
         parent: ParentFilter::Any,
         predicate: None,
+        preloaded: None,
     }
 }
 
@@ -817,6 +818,88 @@ async fn a_batch_fetch_can_ask_about_a_subtree() {
         let mut ids = ids_of(&answer.data, "runs");
         ids.sort();
         assert_eq!(ids, vec!["grandchild".to_string(), "worker".to_string()]);
+    })
+    .await;
+}
+
+/// A page of runs each naming its ancestors links the store once, not once per
+/// run.
+///
+/// `ancestorIds` is answered by walking a run's `parentId` up through the
+/// shared index, and a chain is three deep at most. Linking the whole store per
+/// run would make a page of two hundred cost the store two hundred times over,
+/// and the answer would look exactly the same - so what this checks is the work
+/// that did not happen.
+#[tokio::test]
+async fn a_page_of_ancestors_does_not_link_the_store_once_per_run() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-ancestors-cost", |_d| async move {
+        // Newest first, so the ids below read as the breadcrumb they are.
+        create_run(&meta_at("anc7-root", 100)).expect("run written");
+        let mut mid = meta_at("anc7-mid", 200);
+        mid.parent_run_id = Some("anc7-root".to_string());
+        create_run(&mid).expect("run written");
+        for at in 0..198 {
+            let mut leaf = meta_at(&format!("anc7-leaf-{at:03}"), 300 + at);
+            leaf.parent_run_id = Some("anc7-mid".to_string());
+            create_run(&leaf).expect("run written");
+        }
+
+        let before = crate::commands::serve::testutil::trees_built_over("anc7-");
+        let answer = run_query("{ runs(first: 200) { results { id ancestorIds } } }").await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let built = crate::commands::serve::testutil::trees_built_over("anc7-") - before;
+        assert!(
+            built <= 1,
+            "the store was linked {built} times for one page"
+        );
+
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        let results = json["runs"]["results"].as_array().expect("a page");
+        assert_eq!(results.len(), 200);
+        let chain_of = |id: &str| {
+            results
+                .iter()
+                .find(|row| row["id"] == id)
+                .map(|row| row["ancestorIds"].clone())
+                .expect("the run is on the page")
+        };
+        // Root first, so the list reads as a breadcrumb.
+        assert_eq!(
+            chain_of("anc7-leaf-000"),
+            serde_json::json!(["anc7-root", "anc7-mid"])
+        );
+        assert_eq!(chain_of("anc7-mid"), serde_json::json!(["anc7-root"]));
+        assert_eq!(chain_of("anc7-root"), serde_json::json!([]));
+    })
+    .await;
+}
+
+/// A record that names one of its own descendants as its parent stops the walk
+/// rather than spinning it.
+///
+/// Nothing writes such a record. The guard is that a run already on the chain
+/// is not walked to twice.
+#[tokio::test]
+async fn a_cycle_above_a_run_ends_the_breadcrumb() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-ancestors-cycle", |_d| async move {
+        let mut one = meta_at("cyc-one", 100);
+        one.parent_run_id = Some("cyc-two".to_string());
+        create_run(&one).expect("run written");
+        let mut two = meta_at("cyc-two", 200);
+        two.parent_run_id = Some("cyc-one".to_string());
+        create_run(&two).expect("run written");
+
+        let answer = run_query(
+            r#"{ runs(filter: { id: { eq: "cyc-one" } }) { results { id ancestorIds } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(
+            json["runs"]["results"][0]["ancestorIds"],
+            serde_json::json!(["cyc-one", "cyc-two"]),
+            "each run above is named once and the walk stops"
+        );
     })
     .await;
 }

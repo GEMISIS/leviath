@@ -15,6 +15,8 @@ use async_graphql::{Context, ID};
 
 use super::super::blocking::blocking;
 use super::super::core::blueprints;
+use super::super::core::error::ServeError;
+use super::super::core::runs as run_core;
 use super::super::types::AppState;
 use super::error::IntoGraphql;
 use super::query::{RunExport, yolo_profile as profile_named};
@@ -119,12 +121,23 @@ pub(crate) async fn resolve(ctx: &Context<'_>, id: &str) -> async_graphql::Resul
 /// One entry per id, null where that id names nothing, so a client reading a
 /// page of cached keys can line the answers up against what it asked without
 /// matching on ids. Resolved one after another rather than all at once: the
-/// reads behind them are a file each at most, and a fan-out over an
-/// unbounded list of ids is what the page limits exist to prevent.
+/// reads behind them are a file each at most.
+///
+/// Bounded by the same cap the run listing puts on a named list of ids, for
+/// the same reason: one request is one read per id, and a list nobody capped
+/// is a fan-out over the whole store.
 pub(crate) async fn resolve_many(
     ctx: &Context<'_>,
     ids: Vec<ID>,
 ) -> async_graphql::Result<Vec<Option<Node>>> {
+    if ids.len() > run_core::MAX_IDS {
+        return Err(ServeError::BadRequest(format!(
+            "`ids` names {} nodes; at most {} may be named at once",
+            ids.len(),
+            run_core::MAX_IDS
+        )))
+        .gql();
+    }
     let mut found = Vec::with_capacity(ids.len());
     for id in ids {
         found.push(resolve(ctx, id.as_str()).await?);

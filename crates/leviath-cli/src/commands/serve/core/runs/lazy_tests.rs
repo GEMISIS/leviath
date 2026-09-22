@@ -122,6 +122,7 @@ fn spec() -> RunSpec {
         parent: ParentFilter::Any,
         blueprint: None,
         predicate: None,
+        preloaded: None,
         digest: "abcd1234".to_string(),
     }
 }

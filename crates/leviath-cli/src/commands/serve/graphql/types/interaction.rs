@@ -344,7 +344,9 @@ impl Interaction {
     /// The call awaiting approval, typed. Null for every other kind of ask,
     /// and null once settled: the journal keeps the tool's name, not its
     /// arguments.
-    #[filter(skip)] // TODO(mirror): ToolCall
+    // Unfiltered: a call is an interface over a type per tool, and there is no
+    // one comparator shape that spans them.
+    #[filter(skip)]
     async fn tool_call(&self) -> Option<&super::tool_calls::ToolCall> {
         self.tool_call.as_deref()
     }

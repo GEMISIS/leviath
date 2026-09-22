@@ -287,29 +287,42 @@ async fn act_and_read(
 /// so the acts below share a filter with the `runs` listing rather than each
 /// growing its own way of saying which runs it is about.
 ///
-/// A filter that names ids outright carries the ones the listing could not read
-/// as well as the ones it could. A run whose record will not parse is invisible
-/// to every listing, and dropping it here would leave it both invisible and
-/// undeletable; it comes back as `skipped` with the reason instead, which is
-/// what `force` is then for.
+/// Naming ids outright says which runs to read, not which ones to act on: the
+/// rest of the filter still decides, exactly as it does on the listing. A run
+/// the filter excluded is not acted on because its id was written down.
+///
+/// The one id a named list adds on its own is a run the index has never seen.
+/// A run whose record will not parse is invisible to every listing, so nothing
+/// else could ever name it, and dropping it here would leave it both invisible
+/// and undeletable; it comes back as `skipped` with the reason instead, which
+/// is what `force` is then for.
 pub(super) async fn matching_run_ids(
     state: &AppState,
     filter: RunFilter,
     act: &str,
 ) -> Result<Vec<String>, ServeError> {
-    // The ids the filter names outright come first, unread: a run whose record
-    // will not parse is in no listing, and the act has to be able to name it.
     let named = run_predicate::named_ids(&filter)?;
     let mut ids: Vec<String> = run_predicate::selection_for(filter, act, state)
         .await?
         .iter()
         .map(|meta| meta.run_id.clone())
         .collect();
-    for id in named.into_iter().flatten() {
-        if !ids.contains(&id) {
-            ids.push(id);
+    // A set, because one filter may name the same id twice - `eq` and `in`
+    // both - and an act carried out twice over one run is not what either
+    // spelling asked for. The snapshot is read only where ids were named,
+    // because that is the only way a run outside the walk's answer can be
+    // reached at all.
+    let unlisted: std::collections::BTreeSet<String> = match named {
+        None => std::collections::BTreeSet::new(),
+        Some(named) => {
+            let snapshot = state.caches.run_index.snapshot().await;
+            named
+                .into_iter()
+                .filter(|id| snapshot.get(id).is_none())
+                .collect()
         }
-    }
+    };
+    ids.extend(unlisted);
     Ok(ids)
 }
 

@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_graphql::{EmptyMutation, EmptySubscription, Object, Schema, SimpleObject, Value};
 
-use super::{Connection, NoExtras, Paged, Total};
+use super::{Connection, NoExtras, Paged, PositionQuery, Total, position_page};
+use crate::commands::serve::graphql::filter::{BoxFuture, Filterable, MatchCx, Tri};
 use crate::commands::serve::graphql::scalars::Cursor;
 
 /// An item type, standing in for a mirrored output type.
@@ -212,4 +213,107 @@ async fn an_enormous_count_saturates() {
 #[test]
 fn the_default_extras_carry_nothing() {
     assert_eq!(format!("{:?}", NoExtras), "NoExtras");
+}
+
+/// One recorded item, standing in for a journal entry.
+///
+/// The filter is a plain boolean: what these tests are about is where the walk
+/// gets to and what the cursor records, not what a filter decides.
+#[derive(Debug, PartialEq, Eq)]
+struct Entry(&'static str);
+
+impl Filterable for Entry {
+    type Filter = bool;
+
+    fn test(&self, filter: &bool, _cx: &MatchCx<'_>) -> Tri {
+        Tri::of(*filter)
+    }
+
+    fn confirm<'a>(&'a self, filter: &'a bool, _cx: &'a MatchCx<'a>) -> BoxFuture<'a, bool> {
+        Box::pin(std::future::ready(*filter))
+    }
+}
+
+/// The names on one page, and the cursor it ended on.
+async fn positions(
+    entries: Vec<Entry>,
+    descending: bool,
+    limit: usize,
+    after: Option<&str>,
+) -> (Vec<&'static str>, Option<String>) {
+    let cx = MatchCx::at(1_788_000_000);
+    let page = position_page(
+        entries,
+        &true,
+        &cx,
+        PositionQuery {
+            digest: "testdigest",
+            after,
+            descending,
+            limit,
+        },
+    )
+    .await
+    .expect("the page walks");
+    (
+        page.items.iter().map(|entry| entry.0).collect(),
+        page.cursor.map(|cursor| cursor.0),
+    )
+}
+
+/// A cursor names where an item sits in what was recorded, whichever way the
+/// walk runs.
+///
+/// A journal grows at the end, so a position counted from the end moves every
+/// time the run records something: a descending page two would hand back rows
+/// page one already showed. Counted from the start, the position of an item
+/// that was already there never changes, and a descending walk resumes below
+/// the boundary rather than above it.
+#[tokio::test]
+async fn a_descending_cursor_survives_the_journal_growing_under_it() {
+    let first = vec![Entry("e0"), Entry("e1"), Entry("e2")];
+    let (names, cursor) = positions(first, true, 2, None).await;
+    assert_eq!(names, vec!["e2", "e1"]);
+    let cursor = cursor.expect("there is another page");
+
+    // The run records one more while the client reads.
+    let grown = vec![Entry("e0"), Entry("e1"), Entry("e2"), Entry("e3")];
+    let (names, cursor) = positions(grown, true, 2, Some(&cursor)).await;
+    assert_eq!(
+        names,
+        vec!["e0"],
+        "page two resumes past `e1` rather than at it"
+    );
+    assert!(cursor.is_none(), "the walk reached the end");
+}
+
+/// The ascending walk resumes past the position it recorded, and the cursor
+/// minted one way round is not a cursor for the other.
+#[tokio::test]
+async fn an_ascending_cursor_resumes_where_it_left_off() {
+    let entries = || vec![Entry("e0"), Entry("e1"), Entry("e2")];
+    let (names, cursor) = positions(entries(), false, 2, None).await;
+    assert_eq!(names, vec!["e0", "e1"]);
+    let cursor = cursor.expect("there is another page");
+    let (names, next) = positions(entries(), false, 2, Some(&cursor)).await;
+    assert_eq!(names, vec!["e2"]);
+    assert!(next.is_none());
+
+    // The direction is part of the cursor's identity.
+    let cx = MatchCx::at(1_788_000_000);
+    let refused = position_page(
+        entries(),
+        &true,
+        &cx,
+        PositionQuery {
+            digest: "testdigest",
+            after: Some(&cursor),
+            descending: true,
+            limit: 2,
+        },
+    )
+    .await
+    .err()
+    .expect("a cursor minted ascending is not a descending one");
+    assert_eq!(refused.code(), "BAD_USER_INPUT");
 }

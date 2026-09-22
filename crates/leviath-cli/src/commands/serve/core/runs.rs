@@ -271,6 +271,12 @@ pub(crate) struct RunSpec {
     /// A composable predicate the surface built, consulted per run beside the
     /// filters above.
     pub(crate) predicate: Option<Arc<dyn RunPredicate>>,
+    /// The records behind `ids`, where the caller already holds them.
+    ///
+    /// A caller that walked the store to work out which runs it means is
+    /// carrying every record it walked; reading them back by id would open the
+    /// whole store a second time for one answer.
+    pub(crate) preloaded: Option<Vec<Arc<RunMeta>>>,
     pub(crate) digest: String,
 }
 
@@ -367,6 +373,7 @@ fn read_by_id(ids: &[String]) -> (Vec<Arc<RunMeta>>, Vec<String>) {
     let mut found: Vec<Arc<RunMeta>> = Vec::new();
     let mut missing = Vec::new();
     for id in ids {
+        noted(id);
         match runstate::read_meta(id) {
             Ok(meta) => found.push(Arc::new(meta)),
             Err(_) => missing.push(id.clone()),
@@ -375,9 +382,47 @@ fn read_by_id(ids: &[String]) -> (Vec<Arc<RunMeta>>, Vec<String>) {
     (found, missing)
 }
 
+/// What a read of one run's record straight from disk is reported to.
+///
+/// A caller that walked the store already holds every record it walked, and
+/// opening each one again is the store read twice for one answer. That is only
+/// visible as work that did not happen, so the reads report here and a test
+/// counts them.
+pub(crate) type RecordReadRecorder = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Where a record read is reported, when anything is listening.
+///
+/// Nothing installs a recorder in a server: the list would grow for ever and
+/// nothing but a test has any use for it, so a read costs a load of this and a
+/// call it does not make.
+static RECORDER: std::sync::OnceLock<RecordReadRecorder> = std::sync::OnceLock::new();
+
+/// Report every record read to `record`, for as long as this process lives.
+///
+/// Once, deliberately: a second call is a no-op, so each test that wants the
+/// log can ask for it rather than arranging to be the one that installs it.
+#[cfg(test)]
+pub(crate) fn record_record_reads(record: RecordReadRecorder) {
+    drop(RECORDER.set(record));
+}
+
+/// Note that one run's record is about to be opened.
+fn noted(run_id: &str) {
+    if let Some(record) = RECORDER.get() {
+        record(run_id);
+    }
+}
+
 /// Answer a batch fetch by id.
-fn by_ids(ids: &[String], server_time: i64) -> RunListing {
-    let (found, missing) = read_by_id(ids);
+///
+/// `held` is the records a caller that already walked the store is carrying.
+/// The ids came out of those records, so reading them back would open every
+/// one of them a second time for the same answer.
+fn by_ids(ids: &[String], held: Option<&[Arc<RunMeta>]>, server_time: i64) -> RunListing {
+    let (found, missing) = match held {
+        Some(held) => (held.to_vec(), Vec::new()),
+        None => read_by_id(ids),
+    };
     let total = found.len();
     RunListing {
         hits: found
@@ -406,7 +451,7 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
     let server_time = leviath_core::duration::now_secs();
 
     if let Some(ref ids) = spec.ids {
-        return by_ids(ids, server_time);
+        return by_ids(ids, spec.preloaded.as_deref(), server_time);
     }
 
     let snapshot = state.caches.run_index.snapshot().await;
@@ -591,6 +636,12 @@ pub(crate) struct RunSelection {
     /// `GET /api/runs` leaves it absent and filters with the fields above;
     /// GraphQL's `runs` field puts its whole filter tree here.
     pub(crate) predicate: Option<Arc<dyn RunPredicate>>,
+    /// The records behind `ids`, where the caller already holds them.
+    ///
+    /// Set by a caller that walked the store to work out which runs it means,
+    /// so the listing hands those records back instead of opening every one of
+    /// them again.
+    pub(crate) preloaded: Option<Vec<Arc<RunMeta>>>,
 }
 
 impl RunSelection {
@@ -677,6 +728,7 @@ impl RunSelection {
             parent: self.parent,
             blueprint: self.blueprint,
             predicate: self.predicate,
+            preloaded: self.preloaded,
             digest,
         }
     }

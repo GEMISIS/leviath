@@ -56,7 +56,37 @@ enum Scope {
         predicate: Arc<dyn RunPredicate>,
         /// Whether a run spawned by a run in scope joins the scope.
         include_descendants: bool,
+        /// Whether a status frame could change what this filter answers.
+        ///
+        /// Decided once, when the subscription starts, because the filter does
+        /// not change afterwards. A filter it is false for is never asked
+        /// again, which is what keeps a fleet's heartbeat from costing every
+        /// subscriber a reading of the whole run store per frame.
+        status_can_widen: bool,
     },
+}
+
+/// The filter fields a run's own status frame can change the answer to.
+///
+/// A status frame carries the new status, the reason it is waiting, the title
+/// the titling pass landed, and the two clocks that move with them. Nothing
+/// else on a run's record moves without a frame of its own.
+const MUTABLE_FIELDS: [&str; 5] = [
+    "status:",
+    "waitReason:",
+    "title:",
+    "updatedAt:",
+    "lastProgressAt:",
+];
+
+/// Whether a status frame could change what this filter answers.
+///
+/// Read off the canonical rendering the cursor digest is taken over, so a
+/// filter has one description here rather than two. A field name that turns up
+/// inside a string somebody searched for reads as a mention, which costs a
+/// re-check that answers the same way - never a missed one.
+fn mentions_mutable_fields(rendered: &str) -> bool {
+    MUTABLE_FIELDS.iter().any(|field| rendered.contains(field))
 }
 
 /// The runs a filter names right now, as a scope that can re-check one later.
@@ -75,6 +105,9 @@ async fn matching(
     let Some(predicate) = run_predicate::compile(filter.clone())? else {
         return Ok(Scope::Everything);
     };
+    // Read off the predicate's own digest part, which is the canonical
+    // rendering of what the client wrote, rather than rendering it again.
+    let status_can_widen = mentions_mutable_fields(&predicate.digest_part());
     // The full walk, reads included, so the first frame a subscriber sees is
     // about a run a page of the same filter would have listed.
     let runs = run_predicate::selection(Some(filter), state)
@@ -86,6 +119,7 @@ async fn matching(
         runs,
         predicate,
         include_descendants,
+        status_can_widen,
     })
 }
 
@@ -117,6 +151,7 @@ impl Scope {
             runs,
             predicate,
             include_descendants,
+            status_can_widen,
         } = self
         else {
             return true;
@@ -138,10 +173,11 @@ impl Scope {
                 }
             }
             // A status change is the other moment a run's answer can have
-            // changed, and it is the cheap one: the record it reads is already
-            // in the index.
+            // changed, and it is only asked of a filter one could change.
             ServerEvent::AgentStatus { run_id, .. }
-                if !runs.contains(run_id) && still_matches(state, predicate, run_id).await =>
+                if *status_can_widen
+                    && !runs.contains(run_id)
+                    && still_matches(state, predicate, run_id).await =>
             {
                 runs.insert(run_id.clone());
             }
@@ -310,11 +346,16 @@ impl Subscription_ {
     /// `filter` is the run listing's own filter, so "every failed run of this
     /// blueprint" is the same words here as in `runs`. It is resolved to a set
     /// of runs when the subscription starts. After that the set only grows: a
-    /// run that spawns is checked against the filter once its record exists, a
-    /// run outside the set is checked again on each of its status changes, and
-    /// `includeDescendants` puts the sub-agents of a run in scope as they
+    /// run that spawns is checked against the filter once its record exists,
+    /// and `includeDescendants` puts the sub-agents of a run in scope as they
     /// spawn. A run that stops matching keeps sending, because losing the
     /// frame that says a run finished is worse than one extra row.
+    ///
+    /// A run outside the set is checked again on each of its status changes
+    /// where the filter names something a status change can alter - `status`,
+    /// `waitReason`, `title`, `updatedAt` or `lastProgressAt`. A filter that
+    /// names none of them cannot start matching a run because of a status
+    /// frame, so nothing is re-read.
     ///
     /// Only the filter's in-memory half decides those later checks. A
     /// condition that would have to open a file reads as "not matching" for
@@ -342,14 +383,17 @@ impl Subscription_ {
         include_descendants: bool,
     ) -> async_graphql::Result<impl Stream<Item = RunEventFrame> + use<>> {
         let state = ctx.data_unchecked::<AppState>();
-        // Subscribed before anything is awaited, so a frame sent while the
-        // filter is still being resolved is buffered rather than lost.
+        // The bus's number is read before the receiver exists, and the receiver
+        // before anything is awaited: a frame sent while the filter is still
+        // being resolved is then buffered rather than lost, and numbered above
+        // the greeting rather than under it.
+        let since = super::super::events::latest_seq();
         let frames = BroadcastStream::new(state.event_tx.subscribe());
         let scope = match filter {
             Some(filter) => matching(state, filter, include_descendants).await.gql()?,
             None => Scope::Everything,
         };
-        let opened = super::events::opened(state);
+        let opened = super::events::opened(state, since);
         let live = RunLive {
             frames,
             types: Types(types.into_iter().flatten().collect()),
@@ -376,8 +420,9 @@ impl Subscription_ {
         types: Option<Vec<MachineEventType>>,
     ) -> impl Stream<Item = MachineEventFrame> + use<> {
         let state = ctx.data_unchecked::<AppState>();
+        let since = super::super::events::latest_seq();
         let frames = BroadcastStream::new(state.event_tx.subscribe());
-        let opened = super::events::opened(state);
+        let opened = super::events::opened(state, since);
         let live = MachineLive {
             frames,
             types: Types(types.into_iter().flatten().collect()),
@@ -400,8 +445,9 @@ impl Subscription_ {
         #[graphql(desc = "The job, as `startUpdate` answered with.")] id: ID,
     ) -> impl Stream<Item = UpdateJobEventFrame> + use<> {
         let state = ctx.data_unchecked::<AppState>();
+        let since = super::super::events::latest_seq();
         let frames = BroadcastStream::new(state.event_tx.subscribe());
-        let opened = super::events::opened(state);
+        let opened = super::events::opened(state, since);
         let live = JobLive {
             frames,
             job: id.to_string(),

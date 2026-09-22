@@ -164,6 +164,7 @@ fn anything(limit: usize) -> RunSelection {
         since: None,
         parent: ParentFilter::Any,
         predicate: None,
+        preloaded: None,
     }
 }
 
@@ -218,6 +219,10 @@ pub(crate) async fn selection_for(
 /// to respect; what it does need is the runs named outright, because writing
 /// the file is a second pass and a filter that reads files must not be answered
 /// twice.
+///
+/// The records travel with the ids. The walk above already holds every one of
+/// them, and an export that handed over only the ids would have the listing
+/// open the whole store again to get back what it had just let go.
 pub(crate) async fn everything(
     filter: Option<RunFilter>,
     state: &AppState,
@@ -225,6 +230,7 @@ pub(crate) async fn everything(
     let matched = selection(filter, state).await?;
     Ok(RunSelection {
         ids: Some(matched.iter().map(|meta| meta.run_id.clone()).collect()),
+        preloaded: Some(matched),
         ..anything(usize::MAX)
     })
 }

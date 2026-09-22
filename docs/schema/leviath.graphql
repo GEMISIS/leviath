@@ -10650,10 +10650,11 @@ type RunOutput implements Node {
 	than every point's every region. Chronological by default, which is also
 	the cheaper direction to read.
 	
-	Read whole rather than streamed, unlike `GET /api/agents/{id}/context/history`:
-	filtering a point means reading its window, and a filter answered by
-	reading is what this schema's walk defers past the page it can, not
-	past the one file this already is.
+	Unfiltered, only the page's own windows are read, exactly as
+	`GET /api/agents/{id}/context/history` reads them. A `filter` is a
+	question about each point, and answering it means opening that point's
+	window, so a filtered page reads the run's whole history to decide what
+	is on it. Page first and filter in the client where the history is long.
 	"""
 	contextHistory(
 		"Which points to include. Omitted means all of them."
@@ -13776,11 +13777,16 @@ type Subscription {
 	`filter` is the run listing's own filter, so "every failed run of this
 	blueprint" is the same words here as in `runs`. It is resolved to a set
 	of runs when the subscription starts. After that the set only grows: a
-	run that spawns is checked against the filter once its record exists, a
-	run outside the set is checked again on each of its status changes, and
-	`includeDescendants` puts the sub-agents of a run in scope as they
+	run that spawns is checked against the filter once its record exists,
+	and `includeDescendants` puts the sub-agents of a run in scope as they
 	spawn. A run that stops matching keeps sending, because losing the
 	frame that says a run finished is worse than one extra row.
+	
+	A run outside the set is checked again on each of its status changes
+	where the filter names something a status change can alter - `status`,
+	`waitReason`, `title`, `updatedAt` or `lastProgressAt`. A filter that
+	names none of them cannot start matching a run because of a status
+	frame, so nothing is re-read.
 	
 	Only the filter's in-memory half decides those later checks. A
 	condition that would have to open a file reads as "not matching" for

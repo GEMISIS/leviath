@@ -38,6 +38,7 @@ fn all_runs(fields: Option<Vec<&str>>) -> RunSelection {
         parent: ParentFilter::Any,
         blueprint: None,
         predicate: None,
+        preloaded: None,
     }
 }
 

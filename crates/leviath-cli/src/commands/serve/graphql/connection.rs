@@ -224,18 +224,21 @@ pub(crate) struct PositionQuery<'a> {
 /// Filter, order and page a listing already fully in memory.
 ///
 /// The position [`encode_position`](cursor::encode_position) records is each
-/// item's own place in `items`, after `query.descending` has reversed it if
-/// asked: not a field of the item, because more than one item can share a
-/// journal position - every call one batch dispatched together does - and a
-/// cursor has to name a place the walk cannot repeat or skip, which only the
-/// list's own order guarantees.
+/// item's own place in `items` as they were recorded, ascending, whichever way
+/// round the walk runs: not a field of the item, because more than one item can
+/// share a journal position - every call one batch dispatched together does -
+/// and a cursor has to name a place the walk cannot repeat or skip, which only
+/// the list's own order guarantees.
 ///
-/// A position is therefore where the walk got to rather than where the item
-/// sits in the file, so resuming is the same comparison whichever way round
-/// the walk runs. The direction is still part of the cursor's identity, so a
-/// cursor minted walking one way is refused walking the other.
+/// Counted from the start rather than from the walk's own end, because the
+/// journal behind these listings grows: a run appending an execution moves
+/// every position counted from the end, and a descending page two would then
+/// hand back rows page one already showed. A descending walk reads the same
+/// ascending positions in reverse and resumes below the boundary rather than
+/// above it. The direction is still part of the cursor's identity, so a cursor
+/// minted walking one way is refused walking the other.
 pub(crate) async fn position_page<T>(
-    mut items: Vec<T>,
+    items: Vec<T>,
     filter: &T::Filter,
     cx: &MatchCx<'_>,
     query: PositionQuery<'_>,
@@ -249,9 +252,6 @@ where
         descending,
         limit,
     } = query;
-    if descending {
-        items.reverse();
-    }
     let mut matched: Vec<(usize, T)> = Vec::with_capacity(items.len());
     for (position, item) in items.into_iter().enumerate() {
         // The cheap answer decides on its own where it can, and only an
@@ -259,6 +259,9 @@ where
         if item.confirm(filter, cx).await {
             matched.push((position, item));
         }
+    }
+    if descending {
+        matched.reverse();
     }
     let total = matched.len();
     let start = match after {
@@ -268,7 +271,10 @@ where
                 .map_err(|e| ServeError::BadRequest(e.message()))?;
             matched
                 .iter()
-                .position(|(position, _)| *position > boundary)
+                .position(|(position, _)| match descending {
+                    true => *position < boundary,
+                    false => *position > boundary,
+                })
                 .unwrap_or(matched.len())
         }
     };

@@ -439,6 +439,16 @@ pub(crate) fn latest_seq() -> u64 {
     SEQ.load(Ordering::Relaxed)
 }
 
+/// Held across taking a number and handing the frame over, so the two are one
+/// step.
+///
+/// Numbering and delivery apart would let a producer that took the lower
+/// number reach the channel second, and a subscriber would then read a number
+/// going backwards - which is exactly the comparison a gap is reported from.
+/// The lock covers a counter bump and a push into a ring buffer; nothing under
+/// it waits on anything.
+static ORDER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Stamp one event and hand it to every subscriber.
 ///
 /// The one place a frame is given its sequence number and its time, so no
@@ -446,9 +456,11 @@ pub(crate) fn latest_seq() -> u64 {
 /// with nobody listening is not an error: the daemon keeps working whether or
 /// not a console is open.
 pub(crate) fn send(bus: &broadcast::Sender<Stamped>, event: ServerEvent) {
+    let at = leviath_core::duration::now_secs();
+    let _order = leviath_core::sync::lock(&ORDER);
     let _ = bus.send(Stamped {
         seq: SEQ.fetch_add(1, Ordering::Relaxed) + 1,
-        at: leviath_core::duration::now_secs(),
+        at,
         event,
     });
 }
@@ -456,6 +468,50 @@ pub(crate) fn send(bus: &broadcast::Sender<Stamped>, event: ServerEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two producers sending at once still hand the bus its frames in the
+    /// order they were numbered.
+    ///
+    /// Numbering and delivery are one step, so there is no window in which a
+    /// frame that took the lower number can be delivered after one that took
+    /// the higher. A subscriber that saw them the other way round would read a
+    /// number going backwards, and `EventsDroppedEvent` is derived from exactly
+    /// that comparison.
+    #[test]
+    fn frames_arrive_in_the_order_they_were_numbered() {
+        let (tx, mut rx) = broadcast::channel::<Stamped>(32_768);
+        let each = 4_000;
+        let producers = 4;
+        std::thread::scope(|scope| {
+            for producer in 0..producers {
+                let tx = tx.clone();
+                scope.spawn(move || {
+                    for line in 0..each {
+                        send(
+                            &tx,
+                            ServerEvent::Log {
+                                agent_id: format!("agent-{producer}"),
+                                run_id: "run-1".to_string(),
+                                line: format!("line {line}"),
+                            },
+                        );
+                    }
+                });
+            }
+        });
+        let mut last = 0;
+        let mut seen = 0;
+        while let Ok(frame) = rx.try_recv() {
+            assert!(
+                frame.seq > last,
+                "frame {seen} carries {} after {last}",
+                frame.seq
+            );
+            last = frame.seq;
+            seen += 1;
+        }
+        assert_eq!(seen, each * producers);
+    }
 
     /// The link event is about no run: it filters as the empty run id, and a
     /// per-run subscription still receives it.

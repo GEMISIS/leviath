@@ -250,6 +250,35 @@ fn ids_cannot_be_combined_with_the_parameters_it_would_override() {
     );
 }
 
+/// A batch fetch by id reads each record it names, once, and says which of
+/// them named nothing.
+///
+/// This route holds no records of its own, so the ids are all it has to go on.
+/// A caller that already walked the store hands the records over instead, and
+/// then nothing here is opened a second time.
+#[tokio::test]
+async fn a_batch_fetch_reads_each_record_it_names() {
+    crate::runstate::with_isolated_runs_dir_async("rest-batch-reads", |_d| async move {
+        create_run(&meta_at("bat9-a", 100)).expect("run written");
+        create_run(&meta_at("bat9-b", 200)).expect("run written");
+        let spec = resolve_ok(&[("ids", "bat9-a,bat9-b,bat9-gone")]);
+
+        let counted = || crate::commands::serve::testutil::records_read_under("bat9-");
+        let before = counted();
+        let listing = crate::commands::serve::core::runs::list(&test_state(), &spec).await;
+        assert_eq!(counted() - before, 3, "one read per id, and no more");
+
+        let found: Vec<&str> = listing
+            .hits
+            .iter()
+            .map(|hit| hit.meta.run_id.as_str())
+            .collect();
+        assert_eq!(found, vec!["bat9-a", "bat9-b"]);
+        assert_eq!(listing.missing, vec!["bat9-gone".to_string()]);
+    })
+    .await;
+}
+
 #[test]
 fn too_many_ids_are_refused() {
     let many = (0..MAX_IDS + 1)
