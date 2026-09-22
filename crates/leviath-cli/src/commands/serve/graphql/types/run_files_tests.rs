@@ -475,6 +475,82 @@ async fn the_context_history_pages_in_either_direction() {
     .await;
 }
 
+/// A page of two reads two windows, whatever the journal holds.
+///
+/// A window is the largest thing this API materializes, and reading all of one
+/// run's before trimming to a page of two is the whole journal in memory for
+/// two rows of it. With no filter every point is on the listing, so which ones
+/// the page holds is arithmetic over their own positions and only those are
+/// read. A filter has no such shortcut: whether a point matches is a question
+/// about the point, so every one of them is read.
+#[tokio::test]
+async fn an_unfiltered_history_page_reads_only_its_own_windows() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-history-reads", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let mut meta = meta_in(workdir.path());
+        meta.run_id = "hist8".to_string();
+        create_run(&meta).expect("run written");
+        write_journal(&meta, &[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        let counted = || crate::commands::serve::testutil::windows_read_for("hist8");
+
+        let before = counted();
+        let json = data(
+            meta.clone(),
+            r#"{ run { contextHistory(first: 2) {
+                 total cursor results { window { totalTokens } } } } }"#,
+        )
+        .await;
+        assert_eq!(counted() - before, 2, "a page of two is two windows");
+        let page = &json["run"]["contextHistory"];
+        assert_eq!(page["total"], 10, "the count is still the whole history");
+        assert_eq!(page["results"][0]["window"]["totalTokens"], 10);
+        assert_eq!(page["results"][1]["window"]["totalTokens"], 20);
+
+        // Newest first reads the other end of the journal, and the same two.
+        let before = counted();
+        let json = data(
+            meta.clone(),
+            r#"{ run { contextHistory(first: 2,
+                        orderBy: [{ field: SEQUENCE, direction: DESC }]) {
+                 cursor results { window { totalTokens } } } } }"#,
+        )
+        .await;
+        assert_eq!(counted() - before, 2);
+        let page = &json["run"]["contextHistory"];
+        assert_eq!(page["results"][0]["window"]["totalTokens"], 100);
+        assert_eq!(page["results"][1]["window"]["totalTokens"], 90);
+
+        // And the cursor carries on downwards from there, reading two more.
+        let cursor = page["cursor"].as_str().expect("a cursor").to_string();
+        let before = counted();
+        let json = data(
+            meta.clone(),
+            &format!(
+                r#"{{ run {{ contextHistory(first: 2, after: "{cursor}",
+                          orderBy: [{{ field: SEQUENCE, direction: DESC }}]) {{
+                     results {{ window {{ totalTokens }} }} }} }} }}"#
+            ),
+        )
+        .await;
+        assert_eq!(counted() - before, 2);
+        let page = &json["run"]["contextHistory"];
+        assert_eq!(page["results"][0]["window"]["totalTokens"], 80);
+        assert_eq!(page["results"][1]["window"]["totalTokens"], 70);
+
+        // A filter is a question about each point, so each one is read.
+        let before = counted();
+        let json = data(
+            meta,
+            r#"{ run { contextHistory(first: 2, filter: { stage: { eq: "review" } }) {
+                 total results { window { totalTokens } } } } }"#,
+        )
+        .await;
+        assert_eq!(counted() - before, 10);
+        assert_eq!(json["run"]["contextHistory"]["total"], 10);
+    })
+    .await;
+}
+
 /// A page size over the history's own cap is refused rather than clamped, and
 /// the message says what the cap is for.
 #[tokio::test]
@@ -1357,7 +1433,7 @@ async fn a_history_cursor_from_elsewhere_is_refused() {
         write_journal(&meta, &[10, 20]);
 
         let answer = ask(
-            meta,
+            meta.clone(),
             r#"{ run { contextHistory(first: 1, after: "not-from-here") { total } } }"#,
         )
         .await;
@@ -1365,6 +1441,15 @@ async fn a_history_cursor_from_elsewhere_is_refused() {
             !answer.errors.is_empty(),
             "a cursor this listing did not mint is not followed"
         );
+
+        // The filtered walk reads the same cursor and refuses it the same way.
+        let filtered = ask(
+            meta,
+            r#"{ run { contextHistory(first: 1, after: "not-from-here",
+                        filter: { stage: { eq: "review" } }) { total } } }"#,
+        )
+        .await;
+        assert!(!filtered.errors.is_empty(), "{:?}", filtered.errors);
     })
     .await;
 }

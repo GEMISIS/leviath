@@ -558,6 +558,79 @@ async fn a_delete_sweeps_by_the_filter_the_listing_uses() {
     .await;
 }
 
+/// Naming ids outright says which runs to read, not which ones to act on: the
+/// rest of the filter still decides, exactly as it does on the listing.
+///
+/// The one id a named list adds on its own is a run the index has never seen,
+/// whose record will not parse: it is in no listing, so nothing else could ever
+/// name it, and `force` is what then deletes it.
+#[tokio::test]
+async fn naming_ids_does_not_excuse_a_run_from_the_rest_of_the_filter() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-sweep-named-ids", |_d| async move {
+        create_run(&run_in("going", RunStatus::Running)).expect("run written");
+        create_run(&run_in("parked", RunStatus::Paused)).expect("run written");
+        unreadable_run("broken");
+
+        let (control, _dir, _srv) = busy_daemon(|_| ControlResponse::Ok { ok: true });
+        let answer = mutate(
+            control,
+            r#"mutation { cancelRuns(request: { filter: {
+                 id: { in: ["going", "parked", "broken"] }, status: { eq: RUNNING } } })
+                 { runs { id } skipped { id reason } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = data_of(&answer);
+        assert_eq!(
+            json["cancelRuns"]["runs"],
+            serde_json::json!([{"id": "going"}]),
+            "a paused run is not a RUNNING run"
+        );
+        let touched: Vec<&str> = json["cancelRuns"]["skipped"]
+            .as_array()
+            .expect("a skipped list")
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap_or_default())
+            .collect();
+        assert!(
+            !touched.contains(&"parked"),
+            "a run the filter excluded is not acted on at all: {touched:?}"
+        );
+        // The unreadable record is still reachable, because no listing can
+        // name it and dropping it here would leave it undeletable.
+        assert!(touched.contains(&"broken"), "{touched:?}");
+    })
+    .await;
+}
+
+/// A filter that contradicts itself names nothing rather than everything it
+/// mentioned.
+#[tokio::test]
+async fn ids_named_twice_over_are_intersected_not_added_up() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-sweep-contradiction", |_d| async move {
+        create_run(&run_in("one", RunStatus::Complete)).expect("run written");
+        create_run(&run_in("two", RunStatus::Complete)).expect("run written");
+
+        let answer = mutate(
+            no_daemon_client(),
+            r#"mutation { deleteRuns(request: { filter: {
+                 id: { eq: "one", in: ["two"] } } })
+                 { deletedIds skipped { id } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = data_of(&answer);
+        assert_eq!(
+            json["deleteRuns"]["deletedIds"],
+            serde_json::json!([]),
+            "no run is both `one` and `two`"
+        );
+        assert!(crate::runstate::run_dir("one").exists());
+        assert!(crate::runstate::run_dir("two").exists());
+    })
+    .await;
+}
+
 /// The refusals a sweep shares with the listing it takes its filter from.
 #[tokio::test]
 async fn a_sweep_refuses_what_the_listing_refuses() {
@@ -1287,6 +1360,70 @@ async fn the_blueprint_writes_refuse_what_they_should() {
 }
 
 // ── exports ──
+
+/// An export reads each run's record once: the walk that chose the runs is
+/// carrying every one of them by the time the file is written.
+///
+/// Answering an export from the ids alone means opening the whole store a
+/// second time, on the request's own task, for records the server already had
+/// in hand.
+#[tokio::test]
+async fn an_export_reads_each_record_once() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-export-reads", |_d| async move {
+        for at in 0..5 {
+            create_run(&run_in(&format!("exp9-{at}"), RunStatus::Complete)).expect("run written");
+        }
+        let counted = || crate::commands::serve::testutil::records_read_under("exp9-");
+        let agents = empty_agents();
+        let state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
+        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
+            .data(state)
+            .finish();
+
+        let before = counted();
+        let started = schema
+            .execute(Request::new(
+                r#"mutation { startRunExport(request: { filter: { status: { eq: COMPLETE } } })
+                     { export { id } } }"#,
+            ))
+            .await;
+        assert!(started.errors.is_empty(), "{:?}", started.errors);
+        assert_eq!(
+            counted() - before,
+            0,
+            "no record the walk already held was opened again"
+        );
+
+        let id = data_of(&started)["startRunExport"]["export"]["id"]
+            .as_str()
+            .expect("an id")
+            .to_string();
+        // The file is still the whole selection: reading less must not mean
+        // writing less.
+        let mut written = None;
+        for _ in 0..400 {
+            let polled = schema
+                .execute(Request::new(format!(
+                    "{{ runExport(id: \"{id}\") {{ status written error }} }}"
+                )))
+                .await;
+            assert!(polled.errors.is_empty(), "{:?}", polled.errors);
+            let json = data_of(&polled);
+            if json["runExport"]["status"] == "COMPLETE" {
+                assert!(json["runExport"]["error"].is_null());
+                written = json["runExport"]["written"].as_i64();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            written,
+            Some(5),
+            "every run the filter named is in the file"
+        );
+    })
+    .await;
+}
 
 /// An export is started, polled, and handed over as a signed link.
 ///

@@ -214,6 +214,9 @@ fn resolve(query: &RunsQuery) -> Result<RunSpec, ServeError> {
         // The flat query parameters above are the whole filter this route
         // takes; a composable predicate is the other surface's.
         predicate: None,
+        // This route holds no records of its own: a batch fetch by id reads
+        // each one it names.
+        preloaded: None,
     }
     .resolve(query.cursor.as_deref())
 }

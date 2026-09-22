@@ -9,8 +9,13 @@
 use async_graphql::{Enum, OneofObject, SimpleObject};
 use leviath_graphql_derive::mirror;
 
+use crate::commands::serve::blocking::blocking;
+use crate::commands::serve::core::error::ServeError;
+use crate::commands::serve::core::history;
 use crate::commands::serve::cursor;
-use crate::commands::serve::graphql::connection::{Connection, Paged, Total};
+use crate::commands::serve::graphql::connection::{
+    Connection, Paged, PositionPage, PositionQuery, Total,
+};
 use crate::commands::serve::graphql::error::IntoGraphql;
 use crate::commands::serve::graphql::filter::{Filterable, MatchCx, OrderField, Orderable, Sifted};
 use crate::commands::serve::graphql::paging::digest::canonical;
@@ -280,4 +285,82 @@ pub(crate) struct ContextSnapshotPoint {
 
 impl Paged for ContextSnapshotPoint {
     const NAME: &'static str = "ContextSnapshotPoint";
+}
+
+/// One replayed point as the object a client reads.
+pub(crate) fn snapshot_point(point: leviath_core::run_archive::RunPoint) -> ContextSnapshotPoint {
+    ContextSnapshotPoint {
+        at: Timestamp(point.at),
+        stage: point.meta.current_stage.clone(),
+        window: ContextWindow {
+            snapshot: std::sync::Arc::new(point.context),
+        },
+    }
+}
+
+/// One page of a run's context history, where nothing is filtered.
+///
+/// Every point is on the listing, so which of them this page holds is
+/// arithmetic over their own positions and only those windows are read. A
+/// window is the largest thing this API materializes, and a mature run's
+/// journal holds hundreds; reading them all to hand back fifty is the
+/// difference between a page and the whole file.
+///
+/// The positions, the cursor and the direction are exactly
+/// [`position_page`](crate::commands::serve::graphql::connection::position_page)'s,
+/// so a cursor means the same thing whichever of the two answered the page
+/// before it.
+pub(crate) async fn unfiltered_history(
+    run_id: &str,
+    query: PositionQuery<'_>,
+) -> Result<PositionPage<ContextSnapshotPoint>, ServeError> {
+    let PositionQuery {
+        digest,
+        after,
+        descending,
+        limit,
+    } = query;
+    let counting = run_id.to_string();
+    let total = blocking(move || history::point_count(&counting))
+        .await
+        .unwrap_or_default();
+    let mut ordered: Vec<usize> = (0..total).collect();
+    if descending {
+        ordered.reverse();
+    }
+    let start = match after {
+        None => 0,
+        Some(raw) => {
+            let boundary = cursor::decode_position(raw, digest, descending)
+                .map_err(|e| ServeError::BadRequest(e.message()))?;
+            ordered
+                .iter()
+                .position(|position| match descending {
+                    true => *position < boundary,
+                    false => *position > boundary,
+                })
+                .unwrap_or(ordered.len())
+        }
+    };
+    let mut wanted = ordered.split_off(start);
+    let has_more = wanted.len() > limit;
+    wanted.truncate(limit);
+    let cursor = has_more
+        .then(|| wanted.last())
+        .flatten()
+        .map(|position| Cursor(cursor::encode_position(digest, *position, descending)));
+    let reading = run_id.to_string();
+    let asked = wanted;
+    let mut read = blocking(move || history::windows_at(&reading, &asked)).await;
+    if descending {
+        read.reverse();
+    }
+    Ok(PositionPage {
+        items: read
+            .into_iter()
+            .map(|(_, point)| snapshot_point(point))
+            .collect(),
+        cursor,
+        total,
+    })
 }

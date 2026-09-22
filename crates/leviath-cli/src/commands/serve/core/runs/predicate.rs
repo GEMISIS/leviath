@@ -63,9 +63,41 @@ pub(crate) struct RunTree {
     by_id: HashMap<String, Arc<RunMeta>>,
 }
 
+/// What a build of the run tree is reported to.
+///
+/// One tree per listing is what this costs; one per run in a listing is the
+/// same work squared, and no answer would look any different for it. A promise
+/// about work that does not happen is worth what a test can check, so builds
+/// are reported here and a test counts them.
+pub(crate) type TreeBuildRecorder = Box<dyn Fn(&[Arc<RunMeta>]) + Send + Sync>;
+
+/// Where a tree build is reported, when anything is listening.
+///
+/// Nothing installs a recorder in a server: the list would grow for ever and
+/// nothing but a test has any use for it, so a build costs a load of this and
+/// a call it does not make.
+static RECORDER: std::sync::OnceLock<TreeBuildRecorder> = std::sync::OnceLock::new();
+
+/// Report every tree build to `record`, for as long as this process lives.
+///
+/// Once, deliberately: a second call is a no-op, so each test that wants the
+/// log can ask for it rather than arranging to be the one that installs it.
+#[cfg(test)]
+pub(crate) fn record_tree_builds(record: TreeBuildRecorder) {
+    drop(RECORDER.set(record));
+}
+
+/// Note that a tree is being linked, for the tests that count them.
+fn noted(runs: &[Arc<RunMeta>]) {
+    if let Some(record) = RECORDER.get() {
+        record(runs);
+    }
+}
+
 impl RunTree {
     /// Link these runs together, so a filter can walk from one to its parent.
     pub(crate) fn of(runs: &[Arc<RunMeta>]) -> Self {
+        noted(runs);
         Self {
             by_id: runs
                 .iter()

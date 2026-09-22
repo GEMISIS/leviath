@@ -380,6 +380,46 @@ async fn an_export_answers_to_its_job_id() {
     .await;
 }
 
+/// A batch lookup is bounded by the same cap the run listing puts on a named
+/// list of ids, because it is the same fan-out: one read per id.
+#[tokio::test]
+async fn a_batch_lookup_is_capped_at_the_same_number_of_ids_the_listing_allows() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-node-cap", |_d| async move {
+        let cap = crate::commands::serve::core::runs::MAX_IDS;
+        let listed = |count: usize| {
+            (0..count)
+                .map(|at| format!("\"thing:{at}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
+            .data(state_with_agent_paths(Vec::new()))
+            .finish();
+        let too_many = schema
+            .execute(Request::new(format!(
+                "{{ nodes(ids: [{}]) {{ id }} }}",
+                listed(cap + 1)
+            )))
+            .await;
+        let refusal = too_many.errors.first().expect("a refusal");
+        assert!(refusal.message.contains("at most"), "{}", refusal.message);
+        assert_eq!(
+            refusal
+                .extensions
+                .as_ref()
+                .and_then(|ext| ext.get("code"))
+                .map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string())
+        );
+
+        // The cap itself is an answer, not a refusal.
+        let json = ask_fresh(&format!("{{ nodes(ids: [{}]) {{ id }} }}", listed(cap))).await;
+        assert_eq!(json["nodes"].as_array().map(Vec::len), Some(cap));
+    })
+    .await;
+}
+
 /// An id this schema has no type for is an absence, not a failure.
 #[tokio::test]
 async fn an_id_that_routes_nowhere_answers_null() {

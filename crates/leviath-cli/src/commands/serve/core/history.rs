@@ -147,16 +147,102 @@ pub(crate) fn at_revision(run_id: &str, revision: &str) -> Option<RunPoint> {
     found
 }
 
+/// What a read of one point's context window is reported to.
+///
+/// A window is the largest thing this API materializes, and the promise of
+/// every listing over them is that a page of two reads two of them. That is
+/// only observable as work that did not happen, so the reads report here and a
+/// test counts them.
+pub(crate) type WindowReadRecorder = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Where a window read is reported, when anything is listening.
+///
+/// Nothing installs a recorder in a server: the list would grow for ever and
+/// nothing but a test has any use for it, so a read costs a load of this and a
+/// call it does not make.
+static RECORDER: std::sync::OnceLock<WindowReadRecorder> = std::sync::OnceLock::new();
+
+/// Report every window read to `record`, for as long as this process lives.
+///
+/// Once, deliberately: a second call is a no-op, so each test that wants the
+/// log can ask for it rather than arranging to be the one that installs it.
+#[cfg(test)]
+pub(crate) fn record_window_reads(record: WindowReadRecorder) {
+    drop(RECORDER.set(record));
+}
+
+/// Note that one point's window is being materialized.
+fn noted(run_id: &str) {
+    if let Some(record) = RECORDER.get() {
+        record(run_id);
+    }
+}
+
+/// How many points a run's history holds, or nothing where it has no readable
+/// archive.
+///
+/// One streamed pass that folds the deltas and materializes none of them, so a
+/// listing knows how far it can walk before it decides what to read.
+pub(crate) fn point_count(run_id: &str) -> Option<usize> {
+    let mut total = 0usize;
+    runstate::visit_run_archive(run_id, &mut |_| {
+        total += 1;
+        ControlFlow::Continue(())
+    })?;
+    Some(total)
+}
+
+/// The points at `wanted`, oldest first, with their windows.
+///
+/// The one place a window is materialized for a listing, so a page reads its
+/// own items and nothing else. The replay stops at the last index asked for
+/// rather than running to the end of the journal.
+pub(crate) fn windows_at(run_id: &str, wanted: &[usize]) -> Vec<(usize, RunPoint)> {
+    let stop_at = wanted.iter().copied().max();
+    let mut collected: Vec<(usize, RunPoint)> = Vec::new();
+    runstate::visit_run_archive(run_id, &mut |point| {
+        if wanted.contains(&point.index) {
+            noted(run_id);
+            collected.push((
+                point.index,
+                RunPoint {
+                    // Redacted for the same reason `runstate::context_history`
+                    // redacts: the journal stores the run's record whole, secret
+                    // and all.
+                    meta: point.meta.redacted(),
+                    context: point.context.clone(),
+                    at: point.at,
+                },
+            ));
+        }
+        match stop_at {
+            Some(last) if point.index >= last => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        }
+    });
+    collected
+}
+
+/// Every point of a run's history, windows and all.
+///
+/// What a filter that looks inside a window costs: there is no way to know
+/// which points match without reading each one. Everything else pages over
+/// [`point_count`] and reads through [`windows_at`].
+pub(crate) fn every_window(run_id: &str) -> Vec<RunPoint> {
+    let points = runstate::context_history(run_id);
+    for _ in &points {
+        noted(run_id);
+    }
+    points
+}
+
 /// Read one page of a run's history.
 pub(crate) fn page(run_id: &str, spec: &HistorySpec) -> Result<HistoryPage, ServeError> {
     // One streamed pass to count, so `total` is honest and a descending window
     // knows where to start. Counting folds the deltas but materializes nothing.
-    let mut total = 0usize;
-    let visited = runstate::visit_run_archive(run_id, &mut |_| {
-        total += 1;
-        ControlFlow::Continue(())
-    });
-    if visited.is_none() || (total == 0 && !spec.resuming()) {
+    let counted = point_count(run_id);
+    let total = counted.unwrap_or_default();
+    if counted.is_none() || (total == 0 && !spec.resuming()) {
         return Err(ServeError::NotFound(format!(
             "No context history for run '{run_id}'"
         )));
@@ -177,29 +263,8 @@ pub(crate) fn page(run_id: &str, spec: &HistorySpec) -> Result<HistoryPage, Serv
             (0..=start).rev().take(spec.limit + 1).collect()
         }
     };
-    let stop_at = wanted.iter().copied().max();
 
-    let mut collected: Vec<(usize, RunPoint)> = Vec::new();
-    runstate::visit_run_archive(run_id, &mut |point| {
-        if wanted.contains(&point.index) {
-            collected.push((
-                point.index,
-                RunPoint {
-                    // Redacted for the same reason `runstate::context_history`
-                    // redacts: the journal stores the run's record whole, secret
-                    // and all.
-                    meta: point.meta.redacted(),
-                    context: point.context.clone(),
-                    at: point.at,
-                },
-            ));
-        }
-        match stop_at {
-            Some(last) if point.index >= last => ControlFlow::Break(()),
-            _ => ControlFlow::Continue(()),
-        }
-    });
-
+    let mut collected = windows_at(run_id, &wanted);
     if !spec.ascending {
         collected.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
     }

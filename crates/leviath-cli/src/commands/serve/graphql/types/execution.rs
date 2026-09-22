@@ -101,7 +101,9 @@ impl ToolExecution {
     }
 
     /// The call this attempt was carrying out, typed by its tool.
-    #[filter(skip)] // TODO(mirror): ToolCall
+    // Unfiltered: a call is an interface over a type per tool, and there is no
+    // one comparator shape that spans them.
+    #[filter(skip)]
     async fn call(&self) -> ToolCall {
         // The description is left out here. It would have to come from this
         // build's tool catalog, which describes the tool as it is now rather

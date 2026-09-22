@@ -288,3 +288,61 @@ impl WsTestClient {
         }
     }
 }
+
+/// The first run id of every run tree linked so far, in the order they were
+/// linked.
+static TREE_BUILDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// How many trees have been linked over runs whose ids start with `prefix`.
+///
+/// Installing the recorder here rather than in one test is what lets any of
+/// them ask: the first call wins and the rest are no-ops. The prefix is what
+/// keeps one test's count its own, because the log is the whole process's and
+/// the tests around it run at the same time.
+pub(super) fn trees_built_over(prefix: &str) -> usize {
+    crate::commands::serve::core::runs::predicate::record_tree_builds(Box::new(|runs| {
+        let first = runs.first().map(|meta| meta.run_id.clone());
+        leviath_core::sync::lock(&TREE_BUILDS).push(first.unwrap_or_default());
+    }));
+    leviath_core::sync::lock(&TREE_BUILDS)
+        .iter()
+        .filter(|first| first.starts_with(prefix))
+        .count()
+}
+
+/// Every run whose context window was materialized, in the order it was.
+static WINDOW_READS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// How many context windows have been read for `run_id`.
+///
+/// Installing the recorder here rather than in one test is what lets any of
+/// them ask: the first call wins and the rest are no-ops. The run id is what
+/// keeps one test's count its own, because the log is the whole process's.
+pub(super) fn windows_read_for(run_id: &str) -> usize {
+    crate::commands::serve::core::history::record_window_reads(Box::new(|run_id| {
+        leviath_core::sync::lock(&WINDOW_READS).push(run_id.to_string());
+    }));
+    leviath_core::sync::lock(&WINDOW_READS)
+        .iter()
+        .filter(|read| *read == run_id)
+        .count()
+}
+
+/// Every run whose record was opened by a batch fetch, in the order it was.
+static RECORD_READS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// How many records have been opened by id for runs whose ids start with
+/// `prefix`.
+///
+/// Installing the recorder here rather than in one test is what lets any of
+/// them ask: the first call wins and the rest are no-ops. The prefix is what
+/// keeps one test's count its own, because the log is the whole process's.
+pub(super) fn records_read_under(prefix: &str) -> usize {
+    crate::commands::serve::core::runs::record_record_reads(Box::new(|run_id| {
+        leviath_core::sync::lock(&RECORD_READS).push(run_id.to_string());
+    }));
+    leviath_core::sync::lock(&RECORD_READS)
+        .iter()
+        .filter(|read| read.starts_with(prefix))
+        .count()
+}

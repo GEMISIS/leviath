@@ -559,9 +559,15 @@ pub(crate) enum UpdateJobEventFrame {
 }
 
 /// The frame that opens every subscription.
-pub(crate) fn opened(state: &AppState) -> SubscriptionOpenedEvent {
+///
+/// `since` is the bus's number as it stood before the receiver was registered,
+/// and it is the caller's to read rather than this function's: a filter takes
+/// time to resolve, and every frame that arrives while it does is buffered for
+/// delivery. Numbering the greeting from here would put it at or above one of
+/// those frames, and a client following the field's promise would drop them.
+pub(crate) fn opened(state: &AppState, since: u64) -> SubscriptionOpenedEvent {
     SubscriptionOpenedEvent {
-        seq: BigInt(i64::try_from(super::super::events::latest_seq()).unwrap_or(i64::MAX)),
+        seq: BigInt(i64::try_from(since).unwrap_or(i64::MAX)),
         at: Timestamp(leviath_core::duration::now_secs()),
         server_instance: ID(super::super::events::server_instance().to_string()),
         daemon: DaemonStatus::of(state.control.link(), state.control.code_mismatch()),

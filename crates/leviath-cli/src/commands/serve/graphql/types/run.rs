@@ -14,7 +14,6 @@ use leviath_graphql_derive::mirror;
 use super::super::super::blocking::blocking;
 use super::super::super::core::blueprints;
 use super::super::super::core::error::ServeError;
-use super::super::super::core::runs::predicate::RunTree;
 use super::super::super::core::{files, history};
 use super::super::super::types::AppState;
 use super::super::connection::{
@@ -39,7 +38,7 @@ use crate::runstate::RunMeta;
 use support::{
     BoundedPageArgs, ContextSnapshotPoint, ContextSnapshotPointFilter, CurrentStage,
     LogStageOptions, LogStream, MetadataEntry, RunTreeStatus, as_i32, bounded_page, signed,
-    tail_logs,
+    snapshot_point, tail_logs, unfiltered_history,
 };
 pub(crate) use support::{CostBreakdown, TokenUsage, WorkingClock};
 
@@ -79,7 +78,6 @@ pub(crate) enum RunStatus {
     Error,
     /// Stopped from outside. Nothing went wrong; somebody decided.
     Cancelled,
-    // ─── owned by worker 2S (subscriptions); see `RunStatus::from_wire` ───
     /// A state this build has no name for, which is what a newer daemon's new
     /// state looks like from here.
     ///
@@ -87,7 +85,6 @@ pub(crate) enum RunStatus {
     /// daemon's own word rather than as a value this build chose. A run read
     /// from disk is parsed into one of the states above or not read at all.
     Unknown,
-    // ─── end 2S hunk ───
 }
 
 impl From<&leviath_core::run_meta::RunStatus> for RunStatus {
@@ -295,11 +292,27 @@ impl Run {
     #[filter(with = "run_relations::ancestor_ids")]
     async fn ancestor_ids(&self, ctx: &Context<'_>) -> Vec<ID> {
         let state = ctx.data_unchecked::<AppState>();
-        let tree = RunTree::of(&state.caches.run_index.snapshot().await.into_runs());
-        tree.ancestors(&self.meta.run_id)
-            .into_iter()
-            .map(ID)
-            .collect()
+        let snapshot = state.caches.run_index.snapshot().await;
+        // One step per run above this one, which is three at most, rather than
+        // a map of the whole store per run on the page.
+        let mut chain: Vec<ID> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut above = self.meta.parent_run_id.clone();
+        while let Some(parent) = above {
+            // A record that somehow names one of its own descendants stops the
+            // walk here rather than sending it round for ever.
+            if !seen.insert(parent.clone()) {
+                break;
+            }
+            above = snapshot
+                .get(&parent)
+                .and_then(|meta| meta.parent_run_id.clone());
+            chain.push(ID(parent));
+        }
+        // Walked upwards, reported downwards: root first, so the list reads as
+        // a breadcrumb and `has` finds an ancestor wherever it sits.
+        chain.reverse();
+        chain
     }
 
     /// What this run's stages actually ran on, provider and model together, in
@@ -979,10 +992,11 @@ impl Run {
     /// than every point's every region. Chronological by default, which is also
     /// the cheaper direction to read.
     ///
-    /// Read whole rather than streamed, unlike `GET /api/agents/{id}/context/history`:
-    /// filtering a point means reading its window, and a filter answered by
-    /// reading is what this schema's walk defers past the page it can, not
-    /// past the one file this already is.
+    /// Unfiltered, only the page's own windows are read, exactly as
+    /// `GET /api/agents/{id}/context/history` reads them. A `filter` is a
+    /// question about each point, and answering it means opening that point's
+    /// window, so a filtered page reads the run's whole history to decide what
+    /// is on it. Page first and filter in the client where the history is long.
     #[filter(skip)]
     async fn context_history(
         &self,
@@ -1014,32 +1028,23 @@ impl Run {
             .first()
             .is_some_and(|term| term.direction.descending());
 
-        let run_id = self.meta.run_id.clone();
-        let points = blocking(move || crate::runstate::context_history(&run_id)).await;
-        let items: Vec<ContextSnapshotPoint> = points
-            .into_iter()
-            .map(|point| ContextSnapshotPoint {
-                at: Timestamp(point.at),
-                stage: point.meta.current_stage.clone(),
-                window: ContextWindow {
-                    snapshot: Arc::new(point.context),
-                },
-            })
-            .collect();
-        let cx = MatchCx::at(leviath_core::duration::now_secs());
-        let walked = position_page(
-            items,
-            &filter,
-            &cx,
-            PositionQuery {
-                digest: &digest,
-                after: after.as_ref().map(|token| token.0.as_str()),
-                descending,
-                limit,
-            },
-        )
-        .await
-        .gql()?;
+        let query = PositionQuery {
+            digest: &digest,
+            after: after.as_ref().map(|token| token.0.as_str()),
+            descending,
+            limit,
+        };
+        let walked = match rendered.is_empty() {
+            true => unfiltered_history(&self.meta.run_id, query).await.gql()?,
+            false => {
+                let run_id = self.meta.run_id.clone();
+                let points = blocking(move || history::every_window(&run_id)).await;
+                let items: Vec<ContextSnapshotPoint> =
+                    points.into_iter().map(snapshot_point).collect();
+                let cx = MatchCx::at(leviath_core::duration::now_secs());
+                position_page(items, &filter, &cx, query).await.gql()?
+            }
+        };
         Ok(Connection::plain(
             walked.items,
             walked.cursor,
@@ -1068,13 +1073,7 @@ impl Run {
     ) -> Option<ContextSnapshotPoint> {
         let run_id = self.meta.run_id.clone();
         let point = blocking(move || history::at_revision(&run_id, &revision)).await;
-        point.map(|point| ContextSnapshotPoint {
-            at: Timestamp(point.at),
-            stage: point.meta.current_stage.clone(),
-            window: ContextWindow {
-                snapshot: Arc::new(point.context),
-            },
-        })
+        point.map(snapshot_point)
     }
 
     /// A short-lived signed link to one stored part's bytes.
