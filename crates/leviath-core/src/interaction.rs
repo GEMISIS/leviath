@@ -43,9 +43,11 @@ pub enum BodyFormat {
 pub struct InteractionRequest {
     /// What an answer names this request by, and nothing else names.
     ///
-    /// Minted by [`request_id`], which leads with the run: one daemon holds
+    /// Shaped by [`request_id`], which leads with the run: one daemon holds
     /// every run's open requests in one place, so an id unique within a run is
-    /// not unique enough.
+    /// not unique enough. The tail is drawn by the backend that holds the
+    /// request, never taken from a provider's call id, so two prompts of one
+    /// run cannot share it.
     pub id: String,
     /// What kind of answer is expected.
     pub kind: InteractionKind,
@@ -587,9 +589,15 @@ pub fn make_interaction_id(stage_idx: usize, iteration: usize) -> String {
 /// The run id leads because the id has to be unique across every request the
 /// daemon holds open at once, not just within one run: the hub that keeps them
 /// is one per daemon and keyed by this id alone, and an answer arriving over
-/// the API or from `lev respond` names nothing else. The tail is usually a
-/// provider's tool-call id, which is only unique within the conversation that
-/// produced it, and for two providers it is a counter that starts again at one.
+/// the API or from `lev respond` names nothing else.
+///
+/// The tail has to be unique within the run for the run's whole life, and a
+/// provider's tool-call id is not: it is numbered within one message, so a
+/// run's second turn calls `call_1` again. So the tail is a count the
+/// interaction backend draws per run (`approve`, `gate`, `ask`, `review` and
+/// `edit`), or for an interaction point its name and round, which the
+/// blueprint already keeps distinct. A prompt keeps the provider's call id in
+/// its own field, for the reader that wants the call it was about.
 ///
 /// `kind` is the word that says which question this is: `approve`, `gate`,
 /// `ask`, `review`, `edit` or `point`.

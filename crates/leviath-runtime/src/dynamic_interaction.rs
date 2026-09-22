@@ -116,6 +116,18 @@ pub trait InteractionBackend: Send + Sync {
     fn on_review_document(&self, tool_call_id: &str, title: &str, markdown: &str) {
         let _ = (tool_call_id, title, markdown);
     }
+
+    /// Mint the id the next request of this kind answers to.
+    ///
+    /// The backend mints it because the backend is what holds the request
+    /// open, and only it can promise the id names one request. The hub's
+    /// backend counts per run; this default counts for the process, which is
+    /// unique for a backend that answers for one run and asks nobody else.
+    fn request_id(&self, kind: &str) -> String {
+        static DRAWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = DRAWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        leviath_core::interaction::request_id("local", kind, &n.to_string())
+    }
 }
 
 /// What an unattended run tells the model when a question needed a person.
@@ -190,22 +202,14 @@ pub const BLOCKING_INTERACTION_TOOLS: &[&str] = &[
 /// attached to the answer uses [`dispatch_dynamic_interaction_with_parts`].
 pub async fn dispatch_dynamic_interaction(
     backend: &dyn InteractionBackend,
-    run_id: &str,
     tool_name: &str,
     tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
 ) -> Option<String> {
-    dispatch_dynamic_interaction_with_parts(
-        backend,
-        run_id,
-        tool_name,
-        tool_call_id,
-        arguments,
-        stage_name,
-    )
-    .await
-    .map(|(text, _)| text)
+    dispatch_dynamic_interaction_with_parts(backend, tool_name, tool_call_id, arguments, stage_name)
+        .await
+        .map(|(text, _)| text)
 }
 
 /// [`dispatch_dynamic_interaction`], with the files the person attached to
@@ -213,28 +217,19 @@ pub async fn dispatch_dynamic_interaction(
 /// the caller stores them and writes the references into the tool result.
 pub async fn dispatch_dynamic_interaction_with_parts(
     backend: &dyn InteractionBackend,
-    run_id: &str,
     tool_name: &str,
     tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
 ) -> Option<(String, Vec<InboundPart>)> {
     match tool_name {
-        "present_for_review" => Some(
-            handle_present_for_review(backend, run_id, tool_call_id, arguments, stage_name).await,
-        ),
-        "ask_user_text" => {
-            Some(handle_ask_user_text(backend, run_id, tool_call_id, arguments, stage_name).await)
+        "present_for_review" => {
+            Some(handle_present_for_review(backend, tool_call_id, arguments, stage_name).await)
         }
-        "ask_user_choice" => {
-            Some(handle_ask_user_choice(backend, run_id, tool_call_id, arguments, stage_name).await)
-        }
-        "ask_user_confirm" => Some(
-            handle_ask_user_confirm(backend, run_id, tool_call_id, arguments, stage_name).await,
-        ),
-        "edit_document" => {
-            Some(handle_edit_document(backend, run_id, tool_call_id, arguments, stage_name).await)
-        }
+        "ask_user_text" => Some(handle_ask_user_text(backend, arguments, stage_name).await),
+        "ask_user_choice" => Some(handle_ask_user_choice(backend, arguments, stage_name).await),
+        "ask_user_confirm" => Some(handle_ask_user_confirm(backend, arguments, stage_name).await),
+        "edit_document" => Some(handle_edit_document(backend, arguments, stage_name).await),
         _ => None,
     }
 }
@@ -249,7 +244,6 @@ fn arg_str<'a>(arguments: &'a serde_json::Value, key: &str, default: &'a str) ->
 
 async fn handle_present_for_review(
     backend: &dyn InteractionBackend,
-    run_id: &str,
     tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
@@ -263,12 +257,8 @@ async fn handle_present_for_review(
         title
     ));
 
-    let req = InteractionRequest::review(
-        leviath_core::interaction::request_id(run_id, "review", tool_call_id),
-        &title,
-        &markdown,
-        stage_name,
-    );
+    let req =
+        InteractionRequest::review(backend.request_id("review"), &title, &markdown, stage_name);
     let resp = backend.ask(req).await;
     let user_feedback = response_as_text(&resp);
 
@@ -284,8 +274,6 @@ async fn handle_present_for_review(
 
 async fn handle_ask_user_text(
     backend: &dyn InteractionBackend,
-    run_id: &str,
-    tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
 ) -> (String, Vec<InboundPart>) {
@@ -296,12 +284,7 @@ async fn handle_ask_user_text(
         prompt
     ));
 
-    let req = InteractionRequest::free_text(
-        leviath_core::interaction::request_id(run_id, "ask", tool_call_id),
-        &prompt,
-        stage_name,
-        true,
-    );
+    let req = InteractionRequest::free_text(backend.request_id("ask"), &prompt, stage_name, true);
     let resp = backend.ask(req).await;
     let answer = response_as_text(&resp);
 
@@ -317,8 +300,6 @@ async fn handle_ask_user_text(
 
 async fn handle_ask_user_choice(
     backend: &dyn InteractionBackend,
-    run_id: &str,
-    tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
 ) -> (String, Vec<InboundPart>) {
@@ -346,7 +327,7 @@ async fn handle_ask_user_choice(
     ));
 
     let req = InteractionRequest::multiple_choice(
-        leviath_core::interaction::request_id(run_id, "ask", tool_call_id),
+        backend.request_id("ask"),
         &prompt,
         options.clone(),
         stage_name,
@@ -363,8 +344,6 @@ async fn handle_ask_user_choice(
 
 async fn handle_ask_user_confirm(
     backend: &dyn InteractionBackend,
-    run_id: &str,
-    tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
 ) -> (String, Vec<InboundPart>) {
@@ -375,11 +354,7 @@ async fn handle_ask_user_confirm(
         prompt
     ));
 
-    let req = InteractionRequest::confirm(
-        leviath_core::interaction::request_id(run_id, "ask", tool_call_id),
-        &prompt,
-        stage_name,
-    );
+    let req = InteractionRequest::confirm(backend.request_id("ask"), &prompt, stage_name);
     let resp = backend.ask(req).await;
     let approved = response_approved(&resp);
 
@@ -393,8 +368,6 @@ async fn handle_ask_user_confirm(
 
 async fn handle_edit_document(
     backend: &dyn InteractionBackend,
-    run_id: &str,
-    tool_call_id: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
 ) -> (String, Vec<InboundPart>) {
@@ -407,12 +380,8 @@ async fn handle_edit_document(
 
     backend.log("[tool] edit_document \u{2192} waiting for user edits");
 
-    let req = InteractionRequest::edit_text(
-        leviath_core::interaction::request_id(run_id, "edit", tool_call_id),
-        &prompt,
-        stage_name,
-        &content,
-    );
+    let req =
+        InteractionRequest::edit_text(backend.request_id("edit"), &prompt, stage_name, &content);
     let resp = backend.ask(req).await;
     let edited = response_as_text(&resp);
 
@@ -473,6 +442,13 @@ mod tests {
                 markdown.to_string(),
             ));
         }
+
+        /// Counted per mock, the way the hub counts per run, so a test reads
+        /// an exact id and two asks through one mock never share one.
+        fn request_id(&self, kind: &str) -> String {
+            let n = self.asked.lock().unwrap().len() + 1;
+            leviath_core::interaction::request_id("run-1", kind, &n.to_string())
+        }
     }
 
     // ─── dispatch_dynamic_interaction: routing ─────────────────────────────
@@ -482,7 +458,6 @@ mod tests {
         let backend = MockBackend::default();
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "read_file",
             "id1",
             &serde_json::json!({}),
@@ -499,7 +474,6 @@ mod tests {
             let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "ok")]);
             let result = dispatch_dynamic_interaction(
                 &backend,
-                "run-1",
                 name,
                 "id1",
                 &serde_json::json!({"title": "t", "markdown": "m", "prompt": "p", "options": ["A", "B"]}),
@@ -519,7 +493,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![answer.clone()]);
         let (text, parts) = dispatch_dynamic_interaction_with_parts(
             &backend,
-            "run-1",
             "ask_user_text",
             "id1",
             &serde_json::json!({"prompt": "p"}),
@@ -533,7 +506,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![answer]);
         let text = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_text",
             "id1",
             &serde_json::json!({"prompt": "p"}),
@@ -551,7 +523,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "")]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "present_for_review",
             "call1",
             &serde_json::json!({"title": "My Plan", "markdown": "# Plan\ndetails"}),
@@ -574,7 +545,6 @@ mod tests {
             MockBackend::with_responses(vec![InteractionResponse::text("", "looks great")]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "present_for_review",
             "call2",
             &serde_json::json!({"title": "Design", "markdown": "body"}),
@@ -590,7 +560,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "")]);
         dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "present_for_review",
             "call3",
             &serde_json::json!({}),
@@ -607,7 +576,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "")]);
         dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "present_for_review",
             "call4",
             &serde_json::json!({"title": "T", "markdown": "M"}),
@@ -616,7 +584,7 @@ mod tests {
         .await;
         let asked = backend.asked.lock().unwrap();
         assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0].id, "run-1-review-call4");
+        assert_eq!(asked[0].id, "run-1-review-1");
         assert_eq!(asked[0].prompt, "T");
         assert_eq!(asked[0].body.as_deref(), Some("M"));
         assert_eq!(
@@ -631,7 +599,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "")]);
         dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "present_for_review",
             "call5",
             &serde_json::json!({"title": "T", "markdown": "M"}),
@@ -650,7 +617,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "blue")]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_text",
             "call1",
             &serde_json::json!({"prompt": "What color?"}),
@@ -666,7 +632,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "  ")]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_text",
             "call2",
             &serde_json::json!({"prompt": "Anything?"}),
@@ -682,7 +647,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "x")]);
         dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_text",
             "call3",
             &serde_json::json!({"prompt": "Q?"}),
@@ -690,7 +654,7 @@ mod tests {
         )
         .await;
         let asked = backend.asked.lock().unwrap();
-        assert_eq!(asked[0].id, "run-1-ask-call3");
+        assert_eq!(asked[0].id, "run-1-ask-1");
         assert_eq!(asked[0].prompt, "Q?");
         assert!(asked[0].required);
         assert_eq!(
@@ -705,7 +669,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "x")]);
         dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_text",
             "call4",
             &serde_json::json!({}),
@@ -723,7 +686,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::choice("", 1)]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_choice",
             "call1",
             &serde_json::json!({"prompt": "Pick one", "options": ["A", "B", "C"]}),
@@ -740,7 +702,6 @@ mod tests {
             MockBackend::with_responses(vec![InteractionResponse::text("", "custom answer")]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_choice",
             "call2",
             &serde_json::json!({"prompt": "Pick one", "options": ["A", "B"]}),
@@ -756,7 +717,6 @@ mod tests {
         let backend = MockBackend::default();
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_choice",
             "call3",
             &serde_json::json!({"prompt": "Pick one", "options": ["A"]}),
@@ -777,7 +737,6 @@ mod tests {
         let backend = MockBackend::default();
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_choice",
             "call4",
             &serde_json::json!({"prompt": "Pick one"}),
@@ -796,7 +755,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::choice("", 0)]);
         dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_choice",
             "call5",
             &serde_json::json!({"prompt": "Q?", "options": ["X", "Y"]}),
@@ -804,7 +762,7 @@ mod tests {
         )
         .await;
         let asked = backend.asked.lock().unwrap();
-        assert_eq!(asked[0].id, "run-1-ask-call5");
+        assert_eq!(asked[0].id, "run-1-ask-1");
         assert_eq!(
             asked[0].kind,
             leviath_core::interaction::InteractionKind::MultipleChoice
@@ -823,7 +781,6 @@ mod tests {
         )]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_confirm",
             "call1",
             &serde_json::json!({"prompt": "Proceed?"}),
@@ -843,7 +800,6 @@ mod tests {
         )]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_confirm",
             "call2",
             &serde_json::json!({"prompt": "Proceed?"}),
@@ -860,7 +816,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "")]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_confirm",
             "call3",
             &serde_json::json!({"prompt": "Proceed?"}),
@@ -880,7 +835,6 @@ mod tests {
         )]);
         dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_confirm",
             "call4",
             &serde_json::json!({"prompt": "Sure?"}),
@@ -888,7 +842,7 @@ mod tests {
         )
         .await;
         let asked = backend.asked.lock().unwrap();
-        assert_eq!(asked[0].id, "run-1-ask-call4");
+        assert_eq!(asked[0].id, "run-1-ask-1");
         assert_eq!(
             asked[0].kind,
             leviath_core::interaction::InteractionKind::Confirm
@@ -904,7 +858,6 @@ mod tests {
             MockBackend::with_responses(vec![InteractionResponse::text("", "edited plan")]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "edit_document",
             "call1",
             &serde_json::json!({"content": "original plan"}),
@@ -915,7 +868,7 @@ mod tests {
 
         assert_eq!(result, "User-edited document:\nedited plan");
         let asked = backend.asked.lock().unwrap();
-        assert_eq!(asked[0].id, "run-1-edit-call1");
+        assert_eq!(asked[0].id, "run-1-edit-1");
         assert_eq!(
             asked[0].kind,
             leviath_core::interaction::InteractionKind::EditText
@@ -928,7 +881,6 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "")]);
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "edit_document",
             "call2",
             &serde_json::json!({"content": "keep this"}),
@@ -950,12 +902,22 @@ mod tests {
         }
     }
 
+    /// A backend that mints nothing of its own still hands out ids that
+    /// never repeat, so a double that answers for one run is safe as it is.
+    #[test]
+    fn the_default_id_never_repeats() {
+        let backend = NoopBackend;
+        let first = backend.request_id("ask");
+        let second = backend.request_id("ask");
+        assert!(first.starts_with("local-ask-"), "{first}");
+        assert_ne!(first, second);
+    }
+
     #[tokio::test]
     async fn default_log_and_review_hooks_are_noop_and_safe() {
         let backend = NoopBackend;
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_text",
             "call1",
             &serde_json::json!({"prompt": "Q?"}),
@@ -966,7 +928,6 @@ mod tests {
 
         let result = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "present_for_review",
             "call2",
             &serde_json::json!({"title": "T", "markdown": "M"}),
@@ -1062,7 +1023,6 @@ mod tests {
         // A confirmation is approved - that is what the flag promises.
         let confirmed = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_confirm",
             "c1",
             &serde_json::json!({"prompt": "Delete the branch?"}),
@@ -1077,7 +1037,6 @@ mod tests {
         // answered and decides for itself.
         let chosen = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_choice",
             "c2",
             &serde_json::json!({"prompt": "Which?", "options": ["Ship it", "Abort"]}),
@@ -1091,7 +1050,6 @@ mod tests {
         // Free text says so plainly.
         let answered = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "ask_user_text",
             "c3",
             &serde_json::json!({"prompt": "Which database?"}),
@@ -1104,7 +1062,6 @@ mod tests {
         // A review is acknowledged, and an edit submits the document unchanged.
         let reviewed = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "present_for_review",
             "c4",
             &serde_json::json!({"title": "Plan", "markdown": "# Plan"}),
@@ -1116,7 +1073,6 @@ mod tests {
 
         let edited = dispatch_dynamic_interaction(
             &backend,
-            "run-1",
             "edit_document",
             "c5",
             &serde_json::json!({"content": "keep me"}),

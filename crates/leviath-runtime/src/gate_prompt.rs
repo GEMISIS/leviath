@@ -146,10 +146,10 @@ pub(crate) async fn run_gate_prompt(call: GatedCall, lane: PromptLane<GatePrompt
         outcomes,
         wake,
     } = lane;
-    // Minted before the id is moved into the backend, and carrying the run
-    // because the hub behind that backend is shared with every other run.
-    let id = leviath_core::interaction::request_id(&agent_id, "gate", &tool_id);
     let backend = hub.backend_for(agent_id);
+    // The backend mints the id, so two gates in one run cannot share one
+    // however the provider numbered their calls.
+    let id = backend.request_id("gate");
     let req = build_gate_request(id, &tool_name, taint, clearance);
     let resolution = resolution_from_answer(&backend.ask(req).await);
     let _ = outcomes.send(GatePromptOutcome {
