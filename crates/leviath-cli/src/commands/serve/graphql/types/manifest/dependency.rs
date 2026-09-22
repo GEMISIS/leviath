@@ -4,8 +4,10 @@
 //! a stage failing halfway through for want of a program.
 
 use async_graphql::{Enum, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 /// What kind of thing a dependency is.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum DependencyKind {
     /// An MCP server that must be in the config, with its variables set.
@@ -19,6 +21,7 @@ pub(crate) enum DependencyKind {
 }
 
 /// One name and value, for a server's environment or headers.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct EnvEntry {
     /// The variable or header name.
@@ -30,6 +33,7 @@ pub(crate) struct EnvEntry {
 }
 
 /// A shell command for one operating system.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct InstallCommand {
     /// Which system it is for: `macos`, `linux` or `windows`.
@@ -39,6 +43,7 @@ pub(crate) struct InstallCommand {
 }
 
 /// The transport an MCP server is reached over.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum McpTransport {
     /// A program the daemon launches and talks to over its own pipes.
@@ -52,6 +57,7 @@ pub(crate) enum McpTransport {
 ///
 /// The settings that are the same for everybody. A secret is never here: it is
 /// named in the dependency's variables and asked for when it is installed.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct McpServerTemplate {
     /// How it is reached. Null when the manifest leaves it to be inferred from
@@ -74,6 +80,7 @@ pub(crate) struct McpServerTemplate {
 /// Nothing here runs by itself. Each option changes the machine, by running a
 /// command, running a script, or writing a server into the config, so
 /// `lev deps install` asks first every time.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct DependencyInstall {
     /// One command for any system.
@@ -88,6 +95,7 @@ pub(crate) struct DependencyInstall {
 }
 
 /// One thing a blueprint needs.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct BlueprintDependency {
     /// A short name, unique within the blueprint.
@@ -205,3 +213,7 @@ impl From<&leviath_core::blueprint::McpServerTemplate> for McpServerTemplate {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "dependency_tests.rs"]
+mod tests;

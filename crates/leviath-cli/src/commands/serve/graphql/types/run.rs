@@ -8,27 +8,59 @@
 
 use std::sync::Arc;
 
-use async_graphql::{Context, Enum, ID, Object, SimpleObject};
+use async_graphql::{Context, Enum, ID, Object};
+use leviath_graphql_derive::mirror;
 
 use super::super::super::blocking::blocking;
 use super::super::super::core::blueprints;
 use super::super::super::core::error::ServeError;
+use super::super::super::core::runs::predicate::RunTree;
 use super::super::super::core::{files, history};
 use super::super::super::types::AppState;
+use super::super::connection::{
+    Connection, Paged, PositionQuery, Total, position_order, position_page,
+};
 use super::super::error::IntoGraphql;
+use super::super::filter::{MatchCx, run_relations};
+use super::super::paging::digest::canonical;
+use super::super::paging::order::{OrderDirection, Term};
+use super::super::paging::page::page;
 use super::super::scalars::{BigInt, Cursor, Decimal, Timestamp};
 use super::blueprint::Blueprint;
+use super::interaction::{Interaction, InteractionFilter, InteractionOrder, InteractionOutput};
 use super::run_detail::{
-    Artifact, BlobEntry, ContextWindow, FinalOutput, RunFlags, StageRecord, WaitReason,
+    Artifact, ArtifactFilter, ArtifactOrder, BlobEntry, BlobEntryFilter, BlobEntryOrder,
+    ContextWindow, FinalOutput, RunFlags, StageModelUse, StageRecord, StageRecordFilter,
+    StageRecordOrder, WaitReason,
 };
-use super::run_files::{FileListing, FileSource, FileWindow};
+use super::run_files::{FileEntry, FileEntryFilter, FileListingExtras, FileSource, FileWindow};
+use crate::commands::serve::cursor;
 use crate::runstate::RunMeta;
+use support::{
+    BoundedPageArgs, ContextSnapshotPoint, ContextSnapshotPointFilter, CurrentStage,
+    LogStageOptions, LogStream, MetadataEntry, RunTreeStatus, as_i32, bounded_page, signed,
+    tail_logs,
+};
+pub(crate) use support::{CostBreakdown, TokenUsage, WorkingClock};
+
+mod reads;
+mod support;
+
+/// Where a run's own file reads are reported, for the test that counts them.
+pub(crate) use reads::counted;
+#[cfg(test)]
+pub(crate) use reads::record_file_reads;
+
+impl Paged for Run {
+    const NAME: &'static str = "Run";
+}
 
 /// The lifecycle states a run moves through.
 ///
 /// One state per variant of the daemon's own `RunStatus`, so the two cannot
 /// drift: the conversion below is exhaustive and a new daemon state will not
 /// compile until it is named here.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum RunStatus {
     /// Spawned but not yet running.
@@ -47,6 +79,15 @@ pub(crate) enum RunStatus {
     Error,
     /// Stopped from outside. Nothing went wrong; somebody decided.
     Cancelled,
+    // ─── owned by worker 2S (subscriptions); see `RunStatus::from_wire` ───
+    /// A state this build has no name for, which is what a newer daemon's new
+    /// state looks like from here.
+    ///
+    /// Only ever reached through a live frame, where the status arrives as the
+    /// daemon's own word rather than as a value this build chose. A run read
+    /// from disk is parsed into one of the states above or not read at all.
+    Unknown,
+    // ─── end 2S hunk ───
 }
 
 impl From<&leviath_core::run_meta::RunStatus> for RunStatus {
@@ -66,69 +107,28 @@ impl From<&leviath_core::run_meta::RunStatus> for RunStatus {
 }
 
 impl RunStatus {
-    /// The daemon's own spelling of this state.
+    /// The state one of the daemon's own words names.
     ///
-    /// The filters read `meta.json`, which stores these words, so a GraphQL
-    /// enum value has to become one before it can filter anything. Going
-    /// through the daemon's own `wire()` keeps one spelling for one state
-    /// across both surfaces.
-    pub(crate) fn wire(self) -> &'static str {
+    /// The live frames carry the word rather than a parsed state, and the
+    /// daemon on the other end of the socket may be a newer build than this
+    /// one. [`Unknown`](Self::Unknown) is what a word this build does not know
+    /// becomes, so one new state does not cost a subscriber the whole frame.
+    pub(crate) fn from_wire(word: &str) -> Self {
         use leviath_core::run_meta::RunStatus as Daemon;
-        match self {
-            Self::Starting => Daemon::Starting.wire(),
-            Self::Running => Daemon::Running.wire(),
-            Self::WaitingInput => Daemon::WaitingInput.wire(),
-            Self::Paused => Daemon::Paused.wire(),
-            Self::Complete => Daemon::Complete.wire(),
-            Self::CompleteInteractive => Daemon::CompleteInteractive.wire(),
-            Self::Error => Daemon::Error.wire(),
-            Self::Cancelled => Daemon::Cancelled.wire(),
-        }
+        [
+            Daemon::Starting,
+            Daemon::Running,
+            Daemon::WaitingInput,
+            Daemon::Paused,
+            Daemon::Complete,
+            Daemon::CompleteInteractive,
+            Daemon::Error,
+            Daemon::Cancelled,
+        ]
+        .iter()
+        .find(|status| status.wire() == word)
+        .map_or(Self::Unknown, Self::from)
     }
-}
-
-/// Token counts for a run, a stage, or a subtree roll-up.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct TokenUsage {
-    /// Input tokens, cached ones included.
-    pub(crate) prompt_tokens: BigInt,
-    /// Output tokens.
-    pub(crate) completion_tokens: BigInt,
-    /// Counted within `promptTokens`, not on top of it. Do not add them twice.
-    pub(crate) cached_tokens: BigInt,
-    /// Tokens written to the provider's cache.
-    pub(crate) cache_write_tokens: BigInt,
-}
-
-/// Spend for a run, a stage, or a subtree roll-up.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct CostBreakdown {
-    /// Null is unknown, never free: some call in the run went unpriced.
-    pub(crate) cost_usd: Option<Decimal>,
-    /// The priced subtotal, kept even while `costUsd` is null.
-    pub(crate) cost_priced_usd: Decimal,
-    /// True when every priced call carried the provider's own figure.
-    pub(crate) cost_is_exact: bool,
-    /// Calls no provider priced.
-    pub(crate) unpriced_calls: i32,
-}
-
-/// Elapsed working time: banked spans plus the one in progress.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct WorkingClock {
-    /// Seconds banked by spans that have ended.
-    pub(crate) banked_secs: i32,
-    /// When the span in progress began; null while the clock is stopped.
-    pub(crate) since: Option<Timestamp>,
-}
-
-/// One caller-supplied metadata entry on a run.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct MetadataEntry {
-    /// The key.
-    pub(crate) key: String,
-    /// The value. Always a string.
-    pub(crate) value: String,
 }
 
 /// The resolver state behind the `Run` type.
@@ -154,6 +154,7 @@ pub(crate) struct Run {
 /// Every duration on a run is measured against the moment the request was
 /// answered, so the numbers in one response agree with each other rather than
 /// each being taken at its own instant.
+#[mirror]
 #[Object]
 impl Run {
     /// Globally unique run id, and the id every REST route names this run by.
@@ -167,6 +168,7 @@ impl Run {
     }
 
     /// Human title, set by the titling pass; null until it lands.
+    #[filter(orderable)]
     async fn title(&self) -> Option<&str> {
         self.meta.title.as_deref()
     }
@@ -205,16 +207,19 @@ impl Run {
     }
 
     /// Unix epoch seconds, as the daemon stores it.
+    #[filter(orderable)]
     async fn started_at(&self) -> Timestamp {
         Timestamp(self.meta.started_at)
     }
 
     /// Last state change, unix epoch seconds.
+    #[filter(orderable)]
     async fn updated_at(&self) -> Timestamp {
         Timestamp(self.meta.updated_at)
     }
 
     /// When the run last actually moved. Age a wedged run against this.
+    #[filter(orderable)]
     async fn last_progress_at(&self) -> Option<Timestamp> {
         self.meta.last_progress_at.map(Timestamp)
     }
@@ -274,8 +279,44 @@ impl Run {
     }
 
     /// The run that spawned this one; null for a top-level run.
-    async fn parent_id(&self) -> Option<&str> {
-        self.meta.parent_run_id.as_deref()
+    ///
+    /// `{ isNull: true }` on the filter is what "only the runs nobody started"
+    /// is asked with, and an id here is what "this run's direct children" is.
+    async fn parent_id(&self) -> Option<ID> {
+        self.meta.parent_run_id.clone().map(ID)
+    }
+
+    /// Every run above this one, root first: the breadcrumb of the fan-out
+    /// this run is part of, and empty for a run nobody started.
+    ///
+    /// The flat read of a subtree is a filter on this. `ancestorIds: { has:
+    /// "<id>" }` selects every run under that one at any depth, which nesting
+    /// `children` can only do one level per request.
+    #[filter(with = "run_relations::ancestor_ids")]
+    async fn ancestor_ids(&self, ctx: &Context<'_>) -> Vec<ID> {
+        let state = ctx.data_unchecked::<AppState>();
+        let tree = RunTree::of(&state.caches.run_index.snapshot().await.into_runs());
+        tree.ancestors(&self.meta.run_id)
+            .into_iter()
+            .map(ID)
+            .collect()
+    }
+
+    /// What this run's stages actually ran on, provider and model together, in
+    /// the order the run first reached each pair.
+    ///
+    /// From the run's own record, so filtering on it opens nothing: `{ some: {
+    /// provider: { eq: "anthropic" } } }` is "this run used Anthropic
+    /// somewhere". The per-stage breakdown is on `stages`, which reads a file.
+    async fn stage_models(&self) -> Vec<StageModelUse> {
+        self.meta
+            .stage_models
+            .iter()
+            .map(|used| StageModelUse {
+                provider: used.provider.clone(),
+                model: used.model.clone(),
+            })
+            .collect()
     }
 
     /// The blueprint this run executed.
@@ -289,8 +330,10 @@ impl Run {
     /// Null, with an error naming the file, when neither can be read. Nullable
     /// on purpose: one unreadable blueprint in a page of fifty runs must not
     /// cost a client the other forty-nine.
+    #[filter(skip)]
     async fn blueprint(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Blueprint>> {
         let state = ctx.data_unchecked::<AppState>();
+        counted(&self.meta.run_id);
         let meta = Arc::clone(&self.meta);
         // One `meta.json`-sized read, off the async runtime: a selection set
         // that asks fifty runs for their blueprints is fifty small reads, and
@@ -335,14 +378,49 @@ impl Run {
 
     /// The run's stage ledger: what each stage cost, and how often it ran.
     ///
-    /// Bounded by the blueprint's stage count, so it is a list rather than a
-    /// connection. Read from the run's own `stages.json` only when selected.
-    /// Null, with an error, when that file will not read: one run's broken
-    /// ledger must not cost a client the page around it.
-    async fn stages(&self) -> Option<Vec<StageRecord>> {
-        let run_id = self.meta.run_id.clone();
-        let records = blocking(move || crate::runstate::read_stages_index(&run_id)).await;
-        Some(records.iter().map(StageRecord::from).collect())
+    /// Bounded by the blueprint's stage count, so counting it is free and
+    /// reading the whole thing costs one file. Keyset-paged like every listing
+    /// in this schema even so, for the one client with a blueprint that
+    /// declares hundreds of stages.
+    ///
+    /// A filter on this asks about the ledger rather than about one page of it:
+    /// `stages: { some: { status: { eq: ERROR } } }` on `runs` is "every run
+    /// that failed a stage", and it costs the one file per run it reaches.
+    #[filter(io, with = "run_relations::stages_of", ty = "Vec<StageRecord>")]
+    async fn stages(
+        &self,
+        #[graphql(desc = "Which stages to include. Omitted means all of them.")] filter: Option<
+            StageRecordFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means declared order.")]
+        order_by: Option<Vec<StageRecordOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<StageRecord>> {
+        let items = run_relations::stage_records(&self.meta.run_id).await;
+        let terms = match order_by {
+            Some(asked) if !asked.is_empty() => {
+                asked.into_iter().map(StageRecordOrder::term).collect()
+            }
+            _ => vec![Term {
+                field: super::run_detail::StageRecordOrderField::Index,
+                direction: OrderDirection::Asc,
+            }],
+        };
+        bounded_page(
+            "stages",
+            &self.meta.run_id,
+            items,
+            filter,
+            terms,
+            BoundedPageArgs { first, after },
+            |s: &StageRecord| s.name.clone(),
+        )
+        .await
     }
 
     /// The run's context window as it stands right now.
@@ -350,7 +428,9 @@ impl Run {
     /// Null for a run that has not written one yet, and for a finished run
     /// whose window was never persisted. Region contents are their own field,
     /// so asking for the shape of the window does not read its text.
+    #[filter(io)]
     async fn context(&self) -> Option<ContextWindow> {
+        counted(&self.meta.run_id);
         let run_id = self.meta.run_id.clone();
         let snapshot = blocking(move || crate::runstate::read_context_snapshot(&run_id)).await;
         snapshot.map(|snapshot| ContextWindow {
@@ -359,7 +439,9 @@ impl Run {
     }
 
     /// The answer this run submitted. Null until something is submitted.
+    #[filter(io)]
     async fn final_output(&self) -> Option<FinalOutput> {
+        counted(&self.meta.run_id);
         let run_id = self.meta.run_id.clone();
         blocking(move || crate::runstate::read_final_output(&run_id))
             .await
@@ -368,43 +450,35 @@ impl Run {
 
     /// This run's direct children, paged.
     ///
-    /// A connection rather than an array: a two-hundred-worker fan-out would
-    /// otherwise be one unbounded response. Nest the field to walk deeper, one
-    /// level per nesting, and read `pageInfo.hasNextPage` to see a level that
-    /// was cut. For a flat read of a whole subtree, `runs(filter: { parent: })`
-    /// is the same walk one page at a time.
+    /// The run listing with this run preset as the parent, so it takes the same
+    /// filter, the same sort keys and the same keyset cursor, and a level that
+    /// has more is a non-null `cursor` rather than a flag. Nest the field to
+    /// walk deeper, one level per nesting; for a flat read of the whole subtree
+    /// use `runs(filter: { ancestorIds: { has: "<id>" } })`.
+    #[filter(skip)]
     async fn children(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Page size for this level.", default = 50)] first: i32,
-        #[graphql(desc = "How many of this run's children to skip.", default = 0)] skip: i32,
-    ) -> async_graphql::Result<ChildConnection> {
-        let state = ctx.data_unchecked::<AppState>();
-        let limit = super::super::run_filter::page_size(first).gql()?;
-        let skip = usize::try_from(skip)
-            .map_err(|_| ServeError::BadRequest("`skip` cannot be negative".to_string()))
-            .gql()?;
-        // The index already holds the parent-to-children map, so a level is a
-        // lookup rather than a scan of every run.
-        let snapshot = state.caches.run_index.snapshot().await;
-        let children: Vec<Arc<RunMeta>> = snapshot
-            .under(Some(self.meta.run_id.as_str()))
-            .cloned()
-            .collect();
-        let total = i32::try_from(children.len()).unwrap_or(i32::MAX);
-        let page: Vec<Arc<RunMeta>> = children.iter().skip(skip).take(limit).cloned().collect();
-        let has_next_page = children.len() > skip.saturating_add(page.len());
-        let now = self.now;
-        Ok(ChildConnection {
-            edges: page
-                .into_iter()
-                .map(|meta| ChildEdge {
-                    node: Run { meta, now },
-                })
-                .collect(),
-            total,
-            has_next_page,
-        })
+        #[graphql(desc = "Which of this run's children to list. Omitted means all of them.")]
+        filter: Option<RunFilter>,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means newest first.")]
+        order_by: Option<Vec<RunOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<Run, super::super::query::runs::RunListingExtras>> {
+        super::super::query::runs::children_of(
+            ctx,
+            &self.meta.run_id,
+            filter,
+            order_by,
+            first,
+            after,
+        )
+        .await
     }
 
     /// How deep and how wide this run's sub-agent tree is, without walking it.
@@ -412,6 +486,7 @@ impl Run {
     /// The roll-up covers the whole subtree, which is the figure a fan-out is
     /// judged by: a parent that spent little and whose fifty workers spent a
     /// great deal is not a cheap run.
+    #[filter(skip)]
     async fn tree_status(&self, ctx: &Context<'_>) -> RunTreeStatus {
         let state = ctx.data_unchecked::<AppState>();
         let snapshot = state.caches.run_index.snapshot().await;
@@ -457,119 +532,136 @@ impl Run {
 
     /// A stage's logs.
     ///
-    /// `stageIndex` picks one stage, `allStages` reads every stage in order, and
-    /// neither reads more than `tail` bytes from the end of each stream. The cap
-    /// is the server's, because `allStages` multiplies whatever the client asks
-    /// for by the stage count.
+    /// `stage` picks one stage by index or every stage in order; omitted, it
+    /// means the stage the run is on now. Neither reads more than `tailBytes`
+    /// from the end of each stream, and the cap is the server's, because
+    /// naming every stage multiplies whatever the client asks for by the
+    /// stage count.
     ///
     /// Empty is not null: a stage that has written nothing, an index no stage
     /// answers to and a file this server cannot read all read as no text.
+    #[filter(skip)]
     async fn logs(
         &self,
-        #[graphql(desc = "One stage by index; omitted means the stage the run is on now.")]
-        stage_index: Option<i32>,
         #[graphql(
-            desc = "Every stage's logs in order, instead of one stage's.",
-            default = false
+            desc = "One stage by index or every stage; omitted means the stage the run is \
+                           on now."
         )]
-        all_stages: bool,
-        #[graphql(
-            desc = "Read the operational log rather than the output stream.",
-            default = false
-        )]
-        operational: bool,
+        stage: Option<LogStageOptions>,
+        #[graphql(desc = "Which stream to read.", default_with = "LogStream::Output")]
+        stream: LogStream,
         #[graphql(desc = "Bytes to read from the end of each stream.")] tail_bytes: Option<i32>,
     ) -> async_graphql::Result<String> {
-        let selector = match (stage_index, all_stages) {
-            (Some(_), true) => {
-                return Err(ServeError::BadRequest(
-                    "`stageIndex` names one stage and `allStages` names all of them, so they \
-                     cannot be combined"
-                        .to_string(),
-                ))
-                .gql();
-            }
-            (Some(index), false) => crate::runstate::StageSelector::Index(
-                usize::try_from(index)
-                    .map_err(|_| {
-                        ServeError::BadRequest("`stageIndex` cannot be negative".to_string())
-                    })
-                    .gql()?,
-            ),
-            (None, true) => crate::runstate::StageSelector::All,
-            (None, false) => crate::runstate::StageSelector::Current,
-        };
-        let stream = match operational {
-            true => crate::runstate::LogStream::Operational,
-            false => crate::runstate::LogStream::Output,
-        };
-        let bytes = match tail_bytes {
-            None => DEFAULT_LOG_TAIL_BYTES,
-            Some(asked) => u64::try_from(asked)
-                .map_err(|_| ServeError::BadRequest("`tailBytes` cannot be negative".to_string()))
-                .gql()?
-                .min(MAX_LOG_TAIL_BYTES),
-        };
-        let run_id = self.meta.run_id.clone();
-        Ok(
-            blocking(move || crate::runstate::tail_run_logs(&run_id, selector, stream, bytes))
-                .await,
-        )
+        tail_logs(&self.meta.run_id, stage, stream, tail_bytes).await
     }
 
     /// The binary parts this run holds.
     ///
     /// Metadata only: the bytes are behind each entry's `url`, a short-lived
     /// signed link the byte route verifies. Bytes never ride a query answer,
-    /// and a page can put that link straight into an `<img src>`.
-    async fn blobs(&self, ctx: &Context<'_>) -> Option<Vec<BlobEntry>> {
+    /// and a page can put that link straight into an `<img src>`. Empty for a
+    /// run whose part store is missing rather than merely bare, the same as an
+    /// empty one.
+    ///
+    /// A filter on this asks about the parts rather than about one page of
+    /// them, and about the record rather than the link: `blobs: { some: {
+    /// mimeType: { startsWith: "image/" } } }` is "every run holding an image".
+    #[filter(io, with = "run_relations::blobs_of", ty = "Vec<BlobEntry>")]
+    async fn blobs(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which parts to include. Omitted means all of them.")] filter: Option<
+            BlobEntryFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means declared order.")]
+        order_by: Option<Vec<BlobEntryOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<BlobEntry>> {
         let state = ctx.data_unchecked::<AppState>();
-        let run_id = self.meta.run_id.clone();
-        let stored = blocking(move || crate::blobs::list(&run_id)).await?;
-        let now = leviath_core::duration::now_secs();
-        Some(
-            stored
-                .into_iter()
-                .map(|blob| {
-                    let url = blob.stored.then(|| {
-                        super::super::super::signed_url::signed_path(
-                            &state.signer,
-                            &format!("/api/agents/{}/blobs/{}", self.meta.run_id, blob.sha256),
-                            &[],
-                            now,
-                        )
-                    });
-                    BlobEntry {
-                        sha256: blob.sha256,
-                        mime_type: blob.mime_type,
-                        name: blob.name,
-                        size: BigInt(blob.size as i64),
-                        width: blob.width.and_then(|w| i32::try_from(w).ok()),
-                        height: blob.height.and_then(|h| i32::try_from(h).ok()),
-                        duration_ms: blob.duration_ms.and_then(|d| i32::try_from(d).ok()),
-                        tokens: as_i32(blob.tokens),
-                        regions: blob.regions,
-                        stored: blob.stored,
-                        url,
-                    }
-                })
-                .collect(),
+        let items: Vec<BlobEntry> = run_relations::stored_parts(&self.meta.run_id)
+            .await
+            .into_iter()
+            .map(|blob| {
+                let url = super::run_detail::blob_link(state, &self.meta.run_id, &blob);
+                BlobEntry::of(blob, url)
+            })
+            .collect();
+        let terms = match order_by {
+            Some(asked) if !asked.is_empty() => {
+                asked.into_iter().map(BlobEntryOrder::term).collect()
+            }
+            _ => vec![Term {
+                field: super::run_detail::BlobEntryOrderField::Sha256,
+                direction: OrderDirection::Asc,
+            }],
+        };
+        bounded_page(
+            "blobs",
+            &self.meta.run_id,
+            items,
+            filter,
+            terms,
+            BoundedPageArgs { first, after },
+            |b: &BlobEntry| b.sha256.clone(),
         )
+        .await
     }
 
     /// The files this run handed back beside its answer.
     ///
-    /// Same as `blobs`: metadata here, bytes behind a signed link.
-    async fn artifacts(&self, ctx: &Context<'_>) -> Vec<Artifact> {
+    /// Same as `blobs`: metadata here, bytes behind a signed link, and a filter
+    /// on the records rather than on the link or on one page of them. The run's
+    /// own submission record holds these, so filtering on them reads nothing.
+    #[filter(with = "run_relations::artifacts_of", ty = "Vec<Artifact>")]
+    async fn artifacts(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which files to include. Omitted means all of them.")] filter: Option<
+            ArtifactFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means declared order.")]
+        order_by: Option<Vec<ArtifactOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<Artifact>> {
         let state = ctx.data_unchecked::<AppState>();
-        self.meta
+        let items: Vec<Artifact> = self
+            .meta
             .final_output
             .as_ref()
             .map(|output| output.artifacts.as_slice())
             .unwrap_or_default()
             .iter()
             .map(|artifact| super::run_detail::artifact(state, &self.meta.run_id, artifact))
-            .collect()
+            .collect();
+        let terms = match order_by {
+            Some(asked) if !asked.is_empty() => {
+                asked.into_iter().map(ArtifactOrder::term).collect()
+            }
+            _ => vec![Term {
+                field: super::run_detail::ArtifactOrderField::Name,
+                direction: OrderDirection::Asc,
+            }],
+        };
+        bounded_page(
+            "artifacts",
+            &self.meta.run_id,
+            items,
+            filter,
+            terms,
+            BoundedPageArgs { first, after },
+            |a: &Artifact| a.name.clone(),
+        )
+        .await
     }
 
     /// A short-lived signed link to one file in this run's working directory.
@@ -580,6 +672,7 @@ impl Run {
     ///
     /// Minted without resolving the path, so a file this run never wrote is a
     /// 404 from the byte route rather than nothing here.
+    #[filter(skip)]
     async fn file_url(
         &self,
         ctx: &Context<'_>,
@@ -605,6 +698,7 @@ impl Run {
     ///
     /// A lookup in the index's own map rather than a read: the parent is already
     /// in memory, so walking up a fan-out costs nothing per level.
+    #[filter(with = "run_relations::parent_of")]
     async fn parent(&self, ctx: &Context<'_>) -> Option<Run> {
         let state = ctx.data_unchecked::<AppState>();
         let parent_id = self.meta.parent_run_id.as_deref()?;
@@ -631,10 +725,11 @@ impl Run {
     /// The daemon holds these in memory, so this is one round trip to it rather
     /// than a read of the run store. A run in `WAITING_INPUT` whose ask has just
     /// been answered by somebody else answers null, which is the truth by then.
-    async fn interaction(
+    #[filter(skip)]
+    async fn open_interaction(
         &self,
         ctx: &Context<'_>,
-    ) -> async_graphql::Result<Option<super::super::events::InteractionRequest>> {
+    ) -> async_graphql::Result<Option<Interaction>> {
         let state = ctx.data_unchecked::<AppState>();
         let open = super::super::super::core::spawn::open_interactions(state)
             .await
@@ -642,7 +737,7 @@ impl Run {
         Ok(open
             .into_iter()
             .find(|(run_id, _)| run_id == &self.meta.run_id)
-            .map(|(_, request)| super::super::events::InteractionRequest::from(request)))
+            .map(|(run_id, request)| InteractionOutput::open(run_id, request)))
     }
 
     /// The run's files: what it recorded changing, or what is in its working
@@ -652,6 +747,7 @@ impl Run {
     /// free but capped at record time and a claim about the run rather than about
     /// the disk. `WORKDIR` is the truth, one directory level per request: that
     /// bound is the answer to a repository with a `node_modules` in it.
+    #[filter(skip)]
     async fn files(
         &self,
         ctx: &Context<'_>,
@@ -662,18 +758,50 @@ impl Run {
             default_with = "FileSource::Modified"
         )]
         source: FileSource,
-        #[graphql(desc = "Include dot-prefixed entries.", default = false)] hidden: bool,
-    ) -> async_graphql::Result<FileListing> {
+        #[graphql(desc = "Which entries to include. Omitted means all of them.")] filter: Option<
+            FileEntryFilter,
+        >,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<FileEntry, FileListingExtras>> {
         let state = ctx.data_unchecked::<AppState>();
         let registry = state.current_config().mime_registry_or_defaults();
         let meta = Arc::clone(&self.meta);
         let dir = path.map(std::path::PathBuf::from);
-        let listed = blocking(move || {
-            files::listing(&meta, source.into(), dir.as_deref(), hidden, &registry)
-        })
+        // Dot-prefixed entries are always included now: a filter on `name` is
+        // how a client leaves them out, rather than a second argument saying
+        // the same thing a second way.
+        let listed =
+            blocking(move || files::listing(&meta, source.into(), dir.as_deref(), true, &registry))
+                .await
+                .gql()?;
+        let (items, extras) = super::run_files::split(listed);
+        let limit = page(first, files::MAX_LISTING_ENTRIES, "the files page cap").gql()?;
+        let filter = filter.unwrap_or_default();
+        let rendered = canonical(&filter).gql()?;
+        let digest = cursor::filter_digest(&["files", &self.meta.run_id, rendered.as_str()]);
+        let cx = MatchCx::at(leviath_core::duration::now_secs());
+        let walked = position_page(
+            items,
+            &filter,
+            &cx,
+            PositionQuery {
+                digest: &digest,
+                after: after.as_ref().map(|token| token.0.as_str()),
+                descending: false,
+                limit,
+            },
+        )
         .await
         .gql()?;
-        Ok(FileListing::from(listed))
+        Ok(
+            Connection::plain(walked.items, walked.cursor, Total::known(walked.total))
+                .with_extras(extras),
+        )
     }
 
     /// One window of one of the run's files, as text.
@@ -682,6 +810,7 @@ impl Run {
     /// A larger file is read a window at a time: pass `nextOffset` back as
     /// `offset`, and the windows concatenate into the file. For bytes rather than
     /// text, and for anything that is not text at all, mint a `fileUrl` instead.
+    #[filter(skip)]
     async fn file_content(
         &self,
         ctx: &Context<'_>,
@@ -715,12 +844,23 @@ impl Run {
     /// longer shows: a call a gate refused, one that failed and was reissued, one
     /// a restart cut off. Results are not on the page; each execution fetches its
     /// own, because one result can be a whole file.
+    #[filter(skip)]
     async fn executions(
         &self,
-        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Which executions to include. Omitted means all of them.")] filter: Option<
+            super::execution::ToolExecutionFilter,
+        >,
+        #[graphql(desc = "Sort key and direction. Omitted means dispatch order.")] order_by: Option<
+            Vec<super::execution::ToolExecutionOrder>,
+        >,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
         #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
-    ) -> async_graphql::Result<super::execution::ToolExecutionConnection> {
-        super::execution::page(self.meta.run_id.clone(), first, after).await
+    ) -> async_graphql::Result<Connection<super::execution::ToolExecution>> {
+        super::execution::executions(self.meta.run_id.clone(), filter, order_by, first, after).await
     }
 
     /// Every question this run put to a person and got an outcome for, in the
@@ -733,19 +873,32 @@ impl Run {
     /// stopped once the tool has read it.
     ///
     /// A question is written down when it settles, so one the run is parked on
-    /// right now is not here yet: `interaction` carries that one while it is
-    /// open. A run reading as `WAITING_INPUT` with nothing on its last page has
-    /// asked something nobody has answered, rather than asked nothing.
+    /// right now is not here yet: `openInteraction` carries that one while it
+    /// is open. A run reading as `WAITING_INPUT` with nothing on its last page
+    /// has asked something nobody has answered, rather than asked nothing.
     ///
     /// Empty for an unattended run, which asks nobody: `--yolo` answers before
     /// the question reaches a person, so an empty list on a run that plainly
     /// did something dangerous means exactly that.
+    #[filter(skip)]
     async fn interactions(
         &self,
-        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(
+            desc = "Which of the run's own settled asks to include. Omitted means all of \
+                           them."
+        )]
+        filter: Option<InteractionFilter>,
+        #[graphql(desc = "Sort key and direction. Omitted means the order the run asked them.")]
+        order_by: Option<Vec<InteractionOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
         #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
-    ) -> async_graphql::Result<super::interaction::InteractionConnection> {
-        super::interaction::page(self.meta.run_id.clone(), first, after).await
+    ) -> async_graphql::Result<Connection<Interaction>> {
+        super::interaction::interactions(self.meta.run_id.clone(), filter, order_by, first, after)
+            .await
     }
 
     /// Every trip this run made to a provider, in the order it made them,
@@ -759,12 +912,22 @@ impl Run {
     /// up on a provider.
     ///
     /// Empty for a run whose journal holds no attempt records.
+    #[filter(skip)]
     async fn inferences(
         &self,
-        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Which attempts to include. Omitted means all of them.")] filter: Option<
+            super::inference::InferenceAttemptFilter,
+        >,
+        #[graphql(desc = "Sort key and direction. Omitted means the order they were made.")]
+        order_by: Option<Vec<super::inference::InferenceAttemptOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
         #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
-    ) -> async_graphql::Result<super::inference::InferenceAttemptConnection> {
-        super::inference::page(self.meta.run_id.clone(), first, after).await
+    ) -> async_graphql::Result<Connection<super::inference::InferenceAttempt>> {
+        super::inference::inferences(self.meta.run_id.clone(), filter, order_by, first, after).await
     }
 
     /// Every committed change to this run's context window, in the order they
@@ -783,12 +946,29 @@ impl Run {
     ///
     /// Empty for a run whose journal holds no change records, and for writes
     /// whose path cannot name a cause.
+    #[filter(skip)]
     async fn context_changes(
         &self,
-        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Which changes to include. Omitted means all of them.")] filter: Option<
+            super::context_change::ContextChangeFilter,
+        >,
+        #[graphql(desc = "Sort key and direction. Omitted means the order they landed.")]
+        order_by: Option<Vec<super::context_change::ContextChangeOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
         #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
-    ) -> async_graphql::Result<super::context_change::ContextChangeConnection> {
-        super::context_change::page(self.meta.run_id.clone(), first, after).await
+    ) -> async_graphql::Result<Connection<super::context_change::ContextChange>> {
+        super::context_change::context_changes(
+            self.meta.run_id.clone(),
+            filter,
+            order_by,
+            first,
+            after,
+        )
+        .await
     }
 
     /// Snapshots of this run's context window over the run, paged.
@@ -798,66 +978,73 @@ impl Run {
     /// harder than the run listing is: ask for the regions you render rather
     /// than every point's every region. Chronological by default, which is also
     /// the cheaper direction to read.
+    ///
+    /// Read whole rather than streamed, unlike `GET /api/agents/{id}/context/history`:
+    /// filtering a point means reading its window, and a filter answered by
+    /// reading is what this schema's walk defers past the page it can, not
+    /// past the one file this already is.
+    #[filter(skip)]
     async fn context_history(
         &self,
-        #[graphql(desc = "Page size.", default = 50)] first: i32,
+        #[graphql(desc = "Which points to include. Omitted means all of them.")] filter: Option<
+            ContextSnapshotPointFilter,
+        >,
+        #[graphql(desc = "Sort key and direction. Omitted means chronological.")] order_by: Option<
+            Vec<ContextHistoryOrder>,
+        >,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
         #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
-        #[graphql(desc = "Newest first instead of chronological.", default = false)]
-        descending: bool,
-    ) -> async_graphql::Result<ContextHistoryConnection> {
-        let limit = usize::try_from(first)
-            .ok()
-            .filter(|n| *n > 0)
-            .ok_or_else(|| ServeError::BadRequest("`first` must be at least 1".to_string()))
-            .gql()?;
-        if limit > history::HISTORY_MAX_LIMIT {
-            return Err(ServeError::BadRequest(format!(
-                "`first` may be at most {}, the history page cap: each point carries a whole \
-                 context window",
-                history::HISTORY_MAX_LIMIT
-            )))
-            .gql();
-        }
-        let order = match descending {
-            true => "desc",
-            false => "asc",
-        };
+    ) -> async_graphql::Result<Connection<ContextSnapshotPoint>> {
+        let limit = page(
+            first,
+            history::HISTORY_MAX_LIMIT,
+            "the history page cap: each point carries a whole context window",
+        )
+        .gql()?;
+        let filter = filter.unwrap_or_default();
+        let rendered = canonical(&filter).gql()?;
+        let digest =
+            cursor::filter_digest(&["context_history", &self.meta.run_id, rendered.as_str()]);
+        let descending = order_by
+            .unwrap_or_default()
+            .first()
+            .is_some_and(|term| term.direction.descending());
+
         let run_id = self.meta.run_id.clone();
-        let cursor = after.map(|cursor| cursor.0);
-        let page = blocking(move || {
-            let spec = history::HistorySpec::resolve(
-                &run_id,
-                Some(limit),
-                Some(order),
-                cursor.as_deref(),
-            )?;
-            history::page(&run_id, &spec)
-        })
+        let points = blocking(move || crate::runstate::context_history(&run_id)).await;
+        let items: Vec<ContextSnapshotPoint> = points
+            .into_iter()
+            .map(|point| ContextSnapshotPoint {
+                at: Timestamp(point.at),
+                stage: point.meta.current_stage.clone(),
+                window: ContextWindow {
+                    snapshot: Arc::new(point.context),
+                },
+            })
+            .collect();
+        let cx = MatchCx::at(leviath_core::duration::now_secs());
+        let walked = position_page(
+            items,
+            &filter,
+            &cx,
+            PositionQuery {
+                digest: &digest,
+                after: after.as_ref().map(|token| token.0.as_str()),
+                descending,
+                limit,
+            },
+        )
         .await
         .gql()?;
-        let total = i32::try_from(page.total).unwrap_or(i32::MAX);
-        let end_cursor = page.next_cursor.clone().map(Cursor);
-        Ok(ContextHistoryConnection {
-            edges: page
-                .points
-                .into_iter()
-                .map(|point| ContextHistoryEdge {
-                    cursor: Cursor(format!("{}", point.at)),
-                    node: ContextSnapshotPoint {
-                        at: Timestamp(point.at),
-                        stage: point.meta.current_stage.clone(),
-                        window: ContextWindow {
-                            snapshot: Arc::new(point.context),
-                        },
-                    },
-                })
-                .collect(),
-            page_info: super::super::connection::PageInfo {
-                end_cursor: end_cursor.clone(),
-                has_next_page: end_cursor.is_some(),
-            },
-            total,
-        })
+        Ok(Connection::plain(
+            walked.items,
+            walked.cursor,
+            Total::known(walked.total),
+        ))
     }
 
     /// One window this run held, by its revision.
@@ -874,6 +1061,7 @@ impl Run {
     /// Null when this run never held that window, which is also what a revision
     /// from another run looks like. Where the run held the same content more than
     /// once, this is the first time it did; the content is identical either way.
+    #[filter(skip)]
     async fn context_snapshot(
         &self,
         #[graphql(desc = "The window's revision.")] revision: String,
@@ -895,6 +1083,7 @@ impl Run {
     /// store whether the hash is held. `blobs` carries one per part already and
     /// nulls it for bytes that are gone; this is for a hash a client holds, and
     /// for the download form of a part it is showing inline.
+    #[filter(skip)]
     async fn blob_url(
         &self,
         ctx: &Context<'_>,
@@ -914,6 +1103,7 @@ impl Run {
     ///
     /// Minted without reading what the run produced, so an unknown name is a
     /// 404 from the byte route rather than nothing here.
+    #[filter(skip)]
     async fn artifact_url(
         &self,
         ctx: &Context<'_>,
@@ -935,6 +1125,7 @@ impl Run {
     /// for the blueprint as a whole. Null when the run's blueprint cannot be read:
     /// unknown is not the same as no, and a console that greyed out its box on a
     /// failed read would be wrong half the time.
+    #[filter(skip)]
     async fn accepts_messages(&self, ctx: &Context<'_>) -> Option<bool> {
         let state = ctx.data_unchecked::<AppState>();
         let meta = Arc::clone(&self.meta);
@@ -983,121 +1174,14 @@ impl Run {
     }
 }
 
-/// One child run with nothing else attached.
-///
-/// No cursor: a level is read from the index's parent map in listing order, and
-/// `skip` walks it. A keyset cursor would promise stability across a tree that
-/// is growing under the reader, which is not something this can offer.
-#[derive(SimpleObject)]
-pub(crate) struct ChildEdge {
-    /// The child run.
-    pub(crate) node: Run,
-}
-
-/// One page of a run's direct children.
-#[derive(SimpleObject)]
-pub(crate) struct ChildConnection {
-    /// The children on this page.
-    pub(crate) edges: Vec<ChildEdge>,
-    /// How many direct children this run has.
-    pub(crate) total: i32,
-    /// Whether another page follows.
-    pub(crate) has_next_page: bool,
-}
-
-/// How deep and how wide a run's sub-agent tree is.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct RunTreeStatus {
-    /// Token roll-up over the whole subtree, this run included.
-    pub(crate) rollup: TokenUsage,
-    /// The deepest nesting below this run.
-    pub(crate) depth: i32,
-    /// How many runs are below it, at any depth.
-    pub(crate) descendant_count: i32,
-}
-
-/// How much of a log stream is read when the client does not say.
-const DEFAULT_LOG_TAIL_BYTES: u64 = 32 * 1024;
-
-/// The most one request reads from each stream.
-///
-/// `allStages` multiplies whatever is asked for by the stage count, so the cap
-/// is the server's rather than the client's.
-const MAX_LOG_TAIL_BYTES: u64 = 1024 * 1024;
-
-/// Narrow a daemon counter to the 32 bits GraphQL's `Int` carries.
-///
-/// These are iteration and tool-call counters, which a run reaches in the
-/// thousands at most. Saturating rather than wrapping: if one ever did run
-/// away, a client should read an implausible ceiling rather than a small
-/// number that looks fine.
-fn as_i32(value: usize) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
-}
+position_order!(
+    ContextHistoryOrder,
+    ContextHistoryOrderField,
+    Sequence,
+    "The one sort key `contextHistory` may be ordered by.",
+    "Where this point sits among the run's own, in the order it was recorded."
+);
 
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod tests;
-
-/// A signed link to one of a run's byte routes.
-///
-/// One place mints these, so the fields that hand them out cannot drift apart on
-/// what a link looks like or how long it lasts.
-fn signed(state: &AppState, route: &str, download: bool) -> String {
-    let query: &[(&str, &str)] = match download {
-        true => &[("download", "1")],
-        false => &[],
-    };
-    super::super::super::signed_url::signed_path(
-        &state.signer,
-        route,
-        query,
-        leviath_core::duration::now_secs(),
-    )
-}
-
-/// Where a run is, in its blueprint's own terms.
-#[derive(Debug, SimpleObject)]
-pub(crate) struct CurrentStage {
-    /// The stage's name, as the blueprint spells it.
-    pub(crate) name: String,
-    /// Its position, counting from zero.
-    pub(crate) index: i32,
-    /// How many stages the blueprint has.
-    pub(crate) of: i32,
-}
-
-/// One point in a run's history: the whole context window, as it stood.
-#[derive(SimpleObject)]
-pub(crate) struct ContextSnapshotPoint {
-    /// When the window looked like this.
-    pub(crate) at: Timestamp,
-    /// The stage the run was in. Empty before the first stage is entered.
-    pub(crate) stage: String,
-    /// The window itself. Region contents are their own field, so asking for the
-    /// shape of a hundred windows does not read a hundred windows' text.
-    ///
-    /// Its `revision` is this point's stable name: pass it to `contextSnapshot`
-    /// to come back to exactly this content, whatever the run does next.
-    pub(crate) window: ContextWindow,
-}
-
-/// One point with its cursor.
-#[derive(SimpleObject)]
-pub(crate) struct ContextHistoryEdge {
-    /// The point.
-    pub(crate) node: ContextSnapshotPoint,
-    /// Cursor for this edge.
-    pub(crate) cursor: Cursor,
-}
-
-/// A paged history of one run's context window.
-#[derive(SimpleObject)]
-pub(crate) struct ContextHistoryConnection {
-    /// This page's points, in the order asked for.
-    pub(crate) edges: Vec<ContextHistoryEdge>,
-    /// Where the next page starts.
-    pub(crate) page_info: super::super::connection::PageInfo,
-    /// How many points the run's journal holds altogether.
-    pub(crate) total: i32,
-}

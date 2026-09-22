@@ -1,11 +1,13 @@
 //! Which model a stage runs on, and what it asks of it.
 
 use async_graphql::{SimpleObject, Union};
+use leviath_graphql_derive::mirror;
 
 use super::count;
 use crate::commands::serve::graphql::scalars::Json;
 
 /// One provider and model, in a stage's ordered list.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageModelRoute {
     /// The provider that serves it, as the config names providers.
@@ -15,6 +17,7 @@ pub(crate) struct StageModelRoute {
 }
 
 /// A fixed number of output tokens, sent as written.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct MaxTokensCount {
     /// The number of tokens.
@@ -26,6 +29,7 @@ pub(crate) struct MaxTokensCount {
 /// What a stage that rewrites a whole document wants: the number that fits is
 /// the model's, not the author's, and it changes with the model the stage lands
 /// on. The resolved value is clamped to the model's own maximum.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct MaxTokensContextPercent {
     /// The share, as a percentage.
@@ -36,6 +40,7 @@ pub(crate) struct MaxTokensContextPercent {
 ///
 /// What a stage that fills a region wants: a reply larger than the region it
 /// goes into is cut somewhere, and the region's budget is the honest ceiling.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct MaxTokensRegionPercent {
     /// The share, as a percentage.
@@ -49,6 +54,7 @@ pub(crate) struct MaxTokensRegionPercent {
 /// Three shapes because a fixed number is the wrong answer to two of the three
 /// questions. A relative cap resolves against the model or the region at
 /// inference time, so a stage moved to a larger model uses it.
+#[mirror]
 #[derive(Debug, Union)]
 pub(crate) enum MaxOutputTokens {
     /// A number of tokens.
@@ -85,6 +91,7 @@ impl From<leviath_core::blueprint::OutputCap> for MaxOutputTokens {
 /// takes them and a client renders them. Everything else stays in
 /// `providerParams` as written: a parameter one provider understands is not a
 /// parameter we should invent a field for, and dropping it would lose it.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ModelParameters {
     /// How much the model may wander, when the stage sets it.
@@ -124,6 +131,7 @@ impl ModelParameters {
 }
 
 /// A stage's model block.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageModelConfig {
     /// The models to try, best first. The first whose provider is configured on
@@ -158,3 +166,7 @@ impl From<&leviath_core::blueprint::ModelConfig> for StageModelConfig {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod tests;

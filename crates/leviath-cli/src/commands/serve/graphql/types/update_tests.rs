@@ -9,16 +9,16 @@
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
 use super::super::update::{
-    DaemonStatus, UpdateInfo, UpdateJob, UpdateJobStatus, UpdateStep, UpdateStepStatus,
+    DaemonStatus, UpdateJob, UpdateJobStatus, UpdatePlan, UpdateStep, UpdateStepStatus,
 };
 use crate::commands::update::detect::InstallMethod;
 use crate::commands::update::latest::LatestCheck;
-use crate::commands::update::{ConfigState, UpdatePlan};
+use crate::commands::update::{ConfigState, UpdatePlan as CorePlan};
 
 /// A plan with the given install method and nothing else going on.
-fn plan_with(method: InstallMethod) -> UpdatePlan {
+fn plan_with(method: InstallMethod) -> CorePlan {
     let binary = crate::commands::update::binary_step(&method);
-    UpdatePlan {
+    CorePlan {
         method,
         binary,
         agents: Vec::new(),
@@ -29,10 +29,10 @@ fn plan_with(method: InstallMethod) -> UpdatePlan {
 }
 
 /// Ask the schema about one plan.
-async fn ask(plan: &UpdatePlan, latest: &LatestCheck, query: &str) -> serde_json::Value {
+async fn ask(plan: &CorePlan, latest: &LatestCheck, query: &str) -> serde_json::Value {
     let schema = Schema::build(
         Probe {
-            info: UpdateInfo::from_plan(plan, "9.9.9", latest),
+            info: UpdatePlan::from_plan(plan, "9.9.9", latest),
         },
         EmptyMutation,
         EmptySubscription,
@@ -45,13 +45,13 @@ async fn ask(plan: &UpdatePlan, latest: &LatestCheck, query: &str) -> serde_json
 
 /// A root handing out one update plan.
 struct Probe {
-    info: UpdateInfo,
+    info: UpdatePlan,
 }
 
 #[async_graphql::Object]
 impl Probe {
     /// The plan under test.
-    async fn update(&self) -> &UpdateInfo {
+    async fn update(&self) -> &UpdatePlan {
         &self.info
     }
 }
@@ -112,8 +112,8 @@ async fn every_install_method_has_an_answer() {
 async fn the_binary_step_is_commands_or_advice() {
     let query = r#"{ update { binary {
         __typename
-        ... on UpgradeByCommand { commands shell }
-        ... on UpgradeByAdvice { message }
+        ... on UpgradeByCommandOutput { commands shell }
+        ... on UpgradeByAdviceOutput { message }
     } } }"#;
 
     let brewed = ask(
@@ -124,7 +124,10 @@ async fn the_binary_step_is_commands_or_advice() {
         query,
     )
     .await;
-    assert_eq!(brewed["update"]["binary"]["__typename"], "UpgradeByCommand");
+    assert_eq!(
+        brewed["update"]["binary"]["__typename"],
+        "UpgradeByCommandOutput"
+    );
     let commands = brewed["update"]["binary"]["commands"]
         .as_array()
         .expect("commands");
@@ -148,7 +151,10 @@ async fn the_binary_step_is_commands_or_advice() {
         query,
     )
     .await;
-    assert_eq!(unknown["update"]["binary"]["__typename"], "UpgradeByAdvice");
+    assert_eq!(
+        unknown["update"]["binary"]["__typename"],
+        "UpgradeByAdviceOutput"
+    );
     assert!(
         unknown["update"]["binary"]["message"]
             .as_str()
@@ -410,4 +416,111 @@ fn every_recorded_value_has_an_answer() {
         let job = UpdateJob::from(recorded(recorded_status, Step::Binary, StepStatus::Done));
         assert_eq!(job.status, answered);
     }
+}
+
+/// Every function `#[mirror]` wrote for this file's types runs at least once.
+///
+/// The mirrors are straight lines of delegation, so running each of them once
+/// is enough to measure all of them. One test per file rather than per query:
+/// what a query happens to select is not what the mirror is made of.
+#[tokio::test]
+async fn every_mirrored_function_runs() {
+    use crate::commands::serve::graphql::filter::testkit::{
+        exercise, exercise_enum, exercise_list,
+    };
+
+    exercise_enum(&[
+        super::super::update::InstallMethod::Homebrew,
+        super::super::update::InstallMethod::Cargo,
+    ])
+    .await;
+    exercise_enum(&[UpdateStep::Binary, UpdateStep::Migrations]).await;
+    exercise_enum(&[UpdateStepStatus::Pending, UpdateStepStatus::Failed]).await;
+    exercise_enum(&[UpdateJobStatus::Running, UpdateJobStatus::Complete]).await;
+
+    exercise(&[DaemonStatus {
+        reachable: true,
+        version: Some("0.6.1".to_string()),
+        build: Some("deadbeef".to_string()),
+        pid: Some(4242),
+        tool_env: Some(vec!["BRAVE_API_KEY".to_string()]),
+        restarts: 2,
+        restart_advised: None,
+    }])
+    .await;
+
+    exercise(&[super::super::update::UpgradeByCommand {
+        commands: vec![
+            "brew update".to_string(),
+            "brew upgrade leviath".to_string(),
+        ],
+        shell: "brew update && brew upgrade leviath".to_string(),
+    }])
+    .await;
+    exercise(&[super::super::update::UpgradeByAdvice {
+        message: "install it by hand".to_string(),
+    }])
+    .await;
+    exercise(&[
+        super::super::update::BinaryUpgrade::Command(super::super::update::UpgradeByCommand {
+            commands: vec!["brew upgrade leviath".to_string()],
+            shell: "brew upgrade leviath".to_string(),
+        }),
+        super::super::update::BinaryUpgrade::Advice(super::super::update::UpgradeByAdvice {
+            message: "install it by hand".to_string(),
+        }),
+    ])
+    .await;
+
+    let entries = vec![super::super::update::UpdateBlueprintEntry {
+        name: "coder".to_string(),
+        version: "1.0.0".to_string(),
+        change: "installs".to_string(),
+        has_changes: true,
+        preselected: true,
+    }];
+    exercise(&entries).await;
+    exercise_list(&entries).await;
+
+    let migrations = vec![super::super::update::UpdateMigration {
+        name: "rename-key".to_string(),
+        description: "renames a key".to_string(),
+    }];
+    exercise(&migrations).await;
+    exercise_list(&migrations).await;
+
+    let steps = vec![super::super::update::UpdateJobStep {
+        step: UpdateStep::Binary,
+        status: UpdateStepStatus::Done,
+        detail: "done".to_string(),
+    }];
+    exercise(&steps).await;
+    exercise_list(&steps).await;
+
+    let info = UpdatePlan {
+        version: "9.9.9".to_string(),
+        install_method: super::super::update::InstallMethod::Cargo,
+        channel: None,
+        latest: Some("10.0.0".to_string()),
+        update_available: Some(true),
+        checked_at: Some(crate::commands::serve::graphql::scalars::Timestamp(
+            1_788_924_523,
+        )),
+        binary: super::super::update::BinaryUpgrade::Advice(
+            super::super::update::UpgradeByAdvice {
+                message: "install it by hand".to_string(),
+            },
+        ),
+        blueprints: entries,
+        migrations,
+        config_error: None,
+    };
+    exercise(std::slice::from_ref(&info)).await;
+
+    let job = UpdateJob {
+        id: async_graphql::ID("job-1".to_string()),
+        status: UpdateJobStatus::Running,
+        steps,
+    };
+    exercise(std::slice::from_ref(&job)).await;
 }

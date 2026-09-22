@@ -5,9 +5,13 @@ use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
+use super::super::run::{CostBreakdown, TokenUsage, WorkingClock};
 use super::{
-    ContextWindow, RunFlags, SetupBlocker, StageRecord, StageStatus, WaitReason, WaitReasonKind,
+    Artifact, BlobEntry, ContextRegion, ContextWindow, FinalOutput, RegionPeak, RunFlags,
+    SetupBlocker, StageModelUse, StageRecord, StageStatus, StageVisit, WaitReason, WaitReasonKind,
 };
+use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum, exercise_list};
+use crate::commands::serve::graphql::scalars::{BigInt, Decimal, Timestamp};
 
 /// A root handing out one window, so a field test is one query.
 struct WindowProbe {
@@ -319,4 +323,160 @@ async fn a_context_window_reports_its_regions() {
     assert_eq!(conversation["entryCount"], 0);
     assert_eq!(conversation["content"], "");
     assert!(conversation["description"].is_null());
+}
+
+/// Every function `#[mirror]` wrote for this file's types runs at least once.
+///
+/// The mirrors are straight lines of delegation, so running each of them once
+/// is enough to measure all of them. One test per file rather than per query:
+/// what a query happens to select is not what the mirror is made of.
+#[tokio::test]
+async fn every_mirrored_function_runs() {
+    exercise_enum(&[WaitReasonKind::ToolApproval, WaitReasonKind::NeedsSetup]).await;
+    exercise_enum(&[
+        SetupBlocker::ProviderMissing,
+        SetupBlocker::ProviderUnreachable,
+    ])
+    .await;
+    exercise(&[WaitReason {
+        reason: WaitReasonKind::NeedsSetup,
+        blocker: Some(SetupBlocker::CreditsExhausted),
+        remedy: Some("top up the account".to_string()),
+        outstanding: None,
+        needs_a_person: true,
+    }])
+    .await;
+    exercise(&[RunFlags {
+        empty_output: false,
+        produced_output: true,
+        output_forced: 0,
+        no_output_tools: false,
+        gates_forced: 0,
+        max_iterations_hit: 0,
+        splits_degraded: 0,
+        modified_file_count: 1,
+        modified_files: vec!["src/main.rs".to_string()],
+        searches_run: 2,
+        searches_empty: 0,
+        required_regions_abandoned: Vec::new(),
+        workspace_lost: false,
+    }])
+    .await;
+    exercise(&[FinalOutput {
+        content: "done".to_string(),
+        format: Some("markdown".to_string()),
+        stage: "build".to_string(),
+        submitted_at: Timestamp(100),
+        truncated: false,
+    }])
+    .await;
+    exercise_enum(&[StageStatus::Pending, StageStatus::Complete]).await;
+
+    let usage = || TokenUsage {
+        prompt_tokens: BigInt(10),
+        completion_tokens: BigInt(5),
+        cached_tokens: BigInt(2),
+        cache_write_tokens: BigInt(1),
+    };
+    let cost = || CostBreakdown {
+        cost_usd: Some(Decimal(0.01)),
+        cost_priced_usd: Decimal(0.01),
+        cost_is_exact: true,
+        unpriced_calls: 0,
+    };
+    let visit = StageVisit {
+        id: Some(async_graphql::ID::from("v-one")),
+        ordinal: 1,
+        entered_at: Timestamp(10),
+        left_at: Some(Timestamp(20)),
+        in_progress: false,
+        usage: usage(),
+        cost: cost(),
+    };
+    exercise(std::slice::from_ref(&visit)).await;
+    exercise_list(std::slice::from_ref(&visit)).await;
+
+    let peak = RegionPeak {
+        region: "plan".to_string(),
+        tokens: 100,
+    };
+    exercise(std::slice::from_ref(&peak)).await;
+    exercise_list(std::slice::from_ref(&peak)).await;
+
+    let model_use = StageModelUse {
+        provider: "anthropic".to_string(),
+        model: "claude-opus-5".to_string(),
+    };
+    exercise(std::slice::from_ref(&model_use)).await;
+    exercise_list(std::slice::from_ref(&model_use)).await;
+
+    let record = StageRecord {
+        name: "build".to_string(),
+        index: 0,
+        status: StageStatus::Active,
+        entered: true,
+        usage: usage(),
+        cost: cost(),
+        models: Some(vec![model_use]),
+        visit_count: 1,
+        visits: vec![visit],
+        region_peaks: vec![peak],
+        runaway_warned: false,
+        started_at: Some(Timestamp(10)),
+        ended_at: None,
+        active: Some(WorkingClock {
+            banked_secs: 5,
+            since: Some(Timestamp(20)),
+        }),
+    };
+    exercise(std::slice::from_ref(&record)).await;
+    exercise_list(std::slice::from_ref(&record)).await;
+
+    let snapshot = Arc::new(leviath_core::run_meta::ContextSnapshot {
+        stage_name: "build".to_string(),
+        total_tokens: 100,
+        max_tokens: 1_000,
+        regions: vec![leviath_core::run_meta::RegionSnapshot {
+            name: "plan".to_string(),
+            kind: "pinned".to_string(),
+            current_tokens: 10,
+            max_tokens: 100,
+            description: None,
+            entries: Vec::new(),
+        }],
+    });
+    let region = ContextRegion {
+        snapshot: Arc::clone(&snapshot),
+        at: 0,
+    };
+    exercise(std::slice::from_ref(&region)).await;
+    exercise_list(std::slice::from_ref(&region)).await;
+    exercise(&[ContextWindow { snapshot }]).await;
+
+    let blob = BlobEntry {
+        sha256: "abc".to_string(),
+        mime_type: "image/png".to_string(),
+        name: Some("logo.png".to_string()),
+        size: BigInt(1_024),
+        width: Some(64),
+        height: Some(64),
+        duration_ms: None,
+        tokens: 20,
+        regions: vec!["conversation".to_string()],
+        stored: true,
+        url: Some("https://example.test/blob".to_string()),
+    };
+    exercise(std::slice::from_ref(&blob)).await;
+    exercise_list(std::slice::from_ref(&blob)).await;
+
+    let artifact = Artifact {
+        name: "report.md".to_string(),
+        mime_type: "text/markdown".to_string(),
+        size: Some(BigInt(512)),
+        sha256: Some("def".to_string()),
+        path: "report.md".to_string(),
+        url: "https://example.test/artifact".to_string(),
+    };
+    exercise(std::slice::from_ref(&artifact)).await;
+    exercise_list(std::slice::from_ref(&artifact)).await;
 }

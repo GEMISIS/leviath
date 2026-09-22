@@ -9,7 +9,7 @@ use std::path::Path;
 
 use async_graphql::{InputType, Name, Value, indexmap::IndexMap};
 
-use super::{BlueprintInput, RegionInput};
+use super::{BlueprintRef, RegionRef};
 use crate::commands::serve::blueprints::TEST_AGENTS_DIR;
 use crate::commands::serve::core::error::ServeError;
 use crate::commands::serve::testutil::state_with_agent_paths;
@@ -44,7 +44,7 @@ fn install(root: &Path, name: &str) -> String {
 #[tokio::test]
 async fn a_pointer_without_a_pin_is_the_name_it_was_given() {
     let state = state_with_agent_paths(Vec::new());
-    let input = BlueprintInput {
+    let input = BlueprintRef {
         name: "coder".to_string(),
         digest: None,
     };
@@ -60,7 +60,7 @@ async fn a_pin_that_matches_the_installed_manifest_passes() {
     TEST_AGENTS_DIR
         .scope(agents.path().to_path_buf(), async move {
             let state = state_with_agent_paths(Vec::new());
-            let input = BlueprintInput {
+            let input = BlueprintRef {
                 name: "pinned".to_string(),
                 digest: Some(digest),
             };
@@ -79,7 +79,7 @@ async fn a_stale_pin_is_a_conflict_naming_both_digests() {
         .scope(agents.path().to_path_buf(), async move {
             let state = state_with_agent_paths(Vec::new());
             let stale = "0".repeat(64);
-            let input = BlueprintInput {
+            let input = BlueprintRef {
                 name: "drifted".to_string(),
                 digest: Some(stale.clone()),
             };
@@ -106,7 +106,7 @@ async fn a_pin_on_an_uninstalled_name_is_a_not_found() {
     TEST_AGENTS_DIR
         .scope(agents.path().to_path_buf(), async move {
             let state = state_with_agent_paths(Vec::new());
-            let input = BlueprintInput {
+            let input = BlueprintRef {
                 name: "absent".to_string(),
                 digest: Some("a".repeat(64)),
             };
@@ -138,20 +138,20 @@ fn one(field: &str, value: Value) -> Option<Value> {
 #[test]
 fn both_inputs_round_trip_through_their_own_value_form() {
     let digest = "b".repeat(64);
-    let blueprint = BlueprintInput {
+    let blueprint = BlueprintRef {
         name: "coder".to_string(),
         digest: Some(digest.clone()),
     };
-    let Ok(read_back) = BlueprintInput::parse(Some(blueprint.to_value())) else {
+    let Ok(read_back) = BlueprintRef::parse(Some(blueprint.to_value())) else {
         panic!("a blueprint input reads back from its own value");
     };
     assert_eq!(read_back.name, "coder");
     assert_eq!(read_back.digest, Some(digest));
 
-    let region = RegionInput {
+    let region = RegionRef {
         name: "plan".to_string(),
     };
-    let Ok(read_back) = RegionInput::parse(Some(region.to_value())) else {
+    let Ok(read_back) = RegionRef::parse(Some(region.to_value())) else {
         panic!("a region input reads back from its own value");
     };
     assert_eq!(read_back.name, "plan");
@@ -160,7 +160,7 @@ fn both_inputs_round_trip_through_their_own_value_form() {
 /// Both inputs refuse what they cannot read, field by field.
 ///
 /// Each field is read in turn, so an object whose *last* field is wrong takes a
-/// path no test of the first one enters. `BlueprintInput` reads `name` and then
+/// path no test of the first one enters. `BlueprintRef` reads `name` and then
 /// `digest`, so both positions are checked here.
 #[test]
 fn both_inputs_refuse_what_they_cannot_read() {
@@ -168,17 +168,17 @@ fn both_inputs_refuse_what_they_cannot_read() {
     let text = |s: &str| Value::String(s.to_string());
     let scalar = || Some(Value::String("nope".to_string()));
 
-    assert!(BlueprintInput::parse(scalar()).is_err(), "not an object");
+    assert!(BlueprintRef::parse(scalar()).is_err(), "not an object");
     assert!(
-        BlueprintInput::parse(one("name", number())).is_err(),
+        BlueprintRef::parse(one("name", number())).is_err(),
         "a name is a string"
     );
     assert!(
-        BlueprintInput::parse(one("digest", text("abc"))).is_err(),
+        BlueprintRef::parse(one("digest", text("abc"))).is_err(),
         "a pin without a name points at nothing"
     );
     assert!(
-        BlueprintInput::parse(None).is_err(),
+        BlueprintRef::parse(None).is_err(),
         "no value at all is no pointer"
     );
 
@@ -186,14 +186,14 @@ fn both_inputs_refuse_what_they_cannot_read() {
     with_bad_digest.insert(Name::new("name"), text("coder"));
     with_bad_digest.insert(Name::new("digest"), number());
     assert!(
-        BlueprintInput::parse(Some(Value::Object(with_bad_digest))).is_err(),
+        BlueprintRef::parse(Some(Value::Object(with_bad_digest))).is_err(),
         "a good first field does not excuse a bad second one"
     );
 
-    assert!(RegionInput::parse(scalar()).is_err(), "not an object");
-    assert!(RegionInput::parse(None).is_err(), "a region needs a name");
+    assert!(RegionRef::parse(scalar()).is_err(), "not an object");
+    assert!(RegionRef::parse(None).is_err(), "a region needs a name");
     assert!(
-        RegionInput::parse(one("name", number())).is_err(),
+        RegionRef::parse(one("name", number())).is_err(),
         "a name is a string"
     );
 }

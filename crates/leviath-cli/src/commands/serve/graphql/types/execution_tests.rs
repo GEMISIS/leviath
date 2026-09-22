@@ -146,26 +146,26 @@ async fn the_executions_read_back_typed_with_their_results() {
 
         let json = data(
             r#"{ run { executions(first: 10) {
-                 total pageInfo { hasNextPage }
-                 edges { node {
+                 total cursor
+                 results {
                    id callId outcome stageIndex iteration dispatchedAt endedAt journalPosition
                    call {
                      __typename toolName rawArguments
-                     ... on ReadFileCall { args { path } }
-                     ... on ShellCall { args { command } }
+                     ... on ReadFileCallOutput { args { path } }
+                     ... on ShellCallOutput { args { command } }
                    }
                    result { text bytes truncated parts }
-                 } }
+                 }
                } } }"#,
         )
         .await;
         let page = &json["run"]["executions"];
         assert_eq!(page["total"], 2);
-        assert_eq!(page["pageInfo"]["hasNextPage"], false);
+        assert!(page["cursor"].is_null(), "the only page");
 
         // Dispatch order, so the read comes first even though the shell call has
         // no ending recorded.
-        let first = &page["edges"][0]["node"];
+        let first = &page["results"][0];
         assert_eq!(first["id"], "x1");
         assert_eq!(first["callId"], "c1");
         assert_eq!(first["outcome"], "SUCCEEDED");
@@ -173,7 +173,7 @@ async fn the_executions_read_back_typed_with_their_results() {
         assert_eq!(first["iteration"], 3);
         assert_eq!(first["dispatchedAt"], 100);
         assert_eq!(first["endedAt"], 101);
-        assert_eq!(first["call"]["__typename"], "ReadFileCall");
+        assert_eq!(first["call"]["__typename"], "ReadFileCallOutput");
         assert_eq!(first["call"]["args"]["path"], "notes.md");
         // The raw arguments sit beside the typed reading of them, always.
         assert_eq!(first["call"]["rawArguments"]["path"], "notes.md");
@@ -184,14 +184,14 @@ async fn the_executions_read_back_typed_with_their_results() {
         // Both calls of one batch name the same position, which is the record
         // that dispatched them.
         assert_eq!(
-            first["journalPosition"], page["edges"][1]["node"]["journalPosition"],
+            first["journalPosition"], page["results"][1]["journalPosition"],
             "one batch, one dispatch record"
         );
 
         // The second call never finished, and every field about its ending says
         // so rather than guessing.
-        let second = &page["edges"][1]["node"];
-        assert_eq!(second["call"]["__typename"], "ShellCall");
+        let second = &page["results"][1];
+        assert_eq!(second["call"]["__typename"], "ShellCallOutput");
         assert_eq!(second["call"]["args"]["command"], "ls -la");
         assert!(second["endedAt"].is_null());
         assert!(second["outcome"].is_null());
@@ -230,10 +230,10 @@ async fn an_abandoned_attempt_reads_as_indeterminate() {
         ]);
 
         let json = data(
-            "{ run { executions(first: 10) { edges { node { outcome endedAt result { text } } } } } }",
+            "{ run { executions(first: 10) { results { outcome endedAt result { text } } } } }",
         )
         .await;
-        let node = &json["run"]["executions"]["edges"][0]["node"];
+        let node = &json["run"]["executions"]["results"][0];
         assert_eq!(node["outcome"], "INDETERMINATE");
         assert_eq!(node["endedAt"], 140);
         assert!(
@@ -265,11 +265,9 @@ async fn an_inline_result_reads_from_its_batch_record() {
             response: String::new(),
         }]);
 
-        let json = data(
-            "{ run { executions(first: 10) { edges { node { endedAt result { text } } } } } }",
-        )
-        .await;
-        let node = &json["run"]["executions"]["edges"][0]["node"];
+        let json =
+            data("{ run { executions(first: 10) { results { endedAt result { text } } } } }").await;
+        let node = &json["run"]["executions"]["results"][0];
         assert_eq!(node["endedAt"], 100, "it ended when it was dispatched");
         assert_eq!(node["result"]["text"], "[blocked] taint gate refused it");
     })
@@ -300,29 +298,27 @@ async fn the_executions_page_carries_on_from_its_cursor() {
             response: String::new(),
         }]);
 
-        let json = data(
-            "{ run { executions(first: 2) { total pageInfo { hasNextPage endCursor } edges { node { callId } } } } }",
-        )
-        .await;
+        let json =
+            data("{ run { executions(first: 2) { total cursor results { callId } } } }").await;
         let page = &json["run"]["executions"];
         assert_eq!(page["total"], 5);
-        assert_eq!(page["pageInfo"]["hasNextPage"], true);
-        assert_eq!(page["edges"][0]["node"]["callId"], "c0");
-        let cursor = page["pageInfo"]["endCursor"].as_str().expect("a cursor");
+        assert!(page["cursor"].as_str().is_some(), "more to come");
+        assert_eq!(page["results"][0]["callId"], "c0");
+        let cursor = page["cursor"].as_str().expect("a cursor");
 
         let json = data(&format!(
             r#"{{ run {{ executions(first: 10, after: "{cursor}") {{
-                 pageInfo {{ hasNextPage }} edges {{ node {{ callId }} }}
+                 cursor results {{ callId }}
                }} }} }}"#
         ))
         .await;
         let page = &json["run"]["executions"];
-        assert_eq!(page["pageInfo"]["hasNextPage"], false, "that was the rest");
-        let ids: Vec<&str> = page["edges"]
+        assert!(page["cursor"].is_null(), "that was the rest");
+        let ids: Vec<&str> = page["results"]
             .as_array()
-            .expect("edges")
+            .expect("results")
             .iter()
-            .filter_map(|edge| edge["node"]["callId"].as_str())
+            .filter_map(|node| node["callId"].as_str())
             .collect();
         assert_eq!(ids, vec!["c2", "c3", "c4"], "no call read twice");
     })
@@ -355,6 +351,67 @@ async fn a_cursor_from_elsewhere_is_refused() {
     .await;
 }
 
+/// Naming `orderBy` explicitly reverses dispatch order, instead of walking it
+/// forward.
+#[tokio::test]
+async fn an_explicit_order_by_walks_backwards() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-exec-orderby", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        write_journal(vec![
+            RunRecord::ToolBatch {
+                calls: vec![call("c1", "x1", "shell", r#"{"command":"one"}"#)],
+                at: 100,
+                stage_index: 0,
+                iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
+                response: String::new(),
+            },
+            RunRecord::ToolBatch {
+                calls: vec![call("c2", "x2", "shell", r#"{"command":"two"}"#)],
+                at: 101,
+                stage_index: 0,
+                iteration: 2,
+                visit_id: String::new(),
+                requested_by: String::new(),
+                response: String::new(),
+            },
+        ]);
+
+        let json = data(
+            "{ run { executions(orderBy: [{ field: JOURNAL_POSITION, direction: DESC }]) { \
+             results { callId } } } }",
+        )
+        .await;
+        let ids: Vec<&str> = json["run"]["executions"]["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .filter_map(|node| node["callId"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["c2", "c1"], "descending reverses dispatch order");
+    })
+    .await;
+}
+
+/// A filter nested past the depth limit is refused rather than walked.
+#[tokio::test]
+async fn a_filter_past_the_depth_limit_is_refused() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-exec-filter-depth", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        let mut filter = r#"{ callId: { eq: "x" } }"#.to_string();
+        for _ in 0..20 {
+            filter = format!("{{ not: {filter} }}");
+        }
+        let message = error(&format!(
+            "{{ run {{ executions(filter: {filter}) {{ total }} }} }}"
+        ))
+        .await;
+        assert!(message.contains("flatten it"), "{message}");
+    })
+    .await;
+}
+
 /// A run that never dispatched a tool did nothing, and says so with an empty
 /// page rather than an error.
 ///
@@ -365,11 +422,12 @@ async fn a_cursor_from_elsewhere_is_refused() {
 async fn a_run_that_did_nothing_has_no_executions() {
     crate::runstate::with_isolated_runs_dir_async("graphql-exec-empty", |_dir| async move {
         create_run(&meta()).expect("run written");
-        let json =
-            data("{ run { executions(first: 10) { total edges { node { callId } } } } }").await;
+        let json = data("{ run { executions(first: 10) { total results { callId } } } }").await;
         assert_eq!(json["run"]["executions"]["total"], 0);
         assert_eq!(
-            json["run"]["executions"]["edges"].as_array().map(Vec::len),
+            json["run"]["executions"]["results"]
+                .as_array()
+                .map(Vec::len),
             Some(0)
         );
     })
@@ -403,10 +461,11 @@ async fn a_large_result_comes_back_as_its_head() {
             },
         ]);
 
-        let json =
-            data("{ run { executions(first: 1) { edges { node { result { text bytes truncated } } } } } }")
-                .await;
-        let result = &json["run"]["executions"]["edges"][0]["node"]["result"];
+        let json = data(
+            "{ run { executions(first: 1) { results { result { text bytes truncated } } } } }",
+        )
+        .await;
+        let result = &json["run"]["executions"]["results"][0]["result"];
         assert_eq!(result["truncated"], true);
         assert_eq!(result["bytes"], whole.len());
         assert_eq!(
@@ -504,9 +563,8 @@ async fn a_result_with_stored_parts_names_them() {
         ]);
 
         let json =
-            data("{ run { executions(first: 1) { edges { node { result { text parts } } } } } }")
-                .await;
-        let result = &json["run"]["executions"]["edges"][0]["node"]["result"];
+            data("{ run { executions(first: 1) { results { result { text parts } } } } }").await;
+        let result = &json["run"]["executions"]["results"][0]["result"];
         assert_eq!(
             result["parts"].as_array().and_then(|p| p.first()),
             Some(&serde_json::json!("diagram.png"))
@@ -618,20 +676,21 @@ async fn a_parked_run_carries_the_ask_it_is_parked_on() {
     });
     let json = with_daemon(
         control,
-        "{ run { interaction { id kind prompt stageName required } } }",
+        "{ run { openInteraction { id kind prompt stageName isRequired } } }",
     )
     .await;
-    assert_eq!(json["run"]["interaction"]["id"], "ask-1");
-    assert_eq!(json["run"]["interaction"]["kind"], "FREE_TEXT");
-    assert_eq!(json["run"]["interaction"]["stageName"], "plan");
+    assert_eq!(json["run"]["openInteraction"]["id"], "ask-1");
+    assert_eq!(json["run"]["openInteraction"]["kind"], "FREE_TEXT");
+    assert_eq!(json["run"]["openInteraction"]["stageName"], "plan");
+    assert_eq!(json["run"]["openInteraction"]["isRequired"], true);
 
     // An ask parked on a different run is not this run's.
     let (control, _socket, _srv) = fake_daemon(move |_| ControlResponse::Interactions {
         interactions: vec![("somebody-else".to_string(), ask("somebody-else"))],
     });
-    let json = with_daemon(control, "{ run { interaction { id } } }").await;
+    let json = with_daemon(control, "{ run { openInteraction { id } } }").await;
     assert!(
-        json["run"]["interaction"].is_null(),
+        json["run"]["openInteraction"].is_null(),
         "another run's prompt is not this one's"
     );
 }
@@ -650,7 +709,7 @@ async fn an_unreachable_daemon_fails_the_ask_rather_than_answering_none() {
         .data(state_with_agent_paths(Vec::new()))
         .finish();
     let answer = schema
-        .execute(Request::new("{ run { interaction { id } } }"))
+        .execute(Request::new("{ run { openInteraction { id } } }"))
         .await;
     assert!(
         !answer.errors.is_empty(),
@@ -761,16 +820,16 @@ async fn an_execution_reads_back_with_what_it_is_connected_to() {
         ]);
 
         let json = data(
-            r#"{ run { executions(first: 10) { edges { node {
+            r#"{ run { executions(first: 10) { results {
                  id stageIndex iteration
                  visit { id ordinal enteredAt inProgress }
                  requestedBy { attempt provider model outcome { kind } }
                  contextChanges { cause revisionAfter regions { region tokenDelta } }
                  producedArtifacts { name mimeType size path url }
-               } } } } }"#,
+               } } } }"#,
         )
         .await;
-        let node = &json["run"]["executions"]["edges"][0]["node"];
+        let node = &json["run"]["executions"]["results"][0];
         assert_eq!(node["id"], "x1");
         assert_eq!(node["stageIndex"], 0);
         assert_eq!(node["iteration"], 3);
@@ -836,12 +895,12 @@ async fn an_execution_with_nothing_recorded_invents_nothing() {
         ]);
 
         let json = data(
-            "{ run { executions(first: 10) { edges { node { \
+            "{ run { executions(first: 10) { results { \
              visit { id } requestedBy { attempt } contextChanges { cause } \
-             producedArtifacts { name } } } } } }",
+             producedArtifacts { name } } } } }",
         )
         .await;
-        let node = &json["run"]["executions"]["edges"][0]["node"];
+        let node = &json["run"]["executions"]["results"][0];
         assert!(node["visit"].is_null(), "no stay was recorded");
         assert!(node["requestedBy"].is_null(), "no attempt was recorded");
         assert_eq!(node["contextChanges"].as_array().map(Vec::len), Some(0));
@@ -874,9 +933,8 @@ async fn a_visit_the_ledger_does_not_hold_is_null() {
             response: String::new(),
         }]);
 
-        let json =
-            data("{ run { executions(first: 10) { edges { node { visit { id } } } } } }").await;
-        assert!(json["run"]["executions"]["edges"][0]["node"]["visit"].is_null());
+        let json = data("{ run { executions(first: 10) { results { visit { id } } } } }").await;
+        assert!(json["run"]["executions"]["results"][0]["visit"].is_null());
     })
     .await;
 }
@@ -905,11 +963,10 @@ async fn an_attempt_the_journal_does_not_hold_is_null() {
                 },
             ]);
 
-            let json = data(
-                "{ run { executions(first: 10) { edges { node { requestedBy { attempt } } } } } }",
-            )
-            .await;
-            assert!(json["run"]["executions"]["edges"][0]["node"]["requestedBy"].is_null());
+            let json =
+                data("{ run { executions(first: 10) { results { requestedBy { attempt } } } } }")
+                    .await;
+            assert!(json["run"]["executions"]["results"][0]["requestedBy"].is_null());
         },
     )
     .await;
@@ -992,13 +1049,143 @@ async fn an_unidentified_execution_claims_no_changes() {
             committed("", 101),
         ]);
 
-        let json = data(
-            "{ run { executions(first: 10) { edges { node { id contextChanges { cause } } } } } }",
-        )
-        .await;
-        let node = &json["run"]["executions"]["edges"][0]["node"];
+        let json =
+            data("{ run { executions(first: 10) { results { id contextChanges { cause } } } } }")
+                .await;
+        let node = &json["run"]["executions"]["results"][0];
         assert!(node["id"].is_null(), "no id was minted for it");
         assert_eq!(node["contextChanges"].as_array().map(Vec::len), Some(0));
+    })
+    .await;
+}
+
+/// Every function `#[mirror]` wrote for this file's types runs at least once.
+///
+/// The mirrors are straight lines of delegation, so running each of them once
+/// is enough to measure all of them. One test per file rather than per query:
+/// what a query happens to select is not what the mirror is made of.
+#[tokio::test]
+async fn every_mirrored_function_runs() {
+    use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum};
+
+    exercise_enum(&[
+        super::execution::ToolOutcome::Succeeded,
+        super::execution::ToolOutcome::Indeterminate,
+    ])
+    .await;
+
+    let execution = super::execution::ToolExecution {
+        run_id: "did-things".to_string(),
+        record: leviath_core::run_archive::Execution {
+            id: "x1".to_string(),
+            call_id: "c1".to_string(),
+            tool: "shell".to_string(),
+            arguments: r#"{"command":"ls"}"#.to_string(),
+            stage_index: 0,
+            iteration: 1,
+            visit_id: String::new(),
+            requested_by: String::new(),
+            artifacts: Vec::new(),
+            dispatched_at: 100,
+            position: 6,
+            ended_at: Some(101),
+            result_position: Some(6),
+            outcome: Some(ToolOutcome::Succeeded),
+        },
+    };
+    exercise(std::slice::from_ref(&execution)).await;
+
+    exercise(&[super::execution::ToolReturn {
+        text: "the notes".to_string(),
+        bytes: crate::commands::serve::graphql::scalars::BigInt(9),
+        truncated: false,
+        parts: vec!["diagram.png".to_string()],
+    }])
+    .await;
+}
+
+/// A position-paged listing walked newest first resumes from its own cursor,
+/// and a filter that has to read a file is settled for every row it reaches.
+///
+/// The two halves of `position_page` that a first, ascending, record-only page
+/// never reaches: the boundary test reads the other way round when the walk is
+/// descending, and a file-backed filter is confirmed rather than answered from
+/// the record.
+#[tokio::test]
+async fn a_descending_page_resumes_and_a_file_backed_filter_is_confirmed() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-exec-desc", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        write_journal(vec![
+            RunRecord::ToolBatch {
+                calls: vec![
+                    call("c1", "x1", "read_file", r#"{"path":"a.md"}"#),
+                    call("c2", "x2", "read_file", r#"{"path":"b.md"}"#),
+                    call("c3", "x3", "read_file", r#"{"path":"c.md"}"#),
+                ],
+                at: 100,
+                stage_index: 1,
+                iteration: 1,
+                visit_id: String::new(),
+                requested_by: String::new(),
+                response: "three reads".to_string(),
+            },
+            RunRecord::ToolCallDone {
+                iteration: 1,
+                call_id: "c1".to_string(),
+                execution_id: "x1".to_string(),
+                result: "the file".into(),
+                outcome: Some(ToolOutcome::Succeeded),
+                at: 101,
+            },
+        ]);
+
+        // Newest first, one at a time: the second page resumes from the first
+        // page's cursor rather than starting over.
+        let first = data(
+            "{ run { executions(orderBy: [{ field: JOURNAL_POSITION, direction: DESC }], first: 1)
+                 { cursor total results { callId } } } }",
+        )
+        .await;
+        let page = &first["run"]["executions"];
+        assert_eq!(page["total"], 3);
+        assert_eq!(page["results"][0]["callId"], "c3");
+        let cursor = page["cursor"].as_str().expect("a second page").to_string();
+
+        let second = data(&format!(
+            "{{ run {{ executions(orderBy: [{{ field: JOURNAL_POSITION, direction: DESC }}],
+                 first: 2, after: \"{cursor}\") {{ results {{ callId }} }} }} }}"
+        ))
+        .await;
+        let rest = &second["run"]["executions"]["results"];
+        assert_eq!(rest[0]["callId"], "c2");
+        assert_eq!(rest[1]["callId"], "c1");
+
+        // `result` is read from the journal rather than from the record, so a
+        // filter on it is settled per row rather than answered up front.
+        let filtered = data(
+            "{ run { executions(filter: { result: { isNull: false } }, first: 10)
+                 { total results { callId } } } }",
+        )
+        .await;
+        let only = &filtered["run"]["executions"];
+        assert_eq!(only["total"], 1, "one call recorded a result");
+        assert_eq!(only["results"][0]["callId"], "c1");
+
+        // An order term that names only its field runs the direction the input
+        // declares as its default, which is newest first.
+        let defaulted = data(
+            "{ run { executions(orderBy: [{ field: JOURNAL_POSITION }], first: 1)
+                 { results { callId } } } }",
+        )
+        .await;
+        assert_eq!(
+            defaulted["run"]["executions"]["results"][0]["callId"], "c3",
+            "no direction means the default one, descending"
+        );
+
+        // A cursor minted for another listing is refused rather than resumed.
+        let refused = error(r#"{ run { executions(after: "not-a-cursor") { total } } }"#).await;
+        assert!(!refused.is_empty(), "a bad cursor is refused");
     })
     .await;
 }

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use async_graphql::{Enum, Object, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use leviath_core::Blueprint as CoreBlueprint;
 
@@ -14,7 +15,7 @@ use super::super::blueprint::{Region, ToolUseGuidance};
 use super::count;
 use super::interaction::InteractionPoint;
 use super::model::StageModelConfig;
-use super::output::{OutputSpec, StageInput};
+use super::output::{OutputSpec, StageParts};
 use super::refs;
 use super::runtime::{
     BlueprintSecurity, NudgeConfig, SandboxConfig, StageHooks, WorkerFailurePolicy,
@@ -23,6 +24,7 @@ use super::tools::{OutputRoute, ToolAcceptRule, ToolPermissionRule, ToolRouting}
 use super::transition::TransitionEdge;
 
 /// How a stage runs.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum StageMode {
     /// The tight loop: infer, act on tool calls, repeat until a transition
@@ -52,6 +54,7 @@ impl From<&leviath_core::blueprint::StageMode> for StageMode {
 }
 
 /// What a stage must produce before it may transition.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct OutputRequirement {
     /// How many times the stage is asked again when it tries to leave without
@@ -64,15 +67,16 @@ pub(crate) struct OutputRequirement {
 /// The resolver state behind the `FanOut` type.
 pub(crate) struct FanOut {
     /// The blueprint the stage and region names resolve in.
-    blueprint: Arc<CoreBlueprint>,
+    pub(crate) blueprint: Arc<CoreBlueprint>,
     /// The fan-out block as the stage wrote it.
-    config: leviath_core::blueprint::FanOutConfig,
+    pub(crate) config: leviath_core::blueprint::FanOutConfig,
 }
 
 /// What a stage's fan-out splits into, and how.
 ///
 /// Only a `FAN_OUT` stage has one. Every other mode answers null, rather than a
 /// block of defaults nobody wrote.
+#[mirror]
 #[Object]
 impl FanOut {
     /// A separate installed blueprint run as the worker, by name. It has to be
@@ -167,12 +171,13 @@ impl FanOut {
 /// The resolver state behind the `StageContext` type.
 pub(crate) struct StageContext {
     /// The stage this block belongs to.
-    blueprint: Arc<CoreBlueprint>,
+    pub(crate) blueprint: Arc<CoreBlueprint>,
     /// Which stage, by declaration order.
-    at: usize,
+    pub(crate) at: usize,
 }
 
 /// Which regions a stage adds, hides or empties on its way in.
+#[mirror]
 #[Object]
 impl StageContext {
     /// Regions this stage declares of its own, beyond the blueprint's layout.
@@ -244,6 +249,7 @@ pub(crate) struct Stage {
 /// Everything here is what the blueprint declares, so a stage reads the same
 /// however many runs have passed through it. A run occupies one stage at a
 /// time and leaves along an edge once that edge's gate is satisfied.
+#[mirror(list)]
 #[Object]
 impl Stage {
     /// Stage name, unique within the blueprint.
@@ -318,8 +324,8 @@ impl Stage {
 
     /// What this stage takes as typed parts, when its regions do not already
     /// say.
-    async fn input(&self) -> StageInput {
-        StageInput {
+    async fn input(&self) -> StageParts {
+        StageParts {
             accepts: self.stage().input_accepts.clone(),
             as_text: self.stage().input_as_text.clone(),
         }
@@ -465,6 +471,7 @@ impl Stage {
     ///
     /// The fields above are what the author declared, which is a different
     /// question: a stage that declares nothing still runs with something.
+    #[filter(skip)]
     async fn effective(&self, ctx: &async_graphql::Context<'_>) -> EffectiveStageSettings {
         let state = ctx.data_unchecked::<crate::commands::serve::types::AppState>();
         let config = state.current_config();
@@ -532,6 +539,7 @@ impl Stage {
 }
 
 /// What the nudge resolves to for this stage.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct EffectiveNudge {
     /// Whether a text-only answer sends the stage back round. Off by default for
@@ -553,6 +561,7 @@ pub(crate) struct EffectiveNudge {
 /// resolution a past run was spawned with, so this is not a claim about a run
 /// that has already started: for that, read the run's own snapshot and the
 /// config beside it.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct EffectiveStageSettings {
     /// Whether the system prompt tells the model it may send independent tool

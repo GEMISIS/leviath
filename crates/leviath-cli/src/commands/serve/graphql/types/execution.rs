@@ -5,16 +5,24 @@
 //! that failed and was reissued, one that was cut off by a restart: all three are
 //! here, and none of them is visible in a folded context window.
 
-use async_graphql::{Context, Enum, Object, SimpleObject};
+use async_graphql::{Context, Enum, ID, Object, SimpleObject};
 use leviath_core::run_archive::Execution;
+use leviath_graphql_derive::mirror;
 
+use super::super::connection::{
+    Connection, Paged, PositionQuery, Total, position_order, position_page,
+};
 use super::super::error::IntoGraphql;
-use super::super::scalars::{BigInt, Timestamp};
+use super::super::filter::MatchCx;
+use super::super::paging::page::page;
+use super::super::scalars::{BigInt, Cursor, Timestamp};
 use super::tool_calls::{ToolCall, tool_call};
 use crate::commands::serve::blocking::blocking;
 use crate::commands::serve::core::{context_changes, executions, inferences};
+use crate::commands::serve::cursor;
 
 /// How one attempt to execute a tool call ended.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum ToolOutcome {
     /// The tool ran and answered.
@@ -79,6 +87,7 @@ impl ToolExecution {
 /// An attempt, not a call: a call the model reissued is a second execution with
 /// its own id. The provider's call id is on the call and may repeat, which is
 /// exactly why these have ids of their own.
+#[mirror]
 #[Object]
 impl ToolExecution {
     /// This attempt's own id, minted when it was dispatched.
@@ -87,11 +96,12 @@ impl ToolExecution {
     /// provider's call id is the only handle there is. A client that needs a key
     /// for a list can use `journalPosition` and `callId` together, which every
     /// journal supports.
-    async fn id(&self) -> Option<String> {
-        self.minted_id()
+    async fn id(&self) -> Option<ID> {
+        self.minted_id().map(ID::from)
     }
 
     /// The call this attempt was carrying out, typed by its tool.
+    #[filter(skip)] // TODO(mirror): ToolCall
     async fn call(&self) -> ToolCall {
         // The description is left out here. It would have to come from this
         // build's tool catalog, which describes the tool as it is now rather
@@ -146,6 +156,7 @@ impl ToolExecution {
     /// stage ledger. Or the visit was past the ledger's per-stage cap of the
     /// earliest 128 stays, where the stay is real and its detail is not kept; the
     /// stage's own roll-ups in `stages` are the complete figures there.
+    #[filter(io)]
     async fn visit(&self) -> async_graphql::Result<Option<super::run_detail::StageVisit>> {
         let Some(visit_id) = self.visit_id() else {
             return Ok(None);
@@ -159,7 +170,7 @@ impl ToolExecution {
                 stage
                     .visits
                     .into_iter()
-                    .find(|visit| visit.id.as_deref() == Some(visit_id))
+                    .find(|visit| visit.id.as_ref().is_some_and(|id| id.as_str() == visit_id))
             }))
     }
 
@@ -172,6 +183,7 @@ impl ToolExecution {
     /// Null means the journal recorded no attempt for this batch, which is every
     /// batch in a journal written by a build that did not record the connection,
     /// and any batch no provider answer asked for.
+    #[filter(io)]
     async fn requested_by(
         &self,
     ) -> async_graphql::Result<Option<super::inference::InferenceAttempt>> {
@@ -199,6 +211,7 @@ impl ToolExecution {
     /// Independent of `outcome`. A call that succeeded may have committed nothing,
     /// and a call that failed may have committed something before it failed, so
     /// neither field may be read off the other.
+    #[filter(io)]
     async fn context_changes(
         &self,
     ) -> async_graphql::Result<Vec<super::context_change::ContextChange>> {
@@ -223,6 +236,7 @@ impl ToolExecution {
     /// from the run's answer on purpose: the answer holds the *latest*
     /// submission's files and says nothing about which call made them, so a
     /// submission a later one replaced would be invisible.
+    #[filter(skip)]
     async fn produced_artifacts(&self, ctx: &Context<'_>) -> Vec<super::run_detail::Artifact> {
         let state = ctx.data_unchecked::<crate::commands::serve::AppState>();
         self.record
@@ -259,7 +273,8 @@ impl ToolExecution {
     ///
     /// For an indeterminate outcome this is the stand-in the resume put in the
     /// window, not something the tool returned.
-    async fn result(&self) -> async_graphql::Result<Option<ToolResult>> {
+    #[filter(io)]
+    async fn result(&self) -> async_graphql::Result<Option<ToolReturn>> {
         let Some(position) = self.record.result_position else {
             return Ok(None);
         };
@@ -268,7 +283,7 @@ impl ToolExecution {
         let found = blocking(move || executions::result(&run_id, position, &call_id))
             .await
             .gql()?;
-        Ok(found.map(|result| ToolResult {
+        Ok(found.map(|result| ToolReturn {
             truncated: result.truncated(),
             text: result.text,
             bytes: BigInt(i64::try_from(result.bytes).unwrap_or(i64::MAX)),
@@ -278,8 +293,9 @@ impl ToolExecution {
 }
 
 /// What a tool answered, as far as it fits in an answer.
+#[mirror]
 #[derive(Debug, SimpleObject)]
-pub(crate) struct ToolResult {
+pub(crate) struct ToolReturn {
     /// The text, cut to the head where the whole thing is large.
     pub(crate) text: String,
     /// How many bytes the whole result is.
@@ -291,76 +307,75 @@ pub(crate) struct ToolResult {
     pub(crate) parts: Vec<String>,
 }
 
-/// One page of what a run did.
-#[derive(SimpleObject)]
-pub(crate) struct ToolExecutionConnection {
-    /// The executions on this page, in dispatch order.
-    pub(crate) edges: Vec<ToolExecutionEdge>,
-    /// Where the next page starts.
-    pub(crate) page_info: super::super::connection::PageInfo,
-    /// How many the run's journal holds altogether.
-    pub(crate) total: i32,
+impl Paged for ToolExecution {
+    const NAME: &'static str = "ToolExecution";
 }
 
-/// One execution and its cursor.
-#[derive(SimpleObject)]
-pub(crate) struct ToolExecutionEdge {
-    /// Where to resume from after this one.
-    pub(crate) cursor: super::super::scalars::Cursor,
-    /// The execution.
-    pub(crate) node: ToolExecution,
-}
+position_order!(
+    ToolExecutionOrder,
+    ToolExecutionOrderField,
+    JournalPosition,
+    "The one sort key `executions` may be ordered by.",
+    "Where the record that dispatched it sits in the run's journal."
+);
 
 /// Read one page of a run's executions.
 ///
 /// Shared by the field on a run and by anything else that grows one later, so
 /// the page cap and the cursor rules are stated once.
-pub(crate) async fn page(
+///
+/// The whole journal is already read to answer this - a run rarely dispatches
+/// more than a few thousand tool calls - so a file-backed filter (`visit`,
+/// `requestedBy`, `contextChanges`, `result`) is confirmed across every
+/// execution once, up front, rather than deferred page by page the way the run
+/// listing defers a file-backed one.
+pub(crate) async fn executions(
     run_id: String,
+    filter: Option<ToolExecutionFilter>,
+    order_by: Option<Vec<ToolExecutionOrder>>,
     first: i32,
-    after: Option<super::super::scalars::Cursor>,
-) -> async_graphql::Result<ToolExecutionConnection> {
-    use crate::commands::serve::core::error::ServeError;
-    let limit = usize::try_from(first)
-        .ok()
-        .filter(|n| *n > 0)
-        .ok_or_else(|| ServeError::BadRequest("`first` must be at least 1".to_string()))
-        .gql()?;
-    if limit > executions::EXECUTIONS_MAX_LIMIT {
-        return Err(ServeError::BadRequest(format!(
-            "`first` may be at most {}, the executions page cap",
-            executions::EXECUTIONS_MAX_LIMIT
-        )))
-        .gql();
-    }
-    let cursor = after.map(|cursor| cursor.0);
+    after: Option<Cursor>,
+) -> async_graphql::Result<Connection<ToolExecution>> {
+    let limit = page(
+        first,
+        executions::EXECUTIONS_MAX_LIMIT,
+        "the executions page cap",
+    )
+    .gql()?;
+    let filter = filter.unwrap_or_default();
+    let rendered = super::super::paging::digest::canonical(&filter).gql()?;
+    let digest = cursor::filter_digest(&["executions", &run_id, rendered.as_str()]);
+    let descending = order_by
+        .unwrap_or_default()
+        .first()
+        .is_some_and(|term| term.direction.descending());
+
     let for_read = run_id.clone();
-    let page = blocking(move || {
-        let spec = executions::ExecutionsSpec::resolve(&for_read, Some(limit), cursor.as_deref())?;
-        executions::page(&for_read, &spec)
-    })
+    let records = blocking(move || executions::read(&for_read)).await.gql()?;
+    let items: Vec<ToolExecution> = records
+        .into_iter()
+        .map(|record| ToolExecution {
+            run_id: run_id.clone(),
+            record,
+        })
+        .collect();
+    let cx = MatchCx::at(leviath_core::duration::now_secs());
+    let walked = position_page(
+        items,
+        &filter,
+        &cx,
+        PositionQuery {
+            digest: &digest,
+            after: after.as_ref().map(|token| token.0.as_str()),
+            descending,
+            limit,
+        },
+    )
     .await
     .gql()?;
-    let total = i32::try_from(page.total).unwrap_or(i32::MAX);
-    let end_cursor = page.next_cursor.clone().map(super::super::scalars::Cursor);
-    Ok(ToolExecutionConnection {
-        edges: page
-            .executions
-            .into_iter()
-            .map(|record| ToolExecutionEdge {
-                // The position orders executions and never changes, so it is the
-                // one thing on an execution worth pointing a cursor at.
-                cursor: super::super::scalars::Cursor(record.position.to_string()),
-                node: ToolExecution {
-                    run_id: run_id.clone(),
-                    record,
-                },
-            })
-            .collect(),
-        page_info: super::super::connection::PageInfo {
-            end_cursor: end_cursor.clone(),
-            has_next_page: end_cursor.is_some(),
-        },
-        total,
-    })
+    Ok(Connection::plain(
+        walked.items,
+        walked.cursor,
+        Total::known(walked.total),
+    ))
 }

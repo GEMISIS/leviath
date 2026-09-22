@@ -1,13 +1,18 @@
-//! Naming a blueprint or a region on the write side.
+//! Naming a blueprint or a region on the write side, and the one shape a
+//! key/value pair takes there.
 //!
-//! A domain entity is not a bare string on the way in either. These two inputs
-//! are what an argument takes in place of a name, so a client that means "the
-//! blueprint I am looking at" can say which revision it means, and a region is
-//! the same shape wherever it is named.
+//! A domain entity is not a bare string on the way in either. The two
+//! references below are what an argument takes in place of a name, so a client
+//! that means "the blueprint I am looking at" can say which revision it means,
+//! and a region is the same shape wherever it is named.
 //!
 //! Both are pure references to something that exists. Manifest text is not a
 //! reference to anything, so an operation that reads text takes it as an
 //! argument of its own.
+//!
+//! [`KeyValueWrite`] lives here for the same reason: run metadata and a
+//! gateway's headers are the same pair of strings, and one type for both is one
+//! shape a client learns once.
 
 use async_graphql::InputObject;
 
@@ -22,7 +27,7 @@ use super::super::types::AppState;
 /// and an operation that also needs a manifest's text takes that text as an
 /// argument of its own.
 #[derive(Debug, InputObject)]
-pub(crate) struct BlueprintInput {
+pub(crate) struct BlueprintRef {
     /// The installed blueprint's name.
     pub(crate) name: String,
     /// The revision the caller believes is installed, as the lowercase hex
@@ -34,7 +39,7 @@ pub(crate) struct BlueprintInput {
     pub(crate) digest: Option<String>,
 }
 
-impl BlueprintInput {
+impl BlueprintRef {
     /// Point at an installed blueprint by name, with any digest pin checked.
     ///
     /// The lookup happens only for a request that sends a pin. Without one there
@@ -88,9 +93,22 @@ async fn verify_digest(state: &AppState, name: &str, pinned: &str) -> Result<(),
 /// does on the way out, and so a later field can be added to it without changing
 /// the argument's type.
 #[derive(Debug, InputObject)]
-pub(crate) struct RegionInput {
+pub(crate) struct RegionRef {
     /// The region's name, as the blueprint declares it.
     pub(crate) name: String,
+}
+
+/// One key and its value, wherever a request writes a pair of strings.
+///
+/// Run metadata and a gateway's headers are the same shape, so they are the
+/// same type: a client that has written one has written both, and neither can
+/// drift into spelling the key `name` while the other spells it `key`.
+#[derive(Debug, InputObject)]
+pub(crate) struct KeyValueWrite {
+    /// The key. Given twice in one list, the last value wins.
+    pub(crate) key: String,
+    /// The value. Always a string.
+    pub(crate) value: String,
 }
 
 #[cfg(test)]

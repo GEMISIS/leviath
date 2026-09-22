@@ -9,6 +9,8 @@ use std::sync::Arc;
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
 use super::run::Run;
+use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum, exercise_list};
+use crate::commands::serve::graphql::scalars::BigInt;
 use crate::commands::serve::testutil::state_with_agent_paths;
 use crate::runstate::{RunMeta, create_run};
 
@@ -117,51 +119,54 @@ async fn a_workdir_listing_reads_one_level() {
     let json = data(
         meta_in(workdir.path()),
         r#"{ run { files(source: WORKDIR) {
-             source path parent workdir truncated modifiedFilesTruncated
-             entries { name path isDir size exists isOutsideWorkdir mimeType }
+             path parent workdir isTruncated isModifiedFilesTruncated
+             results { name path isDir size exists isOutsideWorkdir mimeType }
            } } }"#,
     )
     .await;
     let listing = &json["run"]["files"];
-    assert_eq!(listing["source"], "WORKDIR");
     assert!(listing["parent"].is_null(), "never above the fence");
-    assert_eq!(listing["truncated"], false);
-    let entries = listing["entries"].as_array().expect("entries");
+    assert_eq!(listing["isTruncated"], false);
+    let entries = listing["results"].as_array().expect("results");
     // Directories first, then by name, done here rather than in every client.
+    // Dot files are always included now, and `.hidden` sorts ahead of
+    // `report.md` in that order.
     assert_eq!(entries[0]["name"], "src");
     assert_eq!(entries[0]["isDir"], true);
     assert_eq!(entries[0]["mimeType"], "", "a directory has no type");
-    assert_eq!(entries[1]["name"], "report.md");
-    assert_eq!(entries[1]["mimeType"], "text/markdown");
-    assert_eq!(entries[1]["exists"], true);
-    assert_eq!(entries[1]["size"], 10);
-    assert!(
-        !entries.iter().any(|entry| entry["name"] == ".hidden"),
-        "a dot file stays out unless asked for: {entries:?}"
-    );
+    assert_eq!(entries[1]["name"], ".hidden");
+    let report = entries
+        .iter()
+        .find(|entry| entry["name"] == "report.md")
+        .expect("report.md is in the listing");
+    assert_eq!(report["mimeType"], "text/markdown");
+    assert_eq!(report["exists"], true);
+    assert_eq!(report["size"], 10);
 
     // One level down, by passing an entry's own path back.
     let json = data(
         meta_in(workdir.path()),
-        r#"{ run { files(source: WORKDIR, path: "src") { path parent entries { name } } } }"#,
+        r#"{ run { files(source: WORKDIR, path: "src") { path parent results { name } } } }"#,
     )
     .await;
-    assert_eq!(json["run"]["files"]["entries"][0]["name"], "main.rs");
+    assert_eq!(json["run"]["files"]["results"][0]["name"], "main.rs");
     assert!(
         json["run"]["files"]["parent"].as_str().is_some(),
         "a level down has somewhere to go back to"
     );
 
-    // And with the dot files asked for.
+    // Dot files are excluded with a filter naming them out.
     let json = data(
         meta_in(workdir.path()),
-        r#"{ run { files(source: WORKDIR, hidden: true) { entries { name } } } }"#,
+        r#"{ run { files(source: WORKDIR, filter: { not: { name: { startsWith: "." } } }) {
+             results { name }
+           } } }"#,
     )
     .await;
     assert!(
-        json["run"]["files"]["entries"]
+        !json["run"]["files"]["results"]
             .as_array()
-            .expect("entries")
+            .expect("results")
             .iter()
             .any(|entry| entry["name"] == ".hidden")
     );
@@ -181,20 +186,106 @@ async fn a_recorded_listing_keeps_what_the_run_touched() {
 
     let json = data(
         meta,
-        r#"{ run { files { source modifyingToolCalls modifiedFilesTruncated
-             entries { name exists isOutsideWorkdir } } } }"#,
+        r#"{ run { files { modifyingToolCallCount isModifiedFilesTruncated
+             results { name exists isOutsideWorkdir } } } }"#,
     )
     .await;
     let listing = &json["run"]["files"];
-    assert_eq!(listing["source"], "MODIFIED");
     // Not a file count: a run that edits one file three times records three.
-    assert_eq!(listing["modifyingToolCalls"], 5);
-    assert_eq!(listing["modifiedFilesTruncated"], false);
-    let entries = listing["entries"].as_array().expect("entries");
+    assert_eq!(listing["modifyingToolCallCount"], 5);
+    assert_eq!(listing["isModifiedFilesTruncated"], false);
+    let entries = listing["results"].as_array().expect("results");
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["exists"], true);
     assert_eq!(entries[1]["name"], "gone.txt");
     assert_eq!(entries[1]["exists"], false, "reported, not filtered away");
+}
+
+/// `files` is paged and filtered like every other listing: a cursor resumes
+/// it, a page over the cap is refused, and a filter nested too deep is
+/// refused rather than walked.
+#[tokio::test]
+async fn files_are_paged_and_filtered_like_any_other_listing() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    std::fs::write(workdir.path().join("a.txt"), "a").expect("a file");
+    std::fs::write(workdir.path().join("b.txt"), "b").expect("a file");
+    std::fs::write(workdir.path().join("c.txt"), "c").expect("a file");
+
+    let json = data(
+        meta_in(workdir.path()),
+        r#"{ run { files(source: WORKDIR, first: 2) { cursor results { name } } } }"#,
+    )
+    .await;
+    let page = &json["run"]["files"];
+    let cursor = page["cursor"].as_str().expect("more to come").to_string();
+    let first_names: Vec<&str> = page["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .filter_map(|node| node["name"].as_str())
+        .collect();
+
+    let json = data(
+        meta_in(workdir.path()),
+        &format!(
+            r#"{{ run {{ files(source: WORKDIR, first: 10, after: "{cursor}") {{ cursor results {{ name }} }} }} }}"#
+        ),
+    )
+    .await;
+    let page = &json["run"]["files"];
+    assert!(page["cursor"].is_null(), "that was the rest");
+    let rest_names: Vec<&str> = page["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .filter_map(|node| node["name"].as_str())
+        .collect();
+    assert_eq!(
+        first_names.len() + rest_names.len(),
+        3,
+        "no entry read twice"
+    );
+
+    let answer = ask(
+        meta_in(workdir.path()),
+        "{ run { files(source: WORKDIR, first: 5000) { total } } }",
+    )
+    .await;
+    assert!(
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .message
+            .contains("at most"),
+    );
+
+    let mut filter = r#"{ name: { eq: "a.txt" } }"#.to_string();
+    for _ in 0..20 {
+        filter = format!("{{ not: {filter} }}");
+    }
+    let answer = ask(
+        meta_in(workdir.path()),
+        &format!("{{ run {{ files(source: WORKDIR, filter: {filter}) {{ total }} }} }}"),
+    )
+    .await;
+    assert!(
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .message
+            .contains("flatten it"),
+    );
+
+    // And a cursor that was never minted for this listing is refused rather
+    // than resumed from whatever it decodes to.
+    let answer = ask(
+        meta_in(workdir.path()),
+        r#"{ run { files(source: WORKDIR, after: "not-a-cursor") { total } } }"#,
+    )
+    .await;
+    assert!(!answer.errors.is_empty(), "a cursor is checked");
 }
 
 /// A file is read a window at a time, and the windows concatenate into it.
@@ -315,7 +406,7 @@ async fn a_lost_working_directory_says_so() {
     };
     let answer = ask(
         meta_in(&gone),
-        "{ run { files(source: WORKDIR) { entries { name } } } }",
+        "{ run { files(source: WORKDIR) { results { name } } } }",
     )
     .await;
     let error = answer.errors.first().expect("a refusal");
@@ -339,47 +430,47 @@ async fn the_context_history_pages_in_either_direction() {
         let json = data(
             meta_in(workdir.path()),
             r#"{ run { contextHistory(first: 2) {
-                 total pageInfo { hasNextPage endCursor }
-                 edges { node { at stage window { totalTokens } } }
+                 total cursor
+                 results { at stage window { totalTokens } }
                } } }"#,
         )
         .await;
         let page = &json["run"]["contextHistory"];
         assert_eq!(page["total"], 3);
-        assert_eq!(page["pageInfo"]["hasNextPage"], true);
-        assert_eq!(page["edges"].as_array().map(Vec::len), Some(2));
-        assert_eq!(page["edges"][0]["node"]["window"]["totalTokens"], 10);
-        assert_eq!(page["edges"][0]["node"]["stage"], "review");
+        assert!(page["cursor"].as_str().is_some(), "more to come");
+        assert_eq!(page["results"].as_array().map(Vec::len), Some(2));
+        assert_eq!(page["results"][0]["window"]["totalTokens"], 10);
+        assert_eq!(page["results"][0]["stage"], "review");
 
         // The cursor carries on from where that page stopped.
-        let cursor = page["pageInfo"]["endCursor"].as_str().expect("a cursor");
+        let cursor = page["cursor"].as_str().expect("a cursor");
         let json = data(
             meta_in(workdir.path()),
             &format!(
                 r#"{{ run {{ contextHistory(first: 2, after: "{cursor}") {{
-                     pageInfo {{ hasNextPage }}
-                     edges {{ node {{ window {{ totalTokens }} }} }}
+                     cursor
+                     results {{ window {{ totalTokens }} }}
                    }} }} }}"#
             ),
         )
         .await;
         let page = &json["run"]["contextHistory"];
-        assert_eq!(page["edges"].as_array().map(Vec::len), Some(1));
-        assert_eq!(page["edges"][0]["node"]["window"]["totalTokens"], 30);
-        assert_eq!(page["pageInfo"]["hasNextPage"], false);
+        assert_eq!(page["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(page["results"][0]["window"]["totalTokens"], 30);
+        assert!(page["cursor"].is_null(), "that was the rest");
 
         // Newest first is the same points in the other order.
         let json = data(
             meta_in(workdir.path()),
-            r#"{ run { contextHistory(first: 3, descending: true) {
-                 edges { node { window { totalTokens } } } } } }"#,
+            r#"{ run { contextHistory(orderBy: [{ field: SEQUENCE, direction: DESC }], first: 3) {
+                 results { window { totalTokens } } } } }"#,
         )
         .await;
-        let edges = json["run"]["contextHistory"]["edges"]
+        let results = json["run"]["contextHistory"]["results"]
             .as_array()
-            .expect("edges");
-        assert_eq!(edges[0]["node"]["window"]["totalTokens"], 30);
-        assert_eq!(edges[2]["node"]["window"]["totalTokens"], 10);
+            .expect("results");
+        assert_eq!(results[0]["window"]["totalTokens"], 30);
+        assert_eq!(results[2]["window"]["totalTokens"], 10);
     })
     .await;
 }
@@ -416,27 +507,48 @@ async fn an_oversized_history_page_is_refused() {
     );
 }
 
-/// A run with no journal has no history, which is not an empty page.
+/// A filter nested past the depth limit is refused rather than walked.
+#[tokio::test]
+async fn a_context_history_filter_past_the_depth_limit_is_refused() {
+    let workdir = tempfile::tempdir().expect("a workdir");
+    let mut filter = r#"{ stage: { eq: "plan" } }"#.to_string();
+    for _ in 0..20 {
+        filter = format!("{{ not: {filter} }}");
+    }
+    let answer = ask(
+        meta_in(workdir.path()),
+        &format!("{{ run {{ contextHistory(filter: {filter}) {{ total }} }} }}"),
+    )
+    .await;
+    assert!(
+        answer
+            .errors
+            .first()
+            .expect("a refusal")
+            .message
+            .contains("flatten it")
+    );
+}
+
+/// A run with no journal has no history, and says so with an empty page
+/// rather than an error - the same as every other listing on a run that
+/// recorded nothing.
 #[tokio::test]
 async fn a_run_with_no_journal_has_no_history() {
     crate::runstate::with_isolated_runs_dir_async("graphql-history-none", |_dir| async move {
         let workdir = tempfile::tempdir().expect("a workdir");
         create_run(&meta_in(workdir.path())).expect("run written");
-        let answer = ask(
+        let json = data(
             meta_in(workdir.path()),
-            "{ run { contextHistory(first: 5) { total } } }",
+            "{ run { contextHistory(first: 5) { total results { at } } } }",
         )
         .await;
+        assert_eq!(json["run"]["contextHistory"]["total"], 0);
         assert_eq!(
-            answer
-                .errors
-                .first()
-                .expect("a refusal")
-                .extensions
-                .as_ref()
-                .and_then(|e| e.get("code"))
-                .map(ToString::to_string),
-            Some("\"NOT_FOUND\"".to_string())
+            json["run"]["contextHistory"]["results"]
+                .as_array()
+                .map(Vec::len),
+            Some(0)
         );
     })
     .await;
@@ -626,11 +738,13 @@ async fn the_stored_parts_come_back_with_links() {
 
         let json = data(
             meta,
-            "{ run { blobs { sha256 mimeType name size tokens regions stored url
-                 width height durationMs } } }",
+            "{ run { blobs { results { sha256 mimeType name size tokens regions stored url
+                 width height durationMs } } } }",
         )
         .await;
-        let blobs = json["run"]["blobs"].as_array().expect("the parts");
+        let blobs = json["run"]["blobs"]["results"]
+            .as_array()
+            .expect("the parts");
         assert_eq!(blobs.len(), 2);
         let picture = blobs
             .iter()
@@ -682,10 +796,10 @@ async fn the_artifacts_come_back_with_links_and_paths() {
 
     let json = data(
         meta,
-        "{ run { artifacts { name mimeType size sha256 path url } } }",
+        "{ run { artifacts { results { name mimeType size sha256 path url } } } }",
     )
     .await;
-    let artifact = &json["run"]["artifacts"][0];
+    let artifact = &json["run"]["artifacts"]["results"][0];
     assert_eq!(artifact["name"], "report");
     assert_eq!(artifact["path"], "out/report.md");
     assert_eq!(artifact["mimeType"], "text/markdown");
@@ -740,7 +854,7 @@ async fn what_a_run_waits_on_comes_from_the_daemon() {
     let workdir = tempfile::tempdir().expect("a workdir");
     let answer = ask(
         meta_in(workdir.path()),
-        "{ run { interaction { prompt } } }",
+        "{ run { openInteraction { prompt } } }",
     )
     .await;
     assert_eq!(
@@ -823,11 +937,11 @@ async fn a_stage_record_carries_its_region_peaks() {
 
         let json = data(
             meta,
-            "{ run { stages { name regionPeaks { region tokens }
-                 visits { enteredAt leftAt inProgress } } } }",
+            "{ run { stages { results { name regionPeaks { region tokens }
+                 visits { enteredAt leftAt inProgress } } } } }",
         )
         .await;
-        let stage = &json["run"]["stages"][0];
+        let stage = &json["run"]["stages"]["results"][0];
         assert_eq!(stage["name"], "review");
         assert_eq!(stage["regionPeaks"][0]["region"], "plan");
         assert_eq!(stage["regionPeaks"][0]["tokens"], 120);
@@ -835,6 +949,217 @@ async fn a_stage_record_carries_its_region_peaks() {
         // being null said the way a list is filtered on.
         assert_eq!(stage["visits"][0]["inProgress"], true);
         assert!(stage["visits"][0]["leftAt"].is_null());
+    })
+    .await;
+}
+
+/// `stages` takes the same filter, `orderBy` and cursor every listing in this
+/// schema takes, not just the bare list it used to be.
+#[tokio::test]
+async fn stages_are_filtered_ordered_and_paged_with_a_cursor() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-stages-listing", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let meta = meta_in(workdir.path());
+        crate::runstate::create_run(&meta).expect("run written");
+        crate::runstate::write_stages_index(
+            &meta.run_id,
+            &[
+                leviath_core::run_meta::StageRecord::new("plan".to_string(), 0),
+                leviath_core::run_meta::StageRecord::new("build".to_string(), 1),
+            ],
+        )
+        .expect("the ledger");
+
+        // Declared order by default.
+        let json = data(meta.clone(), "{ run { stages(first: 1) { total cursor results { name } } } }").await;
+        let page = &json["run"]["stages"];
+        assert_eq!(page["total"], 2);
+        assert_eq!(page["results"][0]["name"], "plan");
+        let cursor = page["cursor"].as_str().expect("more to come").to_string();
+
+        // The cursor resumes the rest.
+        let json = data(
+            meta.clone(),
+            &format!(r#"{{ run {{ stages(first: 10, after: "{cursor}") {{ cursor results {{ name }} }} }} }}"#),
+        )
+        .await;
+        let page = &json["run"]["stages"];
+        assert!(page["cursor"].is_null(), "that was the rest");
+        assert_eq!(page["results"][0]["name"], "build");
+
+        // Explicit order reverses declared order.
+        let json = data(
+            meta.clone(),
+            "{ run { stages(orderBy: [{ field: INDEX, direction: DESC }]) { results { name } } } }",
+        )
+        .await;
+        let names: Vec<&str> = json["run"]["stages"]["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .filter_map(|node| node["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["build", "plan"]);
+
+        // A filter narrows the ledger to the one stage named.
+        let json = data(
+            meta.clone(),
+            r#"{ run { stages(filter: { name: { eq: "build" } }) { total results { name } } } }"#,
+        )
+        .await;
+        assert_eq!(json["run"]["stages"]["total"], 1);
+        assert_eq!(json["run"]["stages"]["results"][0]["name"], "build");
+
+        // A page over the cap is refused, saying what the cap is.
+        let answer = ask(meta.clone(), "{ run { stages(first: 5000) { total } } }").await;
+        assert!(
+            answer.errors.first().expect("a refusal").message.contains("at most 200"),
+            "{:?}",
+            answer.errors
+        );
+
+        // A filter nested past the depth limit is refused rather than walked.
+        let mut filter = r#"{ name: { eq: "plan" } }"#.to_string();
+        for _ in 0..20 {
+            filter = format!("{{ not: {filter} }}");
+        }
+        let answer = ask(
+            meta,
+            &format!("{{ run {{ stages(filter: {filter}) {{ total }} }} }}"),
+        )
+        .await;
+        assert!(
+            answer.errors.first().expect("a refusal").message.contains("flatten it"),
+            "{:?}",
+            answer.errors
+        );
+    })
+    .await;
+}
+
+/// `blobs` and `artifacts` take an explicit `orderBy` the same way `stages`
+/// does.
+#[tokio::test]
+async fn blobs_and_artifacts_can_be_ordered_explicitly() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-blobs-artifacts-order", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let mut meta = meta_in(workdir.path());
+        meta.final_output = Some(leviath_core::output::FinalOutputDescriptor {
+            format: None,
+            stage: "review".to_string(),
+            submitted_at: 1_788_924_600,
+            bytes: 4,
+            truncated: false,
+            artifacts: vec![
+                leviath_core::output::Artifact {
+                    name: "b.txt".to_string(),
+                    path: "b.txt".to_string(),
+                    mime_type: leviath_core::mime::MimeType::parse("text/plain").expect("a type"),
+                    size: 1,
+                    sha256: String::new(),
+                },
+                leviath_core::output::Artifact {
+                    name: "a.txt".to_string(),
+                    path: "a.txt".to_string(),
+                    mime_type: leviath_core::mime::MimeType::parse("text/plain").expect("a type"),
+                    size: 1,
+                    sha256: String::new(),
+                },
+            ],
+        });
+        crate::runstate::create_run(&meta).expect("run written");
+
+        let json = data(
+            meta.clone(),
+            "{ run { blobs(orderBy: [{ field: SHA_256, direction: DESC }]) { total } } }",
+        )
+        .await;
+        assert_eq!(json["run"]["blobs"]["total"], 0, "no parts stored");
+
+        let json = data(
+            meta,
+            "{ run { artifacts(orderBy: [{ field: NAME, direction: ASC }]) { results { name } } } }",
+        )
+        .await;
+        let names: Vec<&str> = json["run"]["artifacts"]["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .filter_map(|node| node["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt"], "ascending, by name");
+    })
+    .await;
+}
+
+/// `logs` reads one stage by index, every stage in order, or the stage the
+/// run is on now when `stage` is omitted, from whichever stream is asked for.
+#[tokio::test]
+async fn logs_read_one_stage_every_stage_or_the_current_one() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-logs", |_dir| async move {
+        let workdir = tempfile::tempdir().expect("a workdir");
+        let mut meta = meta_in(workdir.path());
+        meta.current_stage = "build".to_string();
+        meta.stage_index = 1;
+        crate::runstate::create_run(&meta).expect("run written");
+        crate::runstate::write_stages_index(
+            &meta.run_id,
+            &[
+                leviath_core::run_meta::StageRecord::new("plan".to_string(), 0),
+                leviath_core::run_meta::StageRecord::new("build".to_string(), 1),
+            ],
+        )
+        .expect("the ledger");
+        crate::runstate::append_stage_output("reader", 0, "plan output");
+        crate::runstate::append_stage_output("reader", 1, "build output");
+        crate::runstate::append_stage_log("reader", 0, "[tool] plan");
+        crate::runstate::append_stage_log("reader", 1, "[tool] build");
+
+        // Omitted `stage` means the stage the run is on now: the last one in
+        // the ledger.
+        let json = data(meta.clone(), "{ run { logs } }").await;
+        assert_eq!(json["run"]["logs"], "build output\n");
+
+        // One stage by index.
+        let json = data(meta.clone(), "{ run { logs(stage: { index: 0 }) } }").await;
+        assert_eq!(json["run"]["logs"], "plan output\n");
+
+        // Every stage, in order.
+        let json = data(meta.clone(), "{ run { logs(stage: { all: true }) } }").await;
+        assert_eq!(
+            json["run"]["logs"],
+            "===== stage 0: plan =====\nplan output\n\n===== stage 1: build =====\nbuild output\n"
+        );
+
+        // The operational stream instead of the output one.
+        let json = data(
+            meta.clone(),
+            "{ run { logs(stage: { index: 1 }, stream: OPERATIONAL) } }",
+        )
+        .await;
+        assert_eq!(json["run"]["logs"], "[tool] build\n");
+
+        // A negative index is refused.
+        let answer = ask(meta.clone(), "{ run { logs(stage: { index: -1 }) } }").await;
+        assert!(
+            answer
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("cannot be negative")
+        );
+
+        // A negative tailBytes is refused.
+        let answer = ask(meta, "{ run { logs(tailBytes: -1) } }").await;
+        assert!(
+            answer
+                .errors
+                .first()
+                .expect("a refusal")
+                .message
+                .contains("cannot be negative")
+        );
     })
     .await;
 }
@@ -851,12 +1176,12 @@ async fn an_absolute_path_inside_the_workdir_lists() {
     let json = data(
         meta_in(workdir.path()),
         &format!(
-            r#"{{ run {{ files(source: WORKDIR, path: "{}") {{ entries {{ name path }} }} }} }}"#,
+            r#"{{ run {{ files(source: WORKDIR, path: "{}") {{ results {{ name path }} }} }} }}"#,
             absolute.replace('\\', "\\\\")
         ),
     )
     .await;
-    let entry = &json["run"]["files"]["entries"][0];
+    let entry = &json["run"]["files"]["results"][0];
     assert_eq!(entry["name"], "main.rs");
     // The host's own separator: this path goes back to this host, and a Windows
     // server answers `src\main.rs`.
@@ -918,8 +1243,12 @@ async fn a_parts_dimensions_come_through() {
         )
         .expect("a snapshot");
 
-        let json = data(meta, "{ run { blobs { width height durationMs tokens } } }").await;
-        let blob = &json["run"]["blobs"][0];
+        let json = data(
+            meta,
+            "{ run { blobs { results { width height durationMs tokens } } } }",
+        )
+        .await;
+        let blob = &json["run"]["blobs"]["results"][0];
         assert_eq!(blob["width"], 1_024);
         assert_eq!(blob["height"], 768);
         assert_eq!(blob["durationMs"], 0);
@@ -996,7 +1325,7 @@ async fn a_run_yet_to_enter_a_stage_answers_from_its_entry_stage() {
     .await;
 }
 
-/// A page of children larger than the cap is refused, and a negative skip too.
+/// A page of children larger than the cap is refused.
 ///
 /// The cap is what stops one query walking a whole sub-agent tree, so it has to
 /// hold on the nested field as well as on the root listing.
@@ -1011,9 +1340,9 @@ async fn a_child_page_over_the_cap_is_refused() {
         let message = &answer.errors.first().expect("a refusal").message;
         assert!(message.contains("at most"), "{message}");
 
-        let answer = ask(meta, "{ run { children(first: 10, skip: -1) { total } } }").await;
+        let answer = ask(meta, "{ run { children(first: 0) { total } } }").await;
         let message = &answer.errors.first().expect("a refusal").message;
-        assert!(message.contains("negative"), "{message}");
+        assert!(message.contains("at least 1"), "{message}");
     })
     .await;
 }
@@ -1058,21 +1387,17 @@ async fn a_revision_reads_back_the_window_it_names() {
         // share one.
         let json = data(
             meta_in(workdir.path()),
-            "{ run { contextHistory(first: 3) { edges { node { window { revision \
-             totalTokens } } } } } }",
+            "{ run { contextHistory(first: 3) { results { window { revision \
+             totalTokens } } } } }",
         )
         .await;
-        let edges = json["run"]["contextHistory"]["edges"]
+        let results = json["run"]["contextHistory"]["results"]
             .as_array()
-            .expect("edges")
+            .expect("results")
             .clone();
-        let revisions: Vec<&str> = edges
+        let revisions: Vec<&str> = results
             .iter()
-            .map(|edge| {
-                edge["node"]["window"]["revision"]
-                    .as_str()
-                    .expect("a revision")
-            })
+            .map(|node| node["window"]["revision"].as_str().expect("a revision"))
             .collect();
         assert_eq!(revisions.len(), 3);
         assert!(
@@ -1133,5 +1458,38 @@ async fn a_run_with_no_journal_has_no_named_window() {
         .await;
         assert!(json["run"]["contextSnapshot"].is_null());
     })
+    .await;
+}
+
+/// Every function `#[mirror]` wrote for this module's types runs at least once.
+///
+/// The mirrors are straight lines of delegation, so running each of them once
+/// is enough to measure all of them.
+#[tokio::test]
+async fn every_mirrored_function_runs() {
+    use super::run_files::{FileEntry, FileSource, FileWindow};
+
+    exercise_enum(&[FileSource::Modified, FileSource::Workdir]).await;
+
+    let entry = FileEntry {
+        name: "main.rs".to_string(),
+        path: "src/main.rs".to_string(),
+        is_dir: false,
+        size: Some(BigInt(42)),
+        exists: true,
+        is_outside_workdir: false,
+        mime_type: "text/x-rust".to_string(),
+    };
+    exercise(std::slice::from_ref(&entry)).await;
+    exercise_list(std::slice::from_ref(&entry)).await;
+
+    exercise(&[FileWindow {
+        path: "/work/src/main.rs".to_string(),
+        size: BigInt(100),
+        offset: BigInt(0),
+        next_offset: Some(BigInt(50)),
+        content: "fn main() {}".to_string(),
+        truncated: true,
+    }])
     .await;
 }

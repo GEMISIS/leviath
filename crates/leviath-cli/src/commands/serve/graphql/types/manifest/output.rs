@@ -1,10 +1,12 @@
 //! What a run or a stage is asked to hand back.
 
 use async_graphql::{Enum, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use crate::commands::serve::graphql::scalars::Json;
 
 /// What happens when the validator refuses a submitted output.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum ValidatorErrorPolicy {
     /// The output is refused and the stage is asked again with the reason.
@@ -27,6 +29,7 @@ impl From<leviath_core::output::OnValidatorError> for ValidatorErrorPolicy {
 ///
 /// A slot rather than a file: this is what the blueprint asked for, and a run's
 /// `artifacts` is what it produced.
+#[mirror(list)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct OutputArtifact {
     /// The name the run hands it back under.
@@ -44,6 +47,7 @@ pub(crate) struct OutputArtifact {
 /// Declaring a shape does not by itself demand an output: that is
 /// `outputRequirement` on the stage. This says what the answer has to look like
 /// when it comes.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct OutputSpec {
     /// The format asked for, such as `json` or `markdown`.
@@ -95,11 +99,16 @@ impl From<&leviath_core::output::OutputSpec> for OutputSpec {
 /// Both lists empty means the stage takes whatever the regions it sees accept,
 /// which is the usual case: a stage says this only when it wants something
 /// narrower or wider than its regions imply.
+#[mirror]
 #[derive(Debug, SimpleObject)]
-pub(crate) struct StageInput {
+pub(crate) struct StageParts {
     /// Mime patterns this stage takes as parts.
     pub(crate) accepts: Vec<String>,
     /// Mime patterns whose parts reach the model as text whatever that model
     /// takes. For a type the registry already calls text this changes nothing.
     pub(crate) as_text: Vec<String>,
 }
+
+#[cfg(test)]
+#[path = "output_tests.rs"]
+mod tests;

@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use async_graphql::{Enum, Object, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use leviath_core::Blueprint as CoreBlueprint;
 
@@ -16,6 +17,7 @@ use super::count;
 
 /// Whether a stage is sent back round when it answers with text instead of
 /// calling a tool.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum NudgePolicy {
     /// Take the level above.
@@ -41,6 +43,7 @@ impl From<Option<bool>> for NudgePolicy {
 /// Each field cascades on its own, so a level that sets only `max` inherits the
 /// policy and the text. Unset everywhere, the nudge fires, except for a stage
 /// with checkpoints, whose text is its work product.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct NudgeConfig {
     /// Whether the nudge fires.
@@ -65,6 +68,7 @@ impl From<&leviath_core::blueprint::NudgeConfig> for NudgeConfig {
 ///
 /// Two states, not three: a manifest can ask for tracking, and it cannot ask for
 /// less than the machine already insists on. There is no way to spell "off".
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum TaintTracking {
     /// Take the machine's own setting.
@@ -74,6 +78,7 @@ pub(crate) enum TaintTracking {
 }
 
 /// What this level asks of the taint layer.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct BlueprintSecurity {
     /// Whether content that came from outside is followed through the run, so a
@@ -93,6 +98,7 @@ impl From<&leviath_core::taint::SecurityConfig> for BlueprintSecurity {
 }
 
 /// Where a stage's tools run.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum SandboxKind {
     /// On the host, which is the default and an explicit opt-out.
@@ -115,6 +121,7 @@ impl From<leviath_core::sandbox::SandboxKind> for SandboxKind {
 }
 
 /// What happens when the sandbox cannot be established.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum SandboxUnavailable {
     /// The spawn fails. The safe default for code you did not write.
@@ -134,6 +141,7 @@ impl From<leviath_core::sandbox::OnUnavailable> for SandboxUnavailable {
 }
 
 /// Where tools execute.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SandboxConfig {
     /// Which kind of isolation.
@@ -174,6 +182,7 @@ impl From<&leviath_core::sandbox::ToolSandboxConfig> for SandboxConfig {
 /// define is named for the field it is given as, so one file may back several
 /// hooks. A stage that declares none costs nothing: no file is read and no
 /// engine is built.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StageHooks {
     /// As the stage is entered, before its first inference.
@@ -211,6 +220,7 @@ impl From<&leviath_core::blueprint::StageHooks> for StageHooks {
 ///
 /// A request rather than a grant: the machine's own policy decides, and this is
 /// what an operator reads when they are deciding whether to write it in.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SafeCommands {
     /// Tools the blueprint would like allowed outright, by the names the manifest
@@ -235,6 +245,7 @@ impl From<&leviath_core::blueprint::SafeCommandsConfig> for SafeCommands {
 ///
 /// For the degenerate read loop: the same call again and again, or a long run of
 /// read-only calls with nothing produced between them.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RepetitionDetection {
     /// Whether detection runs. Null inherits, and unset everywhere it is on.
@@ -269,6 +280,7 @@ pub(crate) struct FileTrackingConfig {
 ///
 /// So a tool result can point at the region rather than repeating a file the
 /// context already holds.
+#[mirror]
 #[Object]
 impl FileTrackingConfig {
     /// The key-value region the files are synced to.
@@ -319,6 +331,7 @@ impl FileTrackingConfig {
 ///
 /// Its own model on purpose: compaction is cheap, frequent and not the work, so
 /// a run on an expensive model usually summarizes on a small one.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct CompactionConfig {
     /// The provider that serves the summarizer.
@@ -349,6 +362,7 @@ impl From<&leviath_core::lifecycle::CompactionConfig> for CompactionConfig {
 }
 
 /// What happens to a fan-out when one worker fails.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum WorkerFailurePolicy {
     /// The others finish, and the merge stage sees what came back.
@@ -366,3 +380,7 @@ impl From<&leviath_core::blueprint::WorkerFailurePolicy> for WorkerFailurePolicy
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;

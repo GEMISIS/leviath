@@ -23,6 +23,7 @@
 //!   silently behind.
 
 use async_graphql::{Enum, Interface, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use super::super::scalars::Json;
 
@@ -62,6 +63,7 @@ pub(crate) enum UntypedCallReason {
 }
 
 /// One call whose arguments stay as they were recorded.
+#[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct UntypedToolCall {
     /// Tool name, exactly as the model called it.
@@ -90,6 +92,7 @@ macro_rules! tool_calls {
     ) => {
         $(
             #[doc = $doc]
+            #[mirror(no_filter)]
             #[derive(Debug, SimpleObject)]
             pub(crate) struct $call {
                 /// Tool name, exactly as the model called it.
@@ -105,6 +108,7 @@ macro_rules! tool_calls {
         )*
         $(
             #[doc = $ndoc]
+            #[mirror(no_filter)]
             #[derive(Debug, SimpleObject)]
             pub(crate) struct $ncall {
                 /// Tool name, exactly as the model called it.

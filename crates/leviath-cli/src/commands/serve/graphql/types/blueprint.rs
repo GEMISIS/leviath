@@ -10,11 +10,12 @@
 use std::sync::Arc;
 
 use async_graphql::{Enum, ID, Object, SimpleObject};
+use leviath_graphql_derive::mirror;
 
 use super::super::super::core::blueprints::BlueprintSource as CoreSource;
+use super::machine::mime::MimeRow;
 use super::manifest::count;
 use super::manifest::dependency::BlueprintDependency;
-use super::manifest::mime::BlueprintMimeRow;
 use super::manifest::output::OutputSpec;
 use super::manifest::region::{
     RegionAdmission, RegionEviction, RegionSeed, RegionStrategy, RegionVolatility,
@@ -44,6 +45,7 @@ pub(crate) fn revision_id(name: &str, digest: &str) -> ID {
 }
 
 /// Where a blueprint was read from.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum BlueprintSource {
     /// The run's own copy, written at spawn: what the run executed, whatever
@@ -68,6 +70,7 @@ impl From<CoreSource> for BlueprintSource {
 /// Discovery happens either way. What this decides is whether it happens more
 /// than once - not whether the run may install a tool, which is what the tool
 /// permissions decide.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum ToolRescan {
     /// The set is fixed when the run starts. A tool installed mid-run reaches
@@ -101,6 +104,7 @@ impl From<leviath_core::blueprint::ToolRescan> for ToolRescan {
 ///
 /// Omitting guidance never discourages the behaviour. It leaves the paragraph
 /// out of the system prompt, and nothing else.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum HintSetting {
     /// Defer to the level above: a stage defers to the blueprint, and the
@@ -124,6 +128,7 @@ impl From<Option<bool>> for HintSetting {
 }
 
 /// The prompt guidance a blueprint or a stage declares.
+#[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct ToolUseGuidance {
     /// Whether the batch-independent-tool-calls paragraph is included.
@@ -139,6 +144,7 @@ pub(crate) struct ToolUseGuidance {
 /// One value per kind the daemon recognises. The manifest accepts `hashmap`
 /// and `hash_map` for the same kind, which is a spelling the TOML takes; the
 /// API has one name for one thing.
+#[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum RegionKind {
     /// Stays in the prompt verbatim.
@@ -219,6 +225,7 @@ pub(crate) struct Region {
 /// one part of what it knows and compact or empty another. This is the
 /// declaration only. What a live run's region holds is `ContextRegion`, and
 /// the two are read separately on purpose.
+#[mirror(list)]
 #[Object]
 impl Region {
     /// Region name, unique within the layout that declares it.
@@ -450,6 +457,10 @@ impl Region {
     }
 }
 
+impl super::super::connection::Paged for Blueprint {
+    const NAME: &'static str = "Blueprint";
+}
+
 /// The resolver state behind the `Blueprint` type.
 pub(crate) struct Blueprint {
     /// The parsed manifest, shared with the parse cache.
@@ -469,6 +480,7 @@ pub(crate) struct Blueprint {
 /// So read from a run, this is the manifest that run executed; read from the
 /// blueprint listing, it is the definition installed now. The `source` field
 /// says which, and the digest in the id says whether they are the same bytes.
+#[mirror]
 #[Object]
 impl Blueprint {
     /// This revision's id: `<name>@<digest prefix>`.
@@ -484,6 +496,7 @@ impl Blueprint {
     }
 
     /// Unique within the installed set.
+    #[filter(orderable)]
     async fn name(&self) -> &str {
         &self.parsed.name
     }
@@ -499,6 +512,7 @@ impl Blueprint {
     }
 
     /// From `[agent] version`.
+    #[filter(orderable)]
     async fn version(&self) -> &str {
         &self.parsed.version
     }
@@ -595,8 +609,8 @@ impl Blueprint {
 
     /// The mime rows this blueprint ships, so one that works in a file type the
     /// machine has never heard of carries the row that describes it.
-    async fn mime_types(&self) -> Vec<BlueprintMimeRow> {
-        BlueprintMimeRow::from_table(&self.parsed.mime_types)
+    async fn mime_types(&self) -> Vec<MimeRow> {
+        MimeRow::from_table(&self.parsed.mime_types, &self.parsed.name)
     }
 
     /// What this blueprint asks of the taint layer. Null inherits the machine's
@@ -664,6 +678,76 @@ impl Blueprint {
             .iter()
             .map(ContextTransform::from)
             .collect()
+    }
+
+    /// The tools a run of this blueprint can call.
+    ///
+    /// Its own `tools/` directory as well as the machine's, which is what an
+    /// editor offering an `available_tools` list wants. The scope decides which
+    /// directories are walked, so it is a field here rather than an argument on
+    /// the root listing.
+    #[filter(skip)]
+    async fn tools(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        #[graphql(desc = "Which tools to list. Omitted means all of them.")] filter: Option<
+            super::catalog::ToolFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
+        order_by: Option<Vec<super::catalog::ToolOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<
+            super::super::scalars::Cursor,
+        >,
+    ) -> async_graphql::Result<
+        super::super::connection::Connection<super::catalog::Tool, super::catalog::ToolSkips>,
+    > {
+        super::super::query::catalog::tool_page(
+            ctx,
+            Some(&self.parsed.name),
+            filter,
+            order_by,
+            first,
+            after,
+        )
+        .await
+    }
+
+    /// The scripts a run of this blueprint can see.
+    ///
+    /// Its own directory's scripts as well as the machine's. Read `scope` on
+    /// each to tell the two apart.
+    #[filter(skip)]
+    async fn scripts(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        #[graphql(desc = "Which scripts to list. Omitted means all of them.")] filter: Option<
+            super::machine::ScriptFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means id ascending.")]
+        order_by: Option<Vec<super::machine::ScriptOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<
+            super::super::scalars::Cursor,
+        >,
+    ) -> async_graphql::Result<super::super::connection::Connection<super::machine::Script>> {
+        super::super::query::machine::script_page(
+            ctx,
+            Some(&self.parsed.name),
+            filter,
+            order_by,
+            first,
+            after,
+        )
+        .await
     }
 }
 

@@ -9,7 +9,11 @@ use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
-use super::stage::Stage;
+use super::runtime::{SandboxConfig, SandboxKind, SandboxUnavailable};
+use super::stage::{
+    EffectiveNudge, EffectiveStageSettings, FanOut, OutputRequirement, Stage, StageContext,
+    StageMode,
+};
 use crate::commands::serve::testutil::state_with_agent_paths;
 
 /// A manifest that exercises the detail types.
@@ -259,7 +263,7 @@ async fn a_stage_carries_its_model_block() {
                providerParams
                maxOutputTokens {
                  __typename
-                 ... on MaxTokensContextPercent { percent }
+                 ... on MaxTokensContextPercentOutput { percent }
                }
              }
            } } }"#)
@@ -272,7 +276,7 @@ async fn a_stage_carries_its_model_block() {
     assert_eq!(model["parameters"]["temperature"], 0.2);
     assert_eq!(
         model["parameters"]["maxOutputTokens"]["__typename"],
-        "MaxTokensContextPercent"
+        "MaxTokensContextPercentOutput"
     );
     assert_eq!(model["parameters"]["maxOutputTokens"]["percent"], 40.0);
     // A parameter this schema has no field for is kept rather than dropped:
@@ -555,4 +559,146 @@ hide = ["shared"]
     );
     assert_eq!(context["hideNames"][0], "shared");
     assert_eq!(context["reset"].as_array().map(Vec::len), Some(0));
+}
+
+/// Every function `#[mirror]` wrote for `stage.rs`'s types runs at least once.
+///
+/// The generated impls are straight lines of delegation, so running each of
+/// them once is enough to measure all of them.
+#[tokio::test]
+async fn every_mirrored_function_in_stage_runs() {
+    use crate::commands::serve::graphql::filter::testkit::{
+        exercise, exercise_enum, exercise_list,
+    };
+
+    let parsed =
+        Arc::new(leviath_core::manifest::parse_manifest(&manifest()).expect("the manifest parses"));
+    let plan_at = parsed
+        .stages
+        .iter()
+        .position(|s| s.name == "plan")
+        .expect("the plan stage");
+    let build_at = parsed
+        .stages
+        .iter()
+        .position(|s| s.name == "build")
+        .expect("the build stage");
+
+    let stages = vec![
+        Stage {
+            blueprint: Arc::clone(&parsed),
+            at: plan_at,
+        },
+        Stage {
+            blueprint: Arc::clone(&parsed),
+            at: build_at,
+        },
+    ];
+    exercise(&stages).await;
+    exercise_list(&stages).await;
+
+    exercise_enum(&[
+        StageMode::Autonomous,
+        StageMode::InteractivePoints,
+        StageMode::FanOut,
+        StageMode::Output,
+    ])
+    .await;
+
+    exercise(&[OutputRequirement { reasks: 3 }]).await;
+
+    let fan_out_config = match &parsed.stages[build_at].mode {
+        leviath_core::blueprint::StageMode::FanOut { config } => config.clone(),
+        _ => panic!("the build stage is a fan-out"),
+    };
+    let fan_out = FanOut {
+        blueprint: Arc::clone(&parsed),
+        config: fan_out_config,
+    };
+    exercise(std::slice::from_ref(&fan_out)).await;
+
+    let stage_context = StageContext {
+        blueprint: Arc::clone(&parsed),
+        at: plan_at,
+    };
+    exercise(std::slice::from_ref(&stage_context)).await;
+
+    exercise(&[EffectiveNudge {
+        nudges: true,
+        max: 3,
+        text: "keep going".to_string(),
+    }])
+    .await;
+
+    exercise(&[EffectiveStageSettings {
+        includes_batch_hint: true,
+        shell_hint_eligible: false,
+        nudge: EffectiveNudge {
+            nudges: true,
+            max: 3,
+            text: "keep going".to_string(),
+        },
+        sandbox: SandboxConfig {
+            kind: SandboxKind::None,
+            image: None,
+            engine: None,
+            allow_network: true,
+            mounts: Vec::new(),
+            keep_warm: false,
+            on_unavailable: SandboxUnavailable::Warn,
+        },
+        tracks_taint: false,
+    }])
+    .await;
+}
+
+/// A fan-out that runs another blueprint names no stage and no region of its
+/// own, and each of those fields is null rather than a guess.
+///
+/// The other half of the pair above: there the fan-out named all three, and a
+/// resolver that only ever ran with a name is one nobody has watched answer
+/// "there is none".
+#[tokio::test]
+async fn a_fan_out_that_names_no_stage_or_region_answers_null() {
+    let manifest = r#"
+[agent]
+name = "spread"
+version = "1.0.0"
+description = "fans out onto another blueprint"
+entry_stage = "build"
+
+[stages.build]
+mode = "fan_out"
+worker_agent = "helper"
+split_prompt = "one item per file"
+"#;
+    let parsed = leviath_core::manifest::parse_manifest(manifest).expect("the manifest parses");
+    let schema = Schema::build(
+        StageProbe {
+            blueprint: Arc::new(parsed),
+        },
+        EmptyMutation,
+        EmptySubscription,
+    )
+    .data(state_with_agent_paths(Vec::new()))
+    .finish();
+    let answer = schema
+        .execute(Request::new(
+            r#"{ stage(name: "build") { fanOut {
+                 workerAgent workerStage { name } workerStageName
+                 mergeStage { name } mergeStageName
+                 resultsRegion { name } resultsRegionName
+               } } }"#,
+        ))
+        .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json = serde_json::to_value(&answer.data).expect("data serializes");
+    let fan = &json["stage"]["fanOut"];
+    assert_eq!(fan["workerAgent"], "helper");
+    assert!(fan["workerStage"].is_null());
+    assert!(fan["workerStageName"].is_null());
+    assert!(fan["mergeStage"].is_null());
+    assert!(fan["mergeStageName"].is_null());
+    assert!(fan["resultsRegion"].is_null());
+    assert!(fan["resultsRegionName"].is_null());
 }
