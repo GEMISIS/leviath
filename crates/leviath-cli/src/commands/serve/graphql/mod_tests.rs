@@ -267,16 +267,17 @@ async fn a_resolver_keeps_its_own_code() {
     );
 }
 
-/// Every field a query selects comes back, under the name it was selected by.
+/// Every field a query selects comes back in the order it was selected.
 ///
-/// Not in that order, though. The fields of one selection set are resolved
-/// together and the answer is built as each finishes, so a field that reads
-/// the disk lands after two that do not, whichever order they were written in.
-/// That is what the whole schema does, from the root down, and it is why the
-/// Failures section tells a client to read the answer by key. This pins what
-/// does hold, so a client reading `data["config"]` keeps working.
+/// The fields of one selection set are resolved together and the answer is
+/// built as each finishes, so without help a field that reads the disk would
+/// land after two that do not, whichever order they were written in. The
+/// schema puts the order back afterwards, from the root down, which is what
+/// the spec asks for and what a client that reads a response as a stream
+/// relies on. `blueprints` reads a directory and `serverTime` reads a clock,
+/// so this is the slow-first shape that would come back wrong otherwise.
 #[tokio::test]
-async fn every_root_field_asked_for_comes_back_under_its_own_name() {
+async fn every_field_comes_back_in_the_order_it_was_asked_for() {
     // A blueprint directory of this test's own, so what `blueprints` answers
     // is this test's and not whatever is installed on the machine running it.
     let dir = tempfile::tempdir().expect("a temp directory");
@@ -284,13 +285,26 @@ async fn every_root_field_asked_for_comes_back_under_its_own_name() {
         crate::commands::serve::testutil::state_with_agent_paths(vec![dir.path().to_path_buf()]),
         true,
     );
-    let query = "{ blueprints { results { name } } serverTime config { allowsFileUploads } }";
+    let query = "{ blueprints { total results { name } } serverTime config { allowsFileUploads blueprintPaths } }";
     let answer = schema.execute(Request::new(query)).await;
     assert!(answer.errors.is_empty(), "{:?}", answer.errors);
-    let json: serde_json::Value = serde_json::to_value(&answer.data).expect("data serializes");
-    assert!(json["blueprints"]["results"].is_array(), "{json}");
-    assert!(json["serverTime"].is_number(), "{json}");
-    assert!(json["config"]["allowsFileUploads"].is_boolean(), "{json}");
+    let keys = |value: &async_graphql::Value| -> Vec<String> {
+        match value {
+            async_graphql::Value::Object(fields) => {
+                fields.keys().map(ToString::to_string).collect()
+            }
+            other => panic!("an object, not {other:?}"),
+        }
+    };
+    assert_eq!(keys(&answer.data), ["blueprints", "serverTime", "config"]);
+    let async_graphql::Value::Object(root) = &answer.data else {
+        panic!("an object");
+    };
+    assert_eq!(keys(&root["blueprints"]), ["total", "results"]);
+    assert_eq!(
+        keys(&root["config"]),
+        ["allowsFileUploads", "blueprintPaths"]
+    );
 }
 
 /// Every named type in the published schema says what it is.

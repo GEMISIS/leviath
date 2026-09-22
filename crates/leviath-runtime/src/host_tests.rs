@@ -2174,6 +2174,9 @@ async fn cancel_closes_the_runs_open_interactions() {
     // ...and the request stops being advertised to `lev respond` / the
     // dashboard for a run that is going away.
     assert!(hub.pending().is_empty(), "no orphaned prompt is left open");
+    // The emitted set is pruned by the next tick, which is where every
+    // no-longer-pending id is forgotten, whatever ended it.
+    host.emit_events();
     assert!(
         host.emitted_interactions.is_empty(),
         "and it is pruned from the emitted set, not re-announced forever"
@@ -3719,6 +3722,63 @@ async fn emit_events_broadcasts_new_interactions_once() {
             ))
     );
     let _ = asking.await;
+}
+
+/// A prompt raised under a request id an earlier, settled prompt used is
+/// broadcast again.
+///
+/// A provider's tool-call id is unique within one message, not across a
+/// run's turns, so a second turn can raise `<run>-ask-call_1` after the
+/// first one was answered. A console driving its inbox off the event stream
+/// sees the run park and nothing else if that second ask is swallowed.
+#[tokio::test]
+async fn emit_events_broadcasts_a_prompt_that_reuses_a_settled_request_id() {
+    let mut host = host_with(vec![]);
+    let mut rx = host.subscribe();
+    let backend = host.interactions().backend_for("agent-a");
+    let ask = |backend: crate::interaction_hub::HubInteractionBackend| {
+        tokio::spawn(async move {
+            backend
+                .ask(leviath_core::interaction::InteractionRequest::free_text(
+                    "q1", "p", "s", true,
+                ))
+                .await
+        })
+    };
+    let first = ask(backend.clone());
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    host.emit_events();
+    let opened = |rx: &mut tokio::sync::broadcast::Receiver<WorldEvent>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| matches!(e, WorldEvent::Interaction { .. }))
+            .count()
+    };
+    assert_eq!(opened(&mut rx), 1, "the first ask opens");
+    assert!(
+        host.interactions()
+            .answer(leviath_core::interaction::InteractionResponse::text(
+                "q1", "ok"
+            ))
+    );
+    let _ = first.await;
+    // The same id, settled and asked again: an ordinary tick between the two
+    // is what forgets the settled one.
+    host.emit_events();
+    let second = ask(backend);
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    host.emit_events();
+    assert_eq!(opened(&mut rx), 1, "the second ask opens too");
+    assert!(
+        host.interactions()
+            .answer(leviath_core::interaction::InteractionResponse::text(
+                "q1", "ok"
+            ))
+    );
+    let _ = second.await;
 }
 
 #[tokio::test]

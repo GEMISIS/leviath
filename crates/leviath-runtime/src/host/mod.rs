@@ -212,9 +212,9 @@ impl WorldHost {
     /// Forget the emitted-interaction ids that are no longer pending.
     ///
     /// The hub is keyed by agent id but the emitted set is keyed by request
-    /// id, so it is pruned by what is still open. Called after a cancel and
-    /// after a reap, the two moments an interaction can stop being pending
-    /// without being answered.
+    /// id, so it is pruned by what is still open. Run once per tick, before
+    /// the pending prompts are broadcast, so an id a settled prompt used is
+    /// free for the next prompt raised under it.
     fn prune_emitted_interactions(&mut self) {
         let still_open: std::collections::HashSet<String> = self
             .interactions
