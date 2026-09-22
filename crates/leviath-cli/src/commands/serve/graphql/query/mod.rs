@@ -16,57 +16,66 @@
 //! so each method here is a one-line delegation into its group's module
 //! instead.
 //!
-//! [`RunSelection`]: super::run_filter::RunSelection
+//! [`RunSelection`]: super::super::core::runs::RunSelection
 
-use async_graphql::{Context, Object};
+use async_graphql::{Context, ID, Object};
 
-use blueprints::BlueprintConnection;
-use runs::OpenInteraction;
+use runs::{RunListingExtras, RunSearchOptions};
 
-use super::blueprint_filter::BlueprintFilter;
-use super::checks::{KeyVerdict, ScriptVerdict, ValidationReport, YoloDecision, YoloTestInput};
-use super::connection::RunConnection;
-use super::inputs::BlueprintInput;
+use super::checks::{KeyVerdict, ScriptVerdict, ValidationReport};
+use super::connection::Connection;
+use super::inputs::BlueprintRef;
 use super::node::Node;
-use super::run_filter::RunFilter;
-use super::scalars::Cursor;
-use super::types::catalog::{Model, Provider, ToolInventory};
-use super::types::machine::{
-    Config, Directory, DoctorReport, JournalHealth, McpServer, MimeRow, Script, YoloProfiles,
+use super::scalars::{Cursor, Timestamp};
+use super::script_ref::{ScriptKind, ScriptRef};
+use super::types::blueprint::{Blueprint, BlueprintFilter, BlueprintOrder};
+use super::types::catalog::{
+    Model, ModelFilter, ModelOrder, Provider, ProviderFilter, ProviderOrder, Tool, ToolFilter,
+    ToolGroup, ToolOrder, ToolSkips,
 };
-use super::types::update::{DaemonStatus, UpdateInfo, UpdateJob};
+use super::types::machine::{
+    Config, Directory, DoctorReport, McpServer, McpServerFilter, McpServerOrder, MimeRow,
+    MimeRowFilter, MimeRowOrder, Script, ScriptFilter, ScriptOrder, YoloProfile, YoloProfileFilter,
+    YoloProfileOrder,
+};
+use super::types::run::{Run, RunFilter, RunOrder};
+use super::types::update::{DaemonStatus, UpdateJob, UpdateJobFilter, UpdateJobOrder, UpdatePlan};
 
 pub(crate) mod blueprints;
 pub(crate) mod catalog;
 pub(crate) mod checks;
 pub(crate) mod jobs;
+pub(crate) mod listing;
 pub(crate) mod machine;
 pub(crate) mod runs;
 
-/// An export job, as a client polls it. Re-exported so `node` and the
-/// `bulkExportRuns` mutation answer with the same type this field does.
-pub(crate) use jobs::BulkExport;
+/// One model, from the node id `model:<provider>/<modelId>` carries. Shared
+/// with `node`, so the lookup and the listing cannot disagree about what is
+/// there.
+pub(crate) use catalog::model_by_id;
+/// One provider, from the node id `provider:<name>` carries. Shared with
+/// `node`, so the lookup and the listing cannot disagree about what is there.
+pub(crate) use catalog::provider_by_id;
+/// An export of the run store, as a client polls it. Re-exported so `node` and
+/// the export mutation answer with the same type this field does.
+pub(crate) use jobs::RunExport;
 
 /// The config as this schema describes it, with every secret left out.
 ///
 /// Shared with the write side, so a config read and the answer to a config write
 /// are the same shape rather than two that drifted.
 pub(crate) use machine::config_of;
-/// One diagnostics run as this schema describes it.
+/// One diagnostics run that reached the network.
 ///
-/// Shared by the offline field and the live mutation: they run different checks
-/// and answer with the same shape, which is what lets a client render one view.
-pub(crate) use machine::doctor_report;
-/// Re-exported for the tests below, which check the mapping from the config
-/// file's own words to this schema's enum directly rather than through a
-/// query.
-#[cfg(test)]
-use machine::waiver_word;
-/// The yolo profiles as this schema describes them.
+/// Shared with the live mutation: it runs different checks from the offline
+/// field and answers with the same shape, which is what lets a client render
+/// one view.
+pub(crate) use machine::live_doctor_report;
+/// One yolo profile as this schema describes it.
 ///
-/// Shared by the field and the write, so "what is there now" is one shape
-/// whichever asked.
-pub(crate) use machine::yolo_profiles;
+/// Shared by the field, `node` and the write, so "what is there now" is one
+/// shape whichever asked.
+pub(crate) use machine::yolo_profile;
 
 /// The resolver state behind the `Query` type.
 pub(crate) struct Query;
@@ -80,17 +89,14 @@ pub(crate) struct Query;
 /// safe to poll.
 #[Object]
 impl Query {
-    /// The blueprints installed on this machine, by name.
+    /// The blueprints installed on this machine.
     ///
     /// This is the live definition, not what any run executed: for that, read
     /// `blueprint` on the run, which answers from the run's own snapshot. The
     /// digests tell you whether the two are the same bytes.
     ///
-    /// `filter.names` fetches blueprints by name. A name that is not installed
-    /// lands in `missing` rather than failing the request.
-    ///
-    /// Keyset-paged on the name, which is the order the catalogue is read in.
-    /// A cursor names where you got to, so a blueprint installed or removed
+    /// Keyset-paged, by name ascending unless `orderBy` says otherwise. A
+    /// cursor names where you got to, so a blueprint installed or removed
     /// mid-walk cannot make a page skip or repeat one.
     async fn blueprints(
         &self,
@@ -98,21 +104,40 @@ impl Query {
         #[graphql(desc = "Which blueprints to list. Omitted means all of them.")] filter: Option<
             BlueprintFilter,
         >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
+        order_by: Option<Vec<BlueprintOrder>>,
         #[graphql(
             desc = "Page size; capped by the server's page-size cap.",
             default = 50
         )]
         first: i32,
-        #[graphql(desc = "Cursor from the previous page's pageInfo.")] after: Option<Cursor>,
-    ) -> async_graphql::Result<BlueprintConnection> {
-        blueprints::blueprints(ctx, filter, first, after).await
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<Blueprint>> {
+        blueprints::blueprints(ctx, filter, order_by, first, after).await
+    }
+
+    /// One installed blueprint, by the name it is installed under.
+    ///
+    /// Null for a name nothing is installed under. A lookup answers "not
+    /// here" rather than failing, so reading several names costs one request
+    /// and gives an answer for each.
+    async fn blueprint(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The name the blueprint is installed under.")] name: String,
+    ) -> Option<Blueprint> {
+        blueprints::blueprint(ctx, name).await
     }
 
     /// How this server is configured, with every secret left out.
     ///
-    /// Read `capabilities` before choosing a code path. A 404 also means "no
-    /// such run", so discovering a feature by being refused costs a round trip
-    /// and tells you less.
+    /// Everything `updateConfig` writes is here under the same name, so a
+    /// settings screen renders what it saves. A key is the exception: it reads
+    /// back as `hasKey` on its provider.
+    ///
+    /// Read `server.capabilities` before choosing a code path. A 404 also
+    /// means "no such run", so discovering a feature by being refused costs a
+    /// round trip and tells you less.
     async fn config(&self, ctx: &Context<'_>) -> Config {
         machine::config(ctx).await
     }
@@ -127,64 +152,190 @@ impl Query {
     }
 
     /// The MCP servers this machine has configured.
-    async fn mcp_servers(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<McpServer>> {
-        machine::mcp_servers(ctx).await
+    ///
+    /// Keyset-paged, by name ascending unless `orderBy` says otherwise, which
+    /// is the key a machine holds one server per.
+    async fn mcp_servers(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which servers to list. Omitted means all of them.")] filter: Option<
+            McpServerFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
+        order_by: Option<Vec<McpServerOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<McpServer>> {
+        machine::mcp_servers(ctx, filter, order_by, first, after).await
     }
 
-    /// The yolo profiles, and the file they are read from.
-    async fn yolo_profiles(&self) -> YoloProfiles {
-        machine::yolo_profiles()
+    /// One configured MCP server, by the name it is configured under.
+    ///
+    /// Null for a name this machine has no server for. A config that will not
+    /// parse still fails, because that is not the same answer as "no such
+    /// server".
+    async fn mcp_server(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The server's name in the config.")] name: String,
+    ) -> async_graphql::Result<Option<McpServer>> {
+        machine::mcp_server(ctx, name).await
+    }
+
+    /// The yolo profiles this machine has configured.
+    ///
+    /// Where the file is and whether it loads is `config.yoloFile`: this is
+    /// what the file holds. A file that does not load holds nothing, and the
+    /// reason is there rather than here.
+    ///
+    /// Keyset-paged, by name ascending unless `orderBy` says otherwise, which
+    /// is the key the file holds one profile per.
+    async fn yolo_profiles(
+        &self,
+        #[graphql(desc = "Which profiles to list. Omitted means all of them.")] filter: Option<
+            YoloProfileFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
+        order_by: Option<Vec<YoloProfileOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<YoloProfile>> {
+        machine::yolo_profile_page(filter, order_by, first, after).await
+    }
+
+    /// One yolo profile, by the name `--yolo=<name>` spells.
+    ///
+    /// Null for a name the file has no table for, which is also what a file
+    /// that does not load answers: `config.yoloFile.error` says whether that
+    /// is why.
+    async fn yolo_profile(
+        &self,
+        #[graphql(desc = "The profile's name in the file.")] name: String,
+    ) -> Option<YoloProfile> {
+        machine::yolo_profile(&name)
     }
 
     /// The operator's mime registry, before any blueprint's own rows.
-    async fn mime(&self, ctx: &Context<'_>) -> Vec<MimeRow> {
-        machine::mime(ctx).await
+    ///
+    /// Keyset-paged, by mime type ascending unless `orderBy` says otherwise,
+    /// which is the order the registry itself is stored in.
+    async fn mime_rows(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which rows to list. Omitted means all of them.")] filter: Option<
+            MimeRowFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means mime type ascending.")]
+        order_by: Option<Vec<MimeRowOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<MimeRow>> {
+        machine::mime_rows(ctx, filter, order_by, first, after).await
     }
 
-    /// The scripts this machine has registered.
+    /// The scripts every run on this machine can see.
+    ///
+    /// For one blueprint's own scripts as well, read `scripts` on that
+    /// blueprint: the scope changes which directory is walked, so it is a field
+    /// there rather than an argument here.
     async fn scripts(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Only this blueprint's own scripts, plus the global ones.")]
-        blueprint: Option<BlueprintInput>,
-    ) -> async_graphql::Result<Vec<Script>> {
-        machine::scripts(ctx, blueprint).await
+        #[graphql(desc = "Which scripts to list. Omitted means all of them.")] filter: Option<
+            ScriptFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means id ascending.")]
+        order_by: Option<Vec<ScriptOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<Script>> {
+        machine::scripts(ctx, filter, order_by, first, after).await
+    }
+
+    /// One registered script, by the three things that name it.
+    ///
+    /// Null for a reference nothing is filed under, which is what a client that
+    /// guessed a kind or a blueprint gets rather than an error.
+    async fn script(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(
+            name = "ref",
+            desc = "Which script: its kind, its name, and whose it is."
+        )]
+        reference: ScriptRef,
+    ) -> async_graphql::Result<Option<Script>> {
+        machine::script(ctx, reference).await
     }
 
     /// The directories under a path, for a file picker.
     ///
     /// Confined to `--workdir-root` when the operator set one, which is also
     /// why `parent` is null at that fence rather than leading above it.
-    async fn directories(
+    async fn directory(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "The directory to list. Omitted means this server's own.")] path: Option<
             String,
         >,
-        #[graphql(desc = "Include hidden directories.", default = false)] hidden: bool,
+        #[graphql(desc = "Include hidden directories.", default = false)] include_hidden: bool,
     ) -> async_graphql::Result<Directory> {
-        machine::directories(ctx, path, hidden).await
+        machine::directory(ctx, path, include_hidden).await
     }
 
     /// Every model this machine can route to.
     ///
     /// Answered from the catalogue this server keeps, so it costs no provider
-    /// call. Two providers can serve the same model id and bill to different
-    /// places, so `provider` is part of each answer rather than something a
-    /// client infers.
+    /// call and never waits on one. `refreshModels` is the mutation that asks
+    /// the providers for a newer one.
+    ///
+    /// Two providers can serve the same model id and bill to different places,
+    /// so the provider is part of each answer rather than something a client
+    /// infers: for one provider's models, filter on `providerName`.
     async fn models(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Only this provider's models.")] provider: Option<String>,
+        #[graphql(desc = "Which models to list. Omitted means all of them.")] filter: Option<
+            ModelFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means id ascending.")]
+        order_by: Option<Vec<ModelOrder>>,
         #[graphql(
-            desc = "Refresh this server's catalogue from the providers before answering, \
-                    instead of answering from what it already holds. Slower, and it \
-                    changes nothing a later request would not see anyway.",
-            default = false
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
         )]
-        refresh: bool,
-    ) -> Vec<Model> {
-        catalog::models(ctx, provider, refresh).await
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<Model>> {
+        catalog::models(ctx, filter, order_by, first, after).await
+    }
+
+    /// One model, by the id this schema gives it.
+    ///
+    /// Null for an id nothing here serves, which covers a model a provider has
+    /// retired and one this machine has no provider for.
+    async fn model(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The model's id: `model:<provider>/<modelId>`.")] id: ID,
+    ) -> Option<Model> {
+        catalog::model(ctx, id).await
     }
 
     /// The providers this machine can reach, configured or not.
@@ -192,46 +343,79 @@ impl Query {
     /// `enabled` and `signedIn` are different questions with different
     /// answers: a provider can be turned on with no credential stored, and a
     /// credential can outlive the config entry that used it.
-    async fn providers(&self, ctx: &Context<'_>) -> Vec<Provider> {
-        catalog::providers(ctx).await
+    async fn providers(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which providers to list. Omitted means all of them.")] filter: Option<
+            ProviderFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
+        order_by: Option<Vec<ProviderOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<Provider>> {
+        catalog::providers(ctx, filter, order_by, first, after).await
+    }
+
+    /// One provider, by the registry name a blueprint would write.
+    ///
+    /// Null for a name this build has no provider for.
+    async fn provider(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The registry name, such as `openai`.")] name: String,
+    ) -> Option<Provider> {
+        catalog::provider(ctx, name).await
     }
 
     /// The tools a run on this machine can call.
     ///
-    /// Scoped to one blueprint's own directory when `blueprint` names one,
-    /// which is what an editor offering an `available_tools` list wants.
+    /// For one blueprint's own tools as well, read `tools` on that blueprint:
+    /// the scope changes which directory is walked, so it is a field there
+    /// rather than an argument here.
+    ///
+    /// `skipped` sits beside the page: it is what the same walk of the same
+    /// directories found and could not offer, with the reason.
     async fn tools(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "Scope to this blueprint's own tools directory.")] blueprint: Option<
-            BlueprintInput,
+        #[graphql(desc = "Which tools to list. Omitted means all of them.")] filter: Option<
+            ToolFilter,
         >,
-    ) -> async_graphql::Result<ToolInventory> {
-        catalog::tools(ctx, blueprint).await
+        #[graphql(desc = "Sort keys, in priority order. Omitted means name ascending.")]
+        order_by: Option<Vec<ToolOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<Tool, ToolSkips>> {
+        catalog::tools(ctx, filter, order_by, first, after).await
+    }
+
+    /// The group tokens an `available_tools` list may name in place of tool
+    /// names.
+    ///
+    /// A bare list: this build compiles the set in, so it is bounded by the
+    /// code rather than by anything on the machine.
+    async fn tool_groups(&self) -> Vec<ToolGroup> {
+        catalog::tool_groups().await
     }
 
     /// Who is on the other end of the control socket.
     ///
     /// A read this server answers from what it already knows, so it works while
-    /// the daemon is down: that is the point of asking. `connected` false does
-    /// not mean requests fail, it means the live frames have stopped.
+    /// the daemon is down: that is the point of asking. `reachable` false does
+    /// not mean requests fail, it means the live frames have stopped. The one
+    /// field here that does need the daemon is `journal`, and it costs a
+    /// control call only where it is selected.
     async fn daemon(&self, ctx: &Context<'_>) -> DaemonStatus {
         machine::daemon(ctx).await
-    }
-
-    /// Whether the daemon is still recording what its runs do.
-    ///
-    /// Null when the daemon cannot be reached, because this is the daemon's own
-    /// reading and no other copy of it exists - `daemon.reachable` says whether
-    /// that is why. Everything else about a run is read from disk and keeps
-    /// working while the daemon is down; this does not.
-    ///
-    /// Worth asking on any page that shows runs as healthy. A daemon whose
-    /// journal is refusing writes serves every field here exactly as it did
-    /// before, and a run whose journal record cannot be written is failed rather
-    /// than carried on.
-    async fn journal(&self, ctx: &Context<'_>) -> Option<JournalHealth> {
-        machine::journal(ctx).await
     }
 
     /// What an update would do, and whether there is anything newer to get.
@@ -240,7 +424,7 @@ impl Query {
     /// whatever the last check found, and asking starts another one for whoever
     /// asks next rather than waiting on one here, so this is cheap enough for a
     /// page to ask every time it opens.
-    async fn update(&self, ctx: &Context<'_>) -> UpdateInfo {
+    async fn update_plan(&self, ctx: &Context<'_>) -> UpdatePlan {
         machine::update(ctx).await
     }
 
@@ -261,16 +445,26 @@ impl Query {
     /// thing is not here. A read that could not answer the question at all, such
     /// as a config file that will not parse, fails the way the listing it would
     /// have come from fails.
-    ///
-    /// `Model` is not a `Node`, because a model id is the provider's own and two
-    /// providers can serve the same one; read `models` and key on provider and
-    /// id together.
     async fn node(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The id, as whatever holds it spelled it.")] id: async_graphql::ID,
+        #[graphql(desc = "The id, as whatever holds it spelled it.")] id: ID,
     ) -> async_graphql::Result<Option<Node>> {
-        runs::node(ctx, id).await
+        super::node::resolve(ctx, id.as_str()).await
+    }
+
+    /// Several nodes, from their ids alone.
+    ///
+    /// One entry per id, in the order they were asked about, and null where an
+    /// id names nothing. That is what lets a client holding a page of cached
+    /// keys line the answers up against what it asked rather than matching on
+    /// ids, and it is why one dead id costs nothing but its own slot.
+    async fn nodes(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The ids to look up, as whatever holds them spelled them.")] ids: Vec<ID>,
+    ) -> async_graphql::Result<Vec<Option<Node>>> {
+        super::node::resolve_many(ctx, ids).await
     }
 
     /// One update run, by id.
@@ -280,56 +474,117 @@ impl Query {
     async fn update_job(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The job's id.")] id: String,
+        #[graphql(desc = "The job's id.")] id: ID,
     ) -> Option<UpdateJob> {
         jobs::update_job(ctx, id).await
     }
 
-    /// Poll an export this server started.
+    /// Every update run this server has done.
+    ///
+    /// Keyset-paged, oldest first unless `orderBy` says otherwise. A job's id
+    /// carries the second it started, so ordering by it is ordering by when it
+    /// ran.
+    async fn update_jobs(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Which jobs to list. Omitted means all of them.")] filter: Option<
+            UpdateJobFilter,
+        >,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means id ascending.")]
+        order_by: Option<Vec<UpdateJobOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<UpdateJob>> {
+        jobs::update_jobs(ctx, filter, order_by, first, after).await
+    }
+
+    /// Poll an export of the run store this server started.
     ///
     /// Null when no export carries that id: it was never started, or it has
     /// expired. An export's file is kept for an hour, and its record goes with
     /// the file, so neither outlives the other.
-    async fn bulk_export(
+    async fn run_export(
         &self,
         ctx: &Context<'_>,
-        #[graphql(desc = "The export job's id.")] id: String,
-    ) -> Option<BulkExport> {
-        jobs::bulk_export(ctx, id).await
+        #[graphql(desc = "The export job's id.")] id: ID,
+    ) -> Option<RunExport> {
+        jobs::run_export(ctx, id).await
     }
 
     /// Every open ask across every run: the approval inbox.
     ///
     /// The daemon holds these in memory, so this is one read rather than a walk
-    /// of the run store. Each entry names the run it is parked on, which is
-    /// what a client needs to show the row it belongs to.
+    /// of the run store. Each entry names the run it is parked on through its
+    /// own `run` field, which is what a client needs to show the row it
+    /// belongs to.
     async fn open_interactions(
         &self,
         ctx: &Context<'_>,
-    ) -> async_graphql::Result<Vec<OpenInteraction>> {
-        runs::open_interactions(ctx).await
+        #[graphql(desc = "Which open asks to include. Omitted means all of them.")] filter: Option<
+            super::types::interaction::InteractionFilter,
+        >,
+        #[graphql(desc = "Sort key and direction. Omitted means the order they were read.")]
+        order_by: Option<Vec<super::types::interaction::InteractionOrder>>,
+        #[graphql(
+            desc = "Page size; capped by the server's page-size cap.",
+            default = 50
+        )]
+        first: i32,
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<super::types::interaction::Interaction>> {
+        runs::open_interactions(ctx, filter, order_by, first, after).await
     }
 
     /// Keyset-paged run listing.
     ///
-    /// `filter.ids` fetches exact runs, which is also how a client reads one
-    /// run: `runs(filter: { ids: ["..."] })`. An id that names nothing lands
-    /// in `missing` rather than failing the request, so one dead id in a batch
-    /// of fifty does not cost the other forty-nine.
+    /// The filter mirrors `RunOutput` itself: a field of the run is a field of
+    /// the filter, and `and`, `or` and `not` compose them. Read one run with
+    /// `run(id:)`, a batch with `filter: { id: { in: [...] } }`, the runs
+    /// nobody started with `filter: { parentId: { isNull: true } }`, and a
+    /// whole subtree with `filter: { ancestorIds: { has: "<id>" } }`.
+    ///
+    /// There is no scan cap. A filter or a search that names a file is answered
+    /// by reading, and only for the runs the page being asked for reaches, so
+    /// page two costs nothing for page one's runs. `total` is the one field
+    /// that can cost a pass over the store: ask for it on the first page.
     async fn runs(
         &self,
         ctx: &Context<'_>,
         #[graphql(desc = "Which runs to list. Omitted means all of them.")] filter: Option<
             RunFilter,
         >,
+        #[graphql(desc = "Free-text search across the listing.")] search: Option<RunSearchOptions>,
+        #[graphql(desc = "Sort keys, in priority order. Omitted means newest first.")]
+        order_by: Option<Vec<RunOrder>>,
         #[graphql(
             desc = "Page size; capped by the server's page-size limit.",
             default = 50
         )]
         first: i32,
-        #[graphql(desc = "Cursor from the previous page's pageInfo.")] after: Option<Cursor>,
-    ) -> async_graphql::Result<RunConnection> {
-        runs::runs(ctx, filter, first, after).await
+        #[graphql(desc = "Cursor from the previous page.")] after: Option<Cursor>,
+    ) -> async_graphql::Result<Connection<Run, RunListingExtras>> {
+        runs::runs(ctx, filter, search, order_by, first, after).await
+    }
+
+    /// One run, by the id every other route names it by.
+    ///
+    /// Null for an id nothing answers to. A lookup answers "not here" rather
+    /// than failing, so a client reading several ids gets an answer for each.
+    async fn run(&self, #[graphql(desc = "The run's id.")] id: async_graphql::ID) -> Option<Run> {
+        runs::run(id).await
+    }
+
+    /// The daemon's own clock, in unix epoch seconds.
+    ///
+    /// Every duration a run reports is measured against this. A client drawing
+    /// its own clocks should draw them against this rather than the browser's,
+    /// which disagrees by whatever the two machines' clocks disagree by.
+    async fn server_time(&self) -> Timestamp {
+        runs::server_time().await
     }
 
     // ─── The pure checks ──────────────────────────────────────────────────
@@ -344,13 +599,15 @@ impl Query {
     /// succeeded, and what it found is the answer.
     async fn validate_blueprint(
         &self,
-        #[graphql(desc = "The manifest text to check.")] content: String,
+        ctx: &Context<'_>,
+        #[graphql(desc = "The manifest text to check.")] manifest: String,
         #[graphql(
+            name = "as",
             desc = "Check the text as this installed blueprint, so its own scripts resolve."
         )]
-        name: Option<String>,
+        as_blueprint: Option<BlueprintRef>,
     ) -> async_graphql::Result<ValidationReport> {
-        checks::validate_blueprint(content, name).await
+        checks::validate_blueprint(ctx, manifest, as_blueprint).await
     }
 
     /// Whether a provider key looks like one of that provider's.
@@ -358,7 +615,7 @@ impl Query {
     /// Format only: nothing is dialled and nothing is written, which is what
     /// makes it safe to run on every keystroke of a form. `checkProvider` is
     /// the one that asks the account.
-    async fn validate_config_key(
+    async fn validate_provider_key(
         &self,
         #[graphql(desc = "The provider the key is for.")] provider: String,
         #[graphql(desc = "The key to look at. Never stored, never logged.")] key: String,
@@ -366,7 +623,7 @@ impl Query {
             String,
         >,
     ) -> KeyVerdict {
-        checks::validate_config_key(provider, key, base_url).await
+        checks::validate_provider_key(provider, key, base_url).await
     }
 
     /// Whether a script compiles, without writing it.
@@ -377,24 +634,12 @@ impl Query {
     /// compiler here stops at the syntax tree.
     async fn validate_script(
         &self,
-        #[graphql(desc = "Which registry the script is for.")] kind: String,
+        #[graphql(desc = "Which registry the script is for.")] kind: ScriptKind,
         #[graphql(desc = "The source to compile.")] content: String,
         #[graphql(desc = "Hook functions it has to define, for a stage or region hook.")]
-        hooks: Option<Vec<String>>,
+        required_hooks: Option<Vec<String>>,
     ) -> async_graphql::Result<ScriptVerdict> {
-        checks::validate_script(kind, content, hooks).await
-    }
-
-    /// What one yolo profile would do with one call.
-    ///
-    /// The same code path `lev yolo test` runs, so the command and the API cannot
-    /// disagree about a call. Decides and reports; nothing is run.
-    async fn test_yolo_profile(
-        &self,
-        ctx: &Context<'_>,
-        #[graphql(desc = "The call to decide about.")] call: YoloTestInput,
-    ) -> async_graphql::Result<YoloDecision> {
-        checks::test_yolo_profile(ctx, call).await
+        checks::validate_script(kind, content, required_hooks).await
     }
 }
 

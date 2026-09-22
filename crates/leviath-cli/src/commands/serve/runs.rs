@@ -200,6 +200,9 @@ fn resolve(query: &RunsQuery) -> Result<RunSpec, ServeError> {
         statuses,
         sort,
         descending,
+        // One key orders this route, which `sort` and `descending` already
+        // say; several is the other surface's.
+        order: None,
         q,
         sources,
         sources_raw: sources_raw.to_string(),

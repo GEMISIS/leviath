@@ -5,8 +5,7 @@ use leviath_core::run_archive::{
     RunRecord,
 };
 
-use super::{INFERENCES_DEFAULT_LIMIT, INFERENCES_MAX_LIMIT, InferencesSpec, page};
-use crate::commands::serve::cursor;
+use super::read;
 use crate::runstate::{RunMeta, create_run};
 
 /// A run to hang a journal off.
@@ -104,71 +103,6 @@ fn write_journal(run_id: &str, records: Vec<RunRecord>) {
     .expect("the journal");
 }
 
-/// The page size is bounded at both ends, and a zero is refused rather than
-/// read as "give me none".
-#[test]
-fn a_request_is_bounded_at_both_ends() {
-    let spec = InferencesSpec::resolve("run-a", None, None).expect("the defaults");
-    assert_eq!(spec.limit, INFERENCES_DEFAULT_LIMIT);
-    assert!(spec.after.is_none());
-
-    let spec = InferencesSpec::resolve("run-a", Some(10_000), None).expect("clamped");
-    assert_eq!(spec.limit, INFERENCES_MAX_LIMIT);
-
-    let refused = InferencesSpec::resolve("run-a", Some(0), None).expect_err("zero");
-    assert_eq!(refused.code(), "BAD_USER_INPUT");
-}
-
-/// A cursor this listing did not mint is ignored or refused, never followed.
-#[test]
-fn a_cursor_from_elsewhere_does_not_resume_this_listing() {
-    let mine = cursor::encode(
-        "index",
-        "asc",
-        &cursor::filter_digest(&["inferences", "run-a"]),
-        cursor::CursorKey::Int(3),
-        "",
-    );
-    let spec = InferencesSpec::resolve("run-a", None, Some(&mine)).expect("its own cursor");
-    assert_eq!(spec.after, Some(3));
-
-    // A key of a kind this listing never mints: readable, and not usable.
-    let lettered = cursor::encode(
-        "index",
-        "asc",
-        &cursor::filter_digest(&["inferences", "run-a"]),
-        cursor::CursorKey::Text("seven".to_string()),
-        "",
-    );
-    let spec = InferencesSpec::resolve("run-a", None, Some(&lettered)).expect("readable");
-    assert!(spec.after.is_none(), "a key this listing cannot use");
-
-    // A cursor minted for the interactions listing on the same run is refused:
-    // the digest is namespaced per listing, not only per run.
-    let interactions_cursor = cursor::encode(
-        "index",
-        "asc",
-        &cursor::filter_digest(&["interactions", "run-a"]),
-        cursor::CursorKey::Int(3),
-        "",
-    );
-    let refused = InferencesSpec::resolve("run-a", None, Some(&interactions_cursor))
-        .expect_err("a cursor from the interactions listing");
-    assert_eq!(refused.code(), "BAD_USER_INPUT");
-
-    // A cursor minted for a different run is refused too.
-    let elsewhere = cursor::encode(
-        "index",
-        "asc",
-        &cursor::filter_digest(&["inferences", "run-b"]),
-        cursor::CursorKey::Int(1),
-        "",
-    );
-    let refused = InferencesSpec::resolve("run-a", None, Some(&elsewhere))
-        .expect_err("a cursor from another run");
-    assert_eq!(refused.code(), "BAD_USER_INPUT");
-}
-
 /// Every trip to a provider comes back in the order it was made, and the move
 /// that followed one is on the attempt it followed.
 #[test]
@@ -188,25 +122,20 @@ fn the_attempts_read_back_in_order_with_their_failover() {
             ],
         );
 
-        let spec = InferencesSpec::resolve("did-call", None, None).expect("defaults");
-        let paged = page("did-call", &spec).expect("the journal reads");
-        assert_eq!(paged.total, 2, "a failover is not an attempt of its own");
-        assert_eq!(paged.attempts[0].index, 0);
-        assert_eq!(paged.attempts[0].attempt.record.provider, "anthropic");
-        let moved = paged.attempts[0]
-            .attempt
+        let attempts = read("did-call").expect("the journal reads");
+        assert_eq!(attempts.len(), 2, "a failover is not an attempt of its own");
+        assert_eq!(attempts[0].record.provider, "anthropic");
+        let moved = attempts[0]
             .failover
             .as_ref()
             .expect("the move that followed it");
         assert_eq!(moved.to_provider, "openai");
         assert_eq!(moved.to_model, "gpt-5");
-        assert_eq!(paged.attempts[1].index, 1);
-        assert_eq!(paged.attempts[1].attempt.record.provider, "openai");
+        assert_eq!(attempts[1].record.provider, "openai");
         assert!(
-            paged.attempts[1].attempt.failover.is_none(),
+            attempts[1].failover.is_none(),
             "nothing followed the call that worked"
         );
-        assert!(paged.next_cursor.is_none(), "the only page");
     });
 }
 
@@ -231,14 +160,13 @@ fn a_move_is_paired_with_the_call_it_left() {
             ],
         );
 
-        let spec = InferencesSpec::resolve("two-lanes", None, None).expect("defaults");
-        let paged = page("two-lanes", &spec).expect("reads");
+        let attempts = read("two-lanes").expect("reads");
         assert!(
-            paged.attempts[0].attempt.failover.is_some(),
+            attempts[0].failover.is_some(),
             "the stage call that failed over"
         );
         assert!(
-            paged.attempts[1].attempt.failover.is_none(),
+            attempts[1].failover.is_none(),
             "the titling call moved nowhere"
         );
     });
@@ -258,53 +186,23 @@ fn a_move_with_no_attempt_of_its_own_is_left_out() {
             ],
         );
 
-        let spec = InferencesSpec::resolve("orphan-move", None, None).expect("defaults");
-        let paged = page("orphan-move", &spec).expect("reads");
-        assert_eq!(paged.total, 1);
-        assert!(paged.attempts[0].attempt.failover.is_none());
+        let attempts = read("orphan-move").expect("reads");
+        assert_eq!(attempts.len(), 1);
+        assert!(attempts[0].failover.is_none());
     });
 }
 
 /// A run that never called a provider has no attempts, and says so with an
-/// empty page rather than an error.
+/// empty list rather than an error.
 #[test]
 fn a_run_that_never_called_a_provider_has_no_attempts() {
     crate::runstate::with_isolated_runs_dir("inferences-empty", |_dir| {
         create_run(&meta("quiet-run")).expect("run written");
-        let spec = InferencesSpec::resolve("quiet-run", None, None).expect("defaults");
-        let paged = page("quiet-run", &spec).expect("no journal is not a failure");
-        assert_eq!(paged.total, 0);
-        assert!(paged.attempts.is_empty());
-    });
-}
-
-/// The page carries on from its cursor, and the last page says it is the last.
-#[test]
-fn the_attempts_page_carries_on_from_its_cursor() {
-    crate::runstate::with_isolated_runs_dir("inferences-paging", |_dir| {
-        create_run(&meta("many-calls")).expect("run written");
-        let records: Vec<RunRecord> = (0..5)
-            .map(|i| attempt("plan", i + 1, "openai", "gpt-5", reported()))
-            .collect();
-        write_journal("many-calls", records);
-
-        let spec = InferencesSpec::resolve("many-calls", Some(2), None).expect("first page");
-        let first = page("many-calls", &spec).expect("reads");
-        assert_eq!(first.total, 5);
-        assert_eq!(first.attempts.len(), 2);
-        assert_eq!(first.attempts[0].attempt.record.attempt, 1);
-        let cursor = first.next_cursor.expect("more to come");
-
-        let spec = InferencesSpec::resolve("many-calls", Some(10), Some(&cursor))
-            .expect("the cursor resumes");
-        let rest = page("many-calls", &spec).expect("reads");
-        assert!(rest.next_cursor.is_none(), "that was the rest");
-        let numbers: Vec<u32> = rest
-            .attempts
-            .iter()
-            .map(|held| held.attempt.record.attempt)
-            .collect();
-        assert_eq!(numbers, vec![3, 4, 5], "no attempt read twice");
+        assert!(
+            read("quiet-run")
+                .expect("no journal is not a failure")
+                .is_empty()
+        );
     });
 }
 
@@ -320,8 +218,7 @@ fn an_unreadable_journal_is_an_error() {
             b"not an archive",
         )
         .expect("a corrupt journal");
-        let spec = InferencesSpec::resolve("broken", None, None).expect("defaults");
-        let failed = page("broken", &spec).expect_err("an unreadable journal");
+        let failed = read("broken").expect_err("an unreadable journal");
         assert_eq!(failed.code(), "INTERNAL");
         assert!(
             failed.to_string().contains("unreadable journal"),
