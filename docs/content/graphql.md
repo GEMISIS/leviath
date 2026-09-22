@@ -617,6 +617,9 @@ under the same id, which is a fault in the server rather than anything about the
 
 `scope` is the one field worth a note against REST. This spells the widest grant `RUN`, where the
 REST journal and answer routes write `session`. `ONCE` and `STAGE` spell the same on both sides.
+A grant is keyed on what was approved, not on the tool alone: for a shell call that is the program
+and its first literal argument, so `RUN` on `touch a.txt` does not cover `touch b.txt`, and the
+second one asks again.
 
 An unattended run asks nobody, so it has no interactions to list. An empty list on a run that
 plainly did something dangerous means exactly that.
@@ -1393,7 +1396,10 @@ subscription Watch($filter: RunInput) {
       waitReason { reason needsAPerson }
     }
     ... on LogLineWrittenEvent { seq at runId line }
-    ... on InteractionOpenedEvent { seq at runId interaction { id kind prompt options } }
+    ... on InteractionOpenedEvent {
+      seq at runId
+      interaction { id kind prompt options toolName toolCall { __typename } }
+    }
     ... on DaemonLinkChangedEvent { seq at connected restarted restartAdvised }
     ... on EventsDroppedEvent { seq at count }
   }
@@ -1523,10 +1529,9 @@ Every refusal in this section is a `BAD_USER_INPUT` with `httpStatus` `400`. So 
 query earns before a resolver runs: an unknown field, an unknown argument, a misspelled enum value,
 a `@oneOf` input with two members set, or a document that will not parse.
 
-One thing this schema does not promise is the order of the keys in an object. Fields are resolved
-together rather than one after another, and the answer is built as each one finishes. A field that
-reads the disk lands after two that did not, whichever order you wrote them in. Read the answer by
-key.
+The keys of every object come back in the order you selected them, from the root down and through
+every fragment, as the spec asks. Fields are still resolved together rather than one after another,
+so a field that reads the disk costs the same whether it is first or last in the query.
 
 ## The schema
 

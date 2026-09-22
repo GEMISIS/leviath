@@ -38,6 +38,7 @@ mod filter;
 mod inputs;
 mod mutation;
 mod node;
+mod ordering;
 pub(super) mod paging;
 mod query;
 mod scalars;
@@ -91,6 +92,9 @@ pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema 
     // an extension is a hook around execution and contributes nothing to the
     // type registry the SDL is printed from.
     .extension(error::CodeEveryRefusal)
+    // The response answers fields in the order the query selected them, as
+    // the spec says, whichever field resolved first.
+    .extension(ordering::AnswerInSelectionOrder)
     .limit_depth(MAX_DEPTH)
     .limit_complexity(MAX_COMPLEXITY)
     .finish()

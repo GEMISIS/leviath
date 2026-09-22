@@ -273,7 +273,6 @@ impl WorldHost {
             cancelled |= self.world.cancel(self.world.own_agent(e));
             if let Some(agent_id) = agent_id {
                 self.interactions.cancel_for_agent(&agent_id);
-                self.prune_emitted_interactions();
             }
         }
         cancelled
