@@ -716,3 +716,46 @@ async fn a_second_request_under_an_open_id_is_refused_not_swapped_in() {
     let answer = first.await.expect("the ask completes");
     assert_eq!(answer.value.as_deref(), Some("go on"));
 }
+
+/// Two prompts from one run never share an id, however the provider numbered
+/// the calls behind them.
+///
+/// A provider numbers its tool calls within one message, so a run's second
+/// turn asks under `call_1` again. The hub draws the tail itself, so the
+/// second prompt is `-2` whatever the call was called, and an answer to one
+/// cannot land on the other.
+#[test]
+fn a_run_draws_a_fresh_id_for_every_prompt() {
+    let hub = InteractionHub::new();
+    let backend = hub.backend_for("run-a");
+    assert_eq!(backend.request_id("ask"), "run-a-ask-1");
+    assert_eq!(backend.request_id("ask"), "run-a-ask-2");
+    // The kind is in the id but not in the count: one series per run.
+    assert_eq!(backend.request_id("approve"), "run-a-approve-3");
+}
+
+/// Two runs count on their own, so the daemon-wide hub cannot let one run's
+/// prompts crowd another's numbering.
+#[test]
+fn two_runs_count_their_prompts_apart() {
+    let hub = InteractionHub::new();
+    let a = hub.backend_for("run-a");
+    let b = hub.backend_for("run-b");
+    assert_eq!(a.request_id("ask"), "run-a-ask-1");
+    assert_eq!(b.request_id("ask"), "run-b-ask-1");
+    assert_eq!(a.request_id("ask"), "run-a-ask-2");
+}
+
+/// A reaped run's count is let go, and a run that comes back under the same
+/// id after that starts again: nothing of the old run's is open to collide
+/// with.
+#[test]
+fn a_forgotten_run_starts_its_count_again() {
+    let hub = InteractionHub::new();
+    let backend = hub.backend_for("run-a");
+    assert_eq!(backend.request_id("gate"), "run-a-gate-1");
+    hub.forget_run("run-a");
+    assert_eq!(backend.request_id("gate"), "run-a-gate-1");
+    // Forgetting a run the hub never counted for is nothing.
+    hub.forget_run("run-z");
+}

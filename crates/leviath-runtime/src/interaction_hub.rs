@@ -70,12 +70,39 @@ pub struct InteractionHub {
     /// persistence lane is reached from inside one. `journal_interactions`
     /// drains this every tick.
     settled: Arc<Mutex<Vec<(String, leviath_core::run_archive::InteractionRecord)>>>,
+    /// How many request ids each run has drawn, by run.
+    ///
+    /// The tail of a request id comes from here rather than from the
+    /// provider's tool-call id. A provider numbers its calls within one
+    /// message, so a run's second turn asks under `call_1` again, and two
+    /// prompts sharing an id is two prompts sharing an answer. A count the
+    /// hub keeps cannot repeat within a run, whatever the provider does.
+    drawn: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl InteractionHub {
     /// A fresh, empty hub.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The next request id for `run_id`, of the given kind.
+    ///
+    /// `<run>-<kind>-<n>`: the run leads because one hub holds every run's
+    /// open requests, and `n` counts up for the run's life so no two of its
+    /// requests can share an id. The count is not persisted; a run restored
+    /// after a restart gets no prompt back, so nothing old can answer against
+    /// a new number.
+    pub fn next_request_id(&self, run_id: &str, kind: &str) -> String {
+        let mut drawn = leviath_core::sync::lock(&self.drawn);
+        let n = drawn.entry(run_id.to_string()).or_insert(0);
+        *n += 1;
+        leviath_core::interaction::request_id(run_id, kind, &n.to_string())
+    }
+
+    /// Forget a run's request count, once it is gone from the world.
+    pub(crate) fn forget_run(&self, run_id: &str) {
+        leviath_core::sync::lock(&self.drawn).remove(run_id);
     }
 
     /// Attach the tick-loop wake handle so registry changes wake the driver.
@@ -373,11 +400,6 @@ impl HubInteractionBackend {
     }
 
     /// The run this backend asks on behalf of.
-    ///
-    /// What a caller minting a request id needs: the id has to carry the run,
-    /// because the hub behind this backend is shared with every other run in
-    /// the daemon. See
-    /// [`request_id`](leviath_core::interaction::request_id).
     pub fn agent_id(&self) -> &str {
         &self.agent_id
     }
@@ -387,6 +409,10 @@ impl HubInteractionBackend {
 impl InteractionBackend for HubInteractionBackend {
     async fn ask(&self, request: InteractionRequest) -> InteractionResponse {
         self.hub.submit(&self.agent_id, request).await
+    }
+
+    fn request_id(&self, kind: &str) -> String {
+        self.hub.next_request_id(&self.agent_id, kind)
     }
 }
 

@@ -111,7 +111,6 @@ impl ToolService for BasicToolService {
                     // everything else runs on the built-ins.
                     let result = match dispatch_dynamic_interaction(
                         &state.backend,
-                        state.backend.agent_id(),
                         &call.name,
                         &call.id,
                         &call.arguments,

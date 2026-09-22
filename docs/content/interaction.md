@@ -307,7 +307,7 @@ The id can be cut short. `lev respond` takes the start of one, as long as that s
 one open interaction:
 
 ```bash
-lev respond probe-1789971553 --approve   # the whole id is probe-1789971553-793b8652da33-approve-call_1
+lev respond probe-1789971553 --approve   # the whole id is probe-1789971553-793b8652da33-approve-1
 ```
 
 Since the run comes first in an id, the run's own id is usually short enough on its own. A start
@@ -316,11 +316,11 @@ more characters:
 
 ```
 'probe-' is the start of 2 open interactions, so nothing was answered; give enough of an id to name just one:
-  probe-1789971553-793b8652da33-approve-call_1  [tool-approval]  agent=probe-1789971553-793b8652da33  stage=work
-  probe-1789971554-8a2b1c3d4e5f-approve-call_1  [tool-approval]  agent=probe-1789971554-8a2b1c3d4e5f  stage=work
+  probe-1789971553-793b8652da33-approve-1  [tool-approval]  agent=probe-1789971553-793b8652da33  stage=work
+  probe-1789971554-8a2b1c3d4e5f-approve-1  [tool-approval]  agent=probe-1789971554-8a2b1c3d4e5f  stage=work
 ```
 
-Matching runs from the start of the id, so the tail of one (`approve-call_1`) names nothing. That
+Matching runs from the start of the id, so the tail of one (`approve-1`) names nothing. That
 tail is the part two runs are most likely to share. An id given in full answers that interaction
 whatever longer ids begin with it, and a start that fits nothing is `no such open interaction`, the
 same as an id that was never open.

@@ -3395,6 +3395,50 @@ async fn reaper_runs_once_per_agent_before_despawn() {
     );
 }
 
+/// A reaped run's prompt numbering goes with it, and a run still resident
+/// keeps counting where it was.
+///
+/// The count is what keeps a run's prompt ids apart, so it lives exactly as
+/// long as the run can raise one: a reap is the end of that, and a run that
+/// is merely still going is not.
+#[tokio::test]
+async fn a_reap_forgets_the_runs_prompt_count_and_a_live_run_keeps_its_own() {
+    let mut host = host_with(vec![]);
+    let live = {
+        let e = host.world.world_mut().spawn(agent_state("live")).id();
+        host.world.own_agent(e)
+    };
+    let done = {
+        let mut s = agent_state("done");
+        s.status = AgentStatus::Complete;
+        let e = host.world.world_mut().spawn(s).id();
+        host.world.own_agent(e)
+    };
+    host.register("live", live);
+    host.register("done", done);
+    assert_eq!(
+        host.interactions().backend_for("live").request_id("ask"),
+        "live-ask-1"
+    );
+    assert_eq!(
+        host.interactions().backend_for("done").request_id("ask"),
+        "done-ask-1"
+    );
+    host.emit_events();
+    host.emit_events();
+    assert!(host.live_entity("done").is_none(), "reaped after two ticks");
+    assert_eq!(
+        host.interactions().backend_for("live").request_id("ask"),
+        "live-ask-2",
+        "the live run's series carries on"
+    );
+    assert_eq!(
+        host.interactions().backend_for("done").request_id("ask"),
+        "done-ask-1",
+        "the reaped run's series was let go"
+    );
+}
+
 // ─── Runs that finished but are still worth reporting (issue #205) ───────
 
 /// Unload `run_id` the way the daemon does: an agent that has gone terminal

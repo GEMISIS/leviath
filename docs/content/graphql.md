@@ -1072,7 +1072,7 @@ The answer is `@oneOf`, so exactly one variant goes in, and which one the reques
 ```graphql
 mutation {
   answerInteraction(request: {
-    interactionId: "coder-1788924523-abc123-approve-call_1"
+    interactionId: "coder-1788924523-abc123-approve-1"
     answer: { deny: { feedback: "read the file instead" } }
   }) {
     interactionId

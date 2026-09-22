@@ -268,6 +268,10 @@ impl WorldHost {
             self.world.world_mut().despawn(entity);
             self.by_run_id.remove(&run_id);
             self.emitted.remove(&run_id);
+            // A reaped run raises no further prompt, so its request count
+            // goes with it. A parked run keeps its count: it comes back, and
+            // the ids it draws then must not repeat the ones it drew before.
+            self.interactions.forget_run(&run_id);
             // The run leaves memory but not the listing: for a while yet it
             // can still say how it ended.
             self.record_finished(entry, now);

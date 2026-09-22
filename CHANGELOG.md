@@ -54,6 +54,14 @@ same list.
 
 ### Fixed
 
+- An interaction request id is drawn by the daemon rather than taken from the
+  provider's tool-call id, so two prompts from one run can no longer share
+  one. A provider numbers its calls within one message, so a run's second turn
+  asked under `call_1` again; the hub then refused the second prompt as a
+  duplicate and never announced it, and a client driving its inbox off the
+  event stream saw the run park and nothing else. The id is now
+  `<run>-<kind>-<n>`, counted per run for the run's life. The tool call a
+  prompt is about is on the prompt itself.
 - A pause, resume or cancel that reaches a run in the moment it finishes no
   longer overwrites its finished status: `POST /api/agents/{id}/cancel` and
   its two siblings answer 409 in that race, and a GraphQL bulk act reports

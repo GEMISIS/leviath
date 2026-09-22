@@ -339,7 +339,7 @@ A deny may carry `feedback`, a string the model reads as part of the tool result
 call, so its next turn is a redirect rather than a guess:
 
 ```json
-{"request_id": "coder-1788924523-abc123-approve-call_1", "approved": false,
+{"request_id": "coder-1788924523-abc123-approve-1", "approved": false,
  "feedback": "use git log, not git show"}
 ```
 
