@@ -20,8 +20,8 @@
 //! `docs/schema/leviath.graphql` is generated from them and held in lockstep
 //! by a test, the way `openapi.json` is held to the router.
 
-use async_graphql::Schema;
 use async_graphql::http::ALL_WEBSOCKET_PROTOCOLS;
+use async_graphql::{SDLExportOptions, Schema};
 use async_graphql_axum::{GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket};
 use axum::extract::{Extension, WebSocketUpgrade};
 use axum::response::Response;
@@ -29,19 +29,19 @@ use axum::response::Response;
 use super::types::AppState;
 
 mod admin;
-mod blueprint_filter;
 mod checks;
 mod config_input;
 mod connection;
 mod error;
 mod events;
-mod filters;
+mod filter;
 mod inputs;
 mod mutation;
 mod node;
+pub(super) mod paging;
 mod query;
-mod run_filter;
 mod scalars;
+mod script_ref;
 mod subscription;
 mod types;
 
@@ -75,6 +75,12 @@ pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema 
         subscription::Subscription_,
     )
     .data(state)
+    // The two frame interfaces. Nothing returns either of them - a
+    // subscription yields a union, so a client can tell a domain frame from a
+    // transport one - so they are registered by name or they would not reach
+    // the schema at all.
+    .register_output_type::<events::Event>()
+    .register_output_type::<events::RunEvent>()
     // Whether this server was started for the acts that change the machine.
     // Decided once, here, rather than read per request: the REST side answers
     // 404 for them by not mounting the route at all, and a schema has no
@@ -125,8 +131,17 @@ pub(super) fn sdl() -> String {
         mutation::Mutation::default(),
         subscription::Subscription_,
     )
+    // The two frame interfaces. Nothing returns either of them - a
+    // subscription yields a union, so a client can tell a domain frame from a
+    // transport one - so they are registered by name or they would not reach
+    // the schema at all.
+    .register_output_type::<events::Event>()
+    .register_output_type::<events::RunEvent>()
     .finish()
-    .sdl()
+    // A description that fits on one line is printed on one line. Most of
+    // them do, and the block form costs two fence lines each, which is most
+    // of the file's length for no more information.
+    .sdl_with_options(SDLExportOptions::new().prefer_single_line_descriptions())
 }
 
 #[cfg(test)]

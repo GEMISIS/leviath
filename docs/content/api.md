@@ -323,7 +323,7 @@ There is no size cap, so the journal grows by roughly the context size per attem
 [capturing what went to the model](/docs/observability#capturing-what-went-to-the-model).
 
 `[observability] capture_model_input` does the same for every run on the machine, and either one is
-enough. Read the captured requests back on `InferenceAttempt.modelInput` over
+enough. Read the captured requests back on `InferenceAttemptOutput.modelInput` over
 [GraphQL](/docs/graphql#what-one-call-sent).
 
 ### Answering a question
@@ -634,8 +634,11 @@ already lives:
 
 ```graphql
 mutation {
-  bulkExportRuns(filter: { statusIn: [COMPLETE] }, fields: ["run_id", "status", "cost_usd"]) {
-    id status
+  startRunExport(request: {
+    filter: { status: { eq: COMPLETE } }
+    fields: ["run_id", "status", "cost_usd"]
+  }) {
+    export { id status }
   }
 }
 ```
@@ -644,10 +647,10 @@ The answer comes back before the file exists. That is the point of a job: the re
 milliseconds however large the store is. Poll it, and fetch it when it is ready:
 
 ```graphql
-{ bulkExport(id: "export-1789865498-0") { status written error downloadUrl } }
+{ runExport(id: "export-1789865498-0") { status written error downloadUrl } }
 ```
 
-`status` is `queued`, `running`, `complete` or `failed`. `written` counts the runs on disk so far.
+`status` is `QUEUED`, `RUNNING`, `COMPLETE` or `FAILED`. `written` counts the runs on disk so far.
 `downloadUrl` is null until the export is complete, and then it is a signed link to
 `GET /api/exports/{id}`, good for five minutes. That link needs no bearer token, so it can be the
 `href` of a download button.
@@ -667,7 +670,7 @@ loop over ten thousand lines at either end.
 
 A file is kept for one hour, then removed along with its job record. Neither outlives the other, so
 an id that has expired and one that was never started both answer 404. While the export is still
-running, or after it failed, the file route answers 409 and `bulkExport` carries the reason.
+running, or after it failed, the file route answers 409 and `runExport` carries the reason.
 
 ## Where a run's cost went
 
@@ -1782,13 +1785,13 @@ than that feature, not broken.
 | `providers.quota` | `?quota=true` on `GET /api/providers`, and the `quota` object it adds. See [subscription usage](#subscription-usage) |
 | `graphql` | `POST /graphql`, the [GraphQL API](/docs/graphql) beside these routes |
 | `graphql.subscriptions` | `GET /ws/graphql`, the live frames with server-side filtering |
-| `graphql.executions` | `Run.executions`: what a run tried, with each call typed |
-| `graphql.interactions` | `Run.interactions`: every question a run put to a person, with the settlement typed |
-| `graphql.inferences` | `Run.inferences`: every trip a run made to a provider, retries and failovers included |
-| `graphql.context_changes` | `Run.contextChanges`: why each of a run's regions changed, beside the snapshots |
+| `graphql.executions` | `RunOutput.executions`: what a run tried, with each call typed |
+| `graphql.interactions` | `RunOutput.interactions`: every question a run put to a person, with the settlement typed |
+| `graphql.inferences` | `RunOutput.inferences`: every trip a run made to a provider, retries and failovers included |
+| `graphql.context_changes` | `RunOutput.contextChanges`: why each of a run's regions changed, beside the snapshots |
 | `bytes.signed_urls` | Short-lived `exp`/`sig` links on the byte routes, minted by the [GraphQL API](/docs/graphql) |
 | `runs.blueprint_snapshot` | `blueprint_digest` on every run, and the manifest copy each run keeps |
-| `runs.export` | `bulkExportRuns` and `GET /api/exports/{id}`, the whole store as one file. See [below](#exporting-the-whole-store) |
+| `runs.export` | `startRunExport` and `GET /api/exports/{id}`, the whole store as one file. See [below](#exporting-the-whole-store) |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. See [below](#when-the-config-file-will-not-load) |
 
 A few of those promises carry a consequence worth spelling out.

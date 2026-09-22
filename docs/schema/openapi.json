@@ -600,7 +600,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "The export job's id, as the `bulkExportRuns` mutation returned it."
+          "description": "The export job's id, as the `startRunExport` mutation returned it."
         }
       ],
       "get": {
@@ -608,7 +608,7 @@
           "runs"
         ],
         "summary": "The file one bulk export wrote",
-        "description": "Exports are started over GraphQL, with the `bulkExportRuns` mutation, and this is where the file it writes is fetched. The body is JSONL: one run per line, under the same field names the run listing uses, narrowed to the `fields` the export asked for. One run per line rather than one JSON array so a reader can start on it before the writer has finished, and so neither side ever holds the whole store in memory. A file is kept for one hour and then removed with its job record, so an id that has expired and one that was never started both answer 404. While the export is still queued or running, or after it failed, the answer is 409 and the client polls `bulkExport(id:)` instead. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted as `downloadUrl` on the job), which is what a browser download link needs: a header cannot be set on one.",
+        "description": "Exports are started over GraphQL, with the `startRunExport` mutation, and this is where the file it writes is fetched. The body is JSONL: one run per line, under the same field names the run listing uses, narrowed to the `fields` the export asked for. One run per line rather than one JSON array so a reader can start on it before the writer has finished, and so neither side ever holds the whole store in memory. A file is kept for one hour and then removed with its job record, so an id that has expired and one that was never started both answer 404. While the export is still queued or running, or after it failed, the answer is 409 and the client polls `runExport(id:)` instead. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted as `downloadUrl` on the job), which is what a browser download link needs: a header cannot be set on one.",
         "parameters": [
           {
             "name": "Range",
@@ -656,7 +656,7 @@
             "$ref": "#/components/responses/Timeout"
           },
           "409": {
-            "description": "The export is not ready, or it failed. The message says which, and `bulkExport(id:)` carries the reason.",
+            "description": "The export is not ready, or it failed. The message says which, and `runExport(id:)` carries the reason.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3347,7 +3347,7 @@
           "graphql"
         ],
         "summary": "Run a GraphQL query",
-        "description": "The GraphQL surface of this server. It runs over the same core the REST routes call, so it is not a wrapper around them. One request names exactly the fields it wants, at every depth: a view that costs a listing plus one request per run over REST is a single request here, and a field nobody selected is never read from disk. The schema is published beside this spec as `leviath.graphql`, and introspection answers the same thing live. A failure inside a field answers 200 with an `errors` array, each entry carrying `extensions.code` (`BAD_USER_INPUT`, `NOT_FOUND`, `CONFLICT`, `DAEMON_UNAVAILABLE`, `DAEMON_INCOMPATIBLE`, `INTERNAL`) and `extensions.httpStatus`, the status the matching REST route answers with. The statuses below are the transport ones, answered by the layers around the handler before any query runs.",
+        "description": "The GraphQL surface of this server. It runs over the same core the REST routes call, so it is not a wrapper around them. One request names exactly the fields it wants, at every depth: a view that costs a listing plus one request per run over REST is a single request here, and a field nobody selected is never read from disk. One grammar covers all of it. Every listing takes `filter`, `orderBy`, `first` and `after` and answers with `results`, `cursor` and `total`; every filter mirrors the type it selects, field for field, and composes with `and`, `or`, `not` and `isNull`; every mutation takes one argument named `request` and answers with a result carrying what it changed. A type's suffix says what it is for, so `RunOutput` is read, `RunInput` filters, `SpawnRunRequest` is a mutation argument and `RunSpawnedEvent` is a subscription frame. The schema is published beside this spec as `leviath.graphql`, and introspection answers the same thing live. A failure inside a field answers 200 with an `errors` array, each entry carrying `extensions.code` (`BAD_USER_INPUT`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `PAYLOAD_TOO_LARGE`, `UNPROCESSABLE`, `UPSTREAM`, `DAEMON_INCOMPATIBLE`, `DAEMON_UNAVAILABLE`, `INTERNAL`) and `extensions.httpStatus`, the status the matching REST route answers with. The statuses below are the transport ones, answered by the layers around the handler before any query runs.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3428,7 +3428,7 @@
           "graphql"
         ],
         "summary": "Subscribe to the live frames over GraphQL",
-        "description": "A WebSocket upgrade speaking `graphql-transport-ws` (the older `graphql-ws` protocol is accepted too), not a JSON response. Authenticate with `?token=` since a browser cannot set a header on the handshake. The difference from `/ws`: a subscription names the frame types it wants and the runs it is about, and the filtering happens on the server, before a frame is serialized. `includeDescendants` widens a run-scoped subscription to the sub-agents of those runs as they spawn, so a fan-out needs no re-subscribe. A subscription that falls behind receives an `EventsDropped` frame saying how many frames it missed, rather than silently skipping them.",
+        "description": "A WebSocket upgrade speaking `graphql-transport-ws` (the older `graphql-ws` protocol is accepted too), not a JSON response. Authenticate with `?token=` since a browser cannot set a header on the handshake. The difference from `/ws`: a subscription names the frame types it wants and the runs it is about, and the filtering happens on the server, before a frame is serialized. `includeDescendants` widens a run-scoped subscription to the sub-agents of those runs as they spawn, so a fan-out needs no re-subscribe. A subscription that falls behind receives an `EventsDroppedEvent` frame saying how many frames it missed, rather than silently skipping them.",
         "parameters": [
           {
             "name": "token",
@@ -3941,7 +3941,7 @@
           "capture_model_input": {
             "type": "boolean",
             "default": false,
-            "description": "Write this run's exact requests into its journal, once per provider attempt, whatever the machine's own [observability] capture_model_input says. A captured request is the whole prompt and there is no size cap, so the journal grows by roughly the context size per attempt. Read it back on InferenceAttempt.modelInput over GraphQL."
+            "description": "Write this run's exact requests into its journal, once per provider attempt, whatever the machine's own [observability] capture_model_input says. A captured request is the whole prompt and there is no size cap, so the journal grows by roughly the context size per attempt. Read it back on InferenceAttemptOutput.modelInput over GraphQL."
           },
           "workdir": {
             "type": "string",

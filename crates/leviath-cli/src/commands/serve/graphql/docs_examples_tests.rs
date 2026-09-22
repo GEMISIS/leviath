@@ -66,7 +66,7 @@ const PAGES: &[Page] = &[
 /// passing, over nothing. A floor set under what is really there is the same rot
 /// more slowly, because the gap is how many examples may quietly stop being
 /// checked. This one is the count itself.
-const FEWEST_EXAMPLES: usize = 40;
+const FEWEST_EXAMPLES: usize = 45;
 
 /// Exactly the queries the pages carry inside a request body.
 ///
@@ -1028,13 +1028,13 @@ fn refusal(surface: &Surface, example: &str) -> String {
 
 /// A field the root type does not have.
 ///
-/// This is the mistake that is easiest to make by hand: the field is `runs`, it
-/// takes `ids`, and `run(id:)` reads like it ought to work.
+/// This is the mistake that is easiest to make by hand: REST calls a run an
+/// agent, so `agents` reads like it ought to work here too.
 #[test]
 fn a_field_the_root_does_not_have_is_refused() {
-    let message = refusal(&served(), "{ run(id: \"coder-1\") { id } }");
+    let message = refusal(&served(), "{ agents { total } }");
     assert_eq!(
-        message, "1:3: `Query` has no field `run` (at Query)",
+        message, "1:3: `Query` has no field `agents` (at Query)",
         "{message}"
     );
 }
@@ -1065,12 +1065,12 @@ fn an_argument_the_field_does_not_declare_is_refused() {
 /// like the documented one, and only one of the branches is wrong.
 #[test]
 fn a_field_the_fragment_type_does_not_have_is_refused() {
-    let example = "{ runs { edges { node { executions { edges { node {\n  call { ... on ShellCall { commandLine } }\n} } } } } } }";
+    let example = "{ runs { results { executions { results {\n  call { ... on ShellCallOutput { commandLine } }\n} } } } }";
     let message = refusal(&served(), example);
     assert_eq!(
         message,
-        "2:29: `ShellCall` has no field `commandLine` \
-         (at Query.runs.edges.node.executions.edges.node.call ... on ShellCall)",
+        "2:35: `ShellCallOutput` has no field `commandLine` \
+         (at Query.runs.results.executions.results.call ... on ShellCallOutput)",
         "{message}"
     );
 }
@@ -1078,12 +1078,13 @@ fn a_field_the_fragment_type_does_not_have_is_refused() {
 /// A fragment on a type that has nothing to do with the one it is written on.
 #[test]
 fn a_fragment_on_an_unrelated_type_is_refused() {
-    let example = "{ runs { edges { node { executions { edges { node {\n  call { ... on LogLine { line } }\n} } } } } } }";
+    let example =
+        "{ runs { results { executions { results {\n  call { ... on RunOutput { id } }\n} } } } }";
     let message = refusal(&served(), example);
     assert_eq!(
         message,
-        "2:14: `LogLine` is not a `ToolCall` \
-         (at Query.runs.edges.node.executions.edges.node.call)",
+        "2:14: `RunOutput` is not a `ToolCall` \
+         (at Query.runs.results.executions.results.call)",
         "{message}"
     );
 }
@@ -1091,12 +1092,12 @@ fn a_fragment_on_an_unrelated_type_is_refused() {
 /// A field inside an argument's input object that the input type does not have.
 #[test]
 fn an_input_field_the_schema_does_not_have_is_refused() {
-    let example = "mutation { spawnRun(input: { blueprnt: \"coder\" }) { run { id } } }";
+    let example = "mutation { spawnRun(request: { blueprnt: \"coder\" }) { run { id } } }";
     let message = refusal(&served(), example);
     assert_eq!(
         message,
-        "1:28: `SpawnRunInput` has no input field `blueprnt` \
-         (at Mutation.spawnRun(input:))",
+        "1:30: `SpawnRunRequest` has no input field `blueprnt` \
+         (at Mutation.spawnRun(request:))",
         "{message}"
     );
 }
@@ -1109,12 +1110,12 @@ fn an_input_field_the_schema_does_not_have_is_refused() {
 #[test]
 fn a_value_where_an_input_object_belongs_is_refused() {
     let example =
-        "mutation { spawnRun(input: { blueprint: \"coder\", task: \"t\" })\n  { run { id } } }";
+        "mutation { spawnRun(request: { blueprint: \"coder\", task: \"t\" })\n  { run { id } } }";
     let message = refusal(&served(), example);
     assert_eq!(
         message,
-        "1:28: `BlueprintInput` is an input object, and `\"coder\"` is not one \
-         (at Mutation.spawnRun(input:).blueprint)",
+        "1:30: `BlueprintRef` is an input object, and `\"coder\"` is not one \
+         (at Mutation.spawnRun(request:).blueprint)",
         "{message}"
     );
 }
@@ -1149,12 +1150,12 @@ fn one_value_where_a_list_belongs_is_accepted() {
     let surface = served();
     assert!(
         surface
-            .check("{ runs(filter: { ids: \"run-1\" }) { total } }")
+            .check("{ runs(filter: { id: { in: \"run-1\" } }) { total } }")
             .is_ok()
     );
     assert!(
         surface
-            .check("{ runs(filter: { ids: [\"run-1\", \"run-2\"] }) { total } }")
+            .check("{ runs(filter: { id: { in: [\"run-1\", \"run-2\"] } }) { total } }")
             .is_ok()
     );
 }
@@ -1162,12 +1163,12 @@ fn one_value_where_a_list_belongs_is_accepted() {
 /// A fault inside a list says which item it was in.
 #[test]
 fn a_fault_inside_a_list_names_the_item_it_was_in() {
-    let example = "mutation { spawnRun(input: { task: \"t\", regions: [\n  { region: { name: \"plan\" }, text: \"x\" },\n  { regin: { name: \"plan\" }, text: \"x\" }\n] }) { run { id } } }";
+    let example = "mutation { spawnRun(request: { task: \"t\", regions: [\n  { region: { name: \"plan\" }, text: \"x\" },\n  { regin: { name: \"plan\" }, text: \"x\" }\n] }) { run { id } } }";
     let message = refusal(&served(), example);
     assert_eq!(
         message,
-        "1:28: `RegionSeedInput` has no input field `regin` \
-         (at Mutation.spawnRun(input:).regions[1])",
+        "1:30: `RegionSeedWrite` has no input field `regin` \
+         (at Mutation.spawnRun(request:).regions[1])",
         "{message}"
     );
 }
@@ -1177,10 +1178,10 @@ fn a_fault_inside_a_list_names_the_item_it_was_in() {
 fn an_enum_value_the_schema_does_not_have_is_refused() {
     let message = refusal(
         &served(),
-        "{ runs(filter: { status: FINISHED }) { total } }",
+        "{ runs(filter: { status: { eq: FINISHED } }) { total } }",
     );
     assert_eq!(
-        message, "1:16: `RunStatus` has no value `FINISHED` (at Query.runs(filter:).status)",
+        message, "1:16: `RunStatus` has no value `FINISHED` (at Query.runs(filter:).status.eq)",
         "{message}"
     );
 }
@@ -1191,12 +1192,12 @@ fn an_enum_value_the_schema_does_not_have_is_refused() {
 fn a_string_where_an_enum_value_belongs_is_refused() {
     let message = refusal(
         &served(),
-        "{ runs(filter: { status: \"RUNNING\" }) { total } }",
+        "{ runs(filter: { status: { eq: \"RUNNING\" } }) { total } }",
     );
     assert_eq!(
         message,
         "1:16: `RunStatus` is an enum, and `\"RUNNING\"` is not one of its values \
-         (at Query.runs(filter:).status)",
+         (at Query.runs(filter:).status.eq)",
         "{message}"
     );
 }
@@ -1206,7 +1207,10 @@ fn a_string_where_an_enum_value_belongs_is_refused() {
 fn an_enum_value_the_schema_has_is_accepted() {
     assert!(
         served()
-            .check("{ runs(filter: { status: RUNNING, sort: STARTED_AT }) { total } }")
+            .check(
+                "{ runs(filter: { status: { eq: RUNNING } },
+                     orderBy: [{ field: STARTED_AT }]) { total } }"
+            )
             .is_ok()
     );
 }
@@ -1214,10 +1218,10 @@ fn an_enum_value_the_schema_has_is_accepted() {
 /// A null where the schema will not take one.
 #[test]
 fn a_null_where_the_schema_requires_a_value_is_refused() {
-    let example = "mutation { spawnRun(input: { blueprint: { name: \"coder\" }, task: null })\n  { run { id } } }";
+    let example = "mutation { spawnRun(request: { blueprint: { name: \"coder\" }, task: null })\n  { run { id } } }";
     let message = refusal(&served(), example);
     assert_eq!(
-        message, "1:28: a null is not allowed here (at Mutation.spawnRun(input:).task)",
+        message, "1:30: a null is not allowed here (at Mutation.spawnRun(request:).task)",
         "{message}"
     );
 }
@@ -1229,7 +1233,7 @@ fn a_null_where_null_is_allowed_is_accepted() {
     assert!(surface.check("{ runs(filter: null) { total } }").is_ok());
     assert!(
         surface
-            .check("{ runs(filter: { ids: null }) { total } }")
+            .check("{ runs(filter: { id: { in: null } }) { total } }")
             .is_ok()
     );
 }
@@ -1256,7 +1260,7 @@ fn a_value_for_a_scalar_the_schema_defines_is_left_alone() {
 #[test]
 fn a_variable_fits_wherever_it_is_written() {
     let example = "mutation Spawn($task: String!) {\n  \
-        spawnRun(input: { blueprint: { name: \"coder\" }, task: $task }) { run { id } }\n}";
+        spawnRun(request: { blueprint: { name: \"coder\" }, task: $task }) { run { id } }\n}";
     assert!(
         served().check(example).is_ok(),
         "{:?}",
@@ -1350,8 +1354,8 @@ fn an_operation_with_no_root_type_is_refused() {
 #[test]
 fn aliases_fragments_and_typename_are_walked() {
     let example = "query Fleet($after: Cursor) {\n  \
-        active: runs(first: 5, after: $after) { __typename ...page edges { node { id } } }\n}\n\
-        fragment page on RunConnection { pageInfo { hasNextPage } }";
+        active: runs(first: 5, after: $after) { __typename ...page results { id } }\n}\n\
+        fragment page on RunConnection { cursor }";
     assert!(
         served().check(example).is_ok(),
         "{:?}",
@@ -1363,7 +1367,7 @@ fn aliases_fragments_and_typename_are_walked() {
 /// walk accepts both.
 #[test]
 fn a_fragment_may_narrow_or_widen() {
-    let example = "{ tools { tools { ... on ScriptTool { path ... on Tool { name } } } } }";
+    let example = "{ tools { results { ... on ScriptToolOutput { path ... on Tool { name } } } } }";
     assert!(
         served().check(example).is_ok(),
         "{:?}",
@@ -1412,12 +1416,12 @@ fn a_query_inside_a_request_body_is_found() {
 /// The body is JSON, so its escapes are undone before the query is read.
 #[test]
 fn a_request_body_is_unescaped_before_it_is_walked() {
-    let page = "```json\n{\"query\": \"query Fleet {\\n  runs(filter: { query: \\\"coder\\\" }) { total }\\n}\", \"variables\": {}}\n```\n";
+    let page = "```json\n{\"query\": \"query Fleet {\\n  runs(search: { query: \\\"coder\\\" }) { total }\\n}\", \"variables\": {}}\n```\n";
     let payloads = embedded_queries(&fenced_blocks(page));
     assert_eq!(payloads.len(), 1);
     assert_eq!(
         payloads[0].document,
-        "query Fleet {\n  runs(filter: { query: \"coder\" }) { total }\n}"
+        "query Fleet {\n  runs(search: { query: \"coder\" }) { total }\n}"
     );
     assert!(served().check(&payloads[0].document).is_ok());
 }
@@ -1439,12 +1443,12 @@ fn a_line_without_a_request_body_carries_no_query() {
 /// the coordinate inside the query it carries.
 #[test]
 fn a_request_body_with_a_field_the_schema_lacks_is_refused() {
-    let page = "```bash\ncurl -d '{\"query\":\"{ runs { edges { node { nope } } } }\"}'\n```\n";
+    let page = "```bash\ncurl -d '{\"query\":\"{ runs { results { nope } } }\"}'\n```\n";
     let payloads = embedded_queries(&fenced_blocks(page));
     assert_eq!(payloads.len(), 1);
     let message = refusal(&served(), &payloads[0].document);
     assert_eq!(
-        message, "1:25: `Run` has no field `nope` (at Query.runs.edges.node)",
+        message, "1:20: `RunOutput` has no field `nope` (at Query.runs.results)",
         "{message}"
     );
 }
@@ -1541,10 +1545,14 @@ fn an_enum_value_where_a_scalar_belongs_is_refused() {
 /// A number where a string belongs, the mirror of the first one.
 #[test]
 fn a_number_where_a_string_belongs_is_refused() {
-    let message = refusal(&served(), "{ runs(filter: { query: 7 }) { total } }");
+    let message = refusal(
+        &served(),
+        "{ runs(filter: { blueprintName: { eq: 7 } }) { total } }",
+    );
     assert_eq!(
         message,
-        "1:16: `String` takes a string, and `7` is an integer (at Query.runs(filter:).query)",
+        "1:16: `String` takes a string, and `7` is an integer \
+         (at Query.runs(filter:).blueprintName.eq)",
         "{message}"
     );
 }
@@ -1553,11 +1561,14 @@ fn a_number_where_a_string_belongs_is_refused() {
 /// float is the one number both the spec and this server refuse.
 #[test]
 fn a_float_where_an_id_belongs_is_refused() {
-    let message = refusal(&served(), "{ runs(filter: { parent: 1.5 }) { total } }");
+    let message = refusal(
+        &served(),
+        "{ runs(filter: { parentId: { eq: 1.5 } }) { total } }",
+    );
     assert_eq!(
         message,
         "1:16: `ID` takes a string or an integer, and `1.5` is a float \
-         (at Query.runs(filter:).parent)",
+         (at Query.runs(filter:).parentId.eq)",
         "{message}"
     );
 }
@@ -1572,23 +1583,23 @@ fn the_pairings_the_server_coerces_are_accepted() {
     let surface = served();
     for example in [
         // An integer where a float belongs, and a float there too.
-        "mutation { putMimeRow(row: { mimeType: \"image/png\", tokens: { perByte: 1 } }) \
-         { mimeType } }",
-        "mutation { putMimeRow(row: { mimeType: \"image/png\", tokens: { perByte: 0.25 } }) \
-         { mimeType } }",
+        "mutation { upsertMimeRow(request: { row: { mimeType: \"image/png\", \
+         tokens: { perByte: 1 } } }) { isNew } }",
+        "mutation { upsertMimeRow(request: { row: { mimeType: \"image/png\", \
+         tokens: { perByte: 0.25 } } }) { isNew } }",
         // An integer and a string are both ids.
-        "{ runs(filter: { parent: 7 }) { total } }",
-        "{ runs(filter: { parent: \"run-1\" }) { total } }",
-        "{ runs(filter: { ids: [\"run-1\"] }) { total } }",
+        "{ runs(filter: { parentId: { eq: 7 } }) { total } }",
+        "{ runs(filter: { parentId: { eq: \"run-1\" } }) { total } }",
+        "{ runs(filter: { id: { in: [\"run-1\"] } }) { total } }",
         // A scalar the schema defines reads whatever it is handed, and a
         // `Decimal` in this schema travels as a string.
-        "{ runs(filter: { costUsd: { gte: \"1.00\" } }) { total } }",
-        "{ runs(filter: { costUsd: { gte: 1.5 } }) { total } }",
+        "{ runs(filter: { cost: { costUsd: { gte: \"1.00\" } } }) { total } }",
+        "{ runs(filter: { cost: { costUsd: { gte: 1.5 } } }) { total } }",
         // `JSON` takes an object, which no built-in scalar would.
-        "{ testYoloProfile(call: { profile: \"p\", tool: \"shell\", \
-         arguments: { path: \"x\" } }) { profile } }",
+        "{ yoloProfile(name: \"p\") { decide(tool: \"shell\", kind: BUILTIN, \
+         args: { path: \"x\" }) { policy } } }",
         // A boolean where a boolean belongs.
-        "{ runs(filter: { ascending: true }) { total } }",
+        "{ runs(filter: { unattended: { eq: true } }) { total } }",
     ] {
         assert!(
             surface.check(example).is_ok(),
