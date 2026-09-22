@@ -71,6 +71,37 @@ async fn a_spawn_reaches_the_daemon_and_answers_with_the_run() {
     assert!(spawned.run_id.starts_with("coder-"), "{}", spawned.run_id);
 }
 
+/// A request that names no working directory runs where the server runs.
+///
+/// The daemon needs a directory either way, so the server fills one in rather
+/// than passing nothing down: a caller that does not care gets the server's
+/// own, and what the daemon is told is always a real path.
+#[tokio::test]
+async fn a_request_with_no_workdir_runs_where_the_server_does() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut state = with_blueprint(dir.path(), "coder");
+    let here = std::env::current_dir()
+        .map(|dir| dir.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let (control, _socket, _srv) = fake_daemon(move |req| match req {
+        ControlRequest::Spawn { args } => {
+            assert_eq!(
+                args.workdir, here,
+                "the server's own directory is passed on"
+            );
+            ControlResponse::Spawned {
+                run_id: args.run_id,
+            }
+        }
+        other => panic!("the spawn is what reaches the daemon: {other:?}"),
+    });
+    state.control = control;
+
+    spawn(&state, request("coder", None), Vec::new())
+        .await
+        .expect("the daemon took it");
+}
+
 /// A blueprint nobody installed is a `NOT_FOUND` naming what was asked for,
 /// and the daemon is never troubled with it.
 #[tokio::test]
