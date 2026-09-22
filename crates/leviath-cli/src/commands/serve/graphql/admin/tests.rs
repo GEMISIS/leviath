@@ -825,6 +825,12 @@ async fn a_script_reads_back_as_it_was_written() {
             "the source reads back, from the file, when it is asked for"
         );
 
+        // A global tool is named by no row and no manifest, so nothing spells
+        // it relative to anything, and the read side says the same.
+        assert!(script["relativePath"].is_null());
+        let read = ask(r#"{ script(ref: { kind: TOOL, name: "greet" }) { relativePath } }"#).await;
+        assert_eq!(script["relativePath"], read["script"]["relativePath"]);
+
         // A script that does not compile is still written: an editor saves
         // work in progress, and the run is what refuses to use it.
         let broken = ask(
@@ -1086,6 +1092,82 @@ async fn a_yolo_profile_is_written_one_table_at_a_time() {
     .await;
 }
 
+/// The file's own header survives a rewrite of the profile it sits above, and
+/// a delete of it.
+///
+/// `toml_edit` files the blank lines and comments before a `[header]` under
+/// that header's own table, so a file's leading comment belongs to whichever
+/// profile happens to come first. Replacing that profile from a request that
+/// says nothing about comments, or taking it out, would silently take the line
+/// explaining what the file is for with it.
+#[tokio::test]
+async fn the_yolo_file_keeps_its_header_through_a_rewrite_and_a_delete() {
+    crate::commands::serve::testutil::with_home(|_home| async move {
+        let path = crate::yolo::yolo_path();
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
+        std::fs::write(
+            &path,
+            "# what this machine waives, and why\n\n\
+             [careful]\n\
+             default = \"ask\"\n\n\
+             [builder]\n\
+             default = \"allow\"\n",
+        )
+        .expect("the profiles");
+
+        // The first table rewritten: the header sat above it and stays above
+        // it.
+        let rewritten = ask(r#"mutation { upsertYoloProfile(request: { profile: {
+                 name: "careful", default: ALLOW } }) { isNew } }"#)
+        .await;
+        assert_eq!(rewritten["upsertYoloProfile"]["isNew"], false);
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert!(
+            text.contains("# what this machine waives, and why"),
+            "the header survives a rewrite: {text}"
+        );
+
+        // The first table removed: the header moves down to the one that is
+        // first now rather than leaving with the table it happened to sit on.
+        let removed = ask(
+            r#"mutation { deleteYoloProfile(request: { name: "careful" })
+                 { deletedId } }"#,
+        )
+        .await;
+        assert_eq!(
+            removed["deleteYoloProfile"]["deletedId"],
+            "yoloProfile:careful"
+        );
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert!(
+            text.contains("# what this machine waives, and why"),
+            "the header survives a delete: {text}"
+        );
+        assert!(text.contains("[builder]"), "{text}");
+        assert!(!text.contains("[careful]"), "{text}");
+
+        // And the last profile out of the file takes what sat above it, since
+        // there is no table left for it to sit above.
+        ask(r#"mutation { deleteYoloProfile(request: { name: "builder" }) { deletedId } }"#).await;
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert!(
+            text.trim().is_empty(),
+            "nothing is left to comment on: {text}"
+        );
+
+        // A profile with nothing written above its header takes nothing with
+        // it either, and the one before it keeps its own spacing.
+        std::fs::write(&path, "[a]\ndefault = \"allow\"\n[b]\ndefault = \"ask\"\n")
+            .expect("two profiles, no trivia");
+        ask(r#"mutation { deleteYoloProfile(request: { name: "b" }) { deletedId } }"#).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file"),
+            "[a]\ndefault = \"allow\"\n"
+        );
+    })
+    .await;
+}
+
 /// A write that would leave the file unloadable is refused, and the file on
 /// disk is left as it was.
 #[tokio::test]
@@ -1095,8 +1177,9 @@ async fn a_yolo_write_that_would_not_load_is_refused() {
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
         std::fs::write(&path, crate::commands::yolo::EXAMPLE_TOML).expect("the profiles");
 
-        // `default` is the one reserved name: the whole document is checked,
-        // so the refusal comes from the file rather than from the one table.
+        // `default` is the one reserved name. The file loaded before the
+        // write, so what will not load now is what this request asked for,
+        // and that is a bad request.
         let refused = schema(true)
             .execute(Request::new(
                 r#"mutation { upsertYoloProfile(request: { profile: {
@@ -1133,6 +1216,20 @@ async fn a_yolo_write_that_would_not_load_is_refused() {
             ))
             .await;
         assert_eq!(refusal_code(&unparsed), "\"UNPROCESSABLE\"");
+
+        // A file that parses but will not load gets the same answer, and for
+        // the same reason: the request is well formed and the file cannot
+        // answer. Branching on `BAD_USER_INPUT` here would have a client
+        // retrying a query that was never wrong.
+        std::fs::write(&path, "[one]\ndefault = \"allow\"\n\n[two]\nblock = 1\n")
+            .expect("a file with a table that will not load");
+        let unloadable = schema(true)
+            .execute(Request::new(
+                r#"mutation { upsertYoloProfile(request: { profile: {
+                     name: "builder", default: ALLOW } }) { isNew } }"#,
+            ))
+            .await;
+        assert_eq!(refusal_code(&unloadable), "\"UNPROCESSABLE\"");
     })
     .await;
 }
@@ -1173,8 +1270,10 @@ async fn a_yolo_profile_is_deleted_by_name_or_missed() {
             .await;
         assert_eq!(refusal_code(&missed), "\"NOT_FOUND\"");
 
-        // The whole file is checked on the way out too, so taking one table
-        // out of a file another table has broken is refused rather than saved.
+        // A file another table has broken is refused rather than saved, and
+        // the refusal says the file cannot answer rather than blaming the
+        // request: the name is spelled right and nothing sent differently
+        // would help.
         std::fs::write(&path, "[one]\ndefault = \"allow\"\n\n[two]\nblock = 1\n")
             .expect("a file with a table that will not load");
         let refused = schema(true)
@@ -1182,7 +1281,16 @@ async fn a_yolo_profile_is_deleted_by_name_or_missed() {
                 r#"mutation { deleteYoloProfile(request: { name: "one" }) { deletedId } }"#,
             ))
             .await;
-        assert_eq!(refusal_code(&refused), "\"BAD_USER_INPUT\"");
+        assert_eq!(refusal_code(&refused), "\"UNPROCESSABLE\"");
+
+        // And a name that is not in that file gets the same answer rather
+        // than a miss: a file that will not load cannot say what is not in it.
+        let absent = schema(true)
+            .execute(Request::new(
+                r#"mutation { deleteYoloProfile(request: { name: "ghost" }) { deletedId } }"#,
+            ))
+            .await;
+        assert_eq!(refusal_code(&absent), "\"UNPROCESSABLE\"");
     })
     .await;
 }
@@ -2551,12 +2659,25 @@ async fn a_blueprint_scoped_script_says_which_blueprint_it_is_for() {
         let written = ask(r#"mutation { upsertScript(request: {
                  script: { kind: TOOL, name: "greet", blueprintName: "coder" },
                  content: "\"hi\"" })
-                 { script { id kind name scope blueprintName isDeclared } } }"#)
+                 { script { id kind name scope blueprintName isDeclared
+                   relativePath } } }"#)
         .await;
         let script = &written["upsertScript"]["script"];
         assert_eq!(script["scope"], "BLUEPRINT");
         assert_eq!(script["blueprintName"], "coder");
         assert_eq!(script["id"], "script:tool@coder:greet");
+
+        // What a blueprint's manifest would name the file, which the write
+        // answers with and the read answers with because both build the script
+        // through one constructor. A write that left it out had an editor
+        // reading null from the save and a path from the next listing.
+        assert_eq!(script["relativePath"], "tools/greet.rhai");
+        let read = ask(
+            r#"{ script(ref: { kind: TOOL, name: "greet", blueprintName: "coder" })
+                 { relativePath } }"#,
+        )
+        .await;
+        assert_eq!(script["relativePath"], read["script"]["relativePath"]);
     })
     .await;
 }

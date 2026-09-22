@@ -13,6 +13,7 @@ use async_graphql::{Enum, ID, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
 use super::super::super::core::blueprints::BlueprintSource as CoreSource;
+use super::super::paging::page::weight;
 use super::machine::mime::MimeRow;
 use super::manifest::count;
 use super::manifest::dependency::BlueprintDependency;
@@ -687,6 +688,7 @@ impl Blueprint {
     /// directories are walked, so it is a field here rather than an argument on
     /// the root listing.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn tools(
         &self,
         ctx: &async_graphql::Context<'_>,
@@ -722,6 +724,7 @@ impl Blueprint {
     /// Its own directory's scripts as well as the machine's. Read `scope` on
     /// each to tell the two apart.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn scripts(
         &self,
         ctx: &async_graphql::Context<'_>,

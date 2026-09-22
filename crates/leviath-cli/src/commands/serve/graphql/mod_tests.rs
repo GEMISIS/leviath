@@ -59,13 +59,16 @@ async fn the_schema_answers_introspection() {
 #[tokio::test]
 async fn a_query_nested_too_deep_is_refused_before_it_runs() {
     // One level deeper than the limit, built from the only field that nests.
+    // A page of one at every level, so what this trips is the depth limit and
+    // not the complexity budget: the two are separate refusals and this is the
+    // test for the first of them.
     let mut query = "id".to_string();
     for _ in 0..=MAX_DEPTH / 2 {
-        query = format!("children {{ results {{ {query} }} }}");
+        query = format!("children(first: 1) {{ results {{ {query} }} }}");
     }
     let query = format!("results {{ {query} }}");
     let answer = schema()
-        .execute(Request::new(format!("{{ runs {{ {query} }} }}")))
+        .execute(Request::new(format!("{{ runs(first: 1) {{ {query} }} }}")))
         .await;
     let message = &answer.errors.first().expect("a refusal").message;
     assert_eq!(message, "Query is nested too deep.");
@@ -106,6 +109,188 @@ fn the_published_schema_documents_the_admin_surface() {
 fn the_query_limits_are_the_documented_ones() {
     assert_eq!(MAX_DEPTH, 12);
     assert_eq!(MAX_COMPLEXITY, 10_000);
+}
+
+/// The page caps the guide prints are the caps this build enforces.
+///
+/// Four different numbers over four sets of listings, and a client builds its
+/// paging against what the page says. The numbers are read from the constants
+/// rather than written out here, so a cap that moves fails this until the
+/// table moves with it.
+#[test]
+fn the_documented_page_caps_are_the_ones_the_code_enforces() {
+    use crate::commands::serve::core::{files, history, runs as run_core};
+
+    let page = include_str!("../../../../../../docs/content/graphql.md").replace("\r\n", "\n");
+    let caps: [(usize, &str); 4] = [
+        (super::query::catalog::PAGE_CAP, "`models`"),
+        (run_core::MAX_LIMIT, "`runs`"),
+        (files::MAX_LISTING_ENTRIES, "`files` on a run"),
+        (history::HISTORY_MAX_LIMIT, "`contextHistory` on a run"),
+    ];
+    for (cap, listing) in caps {
+        let row = format!("| `{cap}` |");
+        let found = page
+            .lines()
+            .find(|line| line.starts_with(&row))
+            .unwrap_or_else(|| panic!("no page-cap row for {cap}"));
+        assert!(found.contains(listing), "{cap}: {found}");
+    }
+    // The ids a filter may name outright, which is a different limit and says
+    // so on the page rather than sitting in the same table.
+    assert!(
+        page.contains(&format!("names at most {} runs at once", run_core::MAX_IDS)),
+        "the named-id limit is on the page"
+    );
+}
+
+/// The complexity budget counts the rows a query asks for, not the words it
+/// is written with.
+///
+/// Fifty runs each asking for fifty children is the shape the limit exists
+/// for: it is shallow, it is short, and it is two and a half thousand records.
+/// A listing field is charged its page size times what one row of it costs,
+/// which is what makes that query expensive to the check and a page of twenty
+/// cheap.
+#[tokio::test]
+async fn breadth_costs_what_it_asks_for_rather_than_what_it_is_written_with() {
+    let broad = schema()
+        .execute(Request::new(
+            "{ runs(first: 200) { results { children(first: 200) { results { id } } } } }",
+        ))
+        .await;
+    assert_eq!(
+        broad.errors.first().expect("a refusal").message,
+        "Query is too complex."
+    );
+
+    let modest = schema()
+        .execute(Request::new(
+            "{ runs(first: 20) { results { children(first: 20) { results { id } } } } }",
+        ))
+        .await;
+    assert!(modest.errors.is_empty(), "{:?}", modest.errors);
+}
+
+/// A `first` that names no page costs nothing, so the page-size check is what
+/// refuses it.
+///
+/// Charged as a page of zero, a `first: 0` would otherwise have to be charged
+/// as something, and whatever that was would eventually refuse the query as
+/// too large - which tells a client nothing about the one thing wrong with it.
+#[tokio::test]
+async fn a_first_that_names_no_page_is_refused_by_the_page_check() {
+    let answer = schema()
+        .execute(Request::new("{ runs(first: 0) { results { id } } }"))
+        .await;
+    let refusal = answer.errors.first().expect("a refusal");
+    assert!(
+        refusal.message.contains("`first` must be at least 1"),
+        "{refusal:?}"
+    );
+}
+
+/// Every refusal reached before a resolver runs carries the code the docs tell
+/// a client to branch on.
+///
+/// The seven ways a document can be wrong are one thing to a client: it built
+/// the query wrong, and sending it again will not help. Without a code on them
+/// a client is left matching on the message text, which is the one thing the
+/// docs say never to do.
+#[tokio::test]
+async fn a_query_refused_before_it_runs_says_why_in_its_extensions() {
+    let cases = [
+        ("an unknown field", "{ runs { results { nosuchfield } } }"),
+        (
+            "an unknown argument",
+            "{ runs(nope: 1) { results { id } } }",
+        ),
+        (
+            "a bad enum value",
+            "{ runs(filter: { status: { eq: NOPE } }) { results { id } } }",
+        ),
+        ("a syntax error", "{ runs { results { id }"),
+        (
+            "two members of a @oneOf input",
+            r#"mutation { spawnRun(request: { blueprint: { name: "a" }, task: "t",
+                 yolo: { everything: true, profileName: "p" } }) { run { id } } }"#,
+        ),
+        ("a query nested too deep", &deep_query()),
+        (
+            "a query too complex",
+            "{ runs(first: 200) { results { children(first: 200) { results { id } } } } }",
+        ),
+    ];
+    for (what, query) in cases {
+        let answer = schema().execute(Request::new(query)).await;
+        let refusal = answer.errors.first().expect(what);
+        let extensions = refusal.extensions.as_ref().expect(what);
+        assert_eq!(
+            extensions.get("code").map(ToString::to_string),
+            Some("\"BAD_USER_INPUT\"".to_string()),
+            "{what}: {refusal:?}"
+        );
+        assert_eq!(
+            extensions.get("httpStatus").map(ToString::to_string),
+            Some("400".to_string()),
+            "{what}: {refusal:?}"
+        );
+    }
+}
+
+/// One query nested past the depth limit, for the case above.
+fn deep_query() -> String {
+    let mut query = "id".to_string();
+    for _ in 0..=MAX_DEPTH / 2 {
+        query = format!("children(first: 1) {{ results {{ {query} }} }}");
+    }
+    format!("{{ runs(first: 1) {{ results {{ {query} }} }} }}")
+}
+
+/// A failure a resolver reached keeps the code that failure has.
+///
+/// The extension stamps what the parser and the validator refuse and nothing
+/// else, so `NOT_FOUND` does not become `BAD_USER_INPUT` on its way out.
+#[tokio::test]
+async fn a_resolver_keeps_its_own_code() {
+    let answer = schema()
+        .execute(Request::new(
+            r#"mutation { cancelRun(request: { id: "no-such-run" }) { run { id } } }"#,
+        ))
+        .await;
+    let refusal = answer.errors.first().expect("a refusal");
+    let extensions = refusal.extensions.as_ref().expect("extensions");
+    assert_ne!(
+        extensions.get("code").map(ToString::to_string),
+        Some("\"BAD_USER_INPUT\"".to_string()),
+        "{refusal:?}"
+    );
+}
+
+/// Every field a query selects comes back, under the name it was selected by.
+///
+/// Not in that order, though. The fields of one selection set are resolved
+/// together and the answer is built as each finishes, so a field that reads
+/// the disk lands after two that do not, whichever order they were written in.
+/// That is what the whole schema does, from the root down, and it is why the
+/// Failures section tells a client to read the answer by key. This pins what
+/// does hold, so a client reading `data["config"]` keeps working.
+#[tokio::test]
+async fn every_root_field_asked_for_comes_back_under_its_own_name() {
+    // A blueprint directory of this test's own, so what `blueprints` answers
+    // is this test's and not whatever is installed on the machine running it.
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let schema = build_schema(
+        crate::commands::serve::testutil::state_with_agent_paths(vec![dir.path().to_path_buf()]),
+        true,
+    );
+    let query = "{ blueprints { results { name } } serverTime config { allowsFileUploads } }";
+    let answer = schema.execute(Request::new(query)).await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    let json: serde_json::Value = serde_json::to_value(&answer.data).expect("data serializes");
+    assert!(json["blueprints"]["results"].is_array(), "{json}");
+    assert!(json["serverTime"].is_number(), "{json}");
+    assert!(json["config"]["allowsFileUploads"].is_boolean(), "{json}");
 }
 
 /// Every named type in the published schema says what it is.

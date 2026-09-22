@@ -46,7 +46,20 @@ same list.
   unpaged root lists are connections. The SDL prints a one-line description on
   one line. A page of a descending `executions`, `inferences`, `interactions`,
   `contextChanges` or `contextHistory` listing after the first answers with the
-  right items; before this the second page was empty.
+  right items; before this the second page was empty. A query refused before
+  it runs, for an unknown field, a bad enum value or a depth or complexity
+  limit, now carries `extensions.code` like every other failure, and the
+  complexity limit counts what a listing asks for rather than how many words
+  the query has.
+
+### Fixed
+
+- A pause, resume or cancel that reaches a run in the moment it finishes no
+  longer overwrites its finished status: `POST /api/agents/{id}/cancel` and
+  its two siblings answer 409 in that race, and a GraphQL bulk act reports
+  the run under `skipped` as `ALREADY_FINISHED`. The record was read once,
+  before the request went to the daemon, and a run that finished in between
+  was forced onto `cancelled` on disk.
 - **Breaking, GraphQL only.** The schema filters by shape. One set of scalar
   filters - `StringFilter` (`eq`, `ne`, `in`, `notIn`, `contains`,
   `startsWith`, `endsWith`), `IntFilter`, `DecimalFilter` and `TimestampFilter`

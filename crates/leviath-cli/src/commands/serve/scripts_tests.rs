@@ -481,6 +481,7 @@ fn a_path_that_cannot_be_shown_to_be_contained_is_refused() {
         file_dir: PathBuf::new(),
         path: PathBuf::from("no-such-file-for-the-guard-test.rhai"),
         name: "no-such-file-for-the-guard-test".to_string(),
+        relative: None,
         scope: "global",
         agent: None,
     };
@@ -505,6 +506,7 @@ async fn a_write_the_filesystem_refuses_is_reported() {
             file_dir: dir.join("missing"),
             path: dir.join("missing").join("x.rhai"),
             name: "missing/x".to_string(),
+            relative: None,
             scope: "global",
             agent: None,
         };
@@ -531,6 +533,7 @@ async fn a_delete_the_filesystem_refuses_is_reported() {
             file_dir: dir,
             path,
             name: "adirectory".to_string(),
+            relative: None,
             scope: "global",
             agent: None,
         };

@@ -20,7 +20,7 @@ use super::listing::{Window, connection, terms};
 ///
 /// A machine routing to three providers has tens of models; one pointed at a
 /// gateway has thousands, and the same listing has to serve both.
-const PAGE_CAP: usize = 500;
+pub(crate) const PAGE_CAP: usize = 500;
 
 /// The order the models are read in when nothing says otherwise: by id, which
 /// carries the provider first, so a provider's models stay together.
@@ -97,7 +97,11 @@ fn providers_by_name() -> Vec<Term<ProviderOrderField>> {
     }]
 }
 
-/// The providers this machine can reach, configured or not.
+/// The providers a person signs in to through a browser, signed in or not.
+///
+/// Not every provider this machine can talk to. One that takes an API key is
+/// never signed in to, so it is not here; `config.providers` is where every
+/// provider this build knows is listed.
 ///
 /// `enabled` and `signedIn` are different questions with different
 /// answers: a provider can be turned on with no credential stored, and a
@@ -138,7 +142,10 @@ pub(crate) fn provider_by_id(ctx: &Context<'_>, id: &str) -> Option<Provider> {
         .find(|provider| provider.id == provider_id(id))
 }
 
-/// Every provider this machine knows how to reach.
+/// Every provider a person signs in to through a browser, with its state.
+///
+/// The same rows `GET /api/providers` builds, so the two surfaces cannot
+/// disagree about which providers have a sign-in to offer.
 fn reachable(ctx: &Context<'_>) -> Vec<Provider> {
     let state = ctx.data_unchecked::<AppState>();
     super::super::super::providers::provider_infos(state)

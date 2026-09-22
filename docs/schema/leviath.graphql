@@ -1644,7 +1644,12 @@ type ConfigFileStatusOutput {
 
 "Whether the config file on disk loads has changed."
 type ConfigHealthChangedEvent implements Event {
-	"Where this frame sits in the stream, counting from one."
+	"""
+	Where this frame sits in this server's own numbering of
+	frames, counting from one. Server-wide rather than per
+	subscription, so a gap says nothing and only
+	`EventsDroppedEvent` announces a drop.
+	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
 	at: Timestamp!
@@ -2444,10 +2449,14 @@ type ContextTransformOutput {
 "How full the run's context window is, after a turn changed it."
 type ContextUpdatedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -2792,7 +2801,12 @@ subscription, scoped or not, because it explains why a run's frames
 stopped.
 """
 type DaemonLinkChangedEvent implements Event {
-	"Where this frame sits in the stream, counting from one."
+	"""
+	Where this frame sits in this server's own numbering of
+	frames, counting from one. Server-wide rather than per
+	subscription, so a gap says nothing and only
+	`EventsDroppedEvent` announces a drop.
+	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
 	at: Timestamp!
@@ -3385,15 +3399,16 @@ type EnvironmentInfoCallOutput implements ToolCall {
 }
 
 """
-One frame off the daemon broadcast, run or machine.
+One frame a subscription can yield, whatever it turns out to be.
 
-The interface every frame the daemon produces implements, so a
-client reads the stream's bookkeeping without knowing which frame
-it has. The two frames this server produces itself are deliberately
-outside it.
+The interface every frame implements, the two this server produces
+about the subscription itself included, so `... on Event { seq at }`
+reads the stream's bookkeeping off any frame at all. Telling a
+domain frame from a transport one is what the union is for, and
+`RunEvent` is what narrows to the frames about a run.
 """
 interface Event {
-	"Where this frame sits in the stream."
+	"Where this frame sits in this server's own numbering of frames."
 	seq: BigInt!
 	"When the server sent it."
 	at: Timestamp!
@@ -3407,10 +3422,14 @@ skipped past rather than allowed to hold the fan-out. This frame is what
 tells a quiet run from a missed one. Re-read whatever you render when you
 see it; the subscription itself stays open.
 """
-type EventsDroppedEvent {
-	"How many frames this subscription missed."
+type EventsDroppedEvent implements Event {
+	"""
+	How many frames went past unread. Counted off the server's own
+	numbering, so it includes frames this subscription's filter would have
+	dropped anyway: an upper bound on what was missed, never an under-count.
+	"""
 	count: BigInt!
-	"The sequence number of the last frame that did arrive."
+	"The number of the last frame that did arrive."
 	seq: BigInt!
 	"When the gap was noticed, in unix seconds."
 	at: Timestamp!
@@ -4796,10 +4815,14 @@ input InteractionKindFilter {
 "A run parked on a prompt somebody has to answer."
 type InteractionOpenedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -5238,10 +5261,14 @@ type LocaleInfoCallOutput implements ToolCall {
 "One log line, as also written to the stage's log files."
 type LogLineWrittenEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -8181,7 +8208,13 @@ type Query {
 		id: ID!
 	): ModelOutput
 	"""
-	The providers this machine can reach, configured or not.
+	The providers a person signs in to through a browser, signed in or not.
+	
+	Not every provider this machine can talk to. One that takes an API key
+	is never signed in to, so it is not here; `config.providers` is where
+	every provider this build knows is listed. This field is the state
+	behind `signInProvider` and `signOutProvider`, which is why it is the
+	sign-in ones and only those.
 	
 	`enabled` and `signedIn` are different questions with different
 	answers: a provider can be turned on with no credential stored, and a
@@ -8198,9 +8231,10 @@ type Query {
 		after: Cursor
 	): ProviderConnection!
 	"""
-	One provider, by the registry name a blueprint would write.
+	One browser sign-in provider, by the registry name a blueprint writes.
 	
-	Null for a name this build has no provider for.
+	Null for a name `providers` does not list, a provider that takes an API
+	key included.
 	"""
 	provider(
 		"The registry name, such as `openai`."
@@ -9628,10 +9662,14 @@ type RoutingConfigOutput {
 "A run reached a terminal status."
 type RunCompletedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -9684,7 +9722,7 @@ Select `seq at runId agentId` once and every run frame answers it,
 whatever it turns out to be. `run` is read only when selected.
 """
 interface RunEvent {
-	"Where this frame sits in the stream."
+	"Where this frame sits in this server's own numbering of frames."
 	seq: BigInt!
 	"When the server sent it."
 	at: Timestamp!
@@ -10738,10 +10776,14 @@ type RunOutput implements Node {
 "A run acquired a title, or had the one it was showing replaced."
 type RunRenamedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -10777,10 +10819,14 @@ input RunSearchOptions {
 "A run started, including one spawned as a child of another."
 type RunSpawnedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -10838,10 +10884,14 @@ enum RunStatus {
 "A run's status, stage or counters moved."
 type RunStatusChangedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -12334,10 +12384,14 @@ type SpawnRunResult {
 "A run's spend passed a figure the operator asked to be told about."
 type SpendThresholdCrossedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -13432,10 +13486,14 @@ input StageStatusFilter {
 "The run entered a new stage."
 type StageTransitionedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -13841,11 +13899,11 @@ sent. A client that gets one knows the stream is live, knows which process
 is numbering it, and knows whether the daemon behind it is reachable, all
 without a second request.
 """
-type SubscriptionOpenedEvent {
+type SubscriptionOpenedEvent implements Event {
 	"""
-	The sequence number the last frame before this subscription carried, or
-	zero on a server that has sent none. Every frame on this subscription
-	has a number above it.
+	The number the last frame before this subscription carried, or zero on
+	a server that has sent none. Every frame on this subscription has a
+	number above it, though not every number above it arrives here.
 	"""
 	seq: BigInt!
 	"When the subscription opened, in unix seconds."
@@ -14067,10 +14125,14 @@ type TokenUsageOutput {
 "Token usage ticked up."
 type TokensUpdatedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -14195,10 +14257,14 @@ execution id.
 """
 type ToolCallFinishedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -14234,10 +14300,14 @@ type ToolCallFinishedEvent implements Event & RunEvent {
 "A tool call was handed to the async tool lane."
 type ToolCallStartedEvent implements Event & RunEvent {
 	"""
-	Where this frame sits in the stream, counting from one.
+	Where this frame sits in this server's own numbering of
+	frames, counting from one.
 	
-	Rises strictly on this subscription. A jump means frames
-	went past, which is also announced as `EventsDroppedEvent`.
+	One counter for the server, not one per subscription. Two
+	subscriptions open at once see the same frame under the
+	same number, and a subscription that asked for some frame
+	types sees only those numbers, so gaps are ordinary and say
+	nothing. `EventsDroppedEvent` is what announces a drop.
 	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
@@ -15852,7 +15922,12 @@ type UpdateConfigResult {
 
 "An update started by `startUpdate` reached a terminal status."
 type UpdateFinishedEvent implements Event {
-	"Where this frame sits in the stream, counting from one."
+	"""
+	Where this frame sits in this server's own numbering of
+	frames, counting from one. Server-wide rather than per
+	subscription, so a gap says nothing and only
+	`EventsDroppedEvent` announces a drop.
+	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
 	at: Timestamp!
@@ -16134,7 +16209,12 @@ enum UpdateStep {
 
 "A step of an update started by `startUpdate` changed."
 type UpdateStepChangedEvent implements Event {
-	"Where this frame sits in the stream, counting from one."
+	"""
+	Where this frame sits in this server's own numbering of
+	frames, counting from one. Server-wide rather than per
+	subscription, so a gap says nothing and only
+	`EventsDroppedEvent` announces a drop.
+	"""
 	seq: BigInt!
 	"When the server sent it, in unix seconds."
 	at: Timestamp!

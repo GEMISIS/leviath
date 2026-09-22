@@ -2,9 +2,10 @@
 //! and their bulk twins, `spawnRun`, `sendMessage` and `deleteRuns`.
 //!
 //! Each one answers with the run it moved, so a client renders the new state
-//! without a second request. For the single-run acts that means waiting for the
-//! act to show in the run's own record, because the daemon applies it to its
-//! world before the persistence lane writes it down.
+//! without a second request. That means waiting for the act to show in the
+//! run's own record, because the daemon applies it to its world before the
+//! persistence lane writes it down. A sweep waits on its runs together rather
+//! than one after another, so the wait is one window and not one per run.
 //!
 //! The bulk acts are a loop over the same service call. A sweep names runs by a
 //! predicate, and one of them being finished already is no reason to refuse the
@@ -12,6 +13,7 @@
 //! error.
 
 use async_graphql::{Context, Enum, ID, InputObject, OneofObject, SimpleObject};
+use futures_util::StreamExt;
 use leviath_graphql_derive::mirror;
 
 use super::super::super::core::error::ServeError;
@@ -326,11 +328,39 @@ pub(super) async fn matching_run_ids(
     Ok(ids)
 }
 
+/// How many runs a sweep waits on at once.
+///
+/// A sweep is a set, and waiting each run's record out one after another would
+/// cost one settle window per run: a hundred runs would be the better part of a
+/// minute of waiting for reads that have nothing to do with each other. They
+/// are waited on together instead, and the bound is what keeps a sweep over a
+/// large set from having a file open per run at the same time.
+const SETTLE_LANES: usize = 8;
+
+/// One run's record, once the act shows in it, carried back with its id.
+///
+/// The id travels with the answer because the settles finish as a set and a
+/// record that will not read has no run to name itself with.
+async fn settled_run(
+    id: String,
+    action: Action,
+    deadline: std::time::Instant,
+) -> (String, Result<leviath_core::run_meta::RunMeta, ServeError>) {
+    let found = settle(action, deadline, || read_meta(&id)).await;
+    (id, found)
+}
+
 /// One lifecycle act over every run a filter names.
 ///
 /// A run the act has nothing to do to is skipped rather than failing the sweep.
 /// A daemon that cannot be reached is not a fact about one run, so it stays a
 /// failure and ends the whole act.
+///
+/// The acts go one at a time and the waiting is shared: each run is asked in
+/// turn, so a run that finished while the sweep was working its way towards it
+/// is refused by the service call rather than acted on, and the records are
+/// then read back together against one deadline, so the answer carries each run
+/// as the act left it rather than as it stood before.
 async fn act_over(
     ctx: &Context<'_>,
     filter: RunFilter,
@@ -339,34 +369,36 @@ async fn act_over(
 ) -> async_graphql::Result<(Vec<Run>, Vec<Skipped>)> {
     let state = ctx.data_unchecked::<AppState>();
     let ids = matching_run_ids(state, filter, act).await.gql()?;
-    let mut moved = Vec::new();
+    let mut acted: Vec<String> = Vec::new();
     let mut skipped = Vec::new();
     for id in ids {
-        let landed = match lifecycle::act(state, &id, action).await {
-            Ok(()) => read_meta(&id),
-            // It was over before the sweep reached it, which is the ordinary
-            // outcome of acting on a set rather than on one run.
-            Err(failure @ ServeError::Conflict(_)) => {
-                skipped.push(Skipped {
-                    id: ID::from(id),
-                    reason: SkipReason::AlreadyFinished,
-                    message: failure.to_string(),
-                });
-                continue;
-            }
+        match lifecycle::act(state, &id, action).await {
+            Ok(()) => acted.push(id),
+            // It was over before the sweep reached it, or it ended while the
+            // act was on its way, which is the ordinary outcome of acting on a
+            // set rather than on one run.
+            Err(failure @ ServeError::Conflict(_)) => skipped.push(Skipped {
+                id: ID::from(id),
+                reason: SkipReason::AlreadyFinished,
+                message: failure.to_string(),
+            }),
             // The daemon does not have it: it finished and was reaped, or the
             // run index is a moment behind the store.
-            Err(failure @ ServeError::NotFound(_)) => {
-                skipped.push(Skipped {
-                    id: ID::from(id),
-                    reason: SkipReason::Other,
-                    message: failure.to_string(),
-                });
-                continue;
-            }
+            Err(failure @ ServeError::NotFound(_)) => skipped.push(Skipped {
+                id: ID::from(id),
+                reason: SkipReason::Other,
+                message: failure.to_string(),
+            }),
             Err(other) => return Err(graphql_error(&other)),
-        };
-        match landed {
+        }
+    }
+    let deadline = std::time::Instant::now() + SETTLE_WINDOW;
+    let mut settling = futures_util::stream::iter(acted)
+        .map(|id| settled_run(id, action, deadline))
+        .buffered(SETTLE_LANES);
+    let mut moved = Vec::new();
+    while let Some((id, found)) = settling.next().await {
+        match found {
             Ok(meta) => moved.push(run_of(meta)),
             Err(failure) => skipped.push(Skipped {
                 id: ID::from(id),

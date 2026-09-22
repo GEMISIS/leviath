@@ -135,9 +135,19 @@ Change the filter and start again from the first page.
 that has to open files it walks the whole store, so ask for it on the first page and carry the
 number, rather than asking again on every page.
 
-Page sizes are capped per listing, at 200 for most of them and 1000 for a run's `files`. A `first`
-over the cap is refused rather than quietly cut down. A client builds its query in code, and
-silently getting 200 of the 500 rows it asked for shows up much later as missing data.
+Page sizes are capped per listing, and a `first` over the cap is refused rather than quietly cut
+down. A client builds its query in code, and silently getting 200 of the 500 rows it asked for
+shows up much later as missing data.
+
+| `first` cap | Listings |
+|---|---|
+| `500` | `models`, `providers`, `tools` |
+| `200` | `runs`, `blueprints`, `scripts`, `mcpServers`, `mimeRows`, `yoloProfiles`, `updateJobs`, `openInteractions`, and every listing on a run except the two below |
+| `1000` | `files` on a run, where a row is a name and a size |
+| `100` | `contextHistory` on a run, where a point carries a whole context window |
+
+Separately, `runs(filter: { id: { in: [...] } })` names at most 200 runs at once. That is not a page
+size: it is how many records the filter may ask for by name, and going over it is refused.
 
 ## Filters
 
@@ -1018,6 +1028,12 @@ mutation {
 `SkipReason` is `STILL_RUNNING`, `RECORD_UNREADABLE`, `ALREADY_FINISHED` or `OTHER`, with a
 `message` beside it. Partial success is the normal outcome here, not a failure.
 
+`runs` carries each run as the act left it, waited for the same way the single-run acts wait. The
+daemon moves a run in its world and the record is written a moment later, so the sweep reads the
+records back once every act has gone out. A run that ends by itself while the sweep is reaching it
+is `ALREADY_FINISHED` under `skipped` and never under `runs`, so nothing this sweep did overwrites
+what the run says about itself.
+
 An empty filter names every run on this machine, and every one of these four refuses it with
 `BAD_USER_INPUT`. Deleting everything is a thing to ask for outright, not something a client falls
 into by sending a filter it forgot to fill in.
@@ -1292,7 +1308,13 @@ mutation {
 ```
 
 `deleteYoloProfile(request: { name })` takes one out and answers with the id it had. A name the
-file has no table for is a miss rather than a silent success.
+file has no table for is a miss rather than a silent success. Whatever sat above the table it
+removed stays in the file, so deleting the first profile does not take the file's own header.
+
+Both of these read the file as it stands before they touch it. A `yolo.toml` that will not parse,
+or that another profile has made unloadable, is `UNPROCESSABLE`: your request is fine and the file
+cannot answer. `BAD_USER_INPUT` is what the profile you sent earns, such as a reserved name or a
+shell rule that will not compile.
 
 ## The machine itself
 
@@ -1322,6 +1344,10 @@ file has no table for is a miss rather than a silent success.
 `models` answers from the catalogue this server keeps, so it costs no provider call.
 `refreshModels` is the mutation that goes and asks. Two providers can serve the same model id and
 bill to different places, so the provider is part of each model rather than something you infer.
+
+`providers` lists the ones a person signs in to through a browser, which is what `signInProvider`
+and `signOutProvider` act on. A provider that takes an API key is never signed in to, so it is not
+here: `config { providers { ... } }` is where every provider this build knows is listed.
 
 `enabled` and `signedIn` are different questions. A provider can be turned on with no credential
 stored, and a credential can outlive the config entry that used it.
@@ -1384,20 +1410,26 @@ is worse than one extra row.
 Only the filter's in-memory half decides those later checks. A condition that would have to open a
 file reads as "not matching" for now, and is asked again on that run's next frame.
 
-Every frame carries `seq` and `at`, and both come from the interfaces. `Event` gives `seq` and
-`at`, and `RunEvent` adds `runId`, `agentId` and the `run` itself, so one fragment reaches the
-fields every domain frame shares. The two transport frames sit only in the union, which is what
-keeps domain and transport separable.
+Every frame carries `seq` and `at`, and both come from `Event`, which every frame implements, the
+two transport ones included. `RunEvent` adds `runId`, `agentId` and the `run` itself, and only the
+frames about a run implement it, so one fragment reaches the fields every domain frame shares and
+another tells domain from transport.
 
 The first frame of every subscription is a `SubscriptionOpenedEvent`. It says which process is
 numbering the stream and whether the daemon behind it is reachable, so a client knows the stream is
-live without a second request. `seq` rises strictly within one `serverInstance`, and two
-subscriptions reporting different instances were served by different processes, so a reconnecting
-client re-reads rather than resumes.
+live without a second request. Two subscriptions reporting different `serverInstance` values were
+served by different processes, so a reconnecting client re-reads rather than resumes.
 
-Delivery is at-most-once, and a gap is now detectable. `EventsDroppedEvent` says you fell behind
-and by how many frames. The broadcast is bounded, and a listener that cannot keep up is skipped
-past rather than allowed to hold up the daemon. Treat it as the cue to re-read whatever you render.
+`seq` is that process's own numbering of every frame it sends, not a count of the ones this
+subscription received. Two subscriptions open at once see one frame under one number. A
+subscription that asked for three frame types sees the numbers of those three and nothing between,
+so gaps are the ordinary shape of a filtered stream and mean nothing on their own.
+
+Delivery is at-most-once, and a gap is announced rather than inferred. `EventsDroppedEvent` says
+you fell behind, and `count` is how many frames went past unread. It is counted off the server's
+numbering, so it includes frames your filter would have dropped anyway: an upper bound, never an
+under-count. The broadcast is bounded, and a listener that cannot keep up is skipped past rather
+than allowed to hold up the daemon. Treat it as the cue to re-read whatever you render.
 `DaemonLinkChangedEvent` arrives whatever `types` says and whatever the scope is, because a run's
 frames stopping looks exactly like a quiet run without it.
 
@@ -1443,7 +1475,8 @@ A failure inside a field is a 200 with an `errors` entry. Each entry carries the
 query that produced it, so a page of fifty runs where one record will not read still returns the
 other forty-nine.
 
-Branch on `extensions.code`, never on the message text.
+Branch on `extensions.code`, never on the message text. Every failure carries one, a query refused
+before any resolver ran included: those are `BAD_USER_INPUT`.
 
 | Code | Means | REST answers |
 |---|---|---|
@@ -1452,7 +1485,7 @@ Branch on `extensions.code`, never on the message text.
 | `NOT_FOUND` | Nothing by that name, or nothing in the state the act needs | `404` |
 | `CONFLICT` | It exists and its state refuses the change | `409` |
 | `PAYLOAD_TOO_LARGE` | An attachment is over this server's `max_upload_bytes` | `413` |
-| `UNPROCESSABLE` | Well formed, and something on disk will not answer | `422` |
+| `UNPROCESSABLE` | Well formed, and something on disk will not answer, such as a `yolo.toml` a profile you never touched has broken | `422` |
 | `UPSTREAM` | Something this server depends on answered badly. Retrying may well work | `502` |
 | `DAEMON_INCOMPATIBLE` | The daemon was updated under a running server. Restart `lev serve` | `502` |
 | `DAEMON_UNAVAILABLE` | The daemon could not be reached. Get it back, then retry | `503` |
@@ -1462,8 +1495,9 @@ Branch on `extensions.code`, never on the message text.
 vocabulary needs no second table.
 
 Nothing inside a result is a failure. A bulk sweep reports what it did not touch under `skipped`, a
-race reports itself as `ALREADY_SETTLED`, and a check that found something wrong is a report rather
-than an error. Those are outcomes, and a refusal is an error.
+run that ended by itself while the sweep was reaching it reports itself as `ALREADY_FINISHED`, and
+a check that found something wrong is a report rather than an error. Those are outcomes, and a
+refusal is an error.
 
 ## Limits
 
@@ -1475,10 +1509,24 @@ A query is checked before any of it runs.
 | Complexity | 10000 | Depth does not bound breadth: fifty runs each asking for fifty children is shallow and large |
 | Filter depth | 16 | `and`, `or` and relations nest, and a predicate is walked before anything is read |
 | Filter values | 512 | One filter holding thousands of values is a query to split, not a page to serve |
-| `first` | 200, or 1000 on `files` | The page cap, per listing, and refused rather than clamped |
+| `first` | Per listing | The page caps above, refused rather than clamped |
 
 The two filter limits are counted in the same walk that builds the cursor, so a filter that is over
 them is refused before a single run is touched.
+
+Complexity counts the rows a query asks for. A listing field costs its `first` times what one row
+of it costs, so `runs(first: 200) { results { children(first: 200) { results { id } } } }` is
+counted as the forty thousand records it asks for and refused. The same query with `first: 20` at
+both levels costs four hundred and runs.
+
+Every refusal in this section is a `BAD_USER_INPUT` with `httpStatus` `400`. So is every refusal a
+query earns before a resolver runs: an unknown field, an unknown argument, a misspelled enum value,
+a `@oneOf` input with two members set, or a document that will not parse.
+
+One thing this schema does not promise is the order of the keys in an object. Fields are resolved
+together rather than one after another, and the answer is built as each one finishes. A field that
+reads the disk lands after two that did not, whichever order you wrote them in. Read the answer by
+key.
 
 ## The schema
 

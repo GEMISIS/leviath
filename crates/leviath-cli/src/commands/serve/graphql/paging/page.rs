@@ -1,6 +1,23 @@
-//! The page-size check, written once.
+//! The page-size check, and what a page costs the complexity budget.
 
 use crate::commands::serve::core::error::ServeError;
+
+/// What one page of a listing costs, for the check made before anything runs.
+///
+/// A listing field costs its page size times whatever one row of it costs, so
+/// `runs(first: 200) { children(first: 200) { id } }` is counted as the forty
+/// thousand rows it asks for rather than as the handful of words it is written
+/// with. Without this, breadth is free and only nesting is counted, which is
+/// the opposite of where the work is.
+///
+/// A `first` that names no page at all counts as nothing. The page-size check
+/// is what refuses those, and it runs inside the resolver with a message that
+/// says which cap was missed; a complexity refusal in its place would tell a
+/// client its query was too large when the real answer is that `first: 0` is
+/// not a page.
+pub(crate) fn weight(first: i32, child: usize) -> usize {
+    usize::try_from(first).unwrap_or(0).saturating_mul(child)
+}
 
 /// Check a requested page size against a listing's cap.
 ///
