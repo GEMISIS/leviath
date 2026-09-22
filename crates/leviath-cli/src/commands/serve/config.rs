@@ -402,7 +402,6 @@ mod tests {
     use tokio::sync::broadcast;
     use tower::ServiceExt;
 
-    use crate::commands::serve::events::ServerEvent;
     use crate::config::Config;
 
     /// The health of a reloader with no file to watch: loading, because there
@@ -423,7 +422,7 @@ mod tests {
     /// bound, so the result does not depend on what happens to be running on
     /// the developer's machine.
     fn state_without_a_reachable_ollama() -> AppState {
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         AppState {
             caches: Default::default(),
             update_check: Default::default(),
@@ -473,7 +472,7 @@ mod tests {
                 },
             );
         }
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         let state = AppState {
             caches: Default::default(),
             update_check: Default::default(),
@@ -533,7 +532,7 @@ mod tests {
     }
 
     fn test_state() -> AppState {
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         AppState {
             caches: Default::default(),
             update_check: Default::default(),
@@ -549,7 +548,7 @@ mod tests {
     }
 
     fn test_state_with_keys() -> AppState {
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         AppState {
             caches: Default::default(),
             update_check: Default::default(),
@@ -767,7 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_config_agent_paths_included() {
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         let state = AppState {
             caches: Default::default(),
             update_check: Default::default(),
@@ -807,7 +806,7 @@ mod tests {
     /// so the `/api/models` handler's list-building loop runs. `claude-code`
     /// needs no API key and `list_models` returns its three known models.
     fn test_state_listing_models() -> AppState {
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         AppState {
             caches: Default::default(),
             update_check: Default::default(),
@@ -1043,7 +1042,7 @@ mod tests {
 
     /// The state and the file locations a `put_config` test runs against.
     fn state_with_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         let state = AppState {
             caches: Default::default(),
             update_check: Default::default(),
@@ -1073,7 +1072,7 @@ mod tests {
     /// rather than holding a copy - the way `lev serve` builds one. What the
     /// handlers see is then whatever is on disk.
     fn state_watching_config_path(path: std::path::PathBuf) -> (AppState, AdminPaths) {
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         let state = AppState {
             caches: Default::default(),
             update_check: Default::default(),
@@ -2200,7 +2199,7 @@ mod tests {
         // registers only when its address answers, so on a machine without it
         // nothing asks for a client, no error is produced, and this test
         // passes while exercising none of what it is named for.
-        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let (tx, _) = broadcast::channel(64);
         let state = AppState {
             caches: crate::commands::serve::caches::ServeCaches {
                 model_catalog: crate::commands::serve::model_catalog::ModelCatalog::with_builder(

@@ -5,7 +5,7 @@ use axum::extract::{Path as AxumPath, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use tokio::sync::broadcast;
 
-use super::events::ServerEvent;
+use super::events::{ServerEvent, Stamped};
 use super::types::*;
 
 /// How often the server pings an idle-or-not connection. Browsers answer pings
@@ -84,7 +84,7 @@ fn link_greeting(state: &AppState) -> Option<ServerEvent> {
 
 async fn handle_ws(
     socket: WebSocket,
-    rx: broadcast::Receiver<ServerEvent>,
+    rx: broadcast::Receiver<Stamped>,
     filter_run_id: Option<String>,
     greeting: Option<ServerEvent>,
 ) {
@@ -110,7 +110,7 @@ async fn handle_ws(
 /// starved indefinitely.
 async fn handle_ws_with(
     mut socket: WebSocket,
-    mut rx: broadcast::Receiver<ServerEvent>,
+    mut rx: broadcast::Receiver<Stamped>,
     filter_run_id: Option<String>,
     ping_every: std::time::Duration,
     pong_timeout: std::time::Duration,
@@ -146,7 +146,11 @@ async fn handle_ws_with(
             }
             event = rx.recv() => {
                 match event {
-                    Ok(ev) => {
+                    Ok(stamped) => {
+                        // The stamp is the bus's own bookkeeping. `/ws` sends
+                        // the event and nothing else, which is what keeps its
+                        // frames the frames they have always been.
+                        let ev = stamped.event;
                         // If filtering by run_id, skip non-matching events
                         // (a `DaemonLink` is for every subscriber).
                         if let Some(ref filter) = filter_run_id
@@ -211,6 +215,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
+    use super::super::events::send as send_event;
     use crate::commands::serve::testutil::WsTestClient;
     use crate::config::Config;
     use crate::test_support::with_tracing;
@@ -342,7 +347,7 @@ mod tests {
 
     /// Wait until the broadcast subscriber count reaches `expected` (the
     /// handler task subscribing or dropping its receiver), or panic.
-    async fn wait_for_receiver_count(tx: &broadcast::Sender<ServerEvent>, expected: usize) {
+    async fn wait_for_receiver_count(tx: &broadcast::Sender<Stamped>, expected: usize) {
         let mut reached = false;
         for _ in 0..100 {
             if tx.receiver_count() == expected {
@@ -486,11 +491,14 @@ mod tests {
             if tx.receiver_count() == 0 {
                 break; // already disconnected
             }
-            let _ = tx.send(ServerEvent::Log {
-                agent_id: "a".to_string(),
-                run_id: "run-1".to_string(),
-                line: big_line.clone(),
-            });
+            send_event(
+                &tx,
+                ServerEvent::Log {
+                    agent_id: "a".to_string(),
+                    run_id: "run-1".to_string(),
+                    line: big_line.clone(),
+                },
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         wait_for_receiver_count(&tx, 0).await;
@@ -506,12 +514,14 @@ mod tests {
 
         // Give the server a moment to subscribe before we broadcast.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        tx.send(ServerEvent::Log {
-            agent_id: "a".to_string(),
-            run_id: "run-1".to_string(),
-            line: "hello".to_string(),
-        })
-        .unwrap();
+        send_event(
+            &tx,
+            ServerEvent::Log {
+                agent_id: "a".to_string(),
+                run_id: "run-1".to_string(),
+                line: "hello".to_string(),
+            },
+        );
 
         let (opcode, payload) =
             tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
@@ -543,12 +553,14 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let huge_line = "x".repeat(70_000);
-        tx.send(ServerEvent::Log {
-            agent_id: "a".to_string(),
-            run_id: "run-huge".to_string(),
-            line: huge_line.clone(),
-        })
-        .unwrap();
+        send_event(
+            &tx,
+            ServerEvent::Log {
+                agent_id: "a".to_string(),
+                run_id: "run-huge".to_string(),
+                line: huge_line.clone(),
+            },
+        );
 
         let (opcode, payload) =
             tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
@@ -593,19 +605,23 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Non-matching event first - should be filtered out and not sent.
-        tx.send(ServerEvent::Log {
-            agent_id: "a".to_string(),
-            run_id: "run-other".to_string(),
-            line: "skip me".to_string(),
-        })
-        .unwrap();
+        send_event(
+            &tx,
+            ServerEvent::Log {
+                agent_id: "a".to_string(),
+                run_id: "run-other".to_string(),
+                line: "skip me".to_string(),
+            },
+        );
         // Matching event - should be relayed.
-        tx.send(ServerEvent::Log {
-            agent_id: "a".to_string(),
-            run_id: "run-match".to_string(),
-            line: "deliver me".to_string(),
-        })
-        .unwrap();
+        send_event(
+            &tx,
+            ServerEvent::Log {
+                agent_id: "a".to_string(),
+                run_id: "run-match".to_string(),
+                line: "deliver me".to_string(),
+            },
+        );
 
         let (opcode, payload) =
             tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
@@ -780,7 +796,7 @@ mod tests {
         ];
 
         for ev in events {
-            tx.send(ev).unwrap();
+            send_event(&tx, ev);
             let (opcode, payload) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
                     .await
@@ -833,7 +849,7 @@ mod tests {
         // Use a tiny broadcast buffer so that flooding it triggers a `Lagged`
         // error on the server-side subscriber, exercising that branch of
         // `handle_ws` without needing to fabricate the error directly.
-        let (tx, _) = broadcast::channel::<ServerEvent>(2);
+        let (tx, _) = broadcast::channel::<Stamped>(2);
         let state = AppState {
             caches: Default::default(),
             signer: Default::default(),
@@ -854,11 +870,14 @@ mod tests {
         // Send far more events than the channel capacity so the server's
         // subscriber lags and receives `RecvError::Lagged`.
         for i in 0..20 {
-            let _ = tx.send(ServerEvent::Log {
-                agent_id: "a".to_string(),
-                run_id: "run-1".to_string(),
-                line: format!("line-{i}"),
-            });
+            send_event(
+                &tx,
+                ServerEvent::Log {
+                    agent_id: "a".to_string(),
+                    run_id: "run-1".to_string(),
+                    line: format!("line-{i}"),
+                },
+            );
         }
 
         // The connection should survive the lag and keep delivering whatever
@@ -916,11 +935,14 @@ mod tests {
 
         // Flood the channel so handle_ws has pending events when the RST arrives.
         for i in 0..100 {
-            let _ = tx.send(ServerEvent::Log {
-                agent_id: "a".to_string(),
-                run_id: "run-1".to_string(),
-                line: format!("pre-drop flood event {i}"),
-            });
+            send_event(
+                &tx,
+                ServerEvent::Log {
+                    agent_id: "a".to_string(),
+                    run_id: "run-1".to_string(),
+                    line: format!("pre-drop flood event {i}"),
+                },
+            );
         }
 
         // Drop the client - TCP FIN/RST is sent.
@@ -930,11 +952,14 @@ mod tests {
         // branch, hitting the broken socket until send() returns Err.
         for i in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let _ = tx.send(ServerEvent::Log {
-                agent_id: "a".to_string(),
-                run_id: "run-1".to_string(),
-                line: format!("post-drop event {i}"),
-            });
+            send_event(
+                &tx,
+                ServerEvent::Log {
+                    agent_id: "a".to_string(),
+                    run_id: "run-1".to_string(),
+                    line: format!("post-drop event {i}"),
+                },
+            );
         }
 
         // Prove the server is still healthy afterwards.
@@ -965,7 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_ws_breaks_on_closed_channel_via_server_shutdown() {
-        let (tx, _) = broadcast::channel::<ServerEvent>(16);
+        let (tx, _) = broadcast::channel::<Stamped>(16);
         let state = AppState {
             caches: Default::default(),
             signer: Default::default(),
@@ -1267,13 +1292,13 @@ mod tests {
 
     #[test]
     fn broadcast_channel_creation() {
-        let (tx, _rx) = broadcast::channel::<ServerEvent>(16);
+        let (tx, _rx) = broadcast::channel::<Stamped>(16);
         let ev = ServerEvent::Log {
             agent_id: "a".to_string(),
             run_id: "r".to_string(),
             line: "test".to_string(),
         };
-        assert!(tx.send(ev).is_ok());
+        send_event(&tx, ev);
     }
 
     fn assert_none_on_connection_reset(result: Option<u8>) {

@@ -351,3 +351,61 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
 
     client.send_close().await;
 }
+
+/// A `/ws` frame is the event's own JSON and nothing else.
+///
+/// The bus wraps every event in a stamp - a sequence number and a time - so a
+/// GraphQL subscriber can tell a quiet fleet from a gap in what it was handed.
+/// `/ws` is a wire contract that predates the stamp and must not have gained a
+/// byte, so this compares the frame a subscriber receives against the event
+/// serialized on its own.
+#[tokio::test]
+async fn a_websocket_frame_is_the_event_and_nothing_else() {
+    let agents = tempfile::tempdir().expect("an agents dir");
+    let state =
+        crate::commands::serve::testutil::state_with_agent_paths(vec![agents.path().to_path_buf()]);
+    let tx = state.event_tx.clone();
+    let app = Router::new()
+        .route("/ws", get(super::websocket::ws_global))
+        .with_state(state);
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the websocket port");
+    let addr = tcp.local_addr().expect("the bound address");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(tcp, app).await;
+    });
+    let mut client = WsTestClient::connect(addr, "/ws").await;
+    let listening = tx.clone();
+    leviath_testkit::wait_until("the route subscribed", move || {
+        listening.receiver_count() > 0
+    })
+    .await;
+
+    let event = super::events::ServerEvent::AgentStatus {
+        agent_id: "agent-1".to_string(),
+        run_id: "run-1".to_string(),
+        status: "running".to_string(),
+        stage: "build".to_string(),
+        iteration: 3,
+        tool_calls: 4,
+        accepts_messages: true,
+        wait_reason: None,
+        title: Some("A title".to_string()),
+    };
+    let expected = serde_json::to_string(&event).expect("the event serializes");
+    super::events::send(&tx, event);
+
+    let (opcode, payload) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
+            .await
+            .expect("the frame arrives");
+    assert_eq!(opcode, 0x1);
+    assert_eq!(
+        String::from_utf8(payload).expect("the frame is text"),
+        expected,
+        "the frame carries the event's own bytes"
+    );
+    client.send_close().await;
+    server.abort();
+}

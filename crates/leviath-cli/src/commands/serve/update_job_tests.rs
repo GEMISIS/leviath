@@ -71,8 +71,8 @@ struct Fixture {
     config_path: std::path::PathBuf,
     recorder: Recorder,
     jobs: UpdateJobs,
-    events: broadcast::Sender<ServerEvent>,
-    rx: broadcast::Receiver<ServerEvent>,
+    events: broadcast::Sender<Stamped>,
+    rx: broadcast::Receiver<Stamped>,
 }
 
 impl Fixture {
@@ -146,8 +146,8 @@ impl Fixture {
     /// Every frame sent so far.
     fn frames(&mut self) -> Vec<ServerEvent> {
         let mut out = Vec::new();
-        while let Ok(event) = self.rx.try_recv() {
-            out.push(event);
+        while let Ok(stamped) = self.rx.try_recv() {
+            out.push(stamped.event);
         }
         out
     }
@@ -608,7 +608,7 @@ async fn every_step_is_announced_and_the_last_frame_carries_the_record() {
                 step,
                 status,
                 ..
-            } => Some((job_id.clone(), step.clone(), status.clone())),
+            } => Some((job_id.clone(), *step, *status)),
             _ => None,
         })
         .collect();
@@ -616,31 +616,11 @@ async fn every_step_is_announced_and_the_last_frame_carries_the_record() {
     assert_eq!(
         progress,
         vec![
-            (
-                job.id.clone(),
-                "binary".to_string(),
-                StepStatus::Running.wire().to_string()
-            ),
-            (
-                job.id.clone(),
-                "binary".to_string(),
-                StepStatus::Done.wire().to_string()
-            ),
-            (
-                job.id.clone(),
-                "agents".to_string(),
-                StepStatus::Skipped.wire().to_string()
-            ),
-            (
-                job.id.clone(),
-                "keys".to_string(),
-                StepStatus::Skipped.wire().to_string()
-            ),
-            (
-                job.id.clone(),
-                "migrations".to_string(),
-                StepStatus::Skipped.wire().to_string()
-            ),
+            (job.id.clone(), Step::Binary, StepStatus::Running),
+            (job.id.clone(), Step::Binary, StepStatus::Done),
+            (job.id.clone(), Step::Agents, StepStatus::Skipped),
+            (job.id.clone(), Step::Keys, StepStatus::Skipped),
+            (job.id.clone(), Step::Migrations, StepStatus::Skipped),
         ]
     );
 
@@ -655,11 +635,11 @@ async fn every_step_is_announced_and_the_last_frame_carries_the_record() {
         unreachable!("the last frame is the finish, not {last:?}")
     };
     assert_eq!(job_id, &job.id);
-    assert_eq!(status, JobStatus::Complete.wire());
+    assert_eq!(status, &JobStatus::Complete);
     assert!(restart_required);
-    assert_eq!(record["id"], job.id);
-    assert_eq!(record["steps"][0]["status"], StepStatus::Done.wire());
-    assert!(record["restart_hint"].is_string());
+    assert_eq!(record.id, job.id);
+    assert_eq!(record.steps[0].status, StepStatus::Done);
+    assert!(record.restart_hint.is_some());
 }
 
 /// The update frames are about the machine, not about a run: `/ws` gets them
@@ -668,17 +648,25 @@ async fn every_step_is_announced_and_the_last_frame_carries_the_record() {
 fn an_update_frame_belongs_to_no_run() {
     let progress = ServerEvent::UpdateProgress {
         job_id: "update-1-1".to_string(),
-        step: "binary".to_string(),
-        status: StepStatus::Running.wire().to_string(),
+        step: Step::Binary,
+        status: StepStatus::Running,
         detail: "running `scoop update`".to_string(),
     };
     assert_eq!(progress.run_id(), "");
     assert!(!progress.is_for_run("run-1"));
     let finished = ServerEvent::UpdateFinished {
         job_id: "update-1-1".to_string(),
-        status: JobStatus::Complete.wire().to_string(),
+        status: JobStatus::Complete,
         restart_required: false,
-        job: serde_json::json!({}),
+        job: UpdateJob {
+            id: "update-1-1".to_string(),
+            status: JobStatus::Complete,
+            steps: Vec::new(),
+            restart_required: false,
+            restart_hint: None,
+            started_at: 1,
+            finished_at: Some(2),
+        },
     };
     assert_eq!(finished.run_id(), "");
     assert!(!finished.is_for_run("run-1"));
@@ -789,15 +777,12 @@ async fn spawn_answers_with_an_id_and_runs_the_work_behind_it() {
         "recorded before it is done"
     );
     let finished = loop {
-        match fixture.rx.recv().await.expect("the sender is alive") {
+        match fixture.rx.recv().await.expect("the sender is alive").event {
             ServerEvent::UpdateFinished { job_id, status, .. } => break (job_id, status),
             _ => continue,
         }
     };
-    assert_eq!(
-        finished,
-        (id.clone(), JobStatus::Complete.wire().to_string())
-    );
+    assert_eq!(finished, (id.clone(), JobStatus::Complete));
     assert_eq!(
         fixture.jobs.get(&id).expect("still there").status,
         JobStatus::Complete
@@ -839,36 +824,42 @@ fn the_fixture_path_detects_as_the_method_its_test_assumes() {
 
 // ─── The step vocabulary ──────────────────────────────────────────────────────
 
-/// Every value's word is the word serde writes for it.
+/// Every value has the word the record and the live frames both carry.
 ///
-/// Two ways of saying the same thing - the record's JSON and the frame's
-/// `step`/`status` strings - and a client reads both. One arm spelled
-/// differently in `wire()` than in the serde name would be a job whose live
-/// frames and whose record disagree about what happened.
+/// One definition, serde's, read two ways: the record's JSON and the `step`
+/// and `status` fields on the frames. The words are spelled out here so a
+/// rename shows up as a failing test rather than as a client that stops
+/// recognising a step it has always handled.
 #[test]
-fn every_wire_word_is_the_word_serde_writes() {
-    for step in STEPS {
-        assert_eq!(serde_json::to_value(step).expect("plain data"), step.wire());
-    }
-    for status in [
-        StepStatus::Pending,
-        StepStatus::Running,
-        StepStatus::Done,
-        StepStatus::Skipped,
-        StepStatus::Advised,
-        StepStatus::Failed,
-    ] {
-        assert_eq!(
-            serde_json::to_value(status).expect("plain data"),
-            status.wire()
-        );
-    }
-    for status in [JobStatus::Running, JobStatus::Complete, JobStatus::Failed] {
-        assert_eq!(
-            serde_json::to_value(status).expect("plain data"),
-            status.wire()
-        );
-    }
+fn every_value_has_the_word_a_client_reads() {
+    assert_eq!(
+        STEPS
+            .iter()
+            .map(|step| serde_json::to_value(step).expect("plain data"))
+            .collect::<Vec<_>>(),
+        vec!["binary", "agents", "keys", "migrations"]
+    );
+    assert_eq!(
+        [
+            StepStatus::Pending,
+            StepStatus::Running,
+            StepStatus::Done,
+            StepStatus::Skipped,
+            StepStatus::Advised,
+            StepStatus::Failed,
+        ]
+        .iter()
+        .map(|status| serde_json::to_value(status).expect("plain data"))
+        .collect::<Vec<_>>(),
+        vec!["pending", "running", "done", "skipped", "advised", "failed"]
+    );
+    assert_eq!(
+        [JobStatus::Running, JobStatus::Complete, JobStatus::Failed]
+            .iter()
+            .map(|status| serde_json::to_value(status).expect("plain data"))
+            .collect::<Vec<_>>(),
+        vec!["running", "complete", "failed"]
+    );
 }
 
 // ─── The keys step ────────────────────────────────────────────────────────────

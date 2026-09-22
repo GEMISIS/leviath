@@ -103,7 +103,7 @@ pub(super) async fn watch_loop(state: AppState, interval: Duration) {
 fn broadcast_change(state: &AppState, reported: &Option<ConfigFault>) -> Option<ConfigFault> {
     let health = state.config.health();
     if &health.fault != reported {
-        let _ = state.event_tx.send(event(&health));
+        super::events::send(&state.event_tx, event(&health));
     }
     health.fault
 }
@@ -242,7 +242,8 @@ mod tests {
         save(&path, "broken : :");
         let reported = broadcast_change(&state, &reported);
         assert!(reported.is_some(), "the file stopped loading");
-        let frame = serde_json::to_value(rx.try_recv().expect("a frame on the edge")).unwrap();
+        let frame =
+            serde_json::to_value(rx.try_recv().expect("a frame on the edge").event).unwrap();
         assert_eq!(frame["type"], "config_health");
         assert_eq!(frame["healthy"], false);
         assert_eq!(frame["error"]["kind"], "parse");
@@ -258,7 +259,8 @@ mod tests {
             "[model_providers.local]\nkind = \"openai-compatible\"\n",
         );
         let reported = broadcast_change(&state, &reported);
-        let frame = serde_json::to_value(rx.try_recv().expect("a new reason is an edge")).unwrap();
+        let frame =
+            serde_json::to_value(rx.try_recv().expect("a new reason is an edge").event).unwrap();
         assert_eq!(frame["healthy"], false);
         assert_eq!(frame["error"]["kind"], "validation");
         assert_eq!(frame["error"]["key"], "model_providers.local");
@@ -266,7 +268,8 @@ mod tests {
         save(&path, &empty_config());
         let reported = broadcast_change(&state, &reported);
         assert!(reported.is_none(), "it loads again");
-        let frame = serde_json::to_value(rx.try_recv().expect("recovery is an edge too")).unwrap();
+        let frame =
+            serde_json::to_value(rx.try_recv().expect("recovery is an edge too").event).unwrap();
         assert_eq!(frame["healthy"], true);
         assert!(frame.get("error").is_none());
     }
@@ -293,7 +296,7 @@ mod tests {
             .await
             .expect("the watcher sends a frame")
             .expect("the channel stays open");
-        let json = serde_json::to_value(&frame).unwrap();
+        let json = serde_json::to_value(&frame.event).unwrap();
         assert_eq!(json["type"], "config_health");
         watcher.abort();
     }
