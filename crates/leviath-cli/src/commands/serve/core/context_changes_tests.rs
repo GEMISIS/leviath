@@ -3,8 +3,7 @@
 use leviath_core::ContextCause;
 use leviath_core::run_archive::{self, RunIdentity, RunRecord};
 
-use super::{CONTEXT_CHANGES_DEFAULT_LIMIT, CONTEXT_CHANGES_MAX_LIMIT, ContextChangesSpec, page};
-use crate::commands::serve::cursor;
+use super::read;
 use crate::runstate::{RunMeta, create_run};
 
 /// A run to hang a journal off.
@@ -61,71 +60,6 @@ fn write_journal(run_id: &str, records: Vec<RunRecord>) {
     .expect("the journal");
 }
 
-/// The page size is bounded at both ends, and a zero is refused rather than
-/// read as "give me none".
-#[test]
-fn a_request_is_bounded_at_both_ends() {
-    let spec = ContextChangesSpec::resolve("run-a", None, None).expect("the defaults");
-    assert_eq!(spec.limit, CONTEXT_CHANGES_DEFAULT_LIMIT);
-    assert!(spec.after.is_none());
-
-    let spec = ContextChangesSpec::resolve("run-a", Some(10_000), None).expect("clamped");
-    assert_eq!(spec.limit, CONTEXT_CHANGES_MAX_LIMIT);
-
-    let refused = ContextChangesSpec::resolve("run-a", Some(0), None).expect_err("zero");
-    assert_eq!(refused.code(), "BAD_USER_INPUT");
-}
-
-/// A cursor this listing did not mint is ignored or refused, never followed.
-#[test]
-fn a_cursor_from_elsewhere_does_not_resume_this_listing() {
-    let mine = cursor::encode(
-        "index",
-        "asc",
-        &cursor::filter_digest(&["context_changes", "run-a"]),
-        cursor::CursorKey::Int(3),
-        "",
-    );
-    let spec = ContextChangesSpec::resolve("run-a", None, Some(&mine)).expect("its own cursor");
-    assert_eq!(spec.after, Some(3));
-
-    // A key of a kind this listing never mints: readable, and not usable.
-    let lettered = cursor::encode(
-        "index",
-        "asc",
-        &cursor::filter_digest(&["context_changes", "run-a"]),
-        cursor::CursorKey::Text("seven".to_string()),
-        "",
-    );
-    let spec = ContextChangesSpec::resolve("run-a", None, Some(&lettered)).expect("readable");
-    assert!(spec.after.is_none(), "a key this listing cannot use");
-
-    // A cursor minted for the interactions listing on the same run is refused:
-    // the digest is namespaced per listing, not only per run.
-    let interactions_cursor = cursor::encode(
-        "index",
-        "asc",
-        &cursor::filter_digest(&["interactions", "run-a"]),
-        cursor::CursorKey::Int(3),
-        "",
-    );
-    let refused = ContextChangesSpec::resolve("run-a", None, Some(&interactions_cursor))
-        .expect_err("a cursor from the interactions listing");
-    assert_eq!(refused.code(), "BAD_USER_INPUT");
-
-    // A cursor minted for a different run is refused too.
-    let elsewhere = cursor::encode(
-        "index",
-        "asc",
-        &cursor::filter_digest(&["context_changes", "run-b"]),
-        cursor::CursorKey::Int(1),
-        "",
-    );
-    let refused = ContextChangesSpec::resolve("run-a", None, Some(&elsewhere))
-        .expect_err("a cursor from another run");
-    assert_eq!(refused.code(), "BAD_USER_INPUT");
-}
-
 /// Every change comes back in the order it landed, carrying the cause the
 /// journal recorded.
 #[test]
@@ -141,68 +75,32 @@ fn the_changes_read_back_in_recorded_order() {
             ],
         );
 
-        let spec = ContextChangesSpec::resolve("did-change", None, None).expect("defaults");
-        let paged = page("did-change", &spec).expect("the journal reads");
-        assert_eq!(paged.total, 3);
-        assert_eq!(paged.changes[0].index, 0);
-        let first = &paged.changes[0].change.record;
+        let changes = read("did-change").expect("the journal reads");
+        assert_eq!(changes.len(), 3);
+        let first = &changes[0].record;
         assert_eq!(first.regions[0].region, "plan");
         assert_eq!(first.cause, ContextCause::Seed);
-        assert_eq!(
-            paged.changes[1].change.record.cause,
-            ContextCause::ToolResult
-        );
-        assert_eq!(paged.changes[2].index, 2);
-        let last = &paged.changes[2].change.record;
+        assert_eq!(changes[1].record.cause, ContextCause::ToolResult);
+        let last = &changes[2].record;
         assert_eq!(last.regions[0].entries_removed, 3);
         assert_eq!(last.at, 30);
         // Positions climb with the journal, which is what names a change for as
         // long as the run exists.
-        assert!(paged.changes[0].change.position < paged.changes[2].change.position);
-        assert!(paged.next_cursor.is_none(), "the only page");
+        assert!(changes[0].position < changes[2].position);
     });
 }
 
-/// A run whose writes named no cause has no changes, and says so with an empty
-/// page rather than an error.
+/// A run whose writes named no cause has no changes, and says so with an
+/// empty list rather than an error.
 #[test]
 fn a_run_with_no_recorded_causes_has_no_changes() {
     crate::runstate::with_isolated_runs_dir("context-changes-empty", |_dir| {
         create_run(&meta("quiet-run")).expect("run written");
-        let spec = ContextChangesSpec::resolve("quiet-run", None, None).expect("defaults");
-        let paged = page("quiet-run", &spec).expect("no journal is not a failure");
-        assert_eq!(paged.total, 0);
-        assert!(paged.changes.is_empty());
-    });
-}
-
-/// The page carries on from its cursor, and the last page says it is the last.
-#[test]
-fn the_changes_page_carries_on_from_its_cursor() {
-    crate::runstate::with_isolated_runs_dir("context-changes-paging", |_dir| {
-        create_run(&meta("many-changes")).expect("run written");
-        let records: Vec<RunRecord> = (0..5)
-            .map(|i| changed("plan", ContextCause::ContextTool, 1, 0, 20 + i))
-            .collect();
-        write_journal("many-changes", records);
-
-        let spec = ContextChangesSpec::resolve("many-changes", Some(2), None).expect("first page");
-        let first = page("many-changes", &spec).expect("reads");
-        assert_eq!(first.total, 5);
-        assert_eq!(first.changes.len(), 2);
-        assert_eq!(first.changes[0].change.record.at, 20);
-        let cursor = first.next_cursor.expect("more to come");
-
-        let spec = ContextChangesSpec::resolve("many-changes", Some(10), Some(&cursor))
-            .expect("the cursor resumes");
-        let rest = page("many-changes", &spec).expect("reads");
-        assert!(rest.next_cursor.is_none(), "that was the rest");
-        let times: Vec<i64> = rest
-            .changes
-            .iter()
-            .map(|held| held.change.record.at)
-            .collect();
-        assert_eq!(times, vec![22, 23, 24], "no change read twice");
+        assert!(
+            read("quiet-run")
+                .expect("no journal is not a failure")
+                .is_empty()
+        );
     });
 }
 
@@ -218,8 +116,7 @@ fn an_unreadable_journal_is_an_error() {
             b"not an archive",
         )
         .expect("a corrupt journal");
-        let spec = ContextChangesSpec::resolve("broken", None, None).expect("defaults");
-        let failed = page("broken", &spec).expect_err("an unreadable journal");
+        let failed = read("broken").expect_err("an unreadable journal");
         assert_eq!(failed.code(), "INTERNAL");
         assert!(
             failed.to_string().contains("unreadable journal"),
@@ -270,10 +167,9 @@ fn a_transaction_reads_back_with_every_region_it_touched() {
             }],
         );
 
-        let spec = ContextChangesSpec::resolve("compacted", None, None).expect("defaults");
-        let paged = page("compacted", &spec).expect("the journal reads");
-        assert_eq!(paged.total, 1, "one transaction, one change");
-        let record = &paged.changes[0].change.record;
+        let changes = read("compacted").expect("the journal reads");
+        assert_eq!(changes.len(), 1, "one transaction, one change");
+        let record = &changes[0].record;
         assert_eq!(record.revision_before.as_deref(), Some("cw1-before"));
         assert_eq!(record.revision_after.as_deref(), Some("cw1-after"));
         assert_eq!(record.regions.len(), 2);

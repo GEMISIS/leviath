@@ -437,10 +437,10 @@ fn runs_sharing_a_sort_value_are_broken_apart_by_id() {
 fn a_missing_last_progress_at_falls_back_to_started_at() {
     let mut meta = meta_at("a", 500);
     meta.last_progress_at = None;
-    assert_eq!(SortKey::LastProgress.value(&meta), 500);
+    assert_eq!(SortKey::LastProgress.key(&meta), CursorKey::Int(500));
     meta.last_progress_at = Some(900);
-    assert_eq!(SortKey::LastProgress.value(&meta), 900);
-    assert_eq!(SortKey::Updated.value(&meta), 500);
+    assert_eq!(SortKey::LastProgress.key(&meta), CursorKey::Int(900));
+    assert_eq!(SortKey::Updated.key(&meta), CursorKey::Int(500));
 }
 
 /// Walking the whole list a page at a time must visit every run exactly once.

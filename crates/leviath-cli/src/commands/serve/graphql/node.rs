@@ -2,15 +2,12 @@
 //!
 //! A client that caches by id, or that holds an id from a webhook and wants
 //! the thing behind it, needs one field to ask with and one promise behind it:
-//! that an id names the same thing wherever it turns up in this schema. That
-//! promise is only made for the types whose id carries their whole key, which
-//! is why `Model` is not one of them. A model id is the provider's own, two
-//! providers can both serve `gpt-5.5` and bill to different places, and a
-//! model is addressed by provider and id together.
+//! that an id names the same thing wherever it turns up in this schema.
 //!
-//! Three of the seven are keyed by a name rather than by a minted id, so their
-//! ids carry a tag saying which kind of thing the name belongs to. The other
-//! four already carry ids nothing else answers to.
+//! Five of the nine are keyed by a name rather than by a minted id, so their
+//! ids carry a tag saying which kind of thing the name belongs to. A model's
+//! is the longest of those, because a model id is the provider's own and two
+//! providers can both serve `gpt-5.5`: the tag carries the provider as well.
 
 use std::sync::Arc;
 
@@ -20,8 +17,9 @@ use super::super::blocking::blocking;
 use super::super::core::blueprints;
 use super::super::types::AppState;
 use super::error::IntoGraphql;
-use super::query::{BulkExport, yolo_profiles};
+use super::query::{RunExport, yolo_profile as profile_named};
 use super::types::blueprint::{Blueprint, revision_id};
+use super::types::catalog::{MODEL_TAG, Model, PROVIDER_TAG, Provider};
 use super::types::machine::{McpServer, Script, YoloProfile};
 use super::types::run::Run;
 use super::types::update::UpdateJob;
@@ -56,10 +54,14 @@ pub(crate) enum Node {
     McpServer(McpServer),
     /// One named yolo profile.
     YoloProfile(YoloProfile),
+    /// One model this machine can route to.
+    Model(Model),
+    /// One provider this machine can reach.
+    Provider(Provider),
     /// One update this server ran.
     UpdateJob(UpdateJob),
-    /// One export this server started.
-    BulkExport(BulkExport),
+    /// One export of the run store this server started.
+    RunExport(RunExport),
 }
 
 /// One configured MCP server's node id.
@@ -99,6 +101,8 @@ pub(crate) async fn resolve(ctx: &Context<'_>, id: &str) -> async_graphql::Resul
             MCP_SERVER_TAG => mcp_server(ctx, rest),
             YOLO_PROFILE_TAG => Ok(yolo_profile(rest)),
             SCRIPT_TAG => script(ctx, rest),
+            PROVIDER_TAG => Ok(super::query::provider_by_id(ctx, rest).map(Node::Provider)),
+            MODEL_TAG => Ok(super::query::model_by_id(ctx, id).await.map(Node::Model)),
             _ => Ok(None),
         };
     }
@@ -108,6 +112,24 @@ pub(crate) async fn resolve(ctx: &Context<'_>, id: &str) -> async_graphql::Resul
         return blueprint(ctx, id, name).await;
     }
     minted(ctx, id).await
+}
+
+/// Fetch what each of several ids names, in the order they were asked about.
+///
+/// One entry per id, null where that id names nothing, so a client reading a
+/// page of cached keys can line the answers up against what it asked without
+/// matching on ids. Resolved one after another rather than all at once: the
+/// reads behind them are a file each at most, and a fan-out over an
+/// unbounded list of ids is what the page limits exist to prevent.
+pub(crate) async fn resolve_many(
+    ctx: &Context<'_>,
+    ids: Vec<ID>,
+) -> async_graphql::Result<Vec<Option<Node>>> {
+    let mut found = Vec::with_capacity(ids.len());
+    for id in ids {
+        found.push(resolve(ctx, id.as_str()).await?);
+    }
+    Ok(found)
 }
 
 /// The MCP server one tagged id names.
@@ -124,11 +146,7 @@ fn mcp_server(ctx: &Context<'_>, name: &str) -> async_graphql::Result<Option<Nod
 
 /// The yolo profile one tagged id names.
 fn yolo_profile(name: &str) -> Option<Node> {
-    yolo_profiles()
-        .profiles
-        .into_iter()
-        .find(|profile| profile.name == name)
-        .map(Node::YoloProfile)
+    profile_named(name).map(Node::YoloProfile)
 }
 
 /// The script one tagged id names.
@@ -189,7 +207,7 @@ async fn minted(ctx: &Context<'_>, id: &str) -> async_graphql::Result<Option<Nod
         return Ok(Some(Node::UpdateJob(UpdateJob::from(job))));
     }
     if let Some(job) = state.caches.exports.get(id) {
-        return Ok(Some(Node::BulkExport(BulkExport::from_job(state, &job))));
+        return Ok(Some(Node::RunExport(RunExport::from_job(state, &job))));
     }
     let asked = id.to_string();
     let meta = blocking(move || crate::runstate::read_meta(&asked).ok()).await;

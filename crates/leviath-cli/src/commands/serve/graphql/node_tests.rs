@@ -73,7 +73,7 @@ async fn a_run_answers_to_its_run_id() {
         create_run(&meta).expect("run written");
 
         let json = ask_fresh(
-            r#"{ node(id: "coder-1788924523-abc123") { id ... on Run { blueprintName } } }"#,
+            r#"{ node(id: "coder-1788924523-abc123") { id ... on RunOutput { blueprintName } } }"#,
         )
         .await;
         assert_eq!(json["node"]["id"], "coder-1788924523-abc123");
@@ -101,15 +101,15 @@ async fn a_blueprint_answers_to_the_revision_id_it_published() {
         .expect("manifest written");
         let state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
 
-        let listed = ask(state.clone(), "{ blueprints { edges { node { id } } } }").await;
-        let id = listed["blueprints"]["edges"][0]["node"]["id"]
+        let listed = ask(state.clone(), "{ blueprints { results { id } } }").await;
+        let id = listed["blueprints"]["results"][0]["id"]
             .as_str()
             .expect("a revision id")
             .to_string();
 
         let json = ask(
             state.clone(),
-            &format!("{{ node(id: \"{id}\") {{ id ... on Blueprint {{ name version }} }} }}"),
+            &format!("{{ node(id: \"{id}\") {{ id ... on BlueprintOutput {{ name version }} }} }}"),
         )
         .await;
         assert_eq!(json["node"]["id"], id);
@@ -149,34 +149,36 @@ async fn a_script_answers_to_its_kind_its_blueprint_and_its_name() {
 
         let global = ask_fresh(
             r#"{ node(id: "script:tool:summarise") { id
-                 ... on Script { kind name foundAt blueprint } } }"#,
+                 ... on ScriptOutput { kind name scope blueprintName } } }"#,
         )
         .await;
         assert_eq!(global["node"]["id"], "script:tool:summarise");
-        assert_eq!(global["node"]["kind"], "tool");
-        assert_eq!(global["node"]["foundAt"], "global");
-        assert!(global["node"]["blueprint"].is_null());
+        assert_eq!(global["node"]["kind"], "TOOL");
+        assert_eq!(global["node"]["scope"], "GLOBAL");
+        assert!(global["node"]["blueprintName"].is_null());
 
         let scoped = ask_fresh(
             r#"{ node(id: "script:tool@coder:summarise") { id
-                 ... on Script { foundAt blueprint } } }"#,
+                 ... on ScriptOutput { scope blueprintName } } }"#,
         )
         .await;
         assert_eq!(scoped["node"]["id"], "script:tool@coder:summarise");
-        assert_eq!(scoped["node"]["foundAt"], "agent");
-        assert_eq!(scoped["node"]["blueprint"], "coder");
+        assert_eq!(scoped["node"]["scope"], "BLUEPRINT");
+        assert_eq!(scoped["node"]["blueprintName"], "coder");
 
-        // The listing and the lookup agree on the spelling.
-        let listed =
-            ask_fresh(r#"{ scripts(blueprint: { name: "coder" }) { id blueprint } }"#).await;
-        let ids: Vec<&str> = listed["scripts"]
-            .as_array()
-            .expect("the scripts")
-            .iter()
-            .map(|script| script["id"].as_str().unwrap_or_default())
-            .collect();
-        assert!(ids.contains(&"script:tool@coder:summarise"), "{ids:?}");
-        assert!(ids.contains(&"script:tool:summarise"), "{ids:?}");
+        // The listing and the lookup agree on the spelling. Several ids at
+        // once, because `nodes` is what a client holding a page of them asks
+        // with: one answer per id, in the order it asked.
+        let both = ask_fresh(
+            r#"{ nodes(ids: ["script:tool@coder:summarise", "script:tool:summarise",
+                 "script:tool:ghost"]) { id } }"#,
+        )
+        .await;
+        let answers = both["nodes"].as_array().expect("one per id");
+        assert_eq!(answers.len(), 3, "{answers:?}");
+        assert_eq!(answers[0]["id"], "script:tool@coder:summarise");
+        assert_eq!(answers[1]["id"], "script:tool:summarise");
+        assert!(answers[2].is_null(), "a dead id costs only its own slot");
 
         // A kind with no name after it, a name nothing is filed under, and a
         // blueprint name no script can be filed under: absences, not failures.
@@ -210,15 +212,15 @@ async fn an_mcp_server_answers_to_its_name() {
         crate::commands::serve::mcp::TEST_PATHS
             .scope(paths, async {
                 let json = ask_fresh(
-                    r#"{ node(id: "mcpServer:docs") { id ... on McpServer { name endpoint } } }"#,
+                    r#"{ node(id: "mcpServer:docs") { id ... on McpServerOutput { name endpoint } } }"#,
                 )
                 .await;
                 assert_eq!(json["node"]["id"], "mcpServer:docs");
                 assert_eq!(json["node"]["name"], "docs");
                 assert_eq!(json["node"]["endpoint"], "docs-mcp");
 
-                let listed = ask_fresh("{ mcpServers { id } }").await;
-                assert_eq!(listed["mcpServers"][0]["id"], "mcpServer:docs");
+                let listed = ask_fresh("{ mcpServers { results { id } } }").await;
+                assert_eq!(listed["mcpServers"]["results"][0]["id"], "mcpServer:docs");
 
                 let ghost = ask_fresh(r#"{ node(id: "mcpServer:ghost") { id } }"#).await;
                 assert!(ghost["node"].is_null());
@@ -256,6 +258,30 @@ async fn an_mcp_server_in_an_unreadable_config_is_a_failure_not_an_absence() {
                     "{}",
                     failure.message
                 );
+
+                // The batch lookup and the field answer the same way: one bad
+                // id in a list fails the list rather than leaving a null in it.
+                let many = schema
+                    .execute(Request::new(r#"{ nodes(ids: ["mcpServer:docs"]) { id } }"#))
+                    .await;
+                assert!(
+                    many.errors
+                        .first()
+                        .is_some_and(|error| error.message.contains("TOML parse error")),
+                    "{:?}",
+                    many.errors
+                );
+                let field = schema
+                    .execute(Request::new(r#"{ mcpServer(name: "docs") { name } }"#))
+                    .await;
+                assert!(
+                    field
+                        .errors
+                        .first()
+                        .is_some_and(|error| error.message.contains("TOML parse error")),
+                    "{:?}",
+                    field.errors
+                );
             })
             .await;
     })
@@ -271,14 +297,14 @@ async fn a_yolo_profile_answers_to_its_name() {
         std::fs::write(&path, crate::commands::yolo::EXAMPLE_TOML).expect("the profiles");
 
         let json = ask_fresh(
-            r#"{ node(id: "yoloProfile:careful") { id ... on YoloProfile { name default } } }"#,
+            r#"{ node(id: "yoloProfile:careful") { id ... on YoloProfileOutput { name default } } }"#,
         )
         .await;
         assert_eq!(json["node"]["id"], "yoloProfile:careful");
         assert_eq!(json["node"]["name"], "careful");
 
-        let listed = ask_fresh("{ yoloProfiles { profiles { id name } } }").await;
-        let first = &listed["yoloProfiles"]["profiles"][0];
+        let listed = ask_fresh("{ yoloProfiles { results { id name } } }").await;
+        let first = &listed["yoloProfiles"]["results"][0];
         assert_eq!(
             first["id"],
             format!("yoloProfile:{}", first["name"].as_str().expect("a name"))
@@ -300,7 +326,7 @@ async fn an_update_job_answers_to_its_job_id() {
         let json = ask(
             state.clone(),
             &format!(
-                "{{ node(id: \"{}\") {{ id ... on UpdateJob {{ status }} }} }}",
+                "{{ node(id: \"{}\") {{ id ... on UpdateJobOutput {{ status }} }} }}",
                 job.id
             ),
         )
@@ -323,18 +349,20 @@ async fn an_export_answers_to_its_job_id() {
             .data(state)
             .finish();
         let started = schema
-            .execute(Request::new("mutation { bulkExportRuns { id } }"))
+            .execute(Request::new(
+                "mutation { startRunExport(request: {}) { export { id } } }",
+            ))
             .await;
         assert!(started.errors.is_empty(), "{:?}", started.errors);
         let json = serde_json::to_value(&started.data).expect("data serializes");
-        let id = json["bulkExportRuns"]["id"]
+        let id = json["startRunExport"]["export"]["id"]
             .as_str()
             .expect("an id")
             .to_string();
 
         let found = schema
             .execute(Request::new(format!(
-                "{{ node(id: \"{id}\") {{ id ... on BulkExport {{ status }} }} }}"
+                "{{ node(id: \"{id}\") {{ id ... on RunExportOutput {{ status }} }} }}"
             )))
             .await;
         assert!(found.errors.is_empty(), "{:?}", found.errors);
