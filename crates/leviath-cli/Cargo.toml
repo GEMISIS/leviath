@@ -74,6 +74,9 @@ futures-util = { workspace = true }
 tokio-stream = { workspace = true }
 dotenvy = { workspace = true }
 leviath-tools = { workspace = true }
+# The `#[mirror]` attribute behind every filter input in the GraphQL schema:
+# one annotated output type produces its own mirror, so the two cannot drift.
+leviath-graphql-derive = { workspace = true }
 leviath-sys = { workspace = true }
 async-trait = { workspace = true }
 pulldown-cmark = { workspace = true }

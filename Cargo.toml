@@ -11,6 +11,7 @@ members = [
     "crates/leviath-scripting",
     "crates/leviath-package",
     "crates/leviath-cli",
+    "crates/leviath-graphql-derive",
     "crates/leviath-alloc",
     "crates/leviath-tools",
     "crates/leviath-sys",
@@ -108,6 +109,7 @@ leviath-mcp = { path = "crates/leviath-mcp", version = "0.6.3" }
 leviath-scripting = { path = "crates/leviath-scripting", version = "0.6.3" }
 leviath-package = { path = "crates/leviath-package", version = "0.6.3" }
 leviath-tools = { path = "crates/leviath-tools", version = "0.6.3" }
+leviath-graphql-derive = { path = "crates/leviath-graphql-derive", version = "0.6.3" }
 leviath-sys = { path = "crates/leviath-sys", version = "0.6.3" }
 leviath-telemetry = { path = "crates/leviath-telemetry", version = "0.6.3" }
 leviath-testkit = { path = "crates/leviath-testkit" }
@@ -269,6 +271,19 @@ async-graphql = { version = "7.2", features = [
 # `axum-0.8.1` is what this pins, which is the axum the workspace already uses,
 # so the GraphQL routes mount on the existing router rather than a second one.
 async-graphql-axum = "7.2"
+# The three crates every proc macro is written with, behind the `#[mirror]`
+# attribute that writes each GraphQL output type's filter mirror. All three
+# were already in the lock file (async-graphql's own derive pulls them), so
+# naming them here adds no crate to the graph and keeps one version in force.
+# `visit` is what reads a resolver body for an `.await` it was not marked for;
+# `extra-traits` is what lets the macro's unit tests compare parsed items.
+syn = { version = "2", features = ["full", "visit", "visit-mut", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+# Formats a generated token stream back into readable Rust so the macro's unit
+# tests assert on source a person can read, rather than on one long line of
+# tokens. Test-only, in one crate.
+prettyplease = "0.2"
 
 # ── Release profile ──────────────────────────────────────────────────────────
 #

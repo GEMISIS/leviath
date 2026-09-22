@@ -343,7 +343,7 @@ jobs:
                    leviath-mcp leviath-package leviath-scripting \
                    leviath-telemetry leviath-providers leviath-tools \
                    leviath-agent-client leviath-runtime \
-                   leviath leviath-cli; do
+                   leviath leviath-graphql-derive leviath-cli; do
             if curl -fsS -A "leviath-ci (github.com/GEMISIS/leviath)" \
                  "https://crates.io/api/v1/crates/$c/$VERSION" >/dev/null 2>&1; then
               echo "$c@$VERSION already on crates.io, skipping"

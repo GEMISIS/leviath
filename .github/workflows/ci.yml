@@ -335,6 +335,7 @@ jobs:
           - leviath-scripting
           - leviath-package
           - leviath-tools
+          - leviath-graphql-derive
           - leviath-cli
           - leviath-sys
           - leviath-telemetry
