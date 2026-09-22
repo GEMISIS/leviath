@@ -1,0 +1,30 @@
+[package]
+name = "leviath-graphql-derive"
+description = "The #[mirror] attribute: a GraphQL output type's filter input, written from the type itself"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+
+[dev-dependencies]
+prettyplease = { workspace = true }
+async-graphql = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
