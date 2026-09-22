@@ -1,12 +1,66 @@
-//! The `putMimeRow` and `deleteMimeRow` fields, and the input a row is
+//! The `upsertMimeRow` and `deleteMimeRow` fields, and the input a row is
 //! written from.
 
+use async_graphql::{Context, InputObject, OneofObject, SimpleObject};
+
 use super::super::super::core::error::ServeError;
+use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
+use super::super::types::machine::MimeRow;
+
+/// Tokens counted from the picture's area, as a write sends it.
+#[derive(Debug, InputObject)]
+pub(crate) struct PerPixelWrite {
+    /// How many pixels one token buys.
+    pub(crate) pixels_per_token: i32,
+    /// The most one part may cost, and the answer when the dimensions cannot
+    /// be read.
+    pub(crate) max: Option<i32>,
+}
+
+/// How the tokens of a mime type are counted. Exactly one rate.
+#[derive(Debug, OneofObject)]
+pub(crate) enum MimeTokensWrite {
+    /// Tokens per byte of the stored file.
+    PerByte(f64),
+    /// From the picture's area, capped.
+    PerPixel(PerPixelWrite),
+    /// Tokens per second of audio or video.
+    PerSecond(i32),
+    /// Tokens per page of a document.
+    PerPage(i32),
+    /// A flat charge, whatever the size.
+    Fixed(i32),
+}
+
+impl MimeTokensWrite {
+    /// The rule these rates describe.
+    ///
+    /// No refusal, unlike the JSON body the REST route reads: that one carries
+    /// five nullable rates and has to be told "name exactly one", where this
+    /// shape admits exactly one and the refusal happens in the parser.
+    fn into_spec(self) -> crate::commands::mime_rows::TokenSpec {
+        use crate::commands::mime_rows::TokenSpec;
+        match self {
+            Self::PerByte(rate) => TokenSpec::PerByte(rate),
+            Self::PerPixel(pixels) => TokenSpec::PerPixel {
+                divisor: i64::from(pixels.pixels_per_token),
+                max: pixels.max.map(i64::from),
+            },
+            Self::PerSecond(rate) => TokenSpec::PerSecond(i64::from(rate)),
+            Self::PerPage(rate) => TokenSpec::PerPage(i64::from(rate)),
+            Self::Fixed(tokens) => TokenSpec::Fixed(i64::from(tokens)),
+        }
+    }
+}
 
 /// One row of the mime registry, as a write sends it.
-#[derive(async_graphql::InputObject)]
-pub(crate) struct MimeRowInput {
+///
+/// Every field but the key is optional, because a row says only what it
+/// changes: what a field leaves out stays as whatever broader row already
+/// covers the type.
+#[derive(Debug, InputObject)]
+pub(crate) struct MimeRowWrite {
     /// The type or pattern this row covers: `image/png`, or `image/*`.
     pub(crate) mime_type: String,
     /// The family providers key their encoders on.
@@ -23,65 +77,48 @@ pub(crate) struct MimeRowInput {
     /// lifts a check a broader row put on the type.
     pub(crate) check: Option<String>,
     /// How the tokens are counted.
-    pub(crate) tokens: Option<MimeTokensInput>,
+    pub(crate) tokens: Option<MimeTokensWrite>,
 }
 
-/// How the tokens of a mime type are counted. Name exactly one rate.
-#[derive(async_graphql::InputObject)]
-pub(crate) struct MimeTokensInput {
-    /// Tokens per byte of the stored file.
-    pub(crate) per_byte: Option<f64>,
-    /// Pixels one token buys. Pair it with `max`.
-    pub(crate) per_pixel: Option<i32>,
-    /// The most one part may cost, and the answer when the dimensions are
-    /// unknown. Only with `perPixel`.
-    pub(crate) max: Option<i32>,
-    /// Tokens per second of audio or video.
-    pub(crate) per_second: Option<i32>,
-    /// Tokens per page of a document.
-    pub(crate) per_page: Option<i32>,
-    /// A flat charge, whatever the size.
-    pub(crate) fixed: Option<i32>,
+/// Which row to write.
+#[derive(Debug, InputObject)]
+pub(crate) struct UpsertMimeRowRequest {
+    /// The row to write.
+    pub(crate) row: MimeRowWrite,
 }
 
-impl MimeTokensInput {
-    /// The rule these rates describe, or why they describe none.
-    ///
-    /// Through the same reader the REST route uses, so "exactly one rate" means
-    /// the same thing on both surfaces.
-    fn into_spec(self) -> Result<crate::commands::mime_rows::TokenSpec, ServeError> {
-        super::super::super::mime::TokenRuleReq {
-            per_byte: self.per_byte,
-            per_pixel: self.per_pixel.map(i64::from),
-            per_second: self.per_second.map(i64::from),
-            per_page: self.per_page.map(i64::from),
-            fixed: self.fixed.map(i64::from),
-            max: self.max.map(i64::from),
-        }
-        .into_spec()
-        .map_err(ServeError::BadRequest)
-    }
+/// The row as the registry now holds it.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct UpsertMimeRowResult {
+    /// The row, read back through the registry, so what comes back is what a
+    /// run will resolve rather than what was sent.
+    pub(crate) mime_row: MimeRow,
+    /// Whether the row is new, rather than an update of one already there.
+    pub(crate) is_new: bool,
 }
 
-/// What writing a mime row did.
-#[derive(Debug, async_graphql::SimpleObject)]
-pub(crate) struct MimeRowWritten {
+/// Which row to take out.
+#[derive(Debug, InputObject)]
+pub(crate) struct DeleteMimeRowRequest {
     /// The row's key.
     pub(crate) mime_type: String,
-    /// True when the row is new, false when an existing one was updated.
-    pub(crate) created: bool,
+}
+
+/// What was taken out.
+#[derive(Debug, SimpleObject)]
+pub(crate) struct DeleteMimeRowResult {
+    /// The key the row was under.
+    pub(crate) deleted_mime_type: String,
 }
 
 /// Add or update one row of the mime registry.
-///
-/// Every field but the key is optional, because a row says only what it
-/// changes: what a field leaves out stays as whatever broader row already
-/// covers the type.
-pub(crate) async fn put_mime_row(row: MimeRowInput) -> async_graphql::Result<MimeRowWritten> {
-    let tokens = match row.tokens {
-        None => None,
-        Some(rates) => Some(rates.into_spec().gql()?),
-    };
+pub(crate) async fn upsert_mime_row(
+    ctx: &Context<'_>,
+    request: UpsertMimeRowRequest,
+) -> async_graphql::Result<UpsertMimeRowResult> {
+    let state = ctx.data_unchecked::<AppState>();
+    let row = request.row;
+    let tokens = row.tokens.map(MimeTokensWrite::into_spec);
     let written = super::super::super::mime::write_edit(
         &row.mime_type,
         crate::commands::mime_rows::RowEdit {
@@ -95,16 +132,32 @@ pub(crate) async fn put_mime_row(row: MimeRowInput) -> async_graphql::Result<Mim
         },
     )
     .gql()?;
-    Ok(MimeRowWritten {
-        mime_type: written.mime_type,
-        created: written.created,
+    Ok(UpsertMimeRowResult {
+        // The registry rather than the write: a row inherits from every broader
+        // row above it, so what a run resolves for this type is not what the
+        // write said on its own.
+        mime_row: MimeRow::from_entry(super::super::super::blobs::mime_row_named(
+            state,
+            &written.mime_type,
+        )),
+        is_new: written.created,
     })
 }
 
 /// Remove a row from the mime registry.
 ///
-/// False when there was no such row, which is a fact about the registry
-/// rather than a failed request.
-pub(crate) async fn delete_mime_row(mime_type: String) -> async_graphql::Result<bool> {
-    super::super::super::mime::remove_row_named(&mime_type).gql()
+/// A key nothing has a row for is a miss: the caller named a row, and there
+/// was none to take out.
+pub(crate) async fn delete_mime_row(
+    request: DeleteMimeRowRequest,
+) -> async_graphql::Result<DeleteMimeRowResult> {
+    let removed = super::super::super::mime::remove_row_named(&request.mime_type).gql()?;
+    match removed {
+        true => Ok(DeleteMimeRowResult {
+            deleted_mime_type: request.mime_type,
+        }),
+        false => Err(super::super::error::graphql_error(&ServeError::NotFound(
+            format!("no row for '{}'", request.mime_type),
+        ))),
+    }
 }

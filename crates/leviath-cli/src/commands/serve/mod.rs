@@ -55,7 +55,7 @@ mod event_seam_tests;
 
 pub use args::ServeArgs;
 pub(crate) use config::list_model_ids;
-pub(crate) use events::ServerEvent;
+pub(crate) use events::Stamped;
 pub(crate) use mcp::list_mcp_tools;
 pub(crate) use types::AppState;
 use types::ServeLimits;
@@ -431,7 +431,7 @@ async fn execute_with_shutdown(
 
     // Sized like the daemon's WorldEvent ring (see WorldHost): the ring never
     // shrinks, so its capacity is a permanent memory floor once filled.
-    let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
+    let (event_tx, _) = broadcast::channel::<Stamped>(256);
 
     let state = AppState {
         caches: Default::default(),
@@ -851,6 +851,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use events::ServerEvent;
     use tower::ServiceExt;
 
     use crate::runstate::RunMeta;
@@ -1061,6 +1062,7 @@ mod tests {
         ("DaemonIncompatible", 502),
         ("Upstream", 502),
         ("Unprocessable", 422),
+        ("PayloadTooLarge", 413),
         ("RangeNotSatisfiable", 416),
         ("UnsupportedMedia", 415),
         ("Internal", 500),
@@ -1205,7 +1207,7 @@ mod tests {
     #[test]
     fn the_printed_schema_is_the_served_one() {
         let printed = graphql_schema();
-        assert!(printed.contains("type Run "), "{printed}");
+        assert!(printed.contains("type RunOutput "), "{printed}");
         assert_eq!(printed, graphql::sdl());
     }
 
@@ -1257,6 +1259,10 @@ mod tests {
             ),
             ("Upstream", ServeError::Upstream(String::new())),
             ("Unprocessable", ServeError::Unprocessable(String::new())),
+            (
+                "PayloadTooLarge",
+                ServeError::PayloadTooLarge(String::new()),
+            ),
             (
                 "RangeNotSatisfiable",
                 ServeError::RangeNotSatisfiable(String::new()),
@@ -1648,7 +1654,7 @@ mod tests {
                 "the ordinary mutations are always there: {names:?}"
             );
             assert_eq!(
-                names.iter().any(|name| name == "addMcpServer"),
+                names.iter().any(|name| name == "createMcpServer"),
                 allow_admin,
                 "the admin mutations follow the flag (allow_admin: {allow_admin})"
             );

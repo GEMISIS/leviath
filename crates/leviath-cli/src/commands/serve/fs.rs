@@ -58,7 +58,7 @@ pub(super) fn dir_listing(
     use super::core::error::ServeError;
 
     let root = state.limits.workdir_root.as_deref();
-    let cwd = known_dir_or_fs_root(std::env::current_dir().ok());
+    let cwd = picker_cwd();
 
     let listed = match path {
         Some(p) => {
@@ -141,13 +141,24 @@ pub(super) fn dir_listing(
     Ok(DirsResp {
         path: listed.to_string_lossy().into_owned(),
         parent,
-        home: known_dir_or_fs_root(dirs::home_dir())
-            .to_string_lossy()
-            .into_owned(),
+        home: picker_home(),
         cwd: cwd.to_string_lossy().into_owned(),
         root: root.map(|r| r.to_string_lossy().into_owned()),
         dirs,
     })
+}
+
+/// The home directory a picker anchors on.
+pub(super) fn picker_home() -> String {
+    known_dir_or_fs_root(dirs::home_dir())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The working directory a picker anchors on: this process's own, or the
+/// filesystem root when it has none to report.
+pub(super) fn picker_cwd() -> PathBuf {
+    known_dir_or_fs_root(std::env::current_dir().ok())
 }
 
 /// `POST /api/fs/dirs`: create one empty directory inside a directory the
