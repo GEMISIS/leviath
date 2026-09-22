@@ -7,17 +7,24 @@
 //! frames.
 //!
 //! Every frame carries its place in the stream. [`Event`] is the interface
-//! that says so - a sequence number that rises strictly, and the second the
-//! server sent it - and [`RunEvent`] adds the run the frame is about, with the
-//! run itself readable on demand. So a client can select `seq at runId` once,
-//! in one fragment, and only reach for a member type when it needs that
-//! member's own fields.
+//! that says so - this server's own number for the frame, and the second it
+//! sent it - and [`RunEvent`] adds the run the frame is about, with the run
+//! itself readable on demand. So a client can select `seq at runId` once, in
+//! one fragment, and only reach for a member type when it needs that member's
+//! own fields.
 //!
-//! Two frames come from this server rather than from the daemon, and they are
-//! deliberately outside both interfaces: [`SubscriptionOpenedEvent`], which is
-//! always the first frame of every subscription, and [`EventsDroppedEvent`],
-//! which says a subscriber fell behind. Domain and transport are separable
-//! with one fragment because of that split.
+//! Two frames come from this server rather than from the daemon:
+//! [`SubscriptionOpenedEvent`], which is always the first frame of every
+//! subscription, and [`EventsDroppedEvent`], which says a subscriber fell
+//! behind. They carry the stamp like everything else, so they implement
+//! [`Event`]; they are about no run, so they stay out of [`RunEvent`], and
+//! that is what keeps domain and transport separable with one fragment.
+//!
+//! The number is this server's, one counter for the whole process rather than
+//! one per subscription. A subscription that asked for three frame types sees
+//! the numbers of those three, so a gap is the ordinary shape of a filtered
+//! stream and says nothing about what was missed. [`EventsDroppedEvent`] is
+//! the only thing that announces a drop.
 
 use std::sync::Arc;
 
@@ -106,10 +113,14 @@ macro_rules! frames {
             #[derive(Debug, SimpleObject)]
             #[graphql(complex)]
             pub(crate) struct $revent {
-                /// Where this frame sits in the stream, counting from one.
+                /// Where this frame sits in this server's own numbering of
+                /// frames, counting from one.
                 ///
-                /// Rises strictly on this subscription. A jump means frames
-                /// went past, which is also announced as `EventsDroppedEvent`.
+                /// One counter for the server, not one per subscription. Two
+                /// subscriptions open at once see the same frame under the
+                /// same number, and a subscription that asked for some frame
+                /// types sees only those numbers, so gaps are ordinary and say
+                /// nothing. `EventsDroppedEvent` is what announces a drop.
                 seq: BigInt,
                 /// When the server sent it, in unix seconds.
                 at: Timestamp,
@@ -159,7 +170,10 @@ macro_rules! frames {
             $(#[$mmeta])*
             #[derive(Debug, SimpleObject)]
             pub(crate) struct $mevent {
-                /// Where this frame sits in the stream, counting from one.
+                /// Where this frame sits in this server's own numbering of
+                /// frames, counting from one. Server-wide rather than per
+                /// subscription, so a gap says nothing and only
+                /// `EventsDroppedEvent` announces a drop.
                 seq: BigInt,
                 /// When the server sent it, in unix seconds.
                 at: Timestamp,
@@ -173,7 +187,11 @@ macro_rules! frames {
         /// whatever it turns out to be. `run` is read only when selected.
         #[derive(Debug, Interface)]
         #[graphql(
-            field(name = "seq", ty = "&BigInt", desc = "Where this frame sits in the stream."),
+            field(
+                name = "seq",
+                ty = "&BigInt",
+                desc = "Where this frame sits in this server's own numbering of frames."
+            ),
             field(name = "at", ty = "&Timestamp", desc = "When the server sent it."),
             field(name = "run_id", ty = "&ID", desc = "The run this is about."),
             field(
@@ -191,20 +209,29 @@ macro_rules! frames {
             $( $(#[$rmeta])* $rvalue($revent), )*
         }
 
-        /// One frame off the daemon broadcast, run or machine.
+        /// One frame a subscription can yield, whatever it turns out to be.
         ///
-        /// The interface every frame the daemon produces implements, so a
-        /// client reads the stream's bookkeeping without knowing which frame
-        /// it has. The two frames this server produces itself are deliberately
-        /// outside it.
+        /// The interface every frame implements, the two this server produces
+        /// about the subscription itself included, so `... on Event { seq at }`
+        /// reads the stream's bookkeeping off any frame at all. Telling a
+        /// domain frame from a transport one is what the union is for, and
+        /// `RunEvent` is what narrows to the frames about a run.
         #[derive(Debug, Interface)]
         #[graphql(
-            field(name = "seq", ty = "&BigInt", desc = "Where this frame sits in the stream."),
+            field(
+                name = "seq",
+                ty = "&BigInt",
+                desc = "Where this frame sits in this server's own numbering of frames."
+            ),
             field(name = "at", ty = "&Timestamp", desc = "When the server sent it.")
         )]
         pub(crate) enum Event {
             $( $(#[$rmeta])* $rvalue($revent), )*
             $( $(#[$mmeta])* $mvalue($mevent), )*
+            /// The subscription opened.
+            SubscriptionOpened(SubscriptionOpenedEvent),
+            /// This subscription fell behind.
+            EventsDropped(EventsDroppedEvent),
         }
 
         /// One frame type a run subscription can ask for.
@@ -512,9 +539,9 @@ pub(crate) struct DaemonIdentity {
 /// without a second request.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct SubscriptionOpenedEvent {
-    /// The sequence number the last frame before this subscription carried, or
-    /// zero on a server that has sent none. Every frame on this subscription
-    /// has a number above it.
+    /// The number the last frame before this subscription carried, or zero on
+    /// a server that has sent none. Every frame on this subscription has a
+    /// number above it, though not every number above it arrives here.
     pub(crate) seq: BigInt,
     /// When the subscription opened, in unix seconds.
     pub(crate) at: Timestamp,
@@ -536,9 +563,11 @@ pub(crate) struct SubscriptionOpenedEvent {
 /// see it; the subscription itself stays open.
 #[derive(Debug, SimpleObject)]
 pub(crate) struct EventsDroppedEvent {
-    /// How many frames this subscription missed.
+    /// How many frames went past unread. Counted off the server's own
+    /// numbering, so it includes frames this subscription's filter would have
+    /// dropped anyway: an upper bound on what was missed, never an under-count.
     pub(crate) count: BigInt,
-    /// The sequence number of the last frame that did arrive.
+    /// The number of the last frame that did arrive.
     pub(crate) seq: BigInt,
     /// When the gap was noticed, in unix seconds.
     pub(crate) at: Timestamp,

@@ -7,7 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::scripts::{ScriptItem, ScriptKind, compile_status, declared_address, status_pair};
+use super::scripts::{ScriptItem, ScriptKind, compile_status, status_pair};
+use super::scripts_address::declared_address;
 
 /// The directory the operator's mime checks resolve against: the one
 /// `config.toml` and `mime_types.toml` sit in, since a row's `check` is a

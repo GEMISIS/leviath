@@ -5,7 +5,7 @@ use async_graphql::{Context, ID, InputObject, SimpleObject};
 
 use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
-use super::super::script_ref::{ScriptRef, ScriptScope};
+use super::super::script_ref::ScriptRef;
 use super::super::types::machine::Script;
 
 /// Which script to write, and what to put in it.
@@ -62,30 +62,30 @@ pub(crate) async fn upsert_script(
         &request.content,
     )
     .gql()?;
+    // Built by the constructor a listing builds its rows with, from the same
+    // shape, so the script this answers with and the script `script(ref:)`
+    // answers with cannot describe the same file differently.
     Ok(UpsertScriptResult {
-        script: Script {
-            id: super::super::node::script_id(
-                kind,
-                reference.blueprint_name.as_deref(),
-                &reference.name,
-            ),
-            kind: reference.kind,
+        script: Script::from_item(super::super::super::scripts::ScriptItem {
+            kind: kind.to_string(),
             name: reference.name,
-            scope: match reference.blueprint_name {
-                Some(_) => ScriptScope::Blueprint,
-                None => ScriptScope::Global,
-            },
-            blueprint_name: reference.blueprint_name,
+            // The two words a listing spells a scope with, and the two
+            // `ScriptScope::from_wire` reads back.
+            source: match reference.blueprint_name {
+                Some(_) => "agent",
+                None => "global",
+            }
+            .to_string(),
+            agent: reference.blueprint_name,
             path: written.path,
-            // The path a write is addressed by is the path it lands at, so
-            // there is nothing to relativize that the reference did not say.
-            relative_path: None,
+            relative_path: written.relative_path,
             // Written by name into the registry the kind selects, which is
             // what being declared is.
-            is_declared: true,
+            declared: true,
             compiles: Some(written.compiles),
-            compile_error: written.error,
-        },
+            error: written.error,
+            provider: None,
+        }),
     })
 }
 

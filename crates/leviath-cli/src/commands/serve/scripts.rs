@@ -56,6 +56,7 @@ use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
 use super::core::error::ServeError;
+use super::scripts_address::{addressed_path, declared_address, relative_of};
 use super::scripts_mime::{collect_mime_checks, config_dir, row_checks};
 use super::tools::agent_dir;
 use super::types::{ApiError, AppState};
@@ -142,83 +143,14 @@ struct Target {
     /// The `{name}` this was addressed by, normalized: `/`-separated, no
     /// `.rhai`. Spelled back so a response never renames what it was asked for.
     name: String,
+    /// The same file relative to the directory whose rows or manifest name it,
+    /// exactly as the listing reports it. Absent where the listing reports
+    /// none.
+    relative: Option<String>,
     /// `agent` or `global`.
     scope: &'static str,
     /// The agent that owns it, absent for the global directory.
     agent: Option<String>,
-}
-
-/// A `.rhai` file addressed relative to some directory.
-///
-/// One shape for the two places a relative script path is read: a `{name}` off
-/// the URL, and a path a manifest declares. Both have to end up as the same
-/// three answers - what to call it, where it sits, and what to write into a
-/// manifest - and having them computed twice is how the two disagreed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Addressed {
-    /// The `{name}` the routes address it by: `/`-separated, `.rhai` stripped.
-    pub(super) name: String,
-    /// The same file relative to the base directory, extension included, always
-    /// with `/` separators because that is what goes into a manifest.
-    pub(super) relative: String,
-    /// The directory components between the base and the file, in order.
-    dirs: Vec<String>,
-    /// The file name, `.rhai` included.
-    file: String,
-}
-
-impl Addressed {
-    /// Where the file sits under `base`.
-    fn dir_in(&self, base: &Path) -> PathBuf {
-        self.dirs
-            .iter()
-            .fold(base.to_path_buf(), |acc, d| acc.join(d))
-    }
-
-    /// The file itself under `base`.
-    pub(super) fn path_in(&self, base: &Path) -> PathBuf {
-        self.dir_in(base).join(&self.file)
-    }
-}
-
-/// Read a `{name}` as a path relative to a script directory, or `None` when it
-/// is not one these routes can address.
-///
-/// A name may be a single component (`check`) or a `/`-separated relative path
-/// (`validators/a2ui`), because that is the shape a manifest declares a hook or
-/// a validator in and the shape the listing has to report back. Every component
-/// goes through [`leviath_core::is_safe_path_component`], which is what keeps
-/// `..`, an absolute path, a Windows `\` separator and an empty segment out:
-/// `Path::join` normalizes none of them. Containment is still checked
-/// afterwards by [`guard`], because a component that is safe to spell can still
-/// be a symlink pointing elsewhere.
-///
-/// The `.rhai` extension is fixed here rather than taken from the caller, so no
-/// request can ask for a `.toml`, a manifest, or anything else in the agent's
-/// directory. A name that already carries the extension means the same file,
-/// since that is how a manifest and this listing both spell one.
-fn addressed_path(name: &str) -> Option<Addressed> {
-    let stem = name.strip_suffix(".rhai").unwrap_or(name);
-    let mut dirs: Vec<String> = Vec::new();
-    let mut file = String::new();
-    for part in stem.split('/') {
-        if !leviath_core::is_safe_path_component(part) {
-            return None;
-        }
-        // Which component is the file is only known once the walk ends, so
-        // whatever was holding that place becomes a directory as soon as
-        // another component arrives. An empty `file` is the first turn.
-        if !file.is_empty() {
-            dirs.push(std::mem::take(&mut file));
-        }
-        file = part.to_string();
-    }
-    Some(Addressed {
-        name: stem.to_string(),
-        relative: format!("{stem}.rhai"),
-        file: format!("{file}.rhai"),
-        dirs,
-    })
 }
 
 /// Resolve `{kind}/{name}` plus an optional `?agent=` into the one file the
@@ -290,12 +222,14 @@ fn resolve(
 
     let file_dir = addressed.dir_in(&dir);
     let path = addressed.path_in(&dir);
+    let relative = relative_of(kind, agent, &addressed);
     Ok(Target {
         kind,
         dir,
         file_dir,
         path,
         name: addressed.name,
+        relative,
         scope,
         agent: owner,
     })
@@ -569,6 +503,17 @@ pub(super) struct ScriptWritten {
     /// Why not, when it does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) error: Option<String>,
+    /// The same file relative to the directory whose rows or manifest name it,
+    /// which is what a listing reports for it. Absent for a global tool or a
+    /// provider, which nothing names by path.
+    ///
+    /// Not part of the REST body: `PUT /api/scripts/{kind}/{name}` answers
+    /// where the file landed and whether it compiles, and a client that wants
+    /// the row spelling reads the listing. It travels here so the GraphQL
+    /// answer can be built by the same constructor the listing is built by,
+    /// rather than working the spelling out a second time and differently.
+    #[serde(skip)]
+    pub(super) relative_path: Option<String>,
 }
 
 /// The body of `POST /api/scripts/validate`.
@@ -596,19 +541,6 @@ pub(super) struct ValidateScriptResp {
 }
 
 // ─── Listing ────────────────────────────────────────────────────────────────
-
-/// How a manifest-declared path is addressed, or `None` when the manifest
-/// declared something these routes cannot address.
-///
-/// A manifest may name any path inside the agent's directory, a subdirectory
-/// included, and [`addressed_path`] handles those. What it does not handle is a
-/// declaration that is not a `.rhai` file at all: `addressed_path` appends the
-/// extension, so a declared `notes.txt` would be reported as `notes.txt.rhai`,
-/// a different file. Requiring the suffix here keeps the listing off it.
-pub(super) fn declared_address(declared: &str) -> Option<Addressed> {
-    let stem = declared.strip_suffix(".rhai")?;
-    addressed_path(stem)
-}
 
 /// Every hook and validator the manifest declares, keyed by kind and declared
 /// path, carrying the stage-hook names each file was named for.
@@ -1134,6 +1066,7 @@ fn write_script(target: &Target, content: &str) -> Result<ScriptWritten, ServeEr
         path: label,
         compiles,
         error,
+        relative_path: target.relative.clone(),
     })
 }
 

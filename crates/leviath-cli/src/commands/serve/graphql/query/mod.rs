@@ -20,6 +20,8 @@
 
 use async_graphql::{Context, ID, Object};
 
+use super::paging::page::weight;
+
 use runs::{RunListingExtras, RunSearchOptions};
 
 use super::checks::{KeyVerdict, ScriptVerdict, ValidationReport};
@@ -98,6 +100,7 @@ impl Query {
     /// Keyset-paged, by name ascending unless `orderBy` says otherwise. A
     /// cursor names where you got to, so a blueprint installed or removed
     /// mid-walk cannot make a page skip or repeat one.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn blueprints(
         &self,
         ctx: &Context<'_>,
@@ -155,6 +158,7 @@ impl Query {
     ///
     /// Keyset-paged, by name ascending unless `orderBy` says otherwise, which
     /// is the key a machine holds one server per.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn mcp_servers(
         &self,
         ctx: &Context<'_>,
@@ -194,6 +198,7 @@ impl Query {
     ///
     /// Keyset-paged, by name ascending unless `orderBy` says otherwise, which
     /// is the key the file holds one profile per.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn yolo_profiles(
         &self,
         #[graphql(desc = "Which profiles to list. Omitted means all of them.")] filter: Option<
@@ -227,6 +232,7 @@ impl Query {
     ///
     /// Keyset-paged, by mime type ascending unless `orderBy` says otherwise,
     /// which is the order the registry itself is stored in.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn mime_rows(
         &self,
         ctx: &Context<'_>,
@@ -250,6 +256,7 @@ impl Query {
     /// For one blueprint's own scripts as well, read `scripts` on that
     /// blueprint: the scope changes which directory is walked, so it is a field
     /// there rather than an argument here.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn scripts(
         &self,
         ctx: &Context<'_>,
@@ -308,6 +315,7 @@ impl Query {
     /// Two providers can serve the same model id and bill to different places,
     /// so the provider is part of each answer rather than something a client
     /// infers: for one provider's models, filter on `providerName`.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn models(
         &self,
         ctx: &Context<'_>,
@@ -338,11 +346,18 @@ impl Query {
         catalog::model(ctx, id).await
     }
 
-    /// The providers this machine can reach, configured or not.
+    /// The providers a person signs in to through a browser, signed in or not.
+    ///
+    /// Not every provider this machine can talk to. One that takes an API key
+    /// is never signed in to, so it is not here; `config.providers` is where
+    /// every provider this build knows is listed. This field is the state
+    /// behind `signInProvider` and `signOutProvider`, which is why it is the
+    /// sign-in ones and only those.
     ///
     /// `enabled` and `signedIn` are different questions with different
     /// answers: a provider can be turned on with no credential stored, and a
     /// credential can outlive the config entry that used it.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn providers(
         &self,
         ctx: &Context<'_>,
@@ -361,9 +376,10 @@ impl Query {
         catalog::providers(ctx, filter, order_by, first, after).await
     }
 
-    /// One provider, by the registry name a blueprint would write.
+    /// One browser sign-in provider, by the registry name a blueprint writes.
     ///
-    /// Null for a name this build has no provider for.
+    /// Null for a name `providers` does not list, a provider that takes an API
+    /// key included.
     async fn provider(
         &self,
         ctx: &Context<'_>,
@@ -380,6 +396,7 @@ impl Query {
     ///
     /// `skipped` sits beside the page: it is what the same walk of the same
     /// directories found and could not offer, with the reason.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn tools(
         &self,
         ctx: &Context<'_>,
@@ -484,6 +501,7 @@ impl Query {
     /// Keyset-paged, oldest first unless `orderBy` says otherwise. A job's id
     /// carries the second it started, so ordering by it is ordering by when it
     /// ran.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn update_jobs(
         &self,
         ctx: &Context<'_>,
@@ -521,6 +539,7 @@ impl Query {
     /// of the run store. Each entry names the run it is parked on through its
     /// own `run` field, which is what a client needs to show the row it
     /// belongs to.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn open_interactions(
         &self,
         ctx: &Context<'_>,
@@ -551,6 +570,7 @@ impl Query {
     /// by reading, and only for the runs the page being asked for reaches, so
     /// page two costs nothing for page one's runs. `total` is the one field
     /// that can cost a pass over the store: ask for it on the first page.
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn runs(
         &self,
         ctx: &Context<'_>,

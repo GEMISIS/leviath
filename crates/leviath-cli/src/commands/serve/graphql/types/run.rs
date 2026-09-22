@@ -23,7 +23,7 @@ use super::super::error::IntoGraphql;
 use super::super::filter::{MatchCx, run_relations};
 use super::super::paging::digest::canonical;
 use super::super::paging::order::{OrderDirection, Term};
-use super::super::paging::page::page;
+use super::super::paging::page::{page, weight};
 use super::super::scalars::{BigInt, Cursor, Decimal, Timestamp};
 use super::blueprint::Blueprint;
 use super::interaction::{Interaction, InteractionFilter, InteractionOrder, InteractionOutput};
@@ -400,6 +400,7 @@ impl Run {
     /// `stages: { some: { status: { eq: ERROR } } }` on `runs` is "every run
     /// that failed a stage", and it costs the one file per run it reaches.
     #[filter(io, with = "run_relations::stages_of", ty = "Vec<StageRecord>")]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn stages(
         &self,
         #[graphql(desc = "Which stages to include. Omitted means all of them.")] filter: Option<
@@ -469,6 +470,7 @@ impl Run {
     /// walk deeper, one level per nesting; for a flat read of the whole subtree
     /// use `runs(filter: { ancestorIds: { has: "<id>" } })`.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn children(
         &self,
         ctx: &Context<'_>,
@@ -580,6 +582,7 @@ impl Run {
     /// them, and about the record rather than the link: `blobs: { some: {
     /// mimeType: { startsWith: "image/" } } }` is "every run holding an image".
     #[filter(io, with = "run_relations::blobs_of", ty = "Vec<BlobEntry>")]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn blobs(
         &self,
         ctx: &Context<'_>,
@@ -631,6 +634,7 @@ impl Run {
     /// on the records rather than on the link or on one page of them. The run's
     /// own submission record holds these, so filtering on them reads nothing.
     #[filter(with = "run_relations::artifacts_of", ty = "Vec<Artifact>")]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn artifacts(
         &self,
         ctx: &Context<'_>,
@@ -761,6 +765,7 @@ impl Run {
     /// the disk. `WORKDIR` is the truth, one directory level per request: that
     /// bound is the answer to a repository with a `node_modules` in it.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn files(
         &self,
         ctx: &Context<'_>,
@@ -858,6 +863,7 @@ impl Run {
     /// a restart cut off. Results are not on the page; each execution fetches its
     /// own, because one result can be a whole file.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn executions(
         &self,
         #[graphql(desc = "Which executions to include. Omitted means all of them.")] filter: Option<
@@ -894,6 +900,7 @@ impl Run {
     /// the question reaches a person, so an empty list on a run that plainly
     /// did something dangerous means exactly that.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn interactions(
         &self,
         #[graphql(
@@ -926,6 +933,7 @@ impl Run {
     ///
     /// Empty for a run whose journal holds no attempt records.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn inferences(
         &self,
         #[graphql(desc = "Which attempts to include. Omitted means all of them.")] filter: Option<
@@ -960,6 +968,7 @@ impl Run {
     /// Empty for a run whose journal holds no change records, and for writes
     /// whose path cannot name a cause.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn context_changes(
         &self,
         #[graphql(desc = "Which changes to include. Omitted means all of them.")] filter: Option<
@@ -998,6 +1007,7 @@ impl Run {
     /// window, so a filtered page reads the run's whole history to decide what
     /// is on it. Page first and filter in the client where the history is long.
     #[filter(skip)]
+    #[graphql(complexity = "weight(first, child_complexity)")]
     async fn context_history(
         &self,
         #[graphql(desc = "Which points to include. Omitted means all of them.")] filter: Option<

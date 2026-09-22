@@ -259,16 +259,25 @@ fn the_frame_interfaces_reach_the_schema() {
         sdl.contains("type ConfigHealthChangedEvent implements Event"),
         "a machine frame implements Event"
     );
-    // The two transport frames are deliberately outside both, so one fragment
-    // separates what the daemon said from what this server is saying about the
-    // subscription itself.
+    // The two transport frames carry the stamp, so `... on Event { seq at }`
+    // answers on them too. They are about no run, so they stay outside
+    // `RunEvent`, and that is what separates what the daemon said from what
+    // this server is saying about the subscription itself.
     assert!(
-        sdl.contains("type SubscriptionOpenedEvent {"),
-        "the opening frame implements nothing"
+        sdl.contains("type SubscriptionOpenedEvent implements Event {"),
+        "the opening frame is an Event"
     );
     assert!(
-        sdl.contains("type EventsDroppedEvent {"),
-        "the gap frame implements nothing"
+        sdl.contains("type EventsDroppedEvent implements Event {"),
+        "the gap frame is an Event"
+    );
+    assert!(
+        !sdl.contains("SubscriptionOpenedEvent implements Event & RunEvent"),
+        "the opening frame is about no run"
+    );
+    assert!(
+        !sdl.contains("EventsDroppedEvent implements Event & RunEvent"),
+        "the gap frame is about no run"
     );
 }
 

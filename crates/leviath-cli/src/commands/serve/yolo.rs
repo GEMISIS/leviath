@@ -245,12 +245,55 @@ fn read_document() -> Result<DocumentMut, super::core::error::ServeError> {
     })
 }
 
+/// Check that the file, as it stands before anything is edited, loads.
+///
+/// Asked first and answered as [`ServeError::Unprocessable`], because a file
+/// that was already broken is not this request's doing: nothing the caller
+/// sends differently fixes it, and an operator told "bad request" would go
+/// looking at the query rather than at the file. It is the same thing a TOML
+/// file that will not even parse answers, and for the same reason.
+fn loads(doc: &DocumentMut) -> Result<YoloFile, super::core::error::ServeError> {
+    use super::core::error::ServeError;
+
+    YoloFile::from_toml(&doc.to_string()).map_err(|e| {
+        ServeError::Unprocessable(format!("{} does not load: {e}", yolo_path().display()))
+    })
+}
+
+/// Read the file, refuse a file that will not load, apply one edit, write it.
+///
+/// Both one-table writes are this shape, and they share it rather than each
+/// spelling it out, because the two checks around the edit are what say whose
+/// problem a failure is. A file that will not load before the edit is the
+/// operator's, and `UNPROCESSABLE` says so. A file that will not load after it
+/// is the caller's, and that is a bad request. An edit with nothing to do
+/// answers `false` and the file on disk is never opened for writing.
+///
+/// The edit arrives as a trait object rather than by type, so the two callers
+/// share one copy of this and the "nothing to do" arm is the same code for
+/// both. Written generically, the copy the upsert gets has an arm no request
+/// can reach, because an upsert always has a table to write.
+fn edit_document(
+    edit: &mut dyn FnMut(&mut DocumentMut) -> bool,
+) -> Result<Option<YoloFile>, super::core::error::ServeError> {
+    let mut doc = read_document()?;
+    loads(&doc)?;
+    match edit(&mut doc) {
+        false => Ok(None),
+        true => Ok(Some(save_document(&doc)?)),
+    }
+}
+
 /// Check that the document loads as a whole, then write it.
 ///
 /// The whole document rather than the one table that changed: the profiles are
 /// read as a set, and a save that left the file unloadable would be discovered
 /// at the next spawn rather than here. The file on disk is untouched until the
 /// check passes.
+///
+/// A refusal here is a bad request, because by this point the file was known to
+/// load and the edit is the only thing that changed: a reserved profile name, a
+/// shell rule that will not compile.
 fn save_document(doc: &DocumentMut) -> Result<YoloFile, super::core::error::ServeError> {
     use super::core::error::ServeError;
 
@@ -348,20 +391,73 @@ pub(super) struct Written {
     pub(super) profile: std::sync::Arc<crate::yolo::YoloProfile>,
 }
 
+/// What sits above one table's `[header]` line: the blank lines and comments
+/// written before it, which is where the file's own header lives when the
+/// table is the first one.
+fn prefix_of(item: Option<&Item>) -> String {
+    item.and_then(Item::as_table)
+        .and_then(|table| table.decor().prefix())
+        .and_then(toml_edit::RawString::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The table that comes first in the file as it now stands.
+///
+/// By written position rather than by the order the tables are held in, which
+/// is the order they were added in and not the order they are printed in.
+fn first_table(doc: &mut DocumentMut) -> Option<&mut Table> {
+    doc.as_table_mut()
+        .iter_mut()
+        .filter_map(|(_, item)| item.as_table_mut())
+        .min_by_key(|table| table.position().unwrap_or(isize::MAX))
+}
+
+/// Put trivia back above whichever table now stands where it was written.
+///
+/// `toml_edit` files the blank lines and comments before a `[header]` under
+/// that header's own table, so a file's leading comment belongs to whichever
+/// table happens to come first. Replacing or removing that table would take the
+/// comment with it, and the file would lose the line explaining what it is.
+fn keep_prefix(doc: &mut DocumentMut, prefix: &str) {
+    if prefix.is_empty() {
+        return;
+    }
+    let Some(table) = first_table(doc) else {
+        return;
+    };
+    let decor = table.decor_mut();
+    let below = decor
+        .prefix()
+        .and_then(toml_edit::RawString::as_str)
+        .unwrap_or_default()
+        .to_string();
+    decor.set_prefix(format!("{prefix}{below}"));
+}
+
 /// Write one profile's table, leaving every other table in the file as it is.
 ///
 /// Comments and formatting elsewhere in the file survive, because only the one
-/// table is replaced. The comments inside the table being written do not: it is
-/// rewritten from what the request said, and a comment about the old rules
-/// would then describe rules that are gone.
+/// table is replaced, and what sat above the replaced table's own header stays
+/// above it: that is where the file's own leading comment is kept when this is
+/// the first profile in it. The comments inside the table being written do not
+/// survive: it is rewritten from what the request said, and a comment about the
+/// old rules would then describe rules that are gone.
 pub(super) fn upsert_profile(
     name: &str,
     spec: &crate::yolo::rules::ProfileSpec,
 ) -> Result<Written, super::core::error::ServeError> {
-    let mut doc = read_document()?;
-    let is_new = doc.get(name).is_none();
-    doc.insert(name, Item::Table(profile_table(spec)));
-    let file = save_document(&doc)?;
+    let mut is_new = false;
+    let written = edit_document(&mut |doc| {
+        let existing = doc.get(name);
+        is_new = existing.is_none();
+        let kept = prefix_of(existing);
+        let mut table = profile_table(spec);
+        table.decor_mut().set_prefix(kept);
+        doc.insert(name, Item::Table(table));
+        true
+    })?;
+    let file = written.expect("a profile write always has a table to write");
     Ok(Written {
         is_new,
         profile: file
@@ -371,13 +467,21 @@ pub(super) fn upsert_profile(
 }
 
 /// Take one profile out of the file, and say whether there was one.
+///
+/// What sat above the removed table moves down to the table that is first now,
+/// so deleting the first profile does not delete the file's own header with it.
+/// A file that will not load is refused before the miss is answered: it cannot
+/// be read as "there is no profile by that name", and a miss would blame the
+/// name when what is wrong is the file.
 pub(super) fn remove_profile(name: &str) -> Result<bool, super::core::error::ServeError> {
-    let mut doc = read_document()?;
-    if doc.remove(name).is_none() {
-        return Ok(false);
-    }
-    save_document(&doc)?;
-    Ok(true)
+    let removed = edit_document(&mut |doc| match doc.remove(name) {
+        None => false,
+        Some(removed) => {
+            keep_prefix(doc, &prefix_of(Some(&removed)));
+            true
+        }
+    })?;
+    Ok(removed.is_some())
 }
 
 #[cfg(test)]

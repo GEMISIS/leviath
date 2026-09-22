@@ -353,6 +353,133 @@ async fn a_sweep_moves_what_it_can_and_names_what_it_did_not() {
     .await;
 }
 
+/// A run that finishes while the sweep's own act is in flight is passed over,
+/// never listed as one the sweep moved.
+///
+/// The daemon applies a cancel to its world and the persistence lane writes the
+/// record a tick later, so the record read before the act says `running` for a
+/// run that is already over. The daemon's cancel is unconditional once it gets
+/// there: it forces such a run onto `cancelled` on disk, which is a finished
+/// run's own answer overwritten and a `RunCompletedEvent` turned into a lie.
+/// The record is read again after the act, and a finish the act did not produce
+/// is the conflict it always was.
+#[tokio::test]
+async fn a_run_that_finishes_under_a_sweep_is_skipped_rather_than_overwritten() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-sweep-race", |_d| async move {
+        create_run(&run_in("racing", RunStatus::Running)).expect("run written");
+
+        let (control, _dir, _srv) = busy_daemon(|request| match request {
+            leviath_runtime::control_socket::ControlRequest::Cancel { .. } => {
+                // The run reached its own end while this request was on its
+                // way, and the lane wrote the record just before the daemon
+                // answered.
+                crate::runstate::write_meta(&run_in("racing", RunStatus::Complete))
+                    .expect("the finish is written");
+                ControlResponse::Ok { ok: true }
+            }
+            other => panic!("a cancel, not {other:?}"),
+        });
+        let answer = mutate(
+            control,
+            r#"mutation { cancelRuns(request: { filter: { id: { in: ["racing"] } } })
+                 { runs { id status } skipped { id reason } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = data_of(&answer);
+        assert_eq!(
+            json["cancelRuns"]["runs"],
+            serde_json::json!([]),
+            "a run that finished by itself is not a run the sweep moved"
+        );
+        assert_eq!(
+            json["cancelRuns"]["skipped"],
+            serde_json::json!([{"id": "racing", "reason": "ALREADY_FINISHED"}])
+        );
+        // And what the run says about itself is still its own answer.
+        assert_eq!(
+            crate::runstate::read_meta("racing")
+                .expect("the record")
+                .status,
+            RunStatus::Complete
+        );
+    })
+    .await;
+}
+
+/// The same race against the single-run act is the conflict a client can tell
+/// "you stopped it" from "it was over before you asked" by.
+#[tokio::test]
+async fn a_run_that_finishes_under_a_cancel_is_a_conflict() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-cancel-race", |_d| async move {
+        create_run(&run_in("racing", RunStatus::Running)).expect("run written");
+        let (control, _dir, _srv) = busy_daemon(|_| {
+            crate::runstate::write_meta(&run_in("racing", RunStatus::Complete))
+                .expect("the finish is written");
+            ControlResponse::Ok { ok: true }
+        });
+        let answer = mutate(
+            control,
+            r#"mutation { cancelRun(request: { id: "racing" }) { run { status } } }"#,
+        )
+        .await;
+        assert_eq!(code_of(&answer), "\"CONFLICT\"");
+    })
+    .await;
+}
+
+/// A sweep answers with each run as the act left it, not as it stood before.
+///
+/// The daemon moves the run in its world and answers; the record is written a
+/// tick later. A sweep that read the record the moment the daemon replied
+/// answered `RUNNING` for every run it had just paused, which is the one thing
+/// the field is there to say.
+#[tokio::test]
+async fn a_sweep_answers_with_the_status_the_act_left() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-sweep-settle", |_d| async move {
+        for id in ["one", "two"] {
+            create_run(&run_in(id, RunStatus::Running)).expect("run written");
+        }
+        let (control, _dir, _srv) = busy_daemon(|request| match request {
+            leviath_runtime::control_socket::ControlRequest::Pause { run_id } => {
+                // The lane writes the record after the daemon has answered,
+                // which is the ordering the settle loop exists for.
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                    crate::runstate::write_meta(&run_in(&run_id, RunStatus::Paused))
+                        .expect("the pause is written");
+                });
+                ControlResponse::Ok { ok: true }
+            }
+            other => panic!("a pause, not {other:?}"),
+        });
+        let answer = mutate(
+            control,
+            r#"mutation { pauseRuns(request: { filter: { id: { in: ["one", "two"] } } })
+                 { runs { id status } } }"#,
+        )
+        .await;
+        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+        let json = data_of(&answer);
+        // The sweep's own order is the listing's, newest first, so what is
+        // asserted is the pair rather than which came back first.
+        let mut moved: Vec<(&str, &str)> = json["pauseRuns"]["runs"]
+            .as_array()
+            .expect("the runs that moved")
+            .iter()
+            .map(|run| {
+                (
+                    run["id"].as_str().unwrap_or_default(),
+                    run["status"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        moved.sort_unstable();
+        assert_eq!(moved, vec![("one", "PAUSED"), ("two", "PAUSED")]);
+    })
+    .await;
+}
+
 /// The other two sweeps do the same thing with their own verb, and answer with
 /// their own result type.
 #[tokio::test]

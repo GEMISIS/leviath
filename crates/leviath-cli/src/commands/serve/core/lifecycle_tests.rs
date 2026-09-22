@@ -125,6 +125,54 @@ async fn a_conflict_names_the_act_it_refused() {
     .await;
 }
 
+/// A run that finishes while the control request is in flight is a conflict,
+/// not an act that landed.
+///
+/// Both surfaces read this: `POST /api/agents/{id}/cancel` answers 409 and the
+/// GraphQL sweep reports `ALREADY_FINISHED`. The record is read on each side of
+/// the request, because a run over in the daemon's world has not had its record
+/// written yet when the first read happens, and the daemon's cancel is
+/// unconditional once it arrives.
+#[tokio::test]
+async fn a_run_that_finishes_while_the_act_is_in_flight_is_a_conflict() {
+    crate::runstate::with_isolated_runs_dir_async("lifecycle-race", |_d| async move {
+        create_run(&run_in("racing", RunStatus::Running)).expect("run written");
+        let (control, _dir, _srv) = fake_daemon(|_| {
+            // The run reached its own end while the request was on its way.
+            crate::runstate::write_meta(&run_in("racing", RunStatus::Complete))
+                .expect("the finish is written");
+            ControlResponse::Ok { ok: true }
+        });
+        let failure = act(&state_with(control), "racing", Action::Cancel)
+            .await
+            .expect_err("it was over before the cancel got there");
+        assert_eq!(failure.code(), "CONFLICT");
+        assert!(failure.to_string().contains("complete"), "{failure}");
+    })
+    .await;
+}
+
+/// A cancel that lands is not read as the run finishing by itself.
+///
+/// `cancelled` is terminal and it is what a cancel produces, so the check made
+/// after the daemon answers has to tell those apart or every successful cancel
+/// would report itself as a conflict.
+#[tokio::test]
+async fn a_cancel_that_lands_is_not_a_conflict() {
+    crate::runstate::with_isolated_runs_dir_async("lifecycle-landed", |_d| async move {
+        create_run(&run_in("stopping", RunStatus::Running)).expect("run written");
+        let (control, _dir, _srv) = fake_daemon(|_| {
+            crate::runstate::write_meta(&run_in("stopping", RunStatus::Cancelled))
+                .expect("the cancel is written");
+            ControlResponse::Ok { ok: true }
+        });
+        act(&state_with(control), "stopping", Action::Cancel)
+            .await
+            .expect("the cancel landed");
+    })
+    .await;
+}
+
 /// A run still taking messages can be cancelled: finishing its stages is not
 /// the same as being over.
 #[tokio::test]

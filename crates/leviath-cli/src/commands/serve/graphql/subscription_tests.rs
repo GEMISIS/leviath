@@ -195,19 +195,22 @@ async fn the_stamp_rises_and_is_dated() {
         4,
     )
     .await;
-    // The opening frame selects nothing here, so it comes back as an empty
-    // object: the three that follow are what this is about.
+    // One fragment, four frames, the greeting included: the transport frames
+    // implement `Event` too, so a client reads the stamp off whatever arrives
+    // rather than naming each member type to get at it.
     let seqs: Vec<i64> = out
         .iter()
-        .skip(1)
         .map(|frame| {
             let at = field(frame, "runEvents", "at").as_i64().expect("a time");
             assert!(at > 1_700_000_000, "the frame is dated: {at}");
             field(frame, "runEvents", "seq").as_i64().expect("a number")
         })
         .collect();
-    assert_eq!(seqs.len(), 3);
-    assert!(seqs[0] < seqs[1] && seqs[1] < seqs[2], "{seqs:?}");
+    assert_eq!(seqs.len(), 4);
+    assert!(
+        seqs.windows(2).all(|pair| pair[0] < pair[1]),
+        "the greeting is numbered under the frames that follow it: {seqs:?}"
+    );
 }
 
 /// Every frame arrives when nothing is filtered, and each one arrives as its

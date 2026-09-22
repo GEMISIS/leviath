@@ -86,6 +86,11 @@ pub(super) fn build_schema(state: AppState, allow_admin: bool) -> LeviathSchema 
     // 404 for them by not mounting the route at all, and a schema has no
     // "unmounted", so this is what stands in for it.
     .data(admin::AdminAccess(allow_admin))
+    // What gives a parse or validation refusal the same `extensions.code` a
+    // resolver's failure carries. Registered here and not in `sdl()`, because
+    // an extension is a hook around execution and contributes nothing to the
+    // type registry the SDL is printed from.
+    .extension(error::CodeEveryRefusal)
     .limit_depth(MAX_DEPTH)
     .limit_complexity(MAX_COMPLEXITY)
     .finish()
