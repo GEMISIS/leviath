@@ -13,18 +13,20 @@
 //! per live run rather than a parse of every run on the machine.
 //! [`MAX_SEARCH_SCAN`] bounds the half of search that reads files.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::super::cursor::{self, Cursor, CursorKey};
+use super::super::graphql::paging::order::{Order, OrderDirection, Term};
 use super::super::search;
 use super::super::types::{AppState, Highlight, status_matches};
 use crate::runstate::{self, RunMeta};
 
+pub(crate) mod lazy;
 pub(crate) mod matching;
 pub(crate) mod predicate;
 use matching::*;
-use predicate::{MatchContext, RunPredicate};
+use predicate::{MatchContext, RunPredicate, RunTree};
 
 /// Largest page size served. A larger `limit` is clamped rather than refused: a
 /// client asking for 1000 wants as much as it can get, and the real value is
@@ -49,17 +51,20 @@ pub(crate) const MAX_HIGHLIGHTS: usize = 5;
 
 /// Which field a run is ordered by.
 ///
-/// The shared `At` suffix is the point, not an accident: these are the three
-/// timestamps on a run, and each variant is named for the `RunMeta` field it
-/// reads and the query value that selects it.
+/// The three timestamps `?sort=` takes, each named for the `RunMeta` field it
+/// reads, plus the title, which only the GraphQL listing offers: `parse` below
+/// still answers for the three alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SortKey {
     Started,
     Updated,
     LastProgress,
+    Title,
 }
 
 impl SortKey {
+    /// The key a `?sort=` value names, or nothing for a word this route does
+    /// not order by.
     pub(crate) fn parse(raw: &str) -> Option<Self> {
         match raw {
             "started_at" => Some(SortKey::Started),
@@ -69,25 +74,36 @@ impl SortKey {
         }
     }
 
+    /// The word a cursor records for this key, which is also the query value
+    /// that selects it.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             SortKey::Started => "started_at",
             SortKey::Updated => "updated_at",
             SortKey::LastProgress => "last_progress_at",
+            SortKey::Title => "title",
         }
     }
 
-    /// This run's value for the key.
+    /// This run's place in the order this key runs in.
     ///
     /// `last_progress_at` is `Option`, and absent means "written by a daemon
     /// older than the field, or before the first snapshot landed". The run
     /// demonstrably started, so `started_at` is the honest floor - and it keeps
-    /// the key non-null, which the cursor needs.
-    pub(crate) fn value(self, meta: &RunMeta) -> i64 {
+    /// the key non-null, which the cursor needs. A run with no title yet has no
+    /// value at all, and sorts where the cursor's own ordering puts an absent
+    /// one.
+    pub(crate) fn key(self, meta: &RunMeta) -> CursorKey {
         match self {
-            SortKey::Started => meta.started_at,
-            SortKey::Updated => meta.updated_at,
-            SortKey::LastProgress => meta.last_progress_at.unwrap_or(meta.started_at),
+            SortKey::Started => CursorKey::Int(meta.started_at),
+            SortKey::Updated => CursorKey::Int(meta.updated_at),
+            SortKey::LastProgress => {
+                CursorKey::Int(meta.last_progress_at.unwrap_or(meta.started_at))
+            }
+            SortKey::Title => match meta.title {
+                Some(ref title) => CursorKey::Text(title.clone()),
+                None => CursorKey::Null,
+            },
         }
     }
 }
@@ -237,6 +253,13 @@ pub(crate) struct RunSpec {
     pub(crate) statuses: Vec<String>,
     pub(crate) sort: SortKey,
     pub(crate) descending: bool,
+    /// The compiled order, which is what the lazy walk compares on and what
+    /// mints its cursors.
+    ///
+    /// One term for a listing ordered by one key, which is every listing `GET
+    /// /api/runs` serves and what `sort` and `descending` above spell; the
+    /// GraphQL field may ask for several, and then this is the whole of them.
+    pub(crate) order: Order<SortKey>,
     pub(crate) q: Option<String>,
     pub(crate) sources: Vec<Source>,
     pub(crate) fields: Option<HashSet<String>>,
@@ -266,8 +289,8 @@ impl RunSpec {
 /// resumed past. Run ids are unique, so this makes the order total.
 pub(crate) fn sort_runs(runs: &mut [Arc<RunMeta>], spec: &RunSpec) {
     runs.sort_by(|a, b| {
-        let ka = (spec.sort.value(a), a.run_id.as_str());
-        let kb = (spec.sort.value(b), b.run_id.as_str());
+        let ka = (spec.sort.key(a), a.run_id.as_str());
+        let kb = (spec.sort.key(b), b.run_id.as_str());
         if spec.descending {
             kb.cmp(&ka)
         } else {
@@ -289,13 +312,7 @@ pub(crate) fn paginate(
         None => runs,
         Some(ref cursor) => runs
             .into_iter()
-            .filter(|meta| {
-                cursor.precedes(
-                    &CursorKey::Int(spec.sort.value(meta)),
-                    &meta.run_id,
-                    spec.descending,
-                )
-            })
+            .filter(|meta| cursor.precedes(&spec.sort.key(meta), &meta.run_id, spec.descending))
             .collect(),
     };
 
@@ -306,7 +323,7 @@ pub(crate) fn paginate(
             spec.sort.as_str(),
             if spec.descending { "desc" } else { "asc" },
             &spec.digest,
-            CursorKey::Int(spec.sort.value(last)),
+            spec.sort.key(last),
             &last.run_id,
         )
     });
@@ -340,36 +357,13 @@ pub(crate) struct RunListing {
     pub(crate) server_time: i64,
 }
 
-/// The descendants of every run a predicate asks about, walked once.
-///
-/// Empty for a listing with no predicate, which is every REST one: an absent
-/// filter walks no trees.
-fn subtrees_in(
-    spec: &RunSpec,
-    snapshot: &super::super::run_index::RunSnapshot,
-) -> HashMap<String, HashSet<String>> {
-    let mut roots = Vec::new();
-    if let Some(ref predicate) = spec.predicate {
-        predicate.subtree_roots(&mut roots);
-    }
-    roots
-        .into_iter()
-        .map(|root| {
-            let under = snapshot.descendants_of(&root);
-            (root, under)
-        })
-        .collect()
-}
-
-/// Read exactly the runs a batch fetch names.
+/// The runs a batch fetch names, read straight from their own records.
 ///
 /// Unpaged and in the order the ids were given: the caller already said which
 /// runs it wants and how many, so there is nothing left for a sort or a cursor
 /// to decide. Ids that name no run on this machine are reported rather than
-/// thrown, so one dead id costs a client nothing else in the batch. A
-/// predicate still applies, which is what makes "these ids, and only the ones
-/// that failed" a single request.
-async fn by_ids(state: &AppState, spec: &RunSpec, ids: &[String], server_time: i64) -> RunListing {
+/// thrown, so one dead id costs a client nothing else in the batch.
+fn read_by_id(ids: &[String]) -> (Vec<Arc<RunMeta>>, Vec<String>) {
     let mut found: Vec<Arc<RunMeta>> = Vec::new();
     let mut missing = Vec::new();
     for id in ids {
@@ -378,24 +372,12 @@ async fn by_ids(state: &AppState, spec: &RunSpec, ids: &[String], server_time: i
             Err(_) => missing.push(id.clone()),
         }
     }
-    if let Some(ref predicate) = spec.predicate {
-        // The index is read only for a predicate that asks about a subtree,
-        // which a batch fetch rarely does and a REST one never can.
-        let mut roots = Vec::new();
-        predicate.subtree_roots(&mut roots);
-        let subtrees = match roots.is_empty() {
-            true => HashMap::new(),
-            false => {
-                let snapshot = state.caches.run_index.snapshot().await;
-                subtrees_in(spec, &snapshot)
-            }
-        };
-        let ctx = MatchContext {
-            now: server_time,
-            subtrees,
-        };
-        found.retain(|meta| predicate.matches(meta, &ctx));
-    }
+    (found, missing)
+}
+
+/// Answer a batch fetch by id.
+fn by_ids(ids: &[String], server_time: i64) -> RunListing {
+    let (found, missing) = read_by_id(ids);
     let total = found.len();
     RunListing {
         hits: found
@@ -424,7 +406,7 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
     let server_time = leviath_core::duration::now_secs();
 
     if let Some(ref ids) = spec.ids {
-        return by_ids(state, spec, ids, server_time).await;
+        return by_ids(ids, server_time);
     }
 
     let snapshot = state.caches.run_index.snapshot().await;
@@ -434,17 +416,10 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
         ParentFilter::Under(root) => snapshot.descendants_of(root),
         _ => HashSet::new(),
     };
-    let ctx = MatchContext {
-        now: server_time,
-        subtrees: subtrees_in(spec, &snapshot),
-    };
     let mut runs = snapshot.into_runs();
     // Before the sort and before `total`, like every other filter here, so the
     // count describes what was asked for rather than what is on the machine.
     runs.retain(|meta| spec.parent.keeps_in(meta, &descendants));
-    if let Some(ref predicate) = spec.predicate {
-        runs.retain(|meta| predicate.matches(meta, &ctx));
-    }
     if let Some(ref blueprint) = spec.blueprint {
         runs.retain(|meta| &meta.agent_name == blueprint);
     }
@@ -458,8 +433,10 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
     if let Some(since) = spec.since {
         // Inclusive: at seconds granularity an exclusive comparison drops
         // updates that land in the same second as the previous watermark, and a
-        // re-delivered item is recoverable where a lost one is not.
-        runs.retain(|meta| spec.sort.value(meta) >= since);
+        // re-delivered item is recoverable where a lost one is not. Compared as
+        // the key rather than as a number, so it says nothing about an order
+        // this route cannot be asked for.
+        runs.retain(|meta| spec.sort.key(meta) >= CursorKey::Int(since));
     }
 
     // Sort before searching, so the scan budget is spent on the runs the client
@@ -494,6 +471,73 @@ pub(crate) async fn list(state: &AppState, spec: &RunSpec) -> RunListing {
     }
 }
 
+/// Answer a listing request lazily.
+///
+/// The counterpart of [`list`], and deliberately not a replacement for it:
+/// `list` keeps its search budget, its `scan_truncated` and its batch fetch by
+/// id, all of which `GET /api/runs` promises. This one has no cap of any kind,
+/// and opens nothing for a run the page it was asked for does not reach - so a
+/// filter that has to read files costs what that page costs rather than what
+/// the store costs.
+///
+/// The five steps are [`paging::walk`](crate::commands::serve::graphql::paging::walk),
+/// shared with every other listing; [`lazy::RunSift`] is what a run means by
+/// each of them.
+/// A listing that names its runs by id reads exactly those records rather than
+/// the index, which is what keeps "these five runs" one read per run however
+/// large the store is. Everything the filter says still applies to what comes
+/// back.
+pub(crate) async fn walk(
+    state: &AppState,
+    spec: &RunSpec,
+) -> super::super::graphql::paging::walk::Page<lazy::RunSift> {
+    let (sift, items) = prepared(state, spec).await;
+    super::super::graphql::paging::walk::walk(sift, items, spec.cursor.as_ref(), spec.limit).await
+}
+
+/// Every run the filter matches, with no page to stop at.
+///
+/// For a bulk mutation and an export, whose answer is a set rather than a slice
+/// of one. The same five steps run, reads included, so a run this hands back is
+/// exactly a run a page would have listed; what it skips is the cursor and the
+/// page size, neither of which a caller that wants everything has anything to
+/// say about.
+pub(crate) async fn walk_all(state: &AppState, spec: &RunSpec) -> Vec<Arc<RunMeta>> {
+    let (sift, items) = prepared(state, spec).await;
+    // The page size is the whole snapshot, so the walk stops where the runs do.
+    let whole = items.len();
+    super::super::graphql::paging::walk::walk(sift, items, None, whole)
+        .await
+        .items
+}
+
+/// What a run walk starts from: the sift it consults, and the runs it walks.
+async fn prepared(state: &AppState, spec: &RunSpec) -> (lazy::RunSift, Vec<Arc<RunMeta>>) {
+    let snapshot = state.caches.run_index.snapshot().await;
+    // A subtree is the one filter that needs the tree rather than the record,
+    // so it is resolved once here from the index's own parent map.
+    let descendants = match &spec.parent {
+        ParentFilter::Under(root) => snapshot.descendants_of(root),
+        _ => HashSet::new(),
+    };
+    let indexed = snapshot.into_runs();
+    // Linked once for the whole walk, and only where a filter can ask: a
+    // listing with no predicate never looks above the run in front of it.
+    let now = leviath_core::duration::now_secs();
+    let ctx = match spec.predicate {
+        None => MatchContext::at(now),
+        Some(_) => MatchContext {
+            now,
+            tree: Arc::new(RunTree::of(&indexed)),
+        },
+    };
+    let items = match spec.ids {
+        None => indexed,
+        Some(ref ids) => read_by_id(ids).0,
+    };
+    (lazy::RunSift::new(spec, descendants, ctx), items)
+}
+
 /// What a listing asks for, before the cursor is checked against it.
 ///
 /// One of these is what each surface builds: `GET /api/runs` from query
@@ -511,10 +555,18 @@ pub(crate) struct RunSelection {
     pub(crate) blueprint: Option<String>,
     /// Status filters, in the daemon's own spelling.
     pub(crate) statuses: Vec<String>,
-    /// Which timestamp orders the listing.
+    /// Which timestamp orders the listing, and breaks a tie in a listing
+    /// ordered by several.
     pub(crate) sort: SortKey,
     /// Newest first when true.
     pub(crate) descending: bool,
+    /// Every sort key, in priority order, for a surface that offers more than
+    /// one.
+    ///
+    /// Absent is the single-key order `sort` and `descending` spell, which is
+    /// what `GET /api/runs` asks for and what mints the cursor both surfaces
+    /// interchange.
+    pub(crate) order: Option<Vec<Term<SortKey>>>,
     /// The search text, when there is one.
     pub(crate) q: Option<String>,
     /// Where the search looks.
@@ -551,6 +603,21 @@ impl RunSelection {
         self,
         raw_cursor: Option<&str>,
     ) -> Result<RunSpec, super::error::ServeError> {
+        let mut spec = self.unpaged();
+        spec.cursor = match raw_cursor {
+            None => None,
+            Some(raw) => Some(spec.order.decode(raw, &spec.digest)?),
+        };
+        Ok(spec)
+    }
+
+    /// The same spec with no page to resume from.
+    ///
+    /// Separate from [`resolve`](Self::resolve) because a caller that walks
+    /// everything has no cursor to refuse: an export and a bulk act read the
+    /// whole selection, and a refusal neither of them can reach is a branch
+    /// nobody can read the meaning of.
+    pub(crate) fn unpaged(self) -> RunSpec {
         // The filters, in a fixed order, so the same filter set always digests
         // the same way.
         let mut parts = vec![
@@ -582,21 +649,26 @@ impl RunSelection {
         let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
         let digest = cursor::filter_digest(&refs);
 
-        let order_raw = if self.descending { "desc" } else { "asc" };
-        let cursor = match raw_cursor {
-            None => None,
-            Some(raw) => Some(
-                cursor::decode(raw, self.sort.as_str(), order_raw, &digest)
-                    .map_err(|e| super::error::ServeError::BadRequest(e.message()))?,
-            ),
+        // A single-term order records the bare field name and direction, which
+        // is byte for byte what this route has always minted, so a cursor from
+        // either surface still resumes on the other.
+        let direction = match self.descending {
+            true => OrderDirection::Desc,
+            false => OrderDirection::Asc,
         };
-
-        Ok(RunSpec {
+        let order = Order::new(self.order.unwrap_or_else(|| {
+            vec![Term {
+                field: self.sort,
+                direction,
+            }]
+        }));
+        RunSpec {
             limit: self.limit,
-            cursor,
+            cursor: None,
             statuses: self.statuses,
             sort: self.sort,
             descending: self.descending,
+            order,
             q: self.q,
             sources: self.sources,
             fields: self.fields,
@@ -606,7 +678,7 @@ impl RunSelection {
             blueprint: self.blueprint,
             predicate: self.predicate,
             digest,
-        })
+        }
     }
 }
 
