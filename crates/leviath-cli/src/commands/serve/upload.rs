@@ -17,6 +17,8 @@ use axum::http::StatusCode;
 use leviath_core::mime::{Delivery, InboundPart, MimeType};
 use serde::{Deserialize, Serialize};
 
+use super::core::attachments;
+use super::core::error::as_api_error;
 use super::types::{ApiError, err};
 
 /// One entry of a JSON `parts` list.
@@ -43,45 +45,17 @@ pub(super) struct PartRef {
 
 /// The `deliver` word a request used, as the runtime's choice.
 fn delivery(word: &str) -> Result<Delivery, ApiError> {
-    Delivery::from_arg(word).map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    attachments::delivery(word).map_err(|e| as_api_error(&e))
 }
 
 /// A file inside `workdir` as a part, refused when the path escapes, the
 /// file is missing or empty, or the file is over `max_bytes`.
+///
+/// The reading itself is [`attachments::read_within`], which GraphQL's
+/// `attachments` lists call too; this wraps its refusal in the status and body
+/// a REST client reads.
 fn read_within(path: &str, workdir: &Path, max_bytes: u64) -> Result<InboundPart, ApiError> {
-    let full = workdir.join(path);
-    if !leviath_core::resolves_within(&full, workdir) {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            format!("part path '{path}' is outside the run's working directory"),
-        ));
-    }
-    let data = std::fs::read(&full).map_err(|e| {
-        err(
-            StatusCode::BAD_REQUEST,
-            format!("part '{path}' could not be read: {e}"),
-        )
-    })?;
-    if data.is_empty() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            format!("part '{path}' is empty"),
-        ));
-    }
-    if data.len() as u64 > max_bytes {
-        return Err(err(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "part '{path}' is {} bytes, over the {max_bytes} byte ceiling",
-                data.len()
-            ),
-        ));
-    }
-    let name = full
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    Ok(InboundPart::from_bytes(name, data))
+    attachments::read_within(path, workdir, max_bytes).map_err(|e| as_api_error(&e))
 }
 
 /// Every entry of a JSON `parts` list, read from the workdir.
@@ -98,15 +72,8 @@ pub(super) fn json_parts(
             part.name = name.clone();
         }
         if let Some(t) = &item.mime_type {
-            part.mime_type = Some(MimeType::parse(t).map_err(|e| {
-                err(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "part '{}' has mime_type '{t}', which is not one: {e}",
-                        item.path
-                    ),
-                )
-            })?);
+            part.mime_type =
+                Some(attachments::mime_type(&item.path, t).map_err(|e| as_api_error(&e))?);
         }
         if let Some(d) = &item.deliver {
             part.deliver = Some(delivery(d)?);

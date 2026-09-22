@@ -12,6 +12,7 @@
 //! to a filter, a cursor or a daemon reply lands in one place and both
 //! surfaces get it.
 
+pub(super) mod attachments;
 pub(super) mod blueprints;
 pub(super) mod config;
 pub(super) mod context_changes;

@@ -28,6 +28,7 @@ fn all_runs(fields: Option<Vec<&str>>) -> RunSelection {
         statuses: Vec::new(),
         sort: SortKey::Started,
         descending: true,
+        order: None,
         q: None,
         sources: vec![Source::Meta, Source::Files],
         sources_raw: String::new(),

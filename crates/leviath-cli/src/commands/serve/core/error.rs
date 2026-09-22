@@ -62,6 +62,12 @@ pub(crate) enum ServeError {
     #[error("{0}")]
     Unprocessable(String),
 
+    /// What the request carries is over a ceiling this server holds: a file
+    /// attached by path that is larger than `max_upload_bytes`. The request is
+    /// well formed, and a smaller one of the same shape works.
+    #[error("{0}")]
+    PayloadTooLarge(String),
+
     /// The window asked for is not in the thing: an offset past the end of a
     /// file. A different window of the same file is fine, which is what tells
     /// this apart from a bad request.
@@ -96,6 +102,7 @@ impl ServeError {
             Self::DaemonIncompatible(_) => StatusCode::BAD_GATEWAY,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RangeNotSatisfiable(_) => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::UnsupportedMedia(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -116,6 +123,7 @@ impl ServeError {
             Self::DaemonIncompatible(_) => "DAEMON_INCOMPATIBLE",
             Self::Upstream(_) => "UPSTREAM",
             Self::Unprocessable(_) => "UNPROCESSABLE",
+            Self::PayloadTooLarge(_) => "PAYLOAD_TOO_LARGE",
             Self::RangeNotSatisfiable(_) => "RANGE_NOT_SATISFIABLE",
             Self::UnsupportedMedia(_) => "UNSUPPORTED_MEDIA_TYPE",
             Self::Internal(_) => "INTERNAL",
@@ -137,6 +145,7 @@ impl ServeError {
             Self::DaemonIncompatible(_) => Self::DaemonIncompatible(said),
             Self::Upstream(_) => Self::Upstream(said),
             Self::Unprocessable(_) => Self::Unprocessable(said),
+            Self::PayloadTooLarge(_) => Self::PayloadTooLarge(said),
             Self::RangeNotSatisfiable(_) => Self::RangeNotSatisfiable(said),
             Self::UnsupportedMedia(_) => Self::UnsupportedMedia(said),
             Self::Internal(_) => Self::Internal(said),
@@ -230,6 +239,11 @@ mod tests {
                 "UNPROCESSABLE",
             ),
             (
+                ServeError::PayloadTooLarge("l".into()),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PAYLOAD_TOO_LARGE",
+            ),
+            (
                 ServeError::RangeNotSatisfiable("r".into()),
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 "RANGE_NOT_SATISFIABLE",
@@ -305,6 +319,7 @@ mod tests {
             ServeError::DaemonIncompatible("i".into()),
             ServeError::Upstream("u".into()),
             ServeError::Unprocessable("p".into()),
+            ServeError::PayloadTooLarge("l".into()),
             ServeError::RangeNotSatisfiable("r".into()),
             ServeError::UnsupportedMedia("m".into()),
             ServeError::Internal("x".into()),
