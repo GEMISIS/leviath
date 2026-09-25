@@ -511,6 +511,15 @@ pub(super) fn parse_response(body: &Value) -> Result<InferenceResponse> {
             });
         } else if block.get("reasoningContent").is_some() {
             reasoning.push(block.clone());
+        } else {
+            // Said out loud rather than dropped: a block this build does not
+            // read is how an answer goes missing with nothing in the log to
+            // say why. Its keys name the kind; its values may be the user's.
+            let kind: Vec<&str> = block
+                .as_object()
+                .map(|o| o.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            tracing::warn!(?kind, "unrecognised content block from Bedrock; skipped");
         }
     }
     let stop_reason = body
@@ -1069,6 +1078,22 @@ mod tests {
         assert_eq!(response.content, "");
         let err = parse_response(&json!({ "output": {} })).unwrap_err();
         assert!(err.to_string().contains("no output.message"), "{err}");
+    }
+
+    /// A block kind this build does not read is skipped with a warning, and
+    /// the blocks around it still arrive.
+    #[test]
+    fn an_unrecognised_block_is_skipped_with_a_warning() {
+        let _guard = crate::test_support::always_on_tracing_guard();
+        let body = json!({ "output": { "message": { "content": [
+            { "text": "a" },
+            { "guardContent": { "text": { "text": "hidden" } } },
+            "not even an object",
+            { "text": "b" }
+        ] } } });
+        let response = parse_response(&body).unwrap();
+        assert_eq!(response.content, "ab");
+        assert!(response.tool_calls.is_empty());
     }
 
     #[test]

@@ -6,7 +6,8 @@
 //! [`StreamChunk`] the shared collector folds back into one response.
 
 use super::AnthropicProvider;
-use crate::provider::{StreamChunk, TokenUsage, ToolCallDelta};
+use crate::failure::FailureKind;
+use crate::provider::{ProviderError, Result, StreamChunk, TokenUsage, ToolCallDelta};
 use futures_core::Stream;
 
 /// Wrap a byte stream in Anthropic's server-sent-events framer.
@@ -15,7 +16,8 @@ use futures_core::Stream;
 /// [`parse_sse_event`]), which is why it is a closure over that state rather
 /// than a bare `fn`. `parse_sse_event` answers `None` both for "no complete
 /// event yet" and for an event that carries nothing (`ping`, `message_stop`);
-/// either way the stream polls for more bytes, exactly as it did before.
+/// either way the stream polls for more bytes. An `error` event is the
+/// stream's error item.
 pub(super) fn anthropic_sse_stream<S>(inner: S) -> crate::provider::stream::FramedStream
 where
     S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
@@ -24,7 +26,7 @@ where
     crate::provider::stream::FramedStream::new(
         inner,
         Box::new(move |buffer: &mut String| {
-            parse_sse_event(buffer, &mut open_tool_block).map(|chunk| Some(Ok(chunk)))
+            parse_sse_event(buffer, &mut open_tool_block).map(Some)
         }),
         None,
     )
@@ -42,10 +44,16 @@ fn event_block_index(json: &serde_json::Value) -> Option<usize> {
 
 /// Parse a single SSE event from the buffer, consuming it if found.
 /// `open_tool_block` is the call being streamed now; see the field it names.
+///
+/// `None` until a whole event has arrived, and for an event that carries
+/// nothing the collector needs. `Some(Err(..))` for Anthropic's own `error`
+/// event, which is the stream failing with the API's words: dropped, it left
+/// the stream to end with no stop reason, and that read as a connection that
+/// had died rather than as the overload or refusal it was.
 pub(super) fn parse_sse_event(
     buffer: &mut String,
     open_tool_block: &mut Option<usize>,
-) -> Option<StreamChunk> {
+) -> Option<Result<StreamChunk>> {
     // `None` until the double newline that terminates an event has arrived;
     // the caller polls again with more bytes.
     let (event_text, rest) = buffer.split_once("\n\n")?;
@@ -68,9 +76,68 @@ pub(super) fn parse_sse_event(
         return None;
     }
 
-    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let json: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::warn!(
+                event = %event_type,
+                error = %e,
+                "an event from Anthropic's stream is not JSON; skipped"
+            );
+            return None;
+        }
+    };
 
-    match event_type.as_str() {
+    if event_type == "error" {
+        let field = |name: &str| {
+            json.pointer(&format!("/error/{name}"))
+                .and_then(|v| v.as_str())
+        };
+        return Some(Err(stream_error(
+            field("type").unwrap_or("error"),
+            field("message").unwrap_or("(no message)"),
+        )));
+    }
+
+    parse_event(&event_type, &json, open_tool_block).map(Ok)
+}
+
+/// The error an in-stream `error` event stands for.
+///
+/// Anthropic names the kind the way its HTTP statuses do, and the message is
+/// written to read as that status: the retry loop classifies an error by its
+/// text, so a streamed overload gets the same capacity-sized wait a buffered
+/// 529 does, a server fault the blip-sized one, and anything else is the
+/// request's own and permanent.
+pub(super) fn stream_error(kind: &str, message: &str) -> ProviderError {
+    match kind {
+        "rate_limit_error" => ProviderError::RateLimitExceeded {
+            retry_after_secs: None,
+        },
+        "overloaded_error" => status_error(529, FailureKind::ServerError, kind, message),
+        "api_error" => status_error(500, FailureKind::ServerError, kind, message),
+        other => status_error(400, FailureKind::BadRequest, other, message),
+    }
+}
+
+/// An API error in the shape the HTTP path produces for `status`.
+fn status_error(status: u16, failure: FailureKind, kind: &str, message: &str) -> ProviderError {
+    ProviderError::ApiError(format!(
+        "[{}] HTTP {status}: {kind}: {message} - {}",
+        failure.label(),
+        failure.remedy()
+    ))
+}
+
+/// One parsed event as a chunk, or `None` for one that carries nothing the
+/// collector needs. An event or a block this build does not read is said out
+/// loud before it is skipped, so a missing answer has a line in the log.
+fn parse_event(
+    event_type: &str,
+    json: &serde_json::Value,
+    open_tool_block: &mut Option<usize>,
+) -> Option<StreamChunk> {
+    match event_type {
         "content_block_delta" => {
             let delta = json.get("delta")?;
             match delta.get("type").and_then(|t| t.as_str()) {
@@ -97,7 +164,7 @@ pub(super) fn parse_sse_event(
                             // open, and never a fresh number: an index of its
                             // own splits one call into an id with no arguments
                             // and arguments with no id.
-                            index: event_block_index(&json).or(*open_tool_block).unwrap_or(0),
+                            index: event_block_index(json).or(*open_tool_block).unwrap_or(0),
                             id: None,
                             name: None,
                             arguments_delta: partial.to_string(),
@@ -112,43 +179,59 @@ pub(super) fn parse_sse_event(
                         parts: Vec::new(),
                     })
                 }
-                _ => None,
+                other => {
+                    tracing::warn!(
+                        delta_type = other.unwrap_or("(none)"),
+                        "unrecognised content block delta from Anthropic; skipped"
+                    );
+                    None
+                }
             }
         }
         "content_block_start" => {
             let content_block = json.get("content_block")?;
-            if content_block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                let id = content_block
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let name = content_block
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                // The number the event carries, else the one after the last
-                // tool block: a second call must not overwrite the first.
-                let idx = event_block_index(&json)
-                    .unwrap_or_else(|| open_tool_block.map_or(0, |open| open + 1));
-                *open_tool_block = Some(idx);
-                Some(StreamChunk {
-                    delta: String::new(),
-                    tool_calls: vec![ToolCallDelta {
-                        index: idx,
-                        id: Some(id),
-                        name: Some(name),
-                        arguments_delta: String::new(),
-                        thought_signature: None,
-                    }],
-                    tokens: None,
-                    finish_reason: None,
-                    reasoning: None,
-                    parts: Vec::new(),
-                })
-            } else {
-                None
+            match content_block.get("type").and_then(|t| t.as_str()) {
+                Some("tool_use") => {
+                    let id = content_block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = content_block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    // The number the event carries, else the one after the last
+                    // tool block: a second call must not overwrite the first.
+                    let idx = event_block_index(json)
+                        .unwrap_or_else(|| open_tool_block.map_or(0, |open| open + 1));
+                    *open_tool_block = Some(idx);
+                    Some(StreamChunk {
+                        delta: String::new(),
+                        tool_calls: vec![ToolCallDelta {
+                            index: idx,
+                            id: Some(id),
+                            name: Some(name),
+                            arguments_delta: String::new(),
+                            thought_signature: None,
+                        }],
+                        tokens: None,
+                        finish_reason: None,
+                        reasoning: None,
+                        parts: Vec::new(),
+                    })
+                }
+                // A text block's words arrive in its deltas; the start says
+                // nothing the collector needs.
+                Some("text") => None,
+                other => {
+                    tracing::warn!(
+                        block_type = other.unwrap_or("(none)"),
+                        "unrecognised content block from Anthropic's stream; skipped"
+                    );
+                    None
+                }
             }
         }
         "message_delta" => {
@@ -202,7 +285,15 @@ pub(super) fn parse_sse_event(
                 None
             }
         }
-        "message_stop" | "ping" => None,
-        _ => None,
+        // The end of a block and of the message, and a keep-alive, carry
+        // nothing the collector does not already have.
+        "message_stop" | "content_block_stop" | "ping" => None,
+        other => {
+            tracing::warn!(
+                event = other,
+                "unrecognised event from Anthropic's stream; skipped"
+            );
+            None
+        }
     }
 }

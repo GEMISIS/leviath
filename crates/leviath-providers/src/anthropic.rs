@@ -758,11 +758,12 @@ impl AnthropicProvider {
         if let Some(content_blocks) = body.get("content").and_then(|c| c.as_array()) {
             for block in content_blocks {
                 match block.get("type").and_then(|t| t.as_str()) {
-                    Some("text") => {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            content.push_str(text);
+                    Some("text") => match block.get("text").and_then(|t| t.as_str()) {
+                        Some(text) => content.push_str(text),
+                        None => {
+                            tracing::warn!("a text block from Anthropic carries no text; skipped")
                         }
-                    }
+                    },
                     Some("tool_use") => {
                         let id = block
                             .get("id")
@@ -785,7 +786,14 @@ impl AnthropicProvider {
                             thought_signature: None,
                         });
                     }
-                    _ => {}
+                    // Said out loud rather than dropped: a block this build
+                    // does not read (a new kind, or one with no type) is how
+                    // an answer goes missing with nothing in the log to say
+                    // why.
+                    other => tracing::warn!(
+                        block_type = other.unwrap_or("(none)"),
+                        "unrecognised content block from Anthropic; skipped"
+                    ),
                 }
             }
         }
@@ -1116,7 +1124,7 @@ mod mime_tests;
 mod tests {
     // The SSE parser lives in `stream`, and its tests stayed here beside the
     // request-building ones they share fixtures with.
-    use super::stream::{anthropic_sse_stream, parse_sse_event};
+    use super::stream::{anthropic_sse_stream, parse_sse_event, stream_error};
 
     /// Config beats the shipped table, and an unconfigured model still gets the
     /// published rate rather than falling to unpriced.
@@ -2570,7 +2578,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_response_unknown_content_type_ignored() {
+    fn test_parse_response_unknown_content_type_is_skipped_with_a_warning() {
+        let _guard = always_on_tracing_guard();
         let provider = AnthropicProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
             "key".to_string(),
@@ -2578,6 +2587,7 @@ mod tests {
         let body = serde_json::json!({
             "content": [
                 { "type": "image", "data": "abc" },
+                { "data": "no type at all" },
                 { "type": "text", "text": "Hello" }
             ],
             "stop_reason": "end_turn",
@@ -2853,7 +2863,9 @@ mod tests {
     fn test_parse_sse_event_text_delta() {
         let mut buffer = "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n".to_string();
         let mut tool_index: Option<usize> = None;
-        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.delta, "Hello");
         assert!(chunk.tool_calls.is_empty());
         assert!(buffer.is_empty());
@@ -2863,7 +2875,9 @@ mod tests {
     fn test_parse_sse_event_input_json_delta() {
         let mut buffer = "event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"key\\\"\"}}\n\n".to_string();
         let mut tool_index = Some(1usize);
-        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.delta, "");
         assert_eq!(chunk.tool_calls.len(), 1);
         assert_eq!(chunk.tool_calls[0].index, 1);
@@ -2874,7 +2888,9 @@ mod tests {
     fn test_parse_sse_event_content_block_start_tool_use() {
         let mut buffer = "event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"search\"}}\n\n".to_string();
         let mut tool_index: Option<usize> = None;
-        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.tool_calls.len(), 1);
         assert_eq!(chunk.tool_calls[0].id, Some("toolu_1".to_string()));
         assert_eq!(chunk.tool_calls[0].name, Some("search".to_string()));
@@ -2892,11 +2908,80 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// A block kind this build does not stream (a thinking block, say) is
+    /// skipped with a warning rather than in silence.
+    #[test]
+    fn test_parse_sse_event_content_block_start_of_an_unknown_kind_returns_none() {
+        let _guard = always_on_tracing_guard();
+        let mut buffer =
+            "event: content_block_start\ndata: {\"content_block\":{\"type\":\"thinking\"}}\n\n"
+                .to_string();
+        let mut tool_index: Option<usize> = None;
+        assert!(parse_sse_event(&mut buffer, &mut tool_index).is_none());
+        let mut buffer = "event: content_block_start\ndata: {\"content_block\":{}}\n\n".to_string();
+        assert!(parse_sse_event(&mut buffer, &mut tool_index).is_none());
+    }
+
+    /// Anthropic reports a failure mid-stream as an `error` event. It is the
+    /// stream's error, with the API's own words, not a dropped connection.
+    #[test]
+    fn test_parse_sse_event_error_event_is_the_streams_error() {
+        let mut buffer = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n".to_string();
+        let mut tool_index: Option<usize> = None;
+        let err = parse_sse_event(&mut buffer, &mut tool_index)
+            .expect("an error event is an item")
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("overloaded_error"), "{text}");
+        assert!(text.contains("Overloaded"), "{text}");
+        assert!(err.retry_advice().capacity, "{text}");
+        assert!(err.is_transient(), "{text}");
+
+        // One with nothing inside still names itself.
+        let mut buffer = "event: error\ndata: {\"type\":\"error\"}\n\n".to_string();
+        let err = parse_sse_event(&mut buffer, &mut tool_index)
+            .expect("an error event is an item")
+            .unwrap_err();
+        assert!(err.to_string().contains("(no message)"), "{err}");
+    }
+
+    /// Every kind Anthropic documents reads as the HTTP status it stands for,
+    /// so the retry loop treats a streamed refusal like a buffered one.
+    #[test]
+    fn every_stream_error_kind_reads_as_its_status() {
+        let limit = stream_error("rate_limit_error", "slow down");
+        assert_eq!(
+            limit.retry_advice(),
+            crate::provider::RetryAdvice {
+                capacity: true,
+                retry_after_secs: None
+            }
+        );
+        let busy = stream_error("overloaded_error", "Overloaded").to_string();
+        assert!(
+            busy.contains("529") && busy.contains("server-error"),
+            "{busy}"
+        );
+        let fault = stream_error("api_error", "Internal").to_string();
+        assert!(
+            fault.contains("500") && fault.contains("server-error"),
+            "{fault}"
+        );
+        let ours = stream_error("invalid_request_error", "bad field").to_string();
+        assert!(
+            ours.contains("400") && ours.contains("bad-request"),
+            "{ours}"
+        );
+        assert!(ours.contains("bad field"), "{ours}");
+    }
+
     #[test]
     fn test_parse_sse_event_message_delta() {
         let mut buffer = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42}}\n\n".to_string();
         let mut tool_index: Option<usize> = None;
-        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.finish_reason, Some(FinishReason::ToolCall));
         let tokens = chunk.tokens.unwrap();
         assert_eq!(tokens.completion_tokens, 42);
@@ -2906,7 +2991,9 @@ mod tests {
     fn test_parse_sse_event_message_start_with_usage() {
         let mut buffer = "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":50,\"cache_creation_input_tokens\":10}}}\n\n".to_string();
         let mut tool_index: Option<usize> = None;
-        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         let tokens = chunk.tokens.unwrap();
         assert_eq!(tokens.prompt_tokens, 100);
         assert_eq!(tokens.cached_tokens, 50);
@@ -2941,6 +3028,7 @@ mod tests {
 
     #[test]
     fn test_parse_sse_event_unknown_event_returns_none() {
+        let _guard = always_on_tracing_guard();
         let mut buffer = "event: some_future_event\ndata: {\"foo\":\"bar\"}\n\n".to_string();
         let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
@@ -2973,7 +3061,9 @@ mod tests {
             ": this is a comment\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
                 .to_string();
         let mut tool_index: Option<usize> = None;
-        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.delta, "hi");
     }
 
@@ -2989,8 +3079,8 @@ mod tests {
 
     #[test]
     fn test_parse_response_text_block_missing_text_field_is_skipped() {
-        // A text block with no "text" key - exercises the if-let None branch
-        // in parse_response's content iteration.
+        // A text block with no "text" key is skipped, with a warning.
+        let _guard = always_on_tracing_guard();
         let provider = AnthropicProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
             "key".to_string(),
@@ -3106,7 +3196,9 @@ mod tests {
             "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
                 .to_string();
         let mut tool_index: Option<usize> = None;
-        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk.finish_reason, Some(FinishReason::Complete));
         // No usage → tokens default to 0
         let tokens = chunk.tokens.unwrap();
@@ -3127,11 +3219,15 @@ mod tests {
         let mut tool_index: Option<usize> = None;
 
         // First event
-        let chunk1 = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk1 = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk1.delta, "Hello");
 
         // Second event
-        let chunk2 = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let chunk2 = parse_sse_event(&mut buffer, &mut tool_index)
+            .unwrap()
+            .unwrap();
         assert_eq!(chunk2.delta, " world");
 
         // Buffer now empty
@@ -3153,6 +3249,7 @@ mod tests {
 
     #[test]
     fn test_parse_sse_event_invalid_json_data_returns_none() {
+        let _guard = always_on_tracing_guard();
         let mut buffer = "event: content_block_delta\ndata: not-valid-json\n\n".to_string();
         let mut tool_index: Option<usize> = None;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
@@ -3560,8 +3657,10 @@ mod tests {
     #[tokio::test]
     async fn sse_stream_unknown_delta_type_is_skipped() {
         use tokio_stream::StreamExt;
-        // An unknown delta type produces None from parse_sse_event, so the
-        // stream keeps polling the inner stream until it ends.
+        let _guard = always_on_tracing_guard();
+        // An unknown delta type is warned about and produces None from
+        // parse_sse_event, so the stream keeps polling the inner stream until
+        // it ends.
         let data =
             b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"unknown_delta\"}}\n\n"
                 .to_vec();
@@ -3571,6 +3670,26 @@ mod tests {
         };
         let mut sse = anthropic_sse_stream(stream);
         assert!(sse.next().await.is_none());
+    }
+
+    /// An `error` event ends the whole collection with the API's message,
+    /// where before it was dropped and the stream then ended without a stop
+    /// reason, which read as a dropped connection.
+    #[tokio::test]
+    async fn an_anthropic_error_frame_ends_the_stream_with_its_message() {
+        let sse = concat!(
+            "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n",
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+        );
+        let stream = anthropic_sse_stream(StaticByteStream {
+            data: vec![sse.as_bytes().to_vec()],
+            idx: 0,
+        });
+        let err = crate::collect_stream(Box::pin(stream)).await.unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("overloaded_error"), "{text}");
+        assert!(text.contains("Overloaded"), "{text}");
+        assert!(!text.contains("connection-dropped"), "{text}");
     }
 
     #[tokio::test]
