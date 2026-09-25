@@ -155,6 +155,9 @@ lev daemon install         # launchd (macOS) / systemd --user (Linux)
 lev daemon uninstall
 ```
 
+The unit pins `LEVIATH_HOME` to the home that was current when you installed, since a supervised
+process inherits nothing from your shell. Move the home and run `lev daemon install` again.
+
 There is no Windows service integration yet: `lev daemon install` reports itself unsupported
 there. Use `lev daemon start`, and remember that `lev run` starts a daemon automatically anyway.
 
