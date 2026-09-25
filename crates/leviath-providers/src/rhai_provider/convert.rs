@@ -87,7 +87,7 @@ pub fn parse_inference_dynamic(value: Dynamic) -> Result<InferenceResponse> {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
-        tool_calls: parse_tool_calls(&json),
+        tool_calls: parse_tool_calls(&json)?,
         tokens_used: parse_usage(json.get("tokens_used")),
         finish_reason: finish_reason_from_str(json.get("finish_reason").and_then(|v| v.as_str())),
         reasoning: None,
@@ -138,36 +138,36 @@ fn parse_parts(json: &Value) -> Vec<leviath_core::mime::Blob> {
 }
 
 /// Parse the `tool_calls` array of an `inference` result.
-fn parse_tool_calls(json: &Value) -> Vec<ToolCall> {
+fn parse_tool_calls(json: &Value) -> Result<Vec<ToolCall>> {
     json.get("tool_calls")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|tc| ToolCall {
-                    // A script that names its calls keeps its own ids. One that
-                    // does not gets minted ones rather than empty strings: an
-                    // empty id pairs with every result and answers every
-                    // prompt.
-                    id: match tc.get("id").and_then(|v| v.as_str()) {
-                        Some(id) if !id.is_empty() => id.to_string(),
-                        _ => crate::call_ids::mint("rhai_call"),
-                    },
-                    name: tc
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    arguments: tc.get("arguments").cloned().unwrap_or(Value::Null),
-                    // A script wrapping a provider that issues per-call replay
-                    // tokens (Gemini's `thought_signature`) can pass one through.
-                    thought_signature: tc
-                        .get("thought_signature")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                })
-                .collect()
+        .into_iter()
+        .flatten()
+        .map(|tc| {
+            Ok(ToolCall {
+                // A script that names its calls keeps its own ids. One that
+                // does not gets minted ones rather than empty strings: an
+                // empty id pairs with every result and answers every
+                // prompt. A call that names no tool is the script's
+                // mistake, and the reply is malformed.
+                id: crate::provider::tool_call_id(
+                    tc.get("id").and_then(|v| v.as_str()),
+                    "rhai_call",
+                ),
+                name: crate::provider::tool_call_name(
+                    tc.get("name").and_then(|v| v.as_str()),
+                    "the provider script",
+                )?,
+                arguments: tc.get("arguments").cloned().unwrap_or(Value::Null),
+                // A script wrapping a provider that issues per-call replay
+                // tokens (Gemini's `thought_signature`) can pass one through.
+                thought_signature: tc
+                    .get("thought_signature")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// Convert a map the script passed to `on_chunk` into a [`StreamChunk`]. `tokens`

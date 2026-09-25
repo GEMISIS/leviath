@@ -51,6 +51,34 @@ pub(crate) fn parse_tool_arguments(raw: &str) -> serde_json::Value {
     serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
 }
 
+/// The id a tool call is answered by.
+///
+/// A reply that names its call keeps that name. One that sends no id, or an
+/// empty one, gets an id minted under `label` (see [`crate::call_ids`] for
+/// what a minted id guarantees): an empty id pairs with every result and
+/// answers every prompt, so it is the one value a call cannot carry.
+pub(crate) fn tool_call_id(id: Option<&str>, label: &str) -> String {
+    match id {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => crate::call_ids::mint(label),
+    }
+}
+
+/// The tool a call names.
+///
+/// A call with no name, or an empty one, cannot be dispatched to anything,
+/// and there is nothing the model could be told that would let it correct a
+/// call it did not make. The reply is malformed, and the attempt fails as
+/// one, rather than the runtime refusing a call to `''`.
+pub(crate) fn tool_call_name(name: Option<&str>, provider: &str) -> Result<String> {
+    match name {
+        Some(name) if !name.is_empty() => Ok(name.to_string()),
+        _ => Err(ProviderError::InvalidResponse(format!(
+            "a tool call from {provider} names no tool"
+        ))),
+    }
+}
+
 /// A tool call's input as a request may carry it: always an object.
 ///
 /// An object goes out as it is. Anything else becomes `{"_raw": <value>}`.

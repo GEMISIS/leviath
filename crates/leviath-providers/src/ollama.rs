@@ -584,11 +584,10 @@ impl OllamaProvider {
         if let Some(tcs) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
             for tc in tcs {
                 let function = tc.get("function").unwrap_or(&serde_json::Value::Null);
-                let name = function
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let name = crate::provider::tool_call_name(
+                    function.get("name").and_then(|v| v.as_str()),
+                    "Ollama",
+                )?;
                 let arguments = function
                     .get("arguments")
                     .cloned()
@@ -1652,9 +1651,13 @@ mod tests {
             "done": true
         });
 
-        let response = provider.parse_response(&body).unwrap();
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "");
+        // A call with no function names no tool, and a call to nothing is
+        // a malformed reply rather than a call the runtime refuses as `''`.
+        let err = provider.parse_response(&body).unwrap_err();
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::failure::FailureKind::MalformedResponse)
+        );
     }
 
     #[test]
@@ -2026,11 +2029,12 @@ mod tests {
             "prompt_eval_count": 0,
             "done": true
         });
-        // When function is null, name and arguments should default
-        let response = provider.parse_response(&body).unwrap();
-        // tool_calls has 1 entry with empty name
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "");
+        // A null function names no tool, and that is a malformed reply.
+        let err = provider.parse_response(&body).unwrap_err();
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::failure::FailureKind::MalformedResponse)
+        );
     }
 
     // ─── NdjsonStream: parse logic ────────────────────────────────────────
