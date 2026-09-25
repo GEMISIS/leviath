@@ -440,7 +440,6 @@ mod tests {
         assert!(builtin_mime("codex", "gpt-5.5-codex").accepts(&mt("image/png")));
         assert!(builtin_mime("ollama", "llava").accepts(&mt("image/png")));
         assert!(builtin_mime("openrouter", "openai/gpt-5.5").accepts(&mt("image/png")));
-        assert!(!builtin_mime("claude-code", "claude-sonnet-5").accepts(&mt("image/png")));
     }
 
     #[test]

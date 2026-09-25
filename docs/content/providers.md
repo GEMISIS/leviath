@@ -1,6 +1,6 @@
 ---
 title: Providers
-description: Set up Anthropic, OpenAI, Google, xAI, Meta, OpenRouter, Bedrock, Meshy, Ollama, or a Codex, Grok or Claude Code sign-in, and pick each stage's model.
+description: Set up Anthropic, OpenAI, Google, xAI, Meta, OpenRouter, Bedrock, Meshy, Ollama, or a Codex or Grok sign-in, and pick each stage's model.
 group: Get started
 group_order: 1
 order: 3
@@ -27,7 +27,6 @@ writes it into `~/.leviath/config.toml` for you, interactively or with
 | Meshy | `MESHY_API_KEY` | [meshy.ai](https://www.meshy.ai/api) |
 | AWS Bedrock | `AWS_BEARER_TOKEN_BEDROCK` (region from `AWS_REGION`) | [console.aws.amazon.com/bedrock](https://console.aws.amazon.com/bedrock/home#/api-keys) |
 | Ollama | `OLLAMA_HOST` (optional, local) | [ollama.com/download](https://ollama.com/download) |
-| Claude Code | none (subscription; terms caveat below; not in the wizard) | [see below](#claude-code-transport) |
 
 The setup flag `--ollama-url` sets the same base URL that `OLLAMA_HOST` supplies.
 
@@ -525,7 +524,6 @@ What each shipped provider does, as documented on 2026-09-14:
 | `meshy` | 3 days (enterprise: indefinitely) | nothing | A task's model files, previews and textures are kept so they can be downloaded; nothing is used for training |
 | `ollama`, `llama-cpp`, `lm-studio` | nothing | nothing | Local inference |
 | `codex` | the ChatGPT account's terms | nothing | A subscription transport, outside the API's agreements |
-| `claude-code` | the account behind the CLI | nothing | A Commercial API key inherits its organisation's arrangement, ZDR included |
 | a `[model_providers]` entry | unknown | its `retention` key | Leviath cannot know a custom host's policy; declare it if you do |
 
 Declare an agreement with OpenAI, Anthropic, Google or xAI in `zero_retention_agreements`. Google's
@@ -1034,33 +1032,3 @@ server-side, so each turn's reasoning is handed back on the next request. Set
 `codex_replay_reasoning = false` to stop, at the cost of the model re-deriving
 its chain of thought every turn.
 
-## Claude Code transport
-
-If you have Claude Code installed and signed in, you can run Leviath on your Claude subscription
-with no API key. Leviath's structured regions still work; the CLI is driven as a plain inference
-relay.
-
-> [!CAUTION]
-> **Terms of service.** Anthropic's terms state that third-party developers may not offer claude.ai
-> login or subscription rate limits for their products without prior approval. Using this transport
-> routes inference through your Claude subscription via the CLI's OAuth session. By enabling it, you
-> accept responsibility for compliance with Anthropic's terms. For unambiguous compliance, use a
-> direct Anthropic API key instead.
-
-Four measured caveats. The CLI adds about 130 tokens of its own context to **every** call, your
-account email address and the current date included, and there is no flag to turn that off. There is
-no prompt caching. Each call is a separate subprocess. And it serves Anthropic models only.
-
-The setup wizard does not offer it. Turn it on with `lev setup --claude-code true`. Add
-`--claude-code-effort <level>` for something other than the default, or write the keys yourself:
-
-```toml
-[providers]
-claude_code_enabled = true
-claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
-claude_code_effort  = "medium"                  # low | medium | high | xhigh | max
-```
-
-It is off unless you turn it on, and running the wizard later leaves these keys as they are.
-`claude_code_effort` is always sent explicitly: left to itself the CLI picks `high` with adaptive
-thinking, spending output tokens and latency Leviath never asked for.

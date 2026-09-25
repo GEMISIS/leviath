@@ -479,7 +479,7 @@ pub struct InferenceRequest {
 
     /// Optional per-call wall-clock deadline in seconds. When set, providers
     /// bound this specific call to it (HTTP: a per-request total timeout;
-    /// claude-code: its subprocess timeout). When `None`, the provider's default
+    /// a script provider: its call's deadline). When `None`, the provider's default
     /// applies (see `DEFAULT_INFERENCE_TIMEOUT_SECS`). Sourced from a stage's
     /// `[stages.<name>.model] request_timeout_secs`.
     #[serde(default)]
@@ -735,7 +735,7 @@ pub trait Provider: Send + Sync {
     /// Providers with an exact remote token-count endpoint (Anthropic, Gemini)
     /// call it here and fall back to a local heuristic on any error, so this is
     /// infallible. Providers without such an endpoint (OpenAI via tiktoken,
-    /// OpenRouter, Ollama, Claude Code) compute locally and never `.await` on
+    /// OpenRouter, Ollama) compute locally and never `.await` on
     /// the network. Because an implementation may perform a network round-trip,
     /// do **not** call this on a hot per-entry accounting path; use it for
     /// bounded, request-level checks.

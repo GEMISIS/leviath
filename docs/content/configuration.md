@@ -131,9 +131,6 @@ meta_base_url       = "https://gw.corp/v1"   # env fallback: META_AI_BASE_URL
 openrouter_base_url = "https://gw.corp/v1"   # env fallback: OPENROUTER_BASE_URL
 bedrock_base_url    = "https://gw.corp/bedrock"   # env fallback: BEDROCK_BASE_URL
 anthropic_headers   = { X-Gateway-Token = "..." }  # extra headers for that gateway (see below)
-claude_code_enabled = false          # opt in to the Claude Code CLI transport
-claude_code_binary  = "/usr/local/bin/claude"   # unset resolves `claude` on PATH
-claude_code_effort  = "medium"       # low | medium | high | xhigh | max
 ollama_enabled         = false      # offer Ollama; setting ollama_base_url also counts
 codex_enabled          = false      # bill inference to a ChatGPT subscription
 codex_reasoning_effort = "medium"   # low | medium | high | xhigh (see below)
@@ -218,9 +215,6 @@ behind a proxy needs nothing extra here.
 `bedrock_base_url` replaces the Bedrock runtime origin only. With it set, the live model listing,
 the price file and the token-count routes are not read, and `lev models list` shows this build's
 table for Bedrock; see [AWS Bedrock](/docs/providers#aws-bedrock).
-
-`claude_code_enabled` is off unless you turn it on. See
-[Providers](/docs/providers#claude-code-transport) for the terms note that goes with it.
 
 `fallback_order` is where a run goes when the provider it is using stops being usable: out of
 credits, or a rejected key. Entries are `provider/model` pairs, best first, tried after the stage's

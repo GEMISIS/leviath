@@ -1,7 +1,7 @@
 //! What this route serves, and which plans can reach it.
 //!
-//! There is no `/models` endpoint here, so the catalog is compiled in the way
-//! the Claude Code transport's is. Two consequences worth stating rather than
+//! There is no `/models` endpoint here, so the catalog is compiled in. Two
+//! consequences worth stating rather than
 //! discovering: the context windows are this build's belief and cannot be
 //! checked against the server, and the reachable set depends on the account's
 //! ChatGPT plan.

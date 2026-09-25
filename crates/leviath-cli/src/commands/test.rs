@@ -2724,9 +2724,6 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()

@@ -105,7 +105,7 @@ zero` writes it. The setup wizard's **Zero data retention** row writes it too, a
 | Anthropic, Google, xAI | Refused unless you declare an agreement |
 | Meta | Refused, the standard models and a `-contributor` model alike |
 | local models | Nothing to do; nothing leaves the machine |
-| Meshy, Codex, Grok, Claude Code | Refused; the policy is fixed |
+| Meshy, Codex, Grok | Refused; the policy is fixed |
 | Every provider with a Files API | Nothing is uploaded; parts go inline, within each provider's inline limits |
 
 Meta publishes no retention window for its standard models, so the switch refuses them. A

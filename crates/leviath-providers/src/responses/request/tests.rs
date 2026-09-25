@@ -79,10 +79,9 @@ fn developer_texts(body: &Value) -> Vec<String> {
 
 #[test]
 fn every_structured_region_reaches_the_body() {
-    // The bug this pins is recorded in claude_code.rs: a transport that read
-    // only `role == "system"` messages dropped every region, because
-    // `ContextWindow::assemble` puts them in `request.system` and never
-    // populates that role.
+    // A transport that reads only `role == "system"` messages drops every
+    // region, because `ContextWindow::assemble` puts them in `request.system`
+    // and never populates that role.
     let req = request(
         vec![
             block("task", "## task\nDo the thing.", Volatility::Stable),

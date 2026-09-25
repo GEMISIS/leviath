@@ -3227,9 +3227,7 @@ meshy_api_key = "msy-existing"
             openai_base_url: None,
             google_base_url: None,
             openrouter_base_url: None,
-            claude_code_enabled: true,
-            claude_code_binary: None,
-            claude_code_effort: None,
+            codex_enabled: true,
             anthropic_cache_ttl: None,
             fallback_order: Vec::new(),
             ..Default::default()
@@ -3238,7 +3236,7 @@ meshy_api_key = "msy-existing"
         assert!(!rendered.contains("SECRET-VALUE"), "key leaked: {rendered}");
         // "is it configured" is what a debug line is actually asking.
         assert!(rendered.contains("<set>"), "{rendered}");
-        assert!(rendered.contains("claude_code_enabled: true"), "{rendered}");
+        assert!(rendered.contains("codex_enabled: true"), "{rendered}");
         // A header's name says what is configured; its value is a credential
         // as often as not.
         assert!(rendered.contains("X-Gateway-Token"), "{rendered}");
@@ -3253,9 +3251,6 @@ meshy_api_key = "msy-existing"
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -3770,9 +3765,6 @@ headers = { Ocp-Apim-Subscription-Key = "sub" }
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -3793,9 +3785,6 @@ headers = { Ocp-Apim-Subscription-Key = "sub" }
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -3818,9 +3807,6 @@ headers = { Ocp-Apim-Subscription-Key = "sub" }
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -3841,9 +3827,6 @@ headers = { Ocp-Apim-Subscription-Key = "sub" }
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -4033,8 +4016,8 @@ openrouter_api_key = "sk-or-test"
             default.providers.anthropic_api_key
         );
         assert_eq!(
-            parsed.providers.claude_code_enabled,
-            default.providers.claude_code_enabled
+            parsed.providers.ollama_enabled,
+            default.providers.ollama_enabled
         );
     }
 
@@ -4230,9 +4213,6 @@ max_contxt_tokens = 1048576
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -4272,9 +4252,6 @@ max_contxt_tokens = 1048576
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -4313,9 +4290,6 @@ max_contxt_tokens = 1048576
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -4338,9 +4312,6 @@ max_contxt_tokens = 1048576
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -4545,9 +4516,6 @@ enabled = false
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -4626,9 +4594,6 @@ enabled = false
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()

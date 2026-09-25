@@ -37,11 +37,8 @@ google_base_url = "https://gateway.example.internal/v1"
 openrouter_base_url = "https://gateway.example.internal/v1"
 meshy_base_url = "https://gateway.example.internal/v1"
 bedrock_base_url = "https://gateway.example.internal/v1"
-claude_code_enabled = false
 # How long a cached prompt prefix survives: "5m" (free, default) or "1h".
 anthropic_cache_ttl = "5m"
-claude_code_binary = "/usr/local/bin/claude"
-claude_code_effort = "medium"
 # Offer Ollama. Opt-in like everything else: setting `ollama_base_url` above
 # also counts as choosing it.
 ollama_enabled = false

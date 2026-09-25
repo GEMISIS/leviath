@@ -15,7 +15,6 @@ pub mod bedrock;
 pub(crate) mod call_ids;
 pub mod capabilities;
 pub mod capability_cache;
-pub mod claude_code;
 pub mod codex;
 #[cfg(feature = "debug-http")]
 pub(crate) mod debug_http;
@@ -55,7 +54,6 @@ pub use anthropic::AnthropicProvider;
 pub use bedrock::BedrockProvider;
 pub use capabilities::{LimitsSource, ModelCapabilities, ModelCapabilityOverride, ModelMime};
 pub use capability_cache::{CapabilityCache, CheckOutcome, ProviderCheck};
-pub use claude_code::ClaudeCodeProvider;
 pub use codex::CodexProvider;
 pub use endpoint::EndpointProvider;
 pub use gemini::GeminiProvider;

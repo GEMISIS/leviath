@@ -19,10 +19,9 @@ use std::sync::Arc;
 #[derive(Clone, PartialEq)]
 pub struct ProviderCreds {
     /// Provider identifier: `anthropic` | `openai` | `google` | `openrouter` |
-    /// `ollama` | `claude-code` | `meshy` | `bedrock`. Selects which provider
-    /// is instantiated.
+    /// `ollama` | `meshy` | `bedrock`. Selects which provider is instantiated.
     pub name: String,
-    /// API key, when the provider needs one (`None` for `ollama`/`claude-code`).
+    /// API key, when the provider needs one (`None` for `ollama`).
     pub api_key: Option<String>,
     /// Base URL override (used by `ollama`; `None` uses the built-in default).
     pub base_url: Option<String>,
@@ -33,13 +32,12 @@ pub struct ProviderCreds {
     pub request_timeout_secs: Option<u64>,
     /// Client-side rate limit (requests/tokens per minute) enforced before
     /// each call. `None` sends requests unthrottled. Ignored by `ollama`
-    /// (a local server) and `claude-code` (a subprocess).
+    /// (a local server).
     pub rate_limit: Option<leviath_providers::RateLimitConfig>,
     /// Provider-specific settings that don't fit the api-key / base-URL shape.
     ///
-    /// `claude-code` reads `binary` (path to the `claude` executable) and
-    /// `effort` (reasoning level); `bedrock` reads `region`, the AWS region
-    /// its hosts are derived from. An OpenAI-compatible endpoint is marked by
+    /// `bedrock` reads `region`, the AWS region its hosts are derived from.
+    /// An OpenAI-compatible endpoint is marked by
     /// `kind` and carries its headers and model list here too; see
     /// [`Self::openai_compatible`] and [`EndpointSpec`], which are the only
     /// two places that spell those keys. Kept as a map rather than named
@@ -487,9 +485,9 @@ pub fn build_provider_registry_probing(
     reachable: &dyn Fn(&str) -> bool,
 ) -> Result<ProviderRegistry, leviath_providers::ProviderError> {
     let mut registry = ProviderRegistry::new();
-    // One client per distinct timeout, built on first use. Lazy because
-    // `claude-code` drives a local CLI and needs no HTTP client at all - eager
-    // construction would let a certificate-store failure block a provider that
+    // One client per distinct timeout, built on first use. Lazy so that a
+    // certificate-store failure surfaces only for a provider that reaches for
+    // a client: a name nothing registers, or an Ollama nothing answers at,
     // never touches a certificate.
     let mut clients = ClientCache::default();
 
@@ -751,24 +749,6 @@ pub fn build_provider_registry_probing(
                          ollama and reload the config to use it."
                     );
                 }
-            }
-            "claude-code" => {
-                // Opt-in: the CLI puts the user's account email address into
-                // every call. The CLI-side config only emits this entry when
-                // the user has explicitly enabled the provider.
-                let binary = c
-                    .options
-                    .get("binary")
-                    .cloned()
-                    .unwrap_or_else(|| "claude".to_string());
-                registry.register(
-                    "claude-code".to_string(),
-                    Arc::new(leviath_providers::ClaudeCodeProvider::with_overrides(
-                        binary,
-                        c.options.get("effort").cloned(),
-                        Some(caps),
-                    )),
-                );
             }
             "codex" => {
                 // Registered without probing for a grant. The alternative is a
@@ -1220,8 +1200,8 @@ mod tests {
     #[test]
     fn build_provider_registry_from_creds_slice() {
         // Drives `build_provider_registry(&[ProviderCreds]).expect("an HTTPS client builds in tests")` directly:
-        // every keyed provider, the ollama-with-default-url arm, claude-code,
-        // and an unknown provider name (the catch-all no-op arm).
+        // every keyed provider, the ollama-with-default-url arm, and an
+        // unknown provider name (the catch-all no-op arm).
         let caps = std::collections::HashMap::new();
         let creds = vec![
             ProviderCreds {
@@ -1270,15 +1250,6 @@ mod tests {
                 options: Default::default(),
             },
             ProviderCreds {
-                name: "claude-code".to_string(),
-                api_key: None,
-                base_url: None,
-                model_capabilities: caps.clone(),
-                request_timeout_secs: None,
-                rate_limit: None,
-                options: Default::default(),
-            },
-            ProviderCreds {
                 name: "totally-unknown".to_string(),
                 api_key: Some("x".to_string()),
                 base_url: None,
@@ -1301,7 +1272,6 @@ mod tests {
         assert!(registry.has("google"));
         assert!(registry.has("openrouter"));
         assert!(registry.has("ollama"));
-        assert!(registry.has("claude-code"));
         assert!(!registry.has("totally-unknown"));
     }
 
@@ -1383,34 +1353,6 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_reads_its_binary_and_effort_options() {
-        // The registry arm must thread both options through: constructing a
-        // default provider here would silently ignore a configured binary path
-        // or effort level.
-        let mut creds = ProviderCreds::simple("claude-code");
-        creds
-            .options
-            .insert("binary".to_string(), "/opt/bin/claude".to_string());
-        creds
-            .options
-            .insert("effort".to_string(), "low".to_string());
-        let registry = build_provider_registry(std::slice::from_ref(&creds))
-            .expect("an HTTPS client builds in tests");
-        assert!(registry.has("claude-code"));
-
-        // Options are consumed by the provider constructor, which is where the
-        // effort allow-list lives; an unusable value must not reach the CLI.
-        creds
-            .options
-            .insert("effort".to_string(), "warp-speed".to_string());
-        assert!(
-            build_provider_registry(&[creds])
-                .expect("an HTTPS client builds in tests")
-                .has("claude-code")
-        );
-    }
-
-    #[test]
     fn provider_creds_simple_has_no_key_or_options() {
         let creds = ProviderCreds::simple("ollama");
         assert_eq!(creds.name, "ollama");
@@ -1483,13 +1425,16 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_that_needs_no_http_client_is_unaffected() {
-        // `claude-code` drives a local CLI. Building its entry must not depend
-        // on an HTTPS client, so a failing factory leaves it registered.
-        let registry =
-            build_provider_registry_with(&[ProviderCreds::simple("claude-code")], &failing_client)
-                .expect("claude-code needs no HTTPS client");
-        assert!(registry.has("claude-code"));
+    fn a_name_nothing_registers_never_asks_for_a_client() {
+        // The client is built on first use, so a credential the registry has
+        // no arm for does not fail the whole build over a certificate store it
+        // was never going to read.
+        let registry = build_provider_registry_with(
+            &[ProviderCreds::simple("nobody-serves-this")],
+            &failing_client,
+        )
+        .expect("an unregistered name needs no HTTPS client");
+        assert!(!registry.has("nobody-serves-this"));
     }
 
     #[test]

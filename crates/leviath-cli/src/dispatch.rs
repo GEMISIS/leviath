@@ -580,8 +580,6 @@ mod tests {
             ollama_url: None,
             override_model: None,
             fallback_model: None,
-            claude_code: None,
-            claude_code_effort: None,
             codex: None,
             grok: None,
             xai_key: None,

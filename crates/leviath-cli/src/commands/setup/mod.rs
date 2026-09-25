@@ -131,17 +131,6 @@ pub struct SetupArgs {
     #[arg(long)]
     pub fallback_model: Option<String>,
 
-    /// Enable the Claude Code CLI transport (runs on your Claude subscription
-    /// instead of an API key). Off unless set: the CLI adds its own context to
-    /// every call, including your account email address.
-    #[arg(long)]
-    pub claude_code: Option<bool>,
-
-    /// Reasoning effort for the Claude Code transport
-    /// (low, medium, high, xhigh, max)
-    #[arg(long)]
-    pub claude_code_effort: Option<String>,
-
     /// Enable the Codex transport (runs on your ChatGPT subscription instead
     /// of an API key). This flag only flips the switch: interactive `lev setup`
     /// signs in from its own screen, and a non-interactive run has nobody
@@ -314,17 +303,11 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     if let Some(ref m) = args.fallback_model {
         config.fallback_model = Some(m.clone());
     }
-    if let Some(enabled) = args.claude_code {
-        config.providers.claude_code_enabled = enabled;
-    }
     if let Some(enabled) = args.codex {
         config.providers.codex_enabled = enabled;
     }
     if let Some(enabled) = args.grok {
         config.providers.grok_enabled = enabled;
-    }
-    if let Some(ref e) = args.claude_code_effort {
-        config.providers.claude_code_effort = Some(e.clone());
     }
     retarget_default_provider(config);
 }
@@ -371,15 +354,6 @@ fn configured_providers(config: &Config) -> Vec<String> {
         .partition(|id| kind(id) == Some(catalog::Credential::BaseUrl));
     keyed
         .into_iter()
-        // The Claude Code transport has no catalog row: the wizard omits it
-        // by a pinned test, because the CLI adds its own context to every
-        // call. It is still a provider a run can use, so it is named here.
-        .chain(
-            config
-                .providers
-                .claude_code_enabled
-                .then_some("claude-code"),
-        )
         .chain(endpoints)
         .chain(unkeyed)
         .map(str::to_string)
@@ -622,8 +596,6 @@ mod tests {
             ollama_url: None,
             override_model: None,
             fallback_model: None,
-            claude_code: None,
-            claude_code_effort: None,
             codex: None,
             grok: None,
             xai_key: None,
@@ -1037,19 +1009,6 @@ mod tests {
         assert!(!config.providers.codex_enabled);
     }
 
-    #[test]
-    fn the_claude_code_transport_counts_as_a_configured_provider() {
-        let mut config = Config::default();
-        apply_flags(
-            &mut config,
-            &SetupArgs {
-                claude_code: Some(true),
-                ..args()
-            },
-        );
-        assert_eq!(config.default_provider, "claude-code");
-    }
-
     // ─── the non-interactive path ───────────────────────────────────────────
 
     #[test]
@@ -1067,8 +1026,6 @@ mod tests {
             ollama_url: Some("http://box:11434".to_string()),
             override_model: Some("m".to_string()),
             fallback_model: Some("f".to_string()),
-            claude_code: Some(true),
-            claude_code_effort: Some("xhigh".to_string()),
             ..args()
         };
 
@@ -1090,11 +1047,6 @@ mod tests {
         assert_eq!(written.ollama_base_url.as_deref(), Some("http://box:11434"));
         assert_eq!(written.override_model.as_deref(), Some("m"));
         assert_eq!(written.fallback_model.as_deref(), Some("f"));
-        assert!(written.providers.claude_code_enabled);
-        assert_eq!(
-            written.providers.claude_code_effort.as_deref(),
-            Some("xhigh")
-        );
     }
 
     /// The environment is scoped for the first call, because "is any provider

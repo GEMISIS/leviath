@@ -11,8 +11,7 @@
 ///
 /// This is the one unified inference timeout. It bounds every provider call the
 /// same way: HTTP providers apply it as a per-request total timeout (see
-/// [`apply_request_timeout`]), the claude-code provider as its subprocess
-/// timeout, and the dispatch layer as the `RetryPolicy.job_timeout` backstop
+/// [`apply_request_timeout`]), and the dispatch layer as the `RetryPolicy.job_timeout` backstop
 /// that frees the pool slot even if a provider's own timer is defeated (e.g. by
 /// trickle keep-alive). 15 minutes is generous for any real inference -
 /// including large-prompt Anthropic cache creation, which can take several

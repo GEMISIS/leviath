@@ -199,8 +199,8 @@ fn catalogue_rows() -> Vec<ModelInfo> {
 /// Core of [`list`], with provider-registry construction injected so tests
 /// can drive the live merge/fallback/error paths with a
 /// [`Provider`](leviath_providers::Provider) mock instead of hitting a real
-/// network endpoint (ollama) or spawning a real subprocess (claude-code) --
-/// both of which [`build_provider_registry`] always registers.
+/// network endpoint, which a registry built from a config with Ollama enabled
+/// would do.
 ///
 /// `build_registry` is a `&dyn Fn` trait object, not a generic
 /// `impl FnOnce`, deliberately: every test below passes a distinct closure
@@ -1888,14 +1888,12 @@ mod tests {
 
     // ─── list()/show() --remote paths, with a mock provider ────────────────
     //
-    // `build_provider_registry` always registers real `ollama`/`claude-code`
-    // providers regardless of config, so these can't safely be exercised via
-    // the real registry (a real network call to localhost:11434, or spawning
-    // a real `claude` subprocess). `list_with_registry`/`show_with_registry`
-    // take an injectable registry builder for exactly this reason: tests
-    // register a `MockProvider` under a name of their choosing and filter to
-    // just that provider via `--provider`, so no real ollama/claude-code
-    // provider is ever touched.
+    // A registry built from a real config reaches for real endpoints (a
+    // network call to localhost:11434 for Ollama), so these can't safely be
+    // exercised through it. `list_with_registry`/`show_with_registry` take an
+    // injectable registry builder for exactly this reason: tests register a
+    // `MockProvider` under a name of their choosing and filter to just that
+    // provider via `--provider`, so no real provider is ever touched.
 
     pub(super) struct MockProvider {
         pub(super) models: Vec<ModelInfo>,
@@ -3391,7 +3389,7 @@ mod live_listing_tests {
         crate::config::with_isolated_config_path_async("models-show-filter", |_| async move {
             let args = ShowArgs {
                 model: "claude-opus-5".to_string(),
-                provider: Some("claude-code".to_string()),
+                provider: Some("anthropic".to_string()),
                 remote: false,
                 offline: true,
             };

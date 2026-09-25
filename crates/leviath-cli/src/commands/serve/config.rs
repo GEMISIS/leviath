@@ -562,9 +562,6 @@ mod tests {
                     openai_base_url: None,
                     google_base_url: None,
                     openrouter_base_url: None,
-                    claude_code_enabled: false,
-                    claude_code_binary: None,
-                    claude_code_effort: None,
                     anthropic_cache_ttl: None,
                     fallback_order: Vec::new(),
                     ..Default::default()
@@ -803,8 +800,9 @@ mod tests {
     // ─── get_models endpoint ──────────────────────────────────────────────────
 
     /// AppState whose registry has a provider that actually enumerates models,
-    /// so the `/api/models` handler's list-building loop runs. `claude-code`
-    /// needs no API key and `list_models` returns its three known models.
+    /// so the `/api/models` handler's list-building loop runs. Bedrock behind
+    /// a gateway URL reads no live listing and answers from this build's
+    /// table, so the test needs no network.
     fn test_state_listing_models() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
@@ -817,7 +815,8 @@ mod tests {
                     openai_base_url: None,
                     google_base_url: None,
                     openrouter_base_url: None,
-                    claude_code_enabled: true,
+                    bedrock_api_key: Some("ABSK-test".to_string()),
+                    bedrock_base_url: Some("http://127.0.0.1:1".to_string()),
                     ..Config::default().providers
                 },
                 ..Config::default()
@@ -848,8 +847,8 @@ mod tests {
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        // With default config (no API keys, claude-code off), providers may
-        // return empty lists, but the endpoint itself should succeed.
+        // With default config (no API keys), providers may return empty
+        // lists, but the endpoint itself should succeed.
         let _ = models;
     }
 
@@ -868,10 +867,10 @@ mod tests {
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        // claude-code enumerates its three known models, so the handler's
-        // per-model mapping loop actually runs and produces entries.
+        // Bedrock enumerates its table, so the handler's per-model mapping
+        // loop actually runs and produces entries.
         assert!(!models.is_empty());
-        assert!(models.iter().any(|m| m["provider"] == "claude-code"));
+        assert!(models.iter().any(|m| m["provider"] == "bedrock"));
         assert!(models.iter().all(|m| m["id"].is_string()));
         // The fields The Lair reads to describe a model beyond its size: the
         // shape flags, whether the row is the provider's own answer, and the
@@ -956,10 +955,7 @@ mod tests {
         )
         .await;
         assert!(!ids.is_empty());
-        assert!(
-            ids.iter().any(|id| id.starts_with("claude-code/")),
-            "{ids:?}"
-        );
+        assert!(ids.iter().any(|id| id.starts_with("bedrock/")), "{ids:?}");
     }
 
     #[test]
@@ -1694,9 +1690,6 @@ mod tests {
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
