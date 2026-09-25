@@ -629,12 +629,16 @@ async fn real_daemon_restart() -> anyhow::Result<()> {
 /// the rendering, paths, and command lines are the tested
 /// `commands::daemon_service` core; this supplies the real exe path, home
 /// directory, and uid.
+///
+/// The home handed over is the one `LEVIATH_HOME` names, not the data root
+/// under it: the daemon joins `.leviath` onto its home itself, so a unit that
+/// carried the data root sent it to `~/.leviath/.leviath`, an empty directory
+/// with no config in it.
 fn resolve_service_unit() -> anyhow::Result<commands::daemon_service::ServiceUnit> {
     let user_home = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the service file"))?;
     let leviath_home = leviath_cli::config::leviath_home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve a leviath home directory"))?
-        .join(".leviath");
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a leviath home directory"))?;
     let exe = std::env::current_exe()?;
     commands::daemon_service::service_unit(
         &exe,

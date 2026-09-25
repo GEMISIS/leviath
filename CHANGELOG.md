@@ -64,6 +64,13 @@ same list.
 
 ### Fixed
 
+- `lev daemon install` writes the home into the service unit's `LEVIATH_HOME`,
+  not the data root under it. The daemon joins `.leviath` onto its home
+  itself, so the unit sent a supervised daemon to `~/.leviath/.leviath`: an
+  empty directory with no config, so no providers, no `allow_env_vars` and no
+  agent permissions, while the `lev` commands in your shell read `~/.leviath`.
+  The stdio capture stays at `~/.leviath/daemon.stdio.log`. Run
+  `lev daemon install` again to rewrite the unit.
 - An interaction request id is drawn by the daemon rather than taken from the
   provider's tool-call id, so two prompts from one run can no longer share
   one. A provider numbers its calls within one message, so a run's second turn

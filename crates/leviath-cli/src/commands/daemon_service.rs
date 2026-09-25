@@ -67,6 +67,13 @@ pub(crate) fn legacy_cleanup(config_home: &Path, uid: u32) -> Vec<(PathBuf, Supe
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const STDIO_FILE: &str = "daemon.stdio.log";
 
+/// Where the supervisor's capture goes: in the daemon's data root under
+/// `home`, beside `daemon.log`, which is where `lev rage` looks for it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn stdio_log(home: &Path) -> std::path::PathBuf {
+    home.join(".leviath").join(STDIO_FILE)
+}
+
 /// A rendered service definition and where it belongs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceUnit {
@@ -84,16 +91,18 @@ pub struct ServiceUnit {
 
 /// Build the service definition for this platform.
 ///
-/// `exe` is the absolute path to the `lev` binary, `home` the leviath home
-/// directory (the unit points the daemon at it explicitly, since a supervised
-/// process inherits none of the user's shell environment), `config_home` the
-/// directory the unit file is written into, and `uid` the user's numeric id
-/// (launchd addresses per-user domains by it).
+/// `exe` is the absolute path to the `lev` binary, `home` the value
+/// `LEVIATH_HOME` gets (the unit points the daemon at it explicitly, since a
+/// supervised process inherits none of the user's shell environment; the
+/// daemon keeps its data under `<home>/.leviath`, which is where the stdio
+/// capture goes too), `config_home` the directory the unit file is written
+/// into, and `uid` the user's numeric id (launchd addresses per-user domains
+/// by it).
 #[cfg(target_os = "macos")]
 pub fn service_unit(exe: &Path, home: &Path, config_home: &Path, uid: u32) -> Result<ServiceUnit> {
     let path = config_home.join(format!("{SERVICE_LABEL}.plist"));
     Ok(ServiceUnit {
-        contents: launchd_plist(exe, home, &home.join(STDIO_FILE)),
+        contents: launchd_plist(exe, home, &stdio_log(home)),
         activate: (
             "launchctl".to_string(),
             vec![
@@ -183,7 +192,7 @@ fn xml_escape(s: &str) -> String {
 pub fn service_unit(exe: &Path, home: &Path, config_home: &Path, _uid: u32) -> Result<ServiceUnit> {
     Ok(ServiceUnit {
         path: config_home.join("leviath.service"),
-        contents: systemd_unit(exe, home, &home.join(STDIO_FILE))?,
+        contents: systemd_unit(exe, home, &stdio_log(home))?,
         activate: (
             "systemctl".to_string(),
             vec![
@@ -715,7 +724,7 @@ mod tests {
         fn unit() -> ServiceUnit {
             service_unit(
                 Path::new("/usr/local/bin/lev"),
-                Path::new("/home/u/.leviath"),
+                Path::new("/home/u"),
                 Path::new("/tmp/lev-units"),
                 501,
             )
@@ -726,7 +735,7 @@ mod tests {
         fn the_unit_restarts_the_daemon_and_points_it_at_the_leviath_home() {
             let u = unit();
             assert!(u.contents.contains("/usr/local/bin/lev"));
-            assert!(u.contents.contains("/home/u/.leviath"));
+            assert!(u.contents.contains("/home/u"));
             assert!(u.contents.contains(STDIO_FILE));
             // Activation and deactivation drive the same supervisor.
             assert_eq!(u.activate.0, u.deactivate.0);
@@ -751,11 +760,41 @@ mod tests {
             assert_eq!(xml_escape("plain/path"), "plain/path");
         }
 
+        /// `LEVIATH_HOME` is the home, and the daemon puts `.leviath` under it
+        /// itself. The unit once carried the data root as the home, so the
+        /// supervised daemon ran out of `~/.leviath/.leviath`: an empty
+        /// directory with no config, so no providers and no agents.
+        #[test]
+        fn the_home_is_the_home_and_the_log_is_under_the_data_root() {
+            let u = service_unit(
+                Path::new("/usr/local/bin/lev"),
+                Path::new("/home/u"),
+                Path::new("/tmp/lev-units"),
+                501,
+            )
+            .unwrap();
+            assert!(
+                u.contents.contains("<string>/home/u</string>"),
+                "{}",
+                u.contents
+            );
+            assert!(
+                !u.contents.contains("<string>/home/u/.leviath</string>"),
+                "{}",
+                u.contents
+            );
+            assert!(
+                u.contents.contains("/home/u/.leviath/daemon.stdio.log"),
+                "{}",
+                u.contents
+            );
+        }
+
         #[test]
         fn it_is_a_launchd_plist_bootstrapped_into_the_gui_domain() {
             let u = service_unit(
                 Path::new("/usr/local/bin/lev"),
-                Path::new("/home/u/.leviath"),
+                Path::new("/home/u"),
                 Path::new("/tmp/lev-units"),
                 501,
             )
@@ -799,11 +838,37 @@ mod tests {
     mod linux {
         use super::*;
 
+        /// `LEVIATH_HOME` is the home, and the daemon puts `.leviath` under it
+        /// itself. The unit once carried the data root as the home, so the
+        /// supervised daemon ran out of `~/.leviath/.leviath`: an empty
+        /// directory with no config, so no providers and no agents.
+        #[test]
+        fn the_home_is_the_home_and_the_log_is_under_the_data_root() {
+            let u = service_unit(
+                Path::new("/usr/local/bin/lev"),
+                Path::new("/home/u"),
+                Path::new("/tmp/lev-units"),
+                501,
+            )
+            .unwrap();
+            assert!(
+                u.contents.contains("Environment=LEVIATH_HOME=/home/u\n"),
+                "{}",
+                u.contents
+            );
+            assert!(
+                u.contents
+                    .contains("append:/home/u/.leviath/daemon.stdio.log"),
+                "{}",
+                u.contents
+            );
+        }
+
         #[test]
         fn it_is_a_systemd_user_unit_enabled_for_the_calling_user() {
             let u = service_unit(
                 Path::new("/usr/local/bin/lev"),
-                Path::new("/home/u/.leviath"),
+                Path::new("/home/u"),
                 Path::new("/tmp/lev-units"),
                 501,
             )
@@ -857,12 +922,12 @@ mod tests {
         fn it_renders_the_expected_directives() {
             let unit = systemd_unit(
                 Path::new("/usr/local/bin/lev"),
-                Path::new("/home/u/.leviath"),
+                Path::new("/home/u"),
                 Path::new("/home/u/.leviath/daemon.stdio.log"),
             )
             .unwrap();
             assert!(unit.contains("ExecStart=/usr/local/bin/lev daemon"));
-            assert!(unit.contains("Environment=LEVIATH_HOME=/home/u/.leviath"));
+            assert!(unit.contains("Environment=LEVIATH_HOME=/home/u\n"));
             assert!(unit.contains("Restart=always"));
             assert!(unit.contains("/home/u/.leviath/daemon.stdio.log"));
         }
