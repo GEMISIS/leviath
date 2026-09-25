@@ -15,6 +15,16 @@ same list.
 
 ### Changed
 
+- **Breaking.** The `claude-code` provider is gone. It drove the `claude` CLI
+  as a subprocess, had no sign-in of its own, read every unrecognised stop
+  reason as a finished answer, and put the account's email address into every
+  call. The `[providers]` keys `claude_code_enabled`, `claude_code_binary` and
+  `claude_code_effort` are unknown keys now: a config that still has them
+  loads, and `lev doctor` names them. `lev setup` has no `--claude-code` or
+  `--claude-code-effort` flag. A `default_provider`, `provider_order` or
+  `fallback_order` entry of `claude-code` no longer names anything, so a
+  bare model name routes to the next provider in the order. The setup wizard's
+  import of MCP servers from `~/.claude.json` and `.mcp.json` is unchanged.
 - **Breaking, GraphQL only.** The whole schema now follows one grammar, and a
   type's suffix says what it is for. Every object a client reads is an
   `XOutput`, and every one of them has an `XInput` that mirrors it field for
@@ -481,10 +491,10 @@ same list.
   the one they were given.
 
   Behind that, two ways a provider could hand out a colliding call id in the
-  first place are closed. `claude-code` minted `cc_call_1`, `cc_call_2` from a
-  counter on the provider object, and a provider-credential edit rebuilds that
-  object while the runs already going keep asking, so two of them handed out the
-  same ids; it now mints from the same process-wide source `ollama` uses, which
+  first place are closed. A provider that minted ids from a counter on its own
+  object handed out the same ones again after a provider-credential edit
+  rebuilt that object under runs already going; every provider that mints an
+  id now draws it from the same process-wide source `ollama` uses, which
   survives both a second provider and a restart. A Gemini reply with the id
   missing, and a Rhai provider script that names no call, used to leave the id
   empty, which pairs with every result and answers every prompt; both now get a

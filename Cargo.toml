@@ -222,8 +222,8 @@ dotenvy = "0.15"
 nix = { version = "0.31", default-features = false, features = ["signal", "process", "user", "socket", "hostname"] }
 temp-env = "0.3"
 # Randomly named, owner-only temp files. A production dependency of the CLI
-# (the task editor) and of providers (the claude-code transport), so one floor
-# here rather than ten copies that could drift.
+# (the task editor) and a test dependency elsewhere, so one floor here rather
+# than ten copies that could drift.
 tempfile = "3"
 crossterm = "0.29"
 # unstable-rendered-line-info: `Paragraph::line_count`, which the dashboard

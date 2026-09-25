@@ -642,23 +642,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_claude_code_transport_is_not_offered() {
-        // It is configured from the config keys or `lev setup --claude-code`,
-        // never from the pick list, so the wizard has no row for it and does
-        // not count the flag as a configured provider of its own.
-        assert!(providers().iter().all(|p| p.id != "claude-code"));
-        assert!(
-            providers()
-                .iter()
-                .all(|p| !p.display.contains("Claude Code"))
-        );
-
-        let mut config = Config::default();
-        config.providers.claude_code_enabled = true;
-        assert!(!is_configured(&config, "claude-code"));
-    }
-
     // ─── credential accessors ───────────────────────────────────────────────
 
     /// A sign-in row carries no value, so selecting it is the whole

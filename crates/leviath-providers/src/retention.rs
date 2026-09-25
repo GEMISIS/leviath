@@ -332,13 +332,6 @@ pub fn builtin(provider: &str, model: &str) -> RetentionPolicy {
              not the API's: no zero data retention agreement covers it and there is \
              no API control",
         ),
-        "claude-code" => RetentionPolicy::new(
-            Retention::Unknown,
-            Control::Fixed,
-            "the account behind the claude CLI decides: an API key from a Commercial \
-             organisation inherits that organisation's arrangement (zero data \
-             retention included); a consumer subscription follows consumer terms",
-        ),
         _ => RetentionPolicy::new(
             Retention::Unknown,
             Control::Fixed,
@@ -606,7 +599,6 @@ mod tests {
             builtin("codex", "gpt-5.6-sol").retention,
             Retention::Unknown
         );
-        assert_eq!(builtin("claude-code", "opus").retention, Retention::Unknown);
         assert_eq!(
             builtin("cerebras", "gpt-oss-120b").retention,
             Retention::Unknown

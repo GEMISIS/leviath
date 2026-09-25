@@ -722,7 +722,7 @@
           "properties": {
             "provider": {
               "type": "string",
-              "description": "A registered provider name. The built-ins are anthropic, openai, google, openrouter, ollama, and claude-code; a Rhai provider resolves by its script name. Omit it unless the model is reachable only one way; omitting it lets the user's own provider choice decide."
+              "description": "A registered provider name. The built-ins are anthropic, openai, google, openrouter, and ollama; a Rhai provider resolves by its script name. Omit it unless the model is reachable only one way; omitting it lets the user's own provider choice decide."
             },
             "model": {
               "type": "string",

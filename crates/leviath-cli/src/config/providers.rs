@@ -142,29 +142,6 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub meta_headers: std::collections::BTreeMap<String, String>,
 
-    /// Whether the Claude Code CLI transport is enabled.
-    ///
-    /// **Opt-in, and never selected for the user.** The CLI injects its own
-    /// context into every call - including the account email address on the
-    /// OAuth (subscription) path - which cannot be disabled. `lev setup` offers
-    /// it and defaults to declining, so a user who presses Enter through the
-    /// wizard ends up with it off.
-    #[serde(default)]
-    pub claude_code_enabled: bool,
-
-    /// Path to the `claude` executable. `None` resolves `claude` on `PATH`.
-    #[serde(default)]
-    pub claude_code_binary: Option<String>,
-
-    /// Reasoning effort for the Claude Code transport: `low` | `medium` |
-    /// `high` | `xhigh` | `max`.
-    ///
-    /// Always sent explicitly. Left to itself the CLI picks `high` with adaptive
-    /// thinking, spending output tokens and latency Leviath never asked for.
-    /// `None` uses [`leviath_providers::claude_code::DEFAULT_EFFORT`].
-    #[serde(default)]
-    pub claude_code_effort: Option<String>,
-
     /// Whether to offer Ollama.
     ///
     /// Ollama needs no key and answers on a well-known local port, so it is
@@ -186,8 +163,8 @@ pub struct ProviderConfig {
     /// Whether to offer the Codex transport, which bills inference to a
     /// ChatGPT subscription rather than an API balance.
     ///
-    /// Opt-in like the Claude Code one, and for a different reason: the
-    /// credential is a browser sign-in rather than a key, so enabling it
+    /// Opt-in because the credential is a browser sign-in rather than a key,
+    /// so enabling it
     /// without one configured would register a provider that cannot answer.
     /// `lev setup` offers it, and `lev auth login codex` does the sign-in.
     #[serde(default)]
@@ -273,7 +250,7 @@ pub struct ProviderConfig {
     /// `default_provider` alone decides, exactly as before.
     ///
     /// Naming a provider here is also a deliberate choice to route bare names
-    /// through it, so a subscription transport (Codex, Claude Code) that is
+    /// through it, so a subscription transport (Codex) that is
     /// otherwise reachable only by an explicit `provider/model` becomes eligible
     /// at the priority it is listed - which is how a user who prefers their
     /// subscription gets it used first. Bare provider names, not
@@ -318,9 +295,6 @@ impl std::fmt::Debug for ProviderConfig {
             .field("meta_api_key", &redacted(&self.meta_api_key))
             // A region is not a secret.
             .field("bedrock_region", &self.bedrock_region)
-            .field("claude_code_enabled", &self.claude_code_enabled)
-            .field("claude_code_binary", &self.claude_code_binary)
-            .field("claude_code_effort", &self.claude_code_effort)
             // Not redacted, deliberately: none of these are secrets, and the
             // grant they authenticate with lives outside this file entirely.
             .field("codex_enabled", &self.codex_enabled)
@@ -383,9 +357,6 @@ impl Default for ProviderConfig {
             bedrock_headers: std::collections::BTreeMap::new(),
             xai_headers: std::collections::BTreeMap::new(),
             meta_headers: std::collections::BTreeMap::new(),
-            claude_code_enabled: false,
-            claude_code_binary: None,
-            claude_code_effort: None,
             ollama_enabled: false,
             codex_enabled: false,
             codex_originator: None,

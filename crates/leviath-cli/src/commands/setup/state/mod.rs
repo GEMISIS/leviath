@@ -938,12 +938,6 @@ impl Wizard {
             }
         }
 
-        // The Claude Code transport has no row here. Its keys
-        // (`claude_code_enabled`, `claude_code_effort`, `claude_code_binary`)
-        // are set by hand or by `lev setup --claude-code`, and the clone of
-        // `base` above carries whatever the file already says through
-        // untouched.
-
         self.write_endpoints(&mut config);
 
         // The head of the priority is the default provider, and the whole
@@ -3647,52 +3641,6 @@ pub(super) mod tests {
         assert_eq!(
             wizard.build_config().ollama_base_url.as_deref(),
             Some("http://box:11434")
-        );
-    }
-
-    #[test]
-    fn an_enabled_claude_code_transport_survives_the_wizard_untouched() {
-        // The transport has no row, so the wizard must neither switch it off
-        // nor rewrite its effort: the config keys pass straight through.
-        let dir = tempfile::tempdir().unwrap();
-        let base = Config {
-            providers: crate::config::ProviderConfig {
-                claude_code_enabled: true,
-                claude_code_effort: Some("max".to_string()),
-                claude_code_binary: Some("/opt/claude".into()),
-                ..Config::default().providers
-            },
-            ..Config::default()
-        };
-        let mut wizard = Wizard::new(
-            base.clone(),
-            &|_| None,
-            Vec::new(),
-            Vec::new(),
-            dir.path(),
-            std::sync::Arc::new(|_| true),
-            Default::default(),
-        );
-        assert!(
-            wizard
-                .providers
-                .iter()
-                .all(|r| r.provider.id != "claude-code")
-        );
-
-        // Touching other providers does not disturb it either.
-        wizard.providers[0].selected = true;
-        wizard.providers[0].value = "sk-ant-x".to_string();
-        let config = wizard.build_config();
-
-        assert!(config.providers.claude_code_enabled);
-        assert_eq!(
-            config.providers.claude_code_effort,
-            base.providers.claude_code_effort
-        );
-        assert_eq!(
-            config.providers.claude_code_binary,
-            base.providers.claude_code_binary
         );
     }
 

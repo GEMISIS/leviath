@@ -169,22 +169,6 @@
           "description": "Host to reach Meta's Model API on instead of https://api.meta.ai/v1.",
           "type": "string"
         },
-        "claude_code_enabled": {
-          "type": "boolean",
-          "default": false
-        },
-        "claude_code_binary": {
-          "type": "string"
-        },
-        "claude_code_effort": {
-          "enum": [
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max"
-          ]
-        },
         "ollama_enabled": {
           "description": "Offer Ollama. Opt-in like every other provider: it needs no key and answers on a well-known local port, so registering it unasked made a bare model name resolvable against whatever happened to be running on the machine. A config that sets `ollama_base_url` counts as having chosen it.",
           "type": "boolean",

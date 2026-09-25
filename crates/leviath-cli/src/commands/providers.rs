@@ -5,8 +5,8 @@
 //! configured provider serves it. Setting it here writes the same key `lev
 //! setup` and `PUT /api/config` write, so the three agree on one file.
 //!
-//! Naming a provider in the order is also how a subscription transport (Codex,
-//! Claude Code) becomes eligible for a bare name: it is otherwise reachable
+//! Naming a provider in the order is also how a subscription transport (Codex)
+//! becomes eligible for a bare name: it is otherwise reachable
 //! only by an explicit `provider/model`, so that turning it on never silently
 //! moves billing. Listing it here is the deliberate choice that opts it in.
 

@@ -1060,8 +1060,6 @@ turns uploads off whatever it says. See [Files and size limits](/docs/mime#files
 | `--ollama-url <URL>` | Ollama base URL |
 | `--override-model <MODEL>` | One model every stage starts on, ahead of what its blueprint names; unset lets each blueprint decide |
 | `--fallback-model <MODEL>` | The model a stage falls back to when none of the models it names is configured here |
-| `--claude-code <true\|false>` | Enable the Claude Code CLI transport. Off unless set, and the wizard does not ask about it |
-| `--claude-code-effort <LEVEL>` | `low`, `medium`, `high`, `xhigh`, or `max` |
 | `--codex <true\|false>` | Enable the Codex transport, which bills a ChatGPT subscription. Flips the switch only. See below |
 | `--grok <true\|false>` | Enable the Grok transport, which bills a SuperGrok or X Premium+ subscription. Flips the switch only. See below |
 | `--install-agents` | Install the bundled blueprints without asking |
@@ -1070,8 +1068,7 @@ turns uploads off whatever it says. See [Files and size limits](/docs/mime#files
 lev setup --non-interactive --anthropic-key sk-ant-... --install-agents
 ```
 
-Zero data retention turns uploads off whatever `--file-uploads` says. The wizard never asks about
-the Claude Code transport, so `--claude-code true` is the way to turn that one on.
+Zero data retention turns uploads off whatever `--file-uploads` says.
 
 `--codex` and `--grok` flip a switch and nothing more. Interactive `lev setup` signs in from its own
 screen, and a non-interactive run has nobody watching a browser. Sign in with `lev auth login codex`
@@ -1153,7 +1150,7 @@ serves it.
 
 The order is the whole list of providers a bare model name may run on. A configured provider that
 is not in it is reachable only by an explicit `provider/model`, so configuring it never silently
-moves a stage or its billing. That holds for a subscription transport (Codex, Claude Code) as much
+moves a stage or its billing. That holds for a subscription transport (Codex, Grok) as much
 as for an API key. A name that is not a configured provider is refused rather than written, since it
 could never win a route.
 

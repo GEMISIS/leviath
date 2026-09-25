@@ -198,11 +198,6 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
         crate::openrouter::table_capabilities,
     ))
     .chain(rows(
-        "claude-code",
-        crate::claude_code::CATALOG,
-        crate::claude_code::table_capabilities,
-    ))
-    .chain(rows(
         "meshy",
         crate::meshy::CATALOG,
         crate::meshy::table_capabilities,
@@ -652,7 +647,7 @@ mod catalog_tests {
                 entry.id
             );
         }
-        for provider in ["anthropic", "openai", "google", "openrouter", "claude-code"] {
+        for provider in ["anthropic", "openai", "google", "openrouter"] {
             assert!(
                 catalog.iter().any(|e| e.provider == provider),
                 "{provider} names nothing"

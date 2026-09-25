@@ -28,7 +28,7 @@ fn cache_ttl_key(ttl: leviath_providers::anthropic::CacheTtl) -> &'static str {
 /// Build the list of [`ProviderCreds`] a [`Config`] implies.
 ///
 /// Every provider here is opt-in: an API-key one when its key is configured,
-/// `claude-code` and `codex` when they are enabled, and `ollama` when it was
+/// `codex` when it is enabled, and `ollama` when it was
 /// chosen or given an address. This is the sole point that reads provider
 /// settings out of `Config`.
 pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
@@ -233,30 +233,6 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
         creds.push(cred);
     }
 
-    // Claude Code needs no API key, but it is opt-in rather than always-on: the
-    // CLI puts the user's account email address into every call and that cannot
-    // be turned off. Leaving it unregistered is also how it stays out of an
-    // agent's model fallback chain - `resolve_stage_model` skips any provider
-    // the registry doesn't have.
-    if config.providers.claude_code_enabled {
-        let mut options = std::collections::HashMap::new();
-        if let Some(binary) = &config.providers.claude_code_binary {
-            options.insert("binary".to_string(), binary.clone());
-        }
-        if let Some(effort) = &config.providers.claude_code_effort {
-            options.insert("effort".to_string(), effort.clone());
-        }
-        creds.push(ProviderCreds {
-            name: "claude-code".to_string(),
-            api_key: None,
-            base_url: None,
-            model_capabilities: caps.clone(),
-            request_timeout_secs: None,
-            rate_limit: None,
-            options,
-        });
-    }
-
     // Codex needs no API key either: its credential is a browser sign-in whose
     // grant lives outside the config entirely, so `api_key` stays `None` and
     // the provider reads the grant itself. Opt-in because registering it
@@ -272,8 +248,8 @@ pub(crate) fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> 
             api_key: None,
             base_url: None,
             model_capabilities: caps.clone(),
-            // Unlike claude-code, this really is HTTP, so the host-wide
-            // request timeout applies.
+            // HTTP like the keyed providers, so the host-wide request
+            // timeout applies.
             request_timeout_secs: config.request_timeout_secs,
             rate_limit: config
                 .rate_limits
@@ -678,10 +654,6 @@ mod tests {
         // Opt-in like everything else, so a default config registers it not
         // at all.
         assert!(!registry.has("ollama"));
-        // Claude Code needs no key either, but is opt-in - a default config
-        // must not reach the user's Claude subscription (or send their account
-        // email to it) without them having said yes.
-        assert!(!registry.has("claude-code"));
         // Should NOT have anthropic, openai, google without keys
         assert!(!registry.has("anthropic"));
         assert!(!registry.has("openai"));
@@ -787,9 +759,6 @@ mod tests {
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 ..Config::default().providers
             },
@@ -1103,9 +1072,6 @@ mod tests {
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()
@@ -1125,8 +1091,6 @@ mod tests {
         assert!(registry.has("google"));
         assert!(registry.has("openrouter"));
         assert!(registry.has("ollama"));
-        // Every key in the world doesn't enable Claude Code - only opting in does.
-        assert!(!registry.has("claude-code"));
     }
 
     // ─── ProviderCreds seam ─────────────────────────────────────────────
@@ -1328,11 +1292,9 @@ mod tests {
         };
         let creds = provider_creds_from_config(&config);
         let names: Vec<&str> = creds.iter().map(|c| c.name.as_str()).collect();
-        // anthropic (keyed) + ollama, but not openai/google/openrouter, and not
-        // claude-code (opt-in, not enabled here).
+        // anthropic (keyed) + ollama, but not openai/google/openrouter.
         assert!(names.contains(&"anthropic"));
         assert!(names.contains(&"ollama"));
-        assert!(!names.contains(&"claude-code"));
         assert!(!names.contains(&"openai"));
         assert!(!names.contains(&"google"));
         assert!(!names.contains(&"openrouter"));
@@ -1460,7 +1422,6 @@ mod tests {
         // unasked, since that makes a bare model name resolvable against
         // whatever happens to be running on the machine.
         assert!(!registry.has("ollama"));
-        assert!(!registry.has("claude-code"));
     }
 
     /// Chosen in `lev setup`, or given an address by hand: either counts.
@@ -1492,59 +1453,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn enabling_claude_code_registers_it_with_its_options() {
-        let config = Config {
-            providers: crate::config::ProviderConfig {
-                anthropic_base_url: None,
-                openai_base_url: None,
-                google_base_url: None,
-                openrouter_base_url: None,
-                claude_code_enabled: true,
-                claude_code_binary: Some("/opt/bin/claude".to_string()),
-                claude_code_effort: Some("low".to_string()),
-                ..Config::default().providers
-            },
-            ..Config::default()
-        };
-        let creds = provider_creds_from_config(&config);
-        let cc = creds
-            .iter()
-            .find(|c| c.name == "claude-code")
-            .expect("enabled ⇒ present");
-        assert_eq!(
-            cc.options.get("binary").map(String::as_str),
-            Some("/opt/bin/claude")
-        );
-        assert_eq!(cc.options.get("effort").map(String::as_str), Some("low"));
-        assert!(cc.api_key.is_none());
-        assert!(
-            build_provider_registry_from_config(&config)
-                .expect("an HTTPS client builds in tests")
-                .has("claude-code")
-        );
-    }
-
-    #[test]
-    fn enabling_claude_code_without_options_carries_none() {
-        let config = Config {
-            providers: crate::config::ProviderConfig {
-                anthropic_base_url: None,
-                openai_base_url: None,
-                google_base_url: None,
-                openrouter_base_url: None,
-                claude_code_enabled: true,
-                ..Config::default().providers
-            },
-            ..Config::default()
-        };
-        let creds = provider_creds_from_config(&config);
-        let cc = creds.iter().find(|c| c.name == "claude-code").unwrap();
-        // Absent settings stay absent so the provider applies its own defaults
-        // (the `claude` binary on PATH, DEFAULT_EFFORT).
-        assert!(cc.options.is_empty());
-    }
-
     // ─── resolve_task: file with only comments in editor-like format ────
 
     #[test]
@@ -1574,9 +1482,6 @@ mod tests {
                 openai_base_url: None,
                 google_base_url: None,
                 openrouter_base_url: None,
-                claude_code_enabled: false,
-                claude_code_binary: None,
-                claude_code_effort: None,
                 anthropic_cache_ttl: None,
                 fallback_order: Vec::new(),
                 ..Default::default()

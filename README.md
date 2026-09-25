@@ -95,7 +95,7 @@ Leviath is also a library: add the [`leviath`](https://crates.io/crates/leviath)
 
 ### 2. Configure a provider
 
-One provider is all you need: an API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), [OpenRouter](https://openrouter.ai/), or [AWS Bedrock](https://console.aws.amazon.com/bedrock/). No key at all? Run a local [Ollama](https://ollama.com), or turn on the [Claude Code transport](https://leviath.dev/docs/providers#claude-code-transport) with `lev setup --claude-code true` to run on your Claude subscription (the wizard does not offer it; read its terms-of-service note first).
+One provider is all you need: an API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), [OpenRouter](https://openrouter.ai/), or [AWS Bedrock](https://console.aws.amazon.com/bedrock/). No key at all? Run a local [Ollama](https://ollama.com).
 
 ```bash
 lev setup      # interactive wizard
@@ -271,11 +271,11 @@ and why you might not want Leviath at all, is on the docs site:
 
 ## Why you might not want Leviath
 
-- **It's not a replacement for Claude Code, Codex, or your favorite coding agent.** Those are polished interactive products at a different layer, and Leviath can even run on top of Claude Code as a transport.
+- **It's not a replacement for Claude Code, Codex, or your favorite coding agent.** Those are polished interactive products at a different layer.
 - **Agents are config, not code.** A Leviath agent is a TOML blueprint plus optional Rhai script tools. If you want to write agent logic in Python or TypeScript against an SDK, other languages drive Leviath through the REST API instead.
 - **Agents execute on one machine.** The daemon hosts every agent in a single process on a single box. You can reach it from anywhere over the REST and WebSocket API, and it can call out through signed webhooks, but there is no hosted service and no scheduling work across several machines.
 - **Isolation is at the data layer by default.** Every agent has its own state, working directory, tool policy and read-path grants, and a panic fails that agent alone rather than the daemon. The [OS sandbox](https://leviath.dev/docs/security) is opt-in: one `[sandbox]` block turns it on for the whole world and each agent gets its own container or namespace, which a blueprint may tighten per stage but never loosen. Two limits are worth knowing. There is no way to sandbox a single `lev run` on demand, and the boundary covers what an agent *executes* (shell, seed commands, script `shell()`) rather than file tools, `web_fetch`, or MCP servers, which stay on the host behind workdir confinement. [Widening it](https://github.com/GEMISIS/leviath/issues/326) is the intended end state.
-- **You need a model provider**: an API key, a local Ollama, or the Claude Code transport (with its terms-of-service caveat).
+- **You need a model provider**: an API key, a local Ollama, or a Codex or Grok subscription sign-in.
 
 ## CLI
 
@@ -285,7 +285,7 @@ Leviath also connects to [Model Context Protocol](https://modelcontextprotocol.i
 
 ## Providers
 
-Anthropic, OpenAI, Google (Gemini), xAI (Grok chat, image, video and speech models), Meta (Muse Spark, Muse Image and Muse Voice Transcribe), OpenRouter, AWS Bedrock (Claude, Nova, Llama and more on an AWS account, with exact token counts and limits read from AWS), local [Ollama](https://ollama.com) with no key, the OpenAI Codex, Grok and Claude Code subscription transports, and any OpenAI-compatible endpoint (llama.cpp, LM Studio, vLLM, an enterprise gateway) as a `kind = "openai-compatible"` entry in `[model_providers]`, with a [Rhai script](https://leviath.dev/docs/rhai-providers) for a wire format that is not OpenAI's. Per-stage model fallback, large files uploaded once to a provider's own file storage, and optional client-side rate limits enforced before each call. [Provider docs →](https://leviath.dev/docs/providers)
+Anthropic, OpenAI, Google (Gemini), xAI (Grok chat, image, video and speech models), Meta (Muse Spark, Muse Image and Muse Voice Transcribe), OpenRouter, AWS Bedrock (Claude, Nova, Llama and more on an AWS account, with exact token counts and limits read from AWS), local [Ollama](https://ollama.com) with no key, the OpenAI Codex and Grok subscription transports, and any OpenAI-compatible endpoint (llama.cpp, LM Studio, vLLM, an enterprise gateway) as a `kind = "openai-compatible"` entry in `[model_providers]`, with a [Rhai script](https://leviath.dev/docs/rhai-providers) for a wire format that is not OpenAI's. Per-stage model fallback, large files uploaded once to a provider's own file storage, and optional client-side rate limits enforced before each call. [Provider docs →](https://leviath.dev/docs/providers)
 
 ## Security
 
@@ -357,7 +357,7 @@ graph TD
 | `leviath-runtime` | ECS engine (bevy_ecs) and stage-run orchestration |
 | `leviath-core` | Regions, layouts, blueprints, manifest, run metadata |
 | `leviath-tools` | Built-in tool implementations |
-| `leviath-providers` | Anthropic, OpenAI, Codex, Google, xAI, Grok, Meta, OpenRouter, Bedrock, Meshy, Ollama, Claude Code |
+| `leviath-providers` | Anthropic, OpenAI, Codex, Google, xAI, Grok, Meta, OpenRouter, Bedrock, Meshy, Ollama |
 | `leviath-mcp` | MCP tool servers over stdio and HTTP/SSE |
 | `leviath-agent-client` | Agent Client Protocol wire types (JSON-RPC over stdio) |
 | `leviath-package` | Agent bundling and install |
