@@ -64,6 +64,17 @@ same list.
 
 ### Fixed
 
+- A content block a provider sends that this build does not read is logged as
+  a warning naming its kind, then skipped, on Anthropic's buffered and
+  streamed replies and on Bedrock's. It was dropped in silence, so a reply
+  that arrived as a block kind Leviath did not know read as an empty answer
+  with nothing in the log to say why.
+- An `error` event on Anthropic's stream is the request's error, with the
+  API's own kind and message: an `overloaded_error` gets the capacity-sized
+  wait a buffered 529 gets, an `api_error` the blip-sized one, and a
+  `rate_limit_error` reads as the rate limit it is. The event was dropped, so
+  the stream then ended without a stop reason and the run recorded a dropped
+  connection in place of the overload or refusal the API had named.
 - `lev daemon install` writes the home into the service unit's `LEVIATH_HOME`,
   not the data root under it. The daemon joins `.leviath` onto its home
   itself, so the unit sent a supervised daemon to `~/.leviath/.leviath`: an

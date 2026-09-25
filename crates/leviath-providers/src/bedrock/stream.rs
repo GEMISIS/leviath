@@ -227,7 +227,12 @@ fn block_index(json: &Value) -> Option<usize> {
 fn map_event(event: &str, json: &Value, state: &mut EventState) -> Option<StreamChunk> {
     match event {
         "contentBlockStart" => {
-            let call = json.pointer("/start/toolUse")?;
+            let Some(call) = json.pointer("/start/toolUse") else {
+                tracing::warn!(
+                    "a content block start from Bedrock's stream opens no tool use; skipped"
+                );
+                return None;
+            };
             // The number the event carries, else the one after the last
             // tool block: a second call must not overwrite the first.
             let index = block_index(json)
@@ -288,7 +293,19 @@ fn map_event(event: &str, json: &Value, state: &mut EventState) -> Option<Stream
                 if let Some(redacted) = reasoning.get("redactedContent") {
                     block.redacted = Some(redacted.clone());
                 }
+                return None;
             }
+            // Said out loud rather than dropped, so a missing answer has a
+            // line in the log. The keys name the kind; the values may be the
+            // user's.
+            let kind: Vec<&str> = delta
+                .as_object()
+                .map(|o| o.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            tracing::warn!(
+                ?kind,
+                "unrecognised content block delta from Bedrock's stream; skipped"
+            );
             None
         }
         "messageStop" => {
@@ -423,6 +440,36 @@ mod tests {
         assert_eq!(response.tool_calls[0].name, "read");
         assert_eq!(response.tool_calls[0].arguments, json!({ "path": "a" }));
         assert_eq!(response.tool_calls[1].id, "");
+    }
+
+    /// A block start that opens no tool use, and a delta of a shape this
+    /// build does not read, are skipped with a warning; the reply around them
+    /// still arrives.
+    #[tokio::test]
+    async fn an_unrecognised_block_or_delta_is_skipped_with_a_warning() {
+        let _guard = crate::test_support::always_on_tracing_guard();
+        let frames = vec![
+            event(
+                "contentBlockStart",
+                r#"{"contentBlockIndex":0,"start":{"guard":{}}}"#,
+            ),
+            event(
+                "contentBlockDelta",
+                r#"{"contentBlockIndex":0,"delta":{"citation":{}}}"#,
+            ),
+            event(
+                "contentBlockDelta",
+                r#"{"contentBlockIndex":0,"delta":"not an object"}"#,
+            ),
+            event(
+                "contentBlockDelta",
+                r#"{"contentBlockIndex":1,"delta":{"text":"still here"}}"#,
+            ),
+            event("messageStop", r#"{"stopReason":"end_turn"}"#),
+        ];
+        let response = collect(stream(frames)).await.unwrap();
+        assert_eq!(response.content, "still here");
+        assert!(response.tool_calls.is_empty());
     }
 
     #[tokio::test]
