@@ -788,17 +788,13 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
     let mut tool_calls = Vec::new();
     if let Some(tcs) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
         for tc in tcs {
-            let id = tc
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let id =
+                crate::provider::tool_call_id(tc.get("id").and_then(|v| v.as_str()), "openai_call");
             let function = tc.get("function").unwrap_or(&serde_json::Value::Null);
-            let name = function
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let name = crate::provider::tool_call_name(
+                function.get("name").and_then(|v| v.as_str()),
+                "the OpenAI-compatible endpoint",
+            )?;
             let arguments_str = function
                 .get("arguments")
                 .and_then(|v| v.as_str())
@@ -3361,12 +3357,13 @@ mod tests {
             }],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1}
         });
-        let resp = parse_openai_response(&body).unwrap();
-        assert_eq!(resp.tool_calls.len(), 1);
-        // function defaults to null, so name and arguments use defaults
-        assert_eq!(resp.tool_calls[0].id, "call_x");
-        assert_eq!(resp.tool_calls[0].name, "");
-        assert!(resp.tool_calls[0].arguments.is_object());
+        // No `function` means no name, and a call that names no tool is a
+        // malformed reply rather than a call to `''`.
+        let err = parse_openai_response(&body).unwrap_err();
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::failure::FailureKind::MalformedResponse)
+        );
     }
 
     #[test]
@@ -3388,7 +3385,12 @@ mod tests {
         });
         let resp = parse_openai_response(&body).unwrap();
         assert_eq!(resp.tool_calls.len(), 1);
-        assert_eq!(resp.tool_calls[0].id, "");
+        // A call with no id is given one: an empty id pairs with every result.
+        assert!(
+            resp.tool_calls[0].id.starts_with("openai_call_"),
+            "{}",
+            resp.tool_calls[0].id
+        );
         assert_eq!(resp.tool_calls[0].name, "do_thing");
         assert_eq!(resp.tool_calls[0].arguments["a"], 1);
     }

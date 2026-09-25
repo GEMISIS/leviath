@@ -309,7 +309,10 @@ pub async fn collect_stream(
 
     Ok(InferenceResponse {
         content,
-        tool_calls: calls.into_values().map(PartialToolCall::finish).collect(),
+        tool_calls: calls
+            .into_values()
+            .map(PartialToolCall::finish)
+            .collect::<Result<Vec<_>>>()?,
         tokens_used: tokens,
         finish_reason,
         reasoning,
@@ -329,16 +332,18 @@ struct PartialToolCall {
 }
 
 impl PartialToolCall {
-    fn finish(self) -> ToolCall {
-        ToolCall {
-            id: self.id,
-            name: self.name,
-            // Same rule as the buffered path: empty text is `{}`, text that is
-            // not JSON is kept as text so a call cut off mid-argument is
-            // reported rather than run with nothing.
+    /// The call, once every delta is in. The same rules as the buffered
+    /// parsers: a call whose id never arrived is given one, a call whose name
+    /// never arrived makes the reply malformed, empty argument text is `{}`,
+    /// and text that is not JSON is kept as text so a call cut off
+    /// mid-argument is reported rather than run with nothing.
+    fn finish(self) -> Result<ToolCall> {
+        Ok(ToolCall {
+            id: crate::provider::tool_call_id(Some(&self.id), "call"),
+            name: crate::provider::tool_call_name(Some(&self.name), "the stream")?,
             arguments: crate::provider::parse_tool_arguments(&self.arguments),
             thought_signature: self.thought_signature,
-        }
+        })
     }
 }
 
@@ -591,6 +596,43 @@ mod tests {
         // turn rather than failing anything here.
         assert_eq!(call.thought_signature.as_deref(), Some("sig-abc"));
         assert_eq!(response.finish_reason, FinishReason::ToolCall);
+    }
+
+    /// A call whose id never arrived is given one, and a call whose name
+    /// never arrived is a malformed reply: the first would pair with every
+    /// result, the second could be dispatched to nothing.
+    #[tokio::test]
+    async fn collect_stream_names_a_call_without_an_id_and_refuses_one_without_a_name() {
+        let call = |id: Option<&str>, name: Option<&str>| {
+            chunks(vec![StreamChunk {
+                parts: Vec::new(),
+                delta: String::new(),
+                tool_calls: vec![ToolCallDelta {
+                    index: 0,
+                    id: id.map(str::to_string),
+                    name: name.map(str::to_string),
+                    arguments_delta: "{}".to_string(),
+                    thought_signature: None,
+                }],
+                tokens: None,
+                finish_reason: Some(FinishReason::ToolCall),
+                reasoning: None,
+            }])
+        };
+        let named = collect_stream(call(None, Some("read_file")))
+            .await
+            .expect("a complete stream");
+        assert!(
+            named.tool_calls[0].id.starts_with("call_"),
+            "{}",
+            named.tool_calls[0].id
+        );
+        assert_eq!(named.tool_calls[0].name, "read_file");
+
+        let err = collect_stream(call(Some("call-1"), None))
+            .await
+            .unwrap_err();
+        assert_eq!(err.failure_kind(), Some(FailureKind::MalformedResponse));
     }
 
     /// A tool call whose arguments stopped arriving mid-JSON (the reply hit its

@@ -765,16 +765,14 @@ impl AnthropicProvider {
                         }
                     },
                     Some("tool_use") => {
-                        let id = block
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                        let id = crate::provider::tool_call_id(
+                            block.get("id").and_then(|v| v.as_str()),
+                            "anthropic_call",
+                        );
+                        let name = crate::provider::tool_call_name(
+                            block.get("name").and_then(|v| v.as_str()),
+                            "Anthropic",
+                        )?;
                         let arguments = block
                             .get("input")
                             .cloned()
@@ -2597,23 +2595,59 @@ mod tests {
         assert_eq!(resp.content, "Hello");
     }
 
+    /// A call that arrives with no id is given one, and an empty id is
+    /// treated as none: either would pair with every result.
     #[test]
-    fn test_parse_response_tool_call_missing_fields() {
+    fn test_parse_response_tool_call_without_an_id_is_given_one() {
         let provider = AnthropicProvider::new(
             crate::provider::build_http_client(None).expect("a test client builds"),
             "key".to_string(),
         );
         let body = serde_json::json!({
             "content": [
-                { "type": "tool_use" }
+                { "type": "tool_use", "name": "read_file" },
+                { "type": "tool_use", "id": "", "name": "read_file", "input": { "path": "a" } }
             ],
             "stop_reason": "tool_use",
             "usage": { "input_tokens": 10, "output_tokens": 5 }
         });
         let resp = provider.parse_response(&body).unwrap();
-        assert_eq!(resp.tool_calls.len(), 1);
-        assert_eq!(resp.tool_calls[0].id, "");
-        assert_eq!(resp.tool_calls[0].name, "");
+        assert_eq!(resp.tool_calls.len(), 2);
+        assert!(
+            resp.tool_calls[0].id.starts_with("anthropic_call_"),
+            "{}",
+            resp.tool_calls[0].id
+        );
+        assert!(
+            resp.tool_calls[1].id.starts_with("anthropic_call_"),
+            "{}",
+            resp.tool_calls[1].id
+        );
+        assert_ne!(resp.tool_calls[0].id, resp.tool_calls[1].id);
+        assert_eq!(resp.tool_calls[0].name, "read_file");
+        assert_eq!(resp.tool_calls[0].arguments, serde_json::json!({}));
+    }
+
+    /// A call that names no tool is a malformed reply, not a call to `''`.
+    #[test]
+    fn test_parse_response_tool_call_without_a_name_is_malformed() {
+        let provider = AnthropicProvider::new(
+            crate::provider::build_http_client(None).expect("a test client builds"),
+            "key".to_string(),
+        );
+        let body = serde_json::json!({
+            "content": [
+                { "type": "tool_use", "id": "toolu_1" }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        });
+        let err = provider.parse_response(&body).unwrap_err();
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::failure::FailureKind::MalformedResponse)
+        );
+        assert!(err.to_string().contains("names no tool"), "{err}");
     }
 
     #[test]

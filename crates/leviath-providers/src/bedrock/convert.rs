@@ -493,16 +493,14 @@ pub(super) fn parse_response(body: &Value) -> Result<InferenceResponse> {
             content.push_str(text);
         } else if let Some(call) = block.get("toolUse") {
             tool_calls.push(ToolCall {
-                id: call
-                    .get("toolUseId")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                name: call
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                id: crate::provider::tool_call_id(
+                    call.get("toolUseId").and_then(|v| v.as_str()),
+                    "bedrock_call",
+                ),
+                name: crate::provider::tool_call_name(
+                    call.get("name").and_then(|v| v.as_str()),
+                    "Bedrock",
+                )?,
                 arguments: call
                     .get("input")
                     .cloned()
@@ -1054,7 +1052,13 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 2);
         assert_eq!(response.tool_calls[0].id, "t1");
         assert_eq!(response.tool_calls[0].arguments, json!({ "path": "a" }));
-        assert_eq!(response.tool_calls[1].id, "");
+        // A call with no id is given one; an empty id would pair with every
+        // result.
+        assert!(
+            response.tool_calls[1].id.starts_with("bedrock_call_"),
+            "{}",
+            response.tool_calls[1].id
+        );
         assert_eq!(response.tool_calls[1].arguments, json!({}));
         assert_eq!(response.finish_reason, FinishReason::ToolCall);
         assert_eq!(response.tokens_used.prompt_tokens, 10);
@@ -1078,6 +1082,30 @@ mod tests {
         assert_eq!(response.content, "");
         let err = parse_response(&json!({ "output": {} })).unwrap_err();
         assert!(err.to_string().contains("no output.message"), "{err}");
+    }
+
+    /// A call with no `toolUseId` is given an id; one with no `name` is a
+    /// malformed reply.
+    #[test]
+    fn a_tool_call_missing_its_id_is_named_and_missing_its_name_is_refused() {
+        let body = json!({ "output": { "message": { "content": [
+            { "toolUse": { "name": "read", "input": { "path": "a" } } }
+        ] }, "stopReason": "tool_use" } });
+        let response = parse_response(&body).unwrap();
+        assert!(
+            response.tool_calls[0].id.starts_with("bedrock_call_"),
+            "{}",
+            response.tool_calls[0].id
+        );
+
+        let body = json!({ "output": { "message": { "content": [
+            { "toolUse": { "toolUseId": "t1", "input": {} } }
+        ] } } });
+        let err = parse_response(&body).unwrap_err();
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::failure::FailureKind::MalformedResponse)
+        );
     }
 
     /// A block kind this build does not read is skipped with a warning, and

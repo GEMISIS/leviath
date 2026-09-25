@@ -64,6 +64,13 @@ same list.
 
 ### Fixed
 
+- A tool call that arrives with no id is given one, and a tool call that
+  names no tool fails the reply as malformed. Anthropic, Bedrock and every
+  OpenAI-compatible endpoint let an empty id through, which pairs with every
+  result and answers every prompt, and let an empty name through, which the
+  runtime then refused as a call to `''` and sent back to the model as if it
+  had asked for that. The same two rules now hold on every buffered and
+  streamed path, Ollama and provider scripts included, in one place each.
 - A content block a provider sends that this build does not read is logged as
   a warning naming its kind, then skipped, on Anthropic's buffered and
   streamed replies and on Bedrock's. It was dropped in silence, so a reply

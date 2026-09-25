@@ -429,8 +429,12 @@ mod tests {
                 "contentBlockDelta",
                 r#"{"delta":{"toolUse":{"input":"\"a\"}"}}}"#,
             ),
-            // A second call with no index takes the next number.
-            event("contentBlockStart", r#"{"start":{"toolUse":{}}}"#),
+            // A second call with no index takes the next number, and with
+            // no id is given one.
+            event(
+                "contentBlockStart",
+                r#"{"start":{"toolUse":{"name":"write"}}}"#,
+            ),
             event("messageStop", r#"{"stopReason":"tool_use"}"#),
         ];
         let response = collect(stream(frames)).await.unwrap();
@@ -439,7 +443,26 @@ mod tests {
         assert_eq!(response.tool_calls[0].id, "t1");
         assert_eq!(response.tool_calls[0].name, "read");
         assert_eq!(response.tool_calls[0].arguments, json!({ "path": "a" }));
-        assert_eq!(response.tool_calls[1].id, "");
+        assert!(
+            response.tool_calls[1].id.starts_with("call_"),
+            "{}",
+            response.tool_calls[1].id
+        );
+        assert_eq!(response.tool_calls[1].name, "write");
+    }
+
+    /// A call that never names its tool makes the reply malformed.
+    #[tokio::test]
+    async fn a_tool_call_without_a_name_is_a_malformed_reply() {
+        let frames = vec![
+            event(
+                "contentBlockStart",
+                r#"{"start":{"toolUse":{"toolUseId":"t1"}}}"#,
+            ),
+            event("messageStop", r#"{"stopReason":"tool_use"}"#),
+        ];
+        let err = collect(stream(frames)).await.unwrap_err();
+        assert_eq!(err.failure_kind(), Some(FailureKind::MalformedResponse));
     }
 
     /// A block start that opens no tool use, and a delta of a shape this
