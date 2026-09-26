@@ -421,6 +421,22 @@ mod cost_tests {
         assert!(none.parts.is_empty());
     }
 
+    /// A script that asks for a call to nothing has made a mistake the model
+    /// cannot correct, so the reply is malformed rather than a call to `''`.
+    #[test]
+    fn a_script_tool_call_without_a_name_is_a_malformed_reply() {
+        let value = rhai::serde::to_dynamic(serde_json::json!({
+            "content": "",
+            "tool_calls": [{"arguments": {"q": 1}}]
+        }))
+        .unwrap();
+        let err = parse_inference_dynamic(value).unwrap_err();
+        assert_eq!(
+            err.failure_kind(),
+            Some(crate::failure::FailureKind::MalformedResponse)
+        );
+    }
+
     #[test]
     fn a_script_provider_can_report_its_own_cost() {
         for key in ["cost_usd", "cost"] {

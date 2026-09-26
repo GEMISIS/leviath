@@ -440,6 +440,8 @@ mod tests {
         assert!(builtin_mime("codex", "gpt-5.5-codex").accepts(&mt("image/png")));
         assert!(builtin_mime("ollama", "llava").accepts(&mt("image/png")));
         assert!(builtin_mime("openrouter", "openai/gpt-5.5").accepts(&mt("image/png")));
+        // A host the table knows nothing about takes text only.
+        assert!(!builtin_mime("nobody-serves-this", "any").accepts(&mt("image/png")));
     }
 
     #[test]
