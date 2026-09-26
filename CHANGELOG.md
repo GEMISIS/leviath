@@ -68,6 +68,12 @@ same list.
 
 ### Fixed
 
+- Leviath no longer caps `encoding_rs` below 0.8.40 for the projects that
+  depend on it. The built-in YAML output check now uses `saphyr-parser`
+  instead of `yaml-rust2`, whose default `encoding` feature pinned it. The
+  check reads parse events and never expands an alias, so a YAML answer that
+  uses anchors and aliases is now checked like any other instead of being
+  let through unchecked.
 - A tool call that arrives with no id is given one, and a tool call that
   names no tool fails the reply as malformed. Anthropic, Bedrock and every
   OpenAI-compatible endpoint let an empty id through, which pairs with every
