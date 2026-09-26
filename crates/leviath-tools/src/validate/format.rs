@@ -75,55 +75,23 @@ fn check_toml(content: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Parse the document, unless it uses anchors or aliases.
+/// Stream the document's parse events and stop at the first error.
 ///
-/// YAML alias expansion is exponential, and this parser offers no bound on it.
-/// 268 bytes of nested aliases takes seconds; one more level takes half a
-/// minute. That matters here more than it would elsewhere: this check runs
-/// inline on the daemon's tick loop, over content an agent produced - and an
-/// agent can be talked into producing anything by a page it fetched. A single
-/// crafted answer would stall every agent in the shared world, not just its own
-/// run.
+/// Events, not a tree, because a tree is where YAML gets expensive: building
+/// one copies an aliased node at every `*name`, so a few hundred bytes of
+/// nested aliases grows exponentially. As an event an alias is just one
+/// `Alias` event, so the whole check is linear in the input. That matters
+/// here more than it would elsewhere: this check runs inline on the daemon's
+/// tick loop, over content an agent produced - and an agent can be talked into
+/// producing anything by a page it fetched.
 ///
-/// So a document using aliases is **not checked**, rather than rejected. The
-/// same stance an uncompilable JSON Schema gets: being unable to check
-/// something is not evidence it is wrong, and refusing the answer would cost an
-/// agent its work over a construct it is allowed to use.
-///
-/// Detection is deliberately over-eager. Mistaking `3 * 4` for an alias costs a
-/// skipped check; missing a real one costs the daemon.
+/// The event stream still catches everything a well-formedness check is for:
+/// broken indentation, unclosed flow collections, and an alias to an anchor
+/// that was never defined.
 fn check_yaml(content: &str) -> Result<(), String> {
-    if uses_anchors_or_aliases(content) {
-        return Ok(());
-    }
-    yaml_rust2::YamlLoader::load_from_str(content)
-        .map(|_| ())
+    saphyr_parser::Parser::new_from_str(content)
+        .try_for_each(|event| event.map(|_| ()))
         .map_err(|e| e.to_string())
-}
-
-/// Whether `content` appears to use a YAML anchor (`&name`) or alias (`*name`).
-///
-/// A sigil in a value position: at the start of a line or after a space or a
-/// flow-collection punctuation mark, and followed by something that could be a
-/// name. Scans once, so it cannot itself be the expensive step.
-fn uses_anchors_or_aliases(content: &str) -> bool {
-    let bytes = content.as_bytes();
-    bytes.iter().enumerate().any(|(i, &b)| {
-        if b != b'&' && b != b'*' {
-            return false;
-        }
-        let before_ok = match i {
-            0 => true,
-            _ => matches!(
-                bytes[i - 1],
-                b' ' | b'\t' | b'\n' | b'\r' | b'[' | b'{' | b',' | b'-'
-            ),
-        };
-        let after_ok = bytes
-            .get(i + 1)
-            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
-        before_ok && after_ok
-    })
 }
 
 /// Read every XML event to the end, tracking element depth.

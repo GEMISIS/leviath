@@ -85,27 +85,24 @@ fn yaml_accepts_valid_and_refuses_broken_indentation() {
     assert!(check(Some("yaml"), "a: [1, 2\nb: 3").is_err());
 }
 
-/// YAML alias expansion is exponential and this parser cannot bound it. The
-/// check runs inline on the daemon's tick loop over content an agent produced,
-/// and an agent can be talked into producing anything by a page it fetched - so
-/// a crafted answer would stall every agent in the shared world.
-///
-/// A document using aliases is skipped rather than rejected: being unable to
-/// check something is not evidence it is wrong.
+/// A tree built from nested aliases grows exponentially, and this check runs
+/// inline on the daemon's tick loop over content an agent produced. So the
+/// document is checked from its parse events and never expanded: a crafted
+/// answer costs the same as any other answer its size.
 #[test]
-fn an_alias_bomb_is_skipped_rather_than_expanded() {
-    // Six levels of nine-way aliasing: ~9^6 nodes if expanded. Under 300 bytes.
+fn an_alias_bomb_is_checked_without_being_expanded() {
+    // Twelve levels of nine-way aliasing: ~9^12 nodes if expanded. Under 600 bytes.
     let mut bomb = String::from("a: &a [x,x,x,x,x,x,x,x,x]\n");
     let mut prev = "a".to_string();
-    for name in ["b", "c", "d", "e", "f", "g"] {
+    for name in ["b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"] {
         let refs = vec![format!("*{prev}"); 9].join(",");
         bomb.push_str(&format!("{name}: &{name} [{refs}]\n"));
         prev = name.to_string();
     }
-    assert!(bomb.len() < 300, "the input is small; the expansion is not");
+    assert!(bomb.len() < 600, "the input is small; the expansion is not");
 
     let started = std::time::Instant::now();
-    assert!(check(Some("yaml"), &bomb).is_ok(), "skipped, not rejected");
+    assert!(check(Some("yaml"), &bomb).is_ok(), "it is valid YAML");
     assert!(
         started.elapsed() < std::time::Duration::from_millis(250),
         "the document must not be expanded at all, took {:?}",
@@ -114,24 +111,18 @@ fn an_alias_bomb_is_skipped_rather_than_expanded() {
 }
 
 #[test]
-fn ordinary_yaml_without_aliases_is_still_checked() {
-    // The skip must not swallow the check for documents that never risked it.
-    assert!(check(Some("yaml"), "a: [1, 2\nb: 3").is_err());
-    assert!(check(Some("yaml"), "findings:\n  - severity: high\n").is_ok());
+fn yaml_with_anchors_is_checked_like_any_other() {
+    assert!(check(Some("yaml"), "base: &defaults\n  a: 1\ncopy: *defaults\n").is_ok());
+    assert!(check(Some("yaml"), "a: &x [1, 2\nb: *x").is_err());
 }
 
-/// Over-eager on purpose: mistaking `3 * 4` for an alias costs a skipped check,
-/// missing a real one costs the daemon.
 #[test]
-fn anchor_and_alias_detection_errs_toward_skipping() {
-    assert!(uses_anchors_or_aliases("base: &defaults\n  a: 1\n"));
-    assert!(uses_anchors_or_aliases("copy: *defaults\n"));
-    assert!(uses_anchors_or_aliases("list: [*a, *b]\n"));
-    // A multiplication in a scalar reads as an alias here, and that is fine.
-    assert!(uses_anchors_or_aliases("note: 3 *4\n"));
-    // Nothing that looks like a sigil in a value position.
-    assert!(!uses_anchors_or_aliases("findings:\n  - severity: high\n"));
-    assert!(!uses_anchors_or_aliases("note: 3 * 4\n"));
+fn an_alias_to_an_undefined_anchor_is_refused() {
+    let reason = check(Some("yaml"), "a: 1\nb: *missing\n").expect_err("no anchor named missing");
+    assert!(
+        reason.contains("unknown anchor"),
+        "the reason names the problem"
+    );
 }
 
 // ── csv ──────────────────────────────────────────────────────────────────────
@@ -180,52 +171,6 @@ fn a_failure_says_what_was_wrong() {
         assert!(
             !outcome.expect_err("asserted Err just above").is_empty(),
             "{format} gave an empty reason"
-        );
-    }
-}
-
-/// The sigil scanner decides whether a document is skipped rather than parsed,
-/// so it has to see an anchor wherever YAML allows one. Missing a position
-/// means the parser is handed a document the skip was meant to keep away from
-/// it, which is where the expansion cost lives.
-#[test]
-fn an_anchor_is_recognised_in_every_value_position() {
-    for content in [
-        "&a x",           // the very start of the document
-        "k: &a x",        // after a space
-        "k:\t&a x",       // after a tab
-        "k:\n  &a x",     // after a newline
-        "k:\r\n  &a x",   // after a carriage return
-        "k: [&a, b]",     // opening a flow sequence
-        "k: {v: &a}",     // opening a flow mapping
-        "k: [b, &a]",     // after a comma
-        "- &a x",         // a block sequence entry
-        "k: *a",          // an alias, not an anchor
-        "k: &_private x", // a name starting with an underscore
-        "k: &a1 x",       // and one with a digit in it
-    ] {
-        assert!(
-            uses_anchors_or_aliases(content),
-            "missed the sigil in {content:?}"
-        );
-    }
-}
-
-/// And it must not fire on an ampersand that is ordinary text, or every
-/// document mentioning one would skip the check it was supposed to get.
-#[test]
-fn an_ampersand_that_is_not_a_sigil_is_left_alone() {
-    for content in [
-        "k: R&D",          // mid-word
-        "k: rock & roll",  // followed by a space
-        "k: value &",      // at the very end, with no name after it
-        "k: 2 * 3",        // multiplication, followed by a space
-        "k: a&&b",         // doubled, so neither is preceded by a separator
-        "plain: document", // no sigil at all
-    ] {
-        assert!(
-            !uses_anchors_or_aliases(content),
-            "false positive on {content:?}"
         );
     }
 }
