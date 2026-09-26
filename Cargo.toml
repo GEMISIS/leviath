@@ -150,7 +150,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # feature (in-memory exporters) is enabled by leviath-telemetry's
 # dev-dependency, not here.
 opentelemetry = "0.32"
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
 opentelemetry-appender-tracing = "0.32"
 thiserror = "2.0"
