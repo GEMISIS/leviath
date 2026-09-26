@@ -766,6 +766,8 @@ fn attempt(id: &str, provider: &str, model: &str) -> RunRecord {
         provider: provider.to_string(),
         model: model.to_string(),
         outcome: run_archive::AttemptOutcome::Succeeded,
+        finish_reason: "tool_call".to_string(),
+        stopped_for: None,
         duration_ms: 900,
         backoff_ms: 100,
         digest: run_archive::RequestDigest {

@@ -80,6 +80,12 @@ async fn error(query: &str) -> String {
 
 /// One attempt record.
 fn attempt(n: u32, provider: &str, model: &str, outcome: AttemptOutcome) -> RunRecord {
+    // An attempt that answered ended `complete`, as the runtime records one
+    // that finished on its own; one that failed has no finish reason.
+    let finish_reason = match outcome {
+        AttemptOutcome::Succeeded => "complete".to_string(),
+        AttemptOutcome::Failed { .. } => String::new(),
+    };
     RunRecord::InferenceAttempt(AttemptRecord {
         id: format!("a{n:08x}"),
         stage: "plan".to_string(),
@@ -87,6 +93,8 @@ fn attempt(n: u32, provider: &str, model: &str, outcome: AttemptOutcome) -> RunR
         provider: provider.to_string(),
         model: model.to_string(),
         outcome,
+        finish_reason,
+        stopped_for: None,
         duration_ms: 1_200,
         backoff_ms: 400,
         digest: RequestDigest {
@@ -200,7 +208,7 @@ async fn the_attempts_read_back_typed_with_their_outcome() {
                  total cursor
                  results {
                    stage attempt provider model durationMs backoffMs at
-                   outcome { kind failureKind transient capacity retry }
+                   outcome { kind finishReason stoppedFor failureKind transient capacity retry }
                    digest { systemHash messages tools maxTokens temperature }
                    failover {
                      stage iteration fromProvider fromModel toProvider toModel
@@ -227,6 +235,14 @@ async fn the_attempts_read_back_typed_with_their_outcome() {
         assert_eq!(first["outcome"]["transient"], false);
         assert_eq!(first["outcome"]["capacity"], false);
         assert_eq!(first["outcome"]["retry"], "REPORTED");
+        // A failure produced no answer, so it has no finish reason.
+        assert!(first["outcome"]["finishReason"].is_null());
+        assert!(first["outcome"]["stoppedFor"].is_null());
+        let answered = &page["results"][1];
+        assert_eq!(answered["outcome"]["kind"], "SUCCEEDED");
+        assert_eq!(answered["outcome"]["finishReason"], "complete");
+        assert!(answered["outcome"]["stoppedFor"].is_null());
+        assert!(answered["outcome"]["failureKind"].is_null());
         // The hash goes out as fixed-width hex: a u64 is not an Int, and a
         // client compares it rather than reading anything into it.
         assert_eq!(first["digest"]["systemHash"], "123456789abcdef0");
@@ -296,6 +312,56 @@ async fn an_unclassified_failure_has_no_kind() {
             assert_eq!(node["outcome"]["retry"], "SAME_MODEL");
             assert!(node["failover"]["failureKind"].is_null());
             assert_eq!(node["failover"]["reason"], "credits_exhausted");
+        },
+    )
+    .await;
+}
+
+/// An answer that ended for a reason this build did not recognise says so,
+/// with the provider's own words beside it. A journal written before finish
+/// reasons were recorded reads as null, not as an empty string.
+#[tokio::test]
+async fn an_unrecognised_stop_is_read_with_the_providers_words() {
+    crate::runstate::with_isolated_runs_dir_async(
+        "graphql-inferences-stopped",
+        |_dir| async move {
+            create_run(&meta()).expect("run written");
+            let RunRecord::InferenceAttempt(mut stopped) = attempt(
+                1,
+                "anthropic",
+                "claude-sonnet-4-5",
+                AttemptOutcome::Succeeded,
+            ) else {
+                unreachable!("attempt builds an attempt record")
+            };
+            stopped.finish_reason = "unknown".to_string();
+            stopped.stopped_for = Some("refusal".to_string());
+            let RunRecord::InferenceAttempt(mut old) = attempt(
+                2,
+                "anthropic",
+                "claude-sonnet-4-5",
+                AttemptOutcome::Succeeded,
+            ) else {
+                unreachable!("attempt builds an attempt record")
+            };
+            old.finish_reason = String::new();
+            write_journal(vec![
+                RunRecord::InferenceAttempt(stopped),
+                RunRecord::InferenceAttempt(old),
+            ]);
+
+            let json = data(
+                "{ run { inferences(first: 10) { results { \
+             outcome { kind finishReason stoppedFor } } } } }",
+            )
+            .await;
+            let results = &json["run"]["inferences"]["results"];
+            assert_eq!(results[0]["outcome"]["kind"], "SUCCEEDED");
+            assert_eq!(results[0]["outcome"]["finishReason"], "unknown");
+            assert_eq!(results[0]["outcome"]["stoppedFor"], "refusal");
+            assert_eq!(results[1]["outcome"]["kind"], "SUCCEEDED");
+            assert!(results[1]["outcome"]["finishReason"].is_null());
+            assert!(results[1]["outcome"]["stoppedFor"].is_null());
         },
     )
     .await;
@@ -604,14 +670,24 @@ async fn every_mirrored_function_runs() {
     ])
     .await;
 
+    let record = |outcome: AttemptOutcome| {
+        let RunRecord::InferenceAttempt(record) = attempt(1, "anthropic", "claude", outcome) else {
+            unreachable!("attempt builds an attempt record")
+        };
+        record
+    };
+    let mut stopped = record(AttemptOutcome::Succeeded);
+    stopped.finish_reason = "unknown".to_string();
+    stopped.stopped_for = Some("content_filter".to_string());
     exercise(&[
-        super::AttemptOutcome::from(&AttemptOutcome::Succeeded),
-        super::AttemptOutcome::from(&AttemptOutcome::Failed {
+        super::AttemptOutcome::from(&record(AttemptOutcome::Succeeded)),
+        super::AttemptOutcome::from(&stopped),
+        super::AttemptOutcome::from(&record(AttemptOutcome::Failed {
             kind: "insufficient_credits".to_string(),
             transient: true,
             capacity: false,
             next: Retry::Reported,
-        }),
+        })),
     ])
     .await;
 

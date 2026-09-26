@@ -1706,6 +1706,8 @@ mod tests {
                     capacity: false,
                     next: Retry::SameModel,
                 },
+                finish_reason: String::new(),
+                stopped_for: None,
                 duration_ms: 1_200,
                 backoff_ms: 0,
                 digest: RequestDigest {
@@ -3101,6 +3103,61 @@ mod tests {
                 .all(|u| u.prompt_tokens < 32_000),
             "no single call exceeded the window, and the journal can now prove it"
         );
+    }
+
+    /// An attempt that answered records how the answer ended, and one that
+    /// did not, or was written before the field existed, reads back with
+    /// nothing there. The two keys are left off the wire when empty, so a
+    /// journal written today reads the same as one written before them.
+    #[test]
+    fn an_attempts_finish_reason_is_kept_and_an_old_record_reads_without_one() {
+        let record = |finish_reason: &str, stopped_for: Option<&str>| AttemptRecord {
+            id: "a1".to_string(),
+            stage: "plan".to_string(),
+            attempt: 1,
+            provider: "anthropic".to_string(),
+            model: "claude".to_string(),
+            outcome: AttemptOutcome::Succeeded,
+            finish_reason: finish_reason.to_string(),
+            stopped_for: stopped_for.map(str::to_string),
+            duration_ms: 10,
+            backoff_ms: 0,
+            digest: RequestDigest {
+                system_hash: 1,
+                messages: 1,
+                tools: 0,
+                max_tokens: 10,
+                temperature: 0.0,
+            },
+            model_input: None,
+            at: 1,
+        };
+
+        let unknown = record("unknown", Some("content_filter"));
+        let json = serde_json::to_string(&unknown).unwrap();
+        assert!(json.contains("\"finish_reason\":\"unknown\""), "{json}");
+        assert!(
+            json.contains("\"stopped_for\":\"content_filter\""),
+            "{json}"
+        );
+        let back: AttemptRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, unknown);
+
+        let plain = record("", None);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("finish_reason"), "{json}");
+        assert!(!json.contains("stopped_for"), "{json}");
+
+        // A record written before the fields existed.
+        let old: AttemptRecord = serde_json::from_str(
+            r#"{"stage":"plan","attempt":1,"provider":"anthropic","model":"claude",
+                "outcome":"succeeded","duration_ms":10,"backoff_ms":0,
+                "digest":{"system_hash":1,"messages":1,"tools":0,"max_tokens":10,"temperature":0.0},
+                "at":1}"#,
+        )
+        .unwrap();
+        assert_eq!(old.finish_reason, "");
+        assert_eq!(old.stopped_for, None);
     }
 
     /// Every way an attempt can end, and every way the loop can follow a

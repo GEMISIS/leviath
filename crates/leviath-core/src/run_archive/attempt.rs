@@ -10,10 +10,10 @@
 //! failover, so "why did this turn take ninety seconds" has an answer that does
 //! not depend on the daemon's log still being around.
 //!
-//! Small by default. Timing, classification, and enough identity
-//! ([`RequestDigest`]) to answer whether two attempts sent the same thing: no
-//! response body, no error message, and no request body unless the operator
-//! asked for one. A record that grew with the prompt would put a copy of the
+//! Small by default. Timing, classification, how the answer ended, and enough
+//! identity ([`RequestDigest`]) to answer whether two attempts sent the same
+//! thing: no response body, no error message, and no request body unless the
+//! operator asked for one. A record that grew with the prompt would put a copy of the
 //! whole window in the journal once per retry, which is why [`ModelInput`]
 //! carries a body only where [`CaptureStatus::Retained`] says it does.
 
@@ -199,6 +199,18 @@ pub struct AttemptRecord {
     pub model: String,
     /// How it ended.
     pub outcome: AttemptOutcome,
+    /// How the provider said the answer ended, where there was one:
+    /// `complete`, `token_limit`, `tool_call`, `stop`, or `unknown` for a
+    /// reason this build did not recognise. Empty on an attempt that produced
+    /// no answer, and in a journal written before finish reasons were
+    /// recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub finish_reason: String,
+    /// The provider's own words for the stop, where `finish_reason` is
+    /// `unknown`. Absent everywhere else: a recognised reason is fully
+    /// described by its label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_for: Option<String>,
     /// How long this attempt itself took, excluding the wait before it.
     pub duration_ms: u64,
     /// How long the loop slept before making this attempt. Zero for the first,
