@@ -277,13 +277,13 @@ async-graphql-axum = "7.2"
 # naming them here adds no crate to the graph and keeps one version in force.
 # `visit` is what reads a resolver body for an `.await` it was not marked for;
 # `extra-traits` is what lets the macro's unit tests compare parsed items.
-syn = { version = "2", features = ["full", "visit", "visit-mut", "extra-traits"] }
+syn = { version = "3", features = ["full", "visit", "visit-mut", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
 # Formats a generated token stream back into readable Rust so the macro's unit
 # tests assert on source a person can read, rather than on one long line of
 # tokens. Test-only, in one crate.
-prettyplease = "0.2"
+prettyplease = "0.3"
 
 # ── Release profile ──────────────────────────────────────────────────────────
 #
