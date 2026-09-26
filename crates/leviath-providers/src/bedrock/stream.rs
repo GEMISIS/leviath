@@ -443,11 +443,8 @@ mod tests {
         assert_eq!(response.tool_calls[0].id, "t1");
         assert_eq!(response.tool_calls[0].name, "read");
         assert_eq!(response.tool_calls[0].arguments, json!({ "path": "a" }));
-        assert!(
-            response.tool_calls[1].id.starts_with("call_"),
-            "{}",
-            response.tool_calls[1].id
-        );
+        let minted = &response.tool_calls[1].id;
+        assert!(minted.starts_with("call_"), "{minted}");
         assert_eq!(response.tool_calls[1].name, "write");
     }
 

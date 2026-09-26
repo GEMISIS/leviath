@@ -3386,11 +3386,8 @@ mod tests {
         let resp = parse_openai_response(&body).unwrap();
         assert_eq!(resp.tool_calls.len(), 1);
         // A call with no id is given one: an empty id pairs with every result.
-        assert!(
-            resp.tool_calls[0].id.starts_with("openai_call_"),
-            "{}",
-            resp.tool_calls[0].id
-        );
+        let minted = &resp.tool_calls[0].id;
+        assert!(minted.starts_with("openai_call_"), "{minted}");
         assert_eq!(resp.tool_calls[0].name, "do_thing");
         assert_eq!(resp.tool_calls[0].arguments["a"], 1);
     }

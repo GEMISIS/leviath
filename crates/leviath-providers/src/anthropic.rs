@@ -2613,17 +2613,12 @@ mod tests {
         });
         let resp = provider.parse_response(&body).unwrap();
         assert_eq!(resp.tool_calls.len(), 2);
+        let ids: Vec<&str> = resp.tool_calls.iter().map(|c| c.id.as_str()).collect();
         assert!(
-            resp.tool_calls[0].id.starts_with("anthropic_call_"),
-            "{}",
-            resp.tool_calls[0].id
+            ids.iter().all(|id| id.starts_with("anthropic_call_")),
+            "{ids:?}"
         );
-        assert!(
-            resp.tool_calls[1].id.starts_with("anthropic_call_"),
-            "{}",
-            resp.tool_calls[1].id
-        );
-        assert_ne!(resp.tool_calls[0].id, resp.tool_calls[1].id);
+        assert_ne!(ids[0], ids[1]);
         assert_eq!(resp.tool_calls[0].name, "read_file");
         assert_eq!(resp.tool_calls[0].arguments, serde_json::json!({}));
     }

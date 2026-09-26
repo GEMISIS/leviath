@@ -2050,6 +2050,16 @@ mod tests {
 
     // ─── Default trait method impls (infer_stream, list_models) ────────────
 
+    /// A provider that says nothing about mime takes text only, so a stored
+    /// part sent its way arrives as text or as its stand-in.
+    #[test]
+    fn the_default_mime_is_text_only() {
+        assert_eq!(
+            MinimalProvider.mime("any"),
+            crate::capabilities::ModelMime::text_only()
+        );
+    }
+
     struct MinimalProvider;
 
     #[async_trait]

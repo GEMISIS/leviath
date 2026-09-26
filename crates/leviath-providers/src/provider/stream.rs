@@ -622,11 +622,8 @@ mod tests {
         let named = collect_stream(call(None, Some("read_file")))
             .await
             .expect("a complete stream");
-        assert!(
-            named.tool_calls[0].id.starts_with("call_"),
-            "{}",
-            named.tool_calls[0].id
-        );
+        let minted = &named.tool_calls[0].id;
+        assert!(minted.starts_with("call_"), "{minted}");
         assert_eq!(named.tool_calls[0].name, "read_file");
 
         let err = collect_stream(call(Some("call-1"), None))

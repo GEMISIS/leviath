@@ -1054,11 +1054,8 @@ mod tests {
         assert_eq!(response.tool_calls[0].arguments, json!({ "path": "a" }));
         // A call with no id is given one; an empty id would pair with every
         // result.
-        assert!(
-            response.tool_calls[1].id.starts_with("bedrock_call_"),
-            "{}",
-            response.tool_calls[1].id
-        );
+        let minted = &response.tool_calls[1].id;
+        assert!(minted.starts_with("bedrock_call_"), "{minted}");
         assert_eq!(response.tool_calls[1].arguments, json!({}));
         assert_eq!(response.finish_reason, FinishReason::ToolCall);
         assert_eq!(response.tokens_used.prompt_tokens, 10);
@@ -1092,11 +1089,8 @@ mod tests {
             { "toolUse": { "name": "read", "input": { "path": "a" } } }
         ] }, "stopReason": "tool_use" } });
         let response = parse_response(&body).unwrap();
-        assert!(
-            response.tool_calls[0].id.starts_with("bedrock_call_"),
-            "{}",
-            response.tool_calls[0].id
-        );
+        let minted = &response.tool_calls[0].id;
+        assert!(minted.starts_with("bedrock_call_"), "{minted}");
 
         let body = json!({ "output": { "message": { "content": [
             { "toolUse": { "toolUseId": "t1", "input": {} } }
