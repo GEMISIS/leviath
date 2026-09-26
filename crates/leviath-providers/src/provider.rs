@@ -585,13 +585,42 @@ pub enum FinishReason {
     /// Model requested stop
     Stop,
 
-    /// The provider gave a reason this build does not recognise. Kept apart
-    /// from [`FinishReason::Complete`] so a new way of stopping (a content
-    /// filter, a gateway's own error marker) is visible in the journal rather
-    /// than passing as a finished answer.
-    Unknown,
+    /// The provider gave a reason this build does not recognise, carried as
+    /// the provider spelled it.
+    ///
+    /// Kept apart from [`FinishReason::Complete`] so a new way of stopping (a
+    /// content filter, a gateway's own marker) leaves a trace: the attempt's
+    /// journal record says `finish_reason: "unknown"` with the raw string
+    /// beside it, and the stage log carries a `[warn]` line. The reply itself
+    /// is still handed on as the answer, so the run keeps its turn.
+    Unknown(String),
 }
 
+impl FinishReason {
+    /// A short, stable name for the journal and the API.
+    pub fn label(&self) -> &'static str {
+        match self {
+            FinishReason::Complete => "complete",
+            FinishReason::TokenLimit => "token_limit",
+            FinishReason::ToolCall => "tool_call",
+            FinishReason::Stop => "stop",
+            FinishReason::Unknown(_) => "unknown",
+        }
+    }
+
+    /// The provider's own words for a stop this build does not recognise, and
+    /// `None` for one it does.
+    pub fn unrecognised(&self) -> Option<&str> {
+        match self {
+            FinishReason::Unknown(raw) => Some(raw),
+            _ => None,
+        }
+    }
+}
+
+/// Compared by kind alone: two unrecognised reasons are equal whatever the
+/// provider called them. A test that cares what it was called reads
+/// [`FinishReason::unrecognised`].
 impl PartialEq for FinishReason {
     #[inline(never)]
     fn eq(&self, other: &Self) -> bool {
@@ -1848,7 +1877,32 @@ mod tests {
 
     #[test]
     fn parse_finish_reason_unknown_is_kept_apart_from_complete() {
-        assert_eq!(parse_openai_finish_reason("unknown"), FinishReason::Unknown);
+        let reason = parse_openai_finish_reason("content_filter");
+        assert_ne!(reason, FinishReason::Complete);
+        assert_eq!(reason.unrecognised(), Some("content_filter"));
+        assert_eq!(reason.label(), "unknown");
+    }
+
+    /// Every kind has a name the journal can carry, and only the unknown one
+    /// has the provider's own words beside it.
+    #[test]
+    fn every_finish_reason_has_a_label() {
+        let named = [
+            (FinishReason::Complete, "complete"),
+            (FinishReason::TokenLimit, "token_limit"),
+            (FinishReason::ToolCall, "tool_call"),
+            (FinishReason::Stop, "stop"),
+            (FinishReason::Unknown("pause_turn".to_string()), "unknown"),
+        ];
+        for (reason, label) in &named {
+            assert_eq!(reason.label(), *label);
+        }
+        assert_eq!(FinishReason::Complete.unrecognised(), None);
+        // Equal by kind, whatever the provider called it.
+        assert_eq!(
+            FinishReason::Unknown("a".to_string()),
+            FinishReason::Unknown("b".to_string())
+        );
     }
 
     // ─── Serialization round-trips ──────────────────────────────────────────
@@ -1955,6 +2009,7 @@ mod tests {
             FinishReason::TokenLimit,
             FinishReason::ToolCall,
             FinishReason::Stop,
+            FinishReason::Unknown("content_filter".to_string()),
         ] {
             let json = serde_json::to_string(&reason).unwrap();
             let back: FinishReason = serde_json::from_str(&json).unwrap();

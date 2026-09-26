@@ -399,17 +399,34 @@ impl ModelInputPlan {
     }
 }
 
+/// How one attempt ended, as its record wants it.
+///
+/// An answer carries how the provider said it ended, which the record keeps
+/// as a label and, for a reason this build does not know, the provider's own
+/// words. A failure carries its classification and what the loop did next.
+enum Ending<'a> {
+    Answered(&'a leviath_providers::FinishReason),
+    Failed(leviath_core::run_archive::AttemptOutcome),
+}
+
 impl AttemptJournal {
     /// Append one attempt's record, under the id the loop minted for it.
     fn record(
         &self,
         id: &str,
         attempt: u32,
-        outcome: leviath_core::run_archive::AttemptOutcome,
+        ending: Ending<'_>,
         took: Duration,
         waited: Duration,
         request: &InferenceRequest,
     ) {
+        let (outcome, finish) = match ending {
+            Ending::Answered(finish) => (
+                leviath_core::run_archive::AttemptOutcome::Succeeded,
+                Some(finish),
+            ),
+            Ending::Failed(outcome) => (outcome, None),
+        };
         let _ = self
             .lane
             .send(crate::persistence_bridge::PersistMsg::Append {
@@ -422,6 +439,8 @@ impl AttemptJournal {
                         provider: self.provider.clone(),
                         model: self.model.clone(),
                         outcome,
+                        finish_reason: finish.map_or_else(String::new, |f| f.label().to_string()),
+                        stopped_for: finish.and_then(|f| f.unrecognised()).map(str::to_string),
                         duration_ms: millis(took),
                         backoff_ms: millis(waited),
                         digest: self.digest.clone(),
@@ -724,11 +743,12 @@ pub(crate) async fn run_inference_job(
         // The request is a parameter rather than something the closure captures:
         // a file renewal takes it mutably, and a record has to carry the bodies
         // as they were when each attempt went out.
-        let record = |id: &str, attempt, outcome, took, waited, request: &InferenceRequest| {
-            if let Some(journal) = journal.as_ref() {
-                journal.record(id, attempt, outcome, took, waited, request);
-            }
-        };
+        let record =
+            |id: &str, attempt, ending: Ending<'_>, took, waited, request: &InferenceRequest| {
+                if let Some(journal) = journal.as_ref() {
+                    journal.record(id, attempt, ending, took, waited, request);
+                }
+            };
         loop {
             // One id per trip, minted before the request goes out and whatever
             // the world does with the journal: the answer's own consequences
@@ -763,7 +783,7 @@ pub(crate) async fn run_inference_job(
                     record(
                         &id,
                         made,
-                        leviath_core::run_archive::AttemptOutcome::Succeeded,
+                        Ending::Answered(&response.finish_reason),
                         took,
                         waited,
                         &request,
@@ -784,7 +804,7 @@ pub(crate) async fn run_inference_job(
                     record(
                         &id,
                         made,
-                        failed(&e, leviath_core::run_archive::Retry::RenewedFiles),
+                        Ending::Failed(failed(&e, leviath_core::run_archive::Retry::RenewedFiles)),
                         took,
                         waited,
                         &request,
@@ -806,7 +826,7 @@ pub(crate) async fn run_inference_job(
                         record(
                             &id,
                             made,
-                            failed(&e, leviath_core::run_archive::Retry::SameModel),
+                            Ending::Failed(failed(&e, leviath_core::run_archive::Retry::SameModel)),
                             took,
                             waited,
                             &request,
@@ -820,7 +840,7 @@ pub(crate) async fn run_inference_job(
                         record(
                             &id,
                             made,
-                            failed(&e, leviath_core::run_archive::Retry::Reported),
+                            Ending::Failed(failed(&e, leviath_core::run_archive::Retry::Reported)),
                             took,
                             waited,
                             &request,
@@ -1778,6 +1798,35 @@ mod tests {
         }
     }
 
+    /// A stop the provider named in words this build does not know is
+    /// journaled as `unknown`, with those words beside it. The answer still
+    /// comes back: what the record adds is the trace.
+    #[tokio::test]
+    async fn an_unrecognised_stop_is_journaled_with_the_providers_words() {
+        let mut answer = response("cut short");
+        answer.finish_reason =
+            leviath_providers::FinishReason::Unknown("content_filter".to_string());
+        let (job, mut lane) = journaled_job(Arc::new(Fixed::Ok(answer)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            job,
+            tx,
+            Arc::new(Notify::new()),
+            no_delay(4),
+            crate::cancel::CancelToken::new(),
+        )
+        .await;
+        assert_eq!(
+            rx.try_recv().expect("outcome").result.unwrap().content,
+            "cut short"
+        );
+        let records = journaled_attempts(&mut lane);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].outcome, AttemptOutcome::Succeeded);
+        assert_eq!(records[0].finish_reason, "unknown");
+        assert_eq!(records[0].stopped_for.as_deref(), Some("content_filter"));
+    }
+
     /// Two refusals and an answer produce three records, not one. Until they did,
     /// a call that spent a minute being refused was journaled exactly like one
     /// that was answered at once.
@@ -1826,6 +1875,11 @@ mod tests {
             failure("", true, true, Retry::SameModel)
         );
         assert_eq!(records[2].outcome, AttemptOutcome::Succeeded);
+        // Only the attempt that answered says how the answer ended.
+        assert_eq!(records[2].finish_reason, "complete");
+        assert_eq!(records[2].stopped_for, None);
+        assert_eq!(records[0].finish_reason, "");
+        assert_eq!(records[0].stopped_for, None);
         // The identity the dispatch system handed over, on every record.
         for record in &records {
             assert_eq!(record.stage, "draft");

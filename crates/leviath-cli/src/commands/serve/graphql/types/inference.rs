@@ -66,17 +66,27 @@ pub(crate) enum AttemptOutcomeKind {
     Failed,
 }
 
-/// How one trip to a provider ended, and how the failure was judged when there
-/// was one.
+/// How one trip to a provider ended, how the failure was judged when there
+/// was one, and how the answer ended when there was one.
 ///
 /// `failureKind`, `transient`, `capacity` and `retry` are null unless `kind` is
-/// `FAILED`: an attempt that worked has no failure to classify. What the answer
-/// cost is on the run's `usage` and `cost`, not here.
+/// `FAILED`: an attempt that worked has no failure to classify. `finishReason`
+/// and `stoppedFor` are null unless `kind` is `SUCCEEDED`, and null in a
+/// journal written before they were recorded. What the answer cost is on the
+/// run's `usage` and `cost`, not here.
 #[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct AttemptOutcome {
     /// Whether the provider answered.
     pub(crate) kind: AttemptOutcomeKind,
+    /// How the provider said the answer ended: `complete`, `token_limit`,
+    /// `tool_call`, `stop`, or `unknown` for a reason this build did not
+    /// recognise. Null for an attempt that produced no answer, and in a journal
+    /// written before finish reasons were recorded.
+    pub(crate) finish_reason: Option<String>,
+    /// The provider's own words for the stop, where `finishReason` is
+    /// `unknown`. Null everywhere else.
+    pub(crate) stopped_for: Option<String>,
     /// A stable label for what went wrong. Null for an attempt that worked, and
     /// for a failure the provider gave no classification for at all.
     pub(crate) failure_kind: Option<String>,
@@ -91,15 +101,17 @@ pub(crate) struct AttemptOutcome {
     pub(crate) retry: Option<RetryDecision>,
 }
 
-impl From<&leviath_core::run_archive::AttemptOutcome> for AttemptOutcome {
-    fn from(outcome: &leviath_core::run_archive::AttemptOutcome) -> Self {
+impl From<&AttemptRecord> for AttemptOutcome {
+    fn from(record: &AttemptRecord) -> Self {
         use leviath_core::run_archive::AttemptOutcome as Core;
-        // Every field but `kind` stays null on the arm that carries no failure,
+        // Every field but `kind` stays null on the arm it does not belong to,
         // so a client switching on `kind` first never has to check whether an
         // unrelated field is meaningful before reading it.
-        match outcome {
+        match &record.outcome {
             Core::Succeeded => Self {
                 kind: AttemptOutcomeKind::Succeeded,
+                finish_reason: label(&record.finish_reason),
+                stopped_for: record.stopped_for.clone(),
                 failure_kind: None,
                 transient: None,
                 capacity: None,
@@ -112,6 +124,8 @@ impl From<&leviath_core::run_archive::AttemptOutcome> for AttemptOutcome {
                 next,
             } => Self {
                 kind: AttemptOutcomeKind::Failed,
+                finish_reason: None,
+                stopped_for: None,
                 failure_kind: label(kind),
                 transient: Some(*transient),
                 capacity: Some(*capacity),
@@ -360,7 +374,7 @@ impl InferenceAttempt {
 
     /// How the attempt ended.
     async fn outcome(&self) -> AttemptOutcome {
-        AttemptOutcome::from(&self.record.outcome)
+        AttemptOutcome::from(&self.record)
     }
 
     /// How long this attempt itself took, in milliseconds, not counting the wait
@@ -421,10 +435,11 @@ position_order!(
     "Where this attempt sits among the run's own, in the order it was made."
 );
 
-/// A stable failure label, or nothing where the error carried none.
+/// A stable label, or nothing where the journal carried none.
 ///
-/// The journal records an unclassified failure as an empty label. Null says the
-/// same thing without a client having to know that.
+/// The journal records an unclassified failure, and an answer whose finish
+/// reason was not recorded, as an empty label. Null says the same thing
+/// without a client having to know that.
 fn label(kind: &str) -> Option<String> {
     (!kind.is_empty()).then(|| kind.to_string())
 }

@@ -15,6 +15,10 @@ same list.
 
 ### Changed
 
+- **Breaking, library only.** `leviath_providers::FinishReason::Unknown`
+  carries the provider's raw stop reason, so a `match` on the bare variant no
+  longer compiles. `FinishReason::label` and `FinishReason::unrecognised` read
+  it.
 - **Breaking.** The `claude-code` provider is gone. It drove the `claude` CLI
   as a subprocess, had no sign-in of its own, read every unrecognised stop
   reason as a finished answer, and put the account's email address into every
@@ -179,6 +183,16 @@ same list.
 
 ### Added
 
+- An inference attempt's journal record says how the answer ended.
+  `finish_reason` is `complete`, `token_limit`, `tool_call`, `stop`, or
+  `unknown` for a reason this build does not recognise, and `stopped_for`
+  carries the provider's own words for an `unknown` one. GraphQL reads them as
+  `finishReason` and `stoppedFor` on `InferenceAttemptOutput.outcome`, null on a
+  failed attempt and in a journal written before they existed. The stage log
+  gets a `[warn]` line when a stop was unrecognised; the reply is still the
+  answer. Until now the variant that promised this was recorded nowhere, so a
+  content filter or a gateway's own stop marker passed as a finished answer
+  with no trace.
 - A stage records what it actually ran on. Each entry in the stage ledger gains
   `models`, the provider and model pairs that stage ran an inference against, in
   the order it first reached each. A list rather than one value because a stage

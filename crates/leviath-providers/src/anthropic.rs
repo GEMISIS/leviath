@@ -745,7 +745,7 @@ impl AnthropicProvider {
             "stop_sequence" => FinishReason::Stop,
             other => {
                 tracing::debug!(reason = other, "unrecognised stop_reason from Anthropic");
-                FinishReason::Unknown
+                FinishReason::Unknown(other.to_string())
             }
         }
     }
@@ -2525,8 +2525,8 @@ mod tests {
             FinishReason::Stop
         );
         assert_eq!(
-            AnthropicProvider::parse_stop_reason("unknown_reason"),
-            FinishReason::Unknown
+            AnthropicProvider::parse_stop_reason("unknown_reason").unrecognised(),
+            Some("unknown_reason")
         );
     }
 

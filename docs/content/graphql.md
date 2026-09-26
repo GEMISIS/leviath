@@ -638,7 +638,7 @@ half, read from the same journal: one entry per trip to a provider, in the order
       cursor
       results {
         stage attempt provider model durationMs backoffMs at
-        outcome { kind failureKind transient capacity retry }
+        outcome { kind finishReason stoppedFor failureKind transient capacity retry }
         digest { systemHash messages tools maxTokens temperature }
         failover { fromProvider fromModel toProvider toModel reason }
       }
@@ -647,7 +647,11 @@ half, read from the same journal: one entry per trip to a provider, in the order
 }
 ```
 
-`outcome.kind` is `SUCCEEDED` or `FAILED`, and the four fields beside it are null unless it failed.
+`outcome.kind` is `SUCCEEDED` or `FAILED`. `finishReason` and `stoppedFor` belong to an attempt that
+answered: `finishReason` is how the provider said the answer ended (`complete`, `token_limit`,
+`tool_call`, `stop`, or `unknown`), and `stoppedFor` is the provider's own words for an `unknown`
+one, such as a content filter Leviath has no name for. Both are null on a failed attempt and in a
+journal written before they were recorded. The four fields after them are null unless it failed.
 `transient` and `capacity` are how the failure was judged at the time rather than now, because what
 counts as transient is a policy that moves between releases. `retry` says what the loop did next.
 `SAME_MODEL` is the same provider again after a wait, and the next entry's `backoffMs` says how

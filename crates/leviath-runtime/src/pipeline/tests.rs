@@ -20393,6 +20393,58 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
     assert!(!world.get::<StageLedger>(plain).unwrap().0[0].output_cap_raised);
 }
 
+/// A stop the provider named in words this build does not know puts a
+/// `[warn]` line in the stage log, and the reply still goes on to be
+/// processed. A stop it does know leaves the log to the token line.
+#[test]
+fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
+    let (mut world, tx) = world_with_results();
+    let e = world
+        .spawn((
+            agent_state(),
+            AwaitingInference,
+            StageCursor { index: 2 },
+            StageIoBuffer::default(),
+        ))
+        .id();
+    let mut response = resp("what got through");
+    response.finish_reason = leviath_providers::FinishReason::Unknown("refusal".to_string());
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: e,
+        attempt_id: String::new(),
+        result: Ok(response),
+        pricing: None,
+    })
+    .unwrap();
+    run_collect(&mut world);
+    let buf = world.get::<StageIoBuffer>(e).unwrap();
+    assert_eq!(buf.logs.len(), 2, "{:?}", buf.logs);
+    assert_eq!(buf.logs[1].0, 2);
+    assert!(buf.logs[1].1.starts_with("[warn] "), "{}", buf.logs[1].1);
+    assert!(buf.logs[1].1.contains("(refusal)"), "{}", buf.logs[1].1);
+    assert!(world.get::<ProcessResponse>(e).is_some());
+
+    let plain = world
+        .spawn((agent_state(), AwaitingInference, StageIoBuffer::default()))
+        .id();
+    tx.send(InferenceOutcome {
+        latency: std::time::Duration::ZERO,
+        entity: plain,
+        attempt_id: String::new(),
+        result: Ok(resp("done")),
+        pricing: None,
+    })
+    .unwrap();
+    run_collect(&mut world);
+    let buf = world.get::<StageIoBuffer>(plain).unwrap();
+    assert!(
+        buf.logs.iter().all(|(_, line)| !line.starts_with("[warn]")),
+        "{:?}",
+        buf.logs
+    );
+}
+
 /// `spawn_agent_seeded` is `pub`, so a hand-built `Blueprint` can reach it
 /// without `parse_manifest`'s "at least one stage" guarantee. Both invariants
 /// it indexes by are refused up front rather than panicking on `stages[0]`.

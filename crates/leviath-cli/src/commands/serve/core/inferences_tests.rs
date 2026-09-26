@@ -41,6 +41,8 @@ fn attempt(stage: &str, n: u32, provider: &str, model: &str, outcome: AttemptOut
         provider: provider.to_string(),
         model: model.to_string(),
         outcome,
+        finish_reason: String::new(),
+        stopped_for: None,
         duration_ms: 1_200,
         backoff_ms: 400,
         digest: digest(),

@@ -208,8 +208,12 @@ fn every_ending_reads_as_what_it_was() {
         Some(FinishReason::TokenLimit)
     );
     assert_eq!(
-        ended("something_new").unwrap().finish_reason,
-        Some(FinishReason::Unknown)
+        ended("something_new")
+            .unwrap()
+            .finish_reason
+            .as_ref()
+            .and_then(FinishReason::unrecognised),
+        Some("something_new")
     );
     assert!(ended("failed").unwrap_err().to_string().contains("failed"));
     assert!(ended("cancelled").is_err());

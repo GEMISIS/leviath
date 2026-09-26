@@ -371,6 +371,23 @@ pub(crate) fn collect_inference(
                     for note in dropped_part_notes(&parts) {
                         buffer.logs.push((idx, note));
                     }
+                    // A stop this build does not recognise (a content filter,
+                    // a gateway's own marker) is kept as the answer, and said
+                    // so here: the reply may well be short of what the model
+                    // meant to say, and the log is where that shows.
+                    if let Some(raw) = response.finish_reason.unrecognised() {
+                        tracing::warn!(
+                            stop_reason = raw,
+                            "the provider stopped for a reason this build does not recognise"
+                        );
+                        buffer.logs.push((
+                            idx,
+                            format!(
+                                "[warn] the provider stopped for a reason this build does not \
+                                 recognise ({raw}); the reply was kept as the answer"
+                            ),
+                        ));
+                    }
                 }
                 let result = to_inference_result(&response, parts, &outcome.attempt_id);
                 commands
@@ -749,8 +766,8 @@ pub struct StageLedger(pub Vec<leviath_core::run_meta::StageRecord>);
 pub(crate) struct StageIoBuffer {
     /// Readable assistant output lines, each tagged with its stage index.
     pub output: Vec<(usize, String)>,
-    /// Operational log lines (tool activity, token counts, errors), each tagged
-    /// with its stage index.
+    /// Operational log lines (tool activity, token counts, warnings, errors),
+    /// each tagged with its stage index.
     pub logs: Vec<(usize, String)>,
 }
 

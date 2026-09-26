@@ -448,7 +448,7 @@ pub(super) fn parse_stop_reason(reason: &str) -> FinishReason {
         "stop_sequence" => FinishReason::Stop,
         other => {
             tracing::debug!(reason = other, "unrecognised stopReason from Bedrock");
-            FinishReason::Unknown
+            FinishReason::Unknown(other.to_string())
         }
     }
 }
@@ -1132,10 +1132,13 @@ mod tests {
         assert_eq!(parse_stop_reason("max_tokens"), FinishReason::TokenLimit);
         assert_eq!(parse_stop_reason("stop_sequence"), FinishReason::Stop);
         assert_eq!(
-            parse_stop_reason("guardrail_intervened"),
-            FinishReason::Unknown
+            parse_stop_reason("guardrail_intervened").unrecognised(),
+            Some("guardrail_intervened")
         );
-        assert_eq!(parse_stop_reason("content_filtered"), FinishReason::Unknown);
+        assert_eq!(
+            parse_stop_reason("content_filtered").unrecognised(),
+            Some("content_filtered")
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@ pub(crate) fn parse_openai_finish_reason(reason: &str) -> FinishReason {
                 reason = other,
                 "unrecognised finish_reason from the provider"
             );
-            FinishReason::Unknown
+            FinishReason::Unknown(other.to_string())
         }
     }
 }

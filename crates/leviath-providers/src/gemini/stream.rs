@@ -169,7 +169,7 @@ pub(crate) fn parse_event(
                         interaction.map(Value::to_string).unwrap_or_default()
                     )))));
                 }
-                _ => FinishReason::Unknown,
+                other => FinishReason::Unknown(other.to_string()),
             };
             Some(Some(Ok(StreamChunk {
                 tokens: Some(

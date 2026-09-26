@@ -312,6 +312,22 @@ input AttemptOutcomeInput {
 	"""
 	kind: AttemptOutcomeKindFilter
 	"""
+	Filter on `AttemptOutcomeOutput.finishReason`.
+	
+	How the provider said the answer ended: `complete`, `token_limit`,
+	`tool_call`, `stop`, or `unknown` for a reason this build did not
+	recognise. Null for an attempt that produced no answer, and in a journal
+	written before finish reasons were recorded.
+	"""
+	finishReason: StringFilter
+	"""
+	Filter on `AttemptOutcomeOutput.stoppedFor`.
+	
+	The provider's own words for the stop, where `finishReason` is
+	`unknown`. Null everywhere else.
+	"""
+	stoppedFor: StringFilter
+	"""
 	Filter on `AttemptOutcomeOutput.failureKind`.
 	
 	A stable label for what went wrong. Null for an attempt that worked, and
@@ -376,16 +392,30 @@ input AttemptOutcomeKindFilter {
 }
 
 """
-How one trip to a provider ended, and how the failure was judged when there
-was one.
+How one trip to a provider ended, how the failure was judged when there
+was one, and how the answer ended when there was one.
 
 `failureKind`, `transient`, `capacity` and `retry` are null unless `kind` is
-`FAILED`: an attempt that worked has no failure to classify. What the answer
-cost is on the run's `usage` and `cost`, not here.
+`FAILED`: an attempt that worked has no failure to classify. `finishReason`
+and `stoppedFor` are null unless `kind` is `SUCCEEDED`, and null in a
+journal written before they were recorded. What the answer cost is on the
+run's `usage` and `cost`, not here.
 """
 type AttemptOutcomeOutput {
 	"Whether the provider answered."
 	kind: AttemptOutcomeKind!
+	"""
+	How the provider said the answer ended: `complete`, `token_limit`,
+	`tool_call`, `stop`, or `unknown` for a reason this build did not
+	recognise. Null for an attempt that produced no answer, and in a journal
+	written before finish reasons were recorded.
+	"""
+	finishReason: String
+	"""
+	The provider's own words for the stop, where `finishReason` is
+	`unknown`. Null everywhere else.
+	"""
+	stoppedFor: String
 	"""
 	A stable label for what went wrong. Null for an attempt that worked, and
 	for a failure the provider gave no classification for at all.
