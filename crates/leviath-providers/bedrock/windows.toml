@@ -15,7 +15,7 @@
 # `reasoning` says the card has a Reasoning line, and `count_tokens` whether
 # the card lists CountTokens as supported on `bedrock-runtime`.
 
-read_on = "2026-09-14"
+read_on = "2026-09-28"
 
 [[model]]
 id = "ai21.jamba-1-5-large-v1:0"
@@ -238,6 +238,16 @@ profiles = ["us.anthropic.claude-opus-5", "eu.anthropic.claude-opus-5", "au.anth
 source = "aws-model-card"
 
 [[model]]
+id = "anthropic.claude-opus-5-5"
+name = "Claude Opus 5.5"
+context = 1000000
+output = 128000
+reasoning = true
+count_tokens = false
+profiles = ["us.anthropic.claude-opus-5-5", "eu.anthropic.claude-opus-5-5", "au.anthropic.claude-opus-5-5", "jp.anthropic.claude-opus-5-5", "global.anthropic.claude-opus-5-5"]
+source = "aws-model-card"
+
+[[model]]
 id = "anthropic.claude-sonnet-4-20250514-v1:0"
 name = "Claude Sonnet 4"
 context = 200000
@@ -275,6 +285,16 @@ output = 128000
 reasoning = true
 count_tokens = false
 profiles = ["us.anthropic.claude-sonnet-5", "eu.anthropic.claude-sonnet-5", "au.anthropic.claude-sonnet-5", "global.anthropic.claude-sonnet-5"]
+source = "aws-model-card"
+
+[[model]]
+id = "anthropic.claude-sonnet-5-5"
+name = "Claude Sonnet 5.5"
+context = 1000000
+output = 128000
+reasoning = true
+count_tokens = false
+profiles = ["global.anthropic.claude-sonnet-5-5"]
 source = "aws-model-card"
 
 [[model]]
