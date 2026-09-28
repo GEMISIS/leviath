@@ -1,0 +1,88 @@
+# Context design inside a blueprint revision: regions, budgets, eviction,
+# handoffs between blueprints, and fan-out wiring. Every region and stage
+# reference here is a typed relation, because a Blueprint only exists when
+# its manifest loads.
+
+# X0 Blueprint author inspects each region's lifecycle, budget as written, eviction and content rules, the regions the runtime supplies, and the handoff mappings, before changing the context design.
+query BlueprintContextDesign($blueprintName: String!) {
+  blueprint(name: $blueprintName) {
+    id
+    name
+    revision {
+      id
+      digest
+      regions {
+        __typename
+        id
+        name
+        stage { name }
+        description
+        describedToModel
+        required { message }
+        volatility
+        admission
+        summarizable
+        accepts
+        contentRule { format schema { __typename ... on InlineJsonSchema { schema } ... on JsonSchemaFile { path } } }
+        budget {
+          __typename
+          ... on TokenCount { tokens }
+          ... on WindowShareBudget { percent minTokens maxTokens }
+        }
+        seed { __typename }
+        ... on SlidingWindowRegion {
+          maxItems
+          batchEviction { __typename ... on DropInBatches { overflow } ... on SummarizeInBatches { count } }
+        }
+        ... on CompactingRegion { compactAtPercent compactAtTokens }
+        ... on CompactHistoryRegion { source { __typename name } }
+        ... on KeyValueRegion { maxEntries }
+        ... on ScriptedRegion { neverEvicted hook { id relativePath digest } }
+      }
+      runtimeRegions { name purpose }
+      stages { name context { ownRegions { name } hidden { name } reset { name } } }
+      handoffs {
+        fromBlueprintName
+        toBlueprintName
+        regions {
+          __typename
+          fromRegionName
+          toRegionName
+          ... on ExtractedRegion { fields }
+        }
+      }
+    }
+  }
+}
+
+# X1 Blueprint author checks each fan-out stage's worker, merge stage, item and result regions and failure policy before deploying.
+query FanOutWorkerContracts($blueprintName: String!) {
+  blueprint(name: $blueprintName) {
+    id
+    name
+    revision {
+      id
+      stages {
+        __typename
+        name
+        ... on FanOutStage {
+          worker {
+            __typename
+            ... on WorkerBlueprint { blueprintName }
+            ... on WorkerStage { stage { __typename name mayRunAsWorker } }
+            ... on WorkerSearch { query }
+          }
+          mergeStage { name }
+          splitPrompt
+          itemsRegion { __typename name }
+          resultsRegion { __typename name }
+          maxWorkers
+          maxItems
+          maxAttempts
+          onWorkerFailure
+        }
+      }
+    }
+  }
+  brokenBlueprints { name problems { rule message stageName remedy } }
+}

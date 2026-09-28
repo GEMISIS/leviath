@@ -1,0 +1,207 @@
+# The machine: this server, the daemon behind it, the config file and its
+# revisions, model providers and models, MCP servers, the mime registry, and
+# the live checks (mutations, because they dial out, spawn or bill).
+
+# M0 Operator opens a machine console: server identity and limits, both daemon connections, the journal, offline diagnostics and the config, with no secret values.
+query MachineOrientation {
+  server {
+    version
+    build
+    instanceId
+    startedAt
+    time
+    restartRequired
+    installation { method channel binaryPath }
+    limits { maxPageSize maxIds requestTimeoutSeconds idempotencyKeyKeptSeconds }
+  }
+  daemon {
+    version
+    build
+    pid
+    sameBuildAsServer
+    restarts
+    control { state since }
+    events { state since }
+    journal { healthy appendsAttempted appendsFailed queueDepth lastError { runId path message at } }
+  }
+  diagnostics { passed checks { name status detail elapsedMs } }
+  config {
+    id
+    path
+    savedAt
+    revision { number digest }
+    problem { __typename path message since ... on FileUnparsable { line column } ... on SettingRefused { key } }
+    routing {
+      defaultProvider { name provider { __typename name isEnabled } }
+      providerOrder { name }
+      overrideModel { providerName modelName }
+      fallbackModel { providerName modelName }
+    }
+    sandbox { __typename sharesHostFilesystem ... on ContainerSandbox { image allowsNetwork whenUnavailable } }
+    allowsFileUploads
+    blueprintPaths
+    approvalPolicyFile { path exists problem { __typename message } }
+  }
+}
+
+# M1 Operator saves settings and must tell a valid active config from an invalid file on disk, and see every model provider in one list with its setup state.
+query ConfigurationHealth($first: Int! = 100) {
+  config {
+    path
+    savedAt
+    problem { __typename path message detail since ... on FileUnparsable { line column } ... on SettingRefused { key } }
+  }
+  modelProviders(first: $first) {
+    results {
+      __typename
+      name
+      displayName
+      isEnabled
+      ... on ApiKeyProvider { hasApiKey baseUrl headerNames }
+      ... on LocalProvider { baseUrl }
+      ... on SubscriptionProvider { signIn { account expiresAt } signInAttempt { __typename ... on SignInFailed { reason } } }
+      ... on CommandLineProvider { program }
+      ... on OpenAiCompatibleProvider { endpoint: baseUrl hasApiKey fallbackModelNames }
+      ... on NamedOpenAiProvider { endpoint: baseUrl hasApiKey keyHeaderName servedModelNames }
+      ... on ScriptProvider { servedModelNames extension { relativePath compileError } }
+    }
+    cursor
+    total
+  }
+}
+
+# M8 Operator compares the active config revision with earlier ones and reads who changed which setting and why, while live file health stays on the owner.
+query ConfigurationRevisionHistory($revisionId: ID!, $first: Int! = 20) {
+  config {
+    revision { id number digest createdAt createdBy settings }
+    revisions(first: $first) { results { id number digest createdAt createdBy } cursor total }
+    history(first: $first) { results { number at by why changes { field before after } } cursor total }
+    problem { __typename message }
+  }
+  earlier: node(id: $revisionId) { id ... on ConfigRevision { number createdAt settings } }
+}
+
+# M2 Admin audits the resolved mime registry and the operator's own rules as written before changing them.
+query MachineCatalogs($first: Int! = 50) {
+  mimeTypes(first: $first) {
+    results {
+      mimeType
+      family
+      isText
+      extensions
+      tokens { __typename }
+      check { relativePath compileError }
+      rules { __typename mimeType liftsCheck }
+    }
+    cursor
+    total
+  }
+  operatorMimeTypeRules(first: $first) {
+    results { id file mimeType extensions liftsCheck revision { number digest } }
+    cursor
+    total
+  }
+}
+
+# M3 Operator searches the model catalogue with each model's provider as a relation, and every provider in one listing, to pick a route.
+query ModelCatalog($first: Int! = 50, $filter: ModelFilter) {
+  models(first: $first, filter: $filter) {
+    results {
+      id
+      name
+      qualifiedName
+      displayName
+      provider { __typename id name isEnabled }
+      maxContextTokens
+      maxOutputTokens
+      supportsTools
+      isListedByProvider
+      pricing { inputPerMtok outputPerMtok }
+    }
+    cursor
+    total
+  }
+  modelProviders(first: $first) { results { __typename id name isEnabled } cursor total }
+}
+
+# M4 Operator runs the live machine check before a maintenance window; a failing layer is data (passed: false), and layers not run say so.
+mutation CheckMachineHealth($request: CheckMachineRequest!) {
+  checkMachine(request: $request) {
+    passed
+    failure
+    diagnostics { passed checks { name status detail elapsedMs } }
+  }
+}
+
+# M5 Operator verifies a configured MCP server starts and lists its tools, under the names grants and approval rules use, before enabling it for runs.
+mutation CheckMcpEndpoint($request: CheckMcpServerRequest!) {
+  checkMcpServer(request: $request) {
+    passed
+    failure
+    mcpServer {
+      __typename
+      name
+      configError
+      ... on StdioMcpServer { command args envNames }
+      ... on HttpMcpServer { url headerNames authorization }
+      toolListing {
+        __typename
+        ... on McpToolsListed { listedAt tools { id name nameOnServer defaultPermission revision { description } } }
+        ... on McpToolListFailed { reason failedAt }
+      }
+    }
+  }
+}
+
+# M6 Operator refreshes one provider's model catalogue before choosing a model; this makes provider requests.
+mutation RefreshModelCatalogue($request: RefreshModelsRequest!) {
+  refreshModels(request: $request) {
+    models { id name qualifiedName provider { name } isListedByProvider }
+  }
+}
+
+# M7 Operator applies one config change pinned to the revision read, with a reason, and reads back the revision it made.
+mutation UpdateMachineConfiguration($request: UpdateConfigRequest!) {
+  updateConfig(request: $request) {
+    alreadyInState
+    config {
+      allowsFileUploads
+      revision { id number digest createdBy }
+      history(first: 1) { results { number why changes { field before after } } }
+      problem { message path }
+    }
+  }
+}
+
+# M9 New: operator lists every MCP server by transport with its last tool listing; v1 had no query that listed MCP tools.
+query McpToolInventory($first: Int! = 50) {
+  mcpServers(first: $first) {
+    results {
+      __typename
+      id
+      name
+      configError
+      revision { number digest }
+      ... on StdioMcpServer { command args }
+      ... on HttpMcpServer { url authorization }
+      toolListing {
+        __typename
+        ... on McpToolsListed { listedAt tools { name nameOnServer } }
+        ... on McpToolListFailed { reason failedAt }
+      }
+    }
+    cursor
+    total
+  }
+  mcpTools: tools(first: $first, filter: { mcpTool: {} }) {
+    results { __typename name ... on McpTool { nameOnServer server { name } } }
+    cursor
+    total
+  }
+}
+
+# M10 New: an agent reads the operating guide the server renders from source before its first call, instead of a copy in its prompt.
+query AgentGuide {
+  howToUseThisGraphQLServer
+  server { version restCapabilities }
+}
