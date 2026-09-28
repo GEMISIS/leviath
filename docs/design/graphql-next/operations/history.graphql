@@ -1,0 +1,46 @@
+# History is on the object: every edited thing exposes revision, revisions
+# and history, and one listing answers "what changed lately" across all of
+# them, over the same Edit type.
+
+# H0 New: operator reads every edit on this machine since a time: which thing, which revision it made, who, why, and the fields it changed.
+query RecentChanges($since: DateTime!, $first: Int! = 50, $after: Cursor) {
+  changes(since: $since, first: $first, after: $after, orderBy: [{ field: AT, direction: DESC }]) {
+    results {
+      subjectId
+      subject { __typename id }
+      number
+      at
+      by
+      why
+      revision { __typename id digest }
+      changes { field before after }
+    }
+    cursor
+    total
+  }
+}
+
+# H1 New: operator reads the edits one caller made to one thing, by the thing's id and the author's name.
+query EditsByAuthor($subjectId: ID!, $by: String!, $since: DateTime!, $first: Int! = 50) {
+  changes(since: $since, first: $first, filter: { subjectId: { eq: $subjectId }, by: { eq: $by } }) {
+    results { number at why changes { field before after } }
+    total
+  }
+}
+
+# H2 New: operator resolves any revision id a record holds (a run's blueprint, an attempt's provider settings, a call's tool) to its content.
+query RevisionById($id: ID!) {
+  node(id: $id) {
+    id
+    __typename
+    ... on Revision { number digest createdAt createdBy }
+    ... on BlueprintRevision { name manifest blueprint { id } }
+    ... on ToolRevision { name description arguments tool { id } }
+    ... on ExtensionRevision { relativePath content extension { id } }
+    ... on ApprovalPolicyRevision { name unlistedTools policy { id } }
+    ... on ModelProviderRevision { settings provider { id } }
+    ... on McpServerRevision { settings server { id } }
+    ... on ConfigRevision { settings }
+    ... on OperatorMimeTypeRuleRevision { settings rule { id } }
+  }
+}
