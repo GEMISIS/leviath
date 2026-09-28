@@ -181,20 +181,6 @@ pub(crate) async fn setup_daemon_host_with(
     // conservative default. Best-effort: a home that does not resolve (path is
     // `None`), or a file that cannot be written, just leaves the pre-cache
     // behaviour in place.
-    // Said at the level it deserves. A provider whose list is unread cannot
-    // tell a bare model name it serves from one it does not, so until the list
-    // is read (it is asked for again before each spawn) every stage relying on
-    // such a name is refused rather than run on something else.
-    let unread = providers.unread_catalogs();
-    if !unread.is_empty() {
-        let names = unread.join(", ");
-        tracing::error!(
-            providers = %names,
-            "started without these providers' model lists; a stage naming a model by bare \
-             name that only they could serve is refused until the list is read, which is \
-             retried before each spawn"
-        );
-    }
     let cache_path = leviath_core::paths::capability_cache_path();
     providers.save_capability_cache(
         cache_path.as_deref(),
@@ -206,6 +192,13 @@ pub(crate) async fn setup_daemon_host_with(
     // started after a `lev setup`, a `PUT /api/config` or a hand edit resolves
     // against the providers the file names now, without a daemon restart.
     let provider_reload = crate::daemon::provider_reload::for_daemon(&config, providers.clone());
+    // A list the prime could not read is answered from the cache's copy of it
+    // until the live one comes back, so a proxy that was down at the wrong
+    // moment costs nothing. After the cache was written above, and before the
+    // restart recovery in `build_host`, so a resumed run resolves against it.
+    crate::daemon::catalog_refresh::settle_at_start(&provider_reload);
+    let refresher_reload = provider_reload.clone();
+    let refresher_config = reloader.clone();
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins - each agent gets its own over its own workdir.
     let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
@@ -231,7 +224,8 @@ pub(crate) async fn setup_daemon_host_with(
         &registry.mcp_tool_owners,
     );
     mcp_pool.warm_recovered(&runs_dir).await;
-    Ok(build_host(HostParts {
+    let refresher_runtime = runtime.clone();
+    let host = build_host(HostParts {
         config,
         providers,
         runs_dir,
@@ -243,7 +237,18 @@ pub(crate) async fn setup_daemon_host_with(
         now_secs: || chrono::Utc::now().timestamp(),
         reloader: Some(reloader),
         provider_reload: Some(provider_reload),
-    }))
+    });
+    // Every list not read live at start is asked for until it answers, and
+    // then every list now and then; a run held for one is paged in when it
+    // does.
+    crate::daemon::catalog_refresh::spawn(
+        &refresher_runtime,
+        refresher_reload,
+        refresher_config,
+        host.catalog_waker(),
+        crate::daemon::catalog_refresh::Pacing::DAEMON,
+    );
+    Ok(host)
 }
 
 /// The reap hook installed on the host: drops a reaped agent's tool state and
@@ -407,8 +412,15 @@ pub fn build_host(parts: HostParts) -> WorldHost {
         },
         &parts.runs_dir,
     );
-    for (run_id, entity) in reloaded {
+    for (run_id, entity) in reloaded.reloaded {
         host.register(run_id, entity);
+    }
+    // A run whose stages need a model list that has not been read is held
+    // rather than crashed, and resumes on its own once the list comes in.
+    let unread = pp_providers.unread_catalogs();
+    for meta in reloaded.held {
+        let entry = crate::daemon::recovery::held_entry(&meta, &unread);
+        host.hold_for_catalog(meta.run_id, entry, unread.clone());
     }
 
     // Config hot-reload: after boot, spawn-time parts.config (permissions,
@@ -2062,6 +2074,197 @@ system_prompt = "x"
         .await;
     }
 
+    /// A daemon config routing bare model names through an OpenRouter at
+    /// `url`, with a `fallback_model` a silent downgrade would land on.
+    fn gateway_config(url: String) -> Config {
+        let mut config = Config {
+            default_provider: "openrouter".to_string(),
+            fallback_model: Some("openrouter/anthropic/claude-sonnet-5".to_string()),
+            openrouter_api_key: Some("sk-or-test".to_string()),
+            ..Config::default()
+        };
+        config.providers.openrouter_base_url = Some(url);
+        config
+    }
+
+    /// A one-stage blueprint naming `claude-opus-5` by bare name, in `dir`.
+    fn story_manifest(dir: &std::path::Path) -> std::path::PathBuf {
+        let manifest = dir.join("story.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"storyteller\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000, seed = \"task\" }\n\n\
+             [stages.story]\nmode = \"autonomous\"\ndescription = \"d\"\n\
+             model = { models = [\"claude-opus-5\"] }\navailable_tools = []\n",
+        )
+        .unwrap();
+        manifest
+    }
+
+    /// Write `run_id` into `runs` as a run that was working on `manifest` when
+    /// its daemon died.
+    fn run_in_flight(runs: &std::path::Path, run_id: &str, manifest: &std::path::Path) {
+        let mut meta = crate::test_fixtures::fixtures::run_meta(run_id);
+        meta.agent_path = manifest.to_string_lossy().to_string();
+        meta.workdir = std::env::temp_dir().to_string_lossy().to_string();
+        meta.current_stage = "story".to_string();
+        meta.status = leviath_core::run_meta::RunStatus::Running;
+        std::fs::create_dir_all(runs.join(run_id)).unwrap();
+        crate::runstate::write_meta_to(&runs.join(run_id), &meta).unwrap();
+    }
+
+    /// The status the daemon reports for `run_id`, `None` when it holds none.
+    async fn status_of(host: &mut WorldHost, run_id: &str) -> Option<AgentStatus> {
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Status {
+            run_id: run_id.to_string(),
+            reply,
+        });
+        rx.await.unwrap()
+    }
+
+    /// The same restart with a run in flight. Resuming it would refuse its
+    /// stage (the list is unread, and there is no cached copy yet), and a
+    /// resume that fails marks the run crashed for good; a proxy down for a
+    /// minute at the wrong moment would have ended it. It is held instead:
+    /// listed as paused on the gateway, untouched on disk, and paged back in
+    /// by itself once the list is read.
+    #[tokio::test]
+    async fn a_run_in_flight_is_held_through_a_dead_gateway_and_resumes_when_it_answers() {
+        let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
+        crate::config::with_isolated_config_path_async(
+            "a_run_in_flight_is_held_through_a_dead_gateway_and_resumes_when_it_answers",
+            |_| async move {
+                let listing =
+                    br#"{"data":[{"id":"anthropic/claude-opus-5","context_length":200000}]}"#;
+                let (url, _) = leviath_testkit::spawn_mock_sequence(vec![
+                    (503, "Service Unavailable", b"proxy down".to_vec()),
+                    (200, "OK", listing.to_vec()),
+                ])
+                .await;
+                let dir = tempfile::tempdir().unwrap();
+                let manifest = story_manifest(dir.path());
+                let runs = tempfile::tempdir().unwrap();
+                run_in_flight(runs.path(), "run-mid", &manifest);
+
+                let mut host = setup_daemon_host(
+                    gateway_config(url),
+                    runs.path().to_path_buf(),
+                    Handle::current(),
+                )
+                .await
+                .expect("the daemon starts");
+
+                assert_eq!(host.held_for_catalog(), ["run-mid"]);
+                assert_eq!(
+                    status_of(&mut host, "run-mid").await,
+                    Some(AgentStatus::Paused)
+                );
+                let meta: leviath_core::run_meta::RunMeta = serde_json::from_str(
+                    &std::fs::read_to_string(runs.path().join("run-mid").join("meta.json"))
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    meta.status,
+                    leviath_core::run_meta::RunStatus::Running,
+                    "a held run is not marked crashed"
+                );
+
+                // Another spawn asks the gateway again, which answers now; the
+                // next pass of the serve loop pages the held run back in.
+                let (op, rx) = spawn_op("run-new", &manifest);
+                let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
+                ctl_tx.send(op).unwrap();
+                drop(ctl_tx);
+                host.serve(ctl_rx).await;
+                assert_eq!(rx.await.unwrap(), Ok("run-new".to_string()));
+                assert!(host.held_for_catalog().is_empty());
+                let resumed = status_of(&mut host, "run-mid").await;
+                assert!(
+                    resumed.is_some() && resumed != Some(AgentStatus::Paused),
+                    "the held run is back in the world: {resumed:?}"
+                );
+            },
+        )
+        .await;
+    }
+
+    /// With a cached copy of the gateway's list, a dead gateway at start costs
+    /// nothing: the copy answers, a new run and a run in flight both start on
+    /// the model their stage named, and the copy is not written back as
+    /// though the gateway had answered.
+    #[tokio::test]
+    async fn a_cached_model_list_answers_while_the_gateway_is_down() {
+        let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
+        crate::config::with_isolated_config_path_async(
+            "a_cached_model_list_answers_while_the_gateway_is_down",
+            |_| async move {
+                let cache_path = leviath_core::paths::capability_cache_path().unwrap();
+                let mut cache = leviath_providers::CapabilityCache::new(1);
+                cache.set(
+                    "openrouter",
+                    [(
+                        "anthropic/claude-opus-5".to_string(),
+                        leviath_providers::LearnedModel::default(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                );
+                std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+                cache.save(&cache_path).unwrap();
+                let (url, _) = leviath_testkit::spawn_mock_sequence(vec![(
+                    503,
+                    "Service Unavailable",
+                    b"proxy down".to_vec(),
+                )])
+                .await;
+                let dir = tempfile::tempdir().unwrap();
+                let manifest = story_manifest(dir.path());
+                let runs = tempfile::tempdir().unwrap();
+                run_in_flight(runs.path(), "run-mid", &manifest);
+
+                let mut host = setup_daemon_host(
+                    gateway_config(url),
+                    runs.path().to_path_buf(),
+                    Handle::current(),
+                )
+                .await
+                .expect("the daemon starts");
+
+                assert!(
+                    host.held_for_catalog().is_empty(),
+                    "nothing waits on a cached list"
+                );
+                assert!(status_of(&mut host, "run-mid").await.is_some());
+                let (op, rx) = spawn_op("run-new", &manifest);
+                let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
+                ctl_tx.send(op).unwrap();
+                drop(ctl_tx);
+                host.serve(ctl_rx).await;
+                assert_eq!(rx.await.unwrap(), Ok("run-new".to_string()));
+                let meta = std::fs::read_to_string(runs.path().join("run-new").join("meta.json"))
+                    .unwrap_or_default();
+                assert!(meta.contains("anthropic/claude-opus-5"), "{meta}");
+                assert!(!meta.contains("claude-sonnet-5"), "{meta}");
+
+                let cache = leviath_providers::CapabilityCache::load(&cache_path).unwrap();
+                let outcome = cache.check("openrouter").map(|c| c.outcome.clone());
+                assert_ne!(
+                    outcome,
+                    Some(leviath_providers::CheckOutcome::Reachable { models: 1 }),
+                    "the gateway did not answer, so the cache must not say it did"
+                );
+                assert!(outcome.is_some(), "the failed start-up read is recorded");
+                assert!(
+                    cache.get("openrouter").is_some(),
+                    "and still holds the copy"
+                );
+            },
+        )
+        .await;
+    }
+
     /// The incident, end to end. A daemon started while its gateway's proxy was
     /// down came up with an empty model list, every bare model name in the
     /// blueprint went unrouted, and every stage ran on `fallback_model` with
@@ -2083,35 +2286,30 @@ system_prompt = "x"
                     (200, "OK", listing.to_vec()),
                 ])
                 .await;
-                let mut config = Config {
-                    default_provider: "openrouter".to_string(),
-                    fallback_model: Some("openrouter/anthropic/claude-sonnet-5".to_string()),
-                    openrouter_api_key: Some("sk-or-test".to_string()),
-                    ..Config::default()
-                };
-                config.providers.openrouter_base_url = Some(url);
                 let runs = tempfile::tempdir().unwrap();
-                let mut host = setup_daemon_host(config, runs.path().to_path_buf(), Handle::current())
-                    .await
-                    .expect("a dead gateway does not stop the daemon starting");
+                let mut host = setup_daemon_host(
+                    gateway_config(url),
+                    runs.path().to_path_buf(),
+                    Handle::current(),
+                )
+                .await
+                .expect("a dead gateway does not stop the daemon starting");
 
                 let dir = tempfile::tempdir().unwrap();
-                let manifest = dir.path().join("story.leviath");
-                std::fs::write(
-                    &manifest,
-                    "[agent]\nname = \"storyteller\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-                     [context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000, seed = \"task\" }\n\n\
-                     [stages.story]\nmode = \"autonomous\"\ndescription = \"d\"\n\
-                     model = { models = [\"claude-opus-5\"] }\navailable_tools = []\n",
-                )
-                .unwrap();
+                let manifest = story_manifest(dir.path());
 
                 // Straight to the spawner, the way the list stood at boot.
                 let (op, rx) = spawn_op("run-dead", &manifest);
                 host.handle(op);
-                let err = rx.await.unwrap().expect_err("must not start on the fallback");
+                let err = rx
+                    .await
+                    .unwrap()
+                    .expect_err("must not start on the fallback");
                 assert!(err.contains("stage 'story' names claude-opus-5"), "{err}");
-                assert!(err.contains("model list of openrouter has not been read"), "{err}");
+                assert!(
+                    err.contains("model list of openrouter has not been read"),
+                    "{err}"
+                );
 
                 // Through the serve loop, whose spawn hook asks the gateway
                 // again: it answers now, so the stage resolves to the model it

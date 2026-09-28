@@ -420,6 +420,21 @@ fn resolve_candidates_in_order(
     candidates
 }
 
+/// What every refusal for an unread model list says, so a caller can tell it
+/// from every other resolution failure without parsing the rest.
+const UNREAD_REFUSAL: &str = "cannot be told yet: the model list of";
+
+/// Whether `error` is [`resolve_stages`] refusing a stage because a model list
+/// it needed has not been read.
+///
+/// That refusal is the one resolution failure that fixes itself: the list
+/// arrives and the same blueprint resolves. A daemon resuming a run after a
+/// restart holds such a run until the list is read, where any other failure
+/// means the run cannot be resumed at all.
+pub fn is_unread_catalog_refusal(error: &str) -> bool {
+    error.contains(UNREAD_REFUSAL)
+}
+
 /// The providers a bare model name may be routed to, best first.
 ///
 /// Only a provider in the preference wins an open route. A bare model name is
@@ -984,8 +999,8 @@ pub fn resolve_stages(
                 unknown_open_route(&stage.model, model_override, defaults, registry)
             {
                 return Err(format!(
-                    "stage '{}' names {model}, and whether any provider serves it cannot be \
-                     told yet: the model list of {} has not been read (see daemon.log for why). \
+                    "stage '{}' names {model}, and whether any provider serves it \
+                     {UNREAD_REFUSAL} {} has not been read (see daemon.log for why). \
                      Refusing rather than starting the stage on a model further down its list \
                      or on fallback_model. The list is read again on the next run.",
                     stage.name,
@@ -2503,6 +2518,10 @@ mod tests {
 
         let err = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
             .expect_err("an unjudgeable first choice must not start on the fallback");
+        assert!(is_unread_catalog_refusal(&err), "{err}");
+        assert!(!is_unread_catalog_refusal(
+            "stage 'x' has no usable provider"
+        ));
         assert!(err.contains("stage 'story' names claude-opus-5"), "{err}");
         assert!(
             err.contains("model list of openrouter has not been read"),

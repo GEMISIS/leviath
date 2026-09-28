@@ -154,8 +154,8 @@ pub(crate) use inference::{
 mod resolve;
 pub use resolve::{
     HeadSource, ModelDefaults, ToolCatalog, ToolOwners, bare_user_model, expand_connector_grants,
-    filter_tools_for_stage, head_source, model_key, providers_tried, resolve_stage_model,
-    resolve_stages, tool_source,
+    filter_tools_for_stage, head_source, is_unread_catalog_refusal, model_key, providers_tried,
+    resolve_stage_model, resolve_stages, tool_source,
 };
 mod stall;
 pub use stall::{DEFAULT_STALL_TIMEOUT_SECS, PausedForSetup, StallTimeout};

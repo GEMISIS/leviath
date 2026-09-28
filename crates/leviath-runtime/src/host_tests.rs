@@ -4589,3 +4589,140 @@ async fn wait_reason_refuses_a_foreign_agent_id() {
         "answered for a foreign id"
     );
 }
+
+/// A gateway whose model list is unread while `learned` is empty.
+struct Gateway {
+    learned: leviath_providers::LearnedModels,
+}
+#[async_trait::async_trait]
+impl Provider for Gateway {
+    async fn infer(&self, _req: &InferenceRequest) -> leviath_providers::Result<InferenceResponse> {
+        Err(ProviderError::Other("not in this test".to_string()))
+    }
+    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+        1
+    }
+    fn max_context_tokens(&self, _m: &str) -> usize {
+        100_000
+    }
+    fn name(&self) -> &str {
+        "gateway"
+    }
+    fn capabilities(&self, _m: &str) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+    fn catalog_unread(&self) -> bool {
+        self.learned.is_empty()
+    }
+}
+
+/// A listing row for a run held for a model list.
+fn held_row(run_id: &str) -> RunListEntry {
+    RunListEntry {
+        started_at: None,
+        active: None,
+        splits_degraded: 0,
+        broken_scripts: Vec::new(),
+        run_id: run_id.to_string(),
+        title: None,
+        status: AgentStatus::Paused,
+        wait_reason: Some(leviath_core::run_meta::WaitReason::NeedsSetup {
+            blocker: leviath_core::run_meta::SetupBlocker::ProviderUnreachable,
+            remedy: "waiting for the model list of gw".to_string(),
+        }),
+        stage: "work".to_string(),
+        stage_index: None,
+        num_stages: None,
+        iteration: 0,
+        tool_calls: 0,
+        last_progress_at: None,
+        unattended: false,
+        yolo_profile: None,
+        empty_output: false,
+        read_paths: None,
+        has_final_output: false,
+    }
+}
+
+/// A run a restart could not resume because the model list its stages need
+/// was unread is held, not crashed: listed as waiting on the list, left alone
+/// while the list is still unread, and paged back in once it is read. One the
+/// page-in still fails for is left parked for `lev resume`.
+#[tokio::test]
+async fn a_run_held_for_a_model_list_resumes_once_the_list_is_read() {
+    let learned = leviath_providers::LearnedModels::default();
+    let mut registry = crate::providers::ProviderRegistry::new();
+    registry.register(
+        "gw".to_string(),
+        Arc::new(Gateway {
+            learned: learned.clone(),
+        }),
+    );
+    let world = PipelineWorld::new(
+        registry,
+        Arc::new(NoTools),
+        InferencePoolConfig::new(),
+        1,
+        None,
+        Handle::current(),
+    );
+    let mut host = WorldHost::new(world);
+    host.set_reloader(Box::new(|world, run_id| {
+        (run_id == "held-a").then(|| world.spawn_agent((agent_state(run_id),)))
+    }));
+    host.hold_for_catalog(
+        "held-a".to_string(),
+        held_row("held-a"),
+        vec!["gw".to_string()],
+    );
+    host.hold_for_catalog(
+        "held-b".to_string(),
+        held_row("held-b"),
+        vec!["gw".to_string()],
+    );
+    let listed: Vec<String> = host.list().into_iter().map(|e| e.run_id).collect();
+    assert!(listed.contains(&"held-a".to_string()), "{listed:?}");
+
+    host.retry_held();
+    assert_eq!(
+        host.held_for_catalog(),
+        ["held-a", "held-b"],
+        "nothing moves while unread"
+    );
+    assert!(host.live_entity("held-a").is_none());
+
+    learned.replace(
+        [("m".to_string(), leviath_providers::LearnedModel::default())]
+            .into_iter()
+            .collect(),
+    );
+    // Whatever reads the list wakes the loop that pages the runs in.
+    host.catalog_waker().notify_one();
+    host.retry_held();
+
+    assert!(host.held_for_catalog().is_empty());
+    assert!(host.live_entity("held-a").is_some(), "the held run is back");
+    let listed: Vec<String> = host.list().into_iter().map(|e| e.run_id).collect();
+    assert!(
+        listed.contains(&"held-b".to_string()),
+        "a run that still cannot be paged in stays listed for `lev resume`: {listed:?}"
+    );
+}
+
+/// A held run a person resumes first leaves the hold with it.
+#[tokio::test]
+async fn resuming_a_held_run_by_hand_ends_the_hold() {
+    let mut host = host_with(vec![]);
+    host.set_reloader(Box::new(|world, run_id| {
+        Some(world.spawn_agent((agent_state(run_id),)))
+    }));
+    host.hold_for_catalog("held".to_string(), held_row("held"), vec!["gw".to_string()]);
+    assert!(
+        ask(&mut host, |reply| ControlOp::Resume {
+            run_id: "held".to_string(),
+            reply
+        })
+        .await
+    );
+    assert!(host.held_for_catalog().is_empty());
+}

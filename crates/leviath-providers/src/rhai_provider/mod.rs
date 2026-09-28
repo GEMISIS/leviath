@@ -165,6 +165,9 @@ pub struct RhaiProvider {
     /// on demand, and asking every script on disk what it serves is the cost
     /// the registry exists to avoid.
     served_models: crate::learned::LearnedModels,
+    /// Whether `list_models` has answered, so an empty answer is told apart
+    /// from one still owed.
+    listing_settled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Model ids `[model_providers.<name>] serves` declares, for a script with
     /// no `list_models` to ask. Static, so it needs no priming.
     declared_models: Arc<Vec<String>>,
@@ -271,6 +274,7 @@ impl RhaiProvider {
             has_warm_models,
             env_allowlist,
             served_models: Default::default(),
+            listing_settled: Default::default(),
             declared_models: Arc::new(serves),
         })
     }
@@ -650,7 +654,10 @@ impl Provider for RhaiProvider {
     /// come back yet. A script with no `list_models` answers from its
     /// `serves` list, which is always an answer.
     fn catalog_unread(&self) -> bool {
-        self.has_list_models && self.served_models.is_empty()
+        self.has_list_models
+            && !self
+                .listing_settled
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Ask the script what it serves, once, so [`Self::serves_model`] can answer
@@ -668,6 +675,9 @@ impl Provider for RhaiProvider {
         // limits through `ModelInfo`, and the script's own `capabilities`
         // answer is what an inference reads, so nothing else is kept here.
         let models = self.list_models().await?;
+        // Answered, even if the answer is that it serves nothing.
+        self.listing_settled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.served_models.replace(
             models
                 .into_iter()

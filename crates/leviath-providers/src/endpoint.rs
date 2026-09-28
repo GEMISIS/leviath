@@ -83,9 +83,27 @@ pub struct EndpointProvider {
     warned_unknown: crate::provider::ModelMemo,
     /// What `GET /models` said, once priming has read it.
     learned: LearnedModels,
+    /// Whether the server has given its final answer about listing: a
+    /// listing (even an empty one), or a status saying it has no listing
+    /// route at all. Until then an empty `learned` is a list still owed.
+    listing_settled: std::sync::atomic::AtomicBool,
     /// The entry's `request_timeout_secs`, which bounds the side calls this
     /// provider makes on its own (the model listing) as well as inference.
     request_timeout_secs: Option<u64>,
+}
+
+/// Whether a listing failure is the server saying it has no listing at all.
+///
+/// A plain OpenAI-compatible server (a llama.cpp build, a vLLM behind a path
+/// that does not route `/models`) answers 404, 405 or 501, and asking again
+/// will never change that. Anything else - no connection, a timeout, a 5xx
+/// from a proxy - is a list the server still owes.
+fn listing_unsupported(error: &crate::ProviderError) -> bool {
+    matches!(
+        error,
+        crate::ProviderError::ApiError(message)
+            if ["HTTP 404", "HTTP 405", "HTTP 501"].iter().any(|s| message.starts_with(s))
+    )
 }
 
 impl EndpointProvider {
@@ -117,6 +135,7 @@ impl EndpointProvider {
             max_completion_tokens: Default::default(),
             warned_unknown: Default::default(),
             learned: Default::default(),
+            listing_settled: Default::default(),
             request_timeout_secs: None,
         }
     }
@@ -425,7 +444,11 @@ impl Provider for EndpointProvider {
     /// Unread when neither the server's listing nor the config says what it
     /// carries. A configured `models` list is an answer on its own.
     fn catalog_unread(&self) -> bool {
-        self.learned.is_empty() && self.configured_models.is_none()
+        self.learned.is_empty()
+            && self.configured_models.is_none()
+            && !self
+                .listing_settled
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
@@ -438,8 +461,21 @@ impl Provider for EndpointProvider {
     }
 
     async fn prime_capabilities(&self) -> Result<()> {
-        let body = self.fetch_models_json().await?;
+        let body = match self.fetch_models_json().await {
+            Ok(body) => body,
+            Err(e) => {
+                // A server with no listing route has answered for good; one
+                // that could not be reached, or failed, still owes a list.
+                if listing_unsupported(&e) {
+                    self.listing_settled
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                return Err(e);
+            }
+        };
         let learned = parse_listing(&body)?;
+        self.listing_settled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let count = learned.len();
         self.learned.replace(learned);
         tracing::debug!(provider = %self.name, models = count, "learned the endpoint's model ids");
@@ -800,6 +836,36 @@ mod tests {
         let provider = provider_at(&listing);
         provider.prime_capabilities().await.unwrap();
         assert!(!provider.catalog_unread());
+
+        // An empty listing is an answer too.
+        let empty = spawn_mock_server(200, "OK", br#"{"data":[]}"#).await;
+        let provider = provider_at(&empty);
+        provider.prime_capabilities().await.unwrap();
+        assert!(!provider.catalog_unread(), "it serves nothing, and said so");
+    }
+
+    /// A server with no listing route answers 404, 405 or 501 however often
+    /// it is asked, so its list is settled: nothing is owed, and a bare model
+    /// name is never held back waiting on it.
+    #[tokio::test]
+    async fn a_server_with_no_listing_route_is_not_unread() {
+        for (status, reason) in [
+            (404, "Not Found"),
+            (405, "Method Not Allowed"),
+            (501, "Not Implemented"),
+        ] {
+            let url = spawn_mock_server(status, reason, b"no").await;
+            let provider = provider_at(&url);
+            assert!(provider.prime_capabilities().await.is_err());
+            assert!(
+                !provider.catalog_unread(),
+                "HTTP {status} is a final answer"
+            );
+        }
+        let url = spawn_mock_server(401, "Unauthorized", b"no").await;
+        let provider = provider_at(&url);
+        assert!(provider.prime_capabilities().await.is_err());
+        assert!(provider.catalog_unread(), "a refused key still owes a list");
     }
 
     #[tokio::test]

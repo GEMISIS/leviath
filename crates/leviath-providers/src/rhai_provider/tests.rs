@@ -684,6 +684,15 @@ async fn a_script_list_is_unread_until_its_listing_comes_back() {
 
     let plain = format!("{NOOP_INIT}fn inference(s, r) {{ #{{}} }}");
     assert!(!build(&plain, FakeExecutor::new()).unwrap().catalog_unread());
+
+    // A listing that comes back empty is an answer, not a list still owed.
+    let empty = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn list_models(state) {{ [] }}"
+    );
+    let p = build(&empty, FakeExecutor::new()).unwrap();
+    p.prime_capabilities().await.unwrap();
+    assert!(!p.catalog_unread());
 }
 
 #[tokio::test]

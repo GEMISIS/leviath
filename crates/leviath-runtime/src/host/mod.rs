@@ -89,6 +89,10 @@ pub struct WorldHost {
     /// operator's `lev ps` view does not change just because the daemon stopped
     /// spending memory on a run nobody is driving.
     parked: HashMap<String, RunListEntry>,
+    /// Runs held back from a restart until the model lists they need are
+    /// read, each with the providers it waits on. Listed through `parked`.
+    /// See [`Self::hold_for_catalog`].
+    held_for_catalog: HashMap<String, Vec<String>>,
 }
 
 /// Consecutive healthy re-drives (no dead cycles, empty tool queue) before the
@@ -181,6 +185,7 @@ impl WorldHost {
             settings: HostSettings::default(),
             emitted_interactions: HashSet::new(),
             parked: HashMap::new(),
+            held_for_catalog: HashMap::new(),
             subagent_tx,
             subagent_rx,
             redrive: DEFAULT_REDRIVE_INTERVAL,
@@ -205,6 +210,7 @@ impl WorldHost {
 // its own `impl WorldHost` block rather than a trait or a free function.
 mod emit;
 mod health;
+mod held;
 mod listing;
 mod subagents;
 
@@ -411,8 +417,10 @@ impl WorldHost {
         }
         let entity = (self.reloader.as_mut()?)(&mut self.world, run_id)?;
         self.by_run_id.insert(run_id.to_string(), entity);
-        // Live again: its listing row comes off the entity, not the parked map.
+        // Live again: its listing row comes off the entity, not the parked map,
+        // and a run held for a model list is no longer waiting on it.
         self.parked.remove(run_id);
+        self.held_for_catalog.remove(run_id);
         Some(entity)
     }
 
@@ -654,6 +662,9 @@ impl WorldHost {
             tokio::time::interval_at(tokio::time::Instant::now() + self.redrive, self.redrive);
         redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         'serve: loop {
+            // Before the drive, so a run whose model list arrived since the
+            // last pass is in the world for it.
+            self.retry_held();
             self.world.run_to_fixed_point();
             self.emit_events();
             tokio::select! {

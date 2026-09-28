@@ -288,27 +288,37 @@ OpenRouter serves it as `openai/gpt-5.5`, without the blueprint knowing either i
 
 ### When a gateway's model list cannot be read
 
-A gateway knows what it serves only once its model list has been read. The daemon reads it at
-start. If the gateway, or a proxy in front of it, is down then, the list stays empty, and "does it
-serve `claude-opus-5`?" has no answer yet.
+A gateway knows what it serves only once its model list has been read. The daemon reads each list
+at start and keeps a copy in `model_capabilities.json`. It reads every list again every six hours,
+so a model a gateway adds is served without a restart.
 
-A stage whose first choices depend on that answer is refused at spawn, rather than started on a
-model further down its list or on `fallback_model`:
+If a gateway, or a proxy in front of it, is down when the daemon starts, the copy answers instead.
+Runs start on the models their stages name, as though the gateway had answered. The daemon asks for
+the live list in the background, first after five seconds and then backing off to once a minute.
+When the live list arrives it replaces the copy and is written back.
+
+With no copy yet (the first start on a machine, say), "does it serve `claude-opus-5`?" has no
+answer. Nothing runs on a guess:
+
+- A run the daemon was resuming after a restart is held. `lev ps` lists it as paused, waiting on
+  the gateway's model list. It resumes by itself the moment the list is read, and is never marked
+  as failed.
+- A new run whose stage depends on the answer is refused at spawn, rather than started on a model
+  further down its list or on `fallback_model`. The list is asked for again before every spawn, so
+  the first run after the gateway comes back goes through.
 
 ```
 stage 'story' names claude-opus-5, and whether any provider serves it cannot be told yet: the
 model list of openrouter has not been read (see daemon.log for why).
 ```
 
-The daemon logs the missing list at start as an error, and asks for it again before every spawn.
-The first run after the gateway comes back resolves normally, with no restart. A stage whose first
-choice has a route, or is pinned to a configured provider, starts as usual. Only a model the
-gateway could not be asked about is held back.
+A stage whose first choice has a route, or is pinned to a configured provider, starts as usual.
+Only a model the gateway could not be asked about is held back.
 
 This applies to OpenRouter, to a [custom OpenAI-compatible provider](#custom-openai-compatible-providers)
-with no `models` list of its own, and to a [script provider](/docs/rhai-providers) that defines
-`list_models`. A provider that knows its models by name, such as Anthropic or OpenAI, always has an
-answer.
+whose server lists its models, and to a [script provider](/docs/rhai-providers) that defines
+`list_models`. A server with no listing route, one given a `models` list in the config, and a
+provider that knows its models by name, such as Anthropic or OpenAI, always have an answer.
 
 ### Running the bundled agents on your provider
 

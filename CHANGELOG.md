@@ -46,14 +46,23 @@ same list.
 - A daemon started while a gateway was unreachable (OpenRouter behind a proxy
   that was down) came up with an empty model list, skipped every bare model
   name as "not served", and ran every stage on `fallback_model`, with only a
-  warning in daemon.log. A model a gateway could not be asked about is now
-  "cannot tell", not "no": the stage is refused at spawn with a message
-  naming the model and the gateway. The daemon logs the missing list at start
-  as an error and asks for it again before every spawn, so the first run after
-  the gateway returns resolves normally without a restart. Library:
-  `Provider::catalog_unread`, `ProviderRegistry::prime_unread` and
-  `unread_catalogs`; an embedded `AgentWorld` reads an unread list before
-  each spawn too.
+  warning in daemon.log. It never read the list again until a restart.
+  - A list that cannot be read at start is now answered from the copy in
+    `model_capabilities.json`, so runs start on the models their stages name.
+    The live list is asked for in the background (five seconds, backing off
+    to a minute) and replaces the copy when it comes back.
+  - With no copy, a model the gateway could not be asked about is "cannot
+    tell", not "no". A run resumed after a restart is held, listed as paused
+    on the gateway's list, and resumes by itself once the list is read,
+    rather than being marked failed. A new run is refused at spawn with a
+    message naming the model and the gateway, and the list is asked for again
+    before every spawn.
+  - Every list is read again every six hours, so a new model is served
+    without a restart.
+  - Library: `Provider::catalog_unread`; `ProviderRegistry::prime_unread`,
+    `prime_named`, `restore_from_cache`, `save_primed` and `unread_catalogs`;
+    `WorldHost::hold_for_catalog`; `is_unread_catalog_refusal`. An embedded
+    `AgentWorld` reads an unread list before each spawn.
 
 ## 0.6.4 - 2026-09-26
 

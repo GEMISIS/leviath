@@ -31,6 +31,36 @@ pub struct ProviderRegistry {
     retention: leviath_providers::retention::RetentionSettings,
 }
 
+/// Write `provider`'s catalogue into `cache` with a successful check stamped
+/// `now`. A provider that keeps no learned store, or has nothing in it, adds
+/// nothing.
+fn record_primed(
+    cache: &mut leviath_providers::CapabilityCache,
+    name: &str,
+    provider: &dyn Provider,
+    now: i64,
+    fingerprints: &HashMap<String, String>,
+) {
+    let Some(learned) = provider.learned_models() else {
+        return;
+    };
+    let snapshot = learned.snapshot();
+    if snapshot.is_empty() {
+        return;
+    }
+    cache.record_check(
+        name,
+        leviath_providers::ProviderCheck {
+            checked_at: now,
+            credential: fingerprints.get(name).cloned(),
+            outcome: leviath_providers::CheckOutcome::Reachable {
+                models: snapshot.len(),
+            },
+        },
+    );
+    cache.set(name, snapshot);
+}
+
 impl ProviderRegistry {
     /// Create a new empty provider registry.
     pub fn new() -> Self {
@@ -235,7 +265,24 @@ impl ProviderRegistry {
         timeout: std::time::Duration,
         also: &[&str],
     ) -> Vec<(String, String)> {
-        Self::prime_each(self.prime_targets(also), timeout).await
+        Self::prime_each(self.prime_targets(also), timeout).await.0
+    }
+
+    /// Prime exactly the providers `names` names, answering the ones whose
+    /// listing came back.
+    ///
+    /// What a daemon retries in the background: the lists that could not be
+    /// read at start, and later every list, so the catalogue a run resolves
+    /// against, and the cache beside it, keep up with what the providers
+    /// actually serve.
+    pub async fn prime_named(&self, timeout: std::time::Duration, names: &[String]) -> Vec<String> {
+        let also: Vec<&str> = names.iter().map(String::as_str).collect();
+        let targets = self
+            .prime_targets(&also)
+            .into_iter()
+            .filter(|(name, _)| names.contains(name))
+            .collect();
+        Self::prime_each(targets, timeout).await.1
     }
 
     /// [`Self::prime_capabilities`] for only the providers whose model list
@@ -248,20 +295,57 @@ impl ProviderRegistry {
     /// the next run go through once the gateway is back, without a restart.
     /// Nothing is asked of a provider whose list is already in hand, so a
     /// healthy daemon pays nothing for this.
-    pub async fn prime_unread(&self, timeout: std::time::Duration, also: &[&str]) -> Vec<String> {
+    ///
+    /// Only the providers in `preferred` are asked: a bare model name can only
+    /// route to one of those, so a provider outside the preference cannot
+    /// hold a stage back, and asking it would only make every spawn wait on a
+    /// listing that changes nothing.
+    pub async fn prime_unread(
+        &self,
+        timeout: std::time::Duration,
+        preferred: &[&str],
+    ) -> Vec<String> {
         let unread: Vec<(String, Arc<dyn Provider>)> = self
-            .prime_targets(also)
+            .prime_targets(preferred)
             .into_iter()
-            .filter(|(_, provider)| provider.catalog_unread())
+            .filter(|(name, provider)| {
+                preferred.contains(&name.as_str()) && provider.catalog_unread()
+            })
             .collect();
-        Self::prime_each(unread.clone(), timeout).await;
-        let mut read: Vec<String> = unread
-            .into_iter()
-            .filter(|(_, provider)| !provider.catalog_unread())
-            .map(|(name, _)| name)
-            .collect();
-        read.sort();
-        read
+        Self::prime_each(unread, timeout).await.1
+    }
+
+    /// Fill each named provider whose list is unread from the capability
+    /// cache at `path`, answering the ones that took it.
+    ///
+    /// A list the daemon read before is a far better answer than none: the
+    /// catalogue of a gateway changes by a model or two a week, and a proxy
+    /// that is down for a minute at start should not hold every run back
+    /// until it returns. The live list is still asked for (the caller keeps
+    /// asking until it answers), and replaces this when it does.
+    pub fn restore_from_cache(&self, path: &std::path::Path, names: &[String]) -> Vec<String> {
+        let Some(cache) = leviath_providers::CapabilityCache::load(path) else {
+            return Vec::new();
+        };
+        let mut restored: Vec<String> = Vec::new();
+        for name in names {
+            let Some(provider) = self.providers.get(name) else {
+                continue;
+            };
+            if !provider.catalog_unread() {
+                continue;
+            }
+            let (Some(learned), Some(models)) = (provider.learned_models(), cache.get(name)) else {
+                continue;
+            };
+            if models.is_empty() {
+                continue;
+            }
+            learned.replace(models.clone().into_iter().collect());
+            restored.push(name.clone());
+        }
+        restored.sort();
+        restored
     }
 
     /// Every provider whose model list is still unread, sorted: what a bare
@@ -320,16 +404,18 @@ impl ProviderRegistry {
     }
 
     /// Prime each of `targets`, each bounded by `timeout`, answering the ones
-    /// whose listing failed.
+    /// whose listing failed (with why) and, separately, the ones that came
+    /// back, sorted.
     async fn prime_each(
         targets: Vec<(String, Arc<dyn Provider>)>,
         timeout: std::time::Duration,
-    ) -> Vec<(String, String)> {
+    ) -> (Vec<(String, String)>, Vec<String>) {
         // Side by side rather than one after another: each provider's answer
         // is its own network call, and a listing command or a daemon start
         // that waited for five of them in turn paid five timeouts in the
         // worst case where one would do.
         let mut failures = Vec::new();
+        let mut read = Vec::new();
         let mut in_flight = tokio::task::JoinSet::new();
         for (name, provider) in targets {
             in_flight.spawn(async move {
@@ -348,7 +434,7 @@ impl ProviderRegistry {
                 }
             };
             match outcome {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => read.push(name),
                 Ok(Err(e)) => {
                     tracing::warn!(
                         provider = %name,
@@ -368,7 +454,8 @@ impl ProviderRegistry {
             }
         }
         failures.sort();
-        failures
+        read.sort();
+        (failures, read)
     }
 
     /// Write every native provider's primed catalogue to the shared capability
@@ -417,21 +504,34 @@ impl ProviderRegistry {
             );
         }
         for (name, provider) in &self.providers {
-            if let Some(learned) = provider.learned_models() {
-                let snapshot = learned.snapshot();
-                if !snapshot.is_empty() {
-                    cache.record_check(
-                        name,
-                        leviath_providers::ProviderCheck {
-                            checked_at: now,
-                            credential: fingerprints.get(name).cloned(),
-                            outcome: leviath_providers::CheckOutcome::Reachable {
-                                models: snapshot.len(),
-                            },
-                        },
-                    );
-                    cache.set(name, snapshot);
-                }
+            record_primed(&mut cache, name, provider.as_ref(), now, fingerprints);
+        }
+        if let Err(e) = cache.save(path) {
+            tracing::warn!(error = %e, "could not write the model-capability cache");
+        }
+    }
+
+    /// [`Self::save_capability_cache`] for only the providers `names` names,
+    /// each of which has just read its list live.
+    ///
+    /// The whole-registry save stamps every provider holding a catalogue as
+    /// freshly checked. Once a catalogue may have come from the cache rather
+    /// than the provider, that stamp would say a gateway answered when it did
+    /// not, so a save after the start names exactly who answered.
+    pub fn save_primed(
+        &self,
+        path: Option<&std::path::Path>,
+        now: i64,
+        fingerprints: &HashMap<String, String>,
+        names: &[String],
+    ) {
+        let Some(path) = path else {
+            return;
+        };
+        let mut cache = leviath_providers::CapabilityCache::load_or_new(path, now);
+        for name in names {
+            if let Some(provider) = self.providers.get(name) {
+                record_primed(&mut cache, name, provider.as_ref(), now, fingerprints);
             }
         }
         if let Err(e) = cache.save(path) {
@@ -812,33 +912,40 @@ mod tests {
         }
     }
 
-    /// Only the lists still unread are asked for again, and the answer names
-    /// the ones that came back. A gateway still down stays unread, so the next
-    /// spawn asks it once more; a list already in hand costs nothing.
+    /// Only the preferred lists still unread are asked for again, and the
+    /// answer names the ones that came back. A gateway still down stays
+    /// unread, so the next spawn asks it once more; a list already in hand,
+    /// and a provider no bare model name can reach, cost nothing.
     #[tokio::test]
-    async fn prime_unread_asks_only_the_unread_lists_and_names_the_ones_read() {
+    async fn prime_unread_asks_only_the_preferred_unread_lists() {
         let back = StubProvider::gateway(PrimeOutcome::Ok);
         let down = StubProvider::gateway(PrimeOutcome::Fails);
         let read = StubProvider {
             gateway: true,
             ..StubProvider::with_learned(&[("m", 100)])
         };
+        let unpreferred = StubProvider::gateway(PrimeOutcome::Ok);
         let table = StubProvider::new(PrimeOutcome::Ok);
         let counts = [
             back.primed.clone(),
             down.primed.clone(),
             read.primed.clone(),
+            unpreferred.primed.clone(),
             table.primed.clone(),
         ];
         let mut registry = ProviderRegistry::new();
         registry.register("back".to_string(), Arc::new(back));
         registry.register("down".to_string(), Arc::new(down));
         registry.register("read".to_string(), Arc::new(read));
+        registry.register("unpreferred".to_string(), Arc::new(unpreferred));
         registry.register("table".to_string(), Arc::new(table));
-        assert_eq!(registry.unread_catalogs(), ["back", "down"]);
+        assert_eq!(registry.unread_catalogs(), ["back", "down", "unpreferred"]);
 
         let got = registry
-            .prime_unread(std::time::Duration::from_secs(5), &[])
+            .prime_unread(
+                std::time::Duration::from_secs(5),
+                &["back", "down", "read", "table"],
+            )
             .await;
 
         assert_eq!(got, ["back"]);
@@ -846,8 +953,143 @@ mod tests {
             .iter()
             .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
             .collect();
-        assert_eq!(primed, [1, 1, 0, 0], "only the unread lists are asked for");
-        assert_eq!(registry.unread_catalogs(), ["down"]);
+        assert_eq!(
+            primed,
+            [1, 1, 0, 0, 0],
+            "only the preferred unread lists are asked for"
+        );
+        assert_eq!(registry.unread_catalogs(), ["down", "unpreferred"]);
+    }
+
+    /// Priming by name asks exactly the named providers and answers the ones
+    /// that came back.
+    #[tokio::test]
+    async fn prime_named_asks_exactly_the_named_providers() {
+        let up = StubProvider::gateway(PrimeOutcome::Ok);
+        let down = StubProvider::gateway(PrimeOutcome::Fails);
+        let other = StubProvider::gateway(PrimeOutcome::Ok);
+        let other_count = other.primed.clone();
+        let mut registry = ProviderRegistry::new();
+        registry.register("up".to_string(), Arc::new(up));
+        registry.register("down".to_string(), Arc::new(down));
+        registry.register("other".to_string(), Arc::new(other));
+
+        let got = registry
+            .prime_named(
+                std::time::Duration::from_secs(5),
+                &["up".to_string(), "down".to_string()],
+            )
+            .await;
+
+        assert_eq!(got, ["up"]);
+        assert_eq!(other_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// An unread list the cache holds a copy of is filled from it; one the
+    /// cache has nothing for, a list already read, and a provider the cache
+    /// was never asked about are left as they are.
+    #[test]
+    fn restore_from_cache_fills_only_the_unread_lists_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model_capabilities.json");
+        let mut cache = leviath_providers::CapabilityCache::new(1);
+        let one = |id: &str| {
+            [(id.to_string(), leviath_providers::LearnedModel::default())]
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        cache.set("cached", one("claude-opus-5"));
+        cache.set("read", one("stale"));
+        cache.set("empty", std::collections::BTreeMap::new());
+        cache.save(&path).unwrap();
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "cached".to_string(),
+            Arc::new(StubProvider::gateway(PrimeOutcome::Ok)),
+        );
+        registry.register(
+            "uncached".to_string(),
+            Arc::new(StubProvider::gateway(PrimeOutcome::Ok)),
+        );
+        registry.register(
+            "empty".to_string(),
+            Arc::new(StubProvider::gateway(PrimeOutcome::Ok)),
+        );
+        registry.register(
+            "storeless".to_string(),
+            Arc::new(StubProvider {
+                gateway: true,
+                ..StubProvider::storeless()
+            }),
+        );
+        registry.register(
+            "read".to_string(),
+            Arc::new(StubProvider {
+                gateway: true,
+                ..StubProvider::with_learned(&[("fresh", 100)])
+            }),
+        );
+        let names: Vec<String> = ["cached", "uncached", "empty", "storeless", "read", "nobody"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+
+        assert_eq!(registry.restore_from_cache(&path, &names), ["cached"]);
+        assert_eq!(
+            registry.unread_catalogs(),
+            ["empty", "storeless", "uncached"]
+        );
+        let read = registry.get("read").unwrap();
+        assert!(
+            read.learned_models().unwrap().contains("fresh"),
+            "a read list is kept"
+        );
+        assert!(
+            registry
+                .restore_from_cache(&dir.path().join("missing.json"), &names)
+                .is_empty()
+        );
+    }
+
+    /// A save after the start stamps only the providers that just answered,
+    /// so a list that came from the cache is never recorded as a fresh check.
+    #[test]
+    fn save_primed_stamps_only_the_named_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model_capabilities.json");
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "answered".to_string(),
+            Arc::new(StubProvider::with_learned(&[("m", 100)])),
+        );
+        registry.register(
+            "restored".to_string(),
+            Arc::new(StubProvider::with_learned(&[("m", 100)])),
+        );
+        let fingerprints = HashMap::new();
+
+        registry.save_primed(
+            Some(&path),
+            7,
+            &fingerprints,
+            &["answered".to_string(), "nobody".to_string()],
+        );
+        registry.save_primed(None, 7, &fingerprints, &["answered".to_string()]);
+        // A cache that cannot be written is a warning, not a failure.
+        let blocked = dir.path().join("a-file");
+        std::fs::write(&blocked, "x").unwrap();
+        registry.save_primed(
+            Some(&blocked.join("model_capabilities.json")),
+            7,
+            &fingerprints,
+            &["answered".to_string()],
+        );
+
+        let cache = leviath_providers::CapabilityCache::load(&path).unwrap();
+        assert_eq!(cache.check("answered").map(|c| c.checked_at), Some(7));
+        assert!(cache.check("restored").is_none());
+        assert!(cache.get("restored").is_none());
     }
 
     /// A provider gets to explain a refusal, and one with nothing to add is

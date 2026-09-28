@@ -48,6 +48,10 @@ struct State {
     registry: ProviderRegistry,
     /// Built but not yet installed into the world. Taken by [`ProviderReload::install`].
     pending: Option<Pending>,
+    /// Providers whose model list has not been read live since this daemon
+    /// started, sorted: unread, or answered from the capability cache. Asked
+    /// again until each answers (see `catalog_refresh`).
+    awaiting_live: Vec<String>,
 }
 
 /// Keeps the daemon's provider registry in step with `config.toml`.
@@ -62,6 +66,10 @@ pub struct ProviderReload {
     /// How an HTTP-backed provider's client is built, injected so a test can
     /// build a registry without opening sockets.
     build_client: leviath_providers::provider::HttpClientFactory<'static>,
+    /// The shared capability cache, resolved once when the daemon started:
+    /// what is read in the background later is written where this daemon's
+    /// home was, whatever the environment says by then.
+    cache_path: Option<std::path::PathBuf>,
 }
 
 impl ProviderReload {
@@ -77,9 +85,16 @@ impl ProviderReload {
                 creds: crate::commands::run::session::provider_creds_from_config(config),
                 registry,
                 pending: None,
+                awaiting_live: Vec::new(),
             }),
             build_client,
+            cache_path: leviath_core::paths::capability_cache_path(),
         }
+    }
+
+    /// Where this daemon's capability cache is.
+    pub fn cache_path(&self) -> Option<&std::path::Path> {
+        self.cache_path.as_deref()
     }
 
     /// The newest registry, for a caller that needs to ask a provider
@@ -152,38 +167,103 @@ impl ProviderReload {
         changed
     }
 
-    /// Read the model list of every provider whose list is still unread, and
-    /// write what that learned to the shared capability cache.
+    /// Read the model list of every preferred provider whose list is still
+    /// unread, and write what came back to the shared capability cache.
     ///
-    /// A daemon that started while a gateway was unreachable refuses every
-    /// bare model name the gateway would have served (see
-    /// `Provider::catalog_unread`). Asked again on each spawn, so the first run
-    /// after the gateway comes back resolves normally rather than the daemon
-    /// needing a restart. A list already in hand is not asked for again.
+    /// A daemon that started while a gateway was unreachable, with no cached
+    /// copy of its list, refuses every bare model name the gateway would have
+    /// served (see `Provider::catalog_unread`). Asked again on each spawn, so
+    /// the first run after the gateway comes back resolves normally rather
+    /// than the daemon needing a restart. A list already in hand is not asked
+    /// for again.
     pub async fn prime_unread(&self, config: &Config) -> Vec<String> {
-        let registry = self.registry();
-        let read = registry
+        let defaults = crate::daemon::spawn::model_defaults(config);
+        let read = self
+            .registry()
             .prime_unread(
                 std::time::Duration::from_secs(PRIME_TIMEOUT_SECS),
-                &[config.default_provider.as_str()],
+                &defaults.order(),
             )
             .await;
-        if !read.is_empty() {
-            let names = read.join(", ");
-            tracing::info!(
-                providers = %names,
-                "read the model list that could not be read before; bare model names \
-                 served there resolve again"
-            );
-            let cache_path = leviath_core::paths::capability_cache_path();
-            registry.save_capability_cache(
-                cache_path.as_deref(),
-                chrono::Utc::now().timestamp(),
-                &crate::provider_checks::fingerprints(cache_path.as_deref(), config),
-                &[],
-            );
-        }
+        self.record_live(config, &read);
         read
+    }
+
+    /// Note `names` as providers whose list has not been read live yet, for
+    /// [`Self::read_awaiting`] to keep asking.
+    pub fn await_live(&self, names: &[String]) {
+        let mut state = self.lock();
+        for name in names {
+            if !state.awaiting_live.contains(name) {
+                state.awaiting_live.push(name.clone());
+            }
+        }
+        state.awaiting_live.sort();
+    }
+
+    /// The providers whose list has not been read live yet, sorted.
+    pub fn awaiting_live(&self) -> Vec<String> {
+        self.lock().awaiting_live.clone()
+    }
+
+    /// Ask every provider in [`Self::awaiting_live`] for its list once,
+    /// answering the ones that came back.
+    pub async fn read_awaiting(&self, config: &Config) -> Vec<String> {
+        let awaiting = self.awaiting_live();
+        if awaiting.is_empty() {
+            return Vec::new();
+        }
+        let read = self
+            .registry()
+            .prime_named(
+                std::time::Duration::from_secs(PRIME_TIMEOUT_SECS),
+                &awaiting,
+            )
+            .await;
+        self.record_live(config, &read);
+        read
+    }
+
+    /// Ask every provider for its list again, so the catalogue runs resolve
+    /// against, and the cache beside it, follow what the providers serve now
+    /// rather than what they served when this daemon started. One that does
+    /// not answer keeps the list it had and joins [`Self::awaiting_live`].
+    pub async fn read_all(&self, config: &Config) -> Vec<String> {
+        let registry = self.registry();
+        let names: Vec<String> = registry
+            .provider_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let read = registry
+            .prime_named(std::time::Duration::from_secs(PRIME_TIMEOUT_SECS), &names)
+            .await;
+        let missed: Vec<String> = names.into_iter().filter(|n| !read.contains(n)).collect();
+        self.await_live(&missed);
+        self.record_live(config, &read);
+        read
+    }
+
+    /// `read` answered live: write their lists to the capability cache, and
+    /// they are no longer awaited.
+    fn record_live(&self, config: &Config, read: &[String]) {
+        if read.is_empty() {
+            return;
+        }
+        self.lock()
+            .awaiting_live
+            .retain(|name| !read.contains(name));
+        let names = read.join(", ");
+        tracing::info!(
+            providers = %names,
+            "read the model list live; bare model names served there resolve against it"
+        );
+        self.registry().save_primed(
+            self.cache_path(),
+            chrono::Utc::now().timestamp(),
+            &crate::provider_checks::fingerprints(self.cache_path(), config),
+            read,
+        );
     }
 
     /// With zero retention asked for, read again what each provider answers

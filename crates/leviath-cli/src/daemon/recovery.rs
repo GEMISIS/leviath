@@ -53,17 +53,29 @@ use leviath_runtime::world::PipelineWorld;
 // that are now one `SpawnDeps`.
 use crate::daemon::spawn::{SpawnDeps, build_agent_for_reload};
 
-/// Reload every non-terminal persisted run under `runs_dir`, returning the
-/// `(run_id, entity)` pairs for the host to map. Runs that fail to reload are
-/// skipped.
+/// What a restart brought back.
+#[derive(Default)]
+pub(crate) struct Recovered {
+    /// The `(run_id, entity)` pairs for the host to map.
+    pub reloaded: Vec<(String, leviath_runtime::world::AgentId)>,
+    /// Runs that could not be resumed yet because a model list their stages
+    /// need has not been read. Their state on disk is untouched; the host
+    /// holds them until the list arrives.
+    pub held: Vec<RunMeta>,
+}
+
+/// Reload every non-terminal persisted run under `runs_dir`. A run that cannot
+/// be reloaded is marked crashed, except one refused only because a model list
+/// is unread: that one is held, since the list arriving is all it needs.
 pub(crate) fn reload_persisted_agents(
     world: &mut PipelineWorld,
     deps: SpawnDeps<'_>,
     runs_dir: &Path,
-) -> Vec<(String, leviath_runtime::world::AgentId)> {
+) -> Recovered {
     let mut reloaded: Vec<(RunMeta, Entity)> = Vec::new();
+    let mut held: Vec<RunMeta> = Vec::new();
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
-        return Vec::new(); // no runs dir yet - nothing to recover
+        return Recovered::default(); // no runs dir yet - nothing to recover
     };
     // Scan phase: collect every persisted run's metadata + whether it's parked mid
     // fan-out (has a fanout.json), so the triage can rank them.
@@ -100,6 +112,14 @@ pub(crate) fn reload_persisted_agents(
         let run_dir = runs_dir.join(&meta.run_id);
         match reload_one(world, deps.clone(), &meta, &run_dir) {
             Ok(entity) => reloaded.push((meta, entity)),
+            Err(e) if leviath_runtime::pipeline::is_unread_catalog_refusal(&e) => {
+                tracing::warn!(
+                    run_id = %meta.run_id,
+                    error = %e,
+                    "holding this run until the model list it needs has been read"
+                );
+                held.push(meta);
+            }
             Err(e) => {
                 tracing::warn!(run_id = %meta.run_id, error = %e, "skipping un-reloadable run");
                 mark_crashed(&run_dir, meta, &e.to_string(), deps.now_secs);
@@ -113,10 +133,48 @@ pub(crate) fn reload_persisted_agents(
     restore_fan_outs(world, &reloaded, runs_dir);
     // Scoped on the way out: the host stores these for the life of the daemon,
     // which is exactly where a bare entity would lose track of its world.
-    reloaded
-        .into_iter()
-        .map(|(meta, entity)| (meta.run_id, world.own_agent(entity)))
-        .collect()
+    Recovered {
+        reloaded: reloaded
+            .into_iter()
+            .map(|(meta, entity)| (meta.run_id, world.own_agent(entity)))
+            .collect(),
+        held,
+    }
+}
+
+/// The listing row for a run held for a model list: paused, and saying on
+/// what, so `lev ps` shows a run that is waiting rather than one that vanished.
+pub(crate) fn held_entry(
+    meta: &RunMeta,
+    awaiting: &[String],
+) -> leviath_runtime::host::RunListEntry {
+    leviath_runtime::host::RunListEntry {
+        run_id: meta.run_id.clone(),
+        title: meta.title.clone(),
+        status: leviath_runtime::components::AgentStatus::Paused,
+        wait_reason: Some(leviath_core::run_meta::WaitReason::NeedsSetup {
+            blocker: leviath_core::run_meta::SetupBlocker::ProviderUnreachable,
+            remedy: format!(
+                "waiting for the model list of {} to be read; resumes on its own when it is",
+                awaiting.join(", ")
+            ),
+        }),
+        stage: meta.current_stage.clone(),
+        stage_index: Some(meta.stage_index),
+        num_stages: Some(meta.num_stages),
+        iteration: meta.iteration,
+        tool_calls: 0,
+        last_progress_at: None,
+        started_at: Some(meta.started_at),
+        active: None,
+        unattended: false,
+        yolo_profile: None,
+        empty_output: false,
+        splits_degraded: 0,
+        broken_scripts: Vec::new(),
+        read_paths: None,
+        has_final_output: false,
+    }
 }
 
 /// Page a single unloaded run back into the world from disk, on demand. Reads
@@ -860,7 +918,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         assert_eq!(restored.len(), 1);
         let (run_id, entity) = &restored[0];
@@ -918,7 +977,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs,
-        );
+        )
+        .reloaded;
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].0, run_id);
         let entity = restored[0].1;
@@ -1126,7 +1186,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         assert_eq!(restored.len(), 1);
         let (run_id, entity) = &restored[0];
@@ -1244,7 +1305,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         assert_eq!(restored.len(), 1);
         assert_restored_from_archive(&world, restored[0].1.entity());
@@ -1306,7 +1368,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         assert_eq!(restored.len(), 1);
         // The valid prefix folds → resume still uses the journal's fresh state.
@@ -1423,7 +1486,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         assert_eq!(restored.len(), 1);
         let entity = restored[0].1;
@@ -1509,7 +1573,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         assert_eq!(restored.len(), 1);
         // Nothing at all: a replay would put the turn here and the answer the
@@ -1619,7 +1684,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         assert_eq!(restored.len(), 1);
         let entries = conversation_of(&world, restored[0].1.entity());
@@ -1689,7 +1755,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         assert_eq!(restored.len(), 1);
         let (run_id, entity) = &restored[0];
@@ -1757,7 +1824,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
 
         // Terminal run skipped; the actionable (Running) run is restored first.
         let order: Vec<&str> = restored.iter().map(|(id, _)| id.as_str()).collect();
@@ -1936,7 +2004,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
         let by_id: std::collections::HashMap<_, _> =
             restored.iter().map(|(r, e)| (r.clone(), *e)).collect();
 
@@ -2015,7 +2084,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
         assert_eq!(restored.len(), 3);
         let by_id: std::collections::HashMap<_, _> =
             restored.iter().map(|(r, e)| (r.clone(), *e)).collect();
@@ -2119,7 +2189,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
         // Only the two non-terminal runs reload.
         assert_eq!(restored.len(), 2);
         let by_id: std::collections::HashMap<_, _> =
@@ -2169,7 +2240,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
         assert_eq!(restored.len(), 1);
         assert!(
             world
@@ -2231,7 +2303,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
         assert_eq!(restored.len(), 1);
 
         let parked = world
@@ -2332,7 +2405,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
         assert_eq!(restored.len(), 1);
 
         let ledger = world
@@ -2399,6 +2473,7 @@ mod tests {
                 },
                 std::path::Path::new("/no/such/runs/dir"),
             )
+            .reloaded
             .is_empty()
         );
 
@@ -2430,7 +2505,8 @@ mod tests {
                 subagent_tx: sub_tx().clone(),
             },
             runs.path(),
-        );
+        )
+        .reloaded;
         assert!(restored.is_empty()); // all skipped, none fatal
 
         // The un-reloadable run is recorded as crashed rather than left claiming
