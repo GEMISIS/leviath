@@ -12,7 +12,8 @@ use leviath_core::blueprint::{ModelConfig, ModelEntry, ToolGroup};
 
 use super::ResolvedStage;
 use crate::providers::ProviderRegistry;
-use leviath_providers::Tool;
+use leviath_providers::{Provider, Tool};
+use std::sync::Arc;
 
 /// The user's default provider/model, the fallback when none of a stage's
 /// listed models has a registered provider. The CLI fills this from
@@ -290,54 +291,24 @@ fn resolve_candidates_in_order(
             continue;
         }
         let key = model_key(&model);
-        // Preferred providers first, in the user's order, so an open route
-        // follows the same preference a named model's routes do. A stable sort
-        // by rank leaves everything not named in the preference in its existing
-        // order behind the named ones.
-        let mut candidates_for_model = registry.native_providers();
-        candidates_for_model.sort_by_key(|(name, _)| defaults.rank(name));
-        // A script provider is not in `native_providers` - it is compiled on
-        // demand rather than enumerated - so without this an open route can
-        // never land on one, and a local box serving one fast model is
-        // unreachable however the machine prefers it. Each script provider named
-        // in the preference is asked as well, which costs one compile of a
-        // script this machine has explicitly chosen and leaves every other
-        // script on disk untouched. Sorted in with the rest by rank below, so a
-        // preferred script lands at the priority it was listed.
-        if model_cfg.allow_user_default {
-            for name in defaults.order() {
-                let already = candidates_for_model.iter().any(|(n, _)| *n == name);
-                if let Some(script) = registry.script_provider_named(name).filter(|_| !already) {
-                    candidates_for_model.push((name, script));
-                }
-            }
-            candidates_for_model.sort_by_key(|(name, _)| defaults.rank(name));
-        }
         let mut routed = false;
-        for (name, provider) in candidates_for_model {
-            // Only a provider in the preference wins an open route. A bare
-            // model name is the blueprint leaving the route to the machine,
-            // and the preference is the machine's answer: a configured
-            // provider left out of it is still reachable by an explicit
-            // `provider/model` or a fallback entry, and never chosen on its
-            // own, so configuring a key cannot silently move every bare-named
-            // stage (and what it bills) onto a provider nobody listed.
-            if !defaults.is_preferred(name) {
-                continue;
-            }
+        for (name, provider) in open_route_providers(model_cfg, defaults, registry) {
             if let Some(id) = provider.serves_model(key) {
-                push(name.to_string(), id);
+                push(name, id);
                 routed = true;
             }
         }
         // Say so when nothing serves it. The chain carries on to the next model,
         // which is what a fallback list is for, but an unroutable name is worth
-        // seeing: it is equally a typo, a model no configured provider carries,
-        // or a gateway whose catalogue never primed.
+        // seeing: it is equally a typo or a model no configured provider
+        // carries. A gateway whose catalogue was never read is not among them:
+        // `resolve_stages` refuses the stage before it gets that far
+        // (`unknown_open_route`).
         if !routed {
             tracing::warn!(
                 model = %model,
-                "no configured provider serves this model, so it is skipped;                  the stage falls through to the next model listed"
+                "no configured provider serves this model, so it is skipped; \
+                 the stage falls through to the next model listed"
             );
         }
     }
@@ -447,6 +418,94 @@ fn resolve_candidates_in_order(
         .collect();
     candidates.extend(tail);
     candidates
+}
+
+/// The providers a bare model name may be routed to, best first.
+///
+/// Only a provider in the preference wins an open route. A bare model name is
+/// the blueprint leaving the route to the machine, and the preference is the
+/// machine's answer: a configured provider left out of it is still reachable
+/// by an explicit `provider/model` or a fallback entry, and never chosen on its
+/// own, so configuring a key cannot silently move every bare-named stage (and
+/// what it bills) onto a provider nobody listed.
+///
+/// A script provider is not in `native_providers` - it is compiled on demand
+/// rather than enumerated - so without the second half an open route could
+/// never land on one, and a local box serving one fast model would be
+/// unreachable however the machine prefers it. Each script provider named in
+/// the preference is asked as well, which costs one compile of a script this
+/// machine has explicitly chosen and leaves every other script on disk
+/// untouched.
+fn open_route_providers(
+    model_cfg: &ModelConfig,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+) -> Vec<(String, Arc<dyn Provider>)> {
+    let mut providers: Vec<(String, Arc<dyn Provider>)> = registry
+        .native_providers()
+        .into_iter()
+        .filter(|(name, _)| defaults.is_preferred(name))
+        .map(|(name, provider)| (name.to_string(), provider))
+        .collect();
+    if model_cfg.allow_user_default {
+        for name in defaults.order() {
+            let already = providers.iter().any(|(n, _)| n == name);
+            if let Some(script) = registry.script_provider_named(name).filter(|_| !already) {
+                providers.push((name.to_string(), script));
+            }
+        }
+    }
+    // In the user's order, so an open route follows the same preference a
+    // named model's routes do.
+    providers.sort_by_key(|(name, _)| defaults.rank(name));
+    providers
+}
+
+/// The first model the stage names that nothing can be said about, with the
+/// providers that could not say.
+///
+/// Walks the stage's own list in order and stops at the first entry that has
+/// a route, because from there on a skipped name is a fallback the author
+/// listed, not the author's choice being lost. A bare name before that point
+/// that no preferred provider serves is only a real "no" when every provider
+/// asked has read its model list. When one has not, the name may well be
+/// served, and skipping it would start the stage on something the author
+/// ranked lower, or on `fallback_model`, with nothing but a warning to show.
+fn unknown_open_route(
+    model_cfg: &ModelConfig,
+    model_override: Option<&str>,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+) -> Option<(String, Vec<String>)> {
+    // A pinned `provider/model` override names its own route.
+    if model_override.is_some_and(|ov| ov.contains('/')) {
+        return None;
+    }
+    for entry in &model_cfg.models {
+        if !entry.provider.is_empty() {
+            if registry.has(&entry.provider) {
+                return None;
+            }
+            continue;
+        }
+        let model = model_override.unwrap_or(&entry.model);
+        let providers = open_route_providers(model_cfg, defaults, registry);
+        if providers
+            .iter()
+            .any(|(_, p)| p.serves_model(model_key(model)).is_some())
+        {
+            return None;
+        }
+        let unread: Vec<String> = providers
+            .into_iter()
+            .filter(|(_, p)| p.catalog_unread())
+            .map(|(name, _)| name)
+            .collect();
+        if !unread.is_empty() {
+            return Some((model.to_string(), unread));
+        }
+    }
+    None
 }
 
 /// The user's override for [`resolve_stage_model`]: the run-level bare
@@ -918,6 +977,21 @@ pub fn resolve_stages(
         .stages
         .iter()
         .map(|stage| {
+            // Refused before anything is resolved: a stage whose first choice
+            // cannot be judged would otherwise start on whatever the chain
+            // offers next, which is the silent downgrade this exists to stop.
+            if let Some((model, unread)) =
+                unknown_open_route(&stage.model, model_override, defaults, registry)
+            {
+                return Err(format!(
+                    "stage '{}' names {model}, and whether any provider serves it cannot be \
+                     told yet: the model list of {} has not been read (see daemon.log for why). \
+                     Refusing rather than starting the stage on a model further down its list \
+                     or on fallback_model. The list is read again on the next run.",
+                    stage.name,
+                    unread.join(", "),
+                ));
+            }
             let mut candidates = resolve_stage_candidates_for(
                 &stage.model,
                 model_override,
@@ -1257,6 +1331,7 @@ mod tests {
                     catalog: None,
                     refusal: None,
                     mime: None,
+                    unread: false,
                 }),
             );
         }
@@ -1276,6 +1351,8 @@ mod tests {
         refusal: Option<String>,
         /// What its models take, when the test cares; text only otherwise.
         mime: Option<leviath_providers::ModelMime>,
+        /// Whether its model list is unread, so its silence is "cannot tell".
+        unread: bool,
     }
     #[async_trait::async_trait]
     impl leviath_providers::Provider for FakeProvider {
@@ -1317,6 +1394,10 @@ mod tests {
         fn refusal_reason(&self, _model_key: &str) -> Option<String> {
             self.refusal.clone()
         }
+
+        fn catalog_unread(&self) -> bool {
+            self.unread
+        }
     }
 
     /// A registry whose providers each publish a complete catalogue, for the
@@ -1331,6 +1412,7 @@ mod tests {
                     catalog: Some(models.iter().map(|m| (*m).to_string()).collect()),
                     refusal: None,
                     mime: None,
+                    unread: false,
                 }),
             );
         }
@@ -1837,6 +1919,7 @@ mod tests {
                     "your ChatGPT plus plan does not include it. Available: gpt-5.5".to_string(),
                 ),
                 mime: None,
+                unread: false,
             }),
         );
 
@@ -2372,6 +2455,147 @@ mod tests {
             request_timeout_secs: None,
         };
         assert_eq!(blueprint_choice(&empty), "no model");
+    }
+
+    /// A registry holding one gateway whose model list could not be read, and
+    /// one provider that serves `fallback` by name.
+    fn registry_with_unread_gateway(fallback: &str) -> ProviderRegistry {
+        let mut r = ProviderRegistry::new();
+        r.register(
+            "openrouter".to_string(),
+            Arc::new(FakeProvider {
+                unread: true,
+                ..Default::default()
+            }),
+        );
+        r.register(
+            "anthropic".to_string(),
+            Arc::new(FakeProvider {
+                serves: vec![fallback.to_string()],
+                ..Default::default()
+            }),
+        );
+        r
+    }
+
+    /// The incident: a daemon came up while its gateway was unreachable, every
+    /// bare model name went unrouted, and every stage ran on `fallback_model`
+    /// with a warning in daemon.log and nothing else. "Cannot tell whether the
+    /// gateway serves it" is not "it does not", so the stage is refused and
+    /// the refusal names the model and the provider whose list is missing.
+    #[test]
+    fn a_stage_whose_model_cannot_be_judged_is_refused_not_downgraded() {
+        let stage = leviath_core::Stage::new(
+            "story".to_string(),
+            model_cfg_open(vec!["claude-opus-5", "gpt-5.4-mini"]),
+        );
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        let defaults = ModelDefaults {
+            retention: Default::default(),
+            provider: "openrouter".to_string(),
+            override_model: None,
+            fallback_model: Some("anthropic/claude-sonnet-5".to_string()),
+            fallback_order: Vec::new(),
+            provider_order: vec!["openrouter".to_string(), "anthropic".to_string()],
+        };
+        let registry = registry_with_unread_gateway("claude-sonnet-5");
+
+        let err = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+            .expect_err("an unjudgeable first choice must not start on the fallback");
+        assert!(err.contains("stage 'story' names claude-opus-5"), "{err}");
+        assert!(
+            err.contains("model list of openrouter has not been read"),
+            "{err}"
+        );
+        assert!(err.contains("fallback_model"), "{err}");
+
+        // The same list once the gateway has answered, and does not carry the
+        // first model: a real "no", so the chain carries on as it always has,
+        // and the spawn-time note says the stage was moved.
+        let mut read = ProviderRegistry::new();
+        read.register(
+            "openrouter".to_string(),
+            Arc::new(FakeProvider {
+                serves: vec!["gpt-5.4-mini".to_string()],
+                ..Default::default()
+            }),
+        );
+        let resolved = resolve_stages(&bp, None, &defaults, &read, catalog(&[]), false, None)
+            .expect("a read list is a real answer");
+        assert_eq!(resolved[0].model, "gpt-5.4-mini");
+    }
+
+    /// Only the author's choices ahead of the first routable entry are at
+    /// stake. A stage whose first choice has a route starts on it whatever the
+    /// gateway could have said about the rest, and so does one that pins its
+    /// first model to a registered provider.
+    #[test]
+    fn an_unread_list_only_matters_before_the_first_route() {
+        let defaults = ModelDefaults {
+            retention: Default::default(),
+            provider: "openrouter".to_string(),
+            override_model: None,
+            fallback_model: None,
+            fallback_order: Vec::new(),
+            provider_order: vec!["openrouter".to_string(), "anthropic".to_string()],
+        };
+        let registry = registry_with_unread_gateway("claude-sonnet-5");
+        let layout = || leviath_core::layout::ContextLayout::new(vec![], 1000);
+
+        let routed_first = leviath_core::Stage::new(
+            "a".to_string(),
+            model_cfg_open(vec!["claude-sonnet-5", "claude-opus-5"]),
+        );
+        let bp = Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![routed_first],
+            layout(),
+        );
+        let resolved = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
+            .expect("the first choice has a route");
+        assert_eq!(resolved[0].model, "claude-sonnet-5");
+
+        let mut pinned_first = model_cfg(vec![("anthropic", "claude-sonnet-5")]);
+        pinned_first
+            .models
+            .push(ModelEntry::new(String::new(), "claude-opus-5".to_string()));
+        let stage = leviath_core::Stage::new("b".to_string(), pinned_first);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout());
+        assert!(
+            resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None).is_ok(),
+            "a pinned, registered first choice is the author's route"
+        );
+
+        // A pin to a provider that is not here is skipped, as it always was,
+        // and the unjudgeable bare name behind it still refuses the stage.
+        let mut pinned_away = model_cfg(vec![("groq", "llama")]);
+        pinned_away
+            .models
+            .push(ModelEntry::new(String::new(), "claude-opus-5".to_string()));
+        let stage = leviath_core::Stage::new("c".to_string(), pinned_away);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout());
+        assert!(
+            resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None).is_err()
+        );
+
+        // A pinned `provider/model` override names its own route.
+        let stage =
+            leviath_core::Stage::new("d".to_string(), model_cfg_open(vec!["claude-opus-5"]));
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout());
+        assert!(
+            resolve_stages(
+                &bp,
+                Some("anthropic/claude-sonnet-5"),
+                &defaults,
+                &registry,
+                catalog(&[]),
+                false,
+                None
+            )
+            .is_ok()
+        );
     }
 
     /// The spawn-time note rides the resolved stage: one line naming the

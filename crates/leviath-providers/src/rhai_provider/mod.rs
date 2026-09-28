@@ -646,6 +646,13 @@ impl Provider for RhaiProvider {
         (!self.declared_models.is_empty()).then(|| (*self.declared_models).clone())
     }
 
+    /// Unread when the script can list its models and that listing has not
+    /// come back yet. A script with no `list_models` answers from its
+    /// `serves` list, which is always an answer.
+    fn catalog_unread(&self) -> bool {
+        self.has_list_models && self.served_models.is_empty()
+    }
+
     /// Ask the script what it serves, once, so [`Self::serves_model`] can answer
     /// on the synchronous resolve path.
     ///

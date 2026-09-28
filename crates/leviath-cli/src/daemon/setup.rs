@@ -181,6 +181,20 @@ pub(crate) async fn setup_daemon_host_with(
     // conservative default. Best-effort: a home that does not resolve (path is
     // `None`), or a file that cannot be written, just leaves the pre-cache
     // behaviour in place.
+    // Said at the level it deserves. A provider whose list is unread cannot
+    // tell a bare model name it serves from one it does not, so until the list
+    // is read (it is asked for again before each spawn) every stage relying on
+    // such a name is refused rather than run on something else.
+    let unread = providers.unread_catalogs();
+    if !unread.is_empty() {
+        let names = unread.join(", ");
+        tracing::error!(
+            providers = %names,
+            "started without these providers' model lists; a stage naming a model by bare \
+             name that only they could serve is refused until the list is read, which is \
+             retried before each spawn"
+        );
+    }
     let cache_path = leviath_core::paths::capability_cache_path();
     providers.save_capability_cache(
         cache_path.as_deref(),
@@ -597,6 +611,10 @@ pub fn build_host(parts: HostParts) -> WorldHost {
             // asks it what its models are. The sync spawner installs whatever
             // this built.
             reload.refresh_and_prime(&config).await;
+            // A model list that could not be read when the daemon started (a
+            // gateway behind a proxy that was down) is asked for again, so
+            // this spawn resolves against it if it is back.
+            reload.prime_unread(&config).await;
             // Under zero retention, what the providers read their answer
             // from (Bedrock's account mode) is read again here, on the one
             // hook that can await, so the gate a moment later judges this
@@ -2039,6 +2057,75 @@ system_prompt = "x"
                 drop(ctl_tx);
                 host.serve(ctl_rx).await;
                 assert_eq!(reply_rx.await.unwrap(), Ok("run-mcp".to_string()));
+            },
+        )
+        .await;
+    }
+
+    /// The incident, end to end. A daemon started while its gateway's proxy was
+    /// down came up with an empty model list, every bare model name in the
+    /// blueprint went unrouted, and every stage ran on `fallback_model` with
+    /// nothing but a warning in daemon.log. Here the gateway refuses the boot
+    /// listing, and a stage naming a model it does carry must be refused
+    /// rather than started on the fallback. Once the gateway answers, the next
+    /// spawn reads the list again and goes through, with no restart.
+    #[tokio::test]
+    async fn a_daemon_started_against_a_dead_gateway_refuses_instead_of_falling_back() {
+        let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
+        crate::config::with_isolated_config_path_async(
+            "a_daemon_started_against_a_dead_gateway_refuses_instead_of_falling_back",
+            |_| async move {
+                let listing =
+                    br#"{"data":[{"id":"anthropic/claude-opus-5","context_length":200000}]}"#;
+                // The boot listing fails (the proxy is down); the next answers.
+                let (url, _) = leviath_testkit::spawn_mock_sequence(vec![
+                    (503, "Service Unavailable", b"proxy down".to_vec()),
+                    (200, "OK", listing.to_vec()),
+                ])
+                .await;
+                let mut config = Config {
+                    default_provider: "openrouter".to_string(),
+                    fallback_model: Some("openrouter/anthropic/claude-sonnet-5".to_string()),
+                    openrouter_api_key: Some("sk-or-test".to_string()),
+                    ..Config::default()
+                };
+                config.providers.openrouter_base_url = Some(url);
+                let runs = tempfile::tempdir().unwrap();
+                let mut host = setup_daemon_host(config, runs.path().to_path_buf(), Handle::current())
+                    .await
+                    .expect("a dead gateway does not stop the daemon starting");
+
+                let dir = tempfile::tempdir().unwrap();
+                let manifest = dir.path().join("story.leviath");
+                std::fs::write(
+                    &manifest,
+                    "[agent]\nname = \"storyteller\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+                     [context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000, seed = \"task\" }\n\n\
+                     [stages.story]\nmode = \"autonomous\"\ndescription = \"d\"\n\
+                     model = { models = [\"claude-opus-5\"] }\navailable_tools = []\n",
+                )
+                .unwrap();
+
+                // Straight to the spawner, the way the list stood at boot.
+                let (op, rx) = spawn_op("run-dead", &manifest);
+                host.handle(op);
+                let err = rx.await.unwrap().expect_err("must not start on the fallback");
+                assert!(err.contains("stage 'story' names claude-opus-5"), "{err}");
+                assert!(err.contains("model list of openrouter has not been read"), "{err}");
+
+                // Through the serve loop, whose spawn hook asks the gateway
+                // again: it answers now, so the stage resolves to the model it
+                // named rather than to the fallback.
+                let (op, rx) = spawn_op("run-back", &manifest);
+                let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel();
+                ctl_tx.send(op).unwrap();
+                drop(ctl_tx);
+                host.serve(ctl_rx).await;
+                assert_eq!(rx.await.unwrap(), Ok("run-back".to_string()));
+                let meta = std::fs::read_to_string(runs.path().join("run-back").join("meta.json"))
+                    .unwrap_or_default();
+                assert!(meta.contains("anthropic/claude-opus-5"), "{meta}");
+                assert!(!meta.contains("claude-sonnet-5"), "{meta}");
             },
         )
         .await;

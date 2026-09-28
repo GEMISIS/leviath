@@ -422,6 +422,12 @@ impl Provider for EndpointProvider {
             .or_else(|| self.configured_models.clone())
     }
 
+    /// Unread when neither the server's listing nor the config says what it
+    /// carries. A configured `models` list is an answer on its own.
+    fn catalog_unread(&self) -> bool {
+        self.learned.is_empty() && self.configured_models.is_none()
+    }
+
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
         // Only what the operator wrote down. A local server bills nothing and
         // a gateway's rates are its own business; a guessed zero would make a
@@ -772,6 +778,28 @@ mod tests {
         assert_eq!(models[0].capabilities.limits_source, LimitsSource::Builtin);
         // The second call is answered from memory: the one-shot server is gone.
         assert_eq!(provider.list_models().await.expect("cached").len(), 2);
+    }
+
+    /// Unread while neither the server nor the config has said what it
+    /// carries; a configured `models` list or a listing that came back is an
+    /// answer.
+    #[tokio::test]
+    async fn an_endpoint_list_is_unread_until_something_says_what_it_carries() {
+        let refused = spawn_mock_server(503, "Service Unavailable", b"down").await;
+        let provider = provider_at(&refused);
+        assert!(provider.catalog_unread());
+        assert!(provider.prime_capabilities().await.is_err());
+        assert!(
+            provider.catalog_unread(),
+            "a failed listing leaves it unread"
+        );
+        let configured = provider_at(&refused).with_models(Some(vec!["llama-3".to_string()]));
+        assert!(!configured.catalog_unread());
+
+        let listing = spawn_mock_server(200, "OK", br#"{"data":[{"id":"qwen"}]}"#).await;
+        let provider = provider_at(&listing);
+        provider.prime_capabilities().await.unwrap();
+        assert!(!provider.catalog_unread());
     }
 
     #[tokio::test]

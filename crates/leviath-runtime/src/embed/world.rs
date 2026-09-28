@@ -20,6 +20,10 @@ use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
 use crate::world::PipelineWorld;
 
+/// How long a spawn waits for a gateway's model list it has not read yet.
+/// Bounded so an unreachable gateway costs a spawn this and no more.
+const PRIME_TIMEOUT_SECS: u64 = 10;
+
 /// An opaque run identifier, minted by [`AgentWorld::spawn`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RunId(String);
@@ -295,6 +299,9 @@ impl AgentWorldBuilder {
         for (name, provider) in self.custom_providers {
             registry.register(name, provider);
         }
+        // Shares every provider with the world's copy, so a list read through
+        // it is the list the spawn resolves against.
+        let unread_registry = registry.clone();
 
         let hub = InteractionHub::new();
         let (service, basic_tools): (Arc<dyn ToolService>, Option<Arc<BasicToolService>>) =
@@ -325,6 +332,18 @@ impl AgentWorldBuilder {
             staged: staged.clone(),
         };
         host.set_spawner(Box::new(move |world, args| spawner.spawn(world, args)));
+        // A gateway's model list is what a bare model name is judged against,
+        // and a stage naming one is refused while that list is unread. Read it
+        // before a spawn needs it (and again before the next, if the gateway
+        // did not answer); a list already in hand costs nothing.
+        host.set_spawn_preprocessor(Box::new(move |_args| {
+            let registry = unread_registry.clone();
+            Box::pin(async move {
+                registry
+                    .prime_unread(std::time::Duration::from_secs(PRIME_TIMEOUT_SECS), &[])
+                    .await;
+            })
+        }));
         if let Some(tools) = basic_tools {
             host.set_reaper(Box::new(move |_world, entity| tools.unregister(entity)));
         }

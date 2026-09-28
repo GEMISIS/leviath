@@ -43,6 +43,17 @@ same list.
 
 - A "No" on a `confirm` interaction point approved the stage. It now aborts
   the run unless a list or directive names "No".
+- A daemon started while a gateway was unreachable (OpenRouter behind a proxy
+  that was down) came up with an empty model list, skipped every bare model
+  name as "not served", and ran every stage on `fallback_model`, with only a
+  warning in daemon.log. A model a gateway could not be asked about is now
+  "cannot tell", not "no": the stage is refused at spawn with a message
+  naming the model and the gateway. The daemon logs the missing list at start
+  as an error and asks for it again before every spawn, so the first run after
+  the gateway returns resolves normally without a restart. Library:
+  `Provider::catalog_unread`, `ProviderRegistry::prime_unread` and
+  `unread_catalogs`; an embedded `AgentWorld` reads an unread list before
+  each spawn too.
 
 ## 0.6.4 - 2026-09-26
 
