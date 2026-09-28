@@ -548,8 +548,9 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<RunListing>,
     },
-    /// Deliver a message to a running agent (by agent id). Reply is `false` if the
-    /// world's message channel is closed.
+    /// Deliver a message to a running agent (by agent id). Reply is `Ok(false)`
+    /// if the world's message channel is closed, and `Err` with the reason for a
+    /// message that says nothing.
     Message {
         /// Target agent id.
         agent_id: String,
@@ -560,19 +561,20 @@ pub enum ControlOp {
         /// Files sent with the message, written beside it as stored parts.
         parts: Vec<leviath_core::mime::InboundPart>,
         /// Reply channel.
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Result<bool, String>>,
     },
     /// List every open interaction awaiting an answer, as `(agent_id, request)`.
     ListInteractions {
         /// Reply channel.
         reply: oneshot::Sender<Vec<(String, InteractionRequest)>>,
     },
-    /// Answer an open interaction. Reply is `false` if no such request is open.
+    /// Answer an open interaction. Reply is `Ok(false)` if no such request is
+    /// open, and `Err` with the reason for an answer the request cannot take.
     AnswerInteraction {
         /// The answer (its `request_id` selects the interaction).
         response: InteractionResponse,
         /// Reply channel.
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Result<bool, String>>,
     },
     /// Cancel an open interaction (its asker wakes with a neutral response).
     /// Reply is `false` if no such request is open.

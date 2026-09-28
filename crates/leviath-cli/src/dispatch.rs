@@ -119,7 +119,10 @@ pub enum Commands {
     /// Resume a paused agent
     Resume(commands::ctl::ResumeArgs),
 
-    /// Answer a pending interaction (or list open ones with no request id)
+    /// List the questions runs are waiting on, or show one in full
+    Interactions(commands::ctl::InteractionsArgs),
+
+    /// Answer a pending interaction
     Respond(commands::ctl::RespondArgs),
 
     /// Interactive agent dashboard
@@ -209,7 +212,8 @@ Running agents:
   cancel        Cancel a running agent (alias: `kill`)
   pause         Pause a running agent (it finishes its in-flight step, then holds)
   resume        Resume a paused agent
-  respond       Answer a pending interaction (or list open ones with no request id)
+  interactions  List the questions runs are waiting on, or show one in full
+  respond       Answer a pending interaction
   dash          Interactive agent dashboard
 
 Inspecting runs:
@@ -273,7 +277,13 @@ pub trait RiskyExecutors {
         &self,
         args: commands::ctl::ResumeArgs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
-    /// `lev respond` - resolves the control-socket path and answers/lists interactions.
+    /// `lev interactions` - resolves the control-socket path and lists or
+    /// shows the open interactions.
+    fn interactions(
+        &self,
+        args: commands::ctl::InteractionsArgs,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>>;
+    /// `lev respond` - resolves the control-socket path and answers an interaction.
     fn respond(
         &self,
         args: commands::ctl::RespondArgs,
@@ -373,6 +383,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Cancel(args) => ex.cancel(args).await,
         Commands::Pause(args) => ex.pause(args).await,
         Commands::Resume(args) => ex.resume(args).await,
+        Commands::Interactions(args) => ex.interactions(args).await,
         Commands::Respond(args) => ex.respond(args).await,
         Commands::Doctor(args) => ex.doctor(args).await,
         Commands::List(args) => commands::list::execute(args).await,
@@ -465,6 +476,9 @@ mod tests {
             Ok(())
         }
         async fn msg(&self, _args: commands::ctl::MsgArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn interactions(&self, _args: commands::ctl::InteractionsArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn respond(&self, _args: commands::ctl::RespondArgs) -> anyhow::Result<()> {
@@ -612,9 +626,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_interactions_variant_is_routed_through_the_executor() {
+        let args = commands::ctl::InteractionsArgs {
+            request_id: None,
+            json: false,
+        };
+        assert!(
+            dispatch(Commands::Interactions(args), &MockRisky::default())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_respond_variant_is_routed_through_the_executor() {
         let args = commands::ctl::RespondArgs {
-            request_id: None,
+            request_id: "q1".to_string(),
             value: None,
             choice: None,
             approve: false,

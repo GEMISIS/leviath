@@ -675,14 +675,35 @@ lev blobs agent-abc123 hero.png --open       # hand it to the OS
 A part the context names but the store no longer holds is listed with a note and cannot be
 fetched. A part with no name exports as its short hash plus the extension its type implies.
 
-### `lev respond [REQUEST_ID] [VALUE]`
+### `lev interactions [REQUEST_ID]`
 
-Answer an interaction the daemon is holding. With no `REQUEST_ID`, lists the open ones.
+List the questions runs are waiting on. Name one to see it in full: the prompt, its options, the
+tool call's arguments, the document under review, and the `lev respond` line that answers it.
+Reading never answers anything.
+
+```bash
+lev interactions                    # every open interaction
+lev interactions probe-1789971553   # one, in full
+lev interactions --json             # the whole request for each, for a script
+```
+
+`REQUEST_ID` follows the same rules as on `lev respond` below.
+
+### `lev respond <REQUEST_ID> [VALUE]`
+
+Answer an interaction the daemon is holding. An answer can't be taken back, so the command needs
+exactly one of `VALUE`, `--choice`, `--approve` or `--deny`. With none it refuses and points at
+`lev interactions`.
 
 `REQUEST_ID` can be the start of an id rather than the whole thing, so a prompt is answered
 without copying forty-odd characters. It has to leave exactly one open interaction: a start
 that fits two is refused with both of them listed, and nothing is answered. An id given in
 full always answers that interaction, even where longer ids begin with it.
+
+The answer has to fit the question. Text answers a free-text or edit question, and `""` counts:
+it acknowledges a review or keeps a document unchanged. `--choice` has to name a listed option.
+`--approve` or `--deny` answers a confirm or a tool approval. Anything else is refused with the
+line that would answer it, and the question stays open.
 
 | Flag | Purpose |
 |---|---|
@@ -709,7 +730,7 @@ solo-1785568852-9fa61fd279dd    Retry backoff audit    waiting: tool approval  w
 busy-1785568852-384bad04c9ac    Index the changelog    active                  work          13824  13824  12m   12m  0s
 waiter-1785568852-7895a2209850  Split the log sweep    waiting: children(1)    delegate 1/2  2      1      12m  12m   41s
 
-1 run needs an answer: lev respond
+1 run needs an answer: lev interactions
 ```
 
 `TITLE` is the [generated one-line title](/docs/configuration#title). The column appears only when

@@ -404,7 +404,15 @@ pub(crate) fn resolve_transition(
                         note_error(&mut window, &stage.name, message);
                         StageResolution::Next(i, t, None)
                     }
-                    None => StageResolution::TerminalError,
+                    None => {
+                        // Most errors arrive with the status already set to
+                        // this message; one raised before a call was ever made
+                        // (a prompt that cannot fit) has only the outcome.
+                        state.status = AgentStatus::Error {
+                            message: message.clone(),
+                        };
+                        StageResolution::TerminalError
+                    }
                 }
             }
             Some(StageOutcome::MaxIterations) => {

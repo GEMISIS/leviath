@@ -338,10 +338,19 @@ impl Dashboard {
     /// Drain the daemon's answers to this tick's commands. A refused command
     /// becomes a toast and a log line, so the row reverting on the next disk
     /// sync has a visible explanation rather than none.
+    ///
+    /// A refused answer leaves its question open in the daemon, so the prompt
+    /// is let back in: the next sync shows it again rather than skipping it as
+    /// already answered.
     pub(super) fn drain_daemon_outcomes(&mut self) {
         while let Ok(outcome) = self.daemon_outcome_rx.try_recv() {
             if outcome.ok {
                 continue;
+            }
+            for agent in &mut self.agents {
+                if agent.last_answered_request_id.as_deref() == Some(outcome.run_id.as_str()) {
+                    agent.last_answered_request_id = None;
+                }
             }
             Self::push_toast(
                 &mut self.toasts,
@@ -2989,6 +2998,35 @@ mod tests {
         assert!(
             dash.log.iter().any(|l| l.message.contains("run-x")),
             "and recorded in the activity log"
+        );
+    }
+
+    /// A refused answer leaves the question open in the daemon, so the prompt
+    /// the dashboard cleared when it sent the answer has to come back.
+    #[test]
+    fn a_refused_answer_lets_its_prompt_back_in() {
+        let mut dash = make_test_dashboard();
+        let mut asked = make_test_agent("run-a", AgentDisplayStatus::Active);
+        asked.last_answered_request_id = Some("run-a-ask-1".to_string());
+        let mut other = make_test_agent("run-b", AgentDisplayStatus::Active);
+        other.last_answered_request_id = Some("run-b-ask-1".to_string());
+        dash.agents.push(asked);
+        dash.agents.push(other);
+        let tx = dash.take_daemon_outcome_tx().unwrap();
+        tx.send(DaemonOutcome {
+            run_id: "run-a-ask-1".to_string(),
+            message: "the daemon refused the answer: pick an option".to_string(),
+            ok: false,
+        })
+        .unwrap();
+
+        dash.drain_daemon_outcomes();
+
+        assert!(dash.agents[0].last_answered_request_id.is_none());
+        assert_eq!(
+            dash.agents[1].last_answered_request_id.as_deref(),
+            Some("run-b-ask-1"),
+            "only the refused answer's prompt comes back"
         );
     }
 

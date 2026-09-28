@@ -495,7 +495,8 @@ impl AgentWorld {
     }
 
     /// Deliver a message into a running agent's inbox. `false` when the
-    /// world can no longer accept messages (shut down or shutting down).
+    /// world can no longer accept messages (shut down or shutting down), or
+    /// when the message has neither text nor files.
     pub async fn send_message(&self, id: &RunId, content: &str) -> bool {
         self.send_message_with(id, content, Vec::new()).await
     }
@@ -517,7 +518,7 @@ impl AgentWorld {
             reply,
         })
         .await
-        .unwrap_or(false)
+        .is_ok_and(|delivered| delivered == Ok(true))
     }
 
     /// Pause a run. `false` if there is no such live run.
@@ -561,9 +562,20 @@ impl AgentWorld {
     }
 
     /// Answer an open question (matched by the response's `request_id`).
-    /// `false` if no such request is open.
+    /// `false` if no such request is open, or if the answer is not one the
+    /// question can take (text for a choice, say); [`Self::try_answer`] says
+    /// which.
     pub fn answer(&self, response: leviath_core::interaction::InteractionResponse) -> bool {
         self.hub.answer(response)
+    }
+
+    /// [`Self::answer`], saying why an answer did not land. A refused answer
+    /// leaves the question open.
+    pub fn try_answer(
+        &self,
+        response: leviath_core::interaction::InteractionResponse,
+    ) -> Result<(), crate::interaction_hub::AnswerError> {
+        self.hub.try_answer(response)
     }
 
     /// Shut the world down and wait for it to finish. The serve loop drains
@@ -967,6 +979,22 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
                 )
                 .await
         );
+        // A message that says nothing is refused, not delivered.
+        assert!(!world.send_message(&run_id, "  ").await);
+
+        // An answer the question cannot take is refused with the reason, and
+        // the question stays open for a right one.
+        assert_eq!(
+            world.try_answer(leviath_core::interaction::InteractionResponse::choice(
+                request.id.clone(),
+                0
+            )),
+            Err(crate::interaction_hub::AnswerError::Refused(format!(
+                "'{}' is a text question: answer it with text",
+                request.id
+            )))
+        );
+        assert_eq!(world.pending_inputs().len(), 1);
 
         // Answering resumes the run to completion.
         assert!(

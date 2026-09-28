@@ -11,6 +11,39 @@ requests since the previous version. A channel publishes only when the version
 below it has moved, so the headings here and the releases on GitHub are the
 same list.
 
+## Unreleased
+
+### Changed
+
+- **Breaking.** `lev respond` only answers. It takes a `REQUEST_ID` and
+  exactly one of a `VALUE`, `--choice`, `--approve` or `--deny`, and refuses
+  otherwise. It used to answer with an empty string when no value was given,
+  which a run reads as nobody answering: a checkpoint approved, a review was
+  "acknowledged". Bare `lev respond` no longer lists; `lev interactions` does.
+- New `lev interactions [REQUEST_ID] [--json]` lists the questions runs are
+  waiting on, or shows one in full with the line that answers it, and never
+  answers anything. `lev ps` points at it.
+- The daemon checks every answer against its question, whoever sends it. An
+  answer with nothing in it, text for a tool approval or a confirm, a choice
+  past the last option, or feedback beside a grant is refused with the
+  reason, and the question stays open. REST answers `400`, GraphQL
+  `BAD_USER_INPUT`. An empty text answer is still an answer.
+- A message with no text and no files is refused (`lev msg`, REST, GraphQL),
+  and so is a blank task for a blueprint that takes one when nothing else was
+  handed in.
+- A prompt that fills the model's context window ends the stage at once with a
+  "Token limit exceeded" error that names the prompt, the window and
+  `[model_capabilities]`. It used to go out with a one-token reply budget, be
+  nudged and resent about ten times, and end as "never called submit_output".
+- Library: `InteractionHub::try_answer` and `AgentWorld::try_answer` say why
+  an answer did not land (`AnswerError`), and `InteractionHub::cancel` is
+  public.
+
+### Fixed
+
+- A "No" on a `confirm` interaction point approved the stage. It now aborts
+  the run unless a list or directive names "No".
+
 ## 0.6.4 - 2026-09-26
 
 ### Changed

@@ -206,7 +206,9 @@ pub enum ProviderError {
     #[error(
         "Token limit exceeded: the prompt's {used} tokens plus the \
          {reply_budget}-token reply budget (max_output_tokens) exceed the \
-         model's {max}-token context window"
+         model's {max}-token context window. Lower the region budgets that \
+         fill the prompt, or, if that window is wrong for this model, set the \
+         real one under [model_capabilities.<model>]"
     )]
     TokenLimitExceeded {
         /// Prompt tokens the request would have sent, without the reply budget.
@@ -1798,7 +1800,9 @@ mod tests {
             err.to_string(),
             "Token limit exceeded: the prompt's 430 tokens plus the 8192-token \
              reply budget (max_output_tokens) exceed the model's 8192-token \
-             context window"
+             context window. Lower the region budgets that fill the prompt, or, if \
+             that window is wrong for this model, set the real one under \
+             [model_capabilities.<model>]"
         );
     }
 

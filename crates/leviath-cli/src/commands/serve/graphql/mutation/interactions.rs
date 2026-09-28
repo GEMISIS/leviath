@@ -4,8 +4,10 @@
 //!
 //! The request names the interaction once and the answer says only what the
 //! answer is, so a feedback line with an approval, or a scope on a denial, is
-//! not a combination the schema can express. Nothing here has to refuse a
-//! contradiction at run time, because none can be written down.
+//! not a combination the schema can express. Whether the answer fits the ask
+//! (text for a choice, an option past the end of the list) depends on the ask,
+//! which the schema cannot see; the daemon checks that, and a refusal comes
+//! back as `BAD_USER_INPUT` with the ask still open.
 
 use async_graphql::{Context, Enum, ID, InputObject, OneofObject, SimpleObject};
 

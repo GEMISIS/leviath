@@ -382,6 +382,40 @@ async fn the_second_answer_to_one_request_finds_nothing_open() {
     );
 }
 
+/// An answer or a message the daemon refused is the caller's mistake, and says
+/// what the mistake was: a 400 over REST, `BAD_USER_INPUT` over GraphQL.
+#[tokio::test]
+async fn a_refusal_from_the_daemon_is_a_bad_request_with_its_reason() {
+    let refusal = |message: &str| {
+        let message = message.to_string();
+        move |_| ControlResponse::Error {
+            message: message.clone(),
+        }
+    };
+    let mut state = state_with_agent_paths(Vec::new());
+    let (control, _socket, _srv) = fake_daemon(refusal("'ask-1' asks for a yes or no"));
+    state.control = control;
+    let failure = answer_interaction(
+        &state,
+        leviath_core::interaction::InteractionResponse::text("ask-1", "yes"),
+    )
+    .await
+    .expect_err("text is no answer to a yes or no");
+    assert_eq!(failure.code(), "BAD_USER_INPUT");
+    assert!(
+        failure.to_string().contains("asks for a yes or no"),
+        "{failure}"
+    );
+
+    let (control, _socket, _srv) = fake_daemon(refusal("refusing to deliver an empty message"));
+    state.control = control;
+    let failure = send_message(&state, "run-a", String::new(), None, Vec::new())
+        .await
+        .expect_err("an empty message says nothing");
+    assert_eq!(failure.code(), "BAD_USER_INPUT");
+    assert!(failure.to_string().contains("empty message"), "{failure}");
+}
+
 /// The inbox is whatever the daemon is holding, each entry naming its run.
 #[tokio::test]
 async fn the_open_asks_come_back_with_their_runs() {

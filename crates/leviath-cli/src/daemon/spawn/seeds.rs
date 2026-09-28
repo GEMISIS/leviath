@@ -155,6 +155,24 @@ pub(super) fn resolve_seeds(
     if !args.task.trim().is_empty() && !blueprint.accepts_task() {
         return Err(blueprint.task_refusal());
     }
+    // The other half: a blueprint that takes a task, handed a blank one and
+    // nothing else, runs with nothing to do. `lev run` asks for a task in that
+    // case, and `--task ""` or an API `"task": ""` is the same request spelled
+    // differently. A fan-out worker carries its work item elsewhere, and a
+    // caller that filled a region or attached a file has said what the run is
+    // for.
+    let handed_in = args.regions.values().any(|v| !v.trim().is_empty()) || !args.parts.is_empty();
+    if blueprint.accepts_task()
+        && args.task.trim().is_empty()
+        && !handed_in
+        && args.worker_stage.is_none()
+    {
+        return Err(format!(
+            "refusing to start '{}' with an empty task: say what the run is for, or hand it \
+             a region or a file",
+            blueprint.name
+        ));
+    }
 
     let base = std::path::Path::new(workdir);
     let blueprint_dir = std::path::Path::new(&args.blueprint_path)

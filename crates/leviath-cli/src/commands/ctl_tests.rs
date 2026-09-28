@@ -411,7 +411,7 @@ async fn forcing_an_unknown_run_reports_no_such_run() {
 
 fn respond_args() -> RespondArgs {
     RespondArgs {
-        request_id: Some("q1".to_string()),
+        request_id: "q1".to_string(),
         value: None,
         choice: None,
         approve: false,
@@ -557,7 +557,7 @@ async fn respond_refuses_feedback_without_deny_before_contacting_the_daemon() {
 }
 
 #[test]
-fn build_response_free_text_uses_value_or_empty() {
+fn build_response_free_text_uses_the_value() {
     let with_value = build_response(
         "q1",
         &RespondArgs {
@@ -566,11 +566,64 @@ fn build_response_free_text_uses_value_or_empty() {
         },
     );
     assert_eq!(with_value, InteractionResponse::text("q1", "hello"));
-    // Missing value → empty string.
-    assert_eq!(
-        build_response("q1", &respond_args()),
-        InteractionResponse::text("q1", "")
+    // An empty "" is an answer the person typed, and is sent as one.
+    let empty = build_response(
+        "q1",
+        &RespondArgs {
+            value: Some(String::new()),
+            ..respond_args()
+        },
     );
+    assert_eq!(empty, InteractionResponse::text("q1", ""));
+}
+
+/// Naming an interaction is not answering it. With no answer given the command
+/// refuses, says how to look at the question instead, and never dials the
+/// daemon: the answer would be permanent, and an empty one reads to the run
+/// like nobody answered.
+#[tokio::test]
+async fn respond_without_an_answer_is_refused_before_contacting_the_daemon() {
+    let client = ControlClient::new(control_id(std::path::Path::new("/no/such/daemon")));
+    let err = respond(&client, &respond_args()).await.unwrap_err();
+    let err = err.to_string();
+    assert!(
+        err.contains("refusing to answer 'q1' without an answer"),
+        "{err}"
+    );
+    assert!(err.contains("lev interactions q1"), "{err}");
+}
+
+/// Two answers is refused rather than one of them quietly dropped.
+#[test]
+fn one_answer_and_only_one() {
+    assert!(
+        check_one_answer(&RespondArgs {
+            approve: true,
+            ..respond_args()
+        })
+        .is_ok()
+    );
+    let err = check_one_answer(&RespondArgs {
+        value: Some("yes".to_string()),
+        choice: Some(1),
+        ..respond_args()
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("give one answer"), "{err}");
+}
+
+/// The answer's clause is read by clap too: `REQUEST_ID` is required, so bare
+/// `lev respond` is a usage error rather than a listing.
+#[test]
+fn a_request_id_is_required() {
+    use clap::Parser;
+    #[derive(Parser, Debug)]
+    struct Cli {
+        #[command(flatten)]
+        respond: RespondArgs,
+    }
+    let err = Cli::try_parse_from(["lev"]).unwrap_err();
+    assert!(err.to_string().contains("REQUEST_ID"), "{err}");
 }
 
 #[test]
@@ -710,8 +763,8 @@ async fn answer_with(
     open: &[(&str, &str)],
 ) -> (anyhow::Result<()>, Vec<serde_json::Value>) {
     let args = RespondArgs {
-        request_id: Some(typed.to_string()),
-        approve: true,
+        request_id: typed.to_string(),
+        value: Some("go on".to_string()),
         ..respond_args()
     };
     served(
@@ -789,7 +842,11 @@ async fn an_ambiguous_prefix_is_refused_and_answers_nothing() {
 async fn answering_reports_a_daemon_that_cannot_be_reached() {
     let dir = tempfile::tempdir().unwrap();
     let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
-    let err = respond(&client, &respond_args()).await.unwrap_err();
+    let args = RespondArgs {
+        value: Some("yes".to_string()),
+        ..respond_args()
+    };
+    let err = respond(&client, &args).await.unwrap_err();
     assert!(err.to_string().contains("not reachable"), "{err}");
 }
 
@@ -821,7 +878,8 @@ async fn the_tail_of_an_id_names_nothing() {
 async fn an_empty_id_is_refused_rather_than_taking_the_only_open_one() {
     let (r, requests) = answer_with("", &[FIRST]).await;
     let err = r.unwrap_err().to_string();
-    assert!(err.contains("name the interaction to answer"), "{err}");
+    assert!(err.contains("name an interaction"), "{err}");
+    assert!(err.contains("lev interactions"), "{err}");
     assert!(answered_ids(&requests).is_empty());
 }
 
@@ -830,8 +888,8 @@ async fn an_empty_id_is_refused_rather_than_taking_the_only_open_one() {
 #[tokio::test]
 async fn an_interaction_that_goes_away_mid_answer_is_reported() {
     let args = RespondArgs {
-        request_id: Some("probe-1789971553".to_string()),
-        approve: true,
+        request_id: "probe-1789971553".to_string(),
+        value: Some("go on".to_string()),
         ..respond_args()
     };
     let (r, requests) = served(
@@ -882,52 +940,10 @@ fn open_interaction_serializes_the_agent_id_alongside_the_request() {
 }
 
 #[tokio::test]
-async fn respond_lists_open_interactions_as_json() {
-    let req = InteractionRequest::free_text("q1", "What now?", "plan", true);
-    let line = serde_json::to_string(&ControlResponse::Interactions {
-        interactions: vec![("agent-a".to_string(), req)],
-    })
-    .unwrap();
-    let r = with_daemon(line, |c| async move {
-        respond(
-            &c,
-            &RespondArgs {
-                request_id: None,
-                json: true,
-                ..respond_args()
-            },
-        )
-        .await
-    })
-    .await;
-    assert!(r.is_ok());
-}
-
-#[tokio::test]
-async fn respond_lists_nothing_open_as_json() {
-    let line = serde_json::to_string(&ControlResponse::Interactions {
-        interactions: Vec::new(),
-    })
-    .unwrap();
-    let r = with_daemon(line, |c| async move {
-        respond(
-            &c,
-            &RespondArgs {
-                request_id: None,
-                json: true,
-                ..respond_args()
-            },
-        )
-        .await
-    })
-    .await;
-    assert!(r.is_ok());
-}
-
-#[tokio::test]
 async fn respond_answers_an_interaction_as_json() {
     let args = RespondArgs {
-        request_id: Some("probe-1789971553".to_string()),
+        request_id: "probe-1789971553".to_string(),
+        value: Some("go on".to_string()),
         json: true,
         ..respond_args()
     };
@@ -940,75 +956,191 @@ async fn respond_answers_an_interaction_as_json() {
     assert_eq!(answered_ids(&requests), vec![FIRST.1.to_string()]);
 }
 
+/// An answer the question cannot take is refused before it is sent, with the
+/// line that would answer it. Nothing reaches the daemon.
 #[tokio::test]
-async fn respond_lists_open_interactions() {
-    let req = InteractionRequest::free_text("q1", "What now?", "plan", true);
-    let line = serde_json::to_string(&ControlResponse::Interactions {
-        interactions: vec![("agent-a".to_string(), req)],
+async fn an_answer_of_the_wrong_shape_is_refused_with_the_right_one() {
+    let choice = InteractionRequest::multiple_choice(
+        "q1",
+        "Pick",
+        vec!["a".to_string(), "b".to_string()],
+        "plan",
+    );
+    let listing = serde_json::to_string(&ControlResponse::Interactions {
+        interactions: vec![("agent-a".to_string(), choice)],
     })
     .unwrap();
-    let r = with_daemon(line, |c| async move {
-        respond(
-            &c,
-            &RespondArgs {
-                request_id: None,
-                ..respond_args()
-            },
-        )
-        .await
+    // Past the last option: the text path would be read against the labels,
+    // but an index has to name one.
+    let args = RespondArgs {
+        choice: Some(2),
+        ..respond_args()
+    };
+    let (r, requests) = served(vec![listing, APPLIED.to_string()], |c| async move {
+        respond(&c, &args).await
     })
     .await;
-    assert!(r.is_ok());
+    let err = r.unwrap_err().to_string();
+    assert!(err.contains("nothing was answered"), "{err}");
+    assert!(
+        err.contains("lev respond q1 --choice N  (N is 0-1)"),
+        "{err}"
+    );
+    assert!(answered_ids(&requests).is_empty());
+}
+
+/// The daemon checks every answer as well, and its reason is what the person
+/// reads, not "unexpected daemon response".
+#[tokio::test]
+async fn a_refusal_from_the_daemon_is_reported_with_its_reason() {
+    let refusal = serde_json::to_string(&ControlResponse::Error {
+        message: "'q1' is a text question: answer it with text".to_string(),
+    })
+    .unwrap();
+    let args = RespondArgs {
+        value: Some("go on".to_string()),
+        ..respond_args()
+    };
+    let (r, _) = served(
+        vec![interactions_line(&[("agent-a", "q1")]), refusal],
+        |c| async move { respond(&c, &args).await },
+    )
+    .await;
+    assert_eq!(
+        r.unwrap_err().to_string(),
+        "'q1' is a text question: answer it with text"
+    );
+}
+
+#[test]
+fn every_kind_says_how_it_is_answered() {
+    let text = InteractionRequest::free_text("t", "Why?", "s", true);
+    assert_eq!(how_to_answer(&text), "lev respond t \"your answer\"");
+    let edit = InteractionRequest::edit_text("e", "Edit", "s", "doc");
+    assert_eq!(how_to_answer(&edit), "lev respond e \"your answer\"");
+    let confirm = InteractionRequest::confirm("y", "Sure?", "s");
+    assert_eq!(
+        how_to_answer(&confirm),
+        "lev respond y --approve  (or --deny)"
+    );
+    let tool = InteractionRequest::tool_approval("a", "bash", serde_json::json!({}), "s", &[]);
+    assert_eq!(
+        how_to_answer(&tool),
+        "lev respond a --approve [--stage|--session]  (or --deny [--feedback TEXT])"
+    );
+}
+
+// ─── lev interactions ─────────────────────────────────────────────────────
+
+fn interactions_args(request_id: Option<&str>, json: bool) -> InteractionsArgs {
+    InteractionsArgs {
+        request_id: request_id.map(str::to_string),
+        json,
+    }
+}
+
+/// Listing and showing only ever read: whatever they print, the daemon is
+/// asked for its listing and for nothing else.
+async fn read_with(
+    listing: String,
+    args: InteractionsArgs,
+) -> (anyhow::Result<()>, Vec<serde_json::Value>) {
+    served(vec![listing, APPLIED.to_string()], |c| async move {
+        interactions(&c, &args).await
+    })
+    .await
 }
 
 #[tokio::test]
-async fn respond_lists_when_none_open() {
-    let line = serde_json::to_string(&ControlResponse::Interactions {
-        interactions: vec![],
-    })
-    .unwrap();
-    let r = with_daemon(line, |c| async move {
-        respond(
-            &c,
-            &RespondArgs {
-                request_id: None,
-                ..respond_args()
-            },
-        )
-        .await
-    })
-    .await;
-    assert!(r.is_ok());
+async fn interactions_lists_and_shows_without_answering() {
+    for args in [
+        interactions_args(None, false),
+        interactions_args(None, true),
+        interactions_args(Some("probe-1789971553"), false),
+        interactions_args(Some(FIRST.1), true),
+    ] {
+        let (r, requests) = read_with(interactions_line(&[FIRST, SECOND]), args).await;
+        r.expect("a read of what is open succeeds");
+        assert_eq!(requests.len(), 1, "one listing, nothing else: {requests:?}");
+        assert!(answered_ids(&requests).is_empty());
+    }
 }
 
 #[tokio::test]
-async fn respond_list_rejects_unexpected_response() {
-    let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {
-        respond(
-            &c,
-            &RespondArgs {
-                request_id: None,
-                ..respond_args()
-            },
-        )
-        .await
-    })
+async fn interactions_lists_nothing_open() {
+    for json in [false, true] {
+        let (r, _) = read_with(interactions_line(&[]), interactions_args(None, json)).await;
+        assert!(r.is_ok());
+    }
+}
+
+/// Showing one takes the same id rules as answering one: an unknown id is an
+/// error, and a start two runs share is refused with both named.
+#[tokio::test]
+async fn interactions_show_refuses_an_id_that_names_nothing_or_several() {
+    let (r, _) = read_with(
+        interactions_line(&[FIRST]),
+        interactions_args(Some("nope"), false),
+    )
     .await;
+    assert_eq!(r.unwrap_err().to_string(), "no such open interaction");
+
+    let (r, _) = read_with(
+        interactions_line(&[FIRST, SECOND]),
+        interactions_args(Some("probe-"), false),
+    )
+    .await;
+    let err = r.unwrap_err().to_string();
+    assert!(err.contains("is the start of 2 open interactions"), "{err}");
+}
+
+#[tokio::test]
+async fn interactions_rejects_unexpected_response() {
+    let (r, _) = read_with(APPLIED.to_string(), interactions_args(None, false)).await;
     assert!(r.unwrap_err().to_string().contains("unexpected"));
 }
 
 #[tokio::test]
-async fn respond_list_errors_when_daemon_absent() {
+async fn interactions_errors_when_daemon_absent() {
     let dir = tempfile::tempdir().unwrap();
     let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
-    let err = respond(
-        &client,
-        &RespondArgs {
-            request_id: None,
-            ..respond_args()
-        },
-    )
-    .await
-    .unwrap_err();
+    let err = interactions(&client, &interactions_args(None, false))
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("not reachable"));
+}
+
+/// The full view carries what the listing has no room for: the call's
+/// arguments, the document under review, and how to answer.
+#[test]
+fn the_full_view_shows_arguments_body_and_the_answer_line() {
+    let mut req = InteractionRequest::tool_approval(
+        "run-approve-1",
+        "bash",
+        serde_json::json!({"command": "rm -rf build"}),
+        "implement",
+        &[],
+    );
+    req.body = Some("line one\nline two".to_string());
+    let out = format_interaction_detail("agent-x", &req);
+    assert!(
+        out.contains("run-approve-1  [tool-approval]  agent=agent-x"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  arguments:\n    {\n      \"command\": \"rm -rf build\"\n    }"),
+        "{out}"
+    );
+    assert!(out.contains("  body:\n    line one\n    line two"), "{out}");
+    assert!(out.contains("  required: yes"), "{out}");
+    assert!(
+        out.ends_with("answer with: lev respond run-approve-1 --approve [--stage|--session]  (or --deny [--feedback TEXT])"),
+        "{out}"
+    );
+
+    let optional = InteractionRequest::free_text("q", "Anything else?", "s", false);
+    let out = format_interaction_detail("agent-y", &optional);
+    assert!(out.contains("  required: no"), "{out}");
+    assert!(!out.contains("arguments:"), "{out}");
+    assert!(!out.contains("body:"), "{out}");
 }

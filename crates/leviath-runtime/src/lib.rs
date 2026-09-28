@@ -121,7 +121,7 @@ pub use inference_bridge::{
     DEFAULT_RETRY_BASE_DELAY_MS, MAX_TOTAL_BACKOFF_SECS, REACHED_BASE_DELAY_SECS, RetryPolicy,
 };
 pub use inference_pool::{InferencePoolConfig, InferencePools};
-pub use interaction_hub::InteractionHub;
+pub use interaction_hub::{AnswerError, InteractionHub};
 pub use pipeline::{ModelDefaults, ResolvedStage, ToolService, is_stage_specific};
 pub use provider_creds::{ProviderCreds, build_provider_registry};
 pub use providers::ProviderRegistry;

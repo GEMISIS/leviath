@@ -1384,6 +1384,24 @@ mod tests {
         task.await.unwrap()
     }
 
+    /// Run `dispatch_tools` while closing the interaction it raises without
+    /// an answer, the way a cancel or a timeout does.
+    async fn dispatch_unanswered(
+        state: Arc<AgentToolState>,
+        calls: Vec<ToolCall>,
+        hub: InteractionHub,
+    ) -> Results {
+        let task = tokio::spawn(async move { dispatch_tools(state, calls, noop_progress()).await });
+        let id = loop {
+            if let Some((_, req)) = hub.pending().first() {
+                break req.id.clone();
+            }
+            tokio::task::yield_now().await;
+        };
+        assert!(hub.cancel(&id));
+        task.await.unwrap()
+    }
+
     /// Build a state whose script tools come from `sources` (name → rhai body,
     /// with a `// @tool <name>` header prepended) and whose script host is
     /// `host`. All other layers permit the tool by default via `global`.
@@ -2289,13 +2307,8 @@ mod tests {
         let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
         let (state, _dir) =
             script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
-        let out = dispatch_answering(
-            state,
-            vec![call("c1", "echo", serde_json::json!({}))],
-            |req| InteractionResponse::text(&req.id, ""),
-            hub,
-        )
-        .await;
+        let out =
+            dispatch_unanswered(state, vec![call("c1", "echo", serde_json::json!({}))], hub).await;
         let result = &out[0].1;
         assert!(result.starts_with("[denied]"), "{result}");
         assert!(!result.contains("declined"), "not a decline: {result}");
@@ -2318,13 +2331,8 @@ mod tests {
         let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
         let (state, _dir) =
             script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
-        let out = dispatch_answering(
-            state,
-            vec![call("c1", "echo", serde_json::json!({}))],
-            |req| InteractionResponse::text(&req.id, ""),
-            hub,
-        )
-        .await;
+        let out =
+            dispatch_unanswered(state, vec![call("c1", "echo", serde_json::json!({}))], hub).await;
         let result = &out[0].1;
         assert!(result.starts_with("[denied]"), "{result}");
         assert!(!result.contains("declined"), "not a decline: {result}");
@@ -2382,21 +2390,31 @@ mod tests {
     }
 
     /// Feedback that arrives beside a grant is a client bug, not a redirect:
-    /// the call runs and the model never hears the word "declined".
+    /// the hub refuses it and keeps the prompt open, and the plain grant that
+    /// follows runs the call without the model ever hearing "declined".
     #[tokio::test]
-    async fn feedback_beside_a_grant_is_ignored() {
+    async fn feedback_beside_a_grant_is_refused_and_the_prompt_stays_open() {
         let hub = InteractionHub::new();
         let mut ask = HashMap::new();
         ask.insert("echo".to_string(), ToolPolicy::Ask);
         let names: HashSet<String> = ["echo".to_string()].into_iter().collect();
         let (state, _dir) =
             script_state(&hub, &[("echo", "\"x\"")], names, no_script_fields().2, ask);
+        let answering = hub.clone();
         let out = dispatch_answering(
             state,
             vec![call("c1", "echo", serde_json::json!({}))],
-            |req| InteractionResponse {
-                feedback: Some("not a redirect".to_string()),
-                ..InteractionResponse::approval(&req.id, true, ApprovalScope::Once)
+            move |req| {
+                let confused = InteractionResponse {
+                    feedback: Some("not a redirect".to_string()),
+                    ..InteractionResponse::approval(&req.id, true, ApprovalScope::Once)
+                };
+                assert!(
+                    !answering.answer(confused),
+                    "feedback beside a grant is a client mistake, refused"
+                );
+                assert_eq!(answering.pending().len(), 1, "the prompt is still open");
+                InteractionResponse::approval(&req.id, true, ApprovalScope::Once)
             },
             hub,
         )

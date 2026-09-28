@@ -335,6 +335,11 @@ document. `choice_index` is a multiple choice, zero-based. `approved` carries an
 (`once`, `stage` or `session`) for a tool approval or a confirm. It answers `202` once the daemon
 has it and `404` when nothing with that id is open.
 
+The answer has to fit the question, and a `400` says why when it does not. An answer with none of
+the three reads to the run like nobody answered, so it is refused. So is `value` on a tool
+approval, or a `choice_index` past the last option. An empty `value` is an answer: it acknowledges
+a review or keeps an edited document as it was. A refused answer leaves the question open.
+
 A deny may carry `feedback`, a string the model reads as part of the tool result for the refused
 call, so its next turn is a redirect rather than a guess:
 

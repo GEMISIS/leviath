@@ -173,6 +173,10 @@ impl RiskyExecutors for RealExecutors {
         commands::ctl::resume_run(&control_client()?, &args).await
     }
 
+    async fn interactions(&self, args: commands::ctl::InteractionsArgs) -> anyhow::Result<()> {
+        commands::ctl::interactions(&control_client()?, &args).await
+    }
+
     async fn respond(&self, args: commands::ctl::RespondArgs) -> anyhow::Result<()> {
         commands::ctl::respond(&control_client()?, &args).await
     }

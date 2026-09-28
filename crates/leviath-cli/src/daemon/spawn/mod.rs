@@ -1482,6 +1482,15 @@ system = { kind = "pinned", max_tokens = 1000 }
         (world, cli)
     }
 
+    /// [`spawn_args`] with a task, for a blueprint that takes one: a blank
+    /// task with nothing else handed in is refused.
+    fn tasked_args(path: &str) -> SpawnArgs {
+        SpawnArgs {
+            task: "do the work".to_string(),
+            ..spawn_args(path)
+        }
+    }
+
     fn spawn_args(path: &str) -> SpawnArgs {
         SpawnArgs {
             run_id: "run-x".to_string(),
@@ -2018,6 +2027,44 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(err.starts_with("[mime_types]:"), "{err}");
     }
 
+    /// A file handed in is something to do, so a blank task beside it passes
+    /// the seeds; a file aimed at a region the agent does not have is then
+    /// refused by the spawn itself, and that refusal is what the caller hears.
+    #[tokio::test]
+    async fn build_agent_reports_a_part_for_a_region_the_agent_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, coder_manifest()).unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mut args = spawn_args(&manifest.to_string_lossy());
+        args.parts.push(leviath_core::mime::InboundPart {
+            region: Some("nowhere".to_string()),
+            name: "sketch.png".to_string(),
+            mime_type: None,
+            deliver: None,
+            caption: None,
+            data: b"\x89PNG\r\n\x1a\nsketch".to_vec(),
+        });
+        let err = build_agent(
+            world.world_mut(),
+            SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
+                hub: &hub,
+                now_secs: 100,
+                subagent_tx: sub_tx(),
+            },
+            &args,
+        )
+        .unwrap_err();
+        assert!(err.contains("which this agent does not declare"), "{err}");
+    }
+
     #[tokio::test]
     async fn build_agent_rejects_a_run_id_that_is_not_a_directory_name() {
         for bad in ["../escape", "a/b", "..", ".", ""] {
@@ -2124,7 +2171,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         let (mut world, cli) = test_world();
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-        let mut args = spawn_args(&manifest.to_string_lossy());
+        let mut args = tasked_args(&manifest.to_string_lossy());
         args.workdir = dir.path().to_string_lossy().to_string();
         let entity = build_agent(
             world.world_mut(),
@@ -2338,7 +2385,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         );
 
         // A sub-agent run is never marked: titles serve the top-level run list.
-        let mut child_args = spawn_args(&manifest.to_string_lossy());
+        let mut child_args = tasked_args(&manifest.to_string_lossy());
         child_args.run_id = "run-child".to_string();
         child_args.parent_run_id = Some("run-x".to_string());
         let child = build_agent(
@@ -2372,7 +2419,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             },
             ..Config::default()
         };
-        let mut off_args = spawn_args(&manifest.to_string_lossy());
+        let mut off_args = tasked_args(&manifest.to_string_lossy());
         off_args.run_id = "run-off".to_string();
         let off = build_agent(
             world.world_mut(),
@@ -3036,7 +3083,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     }
 
     /// The `no_output_tools` a freshly built agent carries.
-    async fn spawned_no_output_tools(manifest_body: &str) -> bool {
+    async fn spawned_no_output_tools(manifest_body: &str, task: &str) -> bool {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
         std::fs::write(&manifest, manifest_body).unwrap();
@@ -3055,7 +3102,10 @@ system = { kind = "pinned", max_tokens = 1000 }
                 now_secs: 100,
                 subagent_tx: sub_tx(),
             },
-            &spawn_args(&manifest.to_string_lossy()),
+            &SpawnArgs {
+                task: task.to_string(),
+                ..spawn_args(&manifest.to_string_lossy())
+            },
         )
         .expect("spawn succeeds");
         world
@@ -3070,7 +3120,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     async fn build_agent_records_whether_the_blueprint_can_write_at_all() {
         // A coding agent writes in `implement`, so silence from it is worth
         // reporting.
-        assert!(!spawned_no_output_tools(&coder_manifest()).await);
+        assert!(!spawned_no_output_tools(&coder_manifest(), "do the work").await);
         // A router-shaped agent delegates and never writes. Reporting it as
         // having "modified nothing" is an accusation the framework has no
         // grounds for.
@@ -3079,6 +3129,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 "[agent]\nname = \"router\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
                  [stages.triage]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
                  available_tools = [\"read_file\", \"spawn_agent\"]\n",
+                "",
             )
             .await
         );
@@ -3105,7 +3156,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 now_secs: 100,
                 subagent_tx: sub_tx(),
             },
-            &spawn_args(&manifest.to_string_lossy()),
+            &tasked_args(&manifest.to_string_lossy()),
         )
         .expect("spawn succeeds");
 
@@ -3180,7 +3231,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                     now_secs: 100,
                     subagent_tx: sub_tx(),
                 },
-                &spawn_args(&manifest.to_string_lossy()),
+                &tasked_args(&manifest.to_string_lossy()),
             )
             .expect("spawn succeeds");
 
@@ -3232,7 +3283,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 now_secs: 100,
                 subagent_tx: sub_tx(),
             },
-            &spawn_args(&manifest.to_string_lossy()),
+            &tasked_args(&manifest.to_string_lossy()),
         )
         .expect("spawn succeeds");
 
@@ -3269,7 +3320,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             )]),
             ..Default::default()
         };
-        let mut args = spawn_args(&manifest.to_string_lossy());
+        let mut args = tasked_args(&manifest.to_string_lossy());
         args.yolo = true;
         args.allow = vec!["read_file".to_string()];
         args.max_depth = Some(7);
@@ -3901,7 +3952,7 @@ system_prompt = "be brief"
                 now_secs: 100,
                 subagent_tx: sub_tx(),
             },
-            &spawn_args(&manifest.to_string_lossy()),
+            &tasked_args(&manifest.to_string_lossy()),
         )
         .expect("spawn succeeds");
         assert_eq!(
@@ -4045,7 +4096,7 @@ system_prompt = "be brief"
                 now_secs: 100,
                 subagent_tx: sub_tx(),
             },
-            &spawn_args(&manifest.to_string_lossy()),
+            &tasked_args(&manifest.to_string_lossy()),
         )
         .expect("spawn succeeds");
         assert_eq!(
@@ -4075,7 +4126,7 @@ system_prompt = "be brief"
                 now_secs: 100,
                 subagent_tx: sub_tx(),
             },
-            &spawn_args(&manifest.to_string_lossy()),
+            &tasked_args(&manifest.to_string_lossy()),
         )
         .expect("spawn succeeds even when nothing grants the declaration");
         assert_eq!(
@@ -5531,6 +5582,60 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
         assert!(err.contains("takes no caller input at all"), "{err}");
     }
 
+    /// A blueprint that takes a task, handed a blank one and nothing else, has
+    /// nothing to do. `--task ""` and an API `"task": ""` are refused like the
+    /// missing task `lev run` already asks for; a region, a file, or being a
+    /// fan-out worker is something to do.
+    #[test]
+    fn a_blank_task_with_nothing_else_is_refused() {
+        let bp = bp(r#"notes = { kind = "pinned", max_tokens = 100, seed = "notes" }"#);
+        let seeds = |args: &SpawnArgs| {
+            resolve_seeds(
+                &bp,
+                args,
+                "/w",
+                &seed_policy(),
+                &no_seed_tools(),
+                &no_read_paths(),
+            )
+        };
+        let err = seeds(&args_with("  ", HashMap::new(), "/w")).expect_err("nothing to do");
+        assert!(
+            err.contains("refusing to start 'seedy' with an empty task"),
+            "{err}"
+        );
+
+        let mut regions = HashMap::new();
+        regions.insert("notes".to_string(), "the brief".to_string());
+        assert!(
+            seeds(&args_with("", regions, "/w")).is_ok(),
+            "a region says what to do"
+        );
+
+        let blank_region: HashMap<String, String> = [("notes".to_string(), " ".to_string())]
+            .into_iter()
+            .collect();
+        assert!(
+            seeds(&args_with("", blank_region, "/w")).is_err(),
+            "a blank region says nothing either"
+        );
+
+        let mut attached = args_with("", HashMap::new(), "/w");
+        attached.parts.push(leviath_core::mime::InboundPart {
+            region: None,
+            name: "sketch.png".to_string(),
+            mime_type: None,
+            deliver: None,
+            caption: None,
+            data: b"\x89PNG".to_vec(),
+        });
+        assert!(seeds(&attached).is_ok(), "a file says what to do");
+
+        let mut worker = args_with("", HashMap::new(), "/w");
+        worker.worker_stage = Some("main".to_string());
+        assert!(seeds(&worker).is_ok(), "a worker's item arrives elsewhere");
+    }
+
     #[test]
     fn the_refusal_names_the_input_the_agent_does_take() {
         let bp =
@@ -5765,7 +5870,7 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
                 )
                 .unwrap();
                 let (mut world, cli) = test_world();
-                let mut args = spawn_args(&manifest.to_string_lossy());
+                let mut args = tasked_args(&manifest.to_string_lossy());
                 args.workdir = dir.path().to_string_lossy().to_string();
                 args.yolo = true;
                 args.yolo_profile = profile.map(str::to_string);

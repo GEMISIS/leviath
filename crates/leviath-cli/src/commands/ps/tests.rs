@@ -418,7 +418,10 @@ fn format_runs_distinguishes_two_kinds_of_waiting() {
     assert!(lines[2].contains("waiting: children(3)"), "{out}");
     assert!(lines[2].contains("10s"), "moved ten seconds ago: {out}");
     // Only the approval needs a person; the children resolve themselves.
-    assert!(out.ends_with("1 run needs an answer: lev respond"), "{out}");
+    assert!(
+        out.ends_with("1 run needs an answer: lev interactions"),
+        "{out}"
+    );
 }
 
 /// The call-out counts only the runs a person has to unblock, and stays away
@@ -456,7 +459,10 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
         &healthy_daemon(),
         0,
     );
-    assert!(one.ends_with("1 run needs an answer: lev respond"), "{one}");
+    assert!(
+        one.ends_with("1 run needs an answer: lev interactions"),
+        "{one}"
+    );
 
     let two = format_runs(
         &[
@@ -468,7 +474,10 @@ fn format_runs_calls_out_only_the_runs_needing_an_answer() {
         &healthy_daemon(),
         0,
     );
-    assert!(two.ends_with("2 runs need an answer: lev respond"), "{two}");
+    assert!(
+        two.ends_with("2 runs need an answer: lev interactions"),
+        "{two}"
+    );
 }
 
 /// Everything from a given column onwards, by character (never by byte - a run
@@ -622,7 +631,10 @@ fn the_footer_and_the_answer_call_out_coexist() {
         ..healthy_daemon()
     };
     let out = format_runs(&[blocked], &[], &health, 0);
-    assert!(out.contains("1 run needs an answer: lev respond"), "{out}");
+    assert!(
+        out.contains("1 run needs an answer: lev interactions"),
+        "{out}"
+    );
     assert!(out.contains("no progress for 2 cycles"), "{out}");
 }
 

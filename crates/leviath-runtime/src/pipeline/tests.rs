@@ -2588,13 +2588,13 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
 
 // ─── requests the runtime must never build ───────────────────────────
 
-/// A prompt that reaches the window leaves nothing to answer with, and the
-/// derived completion budget went to zero. Providers reject that outright
-/// (`Invalid 'max_completion_tokens': integer below minimum value`), and a 400
-/// is not transient, so the retry loop resent the same doomed request until the
-/// run died.
+/// A prompt that fills the window leaves nothing to answer with. Sending it
+/// anyway bought a one-token reply, which the stage read as the model stopping
+/// short: it nudged, re-entered for its missing output and resent the same
+/// prompt about ten times, then recorded "never called submit_output", which
+/// named the wrong cause. The stage ends at once, on the real one.
 #[tokio::test]
-async fn a_full_window_still_asks_for_at_least_one_output_token() {
+async fn a_full_window_ends_the_stage_on_the_overflow_without_a_call() {
     let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
     // A window whose regions have consumed every token it has.
     let mut w = window();
@@ -2605,7 +2605,32 @@ async fn a_full_window_still_asks_for_at_least_one_output_token() {
 
     run(&mut world);
 
-    // The request reached the lane rather than being rejected by the provider.
+    assert!(
+        world.get::<AwaitingInference>(e).is_none(),
+        "no call was made"
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_none());
+    assert!(world.get::<ResolveTransition>(e).is_some());
+    let Some(StageOutcome::Errored(message)) = world.get::<StageOutcome>(e) else {
+        panic!("the stage ends on an error");
+    };
+    assert!(message.starts_with("Token limit exceeded"), "{message}");
+    assert!(message.contains("[model_capabilities"), "{message}");
+}
+
+/// A window of zero is one nobody measured. Refusing on it would refuse
+/// everything, so the call goes out as it always has.
+#[tokio::test]
+async fn an_unmeasured_window_is_not_refused_on() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let mut w = window();
+    w.max_tokens = 0;
+    let e = world
+        .spawn((agent_state(), w, stage("m", vec![], None), ReadyToInfer))
+        .id();
+
+    run(&mut world);
+
     assert!(world.get::<AwaitingInference>(e).is_some());
 }
 
@@ -3686,9 +3711,9 @@ async fn dispatch_persistence_serializes_interaction_point() {
 
     // Let the still-blocked ask complete so its task ends cleanly.
     assert!(
-        hub.answer(leviath_core::interaction::InteractionResponse::text(
+        hub.answer(leviath_core::interaction::InteractionResponse::choice(
             "a-point-plan_approval-3",
-            "",
+            0,
         ))
     );
     ask.await.unwrap();
@@ -11662,6 +11687,29 @@ fn resolve_transition_routes_error_down_a_dead_end_edge_when_that_is_the_only_es
     assert_eq!(
         world.get::<AgentState>(e).unwrap().status,
         AgentStatus::Active
+    );
+}
+
+/// An error raised before any call was made (a prompt that cannot fit) arrives
+/// as the outcome alone. With nowhere to go, the run must still end on it,
+/// rather than keep a status that says it is working.
+#[test]
+fn an_error_outcome_with_no_escape_becomes_the_run_status() {
+    let a = stage_named("a", None, false, None);
+    let bp = blueprint(vec![a]);
+    let mut world = World::new();
+    let e = spawn_outcome_agent(
+        &mut world,
+        bp,
+        StageOutcome::Errored("Token limit exceeded: no room".to_string()),
+        AgentStatus::Active,
+    );
+    run_transition(&mut world);
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Error {
+            message: "Token limit exceeded: no room".to_string()
+        }
     );
 }
 

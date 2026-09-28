@@ -166,6 +166,13 @@ async fn daemon_background_loop(
                 message: format!("the daemon has no such run to {what}"),
                 ok: false,
             },
+            // The daemon refused it and said why: an answer the question
+            // cannot take, or a message with nothing in it.
+            Ok(ControlResponse::Error { message }) => types::DaemonOutcome {
+                run_id,
+                message: format!("the daemon refused the {what}: {message}"),
+                ok: false,
+            },
             Ok(other) => types::DaemonOutcome {
                 run_id,
                 message: format!("unexpected daemon response to {what}: {other:?}"),
@@ -748,6 +755,25 @@ mod tests {
         .await;
         assert!(!refused.ok);
         assert!(refused.message.contains("no such run to resume"));
+    }
+
+    /// An answer the daemon refused says why, rather than reading as an
+    /// unexpected reply.
+    #[tokio::test]
+    async fn daemon_background_loop_reports_a_refused_answer_with_its_reason() {
+        let refused = command_outcome(
+            DaemonCommand::Answer {
+                response: leviath_core::interaction::InteractionResponse::choice("q1", 9),
+            },
+            Some(r#"{"result":"error","message":"'q1' has options 0-1; there is no option 9"}"#),
+        )
+        .await;
+        assert!(!refused.ok);
+        assert_eq!(refused.run_id, "q1");
+        assert_eq!(
+            refused.message,
+            "the daemon refused the answer: 'q1' has options 0-1; there is no option 9"
+        );
     }
 
     /// The loop stops when the dashboard has gone away, rather than spinning on
