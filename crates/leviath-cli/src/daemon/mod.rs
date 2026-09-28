@@ -4,6 +4,7 @@
 //! [`leviath_runtime::control_socket`]): the tool service that bridges tool calls
 //! to the built-in / MCP executors and the interaction hub.
 
+pub(crate) mod catalog_refresh;
 pub mod client;
 pub(crate) mod config_reload;
 pub(crate) mod fanout_spawner;

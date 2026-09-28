@@ -302,6 +302,14 @@ impl AgentWorldBuilder {
         // Shares every provider with the world's copy, so a list read through
         // it is the list the spawn resolves against.
         let unread_registry = registry.clone();
+        // The providers a bare model name may route to: the only ones whose
+        // unread list can hold a stage back, so the only ones worth asking.
+        let preferred: Vec<String> = self
+            .defaults
+            .order()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
 
         let hub = InteractionHub::new();
         let (service, basic_tools): (Arc<dyn ToolService>, Option<Arc<BasicToolService>>) =
@@ -338,9 +346,14 @@ impl AgentWorldBuilder {
         // did not answer); a list already in hand costs nothing.
         host.set_spawn_preprocessor(Box::new(move |_args| {
             let registry = unread_registry.clone();
+            let preferred = preferred.clone();
             Box::pin(async move {
+                let preferred: Vec<&str> = preferred.iter().map(String::as_str).collect();
                 registry
-                    .prime_unread(std::time::Duration::from_secs(PRIME_TIMEOUT_SECS), &[])
+                    .prime_unread(
+                        std::time::Duration::from_secs(PRIME_TIMEOUT_SECS),
+                        &preferred,
+                    )
                     .await;
             })
         }));
