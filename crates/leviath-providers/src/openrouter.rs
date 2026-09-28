@@ -823,6 +823,14 @@ impl Provider for OpenRouterProvider {
         self.learned.catalog()
     }
 
+    /// The gateway's listing is never empty once read, so an empty one is a
+    /// listing that failed or has not run: the compiled-in table that
+    /// [`Self::serves_model`] falls back to cannot name a model newer than
+    /// this build.
+    fn catalog_unread(&self) -> bool {
+        self.learned.is_empty()
+    }
+
     fn pricing(&self, model: &str) -> Option<crate::ModelPricing> {
         self.learned.get(model).and_then(|m| m.pricing)
     }
@@ -2297,6 +2305,23 @@ mod tests {
             provider.warned_unknown.contains("nobody/knows"),
             "a model with no answer anywhere is still called out"
         );
+    }
+
+    /// Until the listing comes back the gateway cannot tell a model it serves
+    /// from one it does not, and says so; a listing that fails leaves it so.
+    #[tokio::test]
+    async fn the_catalogue_is_unread_until_the_listing_comes_back() {
+        let down = spawn_mock_server(503, "Service Unavailable", b"proxy down").await;
+        let provider = provider_with_url(down);
+        assert!(provider.catalog_unread());
+        assert!(provider.prime_capabilities().await.is_err());
+        assert!(provider.catalog_unread());
+
+        let body = br#"{"data":[{"id":"anthropic/claude-opus-5","context_length":200000}]}"#;
+        let up = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(up);
+        provider.prime_capabilities().await.expect("primes");
+        assert!(!provider.catalog_unread());
     }
 
     /// The gateway answers a blueprint's bare model name from its live

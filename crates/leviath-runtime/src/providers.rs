@@ -235,6 +235,51 @@ impl ProviderRegistry {
         timeout: std::time::Duration,
         also: &[&str],
     ) -> Vec<(String, String)> {
+        Self::prime_each(self.prime_targets(also), timeout).await
+    }
+
+    /// [`Self::prime_capabilities`] for only the providers whose model list
+    /// is still unread ([`Provider::catalog_unread`]), answering the ones it
+    /// read this time.
+    ///
+    /// A daemon started while a gateway was unreachable keeps that gateway's
+    /// list empty, and a bare model name it would have served is refused
+    /// until the list is read. Asking again before each spawn is what lets
+    /// the next run go through once the gateway is back, without a restart.
+    /// Nothing is asked of a provider whose list is already in hand, so a
+    /// healthy daemon pays nothing for this.
+    pub async fn prime_unread(&self, timeout: std::time::Duration, also: &[&str]) -> Vec<String> {
+        let unread: Vec<(String, Arc<dyn Provider>)> = self
+            .prime_targets(also)
+            .into_iter()
+            .filter(|(_, provider)| provider.catalog_unread())
+            .collect();
+        Self::prime_each(unread.clone(), timeout).await;
+        let mut read: Vec<String> = unread
+            .into_iter()
+            .filter(|(_, provider)| !provider.catalog_unread())
+            .map(|(name, _)| name)
+            .collect();
+        read.sort();
+        read
+    }
+
+    /// Every provider whose model list is still unread, sorted: what a bare
+    /// model name cannot be judged against until it is read.
+    pub fn unread_catalogs(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .providers
+            .iter()
+            .filter(|(_, provider)| provider.catalog_unread())
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The providers [`Self::prime_capabilities`] asks: every native one, the
+    /// configured script providers, and the ones `also` names.
+    fn prime_targets(&self, also: &[&str]) -> Vec<(String, Arc<dyn Provider>)> {
         let mut targets: Vec<(String, Arc<dyn Provider>)> = self
             .providers
             .iter()
@@ -271,6 +316,15 @@ impl ProviderRegistry {
                 targets.push((name.to_string(), provider));
             }
         }
+        targets
+    }
+
+    /// Prime each of `targets`, each bounded by `timeout`, answering the ones
+    /// whose listing failed.
+    async fn prime_each(
+        targets: Vec<(String, Arc<dyn Provider>)>,
+        timeout: std::time::Duration,
+    ) -> Vec<(String, String)> {
         // Side by side rather than one after another: each provider's answer
         // is its own network call, and a listing command or a daemon start
         // that waited for five of them in turn paid five timeouts in the
@@ -607,6 +661,9 @@ mod tests {
         /// When true, [`Provider::learned_models`] returns `None`, standing in
         /// for a provider (a script provider) that keeps no learned store.
         no_store: bool,
+        /// When true, this stands in for a gateway: its list is unread while
+        /// the learned store is empty, and a prime that succeeds fills it.
+        gateway: bool,
     }
 
     impl StubProvider {
@@ -619,6 +676,15 @@ mod tests {
                 refusal: None,
                 learned: leviath_providers::LearnedModels::default(),
                 no_store: false,
+                gateway: false,
+            }
+        }
+
+        /// A gateway whose listing ends as `outcome` says.
+        fn gateway(outcome: PrimeOutcome) -> Self {
+            Self {
+                gateway: true,
+                ..Self::new(outcome)
             }
         }
 
@@ -691,7 +757,16 @@ mod tests {
             self.primed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             match self.outcome {
-                PrimeOutcome::Ok => Ok(()),
+                PrimeOutcome::Ok => {
+                    if self.gateway {
+                        self.learned.replace(
+                            [("m".to_string(), leviath_providers::LearnedModel::default())]
+                                .into_iter()
+                                .collect(),
+                        );
+                    }
+                    Ok(())
+                }
                 PrimeOutcome::Fails => Err(ProviderError::ApiError("no".to_string())),
                 PrimeOutcome::Hangs => {
                     // Longer than any timeout a test passes, so the timeout arm
@@ -731,6 +806,48 @@ mod tests {
         fn refusal_reason(&self, _model_key: &str) -> Option<String> {
             self.refusal.clone()
         }
+
+        fn catalog_unread(&self) -> bool {
+            self.gateway && self.learned.is_empty()
+        }
+    }
+
+    /// Only the lists still unread are asked for again, and the answer names
+    /// the ones that came back. A gateway still down stays unread, so the next
+    /// spawn asks it once more; a list already in hand costs nothing.
+    #[tokio::test]
+    async fn prime_unread_asks_only_the_unread_lists_and_names_the_ones_read() {
+        let back = StubProvider::gateway(PrimeOutcome::Ok);
+        let down = StubProvider::gateway(PrimeOutcome::Fails);
+        let read = StubProvider {
+            gateway: true,
+            ..StubProvider::with_learned(&[("m", 100)])
+        };
+        let table = StubProvider::new(PrimeOutcome::Ok);
+        let counts = [
+            back.primed.clone(),
+            down.primed.clone(),
+            read.primed.clone(),
+            table.primed.clone(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register("back".to_string(), Arc::new(back));
+        registry.register("down".to_string(), Arc::new(down));
+        registry.register("read".to_string(), Arc::new(read));
+        registry.register("table".to_string(), Arc::new(table));
+        assert_eq!(registry.unread_catalogs(), ["back", "down"]);
+
+        let got = registry
+            .prime_unread(std::time::Duration::from_secs(5), &[])
+            .await;
+
+        assert_eq!(got, ["back"]);
+        let primed: Vec<usize> = counts
+            .iter()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .collect();
+        assert_eq!(primed, [1, 1, 0, 0], "only the unread lists are asked for");
+        assert_eq!(registry.unread_catalogs(), ["down"]);
     }
 
     /// A provider gets to explain a refusal, and one with nothing to add is

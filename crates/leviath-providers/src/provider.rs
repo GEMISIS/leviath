@@ -898,6 +898,22 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Whether this provider answers [`Self::serves_model`] from a model list
+    /// it has not managed to read.
+    ///
+    /// A gateway fronting hundreds of models knows what it serves only once
+    /// its listing has been read. Until then its `None` from `serves_model`
+    /// is "cannot tell", not "does not serve", and a resolver that reads it as
+    /// a no moves a stage onto whatever comes next in its list. That is how a
+    /// daemon started while its proxy was down ran every stage on the
+    /// fallback model. `true` here lets the resolver refuse instead.
+    ///
+    /// Defaults to `false`: a provider that answers from its own naming
+    /// scheme or a compiled-in table can always give a real answer.
+    fn catalog_unread(&self) -> bool {
+        false
+    }
+
     /// This provider's primed catalogue, so a registry can read it into the
     /// shared on-disk cache after priming and fill it from that cache on a
     /// build that has not primed.
@@ -2224,6 +2240,10 @@ mod tests {
     #[test]
     fn default_served_catalog_says_nothing_rather_than_nothing_served() {
         assert_eq!(MinimalProvider.served_catalog(), None);
+        assert!(
+            !MinimalProvider.catalog_unread(),
+            "a provider answering from its own table always has an answer"
+        );
     }
 
     /// A provider that has not implemented `pricing` reports no rates, and that

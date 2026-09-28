@@ -152,6 +152,40 @@ impl ProviderReload {
         changed
     }
 
+    /// Read the model list of every provider whose list is still unread, and
+    /// write what that learned to the shared capability cache.
+    ///
+    /// A daemon that started while a gateway was unreachable refuses every
+    /// bare model name the gateway would have served (see
+    /// `Provider::catalog_unread`). Asked again on each spawn, so the first run
+    /// after the gateway comes back resolves normally rather than the daemon
+    /// needing a restart. A list already in hand is not asked for again.
+    pub async fn prime_unread(&self, config: &Config) -> Vec<String> {
+        let registry = self.registry();
+        let read = registry
+            .prime_unread(
+                std::time::Duration::from_secs(PRIME_TIMEOUT_SECS),
+                &[config.default_provider.as_str()],
+            )
+            .await;
+        if !read.is_empty() {
+            let names = read.join(", ");
+            tracing::info!(
+                providers = %names,
+                "read the model list that could not be read before; bare model names \
+                 served there resolve again"
+            );
+            let cache_path = leviath_core::paths::capability_cache_path();
+            registry.save_capability_cache(
+                cache_path.as_deref(),
+                chrono::Utc::now().timestamp(),
+                &crate::provider_checks::fingerprints(cache_path.as_deref(), config),
+                &[],
+            );
+        }
+        read
+    }
+
     /// With zero retention asked for, read again what each provider answers
     /// its retention from (Bedrock's account mode), so the spawn about to be
     /// judged sees a mode `lev providers retention` set a moment ago rather

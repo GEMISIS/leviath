@@ -668,6 +668,24 @@ async fn list_models_parses_and_filters() {
     assert!(models[0].learned, "a script's list_models is a listing");
 }
 
+/// A script that can list its models has an unread list until that listing
+/// comes back; one without `list_models` answers from `serves` and is never
+/// unread.
+#[tokio::test]
+async fn a_script_list_is_unread_until_its_listing_comes_back() {
+    let listing = format!(
+        "{NOOP_INIT}fn inference(s, r) {{ #{{}} }}\n\
+         fn list_models(state) {{ [ #{{ id: \"m1\" }} ] }}"
+    );
+    let p = build(&listing, FakeExecutor::new()).unwrap();
+    assert!(p.catalog_unread());
+    p.prime_capabilities().await.unwrap();
+    assert!(!p.catalog_unread());
+
+    let plain = format!("{NOOP_INIT}fn inference(s, r) {{ #{{}} }}");
+    assert!(!build(&plain, FakeExecutor::new()).unwrap().catalog_unread());
+}
+
 #[tokio::test]
 async fn list_models_non_array_is_empty() {
     let src = format!(
