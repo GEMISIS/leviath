@@ -25,7 +25,7 @@ use crate::components::{
     AgentMessage, AgentState, AgentStatus, AwaitingInteraction, ContextWindow, ParentRef,
     SubAgentChildren, WaitReason,
 };
-use crate::interaction_hub::InteractionHub;
+use crate::interaction_hub::{AnswerError, InteractionHub};
 use crate::persistence::{RunMetadata, TokenTotals};
 use crate::world::{AgentId, LaneSnapshot, PipelineWorld};
 
@@ -574,6 +574,16 @@ impl WorldHost {
                 parts,
                 reply,
             } => {
+                // A message with no words and no files wakes the run for an
+                // empty turn and costs it an inference, for nothing anybody
+                // said.
+                if content.trim().is_empty() && parts.is_empty() {
+                    let _ = reply.send(Err(
+                        "refusing to deliver an empty message: give it some text or a file"
+                            .to_string(),
+                    ));
+                    return;
+                }
                 // Page the target in if it was unloaded, so delivery finds it.
                 self.resolve_or_reload(&agent_id);
                 let ok = self
@@ -585,7 +595,7 @@ impl WorldHost {
                         parts,
                     })
                     .is_ok();
-                let _ = reply.send(ok);
+                let _ = reply.send(Ok(ok));
             }
             ControlOp::ListInteractions { reply } => {
                 let _ = reply.send(self.interactions.pending());
@@ -597,11 +607,17 @@ impl WorldHost {
                 // this is where that reaches the run (an unanswered prompt
                 // waits for ever, so a run stuck behind one has no other way
                 // out but a cancel).
-                let agent = self.interactions.answer_for(response);
-                if let Some(entity) = agent.as_deref().and_then(|id| self.live_entity(id)) {
-                    self.on_resumed(entity.entity());
-                }
-                let _ = reply.send(agent.is_some());
+                let outcome = match self.interactions.answer_for(response) {
+                    Ok(agent) => {
+                        if let Some(entity) = self.live_entity(&agent) {
+                            self.on_resumed(entity.entity());
+                        }
+                        Ok(true)
+                    }
+                    Err(AnswerError::NotOpen) => Ok(false),
+                    Err(AnswerError::Refused(why)) => Err(why),
+                };
+                let _ = reply.send(outcome);
             }
             ControlOp::CancelInteraction { request_id, reply } => {
                 let _ = reply.send(self.interactions.cancel(&request_id));

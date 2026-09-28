@@ -52,14 +52,20 @@ pub struct ResumeArgs {
     pub run_id: String,
 }
 
-/// Arguments for `lev respond` - answer a pending `ask_user` interaction the
-/// daemon is holding, or (with no `request_id`) list the open interactions.
+/// Arguments for `lev respond` - answer an interaction the daemon is holding.
+///
+/// Answering is all it does, and only with an answer given: an answer can't be
+/// taken back, so naming a question is never enough to answer it.
+/// `lev interactions` lists and shows them.
 #[derive(clap::Args, Debug, Clone)]
+#[command(after_help = "To see an interaction before answering it: lev interactions <REQUEST_ID>")]
 pub struct RespondArgs {
     /// The interaction request id to answer, or enough of its start to name
-    /// one open interaction. Omit to list open interactions.
-    pub request_id: Option<String>,
-    /// Free-text (or edited) answer value.
+    /// one open interaction. `lev interactions` lists them.
+    pub request_id: String,
+    /// The text answer, for a free-text or edit question. An empty "" is an
+    /// answer too: it acknowledges a review, or keeps an edited document as
+    /// it was.
     pub value: Option<String>,
     /// Answer a multiple-choice interaction by 0-based option index.
     #[arg(long)]
@@ -81,8 +87,7 @@ pub struct RespondArgs {
     /// current stage.
     #[arg(long, conflicts_with = "session")]
     pub stage: bool,
-    /// Report open interactions (or the outcome of answering one) as JSON.
-    /// This is how an unattended caller finds the questions it has to answer.
+    /// Report the outcome of the answer as JSON.
     #[arg(long)]
     pub json: bool,
     /// Attach a file to a text answer: `path[:region][:type][:text]`, as on
@@ -92,7 +97,20 @@ pub struct RespondArgs {
     pub attach: Vec<String>,
 }
 
-/// One open interaction in `lev respond --json`.
+/// Arguments for `lev interactions` - list the interactions the daemon is
+/// holding, or show one in full. Reading never answers anything.
+#[derive(clap::Args, Debug, Clone)]
+pub struct InteractionsArgs {
+    /// Show this interaction in full: its request id, or enough of its start
+    /// to name one. Omit to list every open interaction.
+    pub request_id: Option<String>,
+    /// Report as JSON. This is how an unattended caller finds the questions
+    /// it has to answer.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// One open interaction in `lev interactions --json`.
 ///
 /// The whole request rather than the four fields the prose listing has room
 /// for: `tool_arguments` and `body` are exactly what a caller deciding whether
@@ -120,6 +138,8 @@ async fn send_bool(
             Ok(())
         }
         Ok(ControlResponse::Ok { ok: false }) => bail!("{not_found_msg}"),
+        // The daemon refused the request and said why.
+        Ok(ControlResponse::Error { message }) => bail!("{message}"),
         Ok(other) => bail!("unexpected daemon response: {other:?}"),
         Err(e) => bail!("the leviath daemon is not reachable ({e}); start it with `lev daemon`"),
     }
@@ -257,7 +277,7 @@ fn report_forced(
     }
 }
 
-/// A short human label for an interaction kind (used by the `lev respond` list).
+/// A short human label for an interaction kind (used by the `lev interactions` list).
 fn kind_label(kind: &InteractionKind) -> &'static str {
     match kind {
         InteractionKind::FreeText => "free-text",
@@ -293,8 +313,79 @@ fn format_interaction(agent_id: &str, req: &InteractionRequest) -> String {
     s
 }
 
+/// Render one open interaction in full, for `lev interactions <id>`: all of
+/// what the listing entry says, then what the listing has no room for (the
+/// call's arguments, the document under review), and the line that answers it.
+fn format_interaction_detail(agent_id: &str, req: &InteractionRequest) -> String {
+    let mut s = format_interaction(agent_id, req);
+    if let Some(arguments) = &req.tool_arguments {
+        s.push_str("\n  arguments:");
+        let pretty = serde_json::to_string_pretty(arguments).expect("JSON serializes");
+        for line in pretty.lines() {
+            s.push_str(&format!("\n    {line}"));
+        }
+    }
+    if let Some(body) = &req.body {
+        s.push_str("\n  body:");
+        for line in body.lines() {
+            s.push_str(&format!("\n    {line}"));
+        }
+    }
+    let required = match req.required {
+        true => "yes",
+        false => "no",
+    };
+    s.push_str(&format!("\n  required: {required}"));
+    s.push_str(&format!("\nanswer with: {}", how_to_answer(req)));
+    s
+}
+
+/// The `lev respond` line that answers `req`, for its kind.
+fn how_to_answer(req: &InteractionRequest) -> String {
+    let id = &req.id;
+    match req.kind {
+        InteractionKind::FreeText | InteractionKind::EditText => {
+            format!("lev respond {id} \"your answer\"")
+        }
+        InteractionKind::MultipleChoice => format!(
+            "lev respond {id} --choice N  (N is 0-{})",
+            req.options.len().saturating_sub(1)
+        ),
+        InteractionKind::Confirm => format!("lev respond {id} --approve  (or --deny)"),
+        InteractionKind::ToolApproval => {
+            format!("lev respond {id} --approve [--stage|--session]  (or --deny [--feedback TEXT])")
+        }
+    }
+}
+
+/// `lev respond` has to be told what the answer is: exactly one of a value,
+/// `--choice`, `--approve` or `--deny`. An answer can't be taken back, and one
+/// with nothing in it reads to the run like nobody answered (a checkpoint
+/// approves, a review is "acknowledged"), so none given is refused rather than
+/// sent. Two given is refused too, rather than one quietly dropped.
+fn check_one_answer(args: &RespondArgs) -> anyhow::Result<()> {
+    let given = [
+        args.value.is_some(),
+        args.choice.is_some(),
+        args.approve,
+        args.deny,
+    ];
+    match given.into_iter().filter(|given| *given).count() {
+        1 => Ok(()),
+        0 => bail!(
+            "refusing to answer '{id}' without an answer: give a VALUE, --choice N, --approve \
+             or --deny. To see the question first: lev interactions {id}",
+            id = args.request_id
+        ),
+        _ => bail!(
+            "give one answer: a VALUE, --choice, --approve and --deny are each a whole answer"
+        ),
+    }
+}
+
 /// Build the [`InteractionResponse`] implied by the CLI flags. Approve/deny wins,
-/// then an explicit `--choice`, otherwise a free-text value (empty if omitted).
+/// then an explicit `--choice`, otherwise the text value. [`check_one_answer`]
+/// has already made sure exactly one was given.
 fn build_response(request_id: &str, args: &RespondArgs) -> InteractionResponse {
     if args.approve || args.deny {
         let scope = match (args.session, args.stage) {
@@ -360,8 +451,7 @@ async fn open_interactions(
 }
 
 /// List the interactions the daemon is currently holding.
-async fn list_interactions(client: &ControlClient, json: bool) -> anyhow::Result<()> {
-    let interactions = open_interactions(client).await?;
+fn list_interactions(interactions: &[(String, InteractionRequest)], json: bool) {
     if json {
         let open: Vec<OpenInteraction<'_>> = interactions
             .iter()
@@ -373,16 +463,45 @@ async fn list_interactions(client: &ControlClient, json: bool) -> anyhow::Result
             "{}",
             serde_json::to_string_pretty(&open).expect("an interaction listing serializes")
         );
-        return Ok(());
+        return;
     }
     if interactions.is_empty() {
         println!("no open interactions");
     } else {
-        for (agent_id, req) in &interactions {
+        for (agent_id, req) in interactions {
             println!("{}", format_interaction(agent_id, req));
         }
     }
+}
+
+/// Show the one open interaction `typed` names, in full.
+fn show_interaction(
+    interactions: &[(String, InteractionRequest)],
+    typed: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let (agent_id, request) = resolve_request_id(typed, interactions)?;
+    match json {
+        true => println!(
+            "{}",
+            serde_json::to_string_pretty(&OpenInteraction { agent_id, request })
+                .expect("an interaction serializes")
+        ),
+        false => println!("{}", format_interaction_detail(agent_id, request)),
+    }
     Ok(())
+}
+
+/// `lev interactions`: list the open interactions, or show the one named.
+pub async fn interactions(client: &ControlClient, args: &InteractionsArgs) -> anyhow::Result<()> {
+    let open = open_interactions(client).await?;
+    match &args.request_id {
+        None => {
+            list_interactions(&open, args.json);
+            Ok(())
+        }
+        Some(typed) => show_interaction(&open, typed, args.json),
+    }
 }
 
 /// Which open interaction `typed` names.
@@ -394,15 +513,15 @@ async fn list_interactions(client: &ControlClient, json: bool) -> anyhow::Result
 /// listed - a request id carries the run that raised it, so a prompt answered
 /// against the wrong one lets work nobody looked at through, and four more
 /// characters is the cheaper of the two.
-fn resolve_request_id(
+fn resolve_request_id<'a>(
     typed: &str,
-    open: &[(String, InteractionRequest)],
-) -> anyhow::Result<String> {
+    open: &'a [(String, InteractionRequest)],
+) -> anyhow::Result<(&'a str, &'a InteractionRequest)> {
     if typed.is_empty() {
-        bail!("name the interaction to answer; `lev respond` with no id lists the open ones");
+        bail!("name an interaction; `lev interactions` lists the open ones");
     }
-    if open.iter().any(|(_, req)| req.id == typed) {
-        return Ok(typed.to_string());
+    if let Some((agent_id, req)) = open.iter().find(|(_, req)| req.id == typed) {
+        return Ok((agent_id, req));
     }
     let named: Vec<&(String, InteractionRequest)> = open
         .iter()
@@ -410,7 +529,7 @@ fn resolve_request_id(
         .collect();
     match named.as_slice() {
         [] => bail!("no such open interaction"),
-        [(_, req)] => Ok(req.id.clone()),
+        [(agent_id, req)] => Ok((agent_id, req)),
         several => {
             let candidates = several
                 .iter()
@@ -418,8 +537,8 @@ fn resolve_request_id(
                 .collect::<Vec<_>>()
                 .join("\n");
             bail!(
-                "'{typed}' is the start of {} open interactions, so nothing was answered; \
-                 give enough of an id to name just one:\n{candidates}",
+                "'{typed}' is the start of {} open interactions; give enough of an id to \
+                 name just one:\n{candidates}",
                 several.len()
             )
         }
@@ -445,8 +564,18 @@ async fn answer_interaction(
     // exist is the file's error rather than whatever the daemon says next.
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut response = attach_answer(build_response(typed, args), &args.attach, &cwd)?;
-    let request_id = resolve_request_id(typed, &open_interactions(client).await?)?;
+    let open = open_interactions(client).await?;
+    let (_, request) = resolve_request_id(typed, &open)?;
+    let request_id = request.id.clone();
     response.request_id = request_id.clone();
+    // The daemon checks this too; checked here as well so the refusal can say
+    // which flag answers the question.
+    if let Err(why) = leviath_core::interaction::check_answer(request, &response) {
+        bail!(
+            "{why}; nothing was answered. Answer with: {}",
+            how_to_answer(request)
+        );
+    }
     // A failed answer stays an error (non-zero exit plus the message on
     // stderr), so `--json` only changes the success line.
     let applied = match args.json {
@@ -464,14 +593,11 @@ async fn answer_interaction(
     .await
 }
 
-/// `lev respond`: answer a pending interaction, or list open ones when no
-/// `request_id` is given.
+/// `lev respond`: answer a pending interaction.
 pub async fn respond(client: &ControlClient, args: &RespondArgs) -> anyhow::Result<()> {
+    check_one_answer(args)?;
     check_feedback_flag(args)?;
-    match &args.request_id {
-        None => list_interactions(client, args.json).await,
-        Some(typed) => answer_interaction(client, args, typed).await,
-    }
+    answer_interaction(client, args, &args.request_id).await
 }
 
 #[cfg(test)]

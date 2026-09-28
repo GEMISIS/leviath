@@ -346,7 +346,8 @@ These are the commands that talk to it:
 |---|---|
 | `lev ps` | List running agents and their status. See [reading it](/docs/cli#reading-lev-ps) |
 | `lev msg <id> <text>` | Send a message to a running agent |
-| `lev respond` | Answer a pending `ask_user` question |
+| `lev interactions` | List the questions runs are waiting on, or show one |
+| `lev respond <id>` | Answer one of them |
 | `lev pause <run-id>` | Pause a run |
 | `lev resume <run-id>` | Resume a paused run |
 | `lev cancel <run-id>` | Cancel a run |

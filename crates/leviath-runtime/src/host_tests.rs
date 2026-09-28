@@ -2351,12 +2351,13 @@ async fn the_resume_hook_fires_for_a_resume_and_for_an_answered_prompt() {
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
-    assert!(
+    assert_eq!(
         ask(&mut host, |reply| ControlOp::AnswerInteraction {
             response: leviath_core::interaction::InteractionResponse::text("q-perm", "yes"),
             reply,
         })
-        .await
+        .await,
+        Ok(true)
     );
     assert_eq!(asking.await.unwrap().value.as_deref(), Some("yes"));
     assert_eq!(
@@ -2367,12 +2368,13 @@ async fn the_resume_hook_fires_for_a_resume_and_for_an_answered_prompt() {
 
     // An answer to a request nobody is waiting on resumes nothing, and still
     // reports the miss.
-    assert!(
-        !ask(&mut host, |reply| ControlOp::AnswerInteraction {
+    assert_eq!(
+        ask(&mut host, |reply| ControlOp::AnswerInteraction {
             response: leviath_core::interaction::InteractionResponse::text("gone", "x"),
             reply,
         })
-        .await
+        .await,
+        Ok(false)
     );
     assert_eq!(RESUMED.load(Ordering::SeqCst), 2);
 }
@@ -2401,12 +2403,13 @@ async fn an_answer_for_an_unregistered_agent_resumes_nothing() {
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
-    assert!(
+    assert_eq!(
         ask(&mut host, |reply| ControlOp::AnswerInteraction {
             response: leviath_core::interaction::InteractionResponse::text("q-orphan", "hi"),
             reply,
         })
-        .await
+        .await,
+        Ok(true)
     );
     assert_eq!(asking.await.unwrap().value.as_deref(), Some("hi"));
     assert_eq!(RESUMED_ORPHAN.load(Ordering::SeqCst), 0);
@@ -2461,13 +2464,25 @@ async fn interaction_ops_list_answer_and_cancel() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].0, "agent-a");
 
+    // An answer the question cannot take is refused with the reason, and
+    // the question stays open for a right one.
+    let refused = ask(&mut host, |reply| ControlOp::AnswerInteraction {
+        response: leviath_core::interaction::InteractionResponse::choice("q1", 0),
+        reply,
+    })
+    .await;
+    let why = refused.expect_err("a choice is no answer to a text question");
+    assert!(why.contains("text question"), "{why}");
+    let list = ask(&mut host, |reply| ControlOp::ListInteractions { reply }).await;
+    assert_eq!(list.len(), 1, "a refused answer leaves the question open");
+
     // AnswerInteraction fulfils it.
     let ok = ask(&mut host, |reply| ControlOp::AnswerInteraction {
         response: leviath_core::interaction::InteractionResponse::text("q1", "hi"),
         reply,
     })
     .await;
-    assert!(ok);
+    assert_eq!(ok, Ok(true));
     assert_eq!(asking.await.unwrap().value.as_deref(), Some("hi"));
 
     // CancelInteraction on an unknown id ⇒ false.
@@ -2503,6 +2518,24 @@ async fn cancel_interaction_op_wakes_asker() {
     assert_eq!(asking.await.unwrap().request_id, "q2");
 }
 
+/// A message with no words and no files would wake the run for an empty turn,
+/// so it is refused with the reason rather than delivered.
+#[tokio::test]
+async fn an_empty_message_is_refused() {
+    let mut host = host_with(vec![]);
+    spawn(&mut host, "run-a", "agent-a");
+    let refused = ask(&mut host, |reply| ControlOp::Message {
+        agent_id: "agent-a".to_string(),
+        content: " \n".to_string(),
+        target_region: None,
+        parts: Vec::new(),
+        reply,
+    })
+    .await;
+    let why = refused.expect_err("an empty message says nothing");
+    assert!(why.contains("empty message"), "{why}");
+}
+
 #[tokio::test]
 async fn message_op_is_delivered() {
     let mut host = host_with(vec![]);
@@ -2516,7 +2549,7 @@ async fn message_op_is_delivered() {
         reply,
     })
     .await;
-    assert!(ok);
+    assert_eq!(ok, Ok(true));
 
     // One tick delivers the message into context.
     host.world_mut().tick();

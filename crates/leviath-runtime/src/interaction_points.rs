@@ -216,9 +216,20 @@ fn build_point_request(point: &InteractionPoint, id: String, body: &str) -> Inte
     req
 }
 
-/// Resolve a response to the selected option label / free text: a choice index
-/// maps through `options`, otherwise the free-text value (empty if none).
+/// What a confirm point's "yes" reads as, for routing and for the directive
+/// and option lists a blueprint keys on it.
+const CONFIRM_YES: &str = "Yes";
+
+/// What a confirm point's "no" reads as.
+const CONFIRM_NO: &str = "No";
+
+/// Resolve a response to the selected option label / free text: a yes or no
+/// is the confirm label, a choice index maps through `options`, otherwise the
+/// free-text value (empty if none).
 fn resolve_answer(resp: &InteractionResponse, options: &[String]) -> String {
+    if let Some(approved) = resp.approved {
+        return if approved { CONFIRM_YES } else { CONFIRM_NO }.to_string();
+    }
     if let Some(opt) = resp.choice_index.and_then(|i| options.get(i)) {
         return opt.clone();
     }
@@ -249,6 +260,11 @@ fn route_answer(point: &InteractionPoint, user_text: String) -> Routed {
             user_text,
             directive: directive.to_string(),
         }
+    } else if point.style == InteractionStyle::Confirm && user_text == CONFIRM_NO {
+        // Anything not named in a list approves, which is right for a
+        // choice's options and wrong for a refusal: "No" to "go ahead?" that
+        // no list claims stops the run rather than going ahead.
+        Routed::Abort
     } else {
         Routed::Approve { user_text }
     }
@@ -821,7 +837,7 @@ fn inject(window: &mut ContextWindow, name: &str, prefix: &str, text: &str) {
 mod tests {
     use super::*;
     use crate::components::AgentStatus;
-    use leviath_core::interaction::InteractionResponse;
+    use leviath_core::interaction::{ApprovalScope, InteractionResponse};
     use leviath_core::{Region, RegionKind};
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -1900,6 +1916,59 @@ mod tests {
             out,
             PointOutcome::Approve {
                 user_text: "Approve".to_string()
+            }
+        );
+    }
+
+    /// Every client answers a confirm with an approval, not a choice, so the
+    /// yes or no has to reach the routing. A "No" that read as empty text fell
+    /// through to Approve: the person refused and the stage moved on.
+    #[tokio::test]
+    async fn a_confirm_point_hears_yes_and_no() {
+        let confirm = || point("go_ahead", InteractionStyle::Confirm, &[]);
+        let yes = drive_point(confirm(), |hub, id| {
+            assert!(hub.answer(InteractionResponse::approval(
+                &id,
+                true,
+                ApprovalScope::Once
+            )));
+        })
+        .await;
+        assert_eq!(
+            yes,
+            PointOutcome::Approve {
+                user_text: "Yes".to_string()
+            }
+        );
+
+        let no = drive_point(confirm(), |hub, id| {
+            assert!(hub.answer(InteractionResponse::approval(
+                &id,
+                false,
+                ApprovalScope::Once
+            )));
+        })
+        .await;
+        assert_eq!(no, PointOutcome::Abort, "a refusal must not approve");
+
+        // A blueprint that says what "No" means gets that instead.
+        let mut revise = confirm();
+        revise
+            .directives
+            .insert("No".to_string(), "rework it".to_string());
+        let redirected = drive_point(revise, |hub, id| {
+            assert!(hub.answer(InteractionResponse::approval(
+                &id,
+                false,
+                ApprovalScope::Once
+            )));
+        })
+        .await;
+        assert_eq!(
+            redirected,
+            PointOutcome::Directive {
+                user_text: "No".to_string(),
+                directive: "rework it".to_string(),
             }
         );
     }

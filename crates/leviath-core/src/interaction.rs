@@ -357,6 +357,66 @@ pub fn approval_choice(index: usize) -> Option<ApprovalScope> {
     }
 }
 
+/// Whether `resp` is an answer `req` can take, or why not.
+///
+/// An answer that carries no decision reads, to the run, exactly like the
+/// neutral answer a timeout hands back, and what a run does with that depends
+/// on the question: a checkpoint approves, a review is "acknowledged", a tool
+/// approval is denied. So an answer has to say something the question can
+/// hear. Text for a text question (empty is fine there, and is how a person
+/// acknowledges a review or keeps a document unchanged), a listed option for a
+/// choice, and a yes or no for an approval. Every answering surface goes
+/// through this, so a refusal reads the same from each.
+pub fn check_answer(req: &InteractionRequest, resp: &InteractionResponse) -> Result<(), String> {
+    let id = &req.id;
+    if resp.feedback.is_some() && resp.approved != Some(false) {
+        return Err(format!(
+            "feedback goes with a denial; '{id}' was not denied"
+        ));
+    }
+    if !resp.parts.is_empty() && resp.value.is_none() {
+        return Err(format!(
+            "files go with a text answer; the answer to '{id}' has no text"
+        ));
+    }
+    match req.kind {
+        InteractionKind::FreeText | InteractionKind::EditText => {
+            if resp.approved.is_some() || resp.choice_index.is_some() || resp.value.is_none() {
+                return Err(format!("'{id}' is a text question: answer it with text"));
+            }
+        }
+        InteractionKind::MultipleChoice => {
+            let last = req.options.len().saturating_sub(1);
+            match resp.choice_index {
+                Some(index) if index < req.options.len() => {}
+                Some(index) => {
+                    return Err(format!(
+                        "'{id}' has options 0-{last}; there is no option {index}"
+                    ));
+                }
+                // A typed answer is read against the option labels, so a
+                // label (or anything else a person wrote) is an answer. A
+                // blank one is not.
+                None if resp.approved.is_none()
+                    && resp.value.as_deref().is_some_and(|v| !v.trim().is_empty()) => {}
+                None => {
+                    return Err(format!(
+                        "'{id}' is a multiple-choice question: pick one of options 0-{last}"
+                    ));
+                }
+            }
+        }
+        InteractionKind::Confirm | InteractionKind::ToolApproval => {
+            if resp.approved.is_none() {
+                return Err(format!(
+                    "'{id}' asks for a yes or no: approve it or deny it"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ─── Response ───────────────────────────────────────────────────────────────
 
 /// How far an approval reaches.
@@ -791,6 +851,77 @@ mod tests {
             "{:?}",
             req.options
         );
+    }
+
+    /// Each kind of question takes the answer it asks for, and an answer with
+    /// no decision in it is refused rather than read as a timeout.
+    #[test]
+    fn check_answer_takes_only_what_the_question_asks_for() {
+        let text = InteractionRequest::free_text("t", "Why?", "s", true);
+        assert!(check_answer(&text, &InteractionResponse::text("t", "because")).is_ok());
+        assert!(
+            check_answer(&text, &InteractionResponse::text("t", "")).is_ok(),
+            "an empty text answer is how a review is acknowledged"
+        );
+        let nothing = InteractionResponse {
+            value: None,
+            ..InteractionResponse::text("t", "")
+        };
+        let err = check_answer(&text, &nothing).unwrap_err();
+        assert!(err.contains("text question"), "{err}");
+        let approve = InteractionResponse::approval("t", true, ApprovalScope::Once);
+        assert!(check_answer(&text, &approve).is_err());
+        assert!(check_answer(&text, &InteractionResponse::choice("t", 0)).is_err());
+
+        let edit = InteractionRequest::edit_text("e", "Edit", "s", "doc");
+        assert!(check_answer(&edit, &InteractionResponse::text("e", "")).is_ok());
+
+        let choice =
+            InteractionRequest::multiple_choice("c", "Pick", vec!["a".into(), "b".into()], "s");
+        assert!(check_answer(&choice, &InteractionResponse::choice("c", 1)).is_ok());
+        let err = check_answer(&choice, &InteractionResponse::choice("c", 2)).unwrap_err();
+        assert!(err.contains("options 0-1"), "{err}");
+        assert!(err.contains("no option 2"), "{err}");
+        assert!(
+            check_answer(&choice, &InteractionResponse::text("c", "b")).is_ok(),
+            "a typed label is read against the options"
+        );
+        let err = check_answer(&choice, &InteractionResponse::text("c", "  ")).unwrap_err();
+        assert!(err.contains("multiple-choice"), "{err}");
+        assert!(check_answer(&choice, &approve).is_err());
+
+        let confirm = InteractionRequest::confirm("y", "Sure?", "s");
+        assert!(check_answer(&confirm, &approve).is_ok());
+        let denied = InteractionResponse::deny_with_feedback("y", "x");
+        assert!(check_answer(&confirm, &denied).is_ok());
+        let err = check_answer(&confirm, &InteractionResponse::text("y", "yes")).unwrap_err();
+        assert!(err.contains("yes or no"), "{err}");
+        let tool = InteractionRequest::tool_approval("a", "bash", serde_json::json!({}), "s", &[]);
+        assert!(check_answer(&tool, &InteractionResponse::choice("a", 0)).is_err());
+    }
+
+    /// Feedback is a denial's message and files sit beside text; either one
+    /// anywhere else is a client mistake, refused before it reaches the run.
+    #[test]
+    fn check_answer_refuses_feedback_off_a_denial_and_files_off_text() {
+        let tool = InteractionRequest::tool_approval("a", "bash", serde_json::json!({}), "s", &[]);
+        let mut granted = InteractionResponse::approval("a", true, ApprovalScope::Once);
+        granted.feedback = Some("no".into());
+        let err = check_answer(&tool, &granted).unwrap_err();
+        assert!(err.contains("feedback goes with a denial"), "{err}");
+
+        let part = crate::mime::InboundPart {
+            region: None,
+            name: "a.txt".into(),
+            mime_type: None,
+            deliver: None,
+            caption: None,
+            data: b"x".to_vec(),
+        };
+        let denied =
+            InteractionResponse::approval("a", false, ApprovalScope::Once).with_parts(vec![part]);
+        let err = check_answer(&tool, &denied).unwrap_err();
+        assert!(err.contains("files go with a text answer"), "{err}");
     }
 
     /// The index-to-scope mapping is what every client uses, so it has to match

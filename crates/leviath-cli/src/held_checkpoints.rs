@@ -108,7 +108,7 @@ pub(crate) fn preflight_lines(blueprint: &Blueprint, timeout_secs: Option<u64>) 
     lines.push(match timeout_secs.filter(|secs| *secs > 0) {
         None => "  nothing expires these; the run waits until somebody answers".to_string(),
         Some(secs) => format!(
-            "  unanswered after {}, the run stops with an error; `lev respond` lists them",
+            "  unanswered after {}, the run stops with an error; `lev interactions` lists them",
             human_timeout(secs)
         ),
     });

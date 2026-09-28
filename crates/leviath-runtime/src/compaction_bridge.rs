@@ -414,7 +414,9 @@ mod tests {
             err.to_string(),
             "Token limit exceeded: the prompt's 950 tokens plus the 100-token \
              reply budget (max_output_tokens) exceed the model's 1000-token \
-             context window"
+             context window. Lower the region budgets that fill the prompt, or, if \
+             that window is wrong for this model, set the real one under \
+             [model_capabilities.<model>]"
         );
         assert!(
             !provider.inferred.load(std::sync::atomic::Ordering::SeqCst),

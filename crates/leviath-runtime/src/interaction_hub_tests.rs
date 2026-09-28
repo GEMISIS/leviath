@@ -65,6 +65,37 @@ async fn ask_is_answered_through_the_hub() {
     assert!(hub.pending().is_empty());
 }
 
+/// An answer that carries no decision reads to the run like a timeout, so the
+/// hub refuses it and keeps the question open for one that does.
+#[tokio::test]
+async fn an_answer_the_question_cannot_take_leaves_it_open() {
+    let hub = InteractionHub::new();
+    let backend = hub.backend_for("agent-a");
+    let asking = tokio::spawn(async move { backend.ask(req("q1")).await });
+    settle().await;
+
+    let silent = InteractionResponse {
+        value: None,
+        ..InteractionResponse::text("q1", "")
+    };
+    let Err(AnswerError::Refused(why)) = hub.try_answer(silent) else {
+        panic!("an answer with nothing in it must be refused");
+    };
+    assert!(why.contains("text question"), "{why}");
+    assert_eq!(hub.pending().len(), 1, "the question is still open");
+    assert!(hub.take_settled().is_empty(), "nothing settled it");
+
+    assert_eq!(
+        hub.try_answer(InteractionResponse::text("nope", "x")),
+        Err(AnswerError::NotOpen)
+    );
+    assert_eq!(
+        hub.try_answer(InteractionResponse::text("q1", "hi")),
+        Ok(())
+    );
+    assert_eq!(asking.await.unwrap().value.as_deref(), Some("hi"));
+}
+
 /// An unanswered prompt must not hold tool-lane capacity.
 ///
 /// The answer can arrive from another agent's tool call, and on a lane with

@@ -224,6 +224,10 @@ Which list you put an option in decides what picking it does. Nothing is left to
 Options are matched exactly first, then again ignoring dashes and whitespace, so "Auto approve" and
 "auto-approve" both land.
 
+A `confirm` point answers with "Yes" or "No", and the lists key on those words. "Yes" approves
+unless a list names it. "No" is the exception to the table: when no list names it, it aborts the
+run rather than approving. Put "No" in `directives` to have it send the stage back instead.
+
 ### Keeping the document current
 
 `document_region` names a pinned [context](/docs/context) region, `"plan"` in the example above,
@@ -246,7 +250,7 @@ unanswered gate released on its own terms.
 Know what that looks like before you meet it. A `--yolo` run holding an `ask` gate shows
 `waiting: checkpoint` in `lev ps` (the JSON wait reason is `interaction_point`), and does nothing
 until the timeout expires. The default timeout is one hour, so the run is not stuck, but for that hour it is
-indistinguishable from a run that is. `lev respond --json` lists the question it is holding.
+indistinguishable from a run that is. `lev interactions --json` lists the question it is holding.
 
 > [!WARNING]
 > The revise and edit loops are bounded: after 4 revision rounds at a single point (`MAX_REVISION_ROUNDS`),
@@ -284,11 +288,13 @@ accepts_messages = false   # hold messages until a later stage that accepts them
 
 ## Answering questions
 
-When a run is waiting on a question, answer it with `lev respond`. Run it with no arguments to list
-the interactions the daemon is currently holding, then answer one by its request id:
+When a run is waiting on a question, `lev interactions` lists what the daemon is holding, and
+`lev interactions <request-id>` shows one in full without answering it. Answer it with
+`lev respond`:
 
 ```bash
-lev respond                              # list open interactions
+lev interactions                         # list open interactions
+lev interactions <request-id>            # show one in full, with the line that answers it
 lev respond <request-id> "your answer"   # free-text / edited value
 lev respond <request-id> --choice 1      # multiple-choice, 0-based index
 lev respond <request-id> --approve       # tool-approval / confirm
@@ -299,6 +305,11 @@ lev respond <request-id> --deny --feedback "use git log, not git show"   # rejec
 lev respond <request-id> "the arm is still wrong, see @marked_up.png"    # a text answer with a file
 lev respond <request-id> "here" --attach sketch.png:sprites                # or attached by flag
 ```
+
+`lev respond` always needs the answer itself. Naming a question is not answering it, and an
+answer with nothing in it reads to the run like nobody answered, so it is refused. So is an answer
+the question can't take, such as text for a tool approval or `--choice 7` on a list of three. The
+refusal names the flag that would answer it, and the question stays open.
 
 A request id is opaque, and it names the run that asked: two runs stopped on the same tool call are
 two questions with two ids, and answering one says nothing about the other.
@@ -315,7 +326,7 @@ that fits two open interactions answers neither. It is refused, both are listed,
 more characters:
 
 ```
-'probe-' is the start of 2 open interactions, so nothing was answered; give enough of an id to name just one:
+'probe-' is the start of 2 open interactions; give enough of an id to name just one:
   probe-1789971553-793b8652da33-approve-1  [tool-approval]  agent=probe-1789971553-793b8652da33  stage=work
   probe-1789971554-8a2b1c3d4e5f-approve-1  [tool-approval]  agent=probe-1789971554-8a2b1c3d4e5f  stage=work
 ```

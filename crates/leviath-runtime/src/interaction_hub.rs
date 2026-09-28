@@ -20,6 +20,7 @@
 //! puts that deadline on the wait.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -29,6 +30,17 @@ use leviath_core::interaction::{InteractionRequest, InteractionResponse, Settlem
 use tokio::sync::{Notify, oneshot};
 
 use crate::dynamic_interaction::InteractionBackend;
+
+/// Why an answer did not land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerError {
+    /// No request with that id is open: it was answered already, cancelled,
+    /// timed out, or never existed.
+    NotOpen,
+    /// The request is open, but the answer is not one it can take. The
+    /// request stays open.
+    Refused(String),
+}
 
 /// One open interaction awaiting an answer.
 struct PendingEntry {
@@ -263,18 +275,35 @@ impl InteractionHub {
     }
 
     /// Answer an open request. Returns `false` if no request with that id is
-    /// open (already answered, cancelled, or never existed).
+    /// open (already answered, cancelled, or never existed), or if the answer
+    /// is not one the request can take; [`try_answer`](Self::try_answer) says
+    /// which.
     pub fn answer(&self, response: InteractionResponse) -> bool {
-        self.answer_for(response).is_some()
+        self.try_answer(response).is_ok()
     }
 
-    /// [`answer`](Self::answer), reporting *whose* request it was.
+    /// [`answer`](Self::answer), saying why an answer did not land.
+    pub fn try_answer(&self, response: InteractionResponse) -> Result<(), AnswerError> {
+        self.answer_for(response).map(|_| ())
+    }
+
+    /// [`try_answer`](Self::try_answer), reporting *whose* request it was.
     ///
     /// The host needs the agent id because answering a prompt is one of the
     /// points a run resumes at, and what a resume does is per-agent.
-    pub(crate) fn answer_for(&self, response: InteractionResponse) -> Option<String> {
-        let entry = leviath_core::sync::lock(&self.pending).remove(&response.request_id);
-        let entry = entry?;
+    ///
+    /// The answer is checked against the request before the request is taken,
+    /// so a refused answer leaves the question open for a right one.
+    pub(crate) fn answer_for(&self, response: InteractionResponse) -> Result<String, AnswerError> {
+        let entry = {
+            let mut pending = leviath_core::sync::lock(&self.pending);
+            let Entry::Occupied(open) = pending.entry(response.request_id.clone()) else {
+                return Err(AnswerError::NotOpen);
+            };
+            leviath_core::interaction::check_answer(&open.get().request, &response)
+                .map_err(AnswerError::Refused)?;
+            open.remove()
+        };
         let agent_id = entry.agent_id.clone();
         self.record(&entry, Settlement::of(&response));
         // The awaiting `submit` may have gone away (agent despawned); a
@@ -283,12 +312,12 @@ impl InteractionHub {
         // Wake the driver so it reflects the now-cleared request back
         // into the agent's status (Waiting → Active).
         self.nudge();
-        Some(agent_id)
+        Ok(agent_id)
     }
 
     /// Cancel an open request (its `submit` returns the neutral response).
     /// Returns `false` if no such request is open.
-    pub(crate) fn cancel(&self, request_id: &str) -> bool {
+    pub fn cancel(&self, request_id: &str) -> bool {
         // Dropping the entry drops its responder, waking `submit` with an error.
         let entry = leviath_core::sync::lock(&self.pending).remove(request_id);
         let Some(entry) = entry else {

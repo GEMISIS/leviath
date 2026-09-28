@@ -281,6 +281,28 @@ pub(crate) fn effective_parameters(
     table
 }
 
+/// The error a stage ends on when its prompt fills the window and leaves
+/// nothing to answer with, or `None` while there is room for a reply.
+///
+/// Sending anyway buys a reply one token long, which reads as the model
+/// stopping short: the stage nudges it to go on, re-enters for its missing
+/// output, and resends the same prompt each time, then records that the
+/// output never came. The prompt only gets bigger each round, so the first
+/// refusal is the answer. A window of zero is one nobody measured, and is
+/// not refused on.
+pub(crate) fn window_overflow(
+    window: &ContextWindow,
+    calibration: Option<&crate::pipeline::PromptCalibration>,
+) -> Option<leviath_providers::ProviderError> {
+    let spent = crate::pipeline::calibrated_tokens(window.current_tokens, calibration);
+    let full = window.max_tokens > 0 && window.max_tokens.saturating_sub(spent) < MIN_OUTPUT_TOKENS;
+    full.then_some(leviath_providers::ProviderError::TokenLimitExceeded {
+        used: spent,
+        reply_budget: MIN_OUTPUT_TOKENS,
+        max: window.max_tokens,
+    })
+}
+
 /// Build the [`InferenceRequest`] for an agent from its context window + stage
 /// data. Pure; no `.await` - a custom region's render hook is a bounded,
 /// synchronous Rhai eval. (Ported from `AgentEngine::build_inference_request`,
@@ -684,6 +706,24 @@ pub(crate) fn dispatch_inference(
                     stall(StallReason::ProviderMissing);
                     return;
                 };
+                // Compaction has had its turn by now, so a prompt that still
+                // fills the window will fill it on every retry too.
+                if let Some(overflow) = window_overflow(window, calibration) {
+                    tracing::warn!(
+                        model = %si.model,
+                        error = %overflow,
+                        "the assembled prompt leaves no room for a reply; ending the stage"
+                    );
+                    par_commands.command_scope(|mut commands| {
+                        commands
+                            .entity(entity)
+                            .remove::<ReadyToInfer>()
+                            .remove::<DispatchStall>()
+                            .insert(StageOutcome::Errored(overflow.to_string()))
+                            .insert(ResolveTransition);
+                    });
+                    return;
+                }
                 let Some(permit) = stage.pools.try_acquire(&si.provider_name, &si.model) else {
                     // Every in-flight call on this model holds a permit; if
                     // this repeats for minutes, one of them is stuck (see the

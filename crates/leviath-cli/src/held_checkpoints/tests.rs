@@ -92,7 +92,7 @@ fn the_preflight_names_every_checkpoint_and_the_deadline() {
     assert!(block.contains("plan: plan_approval"), "{block}");
     assert!(block.contains("plan: ask_user_text"), "{block}");
     assert!(block.contains("after 1h"), "{block}");
-    assert!(block.contains("lev respond"), "{block}");
+    assert!(block.contains("lev interactions"), "{block}");
 
     // One checkpoint reads as one, not "1 checkpoints".
     let one = preflight_lines(&parse(r#"unattended = "ask""#, ""), Some(3600)).join("\n");

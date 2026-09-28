@@ -357,7 +357,8 @@ pub enum ControlResponse {
         /// `(agent_id, request)` pairs.
         interactions: Vec<(String, InteractionRequest)>,
     },
-    /// The request could not be parsed.
+    /// The request could not be parsed, or the daemon refused it; the message
+    /// says which, and why.
     Error {
         /// A human-readable message.
         message: String,
@@ -480,6 +481,17 @@ impl std::fmt::Display for DaemonIdentity {
     }
 }
 
+/// The response to an operation the host can refuse: `Ok` with whether it
+/// applied, or the refusal as an [`ControlResponse::Error`]. A closed host
+/// channel (shutting down) is the neutral `ok: false`.
+fn refusable(reply: Result<Result<bool, String>, oneshot::error::RecvError>) -> ControlResponse {
+    match reply {
+        Ok(Err(message)) => ControlResponse::Error { message },
+        Ok(Ok(ok)) => ControlResponse::Ok { ok },
+        Err(_) => ControlResponse::Ok { ok: false },
+    }
+}
+
 /// Translate a parsed request into a [`ControlOp`], forward it to the host, and
 /// await the reply as a [`ControlResponse`]. A closed host channel (shutting
 /// down) yields the operation's neutral result.
@@ -551,9 +563,7 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 parts,
                 reply,
             });
-            ControlResponse::Ok {
-                ok: rx.await.unwrap_or(false),
-            }
+            refusable(rx.await)
         }
         ControlRequest::ListInteractions => {
             let (reply, rx) = oneshot::channel();
@@ -565,9 +575,7 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
         ControlRequest::AnswerInteraction { response } => {
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::AnswerInteraction { response, reply });
-            ControlResponse::Ok {
-                ok: rx.await.unwrap_or(false),
-            }
+            refusable(rx.await)
         }
         ControlRequest::CancelInteraction { request_id } => {
             let (reply, rx) = oneshot::channel();
@@ -1016,9 +1024,10 @@ mod tests {
                         let _ = reply.send(true);
                     }
                     ControlOp::Message { reply, .. }
-                    | ControlOp::AnswerInteraction { reply, .. }
-                    | ControlOp::CancelInteraction { reply, .. }
-                    | ControlOp::Shutdown { reply } => {
+                    | ControlOp::AnswerInteraction { reply, .. } => {
+                        let _ = reply.send(Ok(true));
+                    }
+                    ControlOp::CancelInteraction { reply, .. } | ControlOp::Shutdown { reply } => {
                         let _ = reply.send(true);
                     }
                     ControlOp::List { reply } => {
@@ -2320,6 +2329,23 @@ mod tests {
         assert!(!is_daemon_running(&id)); // nothing bound yet
         let _live = bind_control_listener(&id).unwrap();
         assert!(is_daemon_running(&id)); // now a daemon answers
+    }
+
+    /// A refusal from the host reaches the client as the reason, not as a
+    /// bare `ok: false` that reads like a missing run.
+    #[tokio::test]
+    async fn a_refused_op_replies_with_its_reason() {
+        assert_eq!(
+            refusable(Ok(Err("no option 9".to_string()))),
+            ControlResponse::Error {
+                message: "no option 9".to_string()
+            }
+        );
+        assert_eq!(refusable(Ok(Ok(true))), ControlResponse::Ok { ok: true });
+        // A host that went away without replying is the neutral answer.
+        let (reply, rx) = oneshot::channel::<Result<bool, String>>();
+        drop(reply);
+        assert_eq!(refusable(rx.await), ControlResponse::Ok { ok: false });
     }
 
     #[tokio::test]

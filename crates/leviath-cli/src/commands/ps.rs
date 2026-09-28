@@ -605,8 +605,8 @@ pub(crate) fn format_runs(
         .count();
     let mut out = match blocked {
         0 => table,
-        1 => format!("{table}\n\n1 run needs an answer: lev respond"),
-        n => format!("{table}\n\n{n} runs need an answer: lev respond"),
+        1 => format!("{table}\n\n1 run needs an answer: lev interactions"),
+        n => format!("{table}\n\n{n} runs need an answer: lev interactions"),
     };
     let parked: Vec<String> = runs
         .iter()

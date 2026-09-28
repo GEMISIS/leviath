@@ -205,6 +205,8 @@ pub(crate) async fn send_message(
         Ok(ControlResponse::Ok { ok: false }) => Err(ServeError::NotFound(format!(
             "Agent run '{run_id}' is not accepting messages"
         ))),
+        // A message that says nothing.
+        Ok(ControlResponse::Error { message }) => Err(ServeError::BadRequest(message)),
         Ok(other) => Err(ServeError::unexpected_reply(&other)),
         Err(e) => Err(ServeError::from_daemon_io(&e)),
     }
@@ -229,6 +231,9 @@ pub(crate) async fn answer_interaction(
         Ok(ControlResponse::Ok { ok: false }) => Err(ServeError::NotFound(
             "No such open interaction: it was answered already, or it expired".to_string(),
         )),
+        // An answer the question cannot take, such as text for a choice or
+        // nothing at all. The question stays open.
+        Ok(ControlResponse::Error { message }) => Err(ServeError::BadRequest(message)),
         Ok(other) => Err(ServeError::unexpected_reply(&other)),
         Err(e) => Err(ServeError::from_daemon_io(&e)),
     }
