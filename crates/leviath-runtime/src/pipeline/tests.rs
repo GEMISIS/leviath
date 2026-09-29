@@ -21191,3 +21191,172 @@ mod model_parts {
         assert_eq!(artwork.content[0].content.stored_count(), 1);
     }
 }
+
+/// A batch re-armed after a restart runs only what had not finished. The calls
+/// that had (a context write, a file read) are neither run again nor handed to
+/// the lane; their journaled results go into the new batch record as done, so a
+/// second crash still sees them finished.
+#[tokio::test]
+async fn a_recovered_batch_runs_only_what_had_not_finished() {
+    use leviath_core::run_archive::RunRecord;
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let (ptx, mut prx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    world.insert_resource(PersistenceStage(ptx));
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![
+                ctx_call("c_ctx", "notes", "hi"),
+                tc("c_done", "read_file"),
+                tc("c_ask", "ask_user_text"),
+            ]),
+            notes_window(),
+            StageCursor { index: 0 },
+            run_metadata(),
+            crate::pipeline::RecoveredResults(vec![
+                ("c_ctx".to_string(), "Appended to notes".into()),
+                ("c_done".to_string(), "the file".into()),
+            ]),
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    assert!(world.get::<AwaitingTools>(e).is_some());
+    assert!(
+        world.get::<crate::pipeline::RecoveredResults>(e).is_some(),
+        "held until the batch is collected"
+    );
+    let notes = world
+        .get::<ContextWindow>(e)
+        .unwrap()
+        .get_region("notes")
+        .unwrap()
+        .current_tokens;
+    assert_eq!(
+        notes, 0,
+        "the context write that already ran is not run again"
+    );
+
+    let (_, record, ack) = append_msg(prx.try_recv().expect("batch journaled"));
+    let RunRecord::ToolBatch { calls, .. } = record else {
+        panic!("expected a ToolBatch record, got {record:?}");
+    };
+    let results: Vec<(String, Option<String>)> = calls
+        .iter()
+        .map(|c| {
+            (
+                c.id.clone(),
+                c.result.as_ref().map(|r| r.as_str().to_string()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [
+            ("c_ctx".to_string(), Some("Appended to notes".to_string())),
+            ("c_done".to_string(), Some("the file".to_string())),
+            ("c_ask".to_string(), None),
+        ]
+    );
+    ack.expect("dispatch requests an ack")
+        .send(crate::persistence_bridge::Appended::Landed { position: 1 })
+        .unwrap();
+    let job = jrx.try_recv().expect("lane job enqueued");
+    assert_eq!(
+        (job.exec)().await,
+        vec![("c_ask".to_string(), "ran ask_user_text".into())],
+        "only the unfinished call reaches the lane"
+    );
+}
+
+/// A recovered batch whose unfinished call resolves without the lane (here a
+/// tool the stage no longer offers) applies at once, the recovered results
+/// with it.
+#[test]
+fn a_recovered_batch_resolved_inline_applies_its_recovered_results() {
+    let (jtx, mut jrx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    // A stage that offers no tools refuses the unfinished call inline.
+    let inf = si("m");
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![
+                tc("c_done", "read_file"),
+                tc("c_gone", "ask_user_text"),
+            ])
+            .1,
+            ctx(&[("conversation", 10_000)]),
+            inf,
+            StageCursor { index: 0 },
+            crate::pipeline::RecoveredResults(vec![("c_done".to_string(), "the file".into())]),
+            ReadyForTools,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+
+    assert!(jrx.try_recv().is_err(), "nothing went to the lane");
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<crate::pipeline::RecoveredResults>(e).is_none());
+    let text: String = world
+        .get::<ContextWindow>(e)
+        .unwrap()
+        .get_region("conversation")
+        .unwrap()
+        .content
+        .iter()
+        .map(|entry| entry.content.as_str().to_string())
+        .collect();
+    assert!(text.contains("the file"), "{text}");
+}
+
+/// Collecting a re-armed batch writes the recovered results beside the lane's,
+/// and the carried results go with the batch.
+#[test]
+fn collect_tools_merges_recovered_results() {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut world = World::new();
+    world.insert_resource(ToolResults(rx));
+    let e = world
+        .spawn((
+            ctx(&[("conversation", 10_000)]),
+            infer_with(vec![
+                tc("c_done", "read_file"),
+                tc("c_ask", "ask_user_text"),
+            ]),
+            crate::pipeline::RecoveredResults(vec![("c_done".to_string(), "the file".into())]),
+            AwaitingTools,
+        ))
+        .id();
+    tx.send(ToolOutcome {
+        elapsed: std::time::Duration::ZERO,
+        entity: e,
+        results: vec![("c_ask".to_string(), "User answered: blue".into())],
+    })
+    .unwrap();
+
+    run_collect_tools(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<crate::pipeline::RecoveredResults>(e).is_none());
+    let text: String = world
+        .get::<ContextWindow>(e)
+        .unwrap()
+        .get_region("conversation")
+        .unwrap()
+        .content
+        .iter()
+        .map(|entry| entry.content.as_str().to_string())
+        .collect();
+    assert!(text.contains("the file"), "{text}");
+    assert!(text.contains("User answered: blue"), "{text}");
+}

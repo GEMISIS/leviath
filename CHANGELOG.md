@@ -41,6 +41,15 @@ same list.
 
 ### Fixed
 
+- A question waiting on a person (`ask_user_*`, `present_for_review`,
+  `edit_document`) was lost when the daemon restarted: recovery gave the call
+  an `[error] interrupted` result meant for tools with side effects, and a
+  model that did not ask again carried on without the answer. The batch is
+  now dispatched again with its finished calls carried over, so the question
+  comes back in `lev interactions` and the run waits on it. Its request id is
+  new and never repeats one the run drew before the restart. A run restored
+  in a later stage also asks, and is permissioned, as that stage rather than
+  its first.
 - A "No" on a `confirm` interaction point approved the stage. It now aborts
   the run unless a list or directive names "No".
 - A daemon started while a gateway was unreachable (OpenRouter behind a proxy

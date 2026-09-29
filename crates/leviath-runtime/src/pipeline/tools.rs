@@ -144,6 +144,18 @@ impl ToolStage {
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct ContextToolResults(pub Vec<(String, String)>);
 
+/// Results a batch already had before a restart, carried into its re-dispatch.
+///
+/// A daemon that died while a batch waited on a person had asked its question
+/// and run nothing after it; recovery re-arms the batch rather than handing
+/// the model a stand-in (see `restore::restore_pending_batch`). The calls that
+/// finished before the crash are here, with the result the journal recorded,
+/// so [`dispatch_tools`] runs only the rest and none of these twice. Held until
+/// [`collect_tools`](super::collect_tools) merges them, or until an all-inline
+/// batch applies them.
+#[derive(Component, Debug, Clone, Default)]
+pub(crate) struct RecoveredResults(pub Vec<crate::tool_bridge::ToolResult>);
+
 /// Merge context + lane tool results into one `(id, result)` list in the
 /// original tool-call order (Anthropic requires a `tool_result` per `tool_use`,
 /// in order).
@@ -388,6 +400,9 @@ struct BatchDispatch<'a> {
     /// The results the dispatcher already has, by provider call id. A call with
     /// one here never reaches the lane and no completion record will follow it.
     inline: &'a [(String, String)],
+    /// Results carried from before a restart, which are journaled the same
+    /// way, so a second crash still sees them as done.
+    recovered: &'a [crate::tool_bridge::ToolResult],
     /// The stage the batch was dispatched in.
     stage_index: usize,
     /// The stage-local iteration that produced it.
@@ -416,7 +431,13 @@ impl BatchDispatch<'_> {
                         .inline
                         .iter()
                         .find(|(id, _)| id == &c.tool_id)
-                        .map(|(_, r)| r.clone().into()),
+                        .map(|(_, r)| r.clone().into())
+                        .or_else(|| {
+                            self.recovered
+                                .iter()
+                                .find(|(id, _)| id == &c.tool_id)
+                                .map(|(_, r)| r.clone())
+                        }),
                     thought_signature: c.thought_signature.clone(),
                 })
                 .collect(),
@@ -490,6 +511,7 @@ pub(crate) struct DaemonServices<'w> {
 /// recorded results instead of re-running their side effects.
 pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
+    recovered_results: Query<&RecoveredResults>,
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
     daemon: DaemonServices,
@@ -589,7 +611,17 @@ pub(crate) fn dispatch_tools(
         // them. Journaled after the loop, which is also where the batch record
         // that dispatched them goes.
         let mut produced: Vec<(String, Vec<leviath_core::output::Artifact>)> = Vec::new();
+        // What the batch had already finished before a restart. Checked before
+        // anything else below, so a context write, a submission or a file tool
+        // that already ran is never run again.
+        let recovered: Vec<crate::tool_bridge::ToolResult> = recovered_results
+            .get(entity)
+            .map(|r| r.0.clone())
+            .unwrap_or_default();
         for c in &result.tool_calls {
+            if recovered.iter().any(|(id, _)| id == &c.tool_id) {
+                continue;
+            }
             // Everything this call commits to the window is this call's, and
             // nothing after the loop is. Re-set per call, so a change can never
             // be attributed to the call before it.
@@ -916,8 +948,10 @@ pub(crate) fn dispatch_tools(
             // request outright: "each tool_use must have a single result".
             // Deferring is safe because the agent parks on its workers, so no
             // request goes out carrying a `tool_use` that has no result yet.
+            let mut resolved = typed_results(&context_results);
+            resolved.extend(recovered.iter().cloned());
             let merged: Vec<crate::tool_bridge::ToolResult> =
-                merge_in_call_order(&result.tool_calls, &typed_results(&context_results))
+                merge_in_call_order(&result.tool_calls, &resolved)
                     .into_iter()
                     .filter(|(id, _)| id != &call_id)
                     .collect();
@@ -938,6 +972,7 @@ pub(crate) fn dispatch_tools(
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
+                .remove::<RecoveredResults>()
                 .insert(crate::fanout::PendingFanOut { call_id, request });
             continue;
         }
@@ -950,6 +985,7 @@ pub(crate) fn dispatch_tools(
             calls: &result.tool_calls,
             executions: &executions,
             inline: &context_results,
+            recovered: &recovered,
             stage_index: cursor.map_or(0, |c| c.index),
             iteration: state.iteration,
             visit_id: &state.current_visit,
@@ -973,7 +1009,9 @@ pub(crate) fn dispatch_tools(
                 journal_artifacts(persist, &md.run_id, &produced);
             }
             // Nothing async to run - apply the context results now and loop back.
-            let merged = merge_in_call_order(&result.tool_calls, &typed_results(&context_results));
+            let mut resolved = typed_results(&context_results);
+            resolved.extend(recovered.iter().cloned());
+            let merged = merge_in_call_order(&result.tool_calls, &resolved);
             // Log the calls here, because this batch never reaches
             // `collect_tools` - the usual writer of `[tool]` lines - and would
             // otherwise leave no trace anywhere a person can read. A batch of
@@ -1009,6 +1047,7 @@ pub(crate) fn dispatch_tools(
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
+                .remove::<RecoveredResults>()
                 .insert(ReadyToInfer);
             continue;
         }

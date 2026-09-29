@@ -89,6 +89,12 @@ every result as it arrives. On reload it uses the journal to work out what actua
   not have happened, with instructions to check before re-running anything with side effects.
 - **An interrupted `spawn_agent`** also lists the run's existing children, so the model looks for
   the child it may already have created instead of spawning a duplicate.
+- **A question that was waiting on you** (`ask_user_*`, `present_for_review`, `edit_document`) is
+  asked again. A question has no effect to check, and nothing after it in the batch had started, so
+  the batch is dispatched again with its finished calls' results carried over. The question comes
+  back in `lev interactions` under a new request id, and the run shows as waiting on it, as it did
+  before the restart. A taint-gate prompt is not yet among these: its call is not journaled until
+  you answer, so the run asks the model again instead.
 - **A crash in the instant between an effect landing and the journal recording it** is the one gap
   this cannot close, because no journal can watch an external side effect happen atomically. Those
   calls come back as the same check-first error rather than being quietly re-run.
