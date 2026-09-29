@@ -8,9 +8,9 @@ use crate::tui::flowgraph::StageGraph;
 /// The blueprint at `agent_path`: a manifest directory, or the manifest file
 /// itself (the daemon records `agent_path` as the file). `None` when the
 /// manifest cannot be read or parsed.
-pub(super) fn load_blueprint(agent_path: &str) -> Option<leviath_core::Blueprint> {
+pub(super) fn load_blueprint(agent_path: &str) -> Option<leviath_runtime::spec::Blueprint> {
     let content = std::fs::read_to_string(manifest_path(agent_path)).ok()?;
-    leviath_core::manifest::parse_manifest(&content).ok()
+    leviath_runtime::spec::manifest::parse_manifest(&content).ok()
 }
 
 /// Where the manifest of the blueprint at `agent_path` lives; see
@@ -39,7 +39,7 @@ pub(super) fn load_stage_graph_cached(
     cache: &mut StatCache<StageGraph>,
 ) -> Option<Arc<StageGraph>> {
     cache.get_with(&manifest_path(agent_path), |content| {
-        leviath_core::manifest::parse_manifest(content)
+        leviath_runtime::spec::manifest::parse_manifest(content)
             .ok()
             .map(|blueprint| StageGraph::from_blueprint(&blueprint))
     })
@@ -47,7 +47,7 @@ pub(super) fn load_stage_graph_cached(
 
 /// A blueprint shipped inside the binary, by name, so the new-run screen can
 /// preview one that `lev setup` has not installed.
-pub(super) fn bundled_blueprint(name: &str) -> Option<leviath_core::Blueprint> {
+pub(super) fn bundled_blueprint(name: &str) -> Option<leviath_runtime::spec::Blueprint> {
     let agent = crate::bundled::BUNDLED_AGENTS
         .iter()
         .find(|a| a.name == name)?;
@@ -59,7 +59,7 @@ pub(super) fn bundled_blueprint(name: &str) -> Option<leviath_core::Blueprint> {
         .find(|(path, _)| *path == leviath_core::files::MANIFEST_FILENAME)
         .map(|(_, content)| *content)
         .unwrap_or_default();
-    leviath_core::manifest::parse_manifest(content).ok()
+    leviath_runtime::spec::manifest::parse_manifest(content).ok()
 }
 
 /// The stage graph of a bundled blueprint; see [`bundled_blueprint`].

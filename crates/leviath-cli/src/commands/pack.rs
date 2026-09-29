@@ -4,7 +4,7 @@ use clap::Args;
 use leviath_package::AgentBundler;
 use std::path::{Path, PathBuf};
 
-use leviath_core::manifest::parse_manifest;
+use leviath_runtime::spec::manifest::parse_manifest;
 
 /// Arguments for `lev pack`.
 #[derive(Args)]

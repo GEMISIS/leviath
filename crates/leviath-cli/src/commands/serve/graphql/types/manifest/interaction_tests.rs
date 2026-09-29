@@ -40,10 +40,13 @@ edit_options = ["ship"]
 
 /// The one checkpoint `manifest` declares, resolved against its blueprint.
 fn point() -> InteractionPoint {
-    let parsed = leviath_core::manifest::parse_manifest(manifest()).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(manifest()).expect("the manifest parses");
     let blueprint = Arc::new(parsed);
     let core_point = match &blueprint.stages[0].mode {
-        leviath_core::blueprint::StageMode::InteractivePoints { points } => points[0].clone(),
+        leviath_runtime::spec::blueprint::StageMode::InteractivePoints { points } => {
+            points[0].clone()
+        }
         other => panic!("the stage declares interaction points, got {other:?}"),
     };
     InteractionPoint::of(&blueprint, &core_point)
@@ -65,10 +68,13 @@ impl Probe {
 
 /// Ask the schema about one checkpoint, built from manifest text.
 async fn ask(text: &str, query: &str) -> serde_json::Value {
-    let parsed = leviath_core::manifest::parse_manifest(text).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses");
     let blueprint = Arc::new(parsed);
     let core_point = match &blueprint.stages[0].mode {
-        leviath_core::blueprint::StageMode::InteractivePoints { points } => points[0].clone(),
+        leviath_runtime::spec::blueprint::StageMode::InteractivePoints { points } => {
+            points[0].clone()
+        }
         other => panic!("the stage declares interaction points, got {other:?}"),
     };
     let schema = Schema::build(

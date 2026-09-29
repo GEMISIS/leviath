@@ -6,7 +6,7 @@ use super::*;
 
 /// The agent's blueprint (its stage graph), as a component.
 #[derive(Component, Debug, Clone)]
-pub struct AgentBlueprint(pub leviath_core::Blueprint);
+pub struct AgentBlueprint(pub crate::spec::Blueprint);
 
 /// The index of the agent's current stage within its blueprint.
 #[derive(Component, Debug, Clone, Copy)]
@@ -37,11 +37,11 @@ pub(crate) struct StageSetup {
     /// Per-stage inference config (temperature / max output tokens).
     pub inference_config: InferenceConfig,
     /// Optional per-stage tool-result routing.
-    pub routing: Option<leviath_core::ToolResultRouting>,
+    pub routing: Option<crate::spec::ToolResultRouting>,
     /// Whether the stage delivers live user messages to the agent.
     pub accepts_messages: bool,
     /// Optional stage-specific context layout to swap to on entry.
-    pub context_layout: Option<leviath_core::ContextLayout>,
+    pub context_layout: Option<crate::spec::ContextLayout>,
     /// Regions this stage leaves out of its prompt (`[stages.<name>.context] hide`).
     pub context_hide: Vec<String>,
     /// Regions this stage empties on entry (`[stages.<name>.context] reset`).
@@ -58,7 +58,7 @@ pub(crate) struct StageSetups(pub Vec<StageSetup>);
 /// may decline); an LLM must choose. Holds the choosable edges for the async
 /// transition-choice system.
 #[derive(Component, Debug, Clone)]
-pub(crate) struct AwaitingTransitionChoice(pub Vec<leviath_core::blueprint::TransitionEdge>);
+pub(crate) struct AwaitingTransitionChoice(pub Vec<crate::spec::blueprint::TransitionEdge>);
 
 /// The outcome of synchronously resolving a completed stage's transition.
 pub(crate) enum StageResolution {
@@ -81,11 +81,11 @@ pub(crate) enum StageResolution {
     /// largest gate, including the five variants that hold nothing.
     Next(
         usize,
-        leviath_core::blueprint::EdgeTransform,
-        Option<Box<leviath_core::blueprint::TransitionGate>>,
+        crate::spec::blueprint::EdgeTransform,
+        Option<Box<crate::spec::blueprint::TransitionGate>>,
     ),
     /// Multiple candidate edges - an LLM must choose among them.
-    Choose(Vec<leviath_core::blueprint::TransitionEdge>),
+    Choose(Vec<crate::spec::blueprint::TransitionEdge>),
     /// Not a transition after all - put the agent back to work in its current
     /// stage. Only a stuck interrupt produces this: it fires mid-stage, so when
     /// its escape edge is no longer available the stage must simply continue
@@ -96,11 +96,11 @@ pub(crate) enum StageResolution {
 /// Find the first available edge with the given `condition` (e.g. `Error` or
 /// `MaxIterations`) whose target exists and hasn't exhausted its revisit budget.
 pub(crate) fn find_conditioned_edge_ref<'a>(
-    blueprint: &leviath_core::Blueprint,
-    stage: &'a leviath_core::Stage,
+    blueprint: &crate::spec::Blueprint,
+    stage: &'a crate::spec::Stage,
     visits: &std::collections::HashMap<String, usize>,
-    condition: leviath_core::blueprint::TransitionCondition,
-) -> Option<(usize, &'a leviath_core::blueprint::TransitionEdge)> {
+    condition: crate::spec::blueprint::TransitionCondition,
+) -> Option<(usize, &'a crate::spec::blueprint::TransitionEdge)> {
     let transitions = stage.transitions.as_ref()?;
     transitions.values().find_map(|edge| {
         if edge.condition != condition {
@@ -121,11 +121,11 @@ pub(crate) fn find_conditioned_edge_ref<'a>(
 /// As [`find_conditioned_edge_ref`], projected to the target index and a cloned
 /// edge transform - what the transition systems need.
 pub(crate) fn find_conditioned_edge(
-    blueprint: &leviath_core::Blueprint,
-    stage: &leviath_core::Stage,
+    blueprint: &crate::spec::Blueprint,
+    stage: &crate::spec::Stage,
     visits: &std::collections::HashMap<String, usize>,
-    condition: leviath_core::blueprint::TransitionCondition,
-) -> Option<(usize, leviath_core::blueprint::EdgeTransform)> {
+    condition: crate::spec::blueprint::TransitionCondition,
+) -> Option<(usize, crate::spec::blueprint::EdgeTransform)> {
     find_conditioned_edge_ref(blueprint, stage, visits, condition)
         .map(|(idx, edge)| (idx, edge.transform.clone()))
 }
@@ -135,12 +135,12 @@ pub(crate) fn find_conditioned_edge(
 /// `Error`/`MaxIterations` auto-transitions don't apply to a normal completion,
 /// and the LLM-choice case is returned as [`StageResolution::Choose`].)
 pub(crate) fn resolve_transition_sync(
-    blueprint: &leviath_core::Blueprint,
-    stage: &leviath_core::Stage,
+    blueprint: &crate::spec::Blueprint,
+    stage: &crate::spec::Stage,
     stage_idx: usize,
     visits: &std::collections::HashMap<String, usize>,
 ) -> StageResolution {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     match &stage.transitions {
         None => {
             if stage_idx + 1 < blueprint.stages.len() {
@@ -148,7 +148,7 @@ pub(crate) fn resolve_transition_sync(
                 // no edge to hang a gate on.
                 StageResolution::Next(
                     stage_idx + 1,
-                    leviath_core::blueprint::EdgeTransform::Direct,
+                    crate::spec::blueprint::EdgeTransform::Direct,
                     None,
                 )
             } else {
@@ -160,7 +160,7 @@ pub(crate) fn resolve_transition_sync(
                 return StageResolution::Terminal;
             }
             // Filter edges whose target hasn't exhausted its revisit budget.
-            let available: Vec<&leviath_core::blueprint::TransitionEdge> = transitions
+            let available: Vec<&crate::spec::blueprint::TransitionEdge> = transitions
                 .values()
                 .filter(|e| match blueprint.find_stage(&e.target) {
                     Some(ts) => match ts.max_revisits {
@@ -171,7 +171,7 @@ pub(crate) fn resolve_transition_sync(
                 })
                 .collect();
             // Only Always/LlmChoice edges are auto/LLM-followable on completion.
-            let choosable: Vec<&leviath_core::blueprint::TransitionEdge> = available
+            let choosable: Vec<&crate::spec::blueprint::TransitionEdge> = available
                 .into_iter()
                 .filter(|e| {
                     matches!(
@@ -348,7 +348,7 @@ pub(crate) fn resolve_transition(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     for (
         entity,
         bp,
@@ -637,7 +637,7 @@ pub(crate) struct StageEntry<'a> {
 
 pub(crate) fn enter_stage(
     idx: usize,
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &crate::spec::Blueprint,
     setup: &StageSetup,
     entry: StageEntry<'_>,
 ) -> Result<usize, String> {
@@ -691,7 +691,7 @@ pub(crate) fn enter_stage(
 /// here, and an absent digest reads as "no baseline", which the gate treats as
 /// changed - a gate cannot demand an update to something that does not exist.
 pub(crate) fn watched_region_digests(
-    stage: &leviath_core::Stage,
+    stage: &crate::spec::Stage,
     window: &ContextWindow,
 ) -> std::collections::HashMap<String, u64> {
     let mut digests = std::collections::HashMap::new();
@@ -763,9 +763,9 @@ pub(crate) fn emit_stage_transition(
 /// Otherwise the fallback target: the first pinned region, or `conversation`
 /// when a layout declares no pinned region at all.
 ///
-/// [`STAGE_INSTRUCTIONS_REGION`]: leviath_core::layout::STAGE_INSTRUCTIONS_REGION
+/// [`STAGE_INSTRUCTIONS_REGION`]: crate::spec::layout::STAGE_INSTRUCTIONS_REGION
 fn stage_instructions_target(window: &mut ContextWindow) -> String {
-    let declared = leviath_core::layout::STAGE_INSTRUCTIONS_REGION;
+    let declared = crate::spec::layout::STAGE_INSTRUCTIONS_REGION;
     if let Some(at) = window.regions.iter().position(|r| r.name == declared) {
         if at + 1 < window.regions.len() {
             let region = window.regions.remove(at);
@@ -801,7 +801,7 @@ pub(crate) fn apply_stage_context(
         None => window.hidden.clear(),
     }
     for name in &setup.context_hide {
-        if !leviath_core::blueprint::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
+        if !crate::spec::blueprint::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
             window.hidden.insert(name.clone());
         }
     }
@@ -817,7 +817,7 @@ pub(crate) fn apply_stage_context(
 
     let target = stage_instructions_target(window);
     if let Some(region) = window.regions.iter_mut().find(|r| r.name == target) {
-        if target == leviath_core::layout::STAGE_INSTRUCTIONS_REGION {
+        if target == crate::spec::layout::STAGE_INSTRUCTIONS_REGION {
             // The whole region is ours, so the previous stage's prompt goes by
             // emptying it. The fallback below cannot do that - it shares a
             // region with the author's own content - and has to identify its

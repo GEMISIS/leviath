@@ -10,7 +10,7 @@ use axum::response::Json;
 
 use super::blueprint_types::{BlueprintDetail, RoutePair, StageRoutingInfo};
 use super::types::*;
-use leviath_core::manifest::parse_manifest;
+use leviath_runtime::spec::manifest::parse_manifest;
 
 /// Resolve the installed agents directory.
 ///
@@ -362,7 +362,7 @@ pub(super) async fn get_blueprint(
 /// on entry (`context.reset`), so the detail route carries them structured. A
 /// stage that does neither is left out, the way `fan_out_infos` lists only
 /// fan-out stages.
-fn stage_routing_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<StageRoutingInfo> {
+fn stage_routing_infos(bp: &leviath_runtime::spec::blueprint::Blueprint) -> Vec<StageRoutingInfo> {
     bp.stages
         .iter()
         .filter(|stage| !stage.output_routing.is_empty() || !stage.context_reset.is_empty())
@@ -389,11 +389,11 @@ fn stage_routing_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<StageRout
 /// as capped at four workers when the daemon runs thirty; one that missed the
 /// zero rule would show "0 workers" for a stage that is unlimited. Resolving
 /// the numbers here means what the API says is what the run does.
-fn fan_out_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<FanOutInfo> {
+fn fan_out_infos(bp: &leviath_runtime::spec::blueprint::Blueprint) -> Vec<FanOutInfo> {
     bp.stages
         .iter()
         .filter_map(|stage| match &stage.mode {
-            leviath_core::blueprint::StageMode::FanOut { config } => Some(FanOutInfo {
+            leviath_runtime::spec::blueprint::StageMode::FanOut { config } => Some(FanOutInfo {
                 stage: stage.name.clone(),
                 worker_agent: config.worker_agent.clone(),
                 worker_stage: config.worker_stage.clone(),
@@ -402,8 +402,8 @@ fn fan_out_infos(bp: &leviath_core::blueprint::Blueprint) -> Vec<FanOutInfo> {
                 max_workers: config.worker_cap(),
                 max_items: config.max_items,
                 on_worker_failure: match config.on_worker_failure {
-                    leviath_core::blueprint::WorkerFailurePolicy::Continue => "continue",
-                    leviath_core::blueprint::WorkerFailurePolicy::FailAll => "fail_all",
+                    leviath_runtime::spec::blueprint::WorkerFailurePolicy::Continue => "continue",
+                    leviath_runtime::spec::blueprint::WorkerFailurePolicy::FailAll => "fail_all",
                 }
                 .to_string(),
                 results_region: config.results_region.clone(),
@@ -766,11 +766,11 @@ mod canonicalize_tests {
             manifest: String::new(),
             // These tests are about which row wins a name clash, so the
             // manifest behind the row is the emptiest one that exists.
-            parsed: std::sync::Arc::new(leviath_core::Blueprint::new(
+            parsed: std::sync::Arc::new(leviath_runtime::spec::Blueprint::new(
                 name.to_string(),
                 String::new(),
                 Vec::new(),
-                leviath_core::layout::ContextLayout::new(Vec::new(), 0),
+                leviath_runtime::spec::layout::ContextLayout::new(Vec::new(), 0),
             )),
         }
     }
@@ -1089,7 +1089,7 @@ findings = { kind = "clearable", max_tokens = 4000 }
                 {
                     "stage": "wide",
                     "worker_agent": "researcher",
-                    "max_workers": leviath_core::blueprint::DEFAULT_MAX_WORKERS,
+                    "max_workers": leviath_runtime::spec::blueprint::DEFAULT_MAX_WORKERS,
                     "max_items": null,
                     "on_worker_failure": "continue",
                 },

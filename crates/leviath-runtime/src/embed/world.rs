@@ -48,7 +48,7 @@ pub enum BlueprintSource {
     Toml(String),
     /// An already-constructed blueprint value (boxed: a Blueprint is a
     /// large value, and boxing keeps the enum small).
-    Inline(Box<leviath_core::Blueprint>),
+    Inline(Box<crate::spec::Blueprint>),
 }
 
 /// One spawn request. Build with [`SpawnSpec::new`], then set the optional
@@ -220,7 +220,7 @@ impl AgentWorldBuilder {
     pub fn fallback_route(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
         self.defaults
             .fallback_order
-            .push(leviath_core::blueprint::ModelEntry::new(
+            .push(crate::spec::blueprint::ModelEntry::new(
                 provider.into(),
                 model.into(),
             ));
@@ -416,12 +416,12 @@ impl AgentWorld {
         // the freshly minted run id.
         enum Resolved {
             Path(PathBuf),
-            Inline(Box<leviath_core::Blueprint>),
+            Inline(Box<crate::spec::Blueprint>),
         }
         let resolved = match spec.blueprint {
             BlueprintSource::Path(path) => Resolved::Path(path),
             BlueprintSource::Toml(toml) => Resolved::Inline(Box::new(
-                leviath_core::manifest::parse_manifest(&toml)
+                crate::spec::manifest::parse_manifest(&toml)
                     .map_err(|e| EmbedError::Blueprint(format!("parse manifest: {e}")))?,
             )),
             BlueprintSource::Inline(blueprint) => Resolved::Inline(blueprint),
@@ -1531,7 +1531,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
 
         // An invalid inline blueprint (entry stage names nothing) is refused
         // before it reaches the world.
-        let mut invalid = leviath_core::manifest::parse_manifest(TWO_STAGE).unwrap();
+        let mut invalid = crate::spec::manifest::parse_manifest(TWO_STAGE).unwrap();
         invalid.entry_stage = Some("ghost".to_string());
         let err = world
             .spawn(SpawnSpec::new(
@@ -1544,7 +1544,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         assert!(err.to_string().contains("invalid blueprint"));
 
         // A valid one runs. Trim it to a single text-only stage.
-        let mut valid = leviath_core::manifest::parse_manifest(TWO_STAGE).unwrap();
+        let mut valid = crate::spec::manifest::parse_manifest(TWO_STAGE).unwrap();
         valid.stages.truncate(1);
         valid.stages[0].transitions = None;
         valid.entry_stage = Some(valid.stages[0].name.clone());

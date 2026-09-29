@@ -205,7 +205,7 @@ pub struct AgentSafeCommands {
 pub(crate) fn resolve_safe_keys(
     config: &SafeCommands,
     agent: Option<&AgentSafeCommands>,
-    blueprint: Option<&leviath_core::blueprint::SafeCommandsConfig>,
+    blueprint: Option<&leviath_runtime::spec::blueprint::SafeCommandsConfig>,
     allow_blueprint_globally: bool,
 ) -> BTreeMap<String, SafeSource> {
     let mut keys = BTreeMap::new();

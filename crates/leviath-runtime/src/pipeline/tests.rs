@@ -481,7 +481,7 @@ fn build_request_threads_stage_meta_into_custom_region_render() {
 fn build_request_filters_tools_and_uses_config_overrides() {
     let cfg = InferenceConfig {
         temperature: Some(0.1),
-        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(42)),
+        max_output_tokens: Some(crate::spec::blueprint::OutputCap::Tokens(42)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -1645,7 +1645,7 @@ fn stage_with_fallback() -> StageInference {
         model: "model-a".to_string(),
         tools: Vec::new(),
         tool_filter: None,
-        fallbacks: vec![leviath_core::blueprint::ModelEntry::new(
+        fallbacks: vec![crate::spec::blueprint::ModelEntry::new(
             "alive".to_string(),
             "model-b".to_string(),
         )],
@@ -3620,7 +3620,7 @@ fn dispatch_persistence_records_tree_links() {
 
 #[test]
 fn dispatch_persistence_serializes_fan_out_waiting() {
-    use leviath_core::blueprint::{FanOutConfig, WorkerFailurePolicy};
+    use crate::spec::blueprint::{FanOutConfig, WorkerFailurePolicy};
     let (mut world, mut rx) = world_with_persistence();
     let e = world
         .spawn((
@@ -4109,13 +4109,13 @@ fn dispatch_persistence_skips_taint_audit_when_the_gate_is_empty() {
 #[test]
 fn spawn_agent_seeds_the_stage_ledger_with_names() {
     let mk = |name: &str| {
-        leviath_core::Stage::new(
+        crate::spec::Stage::new(
             name.to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         )
     };
     let mut bp = blueprint(vec![mk("plan"), mk("build")]);
-    bp.repetition_detection = Some(leviath_core::blueprint::RepetitionDetectionConfig {
+    bp.repetition_detection = Some(crate::spec::blueprint::RepetitionDetectionConfig {
         max_repeat_calls: Some(2),
         max_readonly_streak: None,
         enabled: Some(true),
@@ -4143,11 +4143,11 @@ fn spawn_agent_seeds_the_stage_ledger_with_names() {
     );
 }
 
-fn percent_region_blueprint(percent: f64) -> leviath_core::Blueprint {
-    let layout = leviath_core::layout::ContextLayout::new(
+fn percent_region_blueprint(percent: f64) -> crate::spec::Blueprint {
+    let layout = crate::spec::layout::ContextLayout::new(
         vec![
-            leviath_core::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(leviath_core::BudgetSpec::Percent {
+            crate::spec::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
+                .with_budget(crate::spec::BudgetSpec::Percent {
                     percent,
                     min: None,
                     max: None,
@@ -4155,11 +4155,11 @@ fn percent_region_blueprint(percent: f64) -> leviath_core::Blueprint {
         ],
         0,
     );
-    let stages = vec![leviath_core::Stage::new(
+    let stages = vec![crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     )];
-    leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
 }
 
 fn world_with_provider() -> World {
@@ -4216,9 +4216,9 @@ fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
     // A pure-absolute blueprint resolves to itself: region max_tokens and the
     // window total match the declared values, provider or not.
     let mut world = world_with_provider();
-    let bp = blueprint(vec![leviath_core::Stage::new(
+    let bp = blueprint(vec![crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     )]);
     let e = spawn_agent(
         &mut world,
@@ -4241,22 +4241,22 @@ fn spawn_agent_seeded_resolves_per_stage_layout() {
     // Stage 0 carries its own percentage layout; it must be resolved against
     // that stage's model window and applied on entry (swapping the global one).
     let mut world = world_with_provider();
-    let global = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
+    let global = crate::spec::layout::ContextLayout::new(
+        vec![crate::spec::layout::RegionDefinition::new(
             "sys".to_string(),
             RegionKind::Pinned,
             5000,
         )],
         5000,
     );
-    let mut stage = leviath_core::Stage::new(
+    let mut stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
-    stage.context_layout = Some(leviath_core::layout::ContextLayout::new(
+    stage.context_layout = Some(crate::spec::layout::ContextLayout::new(
         vec![
-            leviath_core::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(leviath_core::BudgetSpec::Percent {
+            crate::spec::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
+                .with_budget(crate::spec::BudgetSpec::Percent {
                     percent: 0.10,
                     min: None,
                     max: None,
@@ -4264,7 +4264,7 @@ fn spawn_agent_seeded_resolves_per_stage_layout() {
         ],
         0,
     ));
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
+    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
     let e = spawn_agent(
         &mut world,
         "run".to_string(),
@@ -4302,22 +4302,22 @@ fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
     // The global layout is valid, but stage 0's per-stage layout resolves to a
     // starved working budget → the per-stage validation branch fails the spawn.
     let mut world = world_with_provider();
-    let global = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
+    let global = crate::spec::layout::ContextLayout::new(
+        vec![crate::spec::layout::RegionDefinition::new(
             "scratch".to_string(),
             RegionKind::Clearable,
             5000,
         )],
         5000,
     );
-    let mut stage = leviath_core::Stage::new(
+    let mut stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
-    stage.context_layout = Some(leviath_core::layout::ContextLayout::new(
+    stage.context_layout = Some(crate::spec::layout::ContextLayout::new(
         vec![
-            leviath_core::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(leviath_core::BudgetSpec::Percent {
+            crate::spec::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
+                .with_budget(crate::spec::BudgetSpec::Percent {
                     percent: 0.95,
                     min: None,
                     max: None,
@@ -4325,7 +4325,7 @@ fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
         ],
         0,
     ));
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
+    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
     let err = spawn_agent(
         &mut world,
         "run".to_string(),
@@ -4388,13 +4388,14 @@ fn world_with_wide_and_narrow() -> World {
     world
 }
 
-fn pct_region(name: &str, percent: f64) -> leviath_core::layout::RegionDefinition {
-    leviath_core::layout::RegionDefinition::new(name.to_string(), RegionKind::Pinned, 0)
-        .with_budget(leviath_core::BudgetSpec::Percent {
+fn pct_region(name: &str, percent: f64) -> crate::spec::layout::RegionDefinition {
+    crate::spec::layout::RegionDefinition::new(name.to_string(), RegionKind::Pinned, 0).with_budget(
+        crate::spec::BudgetSpec::Percent {
             percent,
             min: None,
             max: None,
-        })
+        },
+    )
 }
 
 fn wide_then_narrow_stages() -> Vec<ResolvedStage> {
@@ -4425,20 +4426,20 @@ fn spawn_sizes_a_region_against_the_smallest_window_that_actually_sees_it() {
     // stage that never sees it - and the narrow stage's working-room floor is
     // judged over just the regions it does see, so the spawn succeeds.
     let mut world = world_with_wide_and_narrow();
-    let layout = leviath_core::layout::ContextLayout::new(
+    let layout = crate::spec::layout::ContextLayout::new(
         vec![pct_region("big", 0.80), pct_region("small", 0.05)],
         0,
     );
     let mk = |name: &str, provider: &str| {
-        leviath_core::Stage::new(
+        crate::spec::Stage::new(
             name.to_string(),
-            leviath_core::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
         )
     };
     let mut narrow = mk("b", "narrow");
     // The narrow stage never reads the big region.
     narrow.context_hide = vec!["big".to_string()];
-    let bp = leviath_core::Blueprint::new(
+    let bp = crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![mk("a", "wide"), narrow],
@@ -4471,21 +4472,21 @@ fn spawn_fails_when_a_shared_region_starves_the_narrow_stage() {
     // that catches the starvation. This is the branch the single-window check
     // cannot make.
     let mut world = world_with_wide_and_narrow();
-    let layout = leviath_core::layout::ContextLayout::new(
+    let layout = crate::spec::layout::ContextLayout::new(
         vec![pct_region("shared", 0.80), pct_region("wideonly", 0.10)],
         0,
     );
     let mk = |name: &str, provider: &str| {
-        leviath_core::Stage::new(
+        crate::spec::Stage::new(
             name.to_string(),
-            leviath_core::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
         )
     };
     let mut narrow = mk("b", "narrow");
     // The narrow stage never sees the wide-only region, so it does not count
     // against its floor - only the shared region does.
     narrow.context_hide = vec!["wideonly".to_string()];
-    let bp = leviath_core::Blueprint::new(
+    let bp = crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![mk("a", "wide"), narrow],
@@ -4712,19 +4713,19 @@ fn run_empty(world: &mut World) {
 fn nudge_bp(reviewed: bool) -> AgentBlueprint {
     let mut stage = stage_named("a", None, false, None);
     if reviewed {
-        let point = leviath_core::blueprint::InteractionPoint {
+        let point = crate::spec::blueprint::InteractionPoint {
             name: "plan_approval".to_string(),
             prompt: "Review the plan above.".to_string(),
             required: true,
-            unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
-            style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+            unattended: crate::spec::blueprint::UnattendedPolicy::AutoApprove,
+            style: crate::spec::blueprint::InteractionStyle::MultipleChoice,
             options: vec!["Approve".to_string()],
             directives: std::collections::HashMap::new(),
             abort_options: Vec::new(),
             edit_options: Vec::new(),
             document_region: Some("plan".to_string()),
         };
-        stage.mode = leviath_core::blueprint::StageMode::InteractivePoints {
+        stage.mode = crate::spec::blueprint::StageMode::InteractivePoints {
             points: vec![point],
         };
     }
@@ -4809,7 +4810,7 @@ fn empty_response_finishes_after_max_nudges() {
     let mut world = World::new();
     let progress = StageProgress {
         total_tool_calls: 0,
-        text_only_nudges: leviath_core::blueprint::DEFAULT_MAX_NUDGES,
+        text_only_nudges: crate::spec::blueprint::DEFAULT_MAX_NUDGES,
         iterations: 0,
         ..Default::default()
     };
@@ -4944,7 +4945,7 @@ fn empty_response_nudges_and_loops_back_when_text_only() {
     let injected = conversation_text(&world, e);
     assert!(injected.contains(&format!(
         "[System] {}",
-        leviath_core::blueprint::DEFAULT_NUDGE_TEXT
+        crate::spec::blueprint::DEFAULT_NUDGE_TEXT
     )));
 }
 
@@ -4952,7 +4953,7 @@ fn empty_response_nudges_and_loops_back_when_text_only() {
 fn empty_response_respects_a_stage_that_disables_its_nudge() {
     // The stage knows its deliverable is text and says so.
     let mut bp = nudge_bp(false);
-    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+    bp.0.stages[0].nudge = Some(crate::spec::NudgeConfig {
         enabled: Some(false),
         ..Default::default()
     });
@@ -5097,7 +5098,7 @@ fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
     // end rather than loop. The stage's nudge is off, so the fall-through
     // resolves rather than nudging on text alone.
     let mut bp = image_bp();
-    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+    bp.0.stages[0].nudge = Some(crate::spec::NudgeConfig {
         enabled: Some(false),
         ..Default::default()
     });
@@ -5129,7 +5130,7 @@ fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
 fn empty_response_honors_an_agent_level_max() {
     // `[agent.nudge] max = 0`: the very first text-only response is final.
     let mut bp = nudge_bp(false);
-    bp.0.nudge = Some(leviath_core::NudgeConfig {
+    bp.0.nudge = Some(crate::spec::NudgeConfig {
         max: Some(0),
         ..Default::default()
     });
@@ -5153,13 +5154,13 @@ fn empty_response_honors_an_agent_level_max() {
 fn empty_response_interpolates_custom_text_placeholders() {
     // A custom text names the stage and its required regions.
     let mut bp = nudge_bp(false);
-    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+    bp.0.stages[0].nudge = Some(crate::spec::NudgeConfig {
         text: Some("Populate {regions} to finish stage {stage}.".to_string()),
         ..Default::default()
     });
     bp.0.context_layout
         .regions
-        .push(leviath_core::layout::RegionDefinition::new(
+        .push(crate::spec::layout::RegionDefinition::new(
             "plan".to_string(),
             RegionKind::Pinned,
             1_000,
@@ -5190,7 +5191,7 @@ fn empty_response_explicit_enabled_overrides_review_suppression() {
     // _reviewed`: the suppression is only the default, and a stage author who
     // explicitly asks for nudging on a reviewed stage gets it.
     let mut bp = nudge_bp(true);
-    bp.0.stages[0].nudge = Some(leviath_core::NudgeConfig {
+    bp.0.stages[0].nudge = Some(crate::spec::NudgeConfig {
         enabled: Some(true),
         ..Default::default()
     });
@@ -5223,7 +5224,7 @@ fn empty_response_reads_the_global_nudge_component() {
             nudge_bp(false),
             StageCursor { index: 0 },
             ReadyForTransition,
-            GlobalNudge(leviath_core::NudgeConfig {
+            GlobalNudge(crate::spec::NudgeConfig {
                 enabled: Some(false),
                 ..Default::default()
             }),
@@ -5252,7 +5253,7 @@ fn empty_response_with_an_out_of_range_cursor_uses_blueprint_defaults() {
         .id();
     run_empty(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
-    assert!(conversation_text(&world, e).contains(leviath_core::blueprint::DEFAULT_NUDGE_TEXT));
+    assert!(conversation_text(&world, e).contains(crate::spec::blueprint::DEFAULT_NUDGE_TEXT));
 }
 
 // ── tool-dispatch ──
@@ -6561,13 +6562,13 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
     // Four stages, and the one under the cursor caps its iterations. The cap is
     // read from the blueprint at the cursor's index rather than from the agent,
     // so a blueprint with distinct caps is what proves the right one is read.
-    let stages: Vec<leviath_core::Stage> = ["a", "b", "gather", "d"]
+    let stages: Vec<crate::spec::Stage> = ["a", "b", "gather", "d"]
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let mut st = leviath_core::Stage::new(
+            let mut st = crate::spec::Stage::new(
                 (*name).to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
             );
             st.max_iterations = Some(10 + i);
             st
@@ -6665,19 +6666,19 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
     world.insert_resource(ToolStage::detached(jtx));
 
     // One region that refreshes, one that does not.
-    let mut layout = leviath_core::layout::ContextLayout::new(
+    let mut layout = crate::spec::layout::ContextLayout::new(
         vec![
-            leviath_core::layout::RegionDefinition::new(
+            crate::spec::layout::RegionDefinition::new(
                 "conversation".to_string(),
                 RegionKind::Clearable,
                 10_000,
             ),
-            leviath_core::layout::RegionDefinition::new(
+            crate::spec::layout::RegionDefinition::new(
                 "environment".to_string(),
                 RegionKind::Pinned,
                 1000,
             ),
-            leviath_core::layout::RegionDefinition::new(
+            crate::spec::layout::RegionDefinition::new(
                 "machine".to_string(),
                 RegionKind::Pinned,
                 1000,
@@ -6685,19 +6686,19 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
         ],
         12_000,
     );
-    layout.regions[1].seed = Some(leviath_core::layout::RegionSeed::Tools {
-        calls: vec![leviath_core::layout::SeedToolCall::new("current_time")],
-        refresh: leviath_core::layout::SeedRefresh::EachStage,
+    layout.regions[1].seed = Some(crate::spec::layout::RegionSeed::Tools {
+        calls: vec![crate::spec::layout::SeedToolCall::new("current_time")],
+        refresh: crate::spec::layout::SeedRefresh::EachStage,
     });
-    layout.regions[2].seed = Some(leviath_core::layout::RegionSeed::Tools {
-        calls: vec![leviath_core::layout::SeedToolCall::new("system_info")],
-        refresh: leviath_core::layout::SeedRefresh::Once,
+    layout.regions[2].seed = Some(crate::spec::layout::RegionSeed::Tools {
+        calls: vec![crate::spec::layout::SeedToolCall::new("system_info")],
+        refresh: crate::spec::layout::SeedRefresh::Once,
     });
-    let stages = vec![leviath_core::Stage::new(
+    let stages = vec![crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     )];
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout);
+    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout);
 
     let mut window = ContextWindow::new(12_000);
     window.add_region(Region::new(
@@ -6864,9 +6865,9 @@ fn a_stage_entry_with_nothing_to_refresh_is_not_held() {
     let e = world
         .spawn((
             agent_state(),
-            AgentBlueprint(blueprint(vec![leviath_core::Stage::new(
+            AgentBlueprint(blueprint(vec![crate::spec::Stage::new(
                 "main".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
             )])),
             conv_window(),
             StageJustEntered {
@@ -8259,8 +8260,8 @@ fn routing(
     overrides: &[(&str, &str)],
     keep_results: bool,
     max_result: Option<usize>,
-) -> leviath_core::blueprint::ToolResultRouting {
-    leviath_core::blueprint::ToolResultRouting {
+) -> crate::spec::blueprint::ToolResultRouting {
+    crate::spec::blueprint::ToolResultRouting {
         default_region: default.to_string(),
         tool_overrides: overrides
             .iter()
@@ -8276,7 +8277,7 @@ fn routing(
 
 /// The text a tool's result ends up as, after routing applied its ceiling.
 fn routed_result(
-    routing: &leviath_core::blueprint::ToolResultRouting,
+    routing: &crate::spec::blueprint::ToolResultRouting,
     tool: &str,
     text: &str,
 ) -> String {
@@ -8930,15 +8931,15 @@ fn deliver_honors_target_region() {
 
 fn edge(
     target: &str,
-    cond: leviath_core::blueprint::TransitionCondition,
-) -> (String, leviath_core::blueprint::TransitionEdge) {
+    cond: crate::spec::blueprint::TransitionCondition,
+) -> (String, crate::spec::blueprint::TransitionEdge) {
     (
         target.to_string(),
-        leviath_core::blueprint::TransitionEdge {
+        crate::spec::blueprint::TransitionEdge {
             target: target.to_string(),
             condition: cond,
             hint: None,
-            transform: leviath_core::blueprint::EdgeTransform::Direct,
+            transform: crate::spec::blueprint::EdgeTransform::Direct,
             gate: None,
             stuck: None,
         },
@@ -8947,13 +8948,13 @@ fn edge(
 
 fn stage_named(
     name: &str,
-    edges: Option<Vec<(String, leviath_core::blueprint::TransitionEdge)>>,
+    edges: Option<Vec<(String, crate::spec::blueprint::TransitionEdge)>>,
     allow_complete: bool,
     max_revisits: Option<usize>,
-) -> leviath_core::Stage {
-    let mut s = leviath_core::Stage::new(
+) -> crate::spec::Stage {
+    let mut s = crate::spec::Stage::new(
         name.to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     s.allow_complete = allow_complete;
     s.max_revisits = max_revisits;
@@ -8963,16 +8964,16 @@ fn stage_named(
     s
 }
 
-fn blueprint(stages: Vec<leviath_core::Stage>) -> leviath_core::Blueprint {
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
+fn blueprint(stages: Vec<crate::spec::Stage>) -> crate::spec::Blueprint {
+    let layout = crate::spec::layout::ContextLayout::new(
+        vec![crate::spec::layout::RegionDefinition::new(
             "conversation".to_string(),
             RegionKind::Clearable,
             10_000,
         )],
         12_000,
     );
-    leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
 }
 
 fn si(model: &str) -> StageInference {
@@ -9013,7 +9014,7 @@ fn setups(n: usize) -> StageSetups {
 
 fn spawn_transition_agent(
     world: &mut World,
-    bp: leviath_core::Blueprint,
+    bp: crate::spec::Blueprint,
     stage_infs: Vec<StageInference>,
     visits: VisitCounts,
 ) -> Entity {
@@ -9122,7 +9123,7 @@ fn transition_terminal_marks_complete() {
 
 #[test]
 fn transition_single_graph_edge_advances() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
@@ -9162,7 +9163,7 @@ fn transition_empty_transitions_is_terminal() {
 
 #[test]
 fn transition_multiple_edges_awaits_choice() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
@@ -9194,7 +9195,7 @@ fn transition_multiple_edges_awaits_choice() {
 
 #[test]
 fn transition_allow_complete_single_edge_awaits_choice() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
@@ -9220,7 +9221,7 @@ fn transition_allow_complete_single_edge_awaits_choice() {
 // ─── A run that owed an answer and gave none is not complete ─────────────────
 
 /// A stage requiring an output that no stage ever produced.
-fn owing_output(require: bool) -> leviath_core::Blueprint {
+fn owing_output(require: bool) -> crate::spec::Blueprint {
     let mut stages = vec![stage_named("only", None, false, None)];
     stages[0].require_output = require;
     blueprint(stages)
@@ -9391,7 +9392,7 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
 
 #[test]
 fn transition_visit_exhausted_edge_is_a_dead_end_error() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
@@ -9427,7 +9428,7 @@ fn transition_visit_exhausted_edge_is_a_dead_end_error() {
 /// with everything it established thrown away.
 #[test]
 fn a_dead_end_edge_catches_the_strand() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
@@ -9466,7 +9467,7 @@ fn a_dead_end_edge_catches_the_strand() {
 /// offered on every visit, which is what collapsed the measured pipelines.
 #[test]
 fn a_dead_end_edge_is_not_offered_while_the_graph_is_healthy() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
@@ -9502,7 +9503,7 @@ fn a_dead_end_edge_is_not_offered_while_the_graph_is_healthy() {
 /// edge is also carrying provider failures and may want to go elsewhere.
 #[test]
 fn a_dead_end_edge_wins_over_an_error_edge() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
@@ -9541,7 +9542,7 @@ fn a_dead_end_edge_wins_over_an_error_edge() {
 /// now a failure mode `error_recovery` can actually catch.
 #[test]
 fn transition_dead_end_routes_down_the_error_edge_when_present() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
@@ -9577,7 +9578,7 @@ fn transition_dead_end_routes_down_the_error_edge_when_present() {
 
 #[test]
 fn transition_non_choosable_edge_is_terminal() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         // Only an Error-condition edge, which isn't followable on a normal
         // completion ⇒ filtered out of the choosable set ⇒ terminal.
@@ -9607,7 +9608,7 @@ fn transition_non_choosable_edge_is_terminal() {
 
 #[test]
 fn transition_unknown_target_edge_is_a_dead_end_error() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![stage_named(
         "a",
         Some(vec![edge("ghost", TransitionCondition::Always)]),
@@ -9689,7 +9690,7 @@ fn enter_stage_injects_system_prompt_and_config() {
     s.system_prompt = Some("be terse".to_string());
     s.inference_config = InferenceConfig {
         temperature: Some(0.3),
-        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(99)),
+        max_output_tokens: Some(crate::spec::blueprint::OutputCap::Tokens(99)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -9715,7 +9716,7 @@ fn enter_stage_injects_system_prompt_and_config() {
     let cfg = world.get::<InferenceConfig>(e).unwrap();
     assert_eq!(
         cfg.max_output_tokens,
-        Some(leviath_core::blueprint::OutputCap::Tokens(99))
+        Some(crate::spec::blueprint::OutputCap::Tokens(99))
     );
     assert!(!world.get::<AgentState>(e).unwrap().accepts_messages);
     assert!(world.get::<ReadyToInfer>(e).is_some());
@@ -9724,8 +9725,8 @@ fn enter_stage_injects_system_prompt_and_config() {
 #[test]
 fn enter_stage_swaps_context_layout() {
     let mut s = setup();
-    s.context_layout = Some(leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
+    s.context_layout = Some(crate::spec::layout::ContextLayout::new(
+        vec![crate::spec::layout::RegionDefinition::new(
             "scratch".to_string(),
             RegionKind::Clearable,
             5000,
@@ -9757,7 +9758,7 @@ fn enter_stage_swaps_context_layout() {
 /// contents back, rather than an empty region.
 #[test]
 fn a_region_hidden_by_one_stage_comes_back_with_its_content() {
-    use leviath_core::layout::{ContextLayout, RegionDefinition};
+    use crate::spec::layout::{ContextLayout, RegionDefinition};
 
     let mut w = pinned_window();
     w.add_to_region("sys", "the data preview".to_string(), 4)
@@ -9837,7 +9838,7 @@ fn a_hidden_region_is_not_assembled_into_the_prompt() {
 /// typed turns have to attach to.
 #[test]
 fn the_message_regions_are_never_hidden() {
-    use leviath_core::layout::{ContextLayout, RegionDefinition};
+    use crate::spec::layout::{ContextLayout, RegionDefinition};
 
     let mut w = ContextWindow::new(10_000);
     w.add_region(Region::new(
@@ -9869,7 +9870,7 @@ fn the_message_regions_are_never_hidden() {
 #[test]
 fn enter_stage_inserts_tool_result_routing() {
     let mut s = setup();
-    s.routing = Some(leviath_core::ToolResultRouting {
+    s.routing = Some(crate::spec::ToolResultRouting {
         default_region: "notes".to_string(),
         ..Default::default()
     });
@@ -9981,16 +9982,16 @@ fn resolved(model: &str) -> ResolvedStage {
 /// settings made is the first thing a reader of the log sees.
 #[test]
 fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
-    let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
-    let s0 = leviath_core::Stage::new(
+    let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
+    let s0 = crate::spec::Stage::new(
         "plan".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
-    let s1 = leviath_core::Stage::new(
+    let s1 = crate::spec::Stage::new(
         "fix".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout);
+    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout);
     let mut noted = resolved("m");
     noted.notes = vec![
         "[model] stage 'fix' starts on p/m (override_model); blueprint asked for q/n".to_string(),
@@ -10023,17 +10024,17 @@ fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
 fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     // A stage with model parameters, routing, and a system prompt should
     // produce a ready agent carrying all of them.
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
+    let layout = crate::spec::layout::ContextLayout::new(
+        vec![crate::spec::layout::RegionDefinition::new(
             "task".to_string(),
             RegionKind::Pinned,
             4000,
         )],
         8000,
     );
-    let mut s = leviath_core::Stage::new(
+    let mut s = crate::spec::Stage::new(
         "start".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     s.model
         .parameters
@@ -10045,11 +10046,11 @@ fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
         "system_prompt".to_string(),
         serde_json::Value::String("be helpful".to_string()),
     );
-    s.tool_result_routing = Some(leviath_core::ToolResultRouting {
+    s.tool_result_routing = Some(crate::spec::ToolResultRouting {
         default_region: "notes".to_string(),
         ..Default::default()
     });
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
 
     let mut world = World::new();
     let e = spawn_agent(
@@ -10068,7 +10069,7 @@ fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     assert_eq!(cfg.temperature, Some(0.5));
     assert_eq!(
         cfg.max_output_tokens,
-        Some(leviath_core::blueprint::OutputCap::Tokens(128))
+        Some(crate::spec::blueprint::OutputCap::Tokens(128))
     );
     assert_eq!(
         world
@@ -10124,7 +10125,7 @@ fn spawn_agent_defaults_config_and_no_routing() {
 
 #[test]
 fn stage_setup_from_folds_fanout_split_prompt() {
-    use leviath_core::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
+    use crate::spec::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
     let fanout = |split: &str| StageMode::FanOut {
         config: FanOutConfig {
             worker_agent: None,
@@ -10229,7 +10230,7 @@ fn stage_setup_from_collects_extra_model_parameters() {
     assert_eq!(setup.inference_config.temperature, Some(0.3));
     assert_eq!(
         setup.inference_config.max_output_tokens,
-        Some(leviath_core::blueprint::OutputCap::Tokens(256))
+        Some(crate::spec::blueprint::OutputCap::Tokens(256))
     );
     let extra = &setup.inference_config.extra_params;
     assert_eq!(extra.len(), 2);
@@ -10329,23 +10330,23 @@ fn the_default_retry_tuning_is_the_shipped_schedule() {
 
 #[test]
 fn spawn_agent_errors_on_oversized_system_prompt() {
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
+    let layout = crate::spec::layout::ContextLayout::new(
+        vec![crate::spec::layout::RegionDefinition::new(
             "task".to_string(),
             RegionKind::Pinned,
             40,
         )],
         1000,
     );
-    let mut s = leviath_core::Stage::new(
+    let mut s = crate::spec::Stage::new(
         "only".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     s.config.insert(
         "system_prompt".to_string(),
         serde_json::Value::String("z".repeat(100_000)),
     );
-    let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
 
     let mut world = World::new();
     let err = spawn_agent(
@@ -10668,7 +10669,7 @@ async fn compaction_skips_region_with_empty_content() {
 
 // ── edge transforms ──
 
-use leviath_core::blueprint::EdgeTransform;
+use crate::spec::blueprint::EdgeTransform;
 
 /// A window with a pinned `sys` region and a stage-specific `scratch` region,
 /// both with content.
@@ -10907,10 +10908,10 @@ async fn edge_compact_drops_marker_when_pool_full() {
     assert!(world.get::<AwaitingCompaction>(e).is_none());
 }
 
-fn clear_edge(target: &str) -> leviath_core::blueprint::TransitionEdge {
-    leviath_core::blueprint::TransitionEdge {
+fn clear_edge(target: &str) -> crate::spec::blueprint::TransitionEdge {
+    crate::spec::blueprint::TransitionEdge {
         target: target.to_string(),
-        condition: leviath_core::blueprint::TransitionCondition::Always,
+        condition: crate::spec::blueprint::TransitionCondition::Always,
         hint: None,
         transform: EdgeTransform::Clear,
         gate: None,
@@ -10985,12 +10986,12 @@ fn resolve_transition_with_compact_transform_marks_pending_edge_compact() {
 
 // ── max_iterations + error/max-iter edges (#3+#4) ──
 
-use leviath_core::blueprint::TransitionCondition;
+use crate::spec::blueprint::TransitionCondition;
 
 fn conditioned_edge(
     target: &str,
     condition: TransitionCondition,
-) -> leviath_core::blueprint::TransitionEdge {
+) -> crate::spec::blueprint::TransitionEdge {
     let mut e = plain_edge(target);
     e.condition = condition;
     e
@@ -11074,14 +11075,14 @@ fn enforce_max_iterations_leaves_a_fan_out_stage_alone() {
     // Same agent, same spent budget - only the mode differs.
     let capped = spawn_ready_agent(&mut world, Some(4), 4, AgentStatus::Active);
     let mut bp = world.get::<AgentBlueprint>(e).unwrap().0.clone();
-    bp.stages[0].mode = leviath_core::blueprint::StageMode::FanOut {
-        config: leviath_core::blueprint::FanOutConfig {
+    bp.stages[0].mode = crate::spec::blueprint::StageMode::FanOut {
+        config: crate::spec::blueprint::FanOutConfig {
             worker_agent: Some("w".to_string()),
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
             max_workers: 4,
-            on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+            on_worker_failure: crate::spec::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "split".to_string(),
             results_region: None,
             max_items: None,
@@ -11126,8 +11127,8 @@ fn stuck_cfg(
     minutes: Option<usize>,
     edits: Option<usize>,
     tool_calls: Option<usize>,
-) -> leviath_core::blueprint::StuckConfig {
-    leviath_core::blueprint::StuckConfig {
+) -> crate::spec::blueprint::StuckConfig {
+    crate::spec::blueprint::StuckConfig {
         after_iterations: iterations,
         after_minutes: minutes,
         after_same_file_edits: edits,
@@ -11357,7 +11358,7 @@ fn note_max_iterations_prefers_the_error_report_region_then_conversation() {
 /// `stuck` edge to `b` armed on `cfg`.
 fn spawn_stuck_agent(
     world: &mut World,
-    cfg: Option<leviath_core::blueprint::StuckConfig>,
+    cfg: Option<crate::spec::blueprint::StuckConfig>,
     progress: StageProgress,
     status: AgentStatus,
     target_max_revisits: Option<usize>,
@@ -11595,7 +11596,7 @@ fn find_conditioned_edge_skips_unknown_target_and_exhausted_revisits() {
 
 fn spawn_outcome_agent(
     world: &mut World,
-    bp: leviath_core::Blueprint,
+    bp: crate::spec::Blueprint,
     outcome: StageOutcome,
     status: AgentStatus,
 ) -> Entity {
@@ -11856,13 +11857,13 @@ fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
 
 fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> AgentBlueprint {
     let region =
-        leviath_core::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
+        crate::spec::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
             .with_required(true, custom_msg.map(str::to_string));
-    let layout = leviath_core::layout::ContextLayout::new(vec![region], 10_000);
+    let layout = crate::spec::layout::ContextLayout::new(vec![region], 10_000);
     let mut stage = stage_named("a", None, false, None);
     stage.available_tools = tools.iter().map(|s| s.to_string()).collect();
     stage.context_layout = Some(layout.clone());
-    AgentBlueprint(leviath_core::Blueprint::new(
+    AgentBlueprint(crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![stage],
@@ -11923,16 +11924,16 @@ fn unmet_required_regions_skips_caller_input_seeded_regions() {
     // be flagged by the agent-facing gate, even when empty and the stage can
     // write context - the caller owns it, not the agent.
     let region =
-        leviath_core::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
+        crate::spec::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
             .with_required(true, None)
-            .with_seed(leviath_core::layout::RegionSeed::CallerInput {
+            .with_seed(crate::spec::layout::RegionSeed::CallerInput {
                 name: "plan".to_string(),
             });
-    let layout = leviath_core::layout::ContextLayout::new(vec![region], 10_000);
+    let layout = crate::spec::layout::ContextLayout::new(vec![region], 10_000);
     let mut stage = stage_named("a", None, false, None);
     stage.available_tools = vec!["context_write".to_string()];
     stage.context_layout = Some(layout.clone());
-    let bp = AgentBlueprint(leviath_core::Blueprint::new(
+    let bp = AgentBlueprint(crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![stage],
@@ -12078,8 +12079,8 @@ fn require_context_regions_proceeds_when_met_capped_or_errored() {
 // ── transition gates: require_region_updated ─────────
 
 /// A gate that watches a region for change rather than for content.
-fn change_gate(region: &str) -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
+fn change_gate(region: &str) -> crate::spec::blueprint::TransitionGate {
+    crate::spec::blueprint::TransitionGate {
         require_region_updated: Some(region.to_string()),
         ..Default::default()
     }
@@ -12164,7 +12165,7 @@ fn a_gate_on_a_missing_region_passes() {
 fn an_unchanged_region_gives_up_after_the_budget() {
     let w = plan_window("unchanged");
     let mut progress = progress_with_baseline(&w);
-    progress.gate_reentries = leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS;
+    progress.gate_reentries = crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS;
     let stage = stage_named("plan", None, false, None);
 
     assert!(matches!(
@@ -12195,7 +12196,7 @@ fn a_custom_message_is_used() {
 /// selectivity is what these four cases pin.
 #[test]
 fn only_watched_regions_get_a_baseline() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
 
     let w = plan_window("the plan");
 
@@ -12287,7 +12288,7 @@ fn a_zero_baseline_cannot_run_away() {
 /// from too few views on exactly that path.
 #[test]
 fn a_hyphenated_target_is_matched_whole() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let edges = vec![
         edge("build-model", TransitionCondition::LlmChoice).1,
         edge("generate-more", TransitionCondition::LlmChoice).1,
@@ -12318,9 +12319,9 @@ fn counted_window(n: usize) -> ContextWindow {
     w
 }
 
-fn count_gate(at_least: usize, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
-        require_region_entries: Some(leviath_core::blueprint::RegionCount {
+fn count_gate(at_least: usize, message: Option<&str>) -> crate::spec::blueprint::TransitionGate {
+    crate::spec::blueprint::TransitionGate {
+        require_region_entries: Some(crate::spec::blueprint::RegionCount {
             region: "views".to_string(),
             at_least,
         }),
@@ -12403,8 +12404,8 @@ fn checklist_window(open: usize, done: usize) -> ContextWindow {
     w
 }
 
-fn items_gate() -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
+fn items_gate() -> crate::spec::blueprint::TransitionGate {
+    crate::spec::blueprint::TransitionGate {
         require_no_open_items: Some("todos".to_string()),
         ..Default::default()
     }
@@ -12454,7 +12455,7 @@ fn an_empty_checklist_gate_passes() {
 fn open_items_give_up_after_the_budget() {
     let w = checklist_window(2, 0);
     let progress = StageProgress {
-        gate_reentries: leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS,
+        gate_reentries: crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS,
         ..Default::default()
     };
     let stage = stage_named("implement", None, false, None);
@@ -12607,8 +12608,8 @@ fn the_checklist_path_holds_together() {
 
 // ── transition gates: require_modifications ─────────
 
-fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
+fn gate(region: Option<&str>, message: Option<&str>) -> crate::spec::blueprint::TransitionGate {
+    crate::spec::blueprint::TransitionGate {
         require_modifications: true,
         message: message.map(str::to_string),
         region: region.map(str::to_string),
@@ -12624,8 +12625,8 @@ fn gate(region: Option<&str>, message: Option<&str>) -> leviath_core::blueprint:
 /// A stage that can write files, with `edges` attached.
 fn writing_stage(
     name: &str,
-    edges: Vec<(String, leviath_core::blueprint::TransitionEdge)>,
-) -> leviath_core::Stage {
+    edges: Vec<(String, crate::spec::blueprint::TransitionEdge)>,
+) -> crate::spec::Stage {
     let mut s = stage_named(name, Some(edges), false, None);
     s.available_tools = vec!["write_file".to_string(), "bash".to_string()];
     s
@@ -12633,15 +12634,15 @@ fn writing_stage(
 
 fn gated_edge(
     target: &str,
-    gate: Option<leviath_core::blueprint::TransitionGate>,
-) -> (String, leviath_core::blueprint::TransitionEdge) {
+    gate: Option<crate::spec::blueprint::TransitionGate>,
+) -> (String, crate::spec::blueprint::TransitionEdge) {
     (
         target.to_string(),
-        leviath_core::blueprint::TransitionEdge {
+        crate::spec::blueprint::TransitionEdge {
             target: target.to_string(),
-            condition: leviath_core::blueprint::TransitionCondition::Always,
+            condition: crate::spec::blueprint::TransitionCondition::Always,
             hint: None,
-            transform: leviath_core::blueprint::EdgeTransform::Direct,
+            transform: crate::spec::blueprint::EdgeTransform::Direct,
             gate,
             stuck: None,
         },
@@ -12682,7 +12683,7 @@ fn gate_blocks_only_an_unsatisfied_require_modifications_edge() {
         gate_blocks(None, &stage, &zero, &window),
         GateDecision::Pass
     );
-    let off = leviath_core::blueprint::TransitionGate::default();
+    let off = crate::spec::blueprint::TransitionGate::default();
     assert_eq!(
         gate_blocks(Some(&off), &stage, &zero, &window),
         GateDecision::Pass
@@ -12890,7 +12891,7 @@ fn resolve_transition_records_a_forced_gate_and_advances() {
 
 #[test]
 fn resolve_transition_skips_the_gate_on_an_error_edge() {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     // The error edge is followed even with zero modifications: a failed stage
     // must be able to reach recovery.
     let mut error_edge = gated_edge("recover", Some(gate(None, None)));
@@ -12923,8 +12924,8 @@ fn ftc(
     reads: bool,
     writes: bool,
     max: Option<usize>,
-) -> leviath_core::blueprint::FileTrackingConfig {
-    leviath_core::blueprint::FileTrackingConfig {
+) -> crate::spec::blueprint::FileTrackingConfig {
+    crate::spec::blueprint::FileTrackingConfig {
         region: "files".to_string(),
         track_reads: reads,
         track_writes: writes,
@@ -13114,8 +13115,8 @@ fn collect_tools_applies_file_tracking_from_blueprint() {
         10_000,
     ));
     // A blueprint carrying a file_tracking config.
-    let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-    let mut bp = leviath_core::Blueprint::new(
+    let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
+    let mut bp = crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![stage_named("a", None, false, None)],
@@ -14540,12 +14541,12 @@ fn last_progress_at_tracks_progress_and_not_the_heartbeat() {
 
 // ── async LLM-choice transition ──
 
-fn plain_edge(target: &str) -> leviath_core::blueprint::TransitionEdge {
-    leviath_core::blueprint::TransitionEdge {
+fn plain_edge(target: &str) -> crate::spec::blueprint::TransitionEdge {
+    crate::spec::blueprint::TransitionEdge {
         target: target.to_string(),
-        condition: leviath_core::blueprint::TransitionCondition::LlmChoice,
+        condition: crate::spec::blueprint::TransitionCondition::LlmChoice,
         hint: None,
-        transform: leviath_core::blueprint::EdgeTransform::Direct,
+        transform: crate::spec::blueprint::EdgeTransform::Direct,
         gate: None,
         stuck: None,
     }
@@ -14683,9 +14684,9 @@ fn conv_window() -> ContextWindow {
 
 fn spawn_choosing_agent(
     world: &mut World,
-    bp: leviath_core::Blueprint,
+    bp: crate::spec::Blueprint,
     stage_infs: Vec<StageInference>,
-    edges: Vec<leviath_core::blueprint::TransitionEdge>,
+    edges: Vec<crate::spec::blueprint::TransitionEdge>,
 ) -> Entity {
     world
         .spawn((
@@ -14863,9 +14864,9 @@ fn world_with_transition_results() -> (World, mpsc::UnboundedSender<InferenceOut
 
 fn spawn_responding_agent(
     world: &mut World,
-    bp: leviath_core::Blueprint,
+    bp: crate::spec::Blueprint,
     stage_infs: Vec<StageInference>,
-    edges: Vec<leviath_core::blueprint::TransitionEdge>,
+    edges: Vec<crate::spec::blueprint::TransitionEdge>,
 ) -> Entity {
     let n = stage_infs.len();
     world
@@ -16046,8 +16047,8 @@ fn owing_bp(max_revisits: Option<usize>) -> AgentBlueprint {
     let mut stage = stage_named("summary", None, true, max_revisits);
     stage.available_tools = vec![leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()];
     stage.require_output = true;
-    let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-    AgentBlueprint(leviath_core::Blueprint::new(
+    let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
+    AgentBlueprint(crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![stage],
@@ -16088,14 +16089,14 @@ fn fanning_bp() -> AgentBlueprint {
 /// The same, with an explicit `max_attempts`.
 fn fanning_bp_with(max_attempts: Option<usize>) -> AgentBlueprint {
     let mut stage = stage_named("investigate", None, false, None);
-    stage.mode = leviath_core::blueprint::StageMode::FanOut {
-        config: leviath_core::blueprint::FanOutConfig {
+    stage.mode = crate::spec::blueprint::StageMode::FanOut {
+        config: crate::spec::blueprint::FanOutConfig {
             worker_agent: Some("researcher".to_string()),
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
             max_workers: 4,
-            on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+            on_worker_failure: crate::spec::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "split it".to_string(),
             results_region: None,
             max_items: None,
@@ -16259,7 +16260,7 @@ fn a_fan_out_stage_uses_its_own_max_attempts() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            FanOutReentries(leviath_core::blueprint::DEFAULT_FAN_OUT_ATTEMPTS + 1),
+            FanOutReentries(crate::spec::blueprint::DEFAULT_FAN_OUT_ATTEMPTS + 1),
         ))
         .id();
 
@@ -16446,7 +16447,7 @@ fn a_generous_max_revisits_does_not_buy_more_output_retries() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(crate::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
             crate::persistence::RunOutcomeFlags::default(),
         ))
         .id();
@@ -16475,7 +16476,7 @@ fn an_exhausted_budget_proceeds_and_records_that_it_was_forced() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(crate::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
             crate::persistence::RunOutcomeFlags::default(),
         ))
         .id();
@@ -16508,7 +16509,7 @@ fn an_exhausted_budget_proceeds_even_with_nowhere_to_record_it() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(crate::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
         ))
         .id();
     run_require_output(&mut world);
@@ -16648,9 +16649,9 @@ fn hook_scripts(src: &str, wanted: &[&str]) -> crate::components::StageHookScrip
 
 /// A one-stage blueprint whose stage names `h.rhai` for `on_stage_enter`.
 fn hooked_bp() -> AgentBlueprint {
-    let mut stage = leviath_core::Stage::new(
+    let mut stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     stage.hooks.on_stage_enter = Some("h.rhai".to_string());
     AgentBlueprint(blueprint(vec![stage]))
@@ -16882,9 +16883,9 @@ fn an_out_of_range_stage_index_is_skipped() {
 #[test]
 fn a_stage_that_declares_no_hook_does_not_run_one() {
     let mut world = World::new();
-    let stage = leviath_core::Stage::new(
+    let stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     let e = world
         .spawn((
@@ -17000,11 +17001,11 @@ fn a_refusal_without_a_reason_still_says_it_was_refused() {
 // ─── before_inference / after_inference ──────────────────────────────────────
 
 fn stage_hooked(
-    field: impl FnOnce(&mut leviath_core::blueprint::StageHooks, String),
+    field: impl FnOnce(&mut crate::spec::blueprint::StageHooks, String),
 ) -> AgentBlueprint {
-    let mut stage = leviath_core::Stage::new(
+    let mut stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     field(&mut stage.hooks, "h.rhai".to_string());
     AgentBlueprint(blueprint(vec![stage]))
@@ -17172,9 +17173,9 @@ fn before_inference_skips_an_out_of_range_stage() {
 #[test]
 fn before_inference_skips_a_stage_that_declared_none() {
     let mut world = World::new();
-    let stage = leviath_core::Stage::new(
+    let stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     let e = world
         .spawn((
@@ -17382,9 +17383,9 @@ fn after_inference_skips_an_out_of_range_stage() {
 #[test]
 fn after_inference_skips_a_stage_that_declared_none() {
     let mut world = World::new();
-    let stage = leviath_core::Stage::new(
+    let stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     let e = world
         .spawn((
@@ -17759,9 +17760,9 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
             ),
         ))
         .id();
-    let stage = leviath_core::Stage::new(
+    let stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     let undeclared = world
         .spawn((
@@ -18055,9 +18056,9 @@ fn a_terminal_run_with_no_hook_is_marked_so_it_is_not_rechecked() {
     let mut world = World::new();
     let mut state = agent_state();
     state.status = AgentStatus::Complete;
-    let stage = leviath_core::Stage::new(
+    let stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     let undeclared = world
         .spawn((
@@ -18229,9 +18230,9 @@ fn on_stage_exit_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
             ),
         ))
         .id();
-    let stage = leviath_core::Stage::new(
+    let stage = crate::spec::Stage::new(
         "main".to_string(),
-        leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     let undeclared = world
         .spawn((
@@ -18449,7 +18450,7 @@ fn a_stage_without_a_prompt_clears_the_previous_one() {
 /// run, which is why the test exists.
 #[test]
 fn stage_instructions_survive_a_stage_layout_that_does_not_declare_them() {
-    use leviath_core::{ContextLayout, RegionDefinition};
+    use crate::spec::{ContextLayout, RegionDefinition};
 
     let mut window = instructions_window(&["stage_instructions", "task"]);
     // A stage layout naming only `task`.
@@ -18507,8 +18508,8 @@ fn routed_window(regions: &[&str], hidden: &[&str]) -> ContextWindow {
     window
 }
 
-fn routed_to(region: &str) -> leviath_core::blueprint::ToolResultRouting {
-    leviath_core::blueprint::ToolResultRouting {
+fn routed_to(region: &str) -> crate::spec::blueprint::ToolResultRouting {
+    crate::spec::blueprint::ToolResultRouting {
         default_region: region.to_string(),
         ..Default::default()
     }
@@ -18998,8 +18999,8 @@ fn a_pointer_to_a_hidden_region_says_it_cannot_be_read_here() {
 
 /// A gate that asks only for regions, so these tests isolate the new condition
 /// from `require_modifications`. The two together are covered separately.
-fn requiring_gate(regions: &[&str]) -> leviath_core::blueprint::TransitionGate {
-    leviath_core::blueprint::TransitionGate {
+fn requiring_gate(regions: &[&str]) -> crate::spec::blueprint::TransitionGate {
+    crate::spec::blueprint::TransitionGate {
         require_regions: regions.iter().map(|s| (*s).to_string()).collect(),
         require_modifications: false,
         ..gate(None, None)
@@ -19100,7 +19101,7 @@ fn require_regions_gives_up_with_the_shared_budget() {
     let stage = writing_stage("plan", Vec::new());
     let window = gate_window(&["plan"], &[]);
     let progress = StageProgress {
-        gate_reentries: leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS,
+        gate_reentries: crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS,
         ..Default::default()
     };
     let decision = gate_blocks(Some(&requiring_gate(&["plan"])), &stage, &progress, &window);
@@ -19132,7 +19133,7 @@ fn require_regions_passes_when_the_window_does_not_hold_the_region() {
 #[test]
 fn require_regions_and_require_modifications_must_both_hold() {
     let stage = writing_stage("plan", Vec::new());
-    let both = leviath_core::blueprint::TransitionGate {
+    let both = crate::spec::blueprint::TransitionGate {
         require_regions: vec!["plan".to_string()],
         ..gate(None, None) // require_modifications: true
     };
@@ -19332,8 +19333,8 @@ fn compact_window(results_summarizable: bool) -> ContextWindow {
     window
 }
 
-fn bare_compact() -> leviath_core::blueprint::EdgeTransform {
-    leviath_core::blueprint::EdgeTransform::Compact { prompt: None }
+fn bare_compact() -> crate::spec::blueprint::EdgeTransform {
+    crate::spec::blueprint::EdgeTransform::Compact { prompt: None }
 }
 
 /// The bug: a bare `compact` hands every non-pinned region to the summarizer,
@@ -19372,7 +19373,7 @@ fn a_region_declared_not_summarizable_is_left_alone() {
 fn a_custom_compact_list_cannot_override_the_region_flag() {
     let _guard = leviath_testkit::tracing_guard();
     let mut window = compact_window(false);
-    let custom = leviath_core::blueprint::EdgeTransform::Custom {
+    let custom = crate::spec::blueprint::EdgeTransform::Custom {
         carry: Vec::new(),
         compact: vec!["results".to_string(), "conversation".to_string()],
         clear: Vec::new(),
@@ -19391,7 +19392,7 @@ fn a_custom_compact_list_cannot_override_the_region_flag() {
 #[test]
 fn not_summarizable_does_not_protect_a_region_from_clear() {
     let mut window = compact_window(false);
-    let cleared = apply_edge_transform(&mut window, &leviath_core::blueprint::EdgeTransform::Clear);
+    let cleared = apply_edge_transform(&mut window, &crate::spec::blueprint::EdgeTransform::Clear);
     assert!(cleared.is_empty(), "clear compacts nothing");
     assert!(
         window
@@ -19416,7 +19417,7 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    let mut call = tc("c1", leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+    let mut call = tc("c1", crate::spec::blueprint::SUBMIT_OUTPUT_TOOL);
     call.arguments = serde_json::json!({ "content": "analyze" });
     let (_, result) = infer_with(vec![call]);
     let bp = blueprint(vec![
@@ -19427,7 +19428,7 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
     let e = world
         .spawn((
             agent_state(),
-            offering(&[leviath_core::blueprint::SUBMIT_OUTPUT_TOOL]),
+            offering(&[crate::spec::blueprint::SUBMIT_OUTPUT_TOOL]),
             result,
             conv_window(),
             AgentBlueprint(bp),
@@ -19454,14 +19455,14 @@ async fn dispatch_tools_records_a_real_submission_with_the_blueprint_present() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    let mut call = tc("c1", leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+    let mut call = tc("c1", crate::spec::blueprint::SUBMIT_OUTPUT_TOOL);
     call.arguments = serde_json::json!({ "content": "Three regressions, listed below." });
     let (_, result) = infer_with(vec![call]);
     let bp = blueprint(vec![stage_named("analyze", None, true, None)]);
     let e = world
         .spawn((
             agent_state(),
-            offering(&[leviath_core::blueprint::SUBMIT_OUTPUT_TOOL]),
+            offering(&[crate::spec::blueprint::SUBMIT_OUTPUT_TOOL]),
             result,
             conv_window(),
             AgentBlueprint(bp),
@@ -19685,7 +19686,7 @@ fn process_response_arms_the_raised_cap_when_the_reply_was_cut_off() {
 fn build_request_raises_the_cap_to_the_model_maximum_after_a_cut_off() {
     let cfg = InferenceConfig {
         temperature: None,
-        max_output_tokens: Some(leviath_core::blueprint::OutputCap::Tokens(100)),
+        max_output_tokens: Some(crate::spec::blueprint::OutputCap::Tokens(100)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -20229,7 +20230,7 @@ fn empty_response_keeps_the_reply_it_accepts() {
 /// and a region the stage does not carry falls back to that maximum.
 #[test]
 fn build_request_resolves_relative_output_caps() {
-    use leviath_core::blueprint::OutputCap;
+    use crate::spec::blueprint::OutputCap;
     let cfg = |cap: OutputCap| InferenceConfig {
         temperature: None,
         max_output_tokens: Some(cap),
@@ -20670,20 +20671,20 @@ mod spawn_parts {
     use crate::pipeline::spawn::{SeededSpawn, spawn_agent_seeded};
     use leviath_core::mime::{InboundPart, MemoryBlobStore};
 
-    fn task_blueprint() -> leviath_core::Blueprint {
-        let layout = leviath_core::layout::ContextLayout::new(
-            vec![leviath_core::layout::RegionDefinition::new(
+    fn task_blueprint() -> crate::spec::Blueprint {
+        let layout = crate::spec::layout::ContextLayout::new(
+            vec![crate::spec::layout::RegionDefinition::new(
                 "task".to_string(),
                 RegionKind::Pinned,
                 4000,
             )],
             8000,
         );
-        let s = leviath_core::Stage::new(
+        let s = crate::spec::Stage::new(
             "start".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
-        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+        crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
     }
 
     fn seeded(parts: Vec<InboundPart>) -> SeededSpawn {
@@ -20694,7 +20695,7 @@ mod spawn_parts {
             parts,
             stages: vec![resolved("m")],
             global_hints: hints(true),
-            global_nudge: leviath_core::NudgeConfig::default(),
+            global_nudge: crate::spec::NudgeConfig::default(),
             region_scripts: HashMap::new(),
             mime_registry: None,
         }
@@ -20853,9 +20854,9 @@ mod typed_tool_results {
         // With a blueprint on the agent, the stage's limit for the tool is
         // looked up before the tool answers; the answer is the same here,
         // since there is still no store to read from.
-        let mut stage = leviath_core::Stage::new(
+        let mut stage = crate::spec::Stage::new(
             "main".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
         stage
             .tool_accepts
@@ -21158,9 +21159,9 @@ mod model_parts {
         let stored =
             Part::stored(png("hero.png").describe(&leviath_core::mime::MimeRegistry::builtin()))
                 .named("hero.png");
-        let mut stage = leviath_core::blueprint::Stage::new(
+        let mut stage = crate::spec::blueprint::Stage::new(
             "draw".to_string(),
-            leviath_core::blueprint::ModelConfig::new("openrouter".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("openrouter".to_string(), "m".to_string()),
         );
         stage
             .output_routing

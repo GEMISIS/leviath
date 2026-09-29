@@ -296,7 +296,7 @@ fn read_path_report(
     config: Option<&crate::config::Config>,
 ) -> Option<crate::read_path_report::GrantReport> {
     let config = config?;
-    let blueprint = leviath_core::manifest::parse_manifest(manifest_toml).ok()?;
+    let blueprint = leviath_runtime::spec::manifest::parse_manifest(manifest_toml).ok()?;
     let workdir = crate::commands::resolve_cwd().unwrap_or_default();
     crate::read_path_report::build(&blueprint, config, &workdir)?.ok()
 }
@@ -610,7 +610,7 @@ mod capability_tests {
                         [stages.main]\nmode = \"autonomous\"\n\n\
                         [context.regions]\nsystem = { kind = \"pinned\", max_tokens = 1000 }\n\n\
                         [read_paths]\nallow = [\"/data/runs\", \"/data/docs\"]\n";
-        let blueprint = leviath_core::manifest::parse_manifest(manifest).expect("parses");
+        let blueprint = leviath_runtime::spec::manifest::parse_manifest(manifest).expect("parses");
 
         let mut config = crate::config::Config::default();
         config.security.read_paths = vec!["/data/runs".to_string()];

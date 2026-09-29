@@ -74,17 +74,19 @@ pub(crate) struct InputSummary {
 ///
 /// The prose and JSON halves of the report both read from this one walk, so
 /// they cannot disagree about what the agent takes.
-fn input_summaries(blueprint: &leviath_core::Blueprint) -> Vec<InputSummary> {
+fn input_summaries(blueprint: &leviath_runtime::spec::Blueprint) -> Vec<InputSummary> {
     blueprint
         .context_layout
         .regions
         .iter()
         .filter_map(|r| match &r.seed {
-            Some(leviath_core::layout::RegionSeed::CallerInput { name }) => Some(InputSummary {
-                key: name.clone(),
-                region: r.name.clone(),
-                required: r.required,
-            }),
+            Some(leviath_runtime::spec::layout::RegionSeed::CallerInput { name }) => {
+                Some(InputSummary {
+                    key: name.clone(),
+                    region: r.name.clone(),
+                    required: r.required,
+                })
+            }
             _ => None,
         })
         .collect()
@@ -94,7 +96,7 @@ fn input_summaries(blueprint: &leviath_core::Blueprint) -> Vec<InputSummary> {
 /// `lev run` would otherwise only reveal by refusing at spawn:
 /// which flags this agent takes, and explicitly that `--task` is not among
 /// them when no region is seeded from the task.
-fn input_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+fn input_lines(blueprint: &leviath_runtime::spec::Blueprint) -> Vec<String> {
     let inputs = input_summaries(blueprint);
     if inputs.is_empty() {
         return vec![
@@ -160,7 +162,7 @@ pub(crate) struct ValidateReport {
 impl ValidateReport {
     /// The report for a manifest that got as far as linting.
     fn linted(
-        blueprint: &leviath_core::Blueprint,
+        blueprint: &leviath_runtime::spec::Blueprint,
         findings: Vec<LintFinding>,
         deny_warnings: bool,
     ) -> Self {
@@ -224,7 +226,7 @@ enum ManifestCheckError {
 /// so the linter can ask what the author actually wrote.
 #[derive(Debug)]
 struct CheckedManifest {
-    blueprint: leviath_core::Blueprint,
+    blueprint: leviath_runtime::spec::Blueprint,
     content: String,
     /// The directory holding the manifest: where its `tools/` live.
     agent_dir: PathBuf,
@@ -260,7 +262,7 @@ fn check_manifest(path: &std::path::Path) -> Result<CheckedManifest, ManifestChe
         ))
     })?;
 
-    let blueprint = leviath_core::manifest::parse_manifest(&content)
+    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content)
         .map_err(|e| ManifestCheckError::Parse(e.to_string()))?;
 
     blueprint
@@ -293,7 +295,7 @@ fn check_manifest(path: &std::path::Path) -> Result<CheckedManifest, ManifestChe
 }
 
 /// Print the "valid blueprint" summary + non-fatal warnings.
-fn print_success(blueprint: &leviath_core::Blueprint) {
+fn print_success(blueprint: &leviath_runtime::spec::Blueprint) {
     println!("✓ Blueprint '{}' is valid.", blueprint.name);
     println!(
         "  {} stages, version {}",
@@ -342,7 +344,7 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
 
 /// One line per stage that takes mime or hands back declared artifacts:
 /// what `lev run --attach` may aim at it, and what `lev result` will list.
-fn mime_lines(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+fn mime_lines(blueprint: &leviath_runtime::spec::Blueprint) -> Vec<String> {
     let mut lines = Vec::new();
     if !blueprint.mime_types.is_empty() {
         let rows: Vec<String> = blueprint
@@ -547,7 +549,7 @@ fn execute_reporting_outcome(
 /// machine-setup fact, not a blueprint error, so it is shown rather than
 /// counted as a finding. A blueprint that declares none prints nothing.
 fn print_dependencies(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &crate::config::Config,
     agent_dir: &std::path::Path,
 ) {
@@ -577,7 +579,7 @@ fn print_dependencies(
 /// blueprint's own order, so the promotion is visible as a difference rather
 /// than something to take on trust.
 fn print_model_resolution(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &crate::config::Config,
     registry: Option<&leviath_runtime::ProviderRegistry>,
 ) {
@@ -598,7 +600,7 @@ fn print_model_resolution(
 /// in the preference to claim the model, which is the same question the
 /// resolver asks: a provider outside the preference never serves a bare name.
 fn model_is_reachable(
-    entry: &leviath_core::blueprint::ModelEntry,
+    entry: &leviath_runtime::spec::blueprint::ModelEntry,
     defaults: &leviath_runtime::pipeline::ModelDefaults,
     registry: &leviath_runtime::ProviderRegistry,
 ) -> bool {
@@ -625,7 +627,7 @@ fn model_key(model: &str) -> &str {
 /// The lines [`print_model_resolution`] prints, so they can be asserted
 /// without capturing stdout.
 fn model_resolution_lines(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &crate::config::Config,
     registry: &leviath_runtime::ProviderRegistry,
 ) -> Vec<String> {
@@ -718,7 +720,7 @@ fn model_resolution_lines(
 
 /// The stage graph as text, the way the dashboard's stage explorer draws it
 /// (escape edges included, since there is no key to reveal them here).
-fn graph_text(blueprint: &leviath_core::Blueprint, width: u16) -> String {
+fn graph_text(blueprint: &leviath_runtime::spec::Blueprint, width: u16) -> String {
     let graph = crate::tui::flowgraph::StageGraph::from_blueprint(blueprint);
     crate::tui::flowgraph::text::render_to_text(&graph, width)
 }
@@ -904,7 +906,7 @@ async fn primed_registry(
 /// which would leave the very entries that named it unchecked. Priming exactly
 /// the ones this blueprint mentions costs a compile of a script the author is
 /// already using.
-fn pinned_providers(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+fn pinned_providers(blueprint: &leviath_runtime::spec::Blueprint) -> Vec<String> {
     let mut names: Vec<String> = blueprint
         .stages
         .iter()
@@ -1406,8 +1408,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     // ─── print_success ───────────────────────────────────────────────────
 
-    fn parse(toml: &str) -> leviath_core::Blueprint {
-        leviath_core::manifest::parse_manifest(toml).unwrap()
+    fn parse(toml: &str) -> leviath_runtime::spec::Blueprint {
+        leviath_runtime::spec::manifest::parse_manifest(toml).unwrap()
     }
 
     #[test]

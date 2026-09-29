@@ -14,7 +14,7 @@
 //!    probe picked from its catalogue. Fails, naming the provider the config
 //!    asked for, when nothing in the preference is configured. The placeholder
 //!    a model-less stage carries
-//!    ([`ModelConfig::provider`](leviath_core::blueprint::ModelConfig::provider))
+//!    ([`ModelConfig::provider`](leviath_runtime::spec::blueprint::ModelConfig::provider))
 //!    is the resolver's last resort, not a finding, and is never reported as
 //!    one.
 //! 4. `inference` - one real call to that provider, straight through
@@ -36,12 +36,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::bail;
-use leviath_core::blueprint::ModelConfig;
 use leviath_providers::{InferenceRequest, Message, Provider};
 use leviath_runtime::ProviderRegistry;
 use leviath_runtime::control_socket::{
     ControlClient, ControlRequest, ControlResponse, DaemonIdentity,
 };
+use leviath_runtime::spec::blueprint::ModelConfig;
 
 use crate::commands::run::session::build_provider_registry_from_config;
 use crate::config::Config;

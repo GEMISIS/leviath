@@ -1,6 +1,6 @@
 //! Checking a blueprint's declared `[[dependencies]]` against this machine.
 //!
-//! A blueprint says what it needs (see [`leviath_core::blueprint::Dependency`]);
+//! A blueprint says what it needs (see [`leviath_runtime::spec::blueprint::Dependency`]);
 //! this module answers whether the machine has it. The same evaluator is used
 //! two ways: the spawn gate fails a run before the first billed inference if a
 //! required dependency is missing, and `lev deps` reports the same findings
@@ -13,8 +13,8 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use leviath_core::blueprint::{Dependency, DependencyKind};
 use leviath_mcp::MCPServerConfig;
+use leviath_runtime::spec::blueprint::{Dependency, DependencyKind};
 
 /// The machine facts a check reads: environment variables and what is on
 /// `PATH`. Injected so the evaluator can be tested against a fake machine.
@@ -264,7 +264,7 @@ fn evaluate_script(check: &str, blueprint_dir: &Path) -> DependencyState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::blueprint::DependencyKind;
+    use leviath_runtime::spec::blueprint::DependencyKind;
     use std::collections::HashMap;
 
     struct FakeProbe {

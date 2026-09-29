@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use leviath_core::Blueprint;
+use leviath_runtime::spec::Blueprint;
 
 use super::error::ServeError;
 use crate::runstate::RunMeta;
@@ -127,11 +127,12 @@ impl BlueprintCache {
         if let Some(hit) = self.lookup(&manifest.digest) {
             return Ok(hit);
         }
-        let parsed = leviath_core::manifest::parse_manifest(&manifest.text).map_err(|e| {
-            // Internal, not a bad request: whoever asked did not write this
-            // file, and on the snapshot path this server wrote it.
-            ServeError::Internal(format!("Blueprint will not parse: {e}"))
-        })?;
+        let parsed =
+            leviath_runtime::spec::manifest::parse_manifest(&manifest.text).map_err(|e| {
+                // Internal, not a bad request: whoever asked did not write this
+                // file, and on the snapshot path this server wrote it.
+                ServeError::Internal(format!("Blueprint will not parse: {e}"))
+            })?;
         let parsed = Arc::new(parsed);
         self.store(manifest.digest.clone(), Arc::clone(&parsed));
         Ok(parsed)
@@ -201,7 +202,7 @@ pub(crate) fn write_blueprint(
     manifest: String,
     replacing: bool,
 ) -> Result<WrittenBlueprint, ServeError> {
-    let parsed = leviath_core::manifest::parse_manifest(&manifest)
+    let parsed = leviath_runtime::spec::manifest::parse_manifest(&manifest)
         .map_err(|e| ServeError::BadRequest(format!("Invalid manifest: {e}")))?;
     let dir = blueprint_dir(name)?;
     let path = dir.join(leviath_core::files::MANIFEST_FILENAME);

@@ -77,7 +77,7 @@ pub(crate) struct GrantReport {
 /// outside a run pass the current directory, which is what `lev run` defaults
 /// to.
 pub(crate) fn build(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &Config,
     workdir: &Path,
 ) -> Option<Result<GrantReport, String>> {

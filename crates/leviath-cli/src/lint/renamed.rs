@@ -5,7 +5,7 @@
 //! discovering it the next time they read the docs and cannot find the key
 //! they wrote.
 
-use leviath_core::manifest::renamed::{Found, legacy_keys_in};
+use leviath_runtime::spec::manifest::renamed::{Found, legacy_keys_in};
 
 use super::{LintFinding, LintSeverity};
 
@@ -20,7 +20,7 @@ use super::{LintFinding, LintSeverity};
 /// line does nothing at all, which is a warning because the author plainly
 /// believes it does something.
 ///
-/// [`Blueprint`]: leviath_core::Blueprint
+/// [`Blueprint`]: leviath_runtime::spec::Blueprint
 pub(super) fn lint_renamed_keys(content: &str) -> Vec<LintFinding> {
     let Ok(document) = toml::from_str::<toml::value::Table>(content) else {
         // Not TOML, so whoever failed to parse it has already said so in terms

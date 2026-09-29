@@ -4,7 +4,7 @@
 
 use super::*;
 
-/// Decide whether a chosen edge's [gate](leviath_core::blueprint::TransitionGate)
+/// Decide whether a chosen edge's [gate](crate::spec::blueprint::TransitionGate)
 /// blocks the transition.
 ///
 /// The failure this guards against: an agent can read and reason about a
@@ -24,8 +24,8 @@ use super::*;
 /// When the gate's re-run budget is spent it gives up loudly, as
 /// [`GateDecision::Forced`].
 pub(crate) fn gate_blocks(
-    gate: Option<&leviath_core::blueprint::TransitionGate>,
-    stage: &leviath_core::Stage,
+    gate: Option<&crate::spec::blueprint::TransitionGate>,
+    stage: &crate::spec::Stage,
     progress: &StageProgress,
     window: &ContextWindow,
 ) -> GateDecision {
@@ -173,7 +173,7 @@ pub(crate) fn gate_blocks(
     let can_modify = stage.grants_all_builtins()
         || stage.available_tools.iter().any(|t| {
             let canonical = leviath_tools::canonical_tool_name(t);
-            leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical)
+            crate::spec::blueprint::MODIFYING_TOOLS.contains(&canonical)
                 || gate
                     .tools
                     .iter()
@@ -222,15 +222,15 @@ pub(crate) fn gate_blocks(
 /// worse than letting a questionable transition through with a warning that
 /// names the `condition` given up on.
 fn spend_gate_attempt(
-    gate: &leviath_core::blueprint::TransitionGate,
-    stage: &leviath_core::Stage,
+    gate: &crate::spec::blueprint::TransitionGate,
+    stage: &crate::spec::Stage,
     progress: &StageProgress,
     condition: &'static str,
     nudge: String,
 ) -> GateDecision {
     let cap = gate
         .max_attempts
-        .unwrap_or(leviath_core::blueprint::DEFAULT_GATE_ATTEMPTS);
+        .unwrap_or(crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS);
     if progress.gate_reentries >= cap {
         tracing::warn!(
             stage = %stage.name,

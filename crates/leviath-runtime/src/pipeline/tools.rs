@@ -739,7 +739,7 @@ pub(crate) fn dispatch_tools(
                     Ok(_) if fan_out.is_some() => Some(format!(
                         "[error] only one {} call per turn - put all the work in \
                          one call, the concurrency is paced for you",
-                        leviath_core::blueprint::FAN_OUT_TOOL
+                        crate::spec::blueprint::FAN_OUT_TOOL
                     )),
                     Ok(request) => {
                         fan_out = Some((c.tool_id.clone(), request));
@@ -930,7 +930,7 @@ pub(crate) fn dispatch_tools(
                 format!(
                     "[error] {} has to be the only tool call in its turn, because it \
                      waits for its workers. Call it on its own.",
-                    leviath_core::blueprint::FAN_OUT_TOOL
+                    crate::spec::blueprint::FAN_OUT_TOOL
                 ),
             ));
             fan_out = None;

@@ -20,7 +20,7 @@ use crate::world::PipelineWorld;
 /// inline (parsed TOML or a constructed value), parked here until the
 /// spawner picks them up by their `inline:<run_id>` pseudo-path. Keeps the
 /// wire-level [`SpawnArgs`] untouched.
-pub(crate) type StagedBlueprints = Arc<Mutex<HashMap<String, leviath_core::Blueprint>>>;
+pub(crate) type StagedBlueprints = Arc<Mutex<HashMap<String, crate::spec::Blueprint>>>;
 
 /// Everything the embed spawner closure needs, captured once at build time.
 pub(crate) struct EmbedSpawner {
@@ -63,7 +63,7 @@ impl EmbedSpawner {
             None => {
                 let content = std::fs::read_to_string(&args.blueprint_path)
                     .map_err(|e| format!("read manifest '{}': {e}", args.blueprint_path))?;
-                let blueprint = leviath_core::manifest::parse_manifest(&content)
+                let blueprint = crate::spec::manifest::parse_manifest(&content)
                     .map_err(|e| format!("parse manifest: {e}"))?;
                 blueprint
                     .validate()
@@ -122,7 +122,7 @@ impl EmbedSpawner {
             stages,
             global_hints: self.hints,
             global_nudge: // The default nudge policy; blueprints override per stage/agent.
-            leviath_core::NudgeConfig::default(),
+            crate::spec::NudgeConfig::default(),
             region_scripts: HashMap::new(),
             mime_registry: None,
         },
@@ -181,10 +181,10 @@ impl EmbedSpawner {
 /// execution) and are skipped here - a hard error only when the region is
 /// `required`, so an unused discovery nicety never sinks a run.
 fn resolve_embedded_seeds(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &crate::spec::Blueprint,
     args: &SpawnArgs,
 ) -> Result<HashMap<String, String>, String> {
-    use leviath_core::layout::RegionSeed;
+    use crate::spec::layout::RegionSeed;
 
     let mut caller: HashMap<&str, &str> = HashMap::new();
     caller.insert("task", &args.task);
@@ -231,8 +231,8 @@ fn resolve_embedded_seeds(
 }
 
 /// A short label for the unsupported seed kinds, for error messages.
-fn seed_kind_name(seed: &leviath_core::layout::RegionSeed) -> &'static str {
-    use leviath_core::layout::RegionSeed;
+fn seed_kind_name(seed: &crate::spec::layout::RegionSeed) -> &'static str {
+    use crate::spec::layout::RegionSeed;
     match seed {
         RegionSeed::CallerInput { .. } => "caller_input",
         RegionSeed::Literal { .. } => "literal",
@@ -270,7 +270,7 @@ pub(crate) fn mint_run_id(stem: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::layout::{ContextLayout, RegionDefinition, RegionSeed};
+    use crate::spec::layout::{ContextLayout, RegionDefinition, RegionSeed};
     use leviath_core::region::RegionKind;
 
     fn region(name: &str, seed: Option<RegionSeed>, required: bool) -> RegionDefinition {
@@ -280,12 +280,12 @@ mod tests {
         r
     }
 
-    fn bp(regions: Vec<RegionDefinition>) -> leviath_core::Blueprint {
-        let s = leviath_core::Stage::new(
+    fn bp(regions: Vec<RegionDefinition>) -> crate::spec::Blueprint {
+        let s = crate::spec::Stage::new(
             "s".to_string(),
-            leviath_core::blueprint::ModelConfig::new("mock".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("mock".to_string(), "m".to_string()),
         );
-        leviath_core::Blueprint::new(
+        crate::spec::Blueprint::new(
             "t".to_string(),
             "d".to_string(),
             vec![s],
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn seed_kind_names_cover_every_variant() {
-        use leviath_core::layout::RegionSeed;
+        use crate::spec::layout::RegionSeed;
         let cases = [
             (
                 RegionSeed::CallerInput {
@@ -423,8 +423,8 @@ mod tests {
             ),
             (
                 RegionSeed::Tools {
-                    calls: vec![leviath_core::layout::SeedToolCall::new("current_time")],
-                    refresh: leviath_core::layout::SeedRefresh::Once,
+                    calls: vec![crate::spec::layout::SeedToolCall::new("current_time")],
+                    refresh: crate::spec::layout::SeedRefresh::Once,
                 },
                 "tools",
             ),

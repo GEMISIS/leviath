@@ -4,14 +4,15 @@
 //! dependencies. Filesystem-based manifest discovery (`find_manifest`) lives in
 //! `leviath-cli`, since it depends on cli-only path helpers.
 
-use crate::blueprint::{
+use crate::spec::blueprint::{
     ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
     StageMode, StuckConfig, ToolRescan, TransitionCondition, TransitionEdge,
 };
-use crate::error::{Error, Result};
-use crate::layout::{RegionDefinition, RegionSeed};
-use crate::lifecycle::CompactionConfig;
-use crate::{Blueprint, ContextLayout, EvictionStrategy, RegionKind, Stage};
+use crate::spec::layout::{RegionDefinition, RegionSeed};
+use crate::spec::{Blueprint, ContextLayout, Stage};
+use leviath_core::error::{Error, Result};
+use leviath_core::lifecycle::CompactionConfig;
+use leviath_core::{EvictionStrategy, RegionKind};
 
 /// Parse an agent.leviath TOML manifest into a Blueprint.
 pub fn parse_manifest(content: &str) -> Result<Blueprint> {
@@ -175,7 +176,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 "[mime_types] must be a table of \"type/subtype\" rows".to_string(),
             ));
         };
-        crate::mime::MimeRegistry::empty()
+        leviath_core::mime::MimeRegistry::empty()
             .layer(rows, "blueprint")
             .map_err(|e| Error::Other(format!("[mime_types]: {e}")))?;
         blueprint.mime_types = rows.clone();

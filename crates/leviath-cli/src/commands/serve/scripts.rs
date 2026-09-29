@@ -549,7 +549,9 @@ pub(super) struct ValidateScriptResp {
 /// rather than a stage hook: nothing about the file says so, the declaration
 /// does. A file written but not yet declared is therefore not listed, which is
 /// the honest answer - nothing would load it either.
-fn declared_scripts(bp: &leviath_core::Blueprint) -> BTreeMap<(ScriptKind, String), Vec<String>> {
+fn declared_scripts(
+    bp: &leviath_runtime::spec::Blueprint,
+) -> BTreeMap<(ScriptKind, String), Vec<String>> {
     let mut declared: BTreeMap<(ScriptKind, String), Vec<String>> = BTreeMap::new();
 
     let layouts = std::iter::once(&bp.context_layout).chain(
@@ -696,7 +698,7 @@ fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
     let Ok(text) = std::fs::read_to_string(dir.join(leviath_core::files::MANIFEST_FILENAME)) else {
         return;
     };
-    let Ok(bp) = leviath_core::manifest::parse_manifest(&text) else {
+    let Ok(bp) = leviath_runtime::spec::manifest::parse_manifest(&text) else {
         return;
     };
 

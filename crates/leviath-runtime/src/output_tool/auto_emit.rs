@@ -30,7 +30,7 @@ use crate::components::ContextWindow;
 /// `output_routing` names, never the whole window: an input mesh in some other
 /// region must not be mistaken for the animated one this stage made.
 pub(crate) fn try_emit(
-    stage: &leviath_core::blueprint::Stage,
+    stage: &crate::spec::blueprint::Stage,
     spec: Option<&OutputSpec>,
     now: i64,
     window: &mut ContextWindow,
@@ -106,7 +106,7 @@ fn describe(records: &[Artifact]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::blueprint::{ModelConfig, Stage};
+    use crate::spec::blueprint::{ModelConfig, Stage};
     use leviath_core::mime::{Blob, MimeRegistry, MimeType};
     use leviath_core::region::{Region, RegionKind};
 

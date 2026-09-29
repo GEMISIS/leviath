@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 use super::count;
 
@@ -54,8 +54,8 @@ pub(crate) struct NudgeConfig {
     pub(crate) text: Option<String>,
 }
 
-impl From<&leviath_core::blueprint::NudgeConfig> for NudgeConfig {
-    fn from(nudge: &leviath_core::blueprint::NudgeConfig) -> Self {
+impl From<&leviath_runtime::spec::blueprint::NudgeConfig> for NudgeConfig {
+    fn from(nudge: &leviath_runtime::spec::blueprint::NudgeConfig) -> Self {
         Self {
             policy: NudgePolicy::from(nudge.enabled),
             max: nudge.max.map(count),
@@ -202,8 +202,8 @@ pub(crate) struct StageHooks {
     pub(crate) on_error: Option<String>,
 }
 
-impl From<&leviath_core::blueprint::StageHooks> for StageHooks {
-    fn from(hooks: &leviath_core::blueprint::StageHooks) -> Self {
+impl From<&leviath_runtime::spec::blueprint::StageHooks> for StageHooks {
+    fn from(hooks: &leviath_runtime::spec::blueprint::StageHooks) -> Self {
         Self {
             on_stage_enter: hooks.on_stage_enter.clone(),
             on_stage_exit: hooks.on_stage_exit.clone(),
@@ -232,8 +232,8 @@ pub(crate) struct SafeCommands {
     pub(crate) shell: Vec<String>,
 }
 
-impl From<&leviath_core::blueprint::SafeCommandsConfig> for SafeCommands {
-    fn from(safe: &leviath_core::blueprint::SafeCommandsConfig) -> Self {
+impl From<&leviath_runtime::spec::blueprint::SafeCommandsConfig> for SafeCommands {
+    fn from(safe: &leviath_runtime::spec::blueprint::SafeCommandsConfig) -> Self {
         Self {
             tools: safe.tools.clone(),
             shell: safe.shell.clone(),
@@ -258,8 +258,8 @@ pub(crate) struct RepetitionDetection {
     pub(crate) max_readonly_streak: Option<i32>,
 }
 
-impl From<&leviath_core::blueprint::RepetitionDetectionConfig> for RepetitionDetection {
-    fn from(detection: &leviath_core::blueprint::RepetitionDetectionConfig) -> Self {
+impl From<&leviath_runtime::spec::blueprint::RepetitionDetectionConfig> for RepetitionDetection {
+    fn from(detection: &leviath_runtime::spec::blueprint::RepetitionDetectionConfig) -> Self {
         Self {
             enabled: detection.enabled,
             max_repeat_calls: detection.max_repeat_calls.map(count),
@@ -273,7 +273,7 @@ pub(crate) struct FileTrackingConfig {
     /// The blueprint the region name resolves in.
     blueprint: Arc<CoreBlueprint>,
     /// The tracking block as the blueprint wrote it.
-    tracking: leviath_core::blueprint::FileTrackingConfig,
+    tracking: leviath_runtime::spec::blueprint::FileTrackingConfig,
 }
 
 /// Keeping the files a run reads and writes in one region.
@@ -318,7 +318,7 @@ impl FileTrackingConfig {
     /// Describe the tracking block against the blueprint that holds it.
     pub(crate) fn of(
         blueprint: &Arc<CoreBlueprint>,
-        tracking: &leviath_core::blueprint::FileTrackingConfig,
+        tracking: &leviath_runtime::spec::blueprint::FileTrackingConfig,
     ) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),
@@ -371,9 +371,9 @@ pub(crate) enum WorkerFailurePolicy {
     FailAll,
 }
 
-impl From<&leviath_core::blueprint::WorkerFailurePolicy> for WorkerFailurePolicy {
-    fn from(policy: &leviath_core::blueprint::WorkerFailurePolicy) -> Self {
-        use leviath_core::blueprint::WorkerFailurePolicy as Core;
+impl From<&leviath_runtime::spec::blueprint::WorkerFailurePolicy> for WorkerFailurePolicy {
+    fn from(policy: &leviath_runtime::spec::blueprint::WorkerFailurePolicy) -> Self {
+        use leviath_runtime::spec::blueprint::WorkerFailurePolicy as Core;
         match policy {
             Core::Continue => Self::Continue,
             Core::FailAll => Self::FailAll,

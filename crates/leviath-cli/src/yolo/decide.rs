@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ToolPolicy;
 use crate::shell_keys::{MatchableSegment, matchable_segments};
-use leviath_core::blueprint::ToolGroup;
+use leviath_runtime::spec::blueprint::ToolGroup;
 
 use super::YoloProfile;
 use super::rules::{ShellRule, Verdict};

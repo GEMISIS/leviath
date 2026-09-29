@@ -24,7 +24,7 @@ pub(crate) struct AgentSource {
     /// what the agent calls itself.
     pub run_stem: String,
     /// The parsed blueprint itself.
-    pub blueprint: leviath_core::Blueprint,
+    pub blueprint: leviath_runtime::spec::Blueprint,
 }
 
 /// Find the agent's manifest and parse it, once.
@@ -58,7 +58,7 @@ pub(crate) fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
         .to_string();
     let content = std::fs::read_to_string(&manifest)
         .map_err(|e| anyhow::anyhow!("read manifest '{}': {e}", manifest.display()))?;
-    let blueprint = leviath_core::manifest::parse_manifest(&content)
+    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content)
         .map_err(|e| anyhow::anyhow!("parse manifest: {e}"))?;
     Ok(AgentSource {
         manifest,
@@ -73,7 +73,7 @@ pub(crate) fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
 /// An unknown region name (one the blueprint doesn't read as caller input) is a
 /// hard error - fast, local typo protection before the daemon is contacted.
 fn resolve_regions(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     regions: HashMap<String, String>,
     cwd: &std::path::Path,
 ) -> anyhow::Result<RegionSeeds> {
@@ -132,7 +132,7 @@ struct RegionSeeds {
 /// checked against `accepts`: only the daemon's registry, with the user's
 /// `[mime_types]` in it, can say what it is.
 fn check_parts(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     parts: &[leviath_core::mime::InboundPart],
 ) -> anyhow::Result<()> {
     let regions = &blueprint.context_layout.regions;
@@ -378,7 +378,7 @@ fn read_path_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
 /// The warning itself: one line saying what is refused, then the stanza that
 /// would grant it. Pure, so the wording is testable without a daemon.
 fn spawn_warning_lines(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Vec<String> {
@@ -1503,8 +1503,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 
     /// A blueprint declaring one absolute read path, so the same entry
     /// compiles on every OS.
-    fn read_paths_blueprint() -> leviath_core::Blueprint {
-        leviath_core::manifest::parse_manifest(
+    fn read_paths_blueprint() -> leviath_runtime::spec::Blueprint {
+        leviath_runtime::spec::manifest::parse_manifest(
             r#"
 [agent]
 name = "cto"
@@ -1605,9 +1605,10 @@ allow = ["/data/runs"]
     /// broken is the daemon's error to report, not a warning to guess at.
     #[test]
     fn nothing_to_warn_about_produces_no_lines() {
-        let plain =
-            leviath_core::manifest::parse_manifest(&crate::test_support::inline_coder_manifest())
-                .expect("blueprint parses");
+        let plain = leviath_runtime::spec::manifest::parse_manifest(
+            &crate::test_support::inline_coder_manifest(),
+        )
+        .expect("blueprint parses");
         assert!(
             spawn_warning_lines(
                 &plain,

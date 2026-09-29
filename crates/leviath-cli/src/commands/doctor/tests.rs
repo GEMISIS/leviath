@@ -1292,8 +1292,8 @@ async fn inference_check_reports_the_provider_error_verbatim() {
 #[test]
 fn the_canary_manifest_is_a_valid_blueprint() {
     let manifest = canary_manifest("openrouter", "anthropic/claude-sonnet-4.5");
-    let blueprint =
-        leviath_core::manifest::parse_manifest(&manifest).expect("the canary manifest parses");
+    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&manifest)
+        .expect("the canary manifest parses");
     blueprint.validate().expect("the canary manifest validates");
     assert_eq!(blueprint.stages.len(), 1, "one stage, one turn");
     let stage = &blueprint.stages[0];
@@ -1312,8 +1312,8 @@ fn the_canary_manifest_escapes_hostile_names() {
     // Provider names come from config, and a quote in one must not be able to
     // close the TOML literal and inject the rest of the file.
     let manifest = canary_manifest("ev\"il", "m\\1");
-    let blueprint =
-        leviath_core::manifest::parse_manifest(&manifest).expect("an escaped name still parses");
+    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&manifest)
+        .expect("an escaped name still parses");
     assert_eq!(blueprint.stages[0].model.provider(), "ev\"il");
     assert_eq!(blueprint.stages[0].model.model(), "m\\1");
 }

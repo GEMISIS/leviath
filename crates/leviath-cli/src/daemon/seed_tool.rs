@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use leviath_core::layout::SeedToolCall;
+use leviath_runtime::spec::layout::SeedToolCall;
 
 use crate::config::ToolPolicy;
 

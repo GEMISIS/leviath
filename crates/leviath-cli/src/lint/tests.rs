@@ -53,7 +53,7 @@ impl LintEnv {
 /// Lint a manifest whose text and blueprint come from the same source, which is
 /// the only pairing production ever passes.
 fn lint(content: &str, env: &LintEnv) -> Vec<LintFinding> {
-    let bp = leviath_core::manifest::parse_manifest(content).expect("fixture parses");
+    let bp = leviath_runtime::spec::manifest::parse_manifest(content).expect("fixture parses");
     lint_manifest(content, &bp, env)
 }
 
@@ -743,7 +743,7 @@ read_file = "allow"
 /// An install that knows one tool of each kind, so a group-aware check can
 /// say which group reaches what.
 fn grouped_env() -> LintEnv {
-    use leviath_core::blueprint::ToolGroup;
+    use leviath_runtime::spec::blueprint::ToolGroup;
     let sources = [
         ("read_file", ToolGroup::Builtin),
         ("shell", ToolGroup::Builtin),
@@ -1724,8 +1724,8 @@ fn every_provider_reachable_reports_nothing() {
 /// reachability question does not arise (the missing-model warning covers it).
 #[test]
 fn a_stage_with_an_empty_models_list_is_not_checked_for_reachability() {
-    let mut bp =
-        leviath_core::manifest::parse_manifest(&manifest(CLEAN_STAGE)).expect("the fixture parses");
+    let mut bp = leviath_runtime::spec::manifest::parse_manifest(&manifest(CLEAN_STAGE))
+        .expect("the fixture parses");
     bp.stages[0].model.models.clear();
     let env = LintEnv {
         available_providers: Some(HashSet::new()),
@@ -1932,7 +1932,8 @@ fn read_paths_env(entries: &[&str], grants: &[&str]) -> (String, LintEnv) {
         "{}\n[read_paths]\nallow = [{listed}]\n",
         manifest(CLEAN_STAGE)
     );
-    let blueprint = leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses");
+    let blueprint =
+        leviath_runtime::spec::manifest::parse_manifest(&toml).expect("the fixture parses");
     let mut config = crate::config::Config::default();
     config.security.read_paths = grants.iter().map(|s| s.to_string()).collect();
     let env = LintEnv::default().with_read_paths(&blueprint, &config, Path::new("/work"));
@@ -2005,7 +2006,8 @@ fn the_blanket_override_is_named_on_the_note() {
         "{}\n[read_paths]\nallow = [\"/data/runs\"]\n",
         manifest(CLEAN_STAGE)
     );
-    let blueprint = leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses");
+    let blueprint =
+        leviath_runtime::spec::manifest::parse_manifest(&toml).expect("the fixture parses");
     let mut config = crate::config::Config::default();
     config.security.allow_blueprint_read_paths = true;
     let env = LintEnv::default().with_read_paths(&blueprint, &config, Path::new("/work"));
@@ -2412,9 +2414,9 @@ max_iterations = 5
 /// public fields. It has to step over them rather than panic.
 #[test]
 fn the_graph_walk_steps_over_names_that_are_not_stages() {
-    use leviath_core::{Blueprint, ContextLayout, Stage, TransitionEdge};
+    use leviath_runtime::spec::{Blueprint, ContextLayout, Stage, TransitionEdge};
 
-    let model = leviath_core::blueprint::ModelConfig::new(
+    let model = leviath_runtime::spec::blueprint::ModelConfig::new(
         "anthropic".to_string(),
         "claude-sonnet-5".to_string(),
     );
@@ -2647,9 +2649,12 @@ fn a_declared_shape_on_a_requiring_stage_reports_nothing() {
 /// something useful if a blueprint reaches it another way.
 #[test]
 fn requiring_an_output_without_the_submit_tool_is_an_error() {
-    let mut stage = leviath_core::Stage::new(
+    let mut stage = leviath_runtime::spec::Stage::new(
         "summary".to_string(),
-        leviath_core::blueprint::ModelConfig::new("anthropic".to_string(), "m".to_string()),
+        leviath_runtime::spec::blueprint::ModelConfig::new(
+            "anthropic".to_string(),
+            "m".to_string(),
+        ),
     );
     stage.available_tools = vec!["read_file".to_string()];
     stage.require_output = true;
@@ -3222,7 +3227,7 @@ fn an_unenforceable_required_region_is_named_once_across_stages() {
 
 /// A blueprint pinning `<provider>/<model>` on its one stage, for the builder
 /// tests below.
-fn blueprint_pinning(pairs: &[(&str, &str)]) -> leviath_core::Blueprint {
+fn blueprint_pinning(pairs: &[(&str, &str)]) -> leviath_runtime::spec::Blueprint {
     let listed = pairs
         .iter()
         .map(|(p, m)| format!("{{ provider = \"{p}\", model = \"{m}\" }}"))
@@ -3232,11 +3237,11 @@ fn blueprint_pinning(pairs: &[(&str, &str)]) -> leviath_core::Blueprint {
         "[stages.main]\nmode = \"autonomous\"\n\
          model = {{ models = [{listed}] }}\nmax_iterations = 10\n"
     ));
-    leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses")
+    leviath_runtime::spec::manifest::parse_manifest(&toml).expect("the fixture parses")
 }
 
 /// A blueprint naming models and leaving every route open.
-fn blueprint_open(models: &[&str]) -> leviath_core::Blueprint {
+fn blueprint_open(models: &[&str]) -> leviath_runtime::spec::Blueprint {
     let listed = models
         .iter()
         .map(|m| format!("\"{m}\""))
@@ -3246,7 +3251,7 @@ fn blueprint_open(models: &[&str]) -> leviath_core::Blueprint {
         "[stages.main]\nmode = \"autonomous\"\n\
          model = {{ models = [{listed}] }}\nmax_iterations = 10\n"
     ));
-    leviath_core::manifest::parse_manifest(&toml).expect("the fixture parses")
+    leviath_runtime::spec::manifest::parse_manifest(&toml).expect("the fixture parses")
 }
 
 /// A natively registered provider serving a fixed set of models, for the open

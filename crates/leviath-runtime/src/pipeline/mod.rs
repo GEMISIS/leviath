@@ -226,7 +226,7 @@ pub struct StageInference {
     /// Providers to fail over to, best first, when the current one turns out
     /// to be unusable. Consumed from the front by `collect_inference`, so an
     /// exhausted list means "nowhere left to go".
-    pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
+    pub fallbacks: Vec<crate::spec::blueprint::ModelEntry>,
     /// The output shape resolved for this stage, carried alongside the tools it
     /// was already folded into. Dispatch reads it to know which format label to
     /// record and, when the author supplied a schema, what to validate against.

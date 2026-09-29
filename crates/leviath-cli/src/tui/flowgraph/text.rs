@@ -51,7 +51,7 @@ impl FlowView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::manifest::parse_manifest;
+    use leviath_runtime::spec::manifest::parse_manifest;
 
     #[test]
     fn every_bundled_agent_renders_every_stage_without_trailing_spaces() {

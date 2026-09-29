@@ -2,7 +2,7 @@ use super::*;
 use crate::config::{Config, ReadPathGrants};
 
 /// A blueprint whose only interesting part is its `[read_paths]` block.
-fn blueprint(name: &str, allow: &[&str]) -> leviath_core::Blueprint {
+fn blueprint(name: &str, allow: &[&str]) -> leviath_runtime::spec::Blueprint {
     let listed = allow
         .iter()
         .map(|e| format!("\"{e}\""))
@@ -29,7 +29,7 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
 
 {block}"#
     );
-    leviath_core::manifest::parse_manifest(&toml).expect("blueprint parses")
+    leviath_runtime::spec::manifest::parse_manifest(&toml).expect("blueprint parses")
 }
 
 /// A config granting `machine_wide` to everyone and `per_agent` to `agent`.
@@ -84,7 +84,7 @@ fn a_blueprint_without_read_paths_has_no_report() {
 #[test]
 fn an_empty_allow_list_has_no_report() {
     let mut bp = blueprint("a", &[]);
-    bp.read_paths = Some(leviath_core::ReadPathsConfig { allow: Vec::new() });
+    bp.read_paths = Some(leviath_runtime::spec::ReadPathsConfig { allow: Vec::new() });
     assert!(build(&bp, &Config::default(), std::path::Path::new("/work")).is_none());
 }
 

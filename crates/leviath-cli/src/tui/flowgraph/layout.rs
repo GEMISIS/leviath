@@ -331,7 +331,7 @@ fn snake_cell(index: usize, per_row: usize) -> (usize, usize) {
 mod tests {
     use super::super::model::{EdgeClass, NodeKind, StageEdge, StageGraph, StageKind, StageNode};
     use super::*;
-    use leviath_core::TransitionCondition;
+    use leviath_runtime::spec::TransitionCondition;
 
     fn node(name: &str) -> StageNode {
         StageNode {

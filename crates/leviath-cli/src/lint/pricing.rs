@@ -8,7 +8,7 @@
 //! more per turn, so the author hears about it at the one moment they are
 //! reading the blueprint.
 
-use leviath_core::blueprint::Blueprint;
+use leviath_runtime::spec::blueprint::Blueprint;
 
 use super::{LintEnv, LintFinding, LintSeverity};
 

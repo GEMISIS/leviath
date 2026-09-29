@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::resolve_cwd;
 use crate::config::Config;
-use leviath_core::manifest::parse_manifest;
+use leviath_runtime::spec::manifest::parse_manifest;
 
 /// Which half of the catalog `lev list` reports.
 ///
@@ -105,7 +105,7 @@ fn read_agent_info(manifest_path: &Path, config: &Config, cwd: &Path) -> Option<
 /// none. A config whose own grant list is broken says so here rather than
 /// staying silent; `lev validate` and the spawn error carry the detail.
 fn read_path_summary(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &Config,
     cwd: &Path,
 ) -> Option<String> {

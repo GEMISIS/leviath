@@ -21,11 +21,11 @@ use super::*;
 ///
 /// A warning rather than an error, because a run that ends loudly on a failed
 /// worker is a defensible design, just rarely the intended one.
-pub(super) fn lint_fanout_escape(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+pub(super) fn lint_fanout_escape(stage: &leviath_runtime::spec::Stage) -> Vec<LintFinding> {
     let StageMode::FanOut { config } = &stage.mode else {
         return Vec::new();
     };
-    if config.on_worker_failure != leviath_core::blueprint::WorkerFailurePolicy::FailAll {
+    if config.on_worker_failure != leviath_runtime::spec::blueprint::WorkerFailurePolicy::FailAll {
         return Vec::new();
     }
     let escapes = stage
@@ -35,8 +35,8 @@ pub(super) fn lint_fanout_escape(stage: &leviath_core::Stage) -> Vec<LintFinding
         .any(|edge| {
             matches!(
                 edge.condition,
-                leviath_core::blueprint::TransitionCondition::Error
-                    | leviath_core::blueprint::TransitionCondition::DeadEnd
+                leviath_runtime::spec::blueprint::TransitionCondition::Error
+                    | leviath_runtime::spec::blueprint::TransitionCondition::DeadEnd
             )
         });
     if escapes {
@@ -73,7 +73,7 @@ pub(super) fn lint_fanout_escape(stage: &leviath_core::Stage) -> Vec<LintFinding
 /// when it is validated itself.
 pub(super) fn lint_fanout_worker_task(
     blueprint: &Blueprint,
-    stage: &leviath_core::Stage,
+    stage: &leviath_runtime::spec::Stage,
 ) -> Vec<LintFinding> {
     let StageMode::FanOut { config } = &stage.mode else {
         return Vec::new();

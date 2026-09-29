@@ -111,20 +111,20 @@ fn host_with(responses: Vec<InferenceResponse>) -> WorldHost {
     WorldHost::new(world)
 }
 
-fn blueprint() -> leviath_core::Blueprint {
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
+fn blueprint() -> crate::spec::Blueprint {
+    let layout = crate::spec::layout::ContextLayout::new(
+        vec![crate::spec::layout::RegionDefinition::new(
             "conversation".to_string(),
             RegionKind::Clearable,
             10_000,
         )],
         12_000,
     );
-    let s = leviath_core::Stage::new(
+    let s = crate::spec::Stage::new(
         "s".to_string(),
-        leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
+        crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
     );
-    leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
 }
 
 fn window() -> crate::components::ContextWindow {
@@ -472,27 +472,27 @@ async fn serve_redrives_the_world_on_its_own_timer_with_no_wake() {
 /// A two-stage linear blueprint (`one` -> `two`), for the stage-boundary
 /// tests. No transitions declared: `resolve_transition_sync` falls through to
 /// the next stage in order, which is the ordinary case.
-fn two_stage_blueprint() -> leviath_core::Blueprint {
-    let layout = leviath_core::layout::ContextLayout::new(
-        vec![leviath_core::layout::RegionDefinition::new(
+fn two_stage_blueprint() -> crate::spec::Blueprint {
+    let layout = crate::spec::layout::ContextLayout::new(
+        vec![crate::spec::layout::RegionDefinition::new(
             "conversation".to_string(),
             RegionKind::Clearable,
             10_000,
         )],
         12_000,
     );
-    let model = leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string());
+    let model = crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string());
     // Both stages end by running out of iterations, which is how a stage that
     // keeps calling tools finishes. That boundary is the one the driver used
     // to miss: `enforce_max_iterations` and `resolve_transition` both run in
     // the same tick, so the agent leaves `ReadyToInfer` and comes back to it
     // with every marker count exactly as it was.
-    let mut one = leviath_core::Stage::new("one".to_string(), model.clone());
+    let mut one = crate::spec::Stage::new("one".to_string(), model.clone());
     one.max_iterations = Some(1);
-    let mut two = leviath_core::Stage::new("two".to_string(), model);
+    let mut two = crate::spec::Stage::new("two".to_string(), model);
     two.max_iterations = Some(1);
     let stages = vec![one, two];
-    leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
 }
 
 /// Spawn an agent that starts at stage `one` of [`two_stage_blueprint`].
@@ -4210,7 +4210,7 @@ async fn pausing_a_fan_out_parent_holds_its_worker_queue() {
             crate::fanout::FanOutState {
                 origin: crate::fanout::FanOutOrigin::Stage,
                 parts: Vec::new(),
-                config: leviath_core::blueprint::FanOutConfig {
+                config: crate::spec::blueprint::FanOutConfig {
                     worker_agent: None,
                     worker_stage: Some("work".to_string()),
                     worker_query: None,
@@ -4293,7 +4293,7 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
             crate::fanout::FanOutState {
                 origin: crate::fanout::FanOutOrigin::Stage,
                 parts: Vec::new(),
-                config: leviath_core::blueprint::FanOutConfig {
+                config: crate::spec::blueprint::FanOutConfig {
                     worker_agent: None,
                     worker_stage: Some("work".to_string()),
                     worker_query: None,

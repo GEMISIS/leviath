@@ -40,7 +40,7 @@ fn all_builtin_agents_parse_successfully() {
         let content = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e));
 
-        let blueprint = leviath_core::manifest::parse_manifest(&content)
+        let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content)
             .unwrap_or_else(|e| panic!("Failed to parse agent '{}': {}", name, e));
 
         // Basic sanity checks
@@ -63,7 +63,7 @@ fn all_builtin_agents_validate() {
 
     for (name, path) in &manifests {
         let content = std::fs::read_to_string(path).unwrap();
-        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         blueprint
             .validate()
@@ -77,7 +77,7 @@ fn all_builtin_agents_have_valid_entry_stage() {
 
     for (name, path) in &manifests {
         let content = std::fs::read_to_string(path).unwrap();
-        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         let entry = blueprint.resolve_entry_stage_name();
         assert!(
@@ -95,7 +95,7 @@ fn all_builtin_agents_transition_targets_exist() {
 
     for (name, path) in &manifests {
         let content = std::fs::read_to_string(path).unwrap();
-        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         for stage in &blueprint.stages {
             if let Some(ref transitions) = stage.transitions {
@@ -117,7 +117,7 @@ fn all_builtin_agents_transition_targets_exist() {
 fn specific_agent_coder_has_expected_structure() {
     let path = crate_root().join("agents/coder/agent.leviath");
     let content = std::fs::read_to_string(&path).unwrap();
-    let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+    let bp = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
     assert_eq!(bp.name, "coder");
     assert!(bp.stages.len() >= 2);
@@ -143,11 +143,11 @@ fn specific_agent_coder_has_expected_structure() {
 /// not written by the agent.
 #[test]
 fn agent_written_required_regions_have_a_stage_that_can_write_them() {
-    use leviath_core::layout::RegionSeed;
+    use leviath_runtime::spec::layout::RegionSeed;
 
     for (name, path) in &discover_agent_manifests() {
         let content = std::fs::read_to_string(path).unwrap();
-        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         let agent_written: Vec<&str> = bp
             .context_layout
@@ -186,11 +186,11 @@ fn agent_written_required_regions_have_a_stage_that_can_write_them() {
 /// left unseeded so `resolve_seeds` skips it and the runtime gate handles it.
 #[test]
 fn required_regions_are_not_also_seeded_from_the_environment() {
-    use leviath_core::layout::RegionSeed;
+    use leviath_runtime::spec::layout::RegionSeed;
 
     for (name, path) in &discover_agent_manifests() {
         let content = std::fs::read_to_string(path).unwrap();
-        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         for region in bp.context_layout.regions.iter().filter(|r| r.required) {
             let environmental = matches!(
@@ -214,7 +214,7 @@ fn required_regions_are_not_also_seeded_from_the_environment() {
 fn specific_agent_researcher_has_graph_transitions() {
     let path = crate_root().join("agents/researcher/agent.leviath");
     let content = std::fs::read_to_string(&path).unwrap();
-    let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+    let bp = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
     assert_eq!(bp.name, "researcher");
     // Researcher should have multiple stages with transitions
@@ -239,7 +239,7 @@ fn all_builtin_agents_have_sound_context_layout() {
 
     for (name, path) in &discover_agent_manifests() {
         let content = std::fs::read_to_string(path).unwrap();
-        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
         let regions = &bp.context_layout.regions;
 
         // (1) explicit conversation sliding_window
@@ -302,11 +302,11 @@ fn all_builtin_agents_have_sound_context_layout() {
 /// run. That's an authoring invariant for the shipped agents, so it lives here.
 #[test]
 fn all_builtin_stuck_edges_are_armed_and_bounded() {
-    use leviath_core::TransitionCondition;
+    use leviath_runtime::spec::TransitionCondition;
 
     for (name, path) in &discover_agent_manifests() {
         let content = std::fs::read_to_string(path).unwrap();
-        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         for stage in &bp.stages {
             let Some(transitions) = &stage.transitions else {
@@ -346,11 +346,12 @@ fn all_builtin_stuck_edges_are_armed_and_bounded() {
 ///      `error_report` - the region is useless if no prompt points at it.
 #[test]
 fn builtin_error_edges_have_a_pinned_error_report_region() {
-    use leviath_core::{RegionKind, TransitionCondition};
+    use leviath_core::RegionKind;
+    use leviath_runtime::spec::TransitionCondition;
 
     for (name, path) in &discover_agent_manifests() {
         let content = std::fs::read_to_string(path).unwrap();
-        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         let error_targets: std::collections::BTreeSet<&str> = bp
             .stages
@@ -414,11 +415,11 @@ fn builtin_error_edges_have_a_pinned_error_report_region() {
 /// edge, since DONE is itself one of the choices.
 #[test]
 fn branching_stages_explain_how_to_choose() {
-    use leviath_core::TransitionCondition;
+    use leviath_runtime::spec::TransitionCondition;
 
     for (name, path) in &discover_agent_manifests() {
         let content = std::fs::read_to_string(path).unwrap();
-        let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         for stage in &bp.stages {
             let Some(transitions) = &stage.transitions else {
@@ -469,11 +470,11 @@ fn branching_stages_explain_how_to_choose() {
 /// parking `--yolo` runs on a prompt by accident (issue #204).
 #[test]
 fn builtin_required_tools_are_offered_and_belong_to_an_interactive_stage() {
-    use leviath_core::blueprint::StageMode;
+    use leviath_runtime::spec::blueprint::StageMode;
 
     for (name, path) in &discover_agent_manifests() {
         let content = std::fs::read_to_string(path).unwrap();
-        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         for stage in &blueprint.stages {
             for tool in &stage.required_tools {
@@ -526,14 +527,14 @@ fn the_bundled_agents_exist_and_are_discoverable() {
 /// turn, which is the shape the lint's own fix text warns against.
 #[test]
 fn a_stage_that_can_fan_out_offers_no_shortcut_past_it() {
-    use leviath_core::blueprint::{StageMode, TransitionCondition};
+    use leviath_runtime::spec::blueprint::{StageMode, TransitionCondition};
 
     let manifests = discover_agent_manifests();
     let mut checked = 0;
 
     for (name, path) in &manifests {
         let content = std::fs::read_to_string(path).unwrap();
-        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
+        let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content).unwrap();
 
         let is_fan_out = |target: &str| {
             blueprint

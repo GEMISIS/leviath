@@ -1,8 +1,8 @@
 //! Inter-agent context transforms: seed a freshly-spawned child agent's context
 //! from its parent's, when the blueprints declare a mapping.
 //!
-//! A [`Blueprint`](leviath_core::Blueprint) may declare
-//! [`ContextTransform`](leviath_core::blueprint::ContextTransform)s - `{from_blueprint,
+//! A [`Blueprint`](crate::spec::Blueprint) may declare
+//! [`ContextTransform`](crate::spec::blueprint::ContextTransform)s - `{from_blueprint,
 //! to_blueprint, mappings}` - describing how a parent's context regions flow into
 //! a child's when the parent (blueprint A) spawns a child (blueprint B). This is
 //! how an agent hands work down the tree: the planner's plan region becomes the
@@ -14,8 +14,8 @@
 //! `transforms`, and for each [`RegionMapping`] copies the parent's `from_region`
 //! into the child's `to_region`, applying the optional [`ContentTransform`].
 
+use crate::spec::blueprint::{ContentTransform, RegionMapping};
 use bevy_ecs::prelude::*;
-use leviath_core::blueprint::{ContentTransform, RegionMapping};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::compaction_bridge::{CompactionJob, CompactionOutcome, run_compaction_job};
@@ -24,7 +24,7 @@ use crate::pipeline::{AgentBlueprint, CompactionSettings, InferenceStage, Provid
 
 /// Seed `child`'s context from `parent`'s per a declared blueprint transform.
 /// No-op unless both carry an [`AgentBlueprint`] with different names and a
-/// matching [`ContextTransform`](leviath_core::blueprint::ContextTransform) exists.
+/// matching [`ContextTransform`](crate::spec::blueprint::ContextTransform) exists.
 pub(crate) fn apply_context_transforms(
     world: &mut World,
     parent: crate::world::AgentId,
@@ -277,17 +277,17 @@ fn extract_fields(content: &str, fields: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::blueprint::{ContextTransform, RegionMapping};
+    use crate::spec::blueprint::{ContextTransform, RegionMapping};
     use leviath_core::{Region, RegionKind};
 
     fn bp_with_transforms(name: &str, transforms: Vec<ContextTransform>) -> AgentBlueprint {
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-        let mut bp = leviath_core::Blueprint::new(
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
+        let mut bp = crate::spec::Blueprint::new(
             name.to_string(),
             "d".to_string(),
-            vec![leviath_core::Stage::new(
+            vec![crate::spec::Stage::new(
                 "s".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
             )],
             layout,
         );

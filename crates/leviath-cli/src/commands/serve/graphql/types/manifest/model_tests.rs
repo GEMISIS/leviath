@@ -111,7 +111,7 @@ fn from_table_drops_a_cap_that_does_not_parse() {
 /// back through the schema rather than the bare conversion.
 #[test]
 fn a_model_config_carries_its_routes_and_timeout() {
-    let mut core = leviath_core::blueprint::ModelConfig::new(
+    let mut core = leviath_runtime::spec::blueprint::ModelConfig::new(
         "anthropic".to_string(),
         "claude-sonnet-5".to_string(),
     );

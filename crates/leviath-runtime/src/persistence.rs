@@ -149,7 +149,7 @@ impl RunOutcomeFlags {
     /// produce nothing, and should still say so.
     ///
     /// [`no_output_tools`]: leviath_core::run_meta::RunFlags::no_output_tools
-    pub fn for_blueprint(bp: &leviath_core::Blueprint) -> Self {
+    pub fn for_blueprint(bp: &crate::spec::Blueprint) -> Self {
         Self(leviath_core::run_meta::RunFlags {
             no_output_tools: !bp.stages.iter().any(stage_can_modify),
             ..Default::default()
@@ -180,14 +180,14 @@ pub struct FinalOutput(pub leviath_core::output::FinalOutput);
 /// is exactly why such a run should still be reported as empty rather than
 /// excused.
 ///
-/// [`MODIFYING_TOOLS`]: leviath_core::blueprint::MODIFYING_TOOLS
-fn stage_can_modify(stage: &leviath_core::Stage) -> bool {
+/// [`MODIFYING_TOOLS`]: crate::spec::blueprint::MODIFYING_TOOLS
+fn stage_can_modify(stage: &crate::spec::Stage) -> bool {
     if stage.grants_all_builtins() {
         return true;
     }
     stage.available_tools.iter().any(|t| {
         let canonical = leviath_tools::canonical_tool_name(t);
-        leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical)
+        crate::spec::blueprint::MODIFYING_TOOLS.contains(&canonical)
             || stage
                 .transitions
                 .iter()
@@ -555,25 +555,25 @@ mod tests {
     /// A stage advertising `tools`, with `gate_tools` named by the gate on its
     /// single outgoing edge. `gate_tools: None` gives the stage no transitions
     /// at all, which is the other half of the `Option` the scan walks.
-    fn stage_with(tools: &[&str], gate_tools: Option<&[&str]>) -> leviath_core::Stage {
-        let mut stage = leviath_core::Stage::new(
+    fn stage_with(tools: &[&str], gate_tools: Option<&[&str]>) -> crate::spec::Stage {
+        let mut stage = crate::spec::Stage::new(
             "s".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
         stage.available_tools = tools.iter().map(|t| (*t).to_string()).collect();
         stage.transitions = gate_tools.map(|extra| {
-            let gate = (!extra.is_empty()).then(|| leviath_core::blueprint::TransitionGate {
+            let gate = (!extra.is_empty()).then(|| crate::spec::blueprint::TransitionGate {
                 require_modifications: true,
                 tools: extra.iter().map(|t| (*t).to_string()).collect(),
                 ..Default::default()
             });
             std::collections::HashMap::from([(
                 "next".to_string(),
-                leviath_core::blueprint::TransitionEdge {
+                crate::spec::blueprint::TransitionEdge {
                     target: "next".to_string(),
-                    condition: leviath_core::blueprint::TransitionCondition::Always,
+                    condition: crate::spec::blueprint::TransitionCondition::Always,
                     hint: None,
-                    transform: leviath_core::blueprint::EdgeTransform::Direct,
+                    transform: crate::spec::blueprint::EdgeTransform::Direct,
                     gate,
                     stuck: None,
                 },
@@ -582,16 +582,16 @@ mod tests {
         stage
     }
 
-    fn blueprint_of(stages: Vec<leviath_core::Stage>) -> leviath_core::Blueprint {
-        leviath_core::Blueprint::new(
+    fn blueprint_of(stages: Vec<crate::spec::Stage>) -> crate::spec::Blueprint {
+        crate::spec::Blueprint::new(
             "bp".to_string(),
             "d".to_string(),
             stages,
-            leviath_core::ContextLayout::new(vec![], 1000),
+            crate::spec::ContextLayout::new(vec![], 1000),
         )
     }
 
-    fn no_output_tools(stages: Vec<leviath_core::Stage>) -> bool {
+    fn no_output_tools(stages: Vec<crate::spec::Stage>) -> bool {
         RunOutcomeFlags::for_blueprint(&blueprint_of(stages))
             .0
             .no_output_tools

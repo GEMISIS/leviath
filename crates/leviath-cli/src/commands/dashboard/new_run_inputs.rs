@@ -196,23 +196,23 @@ impl Dashboard {
         };
         self.new_run_inputs_key = path;
         let config_path = self.new_run_ctx.config_path.clone();
-        self.new_run_inputs = blueprint
-            .map(|bp| {
-                // Resolve each region's percentage budget against the entry
-                // stage's effective (smallest) model window, so a slot knows the
-                // token room it really has.
-                let cache_path = leviath_core::paths::capability_cache_path();
-                let window = entry_stage_window(&bp, &config_path, cache_path.as_deref());
-                let layout = bp.context_layout.resolved(window);
-                layout
-                    .regions
-                    .iter()
-                    .filter_map(|r| match &r.seed {
-                        // The `task` key is the task box; every other key gets a slot.
-                        Some(leviath_core::layout::RegionSeed::CallerInput { name })
-                            if name != "task" =>
-                        {
-                            Some(NewRunInput {
+        self.new_run_inputs =
+            blueprint
+                .map(|bp| {
+                    // Resolve each region's percentage budget against the entry
+                    // stage's effective (smallest) model window, so a slot knows the
+                    // token room it really has.
+                    let cache_path = leviath_core::paths::capability_cache_path();
+                    let window = entry_stage_window(&bp, &config_path, cache_path.as_deref());
+                    let layout = bp.context_layout.resolved(window);
+                    layout
+                        .regions
+                        .iter()
+                        .filter_map(|r| match &r.seed {
+                            // The `task` key is the task box; every other key gets a slot.
+                            Some(leviath_runtime::spec::layout::RegionSeed::CallerInput {
+                                name,
+                            }) if name != "task" => Some(NewRunInput {
                                 key: name.clone(),
                                 region: r.name.clone(),
                                 accepts: r.accepts.clone(),
@@ -220,13 +220,12 @@ impl Dashboard {
                                 max_tokens: r.max_tokens,
                                 edit: LineEdit::new(String::new(), false),
                                 files: Vec::new(),
-                            })
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+                            }),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
     }
 
     /// Whether the screen has an Inputs pane to move the keys to.
@@ -423,7 +422,7 @@ impl Dashboard {
 /// resolves through [`offline_model_window`]. Region percentage budgets resolve
 /// against this, so the picker's token room matches the tightest a run will get.
 fn entry_stage_window(
-    blueprint: &leviath_core::blueprint::Blueprint,
+    blueprint: &leviath_runtime::spec::blueprint::Blueprint,
     config_path: &Path,
     cache_path: Option<&Path>,
 ) -> usize {
@@ -969,7 +968,7 @@ mod tests {
         bp.stages[0]
             .model
             .models
-            .push(leviath_core::blueprint::ModelEntry::new(
+            .push(leviath_runtime::spec::blueprint::ModelEntry::new(
                 "acme".to_string(),
                 "tiny".to_string(),
             ));

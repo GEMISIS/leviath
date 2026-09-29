@@ -7,8 +7,8 @@
 //! comes from the CLI's config file - the user's default provider/model -
 //! arrives as a plain [`ModelDefaults`] value.
 
-use leviath_core::Blueprint;
-use leviath_core::blueprint::{ModelConfig, ModelEntry, ToolGroup};
+use crate::spec::Blueprint;
+use crate::spec::blueprint::{ModelConfig, ModelEntry, ToolGroup};
 
 use super::ResolvedStage;
 use crate::providers::ProviderRegistry;
@@ -764,10 +764,10 @@ pub(crate) fn filter_tools_by_available(
         return Vec::new();
     }
     let all = catalog.defs;
-    let groups = leviath_core::blueprint::groups_in(available);
+    let groups = crate::spec::blueprint::groups_in(available);
     let wanted: std::collections::HashSet<&str> = available
         .iter()
-        .filter(|n| !leviath_core::blueprint::is_tool_group_token(n))
+        .filter(|n| !crate::spec::blueprint::is_tool_group_token(n))
         .map(|n| leviath_tools::canonical_tool_name(n))
         .collect();
     // Names that match nothing get one more chance, as a server-qualified MCP
@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     use super::*;
-    use leviath_core::blueprint::ModelEntry;
+    use crate::spec::blueprint::ModelEntry;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1648,9 +1648,9 @@ mod tests {
     #[test]
     fn resolve_stages_empty_available_tools_gets_none() {
         let mut stage =
-            leviath_core::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
+            crate::spec::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
         stage.available_tools = vec![]; // empty ⇒ no tools
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let tools = vec![Tool {
             name: "read_file".to_string(),
@@ -1675,8 +1675,8 @@ mod tests {
         // The last fallback in `resolve_stage_model` is unchecked, so "ghost"
         // resolves and would spawn an agent that can never take a turn. It has
         // to be an error the caller sees.
-        let stage = leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("ghost", "m")]));
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let stage = crate::spec::Stage::new("plan".to_string(), model_cfg(vec![("ghost", "m")]));
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
 
         let err = resolve_stages(
@@ -1703,11 +1703,11 @@ mod tests {
     /// next entry is the silent substitution this check exists to end.
     #[test]
     fn resolve_stages_refuses_a_model_the_provider_does_not_carry() {
-        let stage = leviath_core::Stage::new(
+        let stage = crate::spec::Stage::new(
             "plan".to_string(),
             model_cfg(vec![("groq", "llama-3.1-70b")]),
         );
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
 
         let err = resolve_stages(
@@ -1734,7 +1734,7 @@ mod tests {
     /// stays.
     #[test]
     fn resolve_stages_drops_a_retaining_fallback_when_zero_retention_is_asked_for() {
-        let stage = leviath_core::Stage::new(
+        let stage = crate::spec::Stage::new(
             "plan".to_string(),
             model_cfg(vec![
                 ("ollama", "q"),
@@ -1742,7 +1742,7 @@ mod tests {
                 ("llama-cpp", "local"),
             ]),
         );
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let registry = registry_publishing(&[
             ("openai", &["gpt-5.5"]),
@@ -1791,9 +1791,9 @@ mod tests {
     #[test]
     fn resolve_stages_refuses_a_retaining_model_when_zero_retention_is_asked_for() {
         let stage = |name: &str, provider: &str, model: &str| {
-            leviath_core::Stage::new(name.to_string(), model_cfg(vec![(provider, model)]))
+            crate::spec::Stage::new(name.to_string(), model_cfg(vec![(provider, model)]))
         };
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new(
             "t".to_string(),
             "d".to_string(),
@@ -1869,8 +1869,8 @@ mod tests {
     /// registered is never called and so is not judged.
     #[test]
     fn resolve_stages_refuses_a_retaining_compaction_model() {
-        let stage = leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("ollama", "q")]));
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let stage = crate::spec::Stage::new("plan".to_string(), model_cfg(vec![("ollama", "q")]));
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let mut bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         bp.compaction_config = Some(leviath_core::lifecycle::CompactionConfig {
             provider: "openai".to_string(),
@@ -1917,11 +1917,11 @@ mod tests {
     /// actually reads when a run will not start.
     #[test]
     fn resolve_stages_prefers_the_providers_own_reason() {
-        let stage = leviath_core::Stage::new(
+        let stage = crate::spec::Stage::new(
             "plan".to_string(),
             model_cfg(vec![("codexish", "gpt-5.3-spark")]),
         );
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
 
         let mut registry = ProviderRegistry::new();
@@ -1969,11 +1969,11 @@ mod tests {
     /// resolves exactly as it would with no check at all.
     #[test]
     fn resolve_stages_allows_a_model_an_unpublishing_provider_never_denied() {
-        let stage = leviath_core::Stage::new(
+        let stage = crate::spec::Stage::new(
             "plan".to_string(),
             model_cfg(vec![("groq", "llama-3.1-70b")]),
         );
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
 
         let resolved = resolve_stages(
@@ -2013,8 +2013,8 @@ mod tests {
         // `--model ghost/x` short-circuits every fallback, so the override is
         // the only provider that was tried.
         let stage =
-            leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+            crate::spec::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
 
         let err = resolve_stages(
@@ -2072,9 +2072,9 @@ mod tests {
         // filter must select the canonical `shell` definition for the alias and
         // silently omit the unknown name (no error, no panic).
         let mut stage =
-            leviath_core::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
+            crate::spec::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
         stage.available_tools = vec!["bash".to_string(), "acme__uninstalled".to_string()];
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let tools = vec![
             Tool {
@@ -2500,11 +2500,11 @@ mod tests {
     /// the refusal names the model and the provider whose list is missing.
     #[test]
     fn a_stage_whose_model_cannot_be_judged_is_refused_not_downgraded() {
-        let stage = leviath_core::Stage::new(
+        let stage = crate::spec::Stage::new(
             "story".to_string(),
             model_cfg_open(vec!["claude-opus-5", "gpt-5.4-mini"]),
         );
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let defaults = ModelDefaults {
             retention: Default::default(),
@@ -2560,9 +2560,9 @@ mod tests {
             provider_order: vec!["openrouter".to_string(), "anthropic".to_string()],
         };
         let registry = registry_with_unread_gateway("claude-sonnet-5");
-        let layout = || leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = || crate::spec::layout::ContextLayout::new(vec![], 1000);
 
-        let routed_first = leviath_core::Stage::new(
+        let routed_first = crate::spec::Stage::new(
             "a".to_string(),
             model_cfg_open(vec!["claude-sonnet-5", "claude-opus-5"]),
         );
@@ -2580,7 +2580,7 @@ mod tests {
         pinned_first
             .models
             .push(ModelEntry::new(String::new(), "claude-opus-5".to_string()));
-        let stage = leviath_core::Stage::new("b".to_string(), pinned_first);
+        let stage = crate::spec::Stage::new("b".to_string(), pinned_first);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout());
         assert!(
             resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None).is_ok(),
@@ -2593,15 +2593,14 @@ mod tests {
         pinned_away
             .models
             .push(ModelEntry::new(String::new(), "claude-opus-5".to_string()));
-        let stage = leviath_core::Stage::new("c".to_string(), pinned_away);
+        let stage = crate::spec::Stage::new("c".to_string(), pinned_away);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout());
         assert!(
             resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None).is_err()
         );
 
         // A pinned `provider/model` override names its own route.
-        let stage =
-            leviath_core::Stage::new("d".to_string(), model_cfg_open(vec!["claude-opus-5"]));
+        let stage = crate::spec::Stage::new("d".to_string(), model_cfg_open(vec!["claude-opus-5"]));
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout());
         assert!(
             resolve_stages(
@@ -2623,8 +2622,8 @@ mod tests {
     #[test]
     fn resolve_stages_notes_a_substitution_and_is_silent_otherwise() {
         let stage =
-            leviath_core::Stage::new("fix".to_string(), model_cfg(vec![("anthropic", "opus")]));
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+            crate::spec::Stage::new("fix".to_string(), model_cfg(vec![("anthropic", "opus")]));
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let registry = registry_with(&["anthropic"]);
         let overridden = ModelDefaults {
@@ -2658,12 +2657,12 @@ mod tests {
         assert!(quiet[0].notes.is_empty());
 
         // The fallback wording says why the blueprint's own list did not do.
-        let ghost = leviath_core::Stage::new("fix".to_string(), model_cfg_open(vec!["nowhere"]));
+        let ghost = crate::spec::Stage::new("fix".to_string(), model_cfg_open(vec!["nowhere"]));
         let bp = Blueprint::new(
             "t".to_string(),
             "d".to_string(),
             vec![ghost],
-            leviath_core::layout::ContextLayout::new(vec![], 1000),
+            crate::spec::layout::ContextLayout::new(vec![], 1000),
         );
         let fallback = ModelDefaults {
             retention: Default::default(),
@@ -2922,12 +2921,12 @@ mod tests {
 
     #[test]
     fn resolve_stages_carries_the_tail_onto_the_resolved_stage() {
-        let mut stage = leviath_core::Stage::new(
+        let mut stage = crate::spec::Stage::new(
             "work".to_string(),
             model_cfg(vec![("openrouter", "deepseek"), ("anthropic", "sonnet")]),
         );
         stage.available_tools = vec![];
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         let registry = registry_with(&["openrouter", "anthropic"]);
         let resolved = resolve_stages(
@@ -2989,13 +2988,13 @@ mod tests {
         // Two stages, one opting out, resolved in a single unattended run: the
         // cut is per stage, not per run.
         let mut plan =
-            leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
+            crate::spec::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
         plan.available_tools = vec!["read_file".to_string(), "ask_user_text".to_string()];
         plan.required_tools = vec!["ask_user_text".to_string()];
         let mut build =
-            leviath_core::Stage::new("build".to_string(), model_cfg(vec![("anthropic", "m")]));
+            crate::spec::Stage::new("build".to_string(), model_cfg(vec![("anthropic", "m")]));
         build.available_tools = vec!["read_file".to_string(), "ask_user_text".to_string()];
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![plan, build], layout);
 
         let resolved = resolve_stages(
@@ -3041,10 +3040,10 @@ mod tests {
         stage_spec: Option<leviath_core::output::OutputSpec>,
     ) -> Blueprint {
         let mut stage =
-            leviath_core::Stage::new("summary".to_string(), model_cfg(vec![("anthropic", "m")]));
+            crate::spec::Stage::new("summary".to_string(), model_cfg(vec![("anthropic", "m")]));
         stage.available_tools = vec![leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()];
         stage.output = stage_spec;
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let mut bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         bp.output = agent;
         bp
@@ -3175,9 +3174,9 @@ mod tests {
     #[test]
     fn a_stage_without_the_submit_tool_is_left_alone() {
         let mut stage =
-            leviath_core::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
+            crate::spec::Stage::new("plan".to_string(), model_cfg(vec![("anthropic", "m")]));
         stage.available_tools = vec!["read_file".to_string()];
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
         let mut bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         bp.output = Some(leviath_core::output::OutputSpec {
             format: Some("a2ui".to_string()),
@@ -3304,14 +3303,14 @@ mod tests {
             ("query", "database"),
         ]);
         let mut stage =
-            leviath_core::Stage::new("work".to_string(), model_cfg(vec![("anthropic", "m")]));
+            crate::spec::Stage::new("work".to_string(), model_cfg(vec![("anthropic", "m")]));
         stage.available_tools = vec![];
         stage.available_connectors = vec!["github".to_string()];
         let bp = Blueprint::new(
             "t".to_string(),
             "d".to_string(),
             vec![stage],
-            leviath_core::layout::ContextLayout::new(vec![], 1000),
+            crate::spec::layout::ContextLayout::new(vec![], 1000),
         );
 
         let resolved = resolve_stages(
@@ -3417,14 +3416,14 @@ mod tests {
             ("beta__only_beta", "beta"),
         ]);
         let mut stage =
-            leviath_core::Stage::new("work".to_string(), model_cfg(vec![("anthropic", "m")]));
+            crate::spec::Stage::new("work".to_string(), model_cfg(vec![("anthropic", "m")]));
         stage.available_tools = vec![];
         stage.available_connectors = vec!["beta".to_string()];
         let bp = Blueprint::new(
             "t".to_string(),
             "d".to_string(),
             vec![stage],
-            leviath_core::layout::ContextLayout::new(vec![], 1000),
+            crate::spec::layout::ContextLayout::new(vec![], 1000),
         );
 
         let resolved = resolve_stages(

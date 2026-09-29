@@ -349,7 +349,7 @@ mod tests {
     use crate::tui::flowgraph::{FlowView, StageGraph};
     use crate::tui::theme::*;
     use crossterm::event::KeyCode;
-    use leviath_core::manifest::parse_manifest;
+    use leviath_runtime::spec::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

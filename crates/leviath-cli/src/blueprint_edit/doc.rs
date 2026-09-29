@@ -6,8 +6,8 @@
 //! in the document and comes back out of [`ManifestDoc::to_toml`] as it went
 //! in.
 
-use leviath_core::Blueprint;
-use leviath_core::manifest::parse_manifest;
+use leviath_runtime::spec::Blueprint;
+use leviath_runtime::spec::manifest::parse_manifest;
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
 use super::tables::{as_table, child, get_bool, get_int, get_str, get_strings, table_keys};

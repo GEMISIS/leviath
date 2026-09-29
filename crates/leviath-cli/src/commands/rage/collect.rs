@@ -627,7 +627,7 @@ fn blueprint_under_test(path: &Path, scrubber: &Scrubber, bundle: &mut Bundle) {
     copy_text_tree(&dir, "blueprint", MAX_TREE_DEPTH, scrubber, bundle);
 
     let check = match std::fs::read_to_string(&manifest) {
-        Ok(content) => match leviath_core::manifest::parse_manifest(&content) {
+        Ok(content) => match leviath_runtime::spec::manifest::parse_manifest(&content) {
             Ok(blueprint) => {
                 let validation = blueprint.validate();
                 serde_json::json!({

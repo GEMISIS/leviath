@@ -139,7 +139,7 @@ pub(super) async fn list_tools(
     };
     let inventory = ToolInventory::discover(dir.as_deref(), q.agent.as_deref());
 
-    let groups = leviath_core::blueprint::ToolGroup::ALL
+    let groups = leviath_runtime::spec::blueprint::ToolGroup::ALL
         .iter()
         .map(|g| GroupItem {
             name: g.token().to_string(),

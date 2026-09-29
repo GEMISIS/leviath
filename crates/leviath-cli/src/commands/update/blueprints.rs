@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::manifest::renamed::{RENAMED_KEYS, RenamedKey};
+use leviath_runtime::spec::manifest::renamed::{RENAMED_KEYS, RenamedKey};
 use toml_edit::{Document, TableLike};
 
 /// One installed blueprint that still spells a key the old way.

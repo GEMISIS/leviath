@@ -391,9 +391,9 @@ pub fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
 /// as-is.)
 pub(crate) fn apply_edge_transform(
     window: &mut ContextWindow,
-    transform: &leviath_core::blueprint::EdgeTransform,
+    transform: &crate::spec::blueprint::EdgeTransform,
 ) -> Vec<String> {
-    use leviath_core::blueprint::EdgeTransform;
+    use crate::spec::blueprint::EdgeTransform;
     match transform {
         EdgeTransform::Direct => Vec::new(),
         EdgeTransform::Clear => {

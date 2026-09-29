@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 use super::super::blueprint::Region;
 use super::count;
@@ -32,9 +32,9 @@ pub(crate) enum TransitionCondition {
     DeadEnd,
 }
 
-impl From<&leviath_core::blueprint::TransitionCondition> for TransitionCondition {
-    fn from(condition: &leviath_core::blueprint::TransitionCondition) -> Self {
-        use leviath_core::blueprint::TransitionCondition as Core;
+impl From<&leviath_runtime::spec::blueprint::TransitionCondition> for TransitionCondition {
+    fn from(condition: &leviath_runtime::spec::blueprint::TransitionCondition) -> Self {
+        use leviath_runtime::spec::blueprint::TransitionCondition as Core;
         match condition {
             Core::Always => Self::Always,
             Core::LlmChoice => Self::LlmChoice,
@@ -62,9 +62,9 @@ pub(crate) enum TransitionTransform {
     Custom,
 }
 
-impl From<&leviath_core::blueprint::EdgeTransform> for TransitionTransform {
-    fn from(transform: &leviath_core::blueprint::EdgeTransform) -> Self {
-        use leviath_core::blueprint::EdgeTransform as Core;
+impl From<&leviath_runtime::spec::blueprint::EdgeTransform> for TransitionTransform {
+    fn from(transform: &leviath_runtime::spec::blueprint::EdgeTransform) -> Self {
+        use leviath_runtime::spec::blueprint::EdgeTransform as Core;
         match transform {
             Core::Direct => Self::Direct,
             Core::Clear => Self::Clear,
@@ -203,8 +203,8 @@ pub(crate) struct StuckThresholds {
     pub(crate) after_tool_calls: Option<i32>,
 }
 
-impl From<&leviath_core::blueprint::StuckConfig> for StuckThresholds {
-    fn from(stuck: &leviath_core::blueprint::StuckConfig) -> Self {
+impl From<&leviath_runtime::spec::blueprint::StuckConfig> for StuckThresholds {
+    fn from(stuck: &leviath_runtime::spec::blueprint::StuckConfig) -> Self {
         Self {
             after_iterations: stuck.after_iterations.map(count),
             after_minutes: stuck.after_minutes.map(count),
@@ -219,7 +219,7 @@ pub(crate) struct TransitionGate {
     /// The blueprint the region names resolve in.
     blueprint: Arc<CoreBlueprint>,
     /// The gate as the edge wrote it.
-    gate: leviath_core::blueprint::TransitionGate,
+    gate: leviath_runtime::spec::blueprint::TransitionGate,
 }
 
 /// What a stage must have done before an edge may be taken.
@@ -342,7 +342,7 @@ pub(crate) struct TransitionEdge {
     /// The stage name this edge leads to, as the manifest keyed it.
     pub(crate) target: String,
     /// The edge as the manifest wrote it.
-    edge: leviath_core::blueprint::TransitionEdge,
+    edge: leviath_runtime::spec::blueprint::TransitionEdge,
 }
 
 /// One outgoing edge of a stage.
@@ -384,7 +384,7 @@ impl TransitionEdge {
     /// The transform in detail: a `COMPACT` edge's prompt, or a `CUSTOM` edge's
     /// per-region lists. Null for `DIRECT` and `CLEAR`.
     async fn transform_config(&self) -> Option<TransformConfig> {
-        use leviath_core::blueprint::EdgeTransform;
+        use leviath_runtime::spec::blueprint::EdgeTransform;
         let (named, compact_prompt) = match &self.edge.transform {
             EdgeTransform::Custom {
                 carry,
@@ -436,7 +436,7 @@ impl TransitionEdge {
     pub(crate) fn of(
         blueprint: &Arc<CoreBlueprint>,
         target: &str,
-        edge: &leviath_core::blueprint::TransitionEdge,
+        edge: &leviath_runtime::spec::blueprint::TransitionEdge,
     ) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),
@@ -496,9 +496,9 @@ pub(crate) struct ContextTransform {
     pub(crate) mappings: Vec<RegionMapping>,
 }
 
-impl From<&leviath_core::blueprint::ContextTransform> for ContextTransform {
-    fn from(transform: &leviath_core::blueprint::ContextTransform) -> Self {
-        use leviath_core::blueprint::ContentTransform as Content;
+impl From<&leviath_runtime::spec::blueprint::ContextTransform> for ContextTransform {
+    fn from(transform: &leviath_runtime::spec::blueprint::ContextTransform) -> Self {
+        use leviath_runtime::spec::blueprint::ContentTransform as Content;
         Self {
             from_blueprint: transform.from_blueprint.clone(),
             to_blueprint: transform.to_blueprint.clone(),

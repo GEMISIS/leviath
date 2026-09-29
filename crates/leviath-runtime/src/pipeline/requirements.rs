@@ -99,8 +99,8 @@ pub(crate) struct RequiredReentries(pub usize);
 /// context-writing tool (gating a stage that can't populate the region would loop
 /// pointlessly). Ported from the imperative `unmet_required_regions`.
 pub(crate) fn unmet_required_regions(
-    blueprint: &leviath_core::Blueprint,
-    stage: &leviath_core::Stage,
+    blueprint: &crate::spec::Blueprint,
+    stage: &crate::spec::Stage,
     window: &ContextWindow,
 ) -> Vec<(String, Option<String>)> {
     let can_write = stage.grants_all_builtins()
@@ -125,7 +125,7 @@ pub(crate) fn unmet_required_regions(
         .filter(|r| {
             !matches!(
                 r.seed,
-                Some(leviath_core::layout::RegionSeed::CallerInput { .. })
+                Some(crate::spec::layout::RegionSeed::CallerInput { .. })
             )
         })
         .filter(|r| {
@@ -369,7 +369,7 @@ pub(crate) fn require_final_output(
         // context, and an output stage runs last, when that context is at its
         // largest: an agent with `max_revisits = 10` billed ten full prompts to
         // fail to say one word.
-        let cap = leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP;
+        let cap = crate::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP;
         let round = reentries.map_or(0, |r| r.0);
         if round >= cap {
             tracing::warn!(
@@ -440,7 +440,7 @@ pub(crate) fn require_fan_out(
     {
         crate::tick_scope::enter(entity);
         let stage = &bp.0.stages[cursor.index];
-        let leviath_core::blueprint::StageMode::FanOut { config } = &stage.mode else {
+        let crate::spec::blueprint::StageMode::FanOut { config } = &stage.mode else {
             continue;
         };
         // The stage's own budget when it set one; a small or local model may
@@ -448,7 +448,7 @@ pub(crate) fn require_fan_out(
         // refusal rather than pay for retries that will not land.
         let cap = config
             .max_attempts
-            .unwrap_or(leviath_core::blueprint::DEFAULT_FAN_OUT_ATTEMPTS);
+            .unwrap_or(crate::spec::blueprint::DEFAULT_FAN_OUT_ATTEMPTS);
         // Set by every accepted call and cleared on stage entry, so its
         // presence means "this entry has already fanned out" rather than "this
         // run has, at some point".

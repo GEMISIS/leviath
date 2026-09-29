@@ -325,7 +325,7 @@ mod tests {
                 manifest.contains("budget = \""),
                 "{template} template should use percentage budgets"
             );
-            let bp = leviath_core::manifest::parse_manifest(&manifest)
+            let bp = leviath_runtime::spec::manifest::parse_manifest(&manifest)
                 .expect("generated template should parse");
             assert!(
                 bp.context_layout.has_percent_budgets(),
@@ -339,7 +339,7 @@ mod tests {
         use leviath_core::RegionKind;
         for template in ["default", "coder", "researcher", "other"] {
             let manifest = create_manifest("inv-agent", template);
-            let bp = leviath_core::manifest::parse_manifest(&manifest).unwrap();
+            let bp = leviath_runtime::spec::manifest::parse_manifest(&manifest).unwrap();
             let regions = &bp.context_layout.regions;
 
             // Explicit conversation sliding_window. (matches! is the FIRST operand

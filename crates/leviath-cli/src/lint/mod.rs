@@ -23,14 +23,14 @@
 //! the parser has already filled in its defaults, and asking the struct cannot
 //! tell "wrote `autonomous`" apart from "wrote nothing".
 //!
-//! [`Blueprint::validate`]: leviath_core::Blueprint::validate
+//! [`Blueprint::validate`]: leviath_runtime::spec::Blueprint::validate
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use leviath_core::Blueprint;
-use leviath_core::blueprint::{StageMode, ToolGroup};
 use leviath_runtime::dynamic_interaction::BLOCKING_INTERACTION_TOOLS;
+use leviath_runtime::spec::Blueprint;
+use leviath_runtime::spec::blueprint::{StageMode, ToolGroup};
 use leviath_tools::canonical_tool_name;
 use serde::{Deserialize, Serialize};
 

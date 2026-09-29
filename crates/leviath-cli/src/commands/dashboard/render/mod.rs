@@ -652,8 +652,10 @@ mod tests {
         let mut agent = make_test_agent("run-graph-tabs", AgentDisplayStatus::Active);
         agent.graph = Some(std::sync::Arc::new(
             crate::tui::flowgraph::StageGraph::from_blueprint(
-                &leviath_core::manifest::parse_manifest("[agent]\nname = \"g\"\n[stages.main]\n")
-                    .unwrap(),
+                &leviath_runtime::spec::manifest::parse_manifest(
+                    "[agent]\nname = \"g\"\n[stages.main]\n",
+                )
+                .unwrap(),
             ),
         ));
         dash.agents.push(agent);
@@ -800,7 +802,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-exp", AgentDisplayStatus::Active);
         let graph = std::sync::Arc::new(crate::tui::flowgraph::StageGraph::from_blueprint(
-            &leviath_core::manifest::parse_manifest(
+            &leviath_runtime::spec::manifest::parse_manifest(
                 "[agent]\nname = \"g\"\n[stages.a]\n[stages.a.transitions.b]\n[stages.b]\n",
             )
             .unwrap(),

@@ -18,7 +18,7 @@ pub struct ResolvedStage {
     pub tools: Vec<Tool>,
     /// Where to go if `provider_name` turns out to be unusable, best first.
     /// See `crate::pipeline::resolve_stage_candidates`.
-    pub fallbacks: Vec<leviath_core::blueprint::ModelEntry>,
+    pub fallbacks: Vec<crate::spec::blueprint::ModelEntry>,
     /// The output shape resolved for this stage: the blueprint's default, the
     /// stage's override, and the launching caller's request, combined. Resolved
     /// caller-side (like the model and tool choices beside it) because only the
@@ -64,7 +64,7 @@ pub(crate) fn context_window_tokens(world: &World, provider_name: &str, model: &
 /// hint; `agent_hints` the blueprint's agent-level override of the same. Each
 /// one cascades stage → agent → global here.
 pub(crate) fn stage_setup_from(
-    stage: &leviath_core::Stage,
+    stage: &crate::spec::Stage,
     global_hints: leviath_core::config::PromptHints,
     agent_hints: leviath_core::config::PromptHintOverrides,
     output: Option<leviath_core::output::OutputSpec>,
@@ -98,7 +98,7 @@ pub(crate) fn stage_setup_from(
     // (which asks for the JSON array of work items) onto any base instructions so
     // the stage's normal inference produces the work items the split system parses.
     let system_prompt = match &stage.mode {
-        leviath_core::blueprint::StageMode::FanOut { config }
+        crate::spec::blueprint::StageMode::FanOut { config }
             if !config.split_prompt.trim().is_empty() =>
         {
             Some(match base_prompt {
@@ -120,12 +120,12 @@ pub(crate) fn stage_setup_from(
                 true => format!(
                     "Before this stage ends you must call `{tool}` with your final answer. It is \
                      the only thing the caller receives.",
-                    tool = leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+                    tool = crate::spec::blueprint::SUBMIT_OUTPUT_TOOL
                 ),
                 false => format!(
                     "Before this stage ends you must call `{tool}` with your final answer. It is \
                      the only thing the caller receives.\n\n{described}",
-                    tool = leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+                    tool = crate::spec::blueprint::SUBMIT_OUTPUT_TOOL
                 ),
             };
             Some(match system_prompt {
@@ -182,7 +182,7 @@ pub(crate) fn stage_setup_from(
 pub(crate) fn spawn_agent(
     world: &mut World,
     agent_id: String,
-    blueprint: leviath_core::Blueprint,
+    blueprint: crate::spec::Blueprint,
     task: &str,
     stages: Vec<ResolvedStage>,
     global_hints: leviath_core::config::PromptHints,
@@ -203,7 +203,7 @@ pub(crate) fn spawn_agent(
             parts: Vec::new(),
             stages,
             global_hints,
-            global_nudge: leviath_core::NudgeConfig::default(),
+            global_nudge: crate::spec::NudgeConfig::default(),
             region_scripts: std::collections::HashMap::new(),
             mime_registry: None,
         },
@@ -219,7 +219,7 @@ pub struct SeededSpawn {
     /// The run id this agent is registered under.
     pub agent_id: String,
     /// The blueprint being spawned.
-    pub blueprint: leviath_core::Blueprint,
+    pub blueprint: crate::spec::Blueprint,
     /// Content for named caller-input regions, keyed by region name.
     pub seeds: std::collections::HashMap<String, String>,
     /// Files the caller attached, written into their regions as stored parts
@@ -230,7 +230,7 @@ pub struct SeededSpawn {
     /// Config-level prompt hints, applied where the blueprint says nothing.
     pub global_hints: leviath_core::config::PromptHints,
     /// The config-level nudge, likewise.
-    pub global_nudge: leviath_core::NudgeConfig,
+    pub global_nudge: crate::spec::NudgeConfig,
     /// Compiled render hooks, keyed by region name.
     pub region_scripts: std::collections::HashMap<
         String,
@@ -543,8 +543,8 @@ mod stage_instructions_fit_tests {
 
     /// A small `task` region beside a dedicated `stage_instructions` region
     /// with room for a stage prompt.
-    fn layout(window: usize) -> leviath_core::layout::ContextLayout {
-        use leviath_core::layout::{BudgetSpec, ContextLayout, RegionDefinition};
+    fn layout(window: usize) -> crate::spec::layout::ContextLayout {
+        use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let pct = |p: f64| BudgetSpec::Percent {
             percent: p,
             min: None,
@@ -554,7 +554,7 @@ mod stage_instructions_fit_tests {
             RegionDefinition::new("task".to_string(), leviath_core::RegionKind::Pinned, 0);
         task.budget = pct(0.02);
         let mut instr = RegionDefinition::new(
-            leviath_core::layout::STAGE_INSTRUCTIONS_REGION.to_string(),
+            crate::spec::layout::STAGE_INSTRUCTIONS_REGION.to_string(),
             leviath_core::RegionKind::Pinned,
             0,
         );
@@ -581,7 +581,7 @@ mod stage_instructions_fit_tests {
         let instr_max = layout
             .regions
             .iter()
-            .find(|r| r.name == leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+            .find(|r| r.name == crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
             .expect("stage_instructions")
             .max_tokens;
         let prompt = big_prompt();
@@ -592,12 +592,12 @@ mod stage_instructions_fit_tests {
              stage_instructions {instr_max}"
         );
 
-        let bp = leviath_core::Blueprint::new(
+        let bp = crate::spec::Blueprint::new(
             "t".to_string(),
             "d".to_string(),
-            vec![leviath_core::Stage::new(
+            vec![crate::spec::Stage::new(
                 "work".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
             )],
             layout,
         );
@@ -628,7 +628,7 @@ mod stage_instructions_fit_tests {
             .expect("the prompt fits the region declared for it");
 
         let instr = window
-            .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
             .expect("region exists");
         assert!(
             instr.content.iter().any(|e| e.content.contains("word")),
@@ -645,7 +645,7 @@ mod stage_instructions_fit_tests {
     /// stage prompt, coupling an unrelated region to prompt lengths.
     #[test]
     fn a_blueprint_that_declares_no_region_still_gets_one() {
-        use leviath_core::layout::{BudgetSpec, ContextLayout, RegionDefinition};
+        use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let window_tokens = 128_000;
         let prompt = big_prompt();
 
@@ -658,12 +658,12 @@ mod stage_instructions_fit_tests {
             max: None,
         };
         let only_task = ContextLayout::new(vec![task], window_tokens).resolved(window_tokens);
-        let bp = leviath_core::Blueprint::new(
+        let bp = crate::spec::Blueprint::new(
             "t".to_string(),
             "d".to_string(),
-            vec![leviath_core::Stage::new(
+            vec![crate::spec::Stage::new(
                 "work".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
             )],
             only_task,
         );
@@ -703,7 +703,7 @@ mod stage_instructions_fit_tests {
             "the task region is left for the caller's task"
         );
         let instr = window
-            .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
             .expect("the runtime made one");
         assert!(instr.content.iter().any(|e| e.content.contains("word")));
     }
@@ -716,7 +716,7 @@ mod stage_instructions_fit_tests {
         crate::context_setup::ensure_stage_instructions_region(&mut window, &[None, None]);
         assert!(
             window
-                .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
                 .is_none()
         );
     }
@@ -726,14 +726,14 @@ mod stage_instructions_fit_tests {
     fn a_declared_region_is_not_resized() {
         let mut window = crate::components::ContextWindow::new(100_000);
         window.add_region(leviath_core::Region::new(
-            leviath_core::layout::STAGE_INSTRUCTIONS_REGION.to_string(),
+            crate::spec::layout::STAGE_INSTRUCTIONS_REGION.to_string(),
             leviath_core::RegionKind::Pinned,
             4_242,
         ));
         crate::context_setup::ensure_stage_instructions_region(&mut window, &[Some(big_prompt())]);
         assert_eq!(
             window
-                .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
                 .expect("declared")
                 .max_tokens,
             4_242
@@ -759,7 +759,7 @@ mod stage_instructions_fit_tests {
         // Capped at a quarter of the window rather than sized to the prompt.
         assert_eq!(
             window
-                .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
                 .expect("made")
                 .max_tokens,
             250
@@ -785,7 +785,7 @@ mod stage_instructions_fit_tests {
         let err = crate::pipeline::transition::apply_stage_context(&setup, &mut window)
             .expect_err("a prompt larger than the window cannot be housed");
         assert!(
-            err.contains(leviath_core::layout::STAGE_INSTRUCTIONS_REGION),
+            err.contains(crate::spec::layout::STAGE_INSTRUCTIONS_REGION),
             "{err}"
         );
     }
@@ -804,7 +804,7 @@ mod stage_instructions_fit_tests {
         );
         assert_eq!(
             window
-                .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
                 .expect("made")
                 .max_tokens,
             expected
@@ -815,7 +815,7 @@ mod stage_instructions_fit_tests {
     /// does not re-declare `stage_instructions`.
     #[test]
     fn a_scoped_stage_layout_still_routes_to_the_declared_region() {
-        use leviath_core::layout::{BudgetSpec, ContextLayout, RegionDefinition};
+        use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let window_tokens = 128_000;
         let prompt = big_prompt();
 
@@ -830,12 +830,12 @@ mod stage_instructions_fit_tests {
         };
         let scoped = ContextLayout::new(vec![scoped_task], window_tokens).resolved(window_tokens);
 
-        let bp = leviath_core::Blueprint::new(
+        let bp = crate::spec::Blueprint::new(
             "t".to_string(),
             "d".to_string(),
-            vec![leviath_core::Stage::new(
+            vec![crate::spec::Stage::new(
                 "work".to_string(),
-                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
             )],
             layout(window_tokens),
         );
@@ -867,7 +867,7 @@ mod stage_instructions_fit_tests {
             .expect("the prompt fits the region declared for it");
 
         let instr = window
-            .get_region(leviath_core::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
             .expect("carried through the scoped layout");
         assert!(
             instr.content.iter().any(|e| e.content.contains("word")),

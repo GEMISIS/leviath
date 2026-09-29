@@ -124,9 +124,9 @@ impl Provider for FakeProvider {
 /// field of the same value now. A test that wants one field different uses
 /// struct-update syntax over the fixture.
 pub(crate) mod fixtures {
-    use leviath_core::blueprint::{FanOutConfig, WorkerFailurePolicy};
     use leviath_core::run_meta::RunMeta;
     use leviath_providers::{FinishReason, InferenceRequest, InferenceResponse, TokenUsage};
+    use leviath_runtime::spec::blueprint::{FanOutConfig, WorkerFailurePolicy};
 
     /// One prompt token, one completion token, nothing cached, no reported
     /// cost.

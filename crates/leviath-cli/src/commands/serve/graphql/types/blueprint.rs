@@ -27,7 +27,7 @@ use super::manifest::runtime::{
 };
 use super::manifest::stage::Stage;
 use super::manifest::transition::ContextTransform;
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 /// How much of the digest an id carries.
 ///
@@ -90,9 +90,9 @@ pub(crate) enum ToolRescan {
     RescanBeforeDispatch,
 }
 
-impl From<leviath_core::blueprint::ToolRescan> for ToolRescan {
-    fn from(setting: leviath_core::blueprint::ToolRescan) -> Self {
-        use leviath_core::blueprint::ToolRescan as Core;
+impl From<leviath_runtime::spec::blueprint::ToolRescan> for ToolRescan {
+    fn from(setting: leviath_runtime::spec::blueprint::ToolRescan) -> Self {
+        use leviath_runtime::spec::blueprint::ToolRescan as Core;
         match setting {
             Core::AtSpawn => Self::AtSpawnOnly,
             Core::AfterWrites => Self::RescanAfterWrites,
@@ -267,8 +267,10 @@ impl Region {
     /// percentage. Null when the region names a fixed ceiling instead.
     async fn budget_percent(&self) -> Option<f64> {
         match &self.region().budget {
-            leviath_core::layout::BudgetSpec::Percent { percent, .. } => Some(percent * 100.0),
-            leviath_core::layout::BudgetSpec::Absolute(_) => None,
+            leviath_runtime::spec::layout::BudgetSpec::Percent { percent, .. } => {
+                Some(percent * 100.0)
+            }
+            leviath_runtime::spec::layout::BudgetSpec::Absolute(_) => None,
         }
     }
 
@@ -276,8 +278,8 @@ impl Region {
     /// model does not starve the region.
     async fn min_tokens(&self) -> Option<i32> {
         match &self.region().budget {
-            leviath_core::layout::BudgetSpec::Percent { min, .. } => min.map(count),
-            leviath_core::layout::BudgetSpec::Absolute(_) => None,
+            leviath_runtime::spec::layout::BudgetSpec::Percent { min, .. } => min.map(count),
+            leviath_runtime::spec::layout::BudgetSpec::Absolute(_) => None,
         }
     }
 
@@ -285,8 +287,8 @@ impl Region {
     /// very large window does not balloon.
     async fn budget_max_tokens(&self) -> Option<i32> {
         match &self.region().budget {
-            leviath_core::layout::BudgetSpec::Percent { max, .. } => max.map(count),
-            leviath_core::layout::BudgetSpec::Absolute(_) => None,
+            leviath_runtime::spec::layout::BudgetSpec::Percent { max, .. } => max.map(count),
+            leviath_runtime::spec::layout::BudgetSpec::Absolute(_) => None,
         }
     }
 
@@ -426,12 +428,12 @@ impl Region {
 
 impl Region {
     /// The region this object stands for.
-    fn region(&self) -> &leviath_core::layout::RegionDefinition {
+    fn region(&self) -> &leviath_runtime::spec::layout::RegionDefinition {
         &self.layout().regions[self.at]
     }
 
     /// The layout that declares it: one stage's own, or the blueprint's.
-    fn layout(&self) -> &leviath_core::layout::ContextLayout {
+    fn layout(&self) -> &leviath_runtime::spec::layout::ContextLayout {
         self.stage
             .and_then(|at| self.blueprint.stages[at].context_layout.as_ref())
             .unwrap_or(&self.blueprint.context_layout)

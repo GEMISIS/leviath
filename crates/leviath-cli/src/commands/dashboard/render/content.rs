@@ -1946,7 +1946,7 @@ mod tests {
     fn graph_from(toml: &str) -> Option<std::sync::Arc<crate::tui::flowgraph::StageGraph>> {
         Some(std::sync::Arc::new(
             crate::tui::flowgraph::StageGraph::from_blueprint(
-                &leviath_core::manifest::parse_manifest(toml).expect("fixture parses"),
+                &leviath_runtime::spec::manifest::parse_manifest(toml).expect("fixture parses"),
             ),
         ))
     }

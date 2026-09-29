@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use leviath_core::blueprint::Blueprint;
 use leviath_providers::Tool;
 use leviath_runtime::host::{SpawnArgs, SubAgentOp};
 use leviath_runtime::interaction_hub::InteractionHub;
@@ -26,6 +25,7 @@ use leviath_runtime::pipeline::{
     CompactionSettings, ModelDefaults, PersistWatermark, Providers, resolve_stages,
     spawn_agent_seeded,
 };
+use leviath_runtime::spec::blueprint::Blueprint;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -154,7 +154,7 @@ fn check_spawn_request(args: &SpawnArgs) -> Result<(), String> {
 fn load_blueprint(
     args: &SpawnArgs,
     config: &crate::config::Config,
-) -> Result<(String, leviath_core::Blueprint), String> {
+) -> Result<(String, leviath_runtime::spec::Blueprint), String> {
     let content = std::fs::read_to_string(&args.blueprint_path)
         .map_err(|e| format!("read manifest '{}': {e}", args.blueprint_path))?;
     // A blueprint that will not load is usually the user's own mistake, but for
@@ -169,7 +169,7 @@ fn load_blueprint(
             ". ",
         )
     };
-    let mut blueprint = leviath_core::manifest::parse_manifest(&content)
+    let mut blueprint = leviath_runtime::spec::manifest::parse_manifest(&content)
         .map_err(|e| format!("parse manifest: {e}{}", stale()))?;
     blueprint
         .validate()
@@ -440,7 +440,7 @@ struct TaintSetup {
 /// blueprint's own `[security]` block, and the world's policy overrides.
 fn resolve_taint_setup(
     world: &World,
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &crate::config::Config,
     all_tool_defs: &[leviath_providers::Tool],
     read_paths_granted: bool,
@@ -532,7 +532,7 @@ fn warn_retired_output_checks(
     blueprint: &Blueprint,
     request: Option<&leviath_core::output::OutputSpec>,
 ) {
-    for line in leviath_core::output::retired_check_warnings(blueprint, request) {
+    for line in leviath_runtime::spec::blueprint::retired_check_warnings(blueprint, request) {
         tracing::warn!(run_id = %run_id, agent_name = %blueprint.name, "{line}");
     }
 }
@@ -1184,8 +1184,8 @@ fn build_agent_inner(
 mod tests {
     use super::*;
     use crate::test_support::{FakeProvider, fixtures};
-    use leviath_core::blueprint::ModelConfig;
     use leviath_runtime::ProviderRegistry;
+    use leviath_runtime::spec::blueprint::ModelConfig;
     use leviath_runtime::world::PipelineWorld;
 
     /// A throwaway sub-agent op sender for tests that don't exercise the bridge.
@@ -1218,7 +1218,7 @@ allow = ["~/.leviath/runs"]
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
 "#;
-            let bp = leviath_core::manifest::parse_manifest(manifest).unwrap();
+            let bp = leviath_runtime::spec::manifest::parse_manifest(manifest).unwrap();
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("agent.leviath");
             std::fs::write(&path, manifest).unwrap();
@@ -1263,7 +1263,7 @@ max_iterations = 5
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
 "#;
-            let bp = leviath_core::manifest::parse_manifest(manifest).unwrap();
+            let bp = leviath_runtime::spec::manifest::parse_manifest(manifest).unwrap();
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("agent.leviath");
             std::fs::write(&path, manifest).unwrap();
@@ -1427,7 +1427,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             assert!(set.is_empty());
         });
     }
-    use leviath_core::blueprint::ModelEntry;
+    use leviath_runtime::spec::blueprint::ModelEntry;
 
     fn model_cfg(models: Vec<(&str, &str)>) -> ModelConfig {
         ModelConfig {
@@ -1532,7 +1532,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     // ── output validators ──
 
     fn validator_blueprint(agent_script: Option<&str>, stage_script: Option<&str>) -> Blueprint {
-        let mut bp = leviath_core::manifest::parse_manifest(
+        let mut bp = leviath_runtime::spec::manifest::parse_manifest(
             "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
              [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
         )
@@ -1560,7 +1560,7 @@ system = { kind = "pinned", max_tokens = 1000 }
                 ..leviath_core::output::OutputSpec::default()
             };
             assert_eq!(
-                leviath_core::output::retired_check_warnings(&bp, Some(&request)).len(),
+                leviath_runtime::spec::blueprint::retired_check_warnings(&bp, Some(&request)).len(),
                 1,
                 "the fixture needs a retirement for the log line to run"
             );
@@ -1649,8 +1649,8 @@ system = { kind = "pinned", max_tokens = 1000 }
 
     // ─── resolve_stage_hook_scripts ──────────────────────────────────────
 
-    fn hooked_manifest(hooks: &str) -> leviath_core::Blueprint {
-        leviath_core::manifest::parse_manifest(&format!(
+    fn hooked_manifest(hooks: &str) -> leviath_runtime::spec::Blueprint {
+        leviath_runtime::spec::manifest::parse_manifest(&format!(
             "[agent]\nname = \"h\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
              [stages.main]\nmodel = {{ provider = \"anthropic\", model = \"m\" }}\n{hooks}"
         ))
@@ -1742,7 +1742,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     fn resolve_region_scripts_empty_without_custom_regions() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
-        let bp = leviath_core::manifest::parse_manifest(
+        let bp = leviath_runtime::spec::manifest::parse_manifest(
             "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
              [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
         )
@@ -1766,7 +1766,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             "fn render(ctx) { \"s\" }",
         )
         .unwrap();
-        let bp = leviath_core::manifest::parse_manifest(custom_region_manifest()).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(custom_region_manifest()).unwrap();
         let scripts = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap();
         assert_eq!(scripts.len(), 2);
         assert!(scripts.contains_key("hooks/brain.rhai"));
@@ -1784,7 +1784,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             "fn render(ctx) { \"x\" }",
         )
         .unwrap();
-        let bp = leviath_core::manifest::parse_manifest(
+        let bp = leviath_runtime::spec::manifest::parse_manifest(
             "[agent]\nname = \"cr\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
              [context.regions.a]\nkind = \"custom\"\nscript = \"hooks/shared.rhai\"\nmax_tokens = 2000\n\n\
              [context.regions.b]\nkind = \"custom\"\nscript = \"hooks/shared.rhai\"\nmax_tokens = 2000\n\n\
@@ -1799,7 +1799,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     fn resolve_region_scripts_missing_file_is_a_hard_error() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("agent.leviath");
-        let bp = leviath_core::manifest::parse_manifest(custom_region_manifest()).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(custom_region_manifest()).unwrap();
         let err = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap_err();
         assert!(err.contains("region 'brain'"), "{err}");
         assert!(err.contains("hooks/brain.rhai"), "{err}");
@@ -1816,7 +1816,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             "fn render(ctx) { \"s\" }",
         )
         .unwrap();
-        let bp = leviath_core::manifest::parse_manifest(custom_region_manifest()).unwrap();
+        let bp = leviath_runtime::spec::manifest::parse_manifest(custom_region_manifest()).unwrap();
         let err = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap_err();
         assert!(err.contains("failed to compile"), "{err}");
         assert!(err.contains("region 'brain'"), "{err}");
@@ -3197,8 +3197,8 @@ system = { kind = "pinned", max_tokens = 1000 }
     /// mode it never asked for.
     #[tokio::test]
     async fn build_agent_tags_an_agent_with_the_rescan_it_asked_for() {
-        use leviath_core::blueprint::ToolRescan;
         use leviath_runtime::pipeline::{DynamicTools, RescanBeforeDispatch};
+        use leviath_runtime::spec::blueprint::ToolRescan;
 
         for (value, polls, before_dispatch) in [
             (ToolRescan::AtSpawn, false, false),
@@ -3609,11 +3609,12 @@ system = { kind = "pinned", max_tokens = 1000 }
     use std::path::Path;
 
     fn blueprint_declaring(read_paths: &[&str]) -> Blueprint {
-        let stage = leviath_core::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let stage =
+            leviath_runtime::spec::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
+        let layout = leviath_runtime::spec::layout::ContextLayout::new(vec![], 1000);
         let mut bp = Blueprint::new("cto".to_string(), "d".to_string(), vec![stage], layout);
         if !read_paths.is_empty() {
-            bp.read_paths = Some(leviath_core::ReadPathsConfig {
+            bp.read_paths = Some(leviath_runtime::spec::ReadPathsConfig {
                 allow: read_paths.iter().map(|s| s.to_string()).collect(),
             });
         }
@@ -3651,7 +3652,7 @@ system = { kind = "pinned", max_tokens = 1000 }
 
         // An explicitly empty `[read_paths]` block is the same as none.
         let mut bp = blueprint_declaring(&[]);
-        bp.read_paths = Some(leviath_core::ReadPathsConfig { allow: vec![] });
+        bp.read_paths = Some(leviath_runtime::spec::ReadPathsConfig { allow: vec![] });
         let (policy, warning) =
             build_read_path_policy(&bp, &Config::default(), Path::new("/w")).unwrap();
         assert!(!policy.is_active());
@@ -4219,7 +4220,7 @@ model = "claude-sonnet-5"
 conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
 "#
         );
-        leviath_core::manifest::parse_manifest(&toml).unwrap()
+        leviath_runtime::spec::manifest::parse_manifest(&toml).unwrap()
     }
 
     fn args_with(task: &str, regions: HashMap<String, String>, workdir: &str) -> SpawnArgs {
@@ -4633,7 +4634,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         }))
     }
 
-    fn tool_bp(seed: &str, required: bool) -> leviath_core::Blueprint {
+    fn tool_bp(seed: &str, required: bool) -> leviath_runtime::spec::Blueprint {
         let req = if required { ", required = true" } else { "" };
         bp(&format!(
             r#"environment = {{ kind = "pinned", max_tokens = 500, seed = {seed}{req} }}"#
@@ -4817,7 +4818,7 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
     }
 
     /// A blueprint with one command-seeded region, optionally `required`.
-    fn command_bp(required: bool) -> leviath_core::Blueprint {
+    fn command_bp(required: bool) -> leviath_runtime::spec::Blueprint {
         let req = if required { ", required = true" } else { "" };
         bp(&format!(
             r#"facts = {{ kind = "pinned", max_tokens = 500, seed = {{ command = "scan-repo" }}{req} }}"#
@@ -5195,16 +5196,16 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         std::fs::create_dir_all(&bp_dir).expect("dirs");
         std::fs::write(root.path().join("outside.txt"), "NOT RHAI").expect("write");
 
-        let mut stage = leviath_core::Stage::new(
+        let mut stage = leviath_runtime::spec::Stage::new(
             "main".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            leviath_runtime::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
         stage.hooks.on_stage_enter = Some("../../outside.txt".to_string());
-        let blueprint = leviath_core::Blueprint::new(
+        let blueprint = leviath_runtime::spec::Blueprint::new(
             "evil".to_string(),
             "d".to_string(),
             vec![stage],
-            leviath_core::layout::ContextLayout::new(vec![], 1000),
+            leviath_runtime::spec::layout::ContextLayout::new(vec![], 1000),
         );
 
         let bp_path = bp_dir.join("agent.leviath");
@@ -5493,11 +5494,11 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         std::fs::create_dir_all(&bp_dir).expect("dirs");
         std::fs::write(root.path().join("outside.txt"), "NOT RHAI").expect("write");
 
-        let mut blueprint = leviath_core::Blueprint::new(
+        let mut blueprint = leviath_runtime::spec::Blueprint::new(
             "evil".to_string(),
             "d".to_string(),
             vec![],
-            leviath_core::layout::ContextLayout::new(vec![], 1000),
+            leviath_runtime::spec::layout::ContextLayout::new(vec![], 1000),
         );
         blueprint.output = Some(leviath_core::output::OutputSpec {
             validator: Some("../../outside.txt".to_string()),
@@ -5517,16 +5518,16 @@ docs = { kind = "pinned", max_tokens = 2000, seed = { files = ["a.txt", "b.txt"]
         std::fs::create_dir_all(&bp_dir).expect("dirs");
         std::fs::write(bp_dir.join("h.rhai"), "fn on_stage_enter(ctx) { () }").expect("write");
 
-        let mut stage = leviath_core::Stage::new(
+        let mut stage = leviath_runtime::spec::Stage::new(
             "main".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            leviath_runtime::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
         stage.hooks.on_stage_enter = Some("h.rhai".to_string());
-        let blueprint = leviath_core::Blueprint::new(
+        let blueprint = leviath_runtime::spec::Blueprint::new(
             "good".to_string(),
             "d".to_string(),
             vec![stage],
-            leviath_core::layout::ContextLayout::new(vec![], 1000),
+            leviath_runtime::spec::layout::ContextLayout::new(vec![], 1000),
         );
 
         let bp_path = bp_dir.join("agent.leviath");
@@ -5557,7 +5558,7 @@ model = "claude-sonnet-5"
 conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
 "#
         );
-        leviath_core::manifest::parse_manifest(&toml).unwrap()
+        leviath_runtime::spec::manifest::parse_manifest(&toml).unwrap()
     }
 
     #[test]
@@ -5709,7 +5710,7 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
                 .iter()
                 .find(|(rel, _)| *rel == "agent.leviath")
                 .expect("every bundled agent ships an agent.leviath");
-            let bp = leviath_core::manifest::parse_manifest(content)
+            let bp = leviath_runtime::spec::manifest::parse_manifest(content)
                 .expect("every bundled agent's manifest parses");
             // The question is `accepts_task`, not "did `resolve_seeds` error".
             // Driving the whole resolver here reported `coder` as refusing a

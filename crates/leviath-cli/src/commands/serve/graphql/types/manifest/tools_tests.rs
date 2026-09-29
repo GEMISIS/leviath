@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 use super::{
     OutputRoute, ToolAcceptRule, ToolPermissionPolicy, ToolPermissionRule, ToolRouteOverride,
@@ -26,7 +26,7 @@ fn blueprint() -> Arc<CoreBlueprint> {
                 \n\
                 [stages.plan]\n\
                 mode = \"autonomous\"\n";
-    Arc::new(leviath_core::manifest::parse_manifest(text).expect("the manifest parses"))
+    Arc::new(leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses"))
 }
 
 /// One permission rule, as `from_table` would build it.
@@ -64,12 +64,12 @@ fn accept_rule() -> ToolAcceptRule {
 
 /// One routing block with an override and a per-tool ceiling, so both of
 /// `ToolRouting`'s list fields carry something.
-fn tool_result_routing() -> leviath_core::blueprint::ToolResultRouting {
+fn tool_result_routing() -> leviath_runtime::spec::blueprint::ToolResultRouting {
     let mut tool_overrides = std::collections::HashMap::new();
     tool_overrides.insert("shell".to_string(), "notes".to_string());
     let mut tool_max_result_tokens = std::collections::HashMap::new();
     tool_max_result_tokens.insert("read_file".to_string(), 2000usize);
-    leviath_core::blueprint::ToolResultRouting {
+    leviath_runtime::spec::blueprint::ToolResultRouting {
         default_region: "notes".to_string(),
         tool_overrides,
         keep_results: true,

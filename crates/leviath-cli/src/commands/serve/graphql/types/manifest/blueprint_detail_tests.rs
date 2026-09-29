@@ -14,7 +14,8 @@ use crate::commands::serve::core::blueprints::{BlueprintSource as CoreSource, di
 /// Ask the schema about the manifest the stage tests declare.
 async fn ask(query: &str) -> serde_json::Value {
     let text = super::stage_tests::manifest();
-    let parsed = leviath_core::manifest::parse_manifest(&text).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(&text).expect("the manifest parses");
     let schema = Schema::build(
         Probe {
             blueprint: Blueprint {
@@ -381,7 +382,8 @@ mode = "interactive"
 /// Ask the schema about the second manifest.
 async fn ask_variants(query: &str) -> serde_json::Value {
     let text = variants();
-    let parsed = leviath_core::manifest::parse_manifest(&text).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(&text).expect("the manifest parses");
     let schema = Schema::build(
         Probe {
             blueprint: Blueprint {
@@ -644,9 +646,9 @@ async fn the_remaining_edge_transforms_come_back() {
 async fn a_permission_word_that_is_not_one_reads_as_ask() {
     use super::super::manifest::stage::Stage as StageObject;
 
-    let mut stage = leviath_core::blueprint::Stage::new(
+    let mut stage = leviath_runtime::spec::blueprint::Stage::new(
         "only".to_string(),
-        leviath_core::blueprint::ModelConfig {
+        leviath_runtime::spec::blueprint::ModelConfig {
             models: Vec::new(),
             allow_user_default: true,
             parameters: std::collections::HashMap::new(),
@@ -656,11 +658,11 @@ async fn a_permission_word_that_is_not_one_reads_as_ask() {
     stage
         .tool_permissions
         .insert("shell".to_string(), "sideways".to_string());
-    let blueprint = Arc::new(leviath_core::Blueprint::new(
+    let blueprint = Arc::new(leviath_runtime::spec::Blueprint::new(
         "hand-built".to_string(),
         "one stage with a word that is not a policy".to_string(),
         vec![stage],
-        leviath_core::layout::ContextLayout::new(Vec::new(), 0),
+        leviath_runtime::spec::layout::ContextLayout::new(Vec::new(), 0),
     ));
 
     let schema = Schema::build(

@@ -316,7 +316,7 @@ impl StageHookScripts {
     /// named for, so a miss here means the stage simply has no such hook.
     pub(crate) fn script_for(
         &self,
-        stage: &leviath_core::Stage,
+        stage: &crate::spec::Stage,
         hook: &str,
     ) -> Option<std::sync::Arc<leviath_scripting::stage_hook::HookScript>> {
         let path = match hook {
@@ -4026,10 +4026,10 @@ mod stage_hook_scripts_tests {
         StageHookScripts(m)
     }
 
-    fn stage_declaring(enter: Option<&str>, exit: Option<&str>) -> leviath_core::Stage {
-        let mut s = leviath_core::Stage::new(
+    fn stage_declaring(enter: Option<&str>, exit: Option<&str>) -> crate::spec::Stage {
+        let mut s = crate::spec::Stage::new(
             "main".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
         s.hooks.on_stage_enter = enter.map(str::to_string);
         s.hooks.on_stage_exit = exit.map(str::to_string);

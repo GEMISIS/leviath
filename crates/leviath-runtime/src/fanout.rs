@@ -17,7 +17,7 @@
 //!   comes back as that call's tool result, routed by the stage's
 //!   `tool_routing` like any other, and the agent carries on where it was.
 //! - **A `mode = "fan_out"` stage** (see
-//!   [`leviath_core::blueprint::StageMode::FanOut`]), which is sugar for
+//!   [`crate::spec::blueprint::StageMode::FanOut`]), which is sugar for
 //!   granting the same tool: its report goes to the config's `results_region`
 //!   and the stage transitions to its `merge_stage`.
 //!
@@ -32,7 +32,7 @@
 //!
 //! A single sub-agent is `spawn_agent`, not a fan-out of one.
 //!
-//! [`FAN_OUT_TOOL`]: leviath_core::blueprint::FAN_OUT_TOOL
+//! [`FAN_OUT_TOOL`]: crate::spec::blueprint::FAN_OUT_TOOL
 mod report;
 mod worker_sources;
 use report::*;
@@ -41,8 +41,8 @@ use worker_sources::merge_worker_sources;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use crate::spec::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
 use bevy_ecs::prelude::*;
-use leviath_core::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
 use leviath_core::mime::{InboundPart, Part};
 use leviath_core::output::Artifact;
 
@@ -320,7 +320,7 @@ pub(crate) fn frame_split_round(
 
 /// What a re-entered fan-out stage is told before it splits again.
 fn split_round_framing(round: usize, previous: &[String]) -> String {
-    let tool = leviath_core::blueprint::FAN_OUT_TOOL;
+    let tool = crate::spec::blueprint::FAN_OUT_TOOL;
     let already = match previous.is_empty() {
         // A previous round whose ids were lost - a daemon restart between the
         // two entries drops the component - still gets the framing, because the
@@ -380,7 +380,7 @@ pub(crate) struct FanOutRequest {
 
 /// Whether a tool call is the fan-out tool.
 pub(crate) fn is_fan_out_tool(name: &str) -> bool {
-    name == leviath_core::blueprint::FAN_OUT_TOOL
+    name == crate::spec::blueprint::FAN_OUT_TOOL
 }
 
 /// Read a `fan_out` call's arguments.
@@ -488,7 +488,7 @@ pub(crate) fn config_for(request: &FanOutRequest, stage: Option<&FanOutConfig>) 
         worker_stage: None,
         worker_query: None,
         merge_stage: None,
-        max_workers: leviath_core::blueprint::DEFAULT_MAX_WORKERS,
+        max_workers: crate::spec::blueprint::DEFAULT_MAX_WORKERS,
         on_worker_failure: WorkerFailurePolicy::Continue,
         split_prompt: String::new(),
         results_region: None,
@@ -945,7 +945,7 @@ fn finish_tool_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting, cal
             r.tool_overrides
                 .iter()
                 .find(|(k, _)| {
-                    leviath_tools::canonical_tool_name(k) == leviath_core::blueprint::FAN_OUT_TOOL
+                    leviath_tools::canonical_tool_name(k) == crate::spec::blueprint::FAN_OUT_TOOL
                 })
                 .map(|(_, v)| v.clone())
                 .unwrap_or_else(|| r.default_region.clone())
@@ -964,7 +964,7 @@ fn finish_tool_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting, cal
     if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
         crate::pipeline::apply_one_tool_result(
             &mut window,
-            leviath_core::blueprint::FAN_OUT_TOOL,
+            crate::spec::blueprint::FAN_OUT_TOOL,
             call_id,
             report.into(),
             routing.as_ref(),
@@ -1155,9 +1155,10 @@ mod tests {
         ProcessResponse, ReadyToInfer, StageInference, StageInferences, StageProgress, StageSetup,
         StageSetups, VisitCounts,
     };
-    use leviath_core::blueprint::{ModelConfig, Stage};
-    use leviath_core::layout::{ContextLayout, RegionDefinition};
-    use leviath_core::{Blueprint, Region, RegionKind};
+    use crate::spec::Blueprint;
+    use crate::spec::blueprint::{ModelConfig, Stage};
+    use crate::spec::layout::{ContextLayout, RegionDefinition};
+    use leviath_core::{Region, RegionKind};
     use std::collections::HashSet;
 
     /// A spawner that spawns a trivial `Active` worker per item, refusing the ids
@@ -1657,7 +1658,7 @@ mod tests {
         assert_eq!(config.worker_stage, None);
         assert_eq!(
             config.max_workers,
-            leviath_core::blueprint::DEFAULT_MAX_WORKERS
+            crate::spec::blueprint::DEFAULT_MAX_WORKERS
         );
         assert_eq!(config.on_worker_failure, WorkerFailurePolicy::Continue);
         assert_eq!(config.max_items, None);
@@ -2139,7 +2140,7 @@ mod tests {
         world
             .entity_mut(e)
             .insert(crate::components::ToolResultRoutingComponent {
-                routing: leviath_core::ToolResultRouting {
+                routing: crate::spec::ToolResultRouting {
                     default_region: "notes".to_string(),
                     tool_overrides: std::collections::HashMap::from([(
                         "read_file".to_string(),
@@ -2211,7 +2212,7 @@ mod tests {
         world
             .entity_mut(e)
             .insert(crate::components::ToolResultRoutingComponent {
-                routing: leviath_core::ToolResultRouting {
+                routing: crate::spec::ToolResultRouting {
                     default_region: "conversation".to_string(),
                     // A second rule that does not match, so the lookup has
                     // something to reject as well as something to find.
@@ -3589,7 +3590,7 @@ mod tests {
         // Routing present on the target stage ⇒ ToolResultRoutingComponent added.
         let mut world = World::new();
         let mut setups = vec![setup(), setup()];
-        setups[1].routing = Some(leviath_core::ToolResultRouting::default());
+        setups[1].routing = Some(crate::spec::ToolResultRouting::default());
         let e = world
             .spawn((
                 AgentBlueprint(fanout_blueprint(cfg(

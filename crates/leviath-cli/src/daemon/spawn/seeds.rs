@@ -131,7 +131,7 @@ pub(super) fn resolve_seeds(
     tools: &crate::daemon::seed_tool::SeedToolPolicy,
     read_paths: &leviath_core::ReadPathPolicy,
 ) -> Result<HashMap<String, String>, String> {
-    use leviath_core::layout::RegionSeed;
+    use leviath_runtime::spec::layout::RegionSeed;
 
     // The effective caller-supplied values: task text plus any named regions.
     let mut caller: HashMap<String, String> = HashMap::new();
@@ -443,7 +443,7 @@ pub(super) fn read_and_concat(
 /// hard spawn error: silently dropping it would either under-grant or run the
 /// agent with less vision than its author designed for.
 pub(super) fn build_read_path_policy(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Result<(leviath_core::ReadPathPolicy, Option<String>), String> {
@@ -462,7 +462,7 @@ pub(super) fn build_read_path_policy(
 /// [`AgentToolState::reread_config`]: crate::daemon::tool_service::AgentToolState::reread_config
 pub(crate) fn compile_read_path_policy(
     agent_name: &str,
-    declared: Option<&leviath_core::blueprint::ReadPathsConfig>,
+    declared: Option<&leviath_runtime::spec::blueprint::ReadPathsConfig>,
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Result<(leviath_core::ReadPathPolicy, Option<String>), String> {
@@ -514,7 +514,7 @@ pub(crate) fn compile_read_path_policy(
 /// grants it had rather than losing them to a typo.
 pub(crate) fn read_path_policy_for(
     agent_name: &str,
-    declared: Option<&leviath_core::blueprint::ReadPathsConfig>,
+    declared: Option<&leviath_runtime::spec::blueprint::ReadPathsConfig>,
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Option<leviath_core::ReadPathPolicy> {
@@ -542,7 +542,7 @@ pub(crate) fn read_path_policy_for(
 /// own grant list will not compile - that is a hard spawn error a line above,
 /// so there is no half-answer to record.
 pub(super) fn read_path_grant_counts(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Option<leviath_core::run_meta::ReadPathGrantCounts> {

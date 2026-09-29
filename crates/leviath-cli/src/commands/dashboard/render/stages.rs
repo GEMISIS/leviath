@@ -466,7 +466,7 @@ mod tests {
         agent.num_stages = 2;
         agent.graph = Some(std::sync::Arc::new(
             crate::tui::flowgraph::StageGraph::from_blueprint(
-                &leviath_core::manifest::parse_manifest(
+                &leviath_runtime::spec::manifest::parse_manifest(
                     "[agent]\nname = \"g\"\n[stages.plan]\n[stages.plan.transitions.implement]\n[stages.implement]\n",
                 )
                 .unwrap(),

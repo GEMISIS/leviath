@@ -251,7 +251,7 @@ pub(crate) async fn tools(
 /// A bare list rather than a connection: this build compiles the set in, so it
 /// is bounded by the code rather than by anything on the machine.
 pub(crate) async fn tool_groups() -> Vec<ToolGroup> {
-    leviath_core::blueprint::ToolGroup::ALL
+    leviath_runtime::spec::blueprint::ToolGroup::ALL
         .iter()
         .map(|group| ToolGroup {
             name: group.token().to_string(),

@@ -2,7 +2,7 @@
 //! budget, seed, and the tool-output routing that targets it.
 
 use super::*;
-use crate::layout::SeedToolCall;
+use crate::spec::layout::SeedToolCall;
 
 /// Parse a `[context.regions]` (or `[stages.<name>.context.regions]`) table into
 /// region definitions plus the summed absolute-budget total.
@@ -32,25 +32,25 @@ pub(super) fn parse_region_layout(
         // becomes the absolute cap and `min_tokens` the absolute floor. Without a
         // `budget`, `max_tokens` is the literal ceiling.
         let percent = match str_of(region_value, "budget") {
-            Some(s) => Some(crate::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
+            Some(s) => Some(crate::spec::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
             None => None,
         };
         let max_tokens_opt = count("max_tokens")?;
         let min_tokens = count("min_tokens")?;
 
         let budget = match percent {
-            Some(percent) => crate::BudgetSpec::Percent {
+            Some(percent) => crate::spec::BudgetSpec::Percent {
                 percent,
                 min: min_tokens,
                 max: max_tokens_opt,
             },
-            None => crate::BudgetSpec::Absolute(max_tokens_opt.unwrap_or(5000)),
+            None => crate::spec::BudgetSpec::Absolute(max_tokens_opt.unwrap_or(5000)),
         };
         // Provisional resolved ceiling: the literal value for absolute regions,
         // the cap (or 0) for percentage regions until resolution overwrites it.
         let provisional_max_tokens = match &budget {
-            crate::BudgetSpec::Absolute(n) => *n,
-            crate::BudgetSpec::Percent { max, .. } => max.unwrap_or(0),
+            crate::spec::BudgetSpec::Absolute(n) => *n,
+            crate::spec::BudgetSpec::Percent { max, .. } => max.unwrap_or(0),
         };
 
         // Compacting regions carry a compaction trigger. Parse `compact_at` (a
@@ -59,7 +59,7 @@ pub(super) fn parse_region_layout(
         // stored on RegionKind::Compacting) per the resolution contract in
         // `ContextLayout::resolve_compacting_threshold`.
         let compact_at = match str_of(region_value, "compact_at") {
-            Some(s) => Some(crate::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
+            Some(s) => Some(crate::spec::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
             None => None,
         };
         let explicit_threshold = count("threshold_tokens")?;
@@ -176,10 +176,10 @@ pub(super) fn parse_region_layout(
         // setting existed, and it is right for the transcript regions that are
         // the majority of them.
         let admission = match str_of(region_value, "admission") {
-            Some("reject") => crate::region::Admission::Reject,
-            Some("evict") | None => crate::region::Admission::Evict,
+            Some("reject") => leviath_core::region::Admission::Reject,
+            Some("evict") | None => leviath_core::region::Admission::Evict,
             Some(other) => {
-                return Err(crate::error::Error::ValidationFailed(format!(
+                return Err(leviath_core::error::Error::ValidationFailed(format!(
                     "region '{region_name}' has admission = \"{other}\"; \
                      expected \"evict\" or \"reject\""
                 )));
@@ -195,11 +195,11 @@ pub(super) fn parse_region_layout(
         // default: the default is the *worst* placement, so a typo would quietly
         // cost the author exactly the caching they were asking for.
         let volatility = match str_of(region_value, "volatility") {
-            Some("stable") => crate::region::Volatility::Stable,
-            Some("grows") => crate::region::Volatility::Grows,
-            Some("rewritten") | None => crate::region::Volatility::Rewritten,
+            Some("stable") => leviath_core::region::Volatility::Stable,
+            Some("grows") => leviath_core::region::Volatility::Grows,
+            Some("rewritten") | None => leviath_core::region::Volatility::Rewritten,
             Some(other) => {
-                return Err(crate::error::Error::ValidationFailed(format!(
+                return Err(leviath_core::error::Error::ValidationFailed(format!(
                     "region '{region_name}' has volatility = \"{other}\"; \
                      expected \"stable\", \"grows\" or \"rewritten\""
                 )));
@@ -363,9 +363,9 @@ pub(super) fn parse_region_seed(
 /// An unreadable value falls back to the default rather than failing the
 /// manifest, matching how the rest of this parser treats a key it cannot make
 /// sense of; `lev validate` is where a typo is reported.
-fn parse_seed_refresh(table: &toml::value::Table) -> crate::layout::SeedRefresh {
+fn parse_seed_refresh(table: &toml::value::Table) -> crate::spec::layout::SeedRefresh {
     str_of(table, "refresh")
-        .and_then(crate::layout::SeedRefresh::from_str_loose)
+        .and_then(crate::spec::layout::SeedRefresh::from_str_loose)
         .unwrap_or_default()
 }
 
@@ -420,27 +420,27 @@ pub(super) fn parse_pattern_list(
         return Ok(Vec::new());
     };
     let Some(items) = value.as_array() else {
-        return Err(crate::error::Error::ValidationFailed(format!(
+        return Err(leviath_core::error::Error::ValidationFailed(format!(
             "{what} has {key} = {value}; expected a list of mime types"
         )));
     };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let Some(s) = item.as_str() else {
-            return Err(crate::error::Error::ValidationFailed(format!(
+            return Err(leviath_core::error::Error::ValidationFailed(format!(
                 "{what} has {key} entry {item}; expected a mime type string"
             )));
         };
         let s = s.trim().to_ascii_lowercase();
         let valid = match s.split_once('/') {
             Some((kind, "*")) => {
-                kind == "*" || crate::mime::MimeType::parse(&format!("{kind}/x")).is_ok()
+                kind == "*" || leviath_core::mime::MimeType::parse(&format!("{kind}/x")).is_ok()
             }
-            Some(_) => crate::mime::MimeType::parse(&s).is_ok(),
+            Some(_) => leviath_core::mime::MimeType::parse(&s).is_ok(),
             None => false,
         };
         if !valid {
-            return Err(crate::error::Error::ValidationFailed(format!(
+            return Err(leviath_core::error::Error::ValidationFailed(format!(
                 "{what} has {key} entry \"{s}\"; expected type/subtype or type/*"
             )));
         }

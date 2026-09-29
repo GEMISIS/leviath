@@ -2784,7 +2784,7 @@ fn the_tools_chooser_offers_groups_first_and_labels_sources() {
     };
     assert_eq!(
         detail("@builtin"),
-        leviath_core::blueprint::ToolGroup::Builtin.describe()
+        leviath_runtime::spec::blueprint::ToolGroup::Builtin.describe()
     );
     assert_eq!(detail("read_file"), "built in");
     assert_eq!(detail("spawn_agent"), "sub-agent tool");

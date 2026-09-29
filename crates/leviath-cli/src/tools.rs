@@ -1739,7 +1739,7 @@ mod policy_tests {
                 .iter()
                 .find(|(rel, _)| rel.ends_with("agent.leviath"))
                 .expect("every bundled agent ships a manifest");
-            let bp = leviath_core::manifest::parse_manifest(manifest)
+            let bp = leviath_runtime::spec::manifest::parse_manifest(manifest)
                 .expect("every bundled agent's manifest parses");
             let perms = bp.agent_tool_permissions();
             for (tool, declared) in &perms {

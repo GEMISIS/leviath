@@ -9,8 +9,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::error::ValidationError;
-use crate::layout::ContextLayout;
+use crate::spec::layout::ContextLayout;
+use leviath_core::error::ValidationError;
 
 // The sibling sections, reached through the parent's glob re-exports so a type
 // moving between them does not touch this import list.
@@ -249,7 +249,7 @@ impl FanOutConfig {
 /// Times a fan-out stage is asked again to start its workers before it is let
 /// through without them, when it sets no `max_attempts`.
 ///
-/// Matches [`DEFAULT_GATE_ATTEMPTS`](crate::blueprint::DEFAULT_GATE_ATTEMPTS)
+/// Matches [`DEFAULT_GATE_ATTEMPTS`](crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS)
 /// and the missing-output budget, for the same reason all three are bounded: a
 /// model that cannot produce the one thing its stage is for should cost a fixed
 /// number of prompts, not an open-ended retry.
@@ -585,7 +585,7 @@ pub struct Stage {
     /// Whether this stage accepts mid-run user messages.
     /// When true, messages sent to the agent are injected into context
     /// between inference calls. Default: true.
-    #[serde(default = "crate::default_true")]
+    #[serde(default = "leviath_core::default_true")]
     pub accepts_messages: bool,
 
     /// Whether the LLM may end the run at this stage instead of naming a
@@ -622,7 +622,7 @@ pub struct Stage {
     /// Set `taint_tracking = false` here to opt a single stage out, or `true`
     /// to opt it in independently of the agent/global setting.
     #[serde(default)]
-    pub security: Option<crate::taint::SecurityConfig>,
+    pub security: Option<leviath_core::taint::SecurityConfig>,
 
     /// Per-stage override for the batch-tool-calls system-prompt hint. `None`
     /// inherits the agent-level `Blueprint.batch_tool_hint` (which in turn
@@ -651,7 +651,7 @@ pub struct Stage {
     /// Set a tighter sandbox here to isolate a single stage - e.g. run analysis
     /// on the host but implementation in a networkless container.
     #[serde(default)]
-    pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
+    pub sandbox: Option<leviath_core::sandbox::ToolSandboxConfig>,
 
     /// Optional routing configuration for tool results.
     /// When set, tool results are routed to the configured region(s) instead
@@ -681,12 +681,12 @@ pub struct Stage {
     /// [`Self::require_output`] (or `mode = "output"`, which sets that for you)
     /// when the stage must not finish without submitting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<crate::output::OutputSpec>,
+    pub output: Option<leviath_core::output::OutputSpec>,
 
     /// Mime type patterns this stage takes as parts, when the regions it
     /// sees do not already say (`[stages.<name>.input] accepts`). Empty means
     /// "whatever the visible regions accept"; see
-    /// [`Blueprint::stage_inputs`](crate::Blueprint::stage_inputs).
+    /// [`Blueprint::stage_inputs`](crate::spec::Blueprint::stage_inputs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_accepts: Vec<String>,
 
@@ -784,7 +784,7 @@ impl Stage {
     /// The most specific matching pattern wins, so a table with both
     /// `image/png` and `image/*` sends a PNG to the first and every other
     /// image to the second, whatever order they appear in.
-    pub fn route_for_mime(&self, mime_type: &crate::mime::MimeType) -> Option<&str> {
+    pub fn route_for_mime(&self, mime_type: &leviath_core::mime::MimeType) -> Option<&str> {
         self.output_routing
             .iter()
             .filter(|(pattern, _)| mime_type.matches(pattern))

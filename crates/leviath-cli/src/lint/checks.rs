@@ -8,7 +8,10 @@ use super::*;
 use leviath_runtime::pipeline::model_key;
 
 /// Fields the stage left to a default: `mode`, `model`, and `max_iterations`.
-pub(super) fn lint_declarations(stage: &leviath_core::Stage, keys: StageKeys) -> Vec<LintFinding> {
+pub(super) fn lint_declarations(
+    stage: &leviath_runtime::spec::Stage,
+    keys: StageKeys,
+) -> Vec<LintFinding> {
     let mut findings = Vec::new();
 
     if !keys.mode {
@@ -65,7 +68,7 @@ pub(super) fn lint_declarations(stage: &leviath_core::Stage, keys: StageKeys) ->
 
 /// Tool names that resolve to nothing, and permissions for tools the stage
 /// never granted.
-pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
+pub(super) fn lint_tools(stage: &leviath_runtime::spec::Stage, env: &LintEnv) -> Vec<LintFinding> {
     let mut findings = Vec::new();
     let groups = stage.tool_groups();
 
@@ -217,7 +220,7 @@ pub(super) fn lint_tools(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lint
 }
 
 /// Human-in-the-loop tools offered by a stage that runs with nobody attached.
-pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+pub(super) fn lint_blocking_tools(stage: &leviath_runtime::spec::Stage) -> Vec<LintFinding> {
     // Only autonomous stages are a problem: the interactive modes are where a
     // person is expected, and the one tool a fan_out stage carries is its own
     // `fan_out`, which blocks on nobody.
@@ -298,12 +301,12 @@ pub(super) fn lint_blocking_tools(stage: &leviath_core::Stage) -> Vec<LintFindin
 
 /// A stage's own output declarations: a demand it cannot meet, a shape nothing
 /// will read, or a reporting stage that can also change the workspace.
-pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+pub(super) fn lint_output_stage(stage: &leviath_runtime::spec::Stage) -> Vec<LintFinding> {
     let mut findings = Vec::new();
     let grants_submit = stage
         .available_tools
         .iter()
-        .any(|t| canonical_tool_name(t) == leviath_core::blueprint::SUBMIT_OUTPUT_TOOL);
+        .any(|t| canonical_tool_name(t) == leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL);
 
     // `Stage::validate` already refuses this outright, so reaching it here means
     // the manifest never loaded. Reported anyway because `lev validate` runs the
@@ -316,13 +319,13 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
                 "output-missing-submit-tool",
                 format!(
                     "must produce a final output but does not grant '{}'",
-                    leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+                    leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL
                 ),
             )
             .in_stage(&stage.name)
             .with_fix(format!(
                 "add '{}' to available_tools, or use mode = \"output\", which grants it",
-                leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+                leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL
             )),
         );
     }
@@ -349,7 +352,9 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
     if stage.mode == StageMode::Output {
         let modifying = stage
             .named_tools()
-            .filter(|t| leviath_core::blueprint::MODIFYING_TOOLS.contains(&canonical_tool_name(t)))
+            .filter(|t| {
+                leviath_runtime::spec::blueprint::MODIFYING_TOOLS.contains(&canonical_tool_name(t))
+            })
             .map(|tool| format!("'{tool}', which changes the workspace"));
         // A group reaching the built-ins carries every modifying tool with it,
         // so it is named once, as the group, rather than once per member.
@@ -388,12 +393,14 @@ pub(super) fn lint_output_stage(stage: &leviath_core::Stage) -> Vec<LintFinding>
 /// cannot write - up to six re-submitted jobs on a paid API - and the run
 /// ends with nothing. Only providers with compiled tables are judged; an open
 /// route is taken on trust.
-pub(super) fn lint_output_stage_can_answer(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+pub(super) fn lint_output_stage_can_answer(
+    stage: &leviath_runtime::spec::Stage,
+) -> Vec<LintFinding> {
     if !(stage.require_output || stage.mode == StageMode::Output) {
         return Vec::new();
     }
     let catalog = leviath_providers::capabilities::builtin_catalog();
-    let judged: Vec<&leviath_core::blueprint::ModelEntry> = stage
+    let judged: Vec<&leviath_runtime::spec::blueprint::ModelEntry> = stage
         .model
         .models
         .iter()
@@ -473,13 +480,13 @@ pub(super) fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> 
         let Some(transitions) = &stage.transitions else {
             continue;
         };
-        let normal: Vec<&leviath_core::blueprint::TransitionEdge> = transitions
+        let normal: Vec<&leviath_runtime::spec::blueprint::TransitionEdge> = transitions
             .values()
             .filter(|e| {
                 matches!(
                     e.condition,
-                    leviath_core::blueprint::TransitionCondition::Always
-                        | leviath_core::blueprint::TransitionCondition::LlmChoice
+                    leviath_runtime::spec::blueprint::TransitionCondition::Always
+                        | leviath_runtime::spec::blueprint::TransitionCondition::LlmChoice
                 )
             })
             .collect();
@@ -498,8 +505,8 @@ pub(super) fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> 
         let has_escape = transitions.values().any(|e| {
             matches!(
                 e.condition,
-                leviath_core::blueprint::TransitionCondition::DeadEnd
-                    | leviath_core::blueprint::TransitionCondition::Error
+                leviath_runtime::spec::blueprint::TransitionCondition::DeadEnd
+                    | leviath_runtime::spec::blueprint::TransitionCondition::Error
             ) && blueprint
                 .find_stage(&e.target)
                 .is_some_and(|t| t.max_revisits.is_none())
@@ -528,7 +535,7 @@ pub(super) fn lint_dead_end_possible(blueprint: &Blueprint) -> Vec<LintFinding> 
 }
 
 pub(super) fn lint_output_reachable(blueprint: &Blueprint) -> Vec<LintFinding> {
-    let outputs: Vec<&leviath_core::Stage> = blueprint
+    let outputs: Vec<&leviath_runtime::spec::Stage> = blueprint
         .stages
         .iter()
         .filter(|s| s.mode == StageMode::Output)
@@ -693,7 +700,10 @@ fn sample_catalog(ids: &[String]) -> String {
 /// Under `[providers] zero_retention`, the models this stage names that keep
 /// something: an error for the one the stage would start on, since the spawn
 /// gate refuses it, and a warning for a fallback, since failover drops it.
-pub(super) fn lint_retention(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
+pub(super) fn lint_retention(
+    stage: &leviath_runtime::spec::Stage,
+    env: &LintEnv,
+) -> Vec<LintFinding> {
     let Some(refusals) = env.retention_refusals.get(&stage.name) else {
         return Vec::new();
     };
@@ -731,7 +741,7 @@ pub(super) fn lint_retention(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<
 }
 
 /// Models and providers the install cannot resolve.
-pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<LintFinding> {
+pub(super) fn lint_models(stage: &leviath_runtime::spec::Stage, env: &LintEnv) -> Vec<LintFinding> {
     let mut findings = Vec::new();
 
     for entry in &stage.model.models {
@@ -850,7 +860,7 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
     // `unrouted_models` is empty both when nobody asked and when everything
     // routes, and both read as reachable here. That is the safe direction: a
     // question nobody asked must not turn into a finding.
-    let reachable = |e: &leviath_core::blueprint::ModelEntry| match e.provider.is_empty() {
+    let reachable = |e: &leviath_runtime::spec::blueprint::ModelEntry| match e.provider.is_empty() {
         true => !env.unrouted_models.contains(&e.model),
         false => env
             .available_providers
@@ -906,7 +916,7 @@ pub(super) fn lint_models(stage: &leviath_core::Stage, env: &LintEnv) -> Vec<Lin
 /// deliverable" - warning on all of them would fire on every agent that ever
 /// wrote `transform = "compact"` and teach people to ignore it.
 pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFinding> {
-    use leviath_core::blueprint::EdgeTransform;
+    use leviath_runtime::spec::blueprint::EdgeTransform;
 
     // Named once per region, however many edges would summarize it: the fix is
     // on the region, so repeating it per edge is noise.
@@ -976,7 +986,7 @@ pub(super) fn lint_compacted_deliverables(blueprint: &Blueprint) -> Vec<LintFind
 /// Caller-seeded regions are exempt for the same reason the runtime exempts
 /// them: the caller owns those, and they are validated at spawn.
 pub(super) fn lint_required_regions_enforceable(blueprint: &Blueprint) -> Vec<LintFinding> {
-    let writes_context = |stage: &leviath_core::Stage| {
+    let writes_context = |stage: &leviath_runtime::spec::Stage| {
         stage.grants_all_builtins()
             || stage
                 .available_tools
@@ -995,7 +1005,7 @@ pub(super) fn lint_required_regions_enforceable(blueprint: &Blueprint) -> Vec<Li
             if !region.required
                 || matches!(
                     region.seed,
-                    Some(leviath_core::layout::RegionSeed::CallerInput { .. })
+                    Some(leviath_runtime::spec::layout::RegionSeed::CallerInput { .. })
                 )
                 || named.contains(&region.name.as_str())
             {
@@ -1073,7 +1083,7 @@ pub(super) fn lint_unbounded_percentage(blueprint: &Blueprint, env: &LintEnv) ->
             .filter_map(|s| s.context_layout.as_ref()),
     ) {
         for region in &layout.regions {
-            let leviath_core::layout::BudgetSpec::Percent {
+            let leviath_runtime::spec::layout::BudgetSpec::Percent {
                 percent, max: None, ..
             } = region.budget
             else {

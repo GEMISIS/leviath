@@ -2048,8 +2048,8 @@ mod tests {
 
     #[tokio::test]
     async fn resumes_a_parent_parked_mid_fan_out() {
-        use leviath_core::blueprint::FanOutConfig;
         use leviath_runtime::fanout::{FanOutState, FanOutWaiting};
+        use leviath_runtime::spec::blueprint::FanOutConfig;
 
         let agent = agent_dir();
         let manifest = agent.path().join("agent.leviath");

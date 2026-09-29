@@ -207,7 +207,7 @@ fn chain_graph(names: &[String]) -> Arc<StageGraph> {
     for name in names {
         text.push_str(&format!("[stages.{name}]\n"));
     }
-    let bp = leviath_core::manifest::parse_manifest(&text)
+    let bp = leviath_runtime::spec::manifest::parse_manifest(&text)
         .expect("stage names passed the manifest's charset");
     Arc::new(StageGraph::from_blueprint(&bp))
 }

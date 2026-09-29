@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use leviath_core::blueprint::Stage;
+use crate::spec::blueprint::Stage;
 use leviath_core::mime::Part;
 
 use crate::components::ContextWindow;
@@ -92,7 +92,7 @@ pub(crate) fn store_routed(window: &mut ContextWindow, routed: &RoutedParts) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::blueprint::ModelConfig;
+    use crate::spec::blueprint::ModelConfig;
     use leviath_core::mime::{Blob, MimeRegistry, MimeType};
 
     fn stored_part(mime: &str, name: &str) -> Part {

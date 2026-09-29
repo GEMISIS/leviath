@@ -125,9 +125,9 @@ pub(crate) struct BlueprintDependency {
     pub(crate) check: Option<String>,
 }
 
-impl From<&leviath_core::blueprint::Dependency> for BlueprintDependency {
-    fn from(dependency: &leviath_core::blueprint::Dependency) -> Self {
-        use leviath_core::blueprint::DependencyKind as Core;
+impl From<&leviath_runtime::spec::blueprint::Dependency> for BlueprintDependency {
+    fn from(dependency: &leviath_runtime::spec::blueprint::Dependency) -> Self {
+        use leviath_runtime::spec::blueprint::DependencyKind as Core;
         let mut mapped = Self {
             name: dependency.name.clone(),
             kind: DependencyKind::Binary,
@@ -164,8 +164,8 @@ impl From<&leviath_core::blueprint::Dependency> for BlueprintDependency {
     }
 }
 
-impl From<&leviath_core::blueprint::DependencyInstall> for DependencyInstall {
-    fn from(install: &leviath_core::blueprint::DependencyInstall) -> Self {
+impl From<&leviath_runtime::spec::blueprint::DependencyInstall> for DependencyInstall {
+    fn from(install: &leviath_runtime::spec::blueprint::DependencyInstall) -> Self {
         Self {
             command: install.command.clone(),
             commands: install
@@ -192,8 +192,8 @@ fn entries(map: &std::collections::BTreeMap<String, String>) -> Vec<EnvEntry> {
         .collect()
 }
 
-impl From<&leviath_core::blueprint::McpServerTemplate> for McpServerTemplate {
-    fn from(template: &leviath_core::blueprint::McpServerTemplate) -> Self {
+impl From<&leviath_runtime::spec::blueprint::McpServerTemplate> for McpServerTemplate {
+    fn from(template: &leviath_runtime::spec::blueprint::McpServerTemplate) -> Self {
         Self {
             transport: template.transport.as_deref().and_then(|word| {
                 match word.trim().to_ascii_lowercase().as_str() {

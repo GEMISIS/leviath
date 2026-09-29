@@ -57,7 +57,8 @@ fn manifest() -> String {
 
 /// Build the object under test from manifest text.
 fn blueprint(text: &str, source: CoreSource) -> Blueprint {
-    let parsed = leviath_core::manifest::parse_manifest(text).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses");
     Blueprint {
         parsed: Arc::new(parsed),
         digest: digest_of(text),
@@ -390,7 +391,7 @@ fn every_region_kind_maps_to_one_value() {
 /// Every stage mode maps to one schema value.
 #[test]
 fn every_stage_mode_maps_to_one_value() {
-    use leviath_core::blueprint::StageMode as Core;
+    use leviath_runtime::spec::blueprint::StageMode as Core;
     assert_eq!(StageMode::from(&Core::Autonomous), StageMode::Autonomous);
     assert_eq!(StageMode::from(&Core::Interactive), StageMode::Interactive);
     assert_eq!(StageMode::from(&Core::Output), StageMode::Output);
@@ -400,7 +401,7 @@ fn every_stage_mode_maps_to_one_value() {
     );
     // Fan-out carries a config with no default, so this one comes from a
     // manifest: the mapping is what is under test, not the config's shape.
-    let fanned = leviath_core::manifest::parse_manifest(
+    let fanned = leviath_runtime::spec::manifest::parse_manifest(
         "[agent]\nname = \"f\"\n\n\
          [stages.split]\nmode = \"fan_out\"\nworker_stage = \"work\"\n\
          split_prompt = \"one item per line\"\n\n\

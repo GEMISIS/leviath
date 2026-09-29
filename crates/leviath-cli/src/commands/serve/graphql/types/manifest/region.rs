@@ -114,9 +114,9 @@ pub(crate) enum SeedRefresh {
     EachStage,
 }
 
-impl From<leviath_core::layout::SeedRefresh> for SeedRefresh {
-    fn from(refresh: leviath_core::layout::SeedRefresh) -> Self {
-        use leviath_core::layout::SeedRefresh as Core;
+impl From<leviath_runtime::spec::layout::SeedRefresh> for SeedRefresh {
+    fn from(refresh: leviath_runtime::spec::layout::SeedRefresh) -> Self {
+        use leviath_runtime::spec::layout::SeedRefresh as Core;
         match refresh {
             Core::Once => Self::Once,
             Core::EachStage => Self::EachStage,
@@ -233,9 +233,9 @@ pub(crate) enum RegionSeed {
     Tools(SeedFromTools),
 }
 
-impl From<&leviath_core::layout::RegionSeed> for RegionSeed {
-    fn from(seed: &leviath_core::layout::RegionSeed) -> Self {
-        use leviath_core::layout::RegionSeed as Core;
+impl From<&leviath_runtime::spec::layout::RegionSeed> for RegionSeed {
+    fn from(seed: &leviath_runtime::spec::layout::RegionSeed) -> Self {
+        use leviath_runtime::spec::layout::RegionSeed as Core;
         match seed {
             Core::CallerInput { name } => Self::Caller(SeedFromCaller { key: name.clone() }),
             Core::Glob { pattern } => Self::Glob(SeedFromGlob {

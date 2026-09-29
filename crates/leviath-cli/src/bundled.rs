@@ -74,7 +74,7 @@ pub(crate) fn installed_version(agents_dir: &Path, name: &str) -> Option<String>
             .join(leviath_core::files::MANIFEST_FILENAME),
     )
     .ok()?;
-    leviath_core::manifest::parse_manifest(&manifest)
+    leviath_runtime::spec::manifest::parse_manifest(&manifest)
         .ok()
         .map(|bp| bp.version)
 }
@@ -161,7 +161,7 @@ pub(crate) fn plan_agent_actions(agents_dir: &Path) -> Vec<(&'static BundledAgen
 /// happens to share a name with a bundled one is never nagged about.
 pub(crate) fn stale_install_note(
     manifest_path: &Path,
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     agents_dir: Option<&Path>,
 ) -> Option<String> {
     let installed = agents_dir?.join(&blueprint.name);
@@ -183,7 +183,7 @@ pub(crate) fn stale_install_note(
 /// it is old rather than that it is wrong.
 ///
 /// The twin of [`stale_install_note`], for the path where there is no
-/// [`leviath_core::Blueprint`] to hand because parsing or validation is what
+/// [`leviath_runtime::spec::Blueprint`] to hand because parsing or validation is what
 /// failed. That is exactly when the user most needs to hear it: a graph rule
 /// added after their install turns their copy into "invalid blueprint", which
 /// reads as a bug in the agent rather than as an out-of-date file, and the
@@ -329,7 +329,7 @@ mod tests {
                     .find(|(rel, _)| *rel == "agent.leviath")
                     .map(|(_, c)| *c)
                     .expect("every bundled agent ships a manifest");
-                let blueprint = leviath_core::manifest::parse_manifest(manifest)
+                let blueprint = leviath_runtime::spec::manifest::parse_manifest(manifest)
                     .expect("every bundled manifest parses");
                 (agent.name, blueprint)
             })
@@ -419,8 +419,8 @@ mod tests {
     /// the next bulk region somebody adds is the one this is here to catch.
     #[test]
     fn a_temporary_region_says_how_its_contents_change() {
-        use leviath_core::BudgetSpec;
         use leviath_core::region::{RegionKind, Volatility};
+        use leviath_runtime::spec::BudgetSpec;
 
         let mut checked = 0;
         for agent in BUNDLED_AGENTS {
@@ -430,7 +430,7 @@ mod tests {
                 .find(|(rel, _)| *rel == "agent.leviath")
                 .map(|(_, c)| *c)
                 .expect("every bundled agent ships a manifest");
-            let blueprint = leviath_core::manifest::parse_manifest(manifest)
+            let blueprint = leviath_runtime::spec::manifest::parse_manifest(manifest)
                 .expect("every bundled manifest parses");
 
             let bulk = blueprint
@@ -581,7 +581,7 @@ mod tests {
             // reads to llvm-cov as an uncovered region. For the same reason the
             // message is a literal - a *call* in an `assert!`'s format args is
             // also a region that only the failing path reaches.
-            let parsed = leviath_core::manifest::parse_manifest(manifest);
+            let parsed = leviath_runtime::spec::manifest::parse_manifest(manifest);
             assert!(
                 parsed.is_ok(),
                 "bundled agent {} does not parse",
@@ -615,7 +615,7 @@ mod tests {
                 .find(|(rel, _)| *rel == "agent.leviath")
                 .map(|(_, c)| *c)
                 .expect("every bundled agent ships a manifest");
-            let parsed = leviath_core::manifest::parse_manifest(manifest);
+            let parsed = leviath_runtime::spec::manifest::parse_manifest(manifest);
             assert!(
                 parsed.is_ok(),
                 "bundled agent {} does not parse",
@@ -691,7 +691,7 @@ mod tests {
         // smallest layout landed at 3.97 the day one did.
         const MIN_GROWTH: f64 = 3.5;
 
-        let room = |layout: &leviath_core::ContextLayout, window: usize| -> usize {
+        let room = |layout: &leviath_runtime::spec::ContextLayout, window: usize| -> usize {
             layout
                 .resolved(window)
                 .regions
@@ -708,7 +708,7 @@ mod tests {
                 .find(|(rel, _)| *rel == "agent.leviath")
                 .map(|(_, c)| *c)
                 .expect("every bundled agent ships a manifest");
-            let parsed = leviath_core::manifest::parse_manifest(manifest);
+            let parsed = leviath_runtime::spec::manifest::parse_manifest(manifest);
             assert!(
                 parsed.is_ok(),
                 "bundled agent {} does not parse",
@@ -779,13 +779,13 @@ mod tests {
                 .find(|(rel, _)| *rel == "agent.leviath")
                 .map(|(_, c)| *c)
                 .expect("checked above");
-            let blueprint = leviath_core::manifest::parse_manifest(manifest)
+            let blueprint = leviath_runtime::spec::manifest::parse_manifest(manifest)
                 .expect("checked by every_bundled_manifest_parses");
 
-            let outputs: Vec<&leviath_core::Stage> = blueprint
+            let outputs: Vec<&leviath_runtime::spec::Stage> = blueprint
                 .stages
                 .iter()
-                .filter(|s| s.mode == leviath_core::blueprint::StageMode::Output)
+                .filter(|s| s.mode == leviath_runtime::spec::blueprint::StageMode::Output)
                 .collect();
             assert!(
                 !outputs.is_empty(),
@@ -801,14 +801,14 @@ mod tests {
                     stage
                         .available_tools
                         .iter()
-                        .any(|t| t == leviath_core::blueprint::SUBMIT_OUTPUT_TOOL),
+                        .any(|t| t == leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL),
                     "{} output stage cannot submit",
                     agent.name
                 );
                 // A stage whose job is to report has no business writing files.
                 assert!(
                     !stage.available_tools.iter().any(|t| {
-                        leviath_core::blueprint::MODIFYING_TOOLS
+                        leviath_runtime::spec::blueprint::MODIFYING_TOOLS
                             .contains(&leviath_tools::canonical_tool_name(t))
                     }),
                     "{} output stage can modify files",
@@ -819,7 +819,7 @@ mod tests {
             for stage in &blueprint.stages {
                 assert!(
                     !stage.allow_complete
-                        || stage.mode == leviath_core::blueprint::StageMode::Output,
+                        || stage.mode == leviath_runtime::spec::blueprint::StageMode::Output,
                     "bundled agent {}: stage '{}' may end the run, skipping the output stage",
                     agent.name,
                     stage.name
@@ -1000,7 +1000,7 @@ mod tests {
         // The parser's own error message enumerates the valid kinds, so read
         // the list back from it rather than restating it here and drifting the
         // same way twice.
-        let err = leviath_core::manifest::parse_manifest(
+        let err = leviath_runtime::spec::manifest::parse_manifest(
             "[agent]\nname = \"a\"\n\n[context.regions]\nx = { kind = \"not-a-kind\" }\n",
         )
         .expect_err("an unknown region kind is a load error")
@@ -1043,7 +1043,7 @@ mod tests {
         // schema's closed enum rejected it. Same trick as the region kinds, for
         // the same reason: read the list out of the parser's error rather than
         // restating it here.
-        let err = leviath_core::manifest::parse_manifest(
+        let err = leviath_runtime::spec::manifest::parse_manifest(
             "[agent]\nname = \"a\"\n\n[stages.main.transitions.other]\ncondition = \"whenever\"\n",
         )
         .expect_err("an unknown condition is a load error")
@@ -1162,7 +1162,7 @@ mod tests {
             // blueprint alone.
             let declared = manifest.matches("gate = {").count();
             let blueprint =
-                leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
+                leviath_runtime::spec::manifest::parse_manifest(manifest).expect("manifest parses");
             let mut checking = 0;
             for stage in &blueprint.stages {
                 for (target, edge) in stage.transitions.iter().flatten() {
@@ -1238,14 +1238,14 @@ mod tests {
                 .map(|(_, c)| *c)
                 .expect("every bundled agent has a manifest");
             let blueprint =
-                leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
+                leviath_runtime::spec::manifest::parse_manifest(manifest).expect("manifest parses");
 
             for stage in &blueprint.stages {
                 // Kept rather than found: filtering evaluates the predicate for
                 // every entry, so the arm handling a pinned route is exercised by
                 // the entries that pin one instead of being skipped the moment an
                 // earlier open entry matches.
-                let reachable: Vec<&leviath_core::blueprint::ModelEntry> = stage
+                let reachable: Vec<&leviath_runtime::spec::blueprint::ModelEntry> = stage
                     .model
                     .models
                     .iter()
@@ -1370,10 +1370,10 @@ mod tests {
                 .map(|(_, c)| *c)
                 .expect("every bundled agent has a manifest");
             let blueprint =
-                leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
+                leviath_runtime::spec::manifest::parse_manifest(manifest).expect("manifest parses");
             for stage in &blueprint.stages {
                 for (target, edge) in stage.transitions.iter().flatten() {
-                    let leviath_core::blueprint::EdgeTransform::Custom {
+                    let leviath_runtime::spec::blueprint::EdgeTransform::Custom {
                         carry,
                         compact,
                         clear,
@@ -1416,7 +1416,7 @@ mod tests {
                 .map(|(_, c)| *c)
                 .expect("every bundled agent has a manifest");
             let blueprint =
-                leviath_core::manifest::parse_manifest(manifest).expect("manifest parses");
+                leviath_runtime::spec::manifest::parse_manifest(manifest).expect("manifest parses");
 
             for stage in &blueprint.stages {
                 // Portability is about stages that fall back to the user's
@@ -1547,7 +1547,7 @@ mod tests {
                 .find(|(rel, _)| *rel == "agent.leviath")
                 .map(|(_, c)| *c)
                 .expect("every bundled agent has a manifest");
-            let parsed = leviath_core::manifest::parse_manifest(manifest);
+            let parsed = leviath_runtime::spec::manifest::parse_manifest(manifest);
             assert!(
                 parsed.is_ok(),
                 "bundled agent {} does not parse",
@@ -1593,7 +1593,7 @@ available_tools = ["read_file", "raed_file"]
 [stages.only.tool_permissions]
 write_file = "allow"
 "#;
-        let bp = leviath_core::manifest::parse_manifest(manifest)
+        let bp = leviath_runtime::spec::manifest::parse_manifest(manifest)
             .expect("the fixture parses; it is the lint that should object");
         // Reuse the same env shape a real bundled agent gets, minus any scripts.
         let env = lint_env_for(&BundledAgent {
@@ -1900,9 +1900,10 @@ write_file = "allow"
         let agent = &BUNDLED_AGENTS[0];
         install_bundled(agent, dir.path()).unwrap();
         let manifest = dir.path().join(agent.name).join("agent.leviath");
-        let mut blueprint =
-            leviath_core::manifest::parse_manifest(&std::fs::read_to_string(&manifest).unwrap())
-                .unwrap();
+        let mut blueprint = leviath_runtime::spec::manifest::parse_manifest(
+            &std::fs::read_to_string(&manifest).unwrap(),
+        )
+        .unwrap();
 
         // At the bundled version there is nothing to say.
         assert_eq!(
@@ -1927,9 +1928,10 @@ write_file = "allow"
         let agent = &BUNDLED_AGENTS[0];
         install_bundled(agent, dir.path()).unwrap();
         let manifest = dir.path().join(agent.name).join("agent.leviath");
-        let mut blueprint =
-            leviath_core::manifest::parse_manifest(&std::fs::read_to_string(&manifest).unwrap())
-                .unwrap();
+        let mut blueprint = leviath_runtime::spec::manifest::parse_manifest(
+            &std::fs::read_to_string(&manifest).unwrap(),
+        )
+        .unwrap();
         blueprint.version = "0.0.1".to_string();
 
         // Somewhere else on disk, under the same name.

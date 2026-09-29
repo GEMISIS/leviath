@@ -5,14 +5,14 @@
 //! region agrees about which layouts count and in what order.
 //!
 //! A region is looked for in the blueprint's own layout first and then in each
-//! stage's own, which is the order [`leviath_core::Blueprint`] itself uses when
+//! stage's own, which is the order [`leviath_runtime::spec::Blueprint`] itself uses when
 //! it decides whether a name exists anywhere. Nothing is invented: a name no
 //! layout declares resolves to nothing, and the field that asked says what that
 //! means.
 
 use std::sync::Arc;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 use super::super::blueprint::Region;
 use super::stage::Stage;
@@ -69,6 +69,6 @@ pub(crate) fn stage(blueprint: &Arc<CoreBlueprint>, name: &str) -> Option<Stage>
 }
 
 /// Where `name` sits in one layout.
-fn position(layout: &leviath_core::layout::ContextLayout, name: &str) -> Option<usize> {
+fn position(layout: &leviath_runtime::spec::layout::ContextLayout, name: &str) -> Option<usize> {
     layout.regions.iter().position(|region| region.name == name)
 }

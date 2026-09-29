@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
-use leviath_core::blueprint::{Blueprint, Dependency, DependencyInstall, DependencyKind};
 use leviath_mcp::{MCPServerConfig, MCPTransport};
+use leviath_runtime::spec::blueprint::{Blueprint, Dependency, DependencyInstall, DependencyKind};
 
 use crate::dependencies::{self, Probe};
 
@@ -129,7 +129,7 @@ fn resolve_agent(agent: &str, env: &DepsEnv) -> anyhow::Result<(Blueprint, PathB
     let content = std::fs::read_to_string(&manifest).map_err(|e| {
         anyhow::anyhow!("could not read the manifest at {}: {e}", manifest.display())
     })?;
-    let blueprint = leviath_core::manifest::parse_manifest(&content)
+    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", manifest.display()))?;
     blueprint
         .validate()
@@ -326,7 +326,7 @@ fn chosen_command(install: &DependencyInstall, os: &str) -> Option<String> {
 /// Turn a blueprint's MCP server template into a config entry.
 fn mcp_from_template(
     name: &str,
-    tpl: &leviath_core::blueprint::McpServerTemplate,
+    tpl: &leviath_runtime::spec::blueprint::McpServerTemplate,
 ) -> MCPServerConfig {
     MCPServerConfig {
         name: name.to_string(),
@@ -1169,7 +1169,7 @@ mod tests {
 
     #[test]
     fn mcp_template_maps_transport_and_headers() {
-        let tpl = leviath_core::blueprint::McpServerTemplate {
+        let tpl = leviath_runtime::spec::blueprint::McpServerTemplate {
             transport: Some("http".into()),
             url: Some("https://x".into()),
             headers: std::collections::BTreeMap::from([("A".into(), "b".into())]),
@@ -1178,7 +1178,7 @@ mod tests {
         let server = mcp_from_template("s", &tpl);
         assert_eq!(server.transport, Some(MCPTransport::Http));
         assert_eq!(server.headers.get("A").map(String::as_str), Some("b"));
-        let stdio = leviath_core::blueprint::McpServerTemplate {
+        let stdio = leviath_runtime::spec::blueprint::McpServerTemplate {
             transport: Some("stdio".into()),
             command: Some("srv".into()),
             ..Default::default()

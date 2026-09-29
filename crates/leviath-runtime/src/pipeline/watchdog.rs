@@ -108,10 +108,7 @@ pub(crate) fn enforce_max_iterations(
         // discarded. `lev validate` has always held that a fan_out stage needs no
         // `max_iterations` (see the lint's `counts_iterations`); the runtime was
         // enforcing one anyway.
-        if matches!(
-            stage.mode,
-            leviath_core::blueprint::StageMode::FanOut { .. }
-        ) {
+        if matches!(stage.mode, crate::spec::blueprint::StageMode::FanOut { .. }) {
             continue;
         }
         let max = stage.max_iterations.unwrap_or(0);
@@ -141,7 +138,7 @@ pub(crate) const STUCK_REPORT_REGION: &str = "stuck_report";
 /// stage that has to act on it.
 pub(crate) const ERROR_REPORT_REGION: &str = "error_report";
 
-/// The per-stage numbers a [`StuckConfig`](leviath_core::blueprint::StuckConfig)
+/// The per-stage numbers a [`StuckConfig`](crate::spec::blueprint::StuckConfig)
 /// is evaluated against.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StuckMetrics {
@@ -161,7 +158,7 @@ pub(crate) struct StuckMetrics {
 /// Ordered most-diagnostic first: file churn names the actual mistake, while
 /// iterations, tool calls and wall clock are only symptoms of it.
 pub(crate) fn detect_stuck(
-    cfg: &leviath_core::blueprint::StuckConfig,
+    cfg: &crate::spec::blueprint::StuckConfig,
     m: &StuckMetrics,
 ) -> Option<String> {
     if let (Some(limit), Some((path, hits))) = (cfg.after_same_file_edits, m.hottest_edit.as_ref())
@@ -333,7 +330,7 @@ pub(crate) fn detect_stuck_stage(
     mut agents: Query<StuckStageQuery, With<ReadyToInfer>>,
     mut commands: Commands,
 ) {
-    use leviath_core::blueprint::TransitionCondition;
+    use crate::spec::blueprint::TransitionCondition;
     let now = chrono::Utc::now().timestamp();
     crate::tick_scope::clear();
     for (entity, state, bp, cursor, mut progress, visits, mut window, buffer) in agents.iter_mut() {

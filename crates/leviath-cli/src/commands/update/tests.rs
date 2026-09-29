@@ -2015,8 +2015,9 @@ fn a_yes_respells_the_keys_and_leaves_everything_else_alone() {
         );
         assert!(after.contains("keep_results = false"), "{after}");
         assert!(!after.contains("persist"), "{after}");
-        let before = leviath_core::manifest::parse_manifest(THEIR_BLUEPRINT).expect("the old");
-        let now = leviath_core::manifest::parse_manifest(&after).expect("the new");
+        let before =
+            leviath_runtime::spec::manifest::parse_manifest(THEIR_BLUEPRINT).expect("the old");
+        let now = leviath_runtime::spec::manifest::parse_manifest(&after).expect("the new");
         assert_eq!(format!("{before:#?}"), format!("{now:#?}"));
     });
 }

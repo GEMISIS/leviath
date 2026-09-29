@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::Config;
-use leviath_core::manifest::parse_manifest;
 use leviath_core::truncate_at_boundary;
+use leviath_runtime::spec::manifest::parse_manifest;
 
 /// Arguments for `lev test`.
 #[derive(Args)]
@@ -363,7 +363,7 @@ fn resolved_max_tokens(case_cap: Option<usize>, ceiling: usize) -> usize {
 /// `lev test` drives one inference, so this is the same set the first turn of a
 /// real run would see - which is what makes `expect_tool_call` mean the same
 /// thing here as it does in production.
-fn stage_tools(stage: &leviath_core::Stage) -> Vec<leviath_providers::Tool> {
+fn stage_tools(stage: &leviath_runtime::spec::Stage) -> Vec<leviath_providers::Tool> {
     // Built over a throwaway workdir: `lev test` never executes a tool, it only
     // needs the definitions so the model can choose to call one.
     let builtins =
@@ -388,7 +388,7 @@ fn stage_tools(stage: &leviath_core::Stage) -> Vec<leviath_providers::Tool> {
 /// Run a single test case: build a one-off context window from the blueprint,
 /// run one inference against the resolved provider, and check the assertions.
 async fn run_test_case(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &leviath_runtime::spec::Blueprint,
     registry: &ProviderRegistry,
     test: &TestCase,
     region_scripts: &std::collections::HashMap<
@@ -664,8 +664,8 @@ max_tokens = 500
 
     /// A minimal model config, since `Stage::new` needs one and these tests
     /// never reach a provider.
-    fn test_model() -> leviath_core::blueprint::ModelConfig {
-        leviath_core::blueprint::ModelConfig::new("anthropic".to_string(), "m".to_string())
+    fn test_model() -> leviath_runtime::spec::blueprint::ModelConfig {
+        leviath_runtime::spec::blueprint::ModelConfig::new("anthropic".to_string(), "m".to_string())
     }
 
     /// The bug these two fixes closed, pinned so it cannot reopen: both keys
@@ -696,7 +696,7 @@ max_tokens = 500
     /// the agent did.
     #[test]
     fn a_stage_advertises_its_tools_so_a_tool_call_is_possible() {
-        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
+        let mut stage = leviath_runtime::spec::Stage::new("s".to_string(), test_model());
         stage.available_tools = vec!["read_file".to_string(), "write_file".to_string()];
         let tools = stage_tools(&stage);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -708,7 +708,7 @@ max_tokens = 500
     /// text-assertion case is unchanged.
     #[test]
     fn a_stage_with_no_tools_advertises_none() {
-        let stage = leviath_core::Stage::new("s".to_string(), test_model());
+        let stage = leviath_runtime::spec::Stage::new("s".to_string(), test_model());
         assert!(stage_tools(&stage).is_empty());
     }
 
@@ -716,7 +716,7 @@ max_tokens = 500
     /// provider would reject.
     #[test]
     fn an_unknown_tool_name_is_not_advertised() {
-        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
+        let mut stage = leviath_runtime::spec::Stage::new("s".to_string(), test_model());
         stage.available_tools = vec!["definitely_not_a_tool".to_string()];
         assert!(stage_tools(&stage).is_empty());
     }
@@ -725,7 +725,7 @@ max_tokens = 500
     /// here what they advertise there.
     #[test]
     fn an_alias_and_a_group_grant_resolve_as_in_a_run() {
-        let mut stage = leviath_core::Stage::new("s".to_string(), test_model());
+        let mut stage = leviath_runtime::spec::Stage::new("s".to_string(), test_model());
         stage.available_tools = vec!["bash".to_string()];
         let names: Vec<String> = stage_tools(&stage).into_iter().map(|t| t.name).collect();
         assert_eq!(names, vec!["shell"]);
@@ -1504,7 +1504,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         }
     }
 
-    fn basic_blueprint() -> leviath_core::Blueprint {
+    fn basic_blueprint() -> leviath_runtime::spec::Blueprint {
         let manifest = r#"
 [agent]
 name = "test-agent"
@@ -1519,7 +1519,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     /// Blueprint with an explicit `tool_results` region, so the
     /// `if window.get_region("tool_results").is_none()` branch is NOT taken.
-    fn blueprint_with_tool_results_region() -> leviath_core::Blueprint {
+    fn blueprint_with_tool_results_region() -> leviath_runtime::spec::Blueprint {
         let manifest = r#"
 [agent]
 name = "test-agent"
@@ -1702,7 +1702,7 @@ max_tokens = 4000
     /// Covers the `ok_or(anyhow!("Blueprint has no stages"))` path.
     #[tokio::test]
     async fn run_test_case_blueprint_with_no_stages_errors() {
-        use leviath_core::{Blueprint, layout::ContextLayout};
+        use leviath_runtime::spec::{Blueprint, layout::ContextLayout};
         let blueprint = Blueprint::new(
             "no-stages".to_string(),
             "test".to_string(),
@@ -1949,14 +1949,14 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     /// seeding the task, and the inference proceeds.
     #[tokio::test]
     async fn run_test_case_with_no_pinned_region_still_runs() {
-        use leviath_core::Blueprint;
-        use leviath_core::layout::ContextLayout;
+        use leviath_runtime::spec::Blueprint;
+        use leviath_runtime::spec::layout::ContextLayout;
         let blueprint = Blueprint::new(
             "no-regions".to_string(),
             "test".to_string(),
-            vec![leviath_core::Stage::new(
+            vec![leviath_runtime::spec::Stage::new(
                 "main".to_string(),
-                leviath_core::blueprint::ModelConfig::new(
+                leviath_runtime::spec::blueprint::ModelConfig::new(
                     "anthropic".to_string(),
                     "claude-sonnet-4-6".to_string(),
                 ),

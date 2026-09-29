@@ -218,7 +218,8 @@ mode = "output"
 /// Ask the schema about the manifest, with a server behind it so `effective`
 /// has a config to resolve against.
 async fn ask(query: &str) -> serde_json::Value {
-    let parsed = leviath_core::manifest::parse_manifest(&manifest()).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(&manifest()).expect("the manifest parses");
     let schema = Schema::build(
         StageProbe {
             blueprint: Arc::new(parsed),
@@ -235,7 +236,7 @@ async fn ask(query: &str) -> serde_json::Value {
 
 /// A root handing out stages by name, so one field test is one query.
 struct StageProbe {
-    blueprint: Arc<leviath_core::Blueprint>,
+    blueprint: Arc<leviath_runtime::spec::Blueprint>,
 }
 
 #[async_graphql::Object]
@@ -533,7 +534,8 @@ max_tokens = 50
 [stages.only.context]
 hide = ["shared"]
 "#;
-    let parsed = leviath_core::manifest::parse_manifest(text).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses");
     let schema = Schema::build(
         StageProbe {
             blueprint: Arc::new(parsed),
@@ -571,8 +573,9 @@ async fn every_mirrored_function_in_stage_runs() {
         exercise, exercise_enum, exercise_list,
     };
 
-    let parsed =
-        Arc::new(leviath_core::manifest::parse_manifest(&manifest()).expect("the manifest parses"));
+    let parsed = Arc::new(
+        leviath_runtime::spec::manifest::parse_manifest(&manifest()).expect("the manifest parses"),
+    );
     let plan_at = parsed
         .stages
         .iter()
@@ -608,7 +611,7 @@ async fn every_mirrored_function_in_stage_runs() {
     exercise(&[OutputRequirement { reasks: 3 }]).await;
 
     let fan_out_config = match &parsed.stages[build_at].mode {
-        leviath_core::blueprint::StageMode::FanOut { config } => config.clone(),
+        leviath_runtime::spec::blueprint::StageMode::FanOut { config } => config.clone(),
         _ => panic!("the build stage is a fan-out"),
     };
     let fan_out = FanOut {
@@ -672,7 +675,8 @@ mode = "fan_out"
 worker_agent = "helper"
 split_prompt = "one item per file"
 "#;
-    let parsed = leviath_core::manifest::parse_manifest(manifest).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(manifest).expect("the manifest parses");
     let schema = Schema::build(
         StageProbe {
             blueprint: Arc::new(parsed),

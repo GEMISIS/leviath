@@ -16,8 +16,8 @@
 //! This module reports both, so the wait is announced before the run starts
 //! rather than discovered twenty minutes later.
 
-use leviath_core::Blueprint;
-use leviath_core::blueprint::{StageMode, UnattendedPolicy};
+use leviath_runtime::spec::Blueprint;
+use leviath_runtime::spec::blueprint::{StageMode, UnattendedPolicy};
 
 /// One thing in a blueprint that will still stop a `--yolo` run.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -25,7 +25,8 @@ fn file_tracking_config() -> FileTrackingConfig {
                 region = \"files\"\n\
                 track_reads = true\n\
                 track_writes = false\n";
-    let parsed = leviath_core::manifest::parse_manifest(text).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses");
     let blueprint = Arc::new(parsed);
     let tracking = blueprint
         .file_tracking

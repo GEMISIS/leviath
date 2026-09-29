@@ -8,7 +8,7 @@ use super::*;
 /// holds the choosable edges so the collect system can match the response back to
 /// one. (Ported from the async portion of `graph::prompt_llm_transition`.)
 #[derive(Component, Debug, Clone)]
-pub(crate) struct AwaitingTransitionResponse(pub Vec<leviath_core::blueprint::TransitionEdge>);
+pub(crate) struct AwaitingTransitionResponse(pub Vec<crate::spec::blueprint::TransitionEdge>);
 
 /// The receiving end of the transition-choice outcomes channel, as a world
 /// resource for the collect system. (The sending end lives in
@@ -19,8 +19,8 @@ pub(crate) struct TransitionResults(pub UnboundedReceiver<InferenceOutcome>);
 /// Build the LLM prompt that asks which stage to run next. (Ported from the
 /// prompt-building portion of `graph::prompt_llm_transition`.)
 pub(crate) fn build_transition_prompt(
-    stage: &leviath_core::Stage,
-    edges: &[leviath_core::blueprint::TransitionEdge],
+    stage: &crate::spec::Stage,
+    edges: &[crate::spec::blueprint::TransitionEdge],
 ) -> String {
     let mut p = match &stage.transition_prompt {
         Some(custom) => {
@@ -75,7 +75,7 @@ pub(crate) fn build_transition_prompt(
 /// run advances along the first declared edge.
 pub(crate) fn match_transition_choice(
     choice: &str,
-    edges: &[leviath_core::blueprint::TransitionEdge],
+    edges: &[crate::spec::blueprint::TransitionEdge],
     allow_complete: bool,
 ) -> Option<String> {
     let lines: Vec<&str> = choice

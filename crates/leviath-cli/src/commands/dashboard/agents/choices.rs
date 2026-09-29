@@ -70,7 +70,7 @@ pub(super) fn tool_choices(
     doc: &ManifestDoc,
     mcp: &McpCatalog,
 ) -> Vec<ToolChoice> {
-    use leviath_core::blueprint::{ToolGroup, is_tool_group_token};
+    use leviath_runtime::spec::blueprint::{ToolGroup, is_tool_group_token};
 
     let mut choices: Vec<ToolChoice> = ToolGroup::ALL
         .iter()

@@ -5,9 +5,9 @@
 //! Blueprints are typically defined in `leviath.toml` files and can be
 //! shared, installed, and versioned.
 
-use crate::error::ValidationError;
-use crate::layout::{ContextLayout, RegionSeed};
-use crate::lifecycle::CompactionConfig;
+use crate::spec::layout::{ContextLayout, RegionSeed};
+use leviath_core::error::ValidationError;
+use leviath_core::lifecycle::CompactionConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -22,7 +22,7 @@ pub const ALWAYS_VISIBLE_REGIONS: [&str; 4] = [
     "conversation",
     "tool_results",
     "final_output",
-    crate::layout::STAGE_INSTRUCTIONS_REGION,
+    crate::spec::layout::STAGE_INSTRUCTIONS_REGION,
 ];
 
 /// When a run looks for tools again after it started.
@@ -132,17 +132,17 @@ pub struct Blueprint {
 
     /// Security configuration for taint tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub security: Option<crate::taint::SecurityConfig>,
+    pub security: Option<leviath_core::taint::SecurityConfig>,
 
     /// Agent-level override for the batch-tool-calls system-prompt hint. `None`
     /// inherits the global config toggle; a per-stage `batch_tool_hint` overrides
-    /// this. See [`crate::taint::resolve_batch_tool_hint`] for the cascade.
+    /// this. See [`leviath_core::taint::resolve_batch_tool_hint`] for the cascade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_tool_hint: Option<bool>,
 
     /// Agent-level override for the platform shell hint. `None` inherits the
     /// global config toggle; a per-stage `shell_hint` overrides this. See
-    /// [`crate::taint::resolve_shell_hint`] for the cascade.
+    /// [`leviath_core::taint::resolve_shell_hint`] for the cascade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_hint: Option<bool>,
 
@@ -162,9 +162,9 @@ pub struct Blueprint {
 
     /// Agent-level sandbox configuration for tool execution. Per-stage
     /// `[stages.<name>.sandbox]` overrides this; both cascade through
-    /// [`crate::resolve_sandbox`].
+    /// [`leviath_core::resolve_sandbox`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<crate::sandbox::ToolSandboxConfig>,
+    pub sandbox: Option<leviath_core::sandbox::ToolSandboxConfig>,
 
     /// When a run looks for tools again after it started.
     ///
@@ -186,7 +186,7 @@ pub struct Blueprint {
     /// `[agent_read_paths.<name>]`, or `allow_blueprint_read_paths = true`),
     /// so an installed manifest cannot widen its own sandbox. Read-only in
     /// every case; `write_file` and `edit_file` stay confined to the workdir.
-    /// Semantics live in [`crate::read_paths`].
+    /// Semantics live in [`leviath_core::read_paths`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_paths: Option<ReadPathsConfig>,
 
@@ -203,12 +203,12 @@ pub struct Blueprint {
 
     /// Agent-level default shape for the run's final output. A per-stage
     /// `[stages.<name>.output]` narrows it, and whoever starts the run can
-    /// override it again. See [`crate::output::resolve_output_spec`].
+    /// override it again. See [`leviath_core::output::resolve_output_spec`].
     ///
     /// `None` means this agent declares no shape, which is not the same as
     /// producing no output: a stage may still ask for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<crate::output::OutputSpec>,
+    pub output: Option<leviath_core::output::OutputSpec>,
 
     /// Rows this agent adds to the mime registry, `[mime_types]` in the
     /// manifest: the types its tools produce and take, layered over the
@@ -747,7 +747,7 @@ impl Blueprint {
                     .filter_map(|s| s.context_layout.as_ref())
                     .flat_map(|l| l.regions.iter()),
             )
-            .filter(|r| matches!(r.kind, crate::RegionKind::Checklist))
+            .filter(|r| matches!(r.kind, leviath_core::RegionKind::Checklist))
             .map(|r| r.name.as_str())
             .collect();
 
@@ -1122,18 +1122,20 @@ mod transition;
 pub use transition::*;
 mod tool_groups;
 pub use tool_groups::*;
+mod output_checks;
+pub use output_checks::retired_check_warnings;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::ContextLayout;
-    use crate::layout::RegionDefinition;
-    use crate::region::RegionKind;
+    use crate::spec::layout::ContextLayout;
+    use crate::spec::layout::RegionDefinition;
+    use leviath_core::region::RegionKind;
 
     /// Build a blueprint from a manifest, so these read as the TOML an author
     /// would actually write rather than as hand-assembled structs.
     fn bp_with_regions(regions_toml: &str) -> Blueprint {
-        crate::manifest::parse_manifest(&format!(
+        crate::spec::manifest::parse_manifest(&format!(
             r#"
 [agent]
 name = "asked"
@@ -2162,7 +2164,7 @@ criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
     fn validate_accepts_a_declared_shape_without_require_output() {
         let mut stage = Stage::new("summary".to_string(), make_model());
         stage.available_tools = vec!["read_file".to_string()];
-        stage.output = Some(crate::output::OutputSpec {
+        stage.output = Some(leviath_core::output::OutputSpec {
             format: Some("a2ui".to_string()),
             ..Default::default()
         });

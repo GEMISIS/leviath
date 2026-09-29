@@ -26,19 +26,19 @@ fn server() -> McpServerTemplate {
 
 /// A core dependency of one kind, with the fields every kind shares filled in.
 fn core_dependency(
-    kind: leviath_core::blueprint::DependencyKind,
-) -> leviath_core::blueprint::Dependency {
-    leviath_core::blueprint::Dependency {
+    kind: leviath_runtime::spec::blueprint::DependencyKind,
+) -> leviath_runtime::spec::blueprint::Dependency {
+    leviath_runtime::spec::blueprint::Dependency {
         name: "thing".to_string(),
         kind,
         required: true,
         remedy: Some("install it".to_string()),
         description: Some("needed for the run".to_string()),
-        install: Some(leviath_core::blueprint::DependencyInstall {
+        install: Some(leviath_runtime::spec::blueprint::DependencyInstall {
             command: Some("npm i -g docs-mcp".to_string()),
             commands: BTreeMap::from([("macos".to_string(), "brew install thing".to_string())]),
             script: Some("install.rhai".to_string()),
-            server: Some(leviath_core::blueprint::McpServerTemplate {
+            server: Some(leviath_runtime::spec::blueprint::McpServerTemplate {
                 transport: Some("stdio".to_string()),
                 command: Some("docs-mcp".to_string()),
                 url: None,
@@ -54,7 +54,7 @@ fn core_dependency(
 /// and the shared fields and the install block carry over untouched.
 #[test]
 fn every_dependency_kind_maps_to_its_own_fields() {
-    use leviath_core::blueprint::DependencyKind as Core;
+    use leviath_runtime::spec::blueprint::DependencyKind as Core;
 
     let mcp = BlueprintDependency::from(&core_dependency(Core::McpServer {
         server: "docs".to_string(),
@@ -103,7 +103,7 @@ fn every_dependency_kind_maps_to_its_own_fields() {
 /// else is left out rather than guessed at.
 #[test]
 fn a_transport_reads_back_or_is_left_out() {
-    let template = |transport: Option<&str>| leviath_core::blueprint::McpServerTemplate {
+    let template = |transport: Option<&str>| leviath_runtime::spec::blueprint::McpServerTemplate {
         transport: transport.map(str::to_string),
         command: None,
         url: None,

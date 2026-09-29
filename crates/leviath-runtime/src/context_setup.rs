@@ -6,9 +6,8 @@
 
 use std::collections::HashMap;
 
-use leviath_core::{
-    Blueprint, ContextLayout, EvictionStrategy, Region, RegionKind, truncate_at_boundary,
-};
+use crate::spec::{Blueprint, ContextLayout};
+use leviath_core::{EvictionStrategy, Region, RegionKind, truncate_at_boundary};
 
 use crate::ContextWindow;
 
@@ -220,7 +219,7 @@ pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     // would silently drop that stage's instructions - the region is the
     // runtime's to fill, not something an author has to remember to re-declare
     // in every stage.
-    let always_visible = leviath_core::blueprint::ALWAYS_VISIBLE_REGIONS;
+    let always_visible = crate::spec::blueprint::ALWAYS_VISIBLE_REGIONS;
     let mut hidden = std::collections::HashSet::new();
     for existing in &window.regions {
         if kept.contains(existing.name.as_str()) {
@@ -286,12 +285,12 @@ pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
 /// names: `stage_instructions`, which is where the prompt was going, rather than
 /// `task`, which is the caller's.
 ///
-/// [`STAGE_INSTRUCTIONS_REGION`]: leviath_core::layout::STAGE_INSTRUCTIONS_REGION
+/// [`STAGE_INSTRUCTIONS_REGION`]: crate::spec::layout::STAGE_INSTRUCTIONS_REGION
 pub(crate) fn ensure_stage_instructions_region(
     window: &mut ContextWindow,
     prompts: &[Option<String>],
 ) {
-    let declared = leviath_core::layout::STAGE_INSTRUCTIONS_REGION;
+    let declared = crate::spec::layout::STAGE_INSTRUCTIONS_REGION;
     if window.get_region(declared).is_some() {
         return;
     }
@@ -327,10 +326,10 @@ mod tests {
         SEED_TRUNCATION_MARKER, apply_layout, fit_seed_to_budget, init_window, init_window_seeded,
     };
     use crate::ContextWindow;
-    use leviath_core::{
-        Blueprint, ContextLayout, EvictionStrategy, RegionKind, Stage, blueprint::ModelConfig,
-        layout::RegionDefinition,
+    use crate::spec::{
+        Blueprint, ContextLayout, Stage, blueprint::ModelConfig, layout::RegionDefinition,
     };
+    use leviath_core::{EvictionStrategy, RegionKind};
     use std::collections::HashMap;
 
     fn blueprint_with(regions: Vec<RegionDefinition>) -> Blueprint {

@@ -6,11 +6,11 @@
 //! quarter of that.
 
 use super::*;
-use crate::layout::SeedToolCall;
+use crate::spec::layout::SeedToolCall;
 
 // ─── [stages.<name>.hooks] ────────────────────────────────────────────
 
-fn stage_with_hooks(body: &str) -> Result<crate::Stage> {
+fn stage_with_hooks(body: &str) -> Result<crate::spec::Stage> {
     let toml_src = format!("[stages.main]\n{body}\n");
     let parsed: toml::Value = toml::from_str(&toml_src).expect("fixture parses");
     let stage_value = parsed
@@ -111,7 +111,7 @@ fn a_hook_that_is_not_a_path_is_refused() {
 /// Extract the `points` vec from a `StageMode::InteractivePoints`.
 /// Panics (with a diagnostic) when the mode is any other variant.
 /// The panic branch is exercised by `unwrap_interactive_points_panics_on_wrong_mode`.
-fn unwrap_interactive_points(mode: &StageMode) -> &[crate::blueprint::InteractionPoint] {
+fn unwrap_interactive_points(mode: &StageMode) -> &[crate::spec::blueprint::InteractionPoint] {
     match mode {
         StageMode::InteractivePoints { points } => points,
         other => panic!(
@@ -181,7 +181,10 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     assert_eq!(bp.description, "A fully configured agent");
     assert_eq!(bp.max_child_depth, Some(3));
     assert_eq!(bp.entry_stage, Some("start".to_string()));
-    assert_eq!(bp.tool_rescan, crate::blueprint::ToolRescan::BeforeDispatch);
+    assert_eq!(
+        bp.tool_rescan,
+        crate::spec::blueprint::ToolRescan::BeforeDispatch
+    );
     assert_eq!(bp.stages.len(), 2);
 
     let start = bp.find_stage("start").unwrap();
@@ -321,7 +324,7 @@ mode = "autonomous"
         .expect("the edge survives");
     assert_eq!(
         edge.condition,
-        crate::blueprint::TransitionCondition::DeadEnd
+        crate::spec::blueprint::TransitionCondition::DeadEnd
     );
 }
 
@@ -674,9 +677,9 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
 
     // Back-compat: with no `budget`, every region is an Absolute budget
     // matching its max_tokens, and compact_at stays None.
-    assert_eq!(sys.budget, crate::BudgetSpec::Absolute(1000));
+    assert_eq!(sys.budget, crate::spec::BudgetSpec::Absolute(1000));
     assert_eq!(sys.compact_at, None);
-    assert_eq!(comp.budget, crate::BudgetSpec::Absolute(6000));
+    assert_eq!(comp.budget, crate::spec::BudgetSpec::Absolute(6000));
     assert_eq!(comp.compact_at, None);
 }
 
@@ -695,7 +698,7 @@ abs  = { kind = "pinned", max_tokens = 3000 }
     let task = bp.context_layout.get_region("task").unwrap();
     assert_eq!(
         task.budget,
-        crate::BudgetSpec::Percent {
+        crate::spec::BudgetSpec::Percent {
             percent: 0.02,
             min: Some(500),
             max: Some(4000),
@@ -707,7 +710,7 @@ abs  = { kind = "pinned", max_tokens = 3000 }
     let free = bp.context_layout.get_region("free").unwrap();
     assert_eq!(
         free.budget,
-        crate::BudgetSpec::Percent {
+        crate::spec::BudgetSpec::Percent {
             percent: 0.25,
             min: None,
             max: None,
@@ -717,7 +720,7 @@ abs  = { kind = "pinned", max_tokens = 3000 }
     assert_eq!(free.max_tokens, 0);
 
     let abs = bp.context_layout.get_region("abs").unwrap();
-    assert_eq!(abs.budget, crate::BudgetSpec::Absolute(3000));
+    assert_eq!(abs.budget, crate::spec::BudgetSpec::Absolute(3000));
 
     assert!(bp.context_layout.has_percent_budgets());
     // Only the absolute region contributes to the summed total.
@@ -854,7 +857,7 @@ task = { kind = "pinned", max_tokens = 4000 }
     let plan_region = plan_layout.get_region("plan").unwrap();
     assert_eq!(
         plan_region.budget,
-        crate::BudgetSpec::Percent {
+        crate::spec::BudgetSpec::Percent {
             percent: 0.20,
             min: None,
             max: Some(40000),
@@ -1037,7 +1040,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         region("clock"),
         Some(RegionSeed::Tools {
             calls: vec![SeedToolCall::new("current_time")],
-            refresh: crate::layout::SeedRefresh::Once,
+            refresh: crate::spec::layout::SeedRefresh::Once,
         })
     );
     // A list of bare names is a list of argument-free calls, in order.
@@ -1048,7 +1051,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
                 SeedToolCall::new("current_time"),
                 SeedToolCall::new("system_info"),
             ],
-            refresh: crate::layout::SeedRefresh::Once,
+            refresh: crate::spec::layout::SeedRefresh::Once,
         })
     );
     // The two entry spellings mix in one list, because most calls take no
@@ -1063,7 +1066,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
                 SeedToolCall::new("system_info"),
                 SeedToolCall::new("locale_info"),
             ],
-            refresh: crate::layout::SeedRefresh::Once,
+            refresh: crate::spec::layout::SeedRefresh::Once,
         })
     );
     assert!(
@@ -1106,7 +1109,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             _ => None,
         }
     };
-    use crate::layout::SeedRefresh;
+    use crate::spec::layout::SeedRefresh;
     // Unset is `once`, for both spellings of a tool seed.
     assert_eq!(
         refresh_of(
@@ -1204,7 +1207,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         ),
         Some(RegionSeed::Tools {
             calls: vec![SeedToolCall::new("current_time")],
-            refresh: crate::layout::SeedRefresh::Once,
+            refresh: crate::spec::layout::SeedRefresh::Once,
         })
     );
 }
@@ -1319,7 +1322,7 @@ model = "claude-sonnet-5"
 
 #[test]
 fn parse_manifest_reads_transforms_with_all_mapping_kinds() {
-    use crate::blueprint::ContentTransform;
+    use crate::spec::blueprint::ContentTransform;
     let toml = r#"
 [agent]
 name = "xform-test"
@@ -1662,7 +1665,7 @@ style = "confirm"
     assert!(points[0].required);
     assert_eq!(
         points[0].style,
-        crate::blueprint::InteractionStyle::MultipleChoice
+        crate::spec::blueprint::InteractionStyle::MultipleChoice
     );
     assert_eq!(points[0].options, vec!["approve", "reject", "revise"]);
     assert_eq!(points[0].document_region.as_deref(), Some("plan"));
@@ -1673,11 +1676,14 @@ style = "confirm"
     assert!(!points[1].required);
     assert_eq!(
         points[1].style,
-        crate::blueprint::InteractionStyle::FreeText
+        crate::spec::blueprint::InteractionStyle::FreeText
     );
 
     assert_eq!(points[2].name, "confirm");
-    assert_eq!(points[2].style, crate::blueprint::InteractionStyle::Confirm);
+    assert_eq!(
+        points[2].style,
+        crate::spec::blueprint::InteractionStyle::Confirm
+    );
 }
 
 #[test]
@@ -1741,15 +1747,15 @@ required = true
 
     assert_eq!(
         policy_of(""),
-        crate::blueprint::UnattendedPolicy::AutoApprove
+        crate::spec::blueprint::UnattendedPolicy::AutoApprove
     );
     assert_eq!(
         policy_of("unattended = \"auto_approve\""),
-        crate::blueprint::UnattendedPolicy::AutoApprove
+        crate::spec::blueprint::UnattendedPolicy::AutoApprove
     );
     assert_eq!(
         policy_of("unattended = \"ask\""),
-        crate::blueprint::UnattendedPolicy::Ask
+        crate::spec::blueprint::UnattendedPolicy::Ask
     );
 }
 
@@ -2042,12 +2048,12 @@ mode = "autonomous"
     // A stage with no override inherits (None).
     assert_eq!(bp.find_stage("build").unwrap().batch_tool_hint, None);
     // End-to-end cascade: plan resolves off, build inherits the agent's on.
-    assert!(!crate::taint::resolve_batch_tool_hint(
+    assert!(!leviath_core::taint::resolve_batch_tool_hint(
         true,
         bp.batch_tool_hint,
         bp.find_stage("plan").unwrap().batch_tool_hint,
     ));
-    assert!(crate::taint::resolve_batch_tool_hint(
+    assert!(leviath_core::taint::resolve_batch_tool_hint(
         true,
         bp.batch_tool_hint,
         bp.find_stage("build").unwrap().batch_tool_hint,
@@ -2094,12 +2100,12 @@ mode = "autonomous"
     assert_eq!(bp.find_stage("build").unwrap().shell_hint, None);
     // End-to-end cascade: plan resolves on despite the agent and global
     // both being off, build follows the agent's off despite the global on.
-    assert!(crate::taint::resolve_shell_hint(
+    assert!(leviath_core::taint::resolve_shell_hint(
         false,
         bp.shell_hint,
         bp.find_stage("plan").unwrap().shell_hint,
     ));
-    assert!(!crate::taint::resolve_shell_hint(
+    assert!(!leviath_core::taint::resolve_shell_hint(
         true,
         bp.shell_hint,
         bp.find_stage("build").unwrap().shell_hint,
@@ -2119,8 +2125,8 @@ mode = "autonomous"
     let bp = parse_manifest(toml).unwrap();
     assert_eq!(bp.shell_hint, None);
     assert_eq!(bp.find_stage("main").unwrap().shell_hint, None);
-    assert!(crate::taint::resolve_shell_hint(true, None, None));
-    assert!(!crate::taint::resolve_shell_hint(false, None, None));
+    assert!(leviath_core::taint::resolve_shell_hint(true, None, None));
+    assert!(!leviath_core::taint::resolve_shell_hint(false, None, None));
 }
 
 #[test]
@@ -2191,11 +2197,11 @@ text = 7
     let bp = parse_manifest(toml).unwrap();
     assert_eq!(
         bp.nudge.as_ref().unwrap(),
-        &crate::blueprint::NudgeConfig::default()
+        &crate::spec::blueprint::NudgeConfig::default()
     );
     assert_eq!(
         bp.find_stage("main").unwrap().nudge.as_ref().unwrap(),
-        &crate::blueprint::NudgeConfig::default()
+        &crate::spec::blueprint::NudgeConfig::default()
     );
 }
 
@@ -2326,14 +2332,14 @@ mode = "autonomous"
 "#;
     let bp = parse_manifest(toml).unwrap();
     // Compare the whole mode (no never-taken fallback arm to leave uncovered).
-    let expected = crate::blueprint::StageMode::FanOut {
-        config: crate::blueprint::FanOutConfig {
+    let expected = crate::spec::blueprint::StageMode::FanOut {
+        config: crate::spec::blueprint::FanOutConfig {
             worker_agent: None,
             worker_stage: Some("worker".to_string()),
             worker_query: None,
             merge_stage: Some("merge".to_string()),
             max_workers: 7,
-            on_worker_failure: crate::blueprint::WorkerFailurePolicy::FailAll,
+            on_worker_failure: crate::spec::blueprint::WorkerFailurePolicy::FailAll,
             split_prompt: "split the work".to_string(),
             results_region: None,
             max_items: None,
@@ -2358,14 +2364,14 @@ worker_agent = "external-worker"
 split_prompt = "go"
 "#;
     let bp = parse_manifest(toml).unwrap();
-    let expected = crate::blueprint::StageMode::FanOut {
-        config: crate::blueprint::FanOutConfig {
+    let expected = crate::spec::blueprint::StageMode::FanOut {
+        config: crate::spec::blueprint::FanOutConfig {
             worker_agent: Some("external-worker".to_string()),
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
-            max_workers: crate::blueprint::DEFAULT_MAX_WORKERS,
-            on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
+            max_workers: crate::spec::blueprint::DEFAULT_MAX_WORKERS,
+            on_worker_failure: crate::spec::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "go".to_string(),
             results_region: None,
             max_items: None,
@@ -2395,14 +2401,14 @@ max_items = 12
 "#;
     // The whole mode, so there is no never-taken match arm left behind.
     let bp = parse_manifest(toml).unwrap();
-    let expected = crate::blueprint::StageMode::FanOut {
-        config: crate::blueprint::FanOutConfig {
+    let expected = crate::spec::blueprint::StageMode::FanOut {
+        config: crate::spec::blueprint::FanOutConfig {
             worker_agent: Some("w".to_string()),
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
-            max_workers: crate::blueprint::DEFAULT_MAX_WORKERS,
-            on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
+            max_workers: crate::spec::blueprint::DEFAULT_MAX_WORKERS,
+            on_worker_failure: crate::spec::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "go".to_string(),
             results_region: Some("worker_rows".to_string()),
             max_items: Some(12),
@@ -2430,14 +2436,14 @@ max_items = 0
 max_workers = 0
 "#;
     let bp = parse_manifest(toml).unwrap();
-    let expected = crate::blueprint::StageMode::FanOut {
-        config: crate::blueprint::FanOutConfig {
+    let expected = crate::spec::blueprint::StageMode::FanOut {
+        config: crate::spec::blueprint::FanOutConfig {
             worker_agent: Some("w".to_string()),
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
             max_workers: 0,
-            on_worker_failure: crate::blueprint::WorkerFailurePolicy::Continue,
+            on_worker_failure: crate::spec::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "go".to_string(),
             results_region: None,
             max_items: None,
@@ -2446,7 +2452,7 @@ max_workers = 0
     };
     let stage = bp.find_stage("parallel").unwrap();
     assert_eq!(stage.mode, expected);
-    let crate::blueprint::StageMode::FanOut { config } = &stage.mode else {
+    let crate::spec::blueprint::StageMode::FanOut { config } = &stage.mode else {
         unreachable!("asserted equal to a fan-out above");
     };
     assert_eq!(config.worker_cap(), None);
@@ -2564,7 +2570,7 @@ mode = "autonomous"
     // holds. (A negative attempt budget is refused instead; see
     // `every_negative_manifest_integer_fails_to_load_naming_the_key`.)
     let gate = transitions["c"].gate.as_ref().unwrap();
-    assert_eq!(gate, &crate::blueprint::TransitionGate::default());
+    assert_eq!(gate, &crate::spec::blueprint::TransitionGate::default());
     // Zero, on the other hand, is a deliberate "record it but never hold".
     let toml = toml.replace("max_attempts = \"four\"", "max_attempts = 0");
     let bp = parse_manifest(&toml).unwrap();
@@ -2637,10 +2643,10 @@ text = true
 "#;
     let bp = parse_manifest(toml).expect("parses");
     assert_eq!(bp.mime_types.len(), 2);
-    let reg = crate::mime::MimeRegistry::builtin()
+    let reg = leviath_core::mime::MimeRegistry::builtin()
         .layered(&bp.mime_types, "blueprint")
         .unwrap();
-    let scene = reg.info(&crate::mime::MimeType::parse("application/x-acme-scene").unwrap());
+    let scene = reg.info(&leviath_core::mime::MimeType::parse("application/x-acme-scene").unwrap());
     assert_eq!(scene.family, "model");
     assert_eq!(scene.check.as_deref(), Some("checks/scene.rhai"));
     assert_eq!(scene.source, "blueprint");
@@ -2648,7 +2654,7 @@ text = true
     // table is left out of it.
     let json = serde_json::to_string(&bp).unwrap();
     assert!(json.contains("\"mime_types\""));
-    let back: crate::Blueprint = serde_json::from_str(&json).unwrap();
+    let back: crate::spec::Blueprint = serde_json::from_str(&json).unwrap();
     assert_eq!(back.mime_types, bp.mime_types);
     let plain = parse_manifest("[agent]\nname = \"plain\"\n").unwrap();
     assert!(plain.mime_types.is_empty());
@@ -2923,7 +2929,7 @@ mode = "output"
     assert!(
         stage
             .available_tools
-            .contains(&crate::blueprint::SUBMIT_OUTPUT_TOOL.to_string())
+            .contains(&crate::spec::blueprint::SUBMIT_OUTPUT_TOOL.to_string())
     );
     // An output stage is normally the last thing a run does.
     assert!(stage.allow_complete);
@@ -3018,7 +3024,7 @@ allow_as_worker = true
         .expect("the stage exists");
     assert_eq!(
         stage.available_tools,
-        vec![crate::blueprint::FAN_OUT_TOOL.to_string()],
+        vec![crate::spec::blueprint::FAN_OUT_TOOL.to_string()],
         "granted even though the author wrote an empty list"
     );
 
@@ -3034,7 +3040,7 @@ allow_as_worker = true
     assert_eq!(
         stage.available_tools,
         vec![
-            crate::blueprint::FAN_OUT_TOOL.to_string(),
+            crate::spec::blueprint::FAN_OUT_TOOL.to_string(),
             "read_file".to_string()
         ],
         "the author's own list is kept and the grant is not duplicated"
@@ -3134,8 +3140,9 @@ type = "object"
     );
 
     // And the two levels combine the way the cascade says.
-    let resolved = crate::output::resolve_output_spec(bp.output.as_ref(), Some(stage_spec), None)
-        .expect("some level asked for an output");
+    let resolved =
+        leviath_core::output::resolve_output_spec(bp.output.as_ref(), Some(stage_spec), None)
+            .expect("some level asked for an output");
     assert_eq!(resolved.format.as_deref(), Some("a2ui"));
     assert_eq!(
         resolved.instructions.as_deref(),
@@ -3165,7 +3172,7 @@ on_validator_error = "reject"
     let bp = parse_manifest(toml).expect("parses");
     assert_eq!(
         bp.output.as_ref().and_then(|s| s.on_validator_error),
-        Some(crate::output::OnValidatorError::Accept)
+        Some(leviath_core::output::OnValidatorError::Accept)
     );
     assert_eq!(
         bp.find_stage("summary")
@@ -3173,7 +3180,7 @@ on_validator_error = "reject"
             .output
             .as_ref()
             .and_then(|s| s.on_validator_error),
-        Some(crate::output::OnValidatorError::Reject)
+        Some(leviath_core::output::OnValidatorError::Reject)
     );
 }
 
@@ -3302,7 +3309,7 @@ mode = "autonomous"
 // LLM-consultation path in resolve_transition / prompt_llm_transition).
 #[test]
 fn coder_plan_stage_branches_on_choice() {
-    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
+    let manifest_content = include_str!("../../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     let plan = bp.find_stage("plan").unwrap();
 
@@ -3341,7 +3348,7 @@ fn coder_plan_stage_branches_on_choice() {
 #[test]
 fn shipped_coding_agents_gate_every_non_error_implement_edge() {
     for manifest_content in [include_str!(
-        "../../../leviath-cli/agents/coder/agent.leviath"
+        "../../../../leviath-cli/agents/coder/agent.leviath"
     )] {
         let bp = parse_manifest(manifest_content).unwrap();
         bp.validate().unwrap();
@@ -3361,9 +3368,9 @@ fn shipped_coding_agents_gate_every_non_error_implement_edge() {
             // escape it exists to provide.
             if matches!(
                 edge.condition,
-                crate::blueprint::TransitionCondition::Error
-                    | crate::blueprint::TransitionCondition::Stuck
-                    | crate::blueprint::TransitionCondition::DeadEnd
+                crate::spec::blueprint::TransitionCondition::Error
+                    | crate::spec::blueprint::TransitionCondition::Stuck
+                    | crate::spec::blueprint::TransitionCondition::DeadEnd
             ) {
                 continue;
             }
@@ -3400,7 +3407,7 @@ fn shipped_coding_agents_gate_every_non_error_implement_edge() {
 
 #[test]
 fn coder_plan_routes_errors_and_cannot_end_the_run() {
-    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
+    let manifest_content = include_str!("../../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     let plan = bp.find_stage("plan").unwrap();
     let transitions = plan.transitions.as_ref().unwrap();
@@ -3409,7 +3416,7 @@ fn coder_plan_routes_errors_and_cannot_end_the_run() {
     assert!(
         transitions
             .get("error_recovery")
-            .map(|e| e.condition == crate::blueprint::TransitionCondition::Error)
+            .map(|e| e.condition == crate::spec::blueprint::TransitionCondition::Error)
             .unwrap_or(false)
     );
 
@@ -3431,7 +3438,7 @@ fn coder_plan_routes_errors_and_cannot_end_the_run() {
 
 #[test]
 fn coder_plan_approval_option_routing() {
-    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
+    let manifest_content = include_str!("../../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     let plan = bp.find_stage("plan").unwrap();
     let points = unwrap_interactive_points(&plan.mode);
@@ -3468,7 +3475,7 @@ fn coder_plan_approval_option_routing() {
 
 #[test]
 fn coder_review_stage_can_finish_and_routes_errors() {
-    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
+    let manifest_content = include_str!("../../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     let review = bp.find_stage("review").unwrap();
 
@@ -3493,14 +3500,14 @@ fn coder_review_stage_can_finish_and_routes_errors() {
     assert!(
         transitions
             .get("error_recovery")
-            .map(|e| e.condition == crate::blueprint::TransitionCondition::Error)
+            .map(|e| e.condition == crate::spec::blueprint::TransitionCondition::Error)
             .unwrap_or(false)
     );
 }
 
 #[test]
 fn coder_blueprint_passes_full_validation() {
-    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
+    let manifest_content = include_str!("../../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
     bp.validate()
         .expect("the shipped coder blueprint must pass Blueprint::validate()");
@@ -3512,7 +3519,7 @@ fn coder_plan_and_implement_can_ask_the_user_dynamically() {
     // be able to decide for themselves, mid-reasoning, that they need
     // human input - via the ask_user_* tools, not just the forced
     // interaction_points.
-    let manifest_content = include_str!("../../../leviath-cli/agents/coder/agent.leviath");
+    let manifest_content = include_str!("../../../../leviath-cli/agents/coder/agent.leviath");
     let bp = parse_manifest(manifest_content).unwrap();
 
     let plan = bp.find_stage("plan").unwrap();
@@ -4134,7 +4141,7 @@ reset = "conversation"
 
 #[test]
 fn route_for_mime_picks_the_most_specific_pattern() {
-    use crate::mime::MimeType;
+    use leviath_core::mime::MimeType;
     let toml = r#"
 [agent]
 name = "draw"
@@ -4164,7 +4171,7 @@ mode = "autonomous"
 
 #[test]
 fn route_for_mime_is_none_when_nothing_matches() {
-    use crate::mime::MimeType;
+    use leviath_core::mime::MimeType;
     let toml = r#"
 [agent]
 name = "draw"
@@ -4462,7 +4469,7 @@ on_unavailable = "warn"
 "#;
     let bp = parse_manifest(toml).unwrap();
     let agent = bp.sandbox.as_ref().unwrap();
-    assert_eq!(agent.kind, crate::SandboxKind::Container);
+    assert_eq!(agent.kind, leviath_core::SandboxKind::Container);
     assert_eq!(agent.image.as_deref(), Some("ubuntu:24.04"));
     assert!(agent.network); // default when omitted
     assert_eq!(agent.engine, None); // auto-detect when omitted
@@ -4474,7 +4481,7 @@ on_unavailable = "warn"
     assert!(!sb.network);
     assert_eq!(sb.mounts, vec!["/data".to_string(), "/cache".to_string()]);
     assert!(sb.keep_warm);
-    assert_eq!(sb.on_unavailable, crate::OnUnavailable::Warn);
+    assert_eq!(sb.on_unavailable, leviath_core::OnUnavailable::Warn);
 }
 
 #[test]
@@ -4488,7 +4495,7 @@ fn parse_manifest_sandbox_kind_variants_and_no_kind() {
     )
     .unwrap();
     let sb = bp.sandbox.unwrap();
-    assert_eq!(sb.kind, crate::SandboxKind::None);
+    assert_eq!(sb.kind, leviath_core::SandboxKind::None);
     assert_eq!(sb.mounts, vec!["/ok".to_string()]);
 
     // `namespace` and `none` kind strings both parse.
@@ -4498,7 +4505,10 @@ fn parse_manifest_sandbox_kind_variants_and_no_kind() {
          [stages.s]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
     )
     .unwrap();
-    assert_eq!(bp.sandbox.unwrap().kind, crate::SandboxKind::Namespace);
+    assert_eq!(
+        bp.sandbox.unwrap().kind,
+        leviath_core::SandboxKind::Namespace
+    );
 
     let bp = parse_manifest(
         "[agent]\nname = \"a\"\n\n\
@@ -4506,7 +4516,7 @@ fn parse_manifest_sandbox_kind_variants_and_no_kind() {
          [stages.s]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
     )
     .unwrap();
-    assert_eq!(bp.sandbox.unwrap().kind, crate::SandboxKind::None);
+    assert_eq!(bp.sandbox.unwrap().kind, leviath_core::SandboxKind::None);
 }
 
 #[test]
@@ -4520,7 +4530,7 @@ fn parse_manifest_sandbox_explicit_error_policy_and_stage_error() {
     .unwrap();
     assert_eq!(
         bp.sandbox.unwrap().on_unavailable,
-        crate::OnUnavailable::Error
+        leviath_core::OnUnavailable::Error
     );
 
     // An invalid *per-stage* sandbox propagates its error through the stage
@@ -5397,7 +5407,7 @@ todos = { kind = "checklist", max_tokens = 2000 }
         bp.context_layout
             .get_region("todos")
             .map(|r| r.kind.clone()),
-        Some(crate::RegionKind::Checklist)
+        Some(leviath_core::RegionKind::Checklist)
     );
     let gate = bp
         .find_stage("implement")
@@ -5707,17 +5717,17 @@ notes = { kind = "temporary", max_tokens = 100 }
     };
     assert_eq!(
         region("sources").admission,
-        crate::region::Admission::Reject,
+        leviath_core::region::Admission::Reject,
         "the setting is read"
     );
     assert_eq!(
         region("scratch").admission,
-        crate::region::Admission::Evict,
+        leviath_core::region::Admission::Evict,
         "and its other value"
     );
     assert_eq!(
         region("notes").admission,
-        crate::region::Admission::Evict,
+        leviath_core::region::Admission::Evict,
         "and absence means the behaviour every region had before"
     );
 
@@ -5786,7 +5796,7 @@ fn a_region_definition_without_the_field_deserializes_as_summarizable() {
         "kind": "Temporary",
         "max_tokens": 1000,
     });
-    let def: crate::layout::RegionDefinition =
+    let def: crate::spec::layout::RegionDefinition =
         serde_json::from_value(json).expect("an older definition still loads");
     assert!(def.summarizable);
 }
@@ -5817,15 +5827,21 @@ unsaid = { kind = "pinned", max_tokens = 100 }
             .find(|r| r.name == name)
             .unwrap_or_else(|| panic!("{name} declared"))
     };
-    assert_eq!(region("task").volatility, crate::region::Volatility::Stable);
-    assert_eq!(region("notes").volatility, crate::region::Volatility::Grows);
+    assert_eq!(
+        region("task").volatility,
+        leviath_core::region::Volatility::Stable
+    );
+    assert_eq!(
+        region("notes").volatility,
+        leviath_core::region::Volatility::Grows
+    );
     assert_eq!(
         region("scratch").volatility,
-        crate::region::Volatility::Rewritten
+        leviath_core::region::Volatility::Rewritten
     );
     assert_eq!(
         region("unsaid").volatility,
-        crate::region::Volatility::Rewritten
+        leviath_core::region::Volatility::Rewritten
     );
 }
 
@@ -5876,7 +5892,7 @@ model = { models = ["claude-sonnet-5"], parameters = { max_output_tokens = "100%
     let manifest = parse_manifest(good).expect("loads");
     assert_eq!(
         manifest.stages[0].model.output_cap(),
-        Ok(Some(crate::blueprint::OutputCap::RegionPercent {
+        Ok(Some(crate::spec::blueprint::OutputCap::RegionPercent {
             percent: 1.0,
             region: "report".to_string()
         }))
@@ -6026,7 +6042,7 @@ fn sandbox_refuses_both_spellings_when_they_differ() {
 #[test]
 fn the_published_schema_and_the_parser_agree_on_every_key() {
     let schema: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../docs/schema/blueprint.schema.json"
+        "../../../../../docs/schema/blueprint.schema.json"
     ))
     .expect("the schema is valid JSON");
     let keys_at = |path: &[&str]| -> Vec<String> {
@@ -6405,9 +6421,9 @@ fn artifact_declarations_are_checked_at_load() {
 
 // ─── [[dependencies]] ─────────────────────────────────────────────────────
 
-use crate::blueprint::{Dependency, DependencyInstall, DependencyKind, McpServerTemplate};
+use crate::spec::blueprint::{Dependency, DependencyInstall, DependencyKind, McpServerTemplate};
 
-fn deps_manifest(body: &str) -> Result<crate::Blueprint> {
+fn deps_manifest(body: &str) -> Result<crate::spec::Blueprint> {
     parse_manifest(&format!("[agent]\nname = \"deps\"\n{body}\n"))
 }
 
@@ -6863,7 +6879,7 @@ keep_results = true
 /// `before_dispath` is the failure the strict key checks exist to prevent.
 #[test]
 fn tool_rescan_reads_every_value_and_the_flag_it_replaced() {
-    use crate::blueprint::ToolRescan;
+    use crate::spec::blueprint::ToolRescan;
     let with = |line: &str| {
         format!("[agent]\nname = \"a\"\n{line}\n\n[stages.main]\nmode = \"autonomous\"\n")
     };
@@ -6914,7 +6930,7 @@ fn tool_rescan_reads_every_value_and_the_flag_it_replaced() {
 /// What each value turns on, said once so the daemon and the API agree.
 #[test]
 fn each_rescan_value_says_what_it_turns_on() {
-    use crate::blueprint::ToolRescan;
+    use crate::spec::blueprint::ToolRescan;
     assert!(!ToolRescan::AtSpawn.rescans());
     assert!(!ToolRescan::AtSpawn.before_dispatch());
     assert!(ToolRescan::AfterWrites.rescans());

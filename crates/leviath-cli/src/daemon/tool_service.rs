@@ -283,9 +283,9 @@ pub(crate) struct ConfigSource {
     /// The blueprint's name, which the per-agent config tables are keyed by.
     pub agent_name: String,
     /// The blueprint's `[safe_commands]`, when it declares any.
-    pub blueprint_safe: Option<leviath_core::blueprint::SafeCommandsConfig>,
+    pub blueprint_safe: Option<leviath_runtime::spec::blueprint::SafeCommandsConfig>,
     /// The blueprint's `[read_paths]`, when it declares any.
-    pub blueprint_read_paths: Option<leviath_core::blueprint::ReadPathsConfig>,
+    pub blueprint_read_paths: Option<leviath_runtime::spec::blueprint::ReadPathsConfig>,
     /// The run's workdir, which read-path entries compile relative to.
     pub workdir: std::path::PathBuf,
     /// The yolo profile the run was launched under by name, so a resume reads
@@ -1720,7 +1720,7 @@ mod tests {
             config_source: Arc::new(ConfigSource {
                 agent_name: "tester".to_string(),
                 blueprint_safe: None,
-                blueprint_read_paths: Some(leviath_core::blueprint::ReadPathsConfig {
+                blueprint_read_paths: Some(leviath_runtime::spec::blueprint::ReadPathsConfig {
                     allow: vec![outside.path().to_string_lossy().to_string()],
                 }),
                 workdir: workdir.path().to_path_buf(),
@@ -1771,7 +1771,7 @@ mod tests {
             config_source: Arc::new(ConfigSource {
                 agent_name: "tester".to_string(),
                 blueprint_safe: None,
-                blueprint_read_paths: Some(leviath_core::blueprint::ReadPathsConfig {
+                blueprint_read_paths: Some(leviath_runtime::spec::blueprint::ReadPathsConfig {
                     // An empty entry is refused by the compiler, which is the
                     // arm a resume has to survive.
                     allow: vec![String::new()],

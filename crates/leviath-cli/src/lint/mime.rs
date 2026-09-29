@@ -10,7 +10,7 @@ use super::*;
 /// misspelled its name. Said only when the stage names its tools one by
 /// one: under a group grant (`@builtin`, `@scripts`) whether the tool is
 /// reached depends on the install, which is not the manifest's business.
-pub(super) fn lint_tool_accepts(stage: &leviath_core::Stage) -> Vec<LintFinding> {
+pub(super) fn lint_tool_accepts(stage: &leviath_runtime::spec::Stage) -> Vec<LintFinding> {
     if !stage.tool_groups().is_empty() {
         return Vec::new();
     }
@@ -101,7 +101,7 @@ pub(super) fn lint_mime_types(blueprint: &Blueprint) -> Vec<LintFinding> {
 /// on trust.
 pub(super) fn lint_stage_mime(
     blueprint: &Blueprint,
-    stage: &leviath_core::Stage,
+    stage: &leviath_runtime::spec::Stage,
 ) -> Vec<LintFinding> {
     let needs: Vec<String> = blueprint
         .stage_inputs(stage)
@@ -111,7 +111,7 @@ pub(super) fn lint_stage_mime(
     if needs.is_empty() {
         return Vec::new();
     }
-    let judged: Vec<&leviath_core::blueprint::ModelEntry> = stage
+    let judged: Vec<&leviath_runtime::spec::blueprint::ModelEntry> = stage
         .model
         .models
         .iter()

@@ -26,7 +26,7 @@
 //! `direct` transform is written as absent; a new path is `hint = "Continue
 //! here when appropriate"`; a new region is `pinned`, `5%`, `4000` tokens.
 //!
-//! [`Blueprint`]: leviath_core::Blueprint
+//! [`Blueprint`]: leviath_runtime::spec::Blueprint
 
 pub(crate) mod catalog;
 pub(crate) mod check;

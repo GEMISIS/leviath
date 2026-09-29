@@ -749,7 +749,7 @@ impl PipelineWorld {
     pub(crate) fn spawn_from_blueprint(
         &mut self,
         agent_id: String,
-        blueprint: leviath_core::Blueprint,
+        blueprint: crate::spec::Blueprint,
         task: &str,
         stages: Vec<crate::pipeline::ResolvedStage>,
         global_hints: leviath_core::config::PromptHints,
@@ -1391,20 +1391,20 @@ mod tests {
         }
     }
 
-    fn blueprint() -> leviath_core::Blueprint {
-        let layout = leviath_core::layout::ContextLayout::new(
-            vec![leviath_core::layout::RegionDefinition::new(
+    fn blueprint() -> crate::spec::Blueprint {
+        let layout = crate::spec::layout::ContextLayout::new(
+            vec![crate::spec::layout::RegionDefinition::new(
                 "conversation".to_string(),
                 RegionKind::Clearable,
                 10_000,
             )],
             12_000,
         );
-        let s = leviath_core::Stage::new(
+        let s = crate::spec::Stage::new(
             "s".to_string(),
-            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
         );
-        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+        crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
     }
 
     /// Spawn a single-stage agent, initially ready to infer.
@@ -1803,7 +1803,7 @@ mod tests {
         // would keep the driver looping past run_until_idle's budget.
         let mut world = build_world(registry_with(vec![text("thinking"), text("final")]));
         let mut bp = blueprint();
-        bp.nudge = Some(leviath_core::NudgeConfig {
+        bp.nudge = Some(crate::spec::NudgeConfig {
             max: Some(1),
             ..Default::default()
         });
@@ -2484,26 +2484,26 @@ mod tests {
 
     /// A single-stage blueprint whose stage is an `interactive_points` stage with a
     /// `plan_approval` point (the shape that blocks awaiting human approval).
-    fn interactive_blueprint() -> leviath_core::Blueprint {
-        use leviath_core::blueprint::{InteractionPoint, InteractionStyle, StageMode};
-        let layout = leviath_core::layout::ContextLayout::new(
-            vec![leviath_core::layout::RegionDefinition::new(
+    fn interactive_blueprint() -> crate::spec::Blueprint {
+        use crate::spec::blueprint::{InteractionPoint, InteractionStyle, StageMode};
+        let layout = crate::spec::layout::ContextLayout::new(
+            vec![crate::spec::layout::RegionDefinition::new(
                 "conversation".to_string(),
                 RegionKind::Clearable,
                 10_000,
             )],
             12_000,
         );
-        let mut s = leviath_core::Stage::new(
+        let mut s = crate::spec::Stage::new(
             "plan".to_string(),
-            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
         );
         s.mode = StageMode::InteractivePoints {
             points: vec![InteractionPoint {
                 name: "plan_approval".to_string(),
                 prompt: "Approve?".to_string(),
                 required: true,
-                unattended: leviath_core::blueprint::UnattendedPolicy::AutoApprove,
+                unattended: crate::spec::blueprint::UnattendedPolicy::AutoApprove,
                 style: InteractionStyle::MultipleChoice,
                 options: vec!["Approve".to_string(), "Abort".to_string()],
                 directives: std::collections::HashMap::new(),
@@ -2512,7 +2512,7 @@ mod tests {
                 document_region: None,
             }],
         };
-        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+        crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
     }
 
     #[tokio::test]
@@ -2859,23 +2859,23 @@ mod tests {
         let mut world = build_world(registry_with(vec![]));
         // A blueprint whose stage carries an enormous system prompt in a tiny
         // pinned region overflows at spawn.
-        let layout = leviath_core::layout::ContextLayout::new(
-            vec![leviath_core::layout::RegionDefinition::new(
+        let layout = crate::spec::layout::ContextLayout::new(
+            vec![crate::spec::layout::RegionDefinition::new(
                 "task".to_string(),
                 RegionKind::Pinned,
                 50,
             )],
             1000,
         );
-        let mut s = leviath_core::Stage::new(
+        let mut s = crate::spec::Stage::new(
             "s".to_string(),
-            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
         );
         s.config.insert(
             "system_prompt".to_string(),
             serde_json::Value::String("x".repeat(100_000)),
         );
-        let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+        let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
 
         let err = world.spawn_from_blueprint(
             "a".to_string(),

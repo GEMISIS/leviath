@@ -16,7 +16,7 @@ use super::*;
 /// ever asks for, so the entry has no effect at all: it reads as a decision and
 /// is not one.
 pub(super) fn lint_tool_policies(
-    stage: &leviath_core::Stage,
+    stage: &leviath_runtime::spec::Stage,
     agent_permissions: &HashMap<String, String>,
 ) -> Vec<LintFinding> {
     // Either spelling counts, because policy resolution accepts either: a stage
@@ -42,7 +42,7 @@ pub(super) fn lint_tool_policies(
     let builtin_group = stage
         .tool_groups()
         .into_iter()
-        .find(|g| g.covers(leviath_core::blueprint::ToolGroup::Builtin));
+        .find(|g| g.covers(leviath_runtime::spec::blueprint::ToolGroup::Builtin));
     if shells.is_empty()
         && !has_policy("shell")
         && let Some(group) = builtin_group
@@ -83,7 +83,7 @@ pub(super) fn lint_tool_policies(
 /// line reads as a decision and is silently undone: the author sets `allow`,
 /// the `implicit-shell-policy` warning goes quiet, and the tool still asks.
 pub(super) fn lint_permission_clamp(
-    stage: &leviath_core::Stage,
+    stage: &leviath_runtime::spec::Stage,
     agent_permissions: &HashMap<String, String>,
 ) -> Vec<LintFinding> {
     use crate::tools::{
@@ -163,7 +163,7 @@ pub(super) fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
         .regions
         .iter()
         .filter_map(|r| match &r.seed {
-            Some(leviath_core::layout::RegionSeed::Command { command }) => {
+            Some(leviath_runtime::spec::layout::RegionSeed::Command { command }) => {
                 // Whether it will actually run matters more than that it is
                 // declared. A seed runs before any prompt exists, so it only
                 // runs if the safe list already covers it - and finding that
@@ -217,13 +217,15 @@ pub(super) fn lint_tool_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
         .regions
         .iter()
         .filter_map(|r| match &r.seed {
-            Some(leviath_core::layout::RegionSeed::Tools { calls, refresh }) => {
+            Some(leviath_runtime::spec::layout::RegionSeed::Tools { calls, refresh }) => {
                 let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
                 // A seed that re-runs on every stage entry is worth saying so:
                 // it is a tool call per stage for the life of the run, not one.
                 let when = match refresh {
-                    leviath_core::layout::SeedRefresh::Once => "",
-                    leviath_core::layout::SeedRefresh::EachStage => " (on every stage entry)",
+                    leviath_runtime::spec::layout::SeedRefresh::Once => "",
+                    leviath_runtime::spec::layout::SeedRefresh::EachStage => {
+                        " (on every stage entry)"
+                    }
                 };
                 Some(format!("{}: {}{when}", r.name, names.join(", ")))
             }

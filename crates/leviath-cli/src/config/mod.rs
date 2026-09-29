@@ -298,9 +298,9 @@ pub struct Config {
     /// before making any tool call. All three keys (`enabled`, `max`, `text`)
     /// are optional; an agent's `[agent.nudge]` or a stage's
     /// `[stages.<name>.nudge]` overrides each field independently. See
-    /// [`leviath_core::resolve_nudge`].
+    /// [`leviath_runtime::spec::resolve_nudge`].
     #[serde(default)]
-    pub nudge: leviath_core::NudgeConfig,
+    pub nudge: leviath_runtime::spec::NudgeConfig,
 
     /// Completion-webhook delivery tuning (retry/backoff/timeout).
     #[serde(default)]
@@ -394,7 +394,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
             shell_hint: true,
-            nudge: leviath_core::NudgeConfig::default(),
+            nudge: leviath_runtime::spec::NudgeConfig::default(),
             webhook: WebhookConfig::default(),
             observability: ObservabilityConfig::default(),
             sandbox: None,
@@ -433,7 +433,7 @@ impl Config {
     pub(crate) fn safe_keys_for_agent(
         &self,
         agent_name: &str,
-        blueprint: Option<&leviath_core::blueprint::SafeCommandsConfig>,
+        blueprint: Option<&leviath_runtime::spec::blueprint::SafeCommandsConfig>,
     ) -> std::collections::BTreeMap<String, crate::approvals::SafeSource> {
         crate::approvals::resolve_safe_keys(
             &self.safe_commands,
@@ -4477,7 +4477,7 @@ anthropic_api_key = "sk-ant-test-key"
             Some("sk-ant-test-key")
         );
         // No [nudge] section ⇒ every field unset ⇒ built-in defaults apply.
-        assert_eq!(config.nudge, leviath_core::NudgeConfig::default());
+        assert_eq!(config.nudge, leviath_runtime::spec::NudgeConfig::default());
     }
 
     #[test]
@@ -4651,7 +4651,7 @@ enabled = false
             },
             batch_tool_hint: true,
             shell_hint: false,
-            nudge: leviath_core::NudgeConfig {
+            nudge: leviath_runtime::spec::NudgeConfig {
                 enabled: Some(true),
                 max: Some(2),
                 text: Some("Use your tools.".to_string()),
@@ -4761,7 +4761,7 @@ enabled = false
         );
         assert_eq!(
             deserialized.nudge,
-            leviath_core::NudgeConfig {
+            leviath_runtime::spec::NudgeConfig {
                 enabled: Some(true),
                 max: Some(2),
                 text: Some("Use your tools.".to_string()),

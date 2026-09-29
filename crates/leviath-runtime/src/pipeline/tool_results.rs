@@ -129,7 +129,7 @@ pub(crate) fn apply_tool_results(
     response_content: &str,
     tool_calls: &[crate::components::ToolCall],
     tool_results: &[crate::tool_bridge::ToolResult],
-    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    routing: Option<&crate::spec::blueprint::ToolResultRouting>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     reasoning: Option<String>,
 ) {
@@ -160,7 +160,7 @@ pub(crate) struct Reply<'a> {
     /// The stage this reply came from, when its `output_routing` should send
     /// some produced parts to regions of their own. `None` keeps every part
     /// in the conversation.
-    pub(crate) stage: Option<&'a leviath_core::blueprint::Stage>,
+    pub(crate) stage: Option<&'a crate::spec::blueprint::Stage>,
     /// Where text over `[mime] inline_text_bytes` is stored, for the reply
     /// and for each tool result. `None` keeps every text inline: the restore
     /// path replays a batch with no store at hand.
@@ -174,7 +174,7 @@ pub(crate) fn apply_tool_results_with_parts(
     reply: Reply<'_>,
     tool_calls: &[crate::components::ToolCall],
     tool_results: &[crate::tool_bridge::ToolResult],
-    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    routing: Option<&crate::spec::blueprint::ToolResultRouting>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     reasoning: Option<String>,
 ) {
@@ -239,7 +239,7 @@ pub(crate) fn apply_one_tool_result(
     tool_name: &str,
     tool_call_id: &str,
     result: leviath_core::region::EntryContent,
-    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    routing: Option<&crate::spec::blueprint::ToolResultRouting>,
     sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
     sink: Option<&crate::context_setup::PartSink<'_>>,
 ) {
@@ -489,7 +489,7 @@ pub(crate) fn truncate_file(content: String, max_tokens: Option<usize>) -> Strin
 }
 
 /// File tracking: for each `read_file`/`write_file` result (per the stage's
-/// [`FileTrackingConfig`](leviath_core::blueprint::FileTrackingConfig)), upsert
+/// [`FileTrackingConfig`](crate::spec::blueprint::FileTrackingConfig)), upsert
 /// the file body into the configured HashMap region (keyed by path, so re-reads
 /// de-dup) and replace the inline tool result with a short reference - keeping
 /// large file bodies out of the rolling conversation. No-op unless the region
@@ -497,7 +497,7 @@ pub(crate) fn truncate_file(content: String, max_tokens: Option<usize>) -> Strin
 /// its `content` argument (no re-read needed in the ECS).
 pub(crate) fn apply_file_tracking(
     window: &mut ContextWindow,
-    ft: &leviath_core::blueprint::FileTrackingConfig,
+    ft: &crate::spec::blueprint::FileTrackingConfig,
     tool_calls: &[crate::components::ToolCall],
     merged: &mut [crate::tool_bridge::ToolResult],
 ) {
@@ -558,7 +558,7 @@ pub(crate) fn apply_file_tracking(
 }
 
 /// The tool names that count as a file modification for the agent's current
-/// stage: the built-in [`MODIFYING_TOOLS`](leviath_core::blueprint::MODIFYING_TOOLS)
+/// stage: the built-in [`MODIFYING_TOOLS`](crate::spec::blueprint::MODIFYING_TOOLS)
 /// plus any extra names declared by that stage's outgoing transition gates (for
 /// agents whose writes go through MCP or script tools). All canonical, so a
 /// `bash`-style alias in a gate's `tools` list still matches its real tool.
@@ -566,7 +566,7 @@ pub(crate) fn stage_modifying_tools(
     blueprint: Option<&AgentBlueprint>,
     cursor: Option<&StageCursor>,
 ) -> Vec<String> {
-    let mut names: Vec<String> = leviath_core::blueprint::MODIFYING_TOOLS
+    let mut names: Vec<String> = crate::spec::blueprint::MODIFYING_TOOLS
         .iter()
         .map(|t| (*t).to_string())
         .collect();

@@ -65,8 +65,10 @@ keep_results = false
 #[test]
 fn the_rewrite_says_exactly_what_it_said_before() {
     let (out, _) = rewrite(OLD).expect("there is something to change");
-    let before = leviath_core::manifest::parse_manifest(OLD).expect("the old spelling parses");
-    let after = leviath_core::manifest::parse_manifest(&out).expect("the new spelling parses");
+    let before =
+        leviath_runtime::spec::manifest::parse_manifest(OLD).expect("the old spelling parses");
+    let after =
+        leviath_runtime::spec::manifest::parse_manifest(&out).expect("the new spelling parses");
     assert_eq!(format!("{before:#?}"), format!("{after:#?}"));
 }
 

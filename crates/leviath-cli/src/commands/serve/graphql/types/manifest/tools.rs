@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 use super::super::blueprint::Region;
 use super::count;
@@ -134,7 +134,7 @@ pub(crate) struct ToolRouting {
     /// The blueprint the region names resolve in.
     blueprint: Arc<CoreBlueprint>,
     /// The routing block as the stage wrote it.
-    routing: leviath_core::blueprint::ToolResultRouting,
+    routing: leviath_runtime::spec::blueprint::ToolResultRouting,
 }
 
 /// Where a stage's tool results land in its context.
@@ -203,7 +203,7 @@ impl ToolRouting {
     /// Describe one stage's routing block against the blueprint that holds it.
     pub(crate) fn of(
         blueprint: &Arc<CoreBlueprint>,
-        routing: &leviath_core::blueprint::ToolResultRouting,
+        routing: &leviath_runtime::spec::blueprint::ToolResultRouting,
     ) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),

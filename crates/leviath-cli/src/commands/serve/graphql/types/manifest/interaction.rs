@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 use super::super::blueprint::Region;
 
@@ -20,9 +20,9 @@ pub(crate) enum UnattendedPolicy {
     Ask,
 }
 
-impl From<leviath_core::blueprint::UnattendedPolicy> for UnattendedPolicy {
-    fn from(policy: leviath_core::blueprint::UnattendedPolicy) -> Self {
-        use leviath_core::blueprint::UnattendedPolicy as Core;
+impl From<leviath_runtime::spec::blueprint::UnattendedPolicy> for UnattendedPolicy {
+    fn from(policy: leviath_runtime::spec::blueprint::UnattendedPolicy) -> Self {
+        use leviath_runtime::spec::blueprint::UnattendedPolicy as Core;
         match policy {
             Core::AutoApprove => Self::AutoApprove,
             Core::Ask => Self::Ask,
@@ -42,9 +42,9 @@ pub(crate) enum InteractionPointStyle {
     Confirm,
 }
 
-impl From<&leviath_core::blueprint::InteractionStyle> for InteractionPointStyle {
-    fn from(style: &leviath_core::blueprint::InteractionStyle) -> Self {
-        use leviath_core::blueprint::InteractionStyle as Core;
+impl From<&leviath_runtime::spec::blueprint::InteractionStyle> for InteractionPointStyle {
+    fn from(style: &leviath_runtime::spec::blueprint::InteractionStyle) -> Self {
+        use leviath_runtime::spec::blueprint::InteractionStyle as Core;
         match style {
             Core::FreeText => Self::FreeText,
             Core::MultipleChoice => Self::MultipleChoice,
@@ -70,7 +70,7 @@ pub(crate) struct InteractionPoint {
     /// The blueprint the document region resolves in.
     blueprint: Arc<CoreBlueprint>,
     /// The point as the stage wrote it.
-    point: leviath_core::blueprint::InteractionPoint,
+    point: leviath_runtime::spec::blueprint::InteractionPoint,
 }
 
 /// A checkpoint a stage raises, where the run waits for a person.
@@ -157,7 +157,7 @@ impl InteractionPoint {
     /// Describe one checkpoint against the blueprint that holds it.
     pub(crate) fn of(
         blueprint: &Arc<CoreBlueprint>,
-        point: &leviath_core::blueprint::InteractionPoint,
+        point: &leviath_runtime::spec::blueprint::InteractionPoint,
     ) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),

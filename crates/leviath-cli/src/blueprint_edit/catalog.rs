@@ -95,7 +95,7 @@ pub(crate) fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<Ca
             let manifest = std::fs::read_to_string(&manifest_path).ok();
             let stages = manifest
                 .as_deref()
-                .and_then(|m| leviath_core::manifest::parse_manifest(m).ok())
+                .and_then(|m| leviath_runtime::spec::manifest::parse_manifest(m).ok())
                 .map(|bp| bp.stages.iter().map(|s| s.name.clone()).collect())
                 .unwrap_or_default();
             let source = match a.source {
@@ -124,13 +124,13 @@ pub(crate) fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<Ca
             entries.push(CatalogEntry {
                 name: agent.name.to_string(),
                 version: agent.version.to_string(),
-                description: leviath_core::manifest::parse_manifest(manifest)
+                description: leviath_runtime::spec::manifest::parse_manifest(manifest)
                     .map(|bp| bp.description)
                     .unwrap_or_default(),
                 source: Source::Bundled,
                 dir: None,
                 manifest: Some(manifest.to_string()),
-                stages: leviath_core::manifest::parse_manifest(manifest)
+                stages: leviath_runtime::spec::manifest::parse_manifest(manifest)
                     .map(|bp| bp.stages.iter().map(|s| s.name.clone()).collect())
                     .unwrap_or_default(),
                 bundled: true,

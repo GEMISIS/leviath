@@ -10,7 +10,6 @@
 //! - **Blueprints**: Agent definitions including stages, models, and tools
 //! - **Lifecycle**: Policies for eviction, compaction, and context management
 
-pub mod blueprint;
 pub mod cache;
 pub mod config;
 pub mod context_cause;
@@ -20,9 +19,7 @@ pub mod error;
 pub mod execution;
 pub mod files;
 pub mod interaction;
-pub mod layout;
 pub mod lifecycle;
-pub mod manifest;
 pub mod mcp_names;
 pub mod mime;
 pub mod output;
@@ -35,24 +32,19 @@ pub mod run_archive;
 pub mod run_meta;
 pub mod sandbox;
 pub mod secrets;
+pub mod stage_tools;
 pub mod sync;
 pub mod taint;
 pub mod telemetry;
 pub mod text;
 pub mod write_limits;
 
-pub use blueprint::{
-    Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, NudgeConfig, ReadPathsConfig,
-    RepetitionDetectionConfig, ResolvedNudge, Stage, StuckConfig, ToolResultRouting,
-    TransitionCondition, TransitionEdge, resolve_nudge,
-};
 pub use cache::CacheHint;
 pub use context_cause::ContextCause;
 pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
 };
 pub use error::{Error, Result, ValidationError};
-pub use layout::{BudgetSpec, ContextLayout, RegionDefinition};
 pub use lifecycle::CompactionConfig;
 pub use output::{
     FINAL_OUTPUT_FILE, FinalOutput, FinalOutputDescriptor, MAX_FINAL_OUTPUT_BYTES, OutputSpec,

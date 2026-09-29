@@ -878,10 +878,10 @@ pub(crate) fn edited_path(call: &crate::components::ToolCall) -> Option<&str> {
 /// a hot-reloaded config applies from the next run rather than mutating live
 /// ones (same snapshot semantics as the batch-tool-hint global). Absent on
 /// worlds that spawn agents without going through the seeded spawn (tests,
-/// embedders); [`leviath_core::resolve_nudge`] then falls through to the
+/// embedders); [`crate::spec::resolve_nudge`] then falls through to the
 /// built-in defaults.
 #[derive(Component, Debug, Clone, Default)]
-pub(crate) struct GlobalNudge(pub leviath_core::NudgeConfig);
+pub(crate) struct GlobalNudge(pub crate::spec::NudgeConfig);
 
 /// Whether this stage's deliverable *is* its text response.
 ///
@@ -896,7 +896,7 @@ pub(crate) struct GlobalNudge(pub leviath_core::NudgeConfig);
 pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor) -> bool {
     matches!(
         bp.0.stages.get(cursor.index).map(|s| &s.mode),
-        Some(leviath_core::blueprint::StageMode::InteractivePoints { points }) if !points.is_empty()
+        Some(crate::spec::blueprint::StageMode::InteractivePoints { points }) if !points.is_empty()
     )
 }
 
@@ -925,7 +925,7 @@ type EmptyResponseQuery = (
 ///
 /// The nudge is programmable per stage (`[stages.<name>.nudge]`), per agent
 /// (`[agent.nudge]`), and globally (config `[nudge]`), each field cascading
-/// independently through [`leviath_core::resolve_nudge`]. With nothing
+/// independently through [`crate::spec::resolve_nudge`]. With nothing
 /// configured, a stage whose output is reviewed is never nudged - see
 /// `stage_output_is_reviewed` - but an explicit `enabled` at any level speaks
 /// for itself. The text supports `{stage}` and `{regions}` placeholders.
@@ -944,7 +944,7 @@ pub(crate) fn handle_empty_response(
         let sink = state.and_then(|state| {
             crate::context_setup::PartSink::over(&sources, &state.agent_id, &mime)
         });
-        let nudge = leviath_core::resolve_nudge(
+        let nudge = crate::spec::resolve_nudge(
             global.map(|g| &g.0),
             bp.0.nudge.as_ref(),
             stage.and_then(|s| s.nudge.as_ref()),
@@ -1080,7 +1080,7 @@ pub(crate) const MAX_NO_IMAGE_NUDGES: usize = 3;
 /// manifest already validated as mime patterns. Image first, then video, then
 /// audio, when a stage names more than one.
 pub(crate) fn stage_expected_media(
-    stage: Option<&leviath_core::blueprint::Stage>,
+    stage: Option<&crate::spec::blueprint::Stage>,
 ) -> Option<&'static str> {
     let stage = stage?;
     let format = stage.output.as_ref().and_then(|o| o.format.as_deref());
@@ -1137,7 +1137,7 @@ fn store_reply(
     window: &mut ContextWindow,
     infer: &crate::components::InferenceResult,
     reasoning: Option<String>,
-    stage: Option<&leviath_core::blueprint::Stage>,
+    stage: Option<&crate::spec::blueprint::Stage>,
     sink: Option<&crate::context_setup::PartSink<'_>>,
 ) {
     // The stage may send some produced parts to regions of their own

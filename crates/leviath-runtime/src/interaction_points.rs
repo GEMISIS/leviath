@@ -27,8 +27,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::spec::blueprint::{InteractionPoint, InteractionStyle, StageMode, UnattendedPolicy};
 use bevy_ecs::prelude::*;
-use leviath_core::blueprint::{InteractionPoint, InteractionStyle, StageMode, UnattendedPolicy};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
@@ -874,25 +874,24 @@ mod tests {
     }
 
     fn blueprint_with(points: Vec<InteractionPoint>) -> AgentBlueprint {
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-        let mut stage = leviath_core::Stage::new(
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
+        let mut stage = crate::spec::Stage::new(
             "plan".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
         stage.mode = StageMode::InteractivePoints { points };
-        let bp =
-            leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
         AgentBlueprint(bp)
     }
 
     /// A single-stage blueprint whose stage is *not* an interactive-points stage.
     fn noninteractive_bp() -> AgentBlueprint {
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-        let stage = leviath_core::Stage::new(
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
+        let stage = crate::spec::Stage::new(
             "auto".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
-        AgentBlueprint(leviath_core::Blueprint::new(
+        AgentBlueprint(crate::spec::Blueprint::new(
             "t".to_string(),
             "d".to_string(),
             vec![stage],
@@ -1055,12 +1054,12 @@ mod tests {
         let bp = blueprint_with(vec![plan_point()]);
         assert!(stage_points(&bp, &StageCursor { index: 0 }).is_some());
         // A non-interactive stage.
-        let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
-        let stage = leviath_core::Stage::new(
+        let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
+        let stage = crate::spec::Stage::new(
             "auto".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         );
-        let bp2 = AgentBlueprint(leviath_core::Blueprint::new(
+        let bp2 = AgentBlueprint(crate::spec::Blueprint::new(
             "t".to_string(),
             "d".to_string(),
             vec![stage],

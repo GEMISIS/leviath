@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::ValidationError;
-use crate::layout::ContextLayout;
+use crate::spec::layout::ContextLayout;
+use leviath_core::error::ValidationError;
 
 /// Context transform for converting between agent types.
 ///
@@ -238,30 +238,7 @@ pub const DEFAULT_GATE_ATTEMPTS: usize = 3;
 /// [`TransitionGate::tools`].
 pub const MODIFYING_TOOLS: &[&str] = &["write_file", "edit_file"];
 
-/// The tool an agent calls to hand back the run's final output.
-///
-/// Named here rather than in `leviath-tools` because both the blueprint
-/// validator and the manifest parser need it, and neither may depend on the
-/// tools crate.
-pub const SUBMIT_OUTPUT_TOOL: &str = "submit_output";
-
-/// The tool that starts a fan-out: one worker per item, all at once.
-///
-/// The single entry point to the fan-out engine. A `mode = "fan_out"` stage is
-/// sugar that grants this tool and transitions to its `merge_stage` once the
-/// call returns; any other stage can grant it directly and fan out in the
-/// middle of its own work, as many times as it needs.
-///
-/// It replaced a design where a fan-out stage's raw text output *was* the work
-/// item list, parsed out of prose by the runtime. That was the one structured
-/// answer the framework asked for without a tool to carry it, and it is what
-/// killed a `deep-researcher` run that answered, accurately, "I have completed
-/// the research."
-///
-/// Named here for the same reason [`SUBMIT_OUTPUT_TOOL`] is: the manifest parser
-/// and the blueprint validator both need it and neither may depend on the tools
-/// crate.
-pub const FAN_OUT_TOOL: &str = "fan_out";
+pub use leviath_core::stage_tools::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
 
 /// Times a stage is re-run for a missing final output before the gate gives up
 /// and lets it through with the run's `output_forced` flag set. Matches
@@ -317,7 +294,7 @@ pub struct ResolvedNudge {
 
 /// Resolve the nudge policy for a stage, cascading each field independently
 /// stage → agent → global. Narrowest level wins with no clamping - like
-/// [`crate::taint::resolve_batch_tool_hint`], this is a UX knob, not a
+/// [`leviath_core::taint::resolve_batch_tool_hint`], this is a UX knob, not a
 /// permission, so a manifest may raise `max` above the global setting.
 ///
 /// `stage_is_reviewed` feeds only the *default* for `enabled`: a stage with

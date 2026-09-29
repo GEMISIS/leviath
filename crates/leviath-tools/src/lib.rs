@@ -42,7 +42,7 @@ pub use validate::*;
 /// Re-exported from `leviath-core`, which owns the name because the blueprint
 /// validator and the manifest parser both need it and neither may depend on
 /// this crate.
-pub use leviath_core::blueprint::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
+pub use leviath_core::stage_tools::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
 
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
 ///

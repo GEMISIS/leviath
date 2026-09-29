@@ -11,7 +11,7 @@ fn safe(shell: &[&str], tools: &[&str]) -> SafeCommands {
 fn resolved(
     config: &SafeCommands,
     agent: Option<&AgentSafeCommands>,
-    blueprint: Option<&leviath_core::blueprint::SafeCommandsConfig>,
+    blueprint: Option<&leviath_runtime::spec::blueprint::SafeCommandsConfig>,
     global_opt_in: bool,
 ) -> BTreeMap<String, SafeSource> {
     resolve_safe_keys(config, agent, blueprint, global_opt_in)
@@ -85,7 +85,7 @@ fn each_layer_contributes_and_the_narrowest_one_is_named() {
 #[test]
 fn a_blueprint_list_is_inert_until_the_user_opts_in() {
     let config = SafeCommands::default();
-    let bp = leviath_core::blueprint::SafeCommandsConfig {
+    let bp = leviath_runtime::spec::blueprint::SafeCommandsConfig {
         shell: vec!["./gradlew".to_string()],
         tools: vec!["web_fetch".to_string()],
     };

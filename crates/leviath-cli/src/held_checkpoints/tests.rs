@@ -39,8 +39,9 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
     )
 }
 
-fn parse(unattended: &str, required: &str) -> leviath_core::Blueprint {
-    leviath_core::manifest::parse_manifest(&manifest(unattended, required)).expect("fixture parses")
+fn parse(unattended: &str, required: &str) -> leviath_runtime::spec::Blueprint {
+    leviath_runtime::spec::manifest::parse_manifest(&manifest(unattended, required))
+        .expect("fixture parses")
 }
 
 #[test]

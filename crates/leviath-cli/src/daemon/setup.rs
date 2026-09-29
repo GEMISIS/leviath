@@ -837,7 +837,7 @@ async fn warm_blueprint_mcp(pool: &crate::daemon::mcp_pool::McpPool, blueprint_p
 /// The provider half of an entry is dropped on purpose. A blueprint may name a
 /// model with no provider at all - that is the point of `models = ["gpt-5.5"]` -
 /// so the name is the only part every entry is guaranteed to have.
-fn blueprint_model_names(blueprint: &leviath_core::Blueprint) -> Vec<String> {
+fn blueprint_model_names(blueprint: &leviath_runtime::spec::Blueprint) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     for stage in &blueprint.stages {
         for entry in &stage.model.models {
@@ -862,7 +862,7 @@ async fn warm_blueprint_models(
     let Ok(content) = std::fs::read_to_string(blueprint_path) else {
         return;
     };
-    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+    let Ok(blueprint) = leviath_runtime::spec::manifest::parse_manifest(&content) else {
         return;
     };
     let models = blueprint_model_names(&blueprint);
@@ -901,11 +901,11 @@ async fn warm_fanout_worker_mcp(
     let Ok(content) = std::fs::read_to_string(blueprint_path) else {
         return;
     };
-    let Ok(blueprint) = leviath_core::manifest::parse_manifest(&content) else {
+    let Ok(blueprint) = leviath_runtime::spec::manifest::parse_manifest(&content) else {
         return;
     };
     for stage in &blueprint.stages {
-        let leviath_core::blueprint::StageMode::FanOut { config } = &stage.mode else {
+        let leviath_runtime::spec::blueprint::StageMode::FanOut { config } = &stage.mode else {
             continue;
         };
         // A `worker_stage` worker runs the parent blueprint (already warmed).
@@ -1716,7 +1716,7 @@ system_prompt = "y"
 model = { models = ["shared", "other", ""] }
 "#;
         let blueprint =
-            leviath_core::manifest::parse_manifest(manifest).expect("the fixture parses");
+            leviath_runtime::spec::manifest::parse_manifest(manifest).expect("the fixture parses");
 
         assert_eq!(
             blueprint_model_names(&blueprint),
@@ -1747,7 +1747,7 @@ entry_stage = "one"
 system_prompt = "x"
 "#;
         let blueprint =
-            leviath_core::manifest::parse_manifest(manifest).expect("the fixture parses");
+            leviath_runtime::spec::manifest::parse_manifest(manifest).expect("the fixture parses");
         assert_eq!(
             blueprint_model_names(&blueprint),
             vec!["claude-sonnet-4-6".to_string()],

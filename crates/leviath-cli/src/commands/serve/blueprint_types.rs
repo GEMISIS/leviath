@@ -110,8 +110,10 @@ pub(super) struct DependencyInfo {
 /// The declared dependencies of a blueprint, in declaration order, so the
 /// detail route carries them structured. Empty for a blueprint that declares
 /// none.
-pub(super) fn dependency_infos(blueprint: &leviath_core::Blueprint) -> Vec<DependencyInfo> {
-    use leviath_core::blueprint::DependencyKind;
+pub(super) fn dependency_infos(
+    blueprint: &leviath_runtime::spec::Blueprint,
+) -> Vec<DependencyInfo> {
+    use leviath_runtime::spec::blueprint::DependencyKind;
     blueprint
         .dependencies
         .iter()
@@ -149,7 +151,7 @@ mod tests {
 
     #[test]
     fn dependency_infos_carries_every_kind() {
-        let bp = leviath_core::manifest::parse_manifest(
+        let bp = leviath_runtime::spec::manifest::parse_manifest(
             "[agent]\nname = \"a\"\n\n\
              [[dependencies]]\nname = \"m\"\nkind = \"mcp_server\"\nserver = \"meshy\"\n\
              env = [\"K\"]\nremedy = \"r\"\ndescription = \"d\"\n\
@@ -177,7 +179,8 @@ mod tests {
         assert!(json.contains("\"kind\":\"mcp_server\""), "{json}");
         assert!(json.contains("\"installable\":true"), "{json}");
         // An agent with no dependencies yields an empty list.
-        let none = leviath_core::manifest::parse_manifest("[agent]\nname = \"n\"\n").unwrap();
+        let none =
+            leviath_runtime::spec::manifest::parse_manifest("[agent]\nname = \"n\"\n").unwrap();
         assert!(dependency_infos(&none).is_empty());
     }
 }

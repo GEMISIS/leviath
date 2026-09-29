@@ -123,7 +123,7 @@ pub(crate) fn text_part(sink: Option<&PartSink<'_>>, name: &str, text: &str) -> 
 /// reach here directly.
 pub(crate) fn ingest_parts(
     window: &mut ContextWindow,
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &crate::spec::Blueprint,
     parts: Vec<InboundPart>,
     sink: &PartSink<'_>,
 ) -> Result<(), String> {
@@ -201,8 +201,8 @@ mod tests {
         window
     }
 
-    fn blueprint() -> leviath_core::Blueprint {
-        leviath_core::manifest::parse_manifest(
+    fn blueprint() -> crate::spec::Blueprint {
+        crate::spec::manifest::parse_manifest(
             "[agent]\nname = \"t\"\n\n[context.regions]\ntask = { kind = \"pinned\" }\nart = { kind = \"pinned\", accepts = [\"image/*\"] }\n",
         )
         .unwrap()
@@ -288,7 +288,7 @@ mod tests {
             err.contains("caption on 'x.png' has nowhere to go"),
             "{err}"
         );
-        let taskless = leviath_core::manifest::parse_manifest(
+        let taskless = crate::spec::manifest::parse_manifest(
             "[agent]\nname = \"t\"\n\n[context.regions]\nlog = { kind = \"temporary\" }\n",
         )
         .unwrap();

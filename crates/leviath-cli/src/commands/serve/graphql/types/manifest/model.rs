@@ -65,9 +65,9 @@ pub(crate) enum MaxOutputTokens {
     RegionPercent(MaxTokensRegionPercent),
 }
 
-impl From<leviath_core::blueprint::OutputCap> for MaxOutputTokens {
-    fn from(cap: leviath_core::blueprint::OutputCap) -> Self {
-        use leviath_core::blueprint::OutputCap as Core;
+impl From<leviath_runtime::spec::blueprint::OutputCap> for MaxOutputTokens {
+    fn from(cap: leviath_runtime::spec::blueprint::OutputCap) -> Self {
+        use leviath_runtime::spec::blueprint::OutputCap as Core;
         match cap {
             Core::Tokens(tokens) => Self::Count(MaxTokensCount {
                 tokens: count(tokens),
@@ -115,7 +115,7 @@ impl ModelParameters {
         let temperature = parameters.get("temperature").and_then(|v| v.as_f64());
         let max_output_tokens = parameters
             .get("max_output_tokens")
-            .and_then(|value| leviath_core::blueprint::OutputCap::parse(value).ok())
+            .and_then(|value| leviath_runtime::spec::blueprint::OutputCap::parse(value).ok())
             .map(MaxOutputTokens::from);
         let rest: serde_json::Map<String, serde_json::Value> = parameters
             .iter()
@@ -147,8 +147,8 @@ pub(crate) struct StageModelConfig {
     pub(crate) request_timeout_secs: Option<i32>,
 }
 
-impl From<&leviath_core::blueprint::ModelConfig> for StageModelConfig {
-    fn from(model: &leviath_core::blueprint::ModelConfig) -> Self {
+impl From<&leviath_runtime::spec::blueprint::ModelConfig> for StageModelConfig {
+    fn from(model: &leviath_runtime::spec::blueprint::ModelConfig) -> Self {
         Self {
             models: model
                 .models

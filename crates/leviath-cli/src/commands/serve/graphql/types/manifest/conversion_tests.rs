@@ -30,7 +30,7 @@ use super::transition::{MappingTransform, TransitionCondition, TransitionTransfo
 /// against their blueprint can be asked for through the schema that serves them.
 struct Probe {
     /// The manifest under test.
-    blueprint: Arc<leviath_core::Blueprint>,
+    blueprint: Arc<leviath_runtime::spec::Blueprint>,
 }
 
 #[async_graphql::Object]
@@ -49,7 +49,8 @@ impl Probe {
 async fn ask(manifest: &str, query: &str) -> serde_json::Value {
     use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
-    let parsed = leviath_core::manifest::parse_manifest(manifest).expect("the manifest parses");
+    let parsed =
+        leviath_runtime::spec::manifest::parse_manifest(manifest).expect("the manifest parses");
     let schema = Schema::build(
         Probe {
             blueprint: Arc::new(parsed),
@@ -69,7 +70,7 @@ async fn ask(manifest: &str, query: &str) -> serde_json::Value {
 /// Every condition an edge can carry has its own value.
 #[test]
 fn every_transition_condition_is_translated() {
-    use leviath_core::blueprint::TransitionCondition as Core;
+    use leviath_runtime::spec::blueprint::TransitionCondition as Core;
 
     let cases = [
         (Core::Always, TransitionCondition::Always),
@@ -87,7 +88,7 @@ fn every_transition_condition_is_translated() {
 /// And every transform, including the two that carry nothing.
 #[test]
 fn every_edge_transform_is_translated() {
-    use leviath_core::blueprint::EdgeTransform as Core;
+    use leviath_runtime::spec::blueprint::EdgeTransform as Core;
 
     assert_eq!(
         TransitionTransform::from(&Core::Direct),
@@ -331,7 +332,7 @@ async fn an_entry_stage_that_is_not_declared_answers_null_and_keeps_its_name() {
 /// fields it keeps.
 #[test]
 fn every_mapping_transform_is_translated() {
-    use leviath_core::blueprint::{ContentTransform, ContextTransform, RegionMapping};
+    use leviath_runtime::spec::blueprint::{ContentTransform, ContextTransform, RegionMapping};
 
     let transform = ContextTransform {
         from_blueprint: "a".to_string(),
@@ -376,7 +377,7 @@ fn every_mapping_transform_is_translated() {
 /// A checkpoint's two enums, both arms each.
 #[test]
 fn a_checkpoints_words_are_translated() {
-    use leviath_core::blueprint::{InteractionStyle, UnattendedPolicy as Core};
+    use leviath_runtime::spec::blueprint::{InteractionStyle, UnattendedPolicy as Core};
 
     assert_eq!(
         UnattendedPolicy::from(Core::AutoApprove),
@@ -492,11 +493,11 @@ fn every_region_policy_is_translated() {
     assert_eq!(compacting.compact_count, Some(4));
 
     assert_eq!(
-        SeedRefresh::from(leviath_core::layout::SeedRefresh::Once),
+        SeedRefresh::from(leviath_runtime::spec::layout::SeedRefresh::Once),
         SeedRefresh::Once
     );
     assert_eq!(
-        SeedRefresh::from(leviath_core::layout::SeedRefresh::EachStage),
+        SeedRefresh::from(leviath_runtime::spec::layout::SeedRefresh::EachStage),
         SeedRefresh::EachStage
     );
 }
@@ -546,8 +547,8 @@ fn every_sandbox_word_is_translated() {
 /// Both answers to a worker that failed, and both to a validator that refused.
 #[test]
 fn the_failure_policies_are_translated() {
-    use leviath_core::blueprint::WorkerFailurePolicy as Core;
     use leviath_core::output::OnValidatorError;
+    use leviath_runtime::spec::blueprint::WorkerFailurePolicy as Core;
 
     assert_eq!(
         WorkerFailurePolicy::from(&Core::Continue),
@@ -570,7 +571,7 @@ fn the_failure_policies_are_translated() {
 /// Each shape an output cap can take is its own type, with its number.
 #[test]
 fn every_output_cap_shape_is_translated() {
-    use leviath_core::blueprint::OutputCap;
+    use leviath_runtime::spec::blueprint::OutputCap;
 
     match MaxOutputTokens::from(OutputCap::Tokens(8_000)) {
         MaxOutputTokens::Count(count) => assert_eq!(count.tokens, 8_000),
@@ -692,7 +693,7 @@ max_result_tokens_per_tool = { shell = 500, read_file = 2000 }
 fn a_server_templates_transport_is_read_or_left_out() {
     use super::dependency::{McpServerTemplate, McpTransport};
 
-    let template = |transport: Option<&str>| leviath_core::blueprint::McpServerTemplate {
+    let template = |transport: Option<&str>| leviath_runtime::spec::blueprint::McpServerTemplate {
         transport: transport.map(str::to_string),
         command: Some("docs-mcp".to_string()),
         url: None,

@@ -1,7 +1,7 @@
 //! Filesystem discovery of `agent.leviath` manifests.
 //!
-//! The pure `TOML` -> [`leviath_core::Blueprint`] parser lives in
-//! [`leviath_core::manifest`]; it is re-exported here as [`parse_manifest`] so
+//! The pure `TOML` -> [`leviath_runtime::spec::Blueprint`] parser lives in
+//! [`leviath_runtime::spec::manifest`]; it is re-exported here as [`parse_manifest`] so
 //! `super::manifest::parse_manifest` call sites resolve.
 
 use std::path::{Path, PathBuf};
@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 /// For the warnings a spawn prints beside the daemon's answer: a manifest
 /// that will not read or parse is the daemon's to report as the spawn error,
 /// and a warning must never be why a spawn fails.
-pub(crate) fn blueprint_at(path: &Path) -> Option<leviath_core::Blueprint> {
+pub(crate) fn blueprint_at(path: &Path) -> Option<leviath_runtime::spec::Blueprint> {
     let content = std::fs::read_to_string(path).ok()?;
-    leviath_core::manifest::parse_manifest(&content).ok()
+    leviath_runtime::spec::manifest::parse_manifest(&content).ok()
 }
 
 /// The "this output format retires your checks" warning for the blueprint at
@@ -25,7 +25,7 @@ pub(crate) fn retired_check_warnings_at(
 ) -> Vec<String> {
     match (request, blueprint_at(path)) {
         (Some(_), Some(blueprint)) => {
-            leviath_core::output::retired_check_warnings(&blueprint, request)
+            leviath_runtime::spec::blueprint::retired_check_warnings(&blueprint, request)
         }
         _ => Vec::new(),
     }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_core::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 use super::super::blueprint::{Region, ToolUseGuidance};
 use super::count;
@@ -40,9 +40,9 @@ pub(crate) enum StageMode {
     Output,
 }
 
-impl From<&leviath_core::blueprint::StageMode> for StageMode {
-    fn from(mode: &leviath_core::blueprint::StageMode) -> Self {
-        use leviath_core::blueprint::StageMode as Core;
+impl From<&leviath_runtime::spec::blueprint::StageMode> for StageMode {
+    fn from(mode: &leviath_runtime::spec::blueprint::StageMode) -> Self {
+        use leviath_runtime::spec::blueprint::StageMode as Core;
         match mode {
             Core::Autonomous => Self::Autonomous,
             Core::Interactive => Self::Interactive,
@@ -69,7 +69,7 @@ pub(crate) struct FanOut {
     /// The blueprint the stage and region names resolve in.
     pub(crate) blueprint: Arc<CoreBlueprint>,
     /// The fan-out block as the stage wrote it.
-    pub(crate) config: leviath_core::blueprint::FanOutConfig,
+    pub(crate) config: leviath_runtime::spec::blueprint::FanOutConfig,
 }
 
 /// What a stage's fan-out splits into, and how.
@@ -230,7 +230,7 @@ impl StageContext {
 
 impl StageContext {
     /// The stage this block belongs to.
-    fn stage(&self) -> &leviath_core::blueprint::Stage {
+    fn stage(&self) -> &leviath_runtime::spec::blueprint::Stage {
         &self.blueprint.stages[self.at]
     }
 }
@@ -312,7 +312,7 @@ impl Stage {
     /// leave without producing anything.
     async fn output_requirement(&self) -> Option<OutputRequirement> {
         self.stage().require_output.then(|| OutputRequirement {
-            reasks: count(leviath_core::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            reasks: count(leviath_runtime::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
         })
     }
 
@@ -446,7 +446,7 @@ impl Stage {
     /// Empty for every mode but `INTERACTIVE_POINTS`.
     async fn interaction_points(&self) -> Vec<InteractionPoint> {
         match &self.stage().mode {
-            leviath_core::blueprint::StageMode::InteractivePoints { points } => points
+            leviath_runtime::spec::blueprint::StageMode::InteractivePoints { points } => points
                 .iter()
                 .map(|point| InteractionPoint::of(&self.blueprint, point))
                 .collect(),
@@ -458,7 +458,7 @@ impl Stage {
     /// mode.
     async fn fan_out(&self) -> Option<FanOut> {
         match &self.stage().mode {
-            leviath_core::blueprint::StageMode::FanOut { config } => Some(FanOut {
+            leviath_runtime::spec::blueprint::StageMode::FanOut { config } => Some(FanOut {
                 blueprint: Arc::clone(&self.blueprint),
                 config: config.clone(),
             }),
@@ -478,9 +478,9 @@ impl Stage {
         let stage = self.stage();
         let reviewed = matches!(
             &stage.mode,
-            leviath_core::blueprint::StageMode::InteractivePoints { points } if !points.is_empty()
+            leviath_runtime::spec::blueprint::StageMode::InteractivePoints { points } if !points.is_empty()
         );
-        let nudge = leviath_core::resolve_nudge(
+        let nudge = leviath_runtime::spec::resolve_nudge(
             Some(&config.nudge),
             self.blueprint.nudge.as_ref(),
             stage.nudge.as_ref(),
@@ -533,7 +533,7 @@ impl Stage {
 
 impl Stage {
     /// The stage this object stands for.
-    fn stage(&self) -> &leviath_core::blueprint::Stage {
+    fn stage(&self) -> &leviath_runtime::spec::blueprint::Stage {
         &self.blueprint.stages[self.at]
     }
 }

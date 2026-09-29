@@ -39,7 +39,7 @@ pub(crate) use leviath_core::config::TelemetryExporterKind;
 /// whether the tool itself is visible ([`available_tools`]) or approved at
 /// runtime ([`ToolPolicy`]).
 ///
-/// [`available_tools`]: leviath_core::blueprint::Stage::available_tools
+/// [`available_tools`]: leviath_runtime::spec::blueprint::Stage::available_tools
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptPermission {

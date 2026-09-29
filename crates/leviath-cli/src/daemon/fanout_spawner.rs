@@ -13,13 +13,13 @@ use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use leviath_core::blueprint::FanOutConfig;
 use leviath_providers::Tool;
 use leviath_runtime::fanout::FanOutSpawner;
 use leviath_runtime::host::SubAgentOp;
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::persistence::RunMetadata;
 use leviath_runtime::pipeline::{AgentBlueprint, force_transition};
+use leviath_runtime::spec::blueprint::FanOutConfig;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -248,7 +248,7 @@ fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, St
             .is_some_and(|n| n.to_lowercase().contains(&needle));
         let desc_matches = std::fs::read_to_string(&manifest)
             .ok()
-            .and_then(|c| leviath_core::manifest::parse_manifest(&c).ok())
+            .and_then(|c| leviath_runtime::spec::manifest::parse_manifest(&c).ok())
             .is_some_and(|bp| bp.description.to_lowercase().contains(&needle));
         if name_matches || desc_matches {
             return Ok(path);

@@ -10,7 +10,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ToolPolicy;
-use leviath_core::blueprint::{ToolGroup, is_tool_group_token};
+use leviath_runtime::spec::blueprint::{ToolGroup, is_tool_group_token};
 
 /// What a profile decides for a call: run it, put it to a person, or refuse it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,7 +233,7 @@ impl ToolRule {
                         entry: entry.to_string(),
                         reason: format!(
                             "not a tool group; the groups are {}",
-                            leviath_core::blueprint::group_tokens_list()
+                            leviath_runtime::spec::blueprint::group_tokens_list()
                         ),
                     });
                 }

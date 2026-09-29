@@ -6,7 +6,7 @@
 //! new-run preview and `lev validate --graph` agree on what a stage looks
 //! like and where it sits.
 //!
-//! - [`model`] reads a [`leviath_core::Blueprint`] into a [`StageGraph`]:
+//! - [`model`] reads a [`leviath_runtime::spec::Blueprint`] into a [`StageGraph`]:
 //!   both manifest shapes, fan-out hand-offs, self-loops as badges.
 //! - [`path`] turns a run's visit timeline into a graph of its own: one node
 //!   per visit, chained in the order they happened.

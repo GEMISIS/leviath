@@ -56,8 +56,8 @@ impl ToolSource {
     /// The `available_tools` group a tool from this source answers to. Both
     /// script directories are one group: `@scripts` grants a script wherever
     /// it lives, exactly as naming it would.
-    pub(crate) fn group(self) -> leviath_core::blueprint::ToolGroup {
-        use leviath_core::blueprint::ToolGroup;
+    pub(crate) fn group(self) -> leviath_runtime::spec::blueprint::ToolGroup {
+        use leviath_runtime::spec::blueprint::ToolGroup;
         match self {
             Self::Builtin => ToolGroup::Builtin,
             Self::Subagent => ToolGroup::Subagent,
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(ToolSource::Subagent.describe(), "sub-agent tool");
         assert_eq!(ToolSource::Agent.describe(), "this agent's script");
         assert_eq!(ToolSource::Global.describe(), "global script");
-        use leviath_core::blueprint::ToolGroup;
+        use leviath_runtime::spec::blueprint::ToolGroup;
         assert_eq!(ToolSource::Builtin.group(), ToolGroup::Builtin);
         assert_eq!(ToolSource::Subagent.group(), ToolGroup::Subagent);
         assert_eq!(ToolSource::Agent.group(), ToolGroup::Scripts);

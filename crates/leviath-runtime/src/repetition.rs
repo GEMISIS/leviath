@@ -104,10 +104,10 @@ impl RepetitionDetector {
     }
 
     /// Build a detector from a blueprint's
-    /// [`RepetitionDetectionConfig`](leviath_core::blueprint::RepetitionDetectionConfig),
+    /// [`RepetitionDetectionConfig`](crate::spec::blueprint::RepetitionDetectionConfig),
     /// filling any unset field from the [`RepetitionConfig`] defaults.
     pub(crate) fn from_detection_config(
-        cfg: &leviath_core::blueprint::RepetitionDetectionConfig,
+        cfg: &crate::spec::blueprint::RepetitionDetectionConfig,
     ) -> Self {
         let d = RepetitionConfig::default();
         Self::new(RepetitionConfig {
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn from_detection_config_maps_set_fields_and_defaults_unset() {
-        use leviath_core::blueprint::RepetitionDetectionConfig;
+        use crate::spec::blueprint::RepetitionDetectionConfig;
         let all = RepetitionDetectionConfig {
             max_repeat_calls: Some(1),
             max_readonly_streak: Some(2),

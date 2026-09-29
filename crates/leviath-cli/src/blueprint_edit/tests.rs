@@ -26,7 +26,7 @@ fn starter() -> ManifestDoc {
 
 /// The manifest re-read by the runtime after an edit: every mutator must
 /// leave something it accepts.
-fn runtime_ok(doc: &ManifestDoc) -> leviath_core::Blueprint {
+fn runtime_ok(doc: &ManifestDoc) -> leviath_runtime::spec::Blueprint {
     let text = doc.to_toml();
     doc.blueprint()
         .unwrap_or_else(|e| panic!("the runtime rejected the edited manifest: {e}\n{text}"))

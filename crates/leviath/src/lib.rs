@@ -90,9 +90,8 @@ pub use leviath_agent_client as agent_client;
 /// The types most embeddings touch first, importable in one line.
 pub mod prelude {
     pub use leviath_core::interaction::{InteractionRequest, InteractionResponse};
-    pub use leviath_core::{
-        Blueprint, BudgetSpec, ContextLayout, Error, PolicyConfig, RegionDefinition, Result,
-    };
+    pub use leviath_core::{Error, PolicyConfig, Result};
+    pub use leviath_runtime::spec::{Blueprint, BudgetSpec, ContextLayout, RegionDefinition};
     pub use leviath_runtime::{
         AgentEvent, AgentState, AgentStatus, AgentWorld, AgentWorldBuilder, BasicToolService,
         BlueprintSource, ContextWindow, EmbedError, EventStream, ProviderCreds, ProviderRegistry,

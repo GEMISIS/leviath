@@ -125,7 +125,7 @@ impl Catalog {
         }
         let name = entry.name.clone();
         let view = match entry.manifest.as_deref() {
-            Some(text) => leviath_core::manifest::parse_manifest(text)
+            Some(text) => leviath_runtime::spec::manifest::parse_manifest(text)
                 .map(|bp| FlowView::new(Arc::new(StageGraph::from_blueprint(&bp)), true))
                 .map_err(|e| e.to_string()),
             None => Err("the manifest could not be read".to_string()),

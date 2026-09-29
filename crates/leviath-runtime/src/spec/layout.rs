@@ -5,8 +5,8 @@
 //! to a hardware memory map that defines where different types of data live and
 //! how they're managed.
 
-use crate::error::ValidationError;
-use crate::region::{RegionKind, RegionSchema};
+use leviath_core::error::ValidationError;
+use leviath_core::region::{RegionKind, RegionSchema};
 use serde::{Deserialize, Serialize};
 
 /// The region a stage's `system_prompt` is written into, when a blueprint
@@ -472,7 +472,7 @@ impl ContextLayout {
     ///   including the parser's `max_tokens * 8 / 10` default).
     ///
     /// The `usize::MAX` sentinel is safe: a layout is always resolved before any
-    /// [`Region::needs_compaction`](crate::region::Region::needs_compaction) check.
+    /// [`Region::needs_compaction`](leviath_core::region::Region::needs_compaction) check.
     fn resolve_compacting_threshold(
         compact_at: Option<f64>,
         threshold_tokens: usize,
@@ -707,7 +707,7 @@ pub struct RegionDefinition {
     pub description: Option<String>,
 
     /// Whether `description` is also shown to the model, under the region's
-    /// name. Off by default - see [`crate::region::Region::describe_in_prompt`].
+    /// name. Off by default - see [`leviath_core::region::Region::describe_in_prompt`].
     #[serde(default)]
     pub describe_in_prompt: bool,
 
@@ -731,7 +731,7 @@ pub struct RegionDefinition {
     /// Setting this false protects the region wherever it is used, rather than
     /// at each of the N edges that might touch it. `clear` still applies - this
     /// says "do not paraphrase my content", not "keep it forever".
-    #[serde(default = "crate::default_true")]
+    #[serde(default = "leviath_core::default_true")]
     pub summarizable: bool,
 
     /// What this region does when a write does not fit.
@@ -740,15 +740,15 @@ pub struct RegionDefinition {
     /// entry is acceptable is a property of what the region holds, and does not
     /// change depending on which stage is writing to it.
     #[serde(default)]
-    pub admission: crate::region::Admission,
+    pub admission: leviath_core::region::Admission,
     /// How much this region's contents move between requests. See
-    /// [`crate::region::Volatility`].
+    /// [`leviath_core::region::Volatility`].
     ///
     /// Defaulted on the wire so a definition written before this existed still
     /// loads, and loads as the pessimistic value - which is what an unclassified
     /// region should be.
     #[serde(default)]
-    pub volatility: crate::region::Volatility,
+    pub volatility: leviath_core::region::Volatility,
 
     /// Optional custom message shown to the agent when this region is required
     /// but empty. Falls back to a generated default when `None`.
@@ -762,7 +762,7 @@ pub struct RegionDefinition {
     pub seed: Option<RegionSeed>,
 
     /// Mime type patterns this region takes; empty means anything. See
-    /// [`crate::region::Region::accepts`].
+    /// [`leviath_core::region::Region::accepts`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepts: Vec<String>,
 }
@@ -786,8 +786,8 @@ impl RegionDefinition {
             required: false,
             required_message: None,
             summarizable: true,
-            admission: crate::region::Admission::default(),
-            volatility: crate::region::Volatility::default(),
+            admission: leviath_core::region::Admission::default(),
+            volatility: leviath_core::region::Volatility::default(),
             seed: None,
             accepts: Vec::new(),
         }
@@ -1077,12 +1077,13 @@ mod tests {
 
     #[test]
     fn test_region_definition_with_schema() {
-        let schema = crate::region::RegionSchema::new(crate::region::ContentFormat::Json);
+        let schema =
+            leviath_core::region::RegionSchema::new(leviath_core::region::ContentFormat::Json);
         let def =
             RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000).with_schema(schema);
         assert_eq!(
             def.schema.as_ref().unwrap().format,
-            crate::region::ContentFormat::Json
+            leviath_core::region::ContentFormat::Json
         );
     }
 
@@ -1452,7 +1453,7 @@ mod tests {
                 "conv".to_string(),
                 RegionKind::SlidingWindow {
                     max_items: 50,
-                    eviction_strategy: crate::region::EvictionStrategy::PerItem,
+                    eviction_strategy: leviath_core::region::EvictionStrategy::PerItem,
                 },
                 5000,
             ),

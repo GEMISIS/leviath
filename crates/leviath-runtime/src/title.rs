@@ -221,7 +221,7 @@ fn resolve_title_model(
 pub fn stage_pairs(
     provider: &str,
     model: &str,
-    fallbacks: &[leviath_core::blueprint::ModelEntry],
+    fallbacks: &[crate::spec::blueprint::ModelEntry],
 ) -> Vec<(String, String)> {
     std::iter::once((provider.to_string(), model.to_string()))
         .chain(
@@ -1568,11 +1568,11 @@ mod tests {
     #[test]
     fn stage_pairs_puts_the_resolved_model_ahead_of_its_fallbacks() {
         let fallbacks = vec![
-            leviath_core::blueprint::ModelEntry {
+            crate::spec::blueprint::ModelEntry {
                 provider: "openai".to_string(),
                 model: "gpt-5-mini".to_string(),
             },
-            leviath_core::blueprint::ModelEntry {
+            crate::spec::blueprint::ModelEntry {
                 provider: "ollama".to_string(),
                 model: "qwen3".to_string(),
             },

@@ -76,9 +76,9 @@ pub(super) struct ToolStateParts<'a> {
     /// before the tool lane existed.
     pub(super) protected: Vec<crate::tools::ProtectedPath>,
     /// `[safe_commands]` the blueprint declares, if the user opted in.
-    pub(super) blueprint_safe: Option<&'a leviath_core::blueprint::SafeCommandsConfig>,
+    pub(super) blueprint_safe: Option<&'a leviath_runtime::spec::blueprint::SafeCommandsConfig>,
     /// `[read_paths]` the blueprint declares, if any.
-    pub(super) blueprint_read_paths: Option<&'a leviath_core::blueprint::ReadPathsConfig>,
+    pub(super) blueprint_read_paths: Option<&'a leviath_runtime::spec::blueprint::ReadPathsConfig>,
     /// The run's workdir, which read-path entries compile relative to.
     pub(super) workdir: std::path::PathBuf,
 }

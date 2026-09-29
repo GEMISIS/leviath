@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use leviath_core::ValidationError;
-use leviath_core::manifest::parse_manifest;
+use leviath_runtime::spec::manifest::parse_manifest;
 
 use crate::lint::{LintEnv, LintSeverity, lint_manifest};
 

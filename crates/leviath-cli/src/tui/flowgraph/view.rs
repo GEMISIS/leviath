@@ -1193,7 +1193,7 @@ fn fit_options(max_stem: f64) -> FitViewOptions {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
-    use leviath_core::manifest::parse_manifest;
+    use leviath_runtime::spec::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

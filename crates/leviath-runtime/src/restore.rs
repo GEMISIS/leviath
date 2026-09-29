@@ -1347,7 +1347,7 @@ mod tests {
             .0
             .get_mut(1)
             .unwrap()
-            .routing = Some(leviath_core::ToolResultRouting {
+            .routing = Some(crate::spec::ToolResultRouting {
             default_region: "knowledge".to_string(),
             ..Default::default()
         });
@@ -1499,7 +1499,7 @@ mod tests {
 
         // The restored stage routes tool results: the component comes in.
         let (mut world, entity) = agent_world();
-        let routed = leviath_core::ToolResultRouting {
+        let routed = crate::spec::ToolResultRouting {
             default_region: "knowledge".to_string(),
             ..Default::default()
         };
@@ -1531,7 +1531,7 @@ mod tests {
         // the spawn stage) is cleared rather than routing future batches.
         let (mut world, entity) = agent_world();
         world.entity_mut(entity).insert(ToolResultRoutingComponent {
-            routing: leviath_core::ToolResultRouting::default(),
+            routing: crate::spec::ToolResultRouting::default(),
         });
         restore_agent(
             &mut world,

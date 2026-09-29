@@ -17,7 +17,7 @@
 //! Free of ratatui and of the dashboard's own types: visits come in as
 //! [`Visit`], which the caller maps from whatever it reads off disk.
 
-use leviath_core::TransitionCondition;
+use leviath_runtime::spec::TransitionCondition;
 
 use super::content::RunPhase;
 use super::model::{EdgeClass, NodeKind, StageEdge, StageGraph, StageKind, StageNode};
@@ -207,7 +207,7 @@ pub(crate) fn path_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::manifest::parse_manifest;
+    use leviath_runtime::spec::manifest::parse_manifest;
 
     fn blueprint() -> StageGraph {
         StageGraph::from_blueprint(

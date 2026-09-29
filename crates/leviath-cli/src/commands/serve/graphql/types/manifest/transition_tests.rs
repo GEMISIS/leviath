@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use leviath_core::Blueprint as CoreBlueprint;
-use leviath_core::blueprint::{
+use leviath_runtime::spec::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::blueprint::{
     EdgeTransform, RegionCount, TransitionCondition as CoreCondition, TransitionEdge as CoreEdge,
     TransitionGate as CoreGate,
 };
@@ -34,7 +34,7 @@ fn blueprint() -> Arc<CoreBlueprint> {
                 \n\
                 [stages.build]\n\
                 mode = \"autonomous\"\n";
-    Arc::new(leviath_core::manifest::parse_manifest(text).expect("the manifest parses"))
+    Arc::new(leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses"))
 }
 
 /// One edge, custom-transformed and gated, as a manifest would write it.

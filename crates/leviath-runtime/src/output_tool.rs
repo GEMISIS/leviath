@@ -74,7 +74,7 @@ fn routing_token<'a>(content: &str, stage_names: &'a [String]) -> Option<&'a str
 
 /// Whether a tool name is the final-output tool this module handles.
 pub(crate) fn is_output_tool(name: &str) -> bool {
-    name == leviath_core::blueprint::SUBMIT_OUTPUT_TOOL
+    name == crate::spec::blueprint::SUBMIT_OUTPUT_TOOL
 }
 
 /// Everything a submission is judged against that is not the submission.

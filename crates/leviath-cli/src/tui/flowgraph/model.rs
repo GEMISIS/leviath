@@ -8,9 +8,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use leviath_core::blueprint::StageMode;
-use leviath_core::{Blueprint, EdgeTransform, TransitionCondition};
 use leviath_providers::capabilities::pattern_covers;
+use leviath_runtime::spec::blueprint::StageMode;
+use leviath_runtime::spec::{Blueprint, EdgeTransform, TransitionCondition};
 
 /// A blueprint's stages and transitions, ready to lay out and draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,7 +484,7 @@ impl StageGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::manifest::parse_manifest;
+    use leviath_runtime::spec::manifest::parse_manifest;
 
     fn graph(toml: &str) -> StageGraph {
         StageGraph::from_blueprint(&parse_manifest(toml).expect("fixture parses"))
@@ -851,7 +851,7 @@ worker_query = "anything that reads logs"
             NodeKind::Stage(StageKind::FanOut {
                 worker: WorkerRef::Query("anything that reads logs".to_string()),
                 merge: None,
-                max_workers: leviath_core::blueprint::DEFAULT_MAX_WORKERS,
+                max_workers: leviath_runtime::spec::blueprint::DEFAULT_MAX_WORKERS,
             })
         );
         // External nodes come after every stage, and are not stages.

@@ -46,7 +46,7 @@ pub(crate) struct InferenceConfig {
     /// The stage's output cap (`parameters.max_output_tokens`), resolved
     /// against the model and the window when each request is built. `None`
     /// caps at the model's `max_output_tokens` capability.
-    pub max_output_tokens: Option<leviath_core::blueprint::OutputCap>,
+    pub max_output_tokens: Option<crate::spec::blueprint::OutputCap>,
     /// Extra provider parameters from `[stages.<name>.model.parameters]` beyond
     /// `temperature`/`max_output_tokens` (e.g. `top_p`, `stop`, `seed`,
     /// `frequency_penalty`). Passed through to the provider request so models can
@@ -80,7 +80,7 @@ pub(crate) struct InferenceConfig {
 #[derive(Component, Debug, Clone)]
 pub(crate) struct ToolResultRoutingComponent {
     /// The routing configuration.
-    pub routing: leviath_core::ToolResultRouting,
+    pub routing: crate::spec::ToolResultRouting,
 }
 
 /// Result of assembling a context window into system blocks and conversation messages.

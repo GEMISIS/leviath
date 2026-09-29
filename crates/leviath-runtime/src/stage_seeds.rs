@@ -23,8 +23,8 @@
 //! A failed call leaves the region as it was rather than blanking it: the
 //! previous value is merely stale, and stale beats absent.
 
+use crate::spec::layout::{RegionSeed, SeedRefresh, SeedToolCall};
 use bevy_ecs::prelude::*;
-use leviath_core::layout::{RegionSeed, SeedRefresh, SeedToolCall};
 
 use crate::components::ContextWindow;
 use crate::pipeline::{AgentBlueprint, ReadyToInfer, StageJustEntered, ToolServiceRes, ToolStage};
@@ -55,7 +55,7 @@ pub(crate) struct PendingStageSeeds {
 ///
 /// Pure over the blueprint so the selection is testable without a world.
 pub(crate) fn refreshing_regions(
-    blueprint: &leviath_core::Blueprint,
+    blueprint: &crate::spec::Blueprint,
 ) -> Vec<(&str, &[SeedToolCall])> {
     blueprint
         .context_layout
@@ -205,10 +205,11 @@ pub(crate) fn apply_stage_seeds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::layout::{ContextLayout, RegionDefinition};
-    use leviath_core::{RegionKind, Stage};
+    use crate::spec::Stage;
+    use crate::spec::layout::{ContextLayout, RegionDefinition};
+    use leviath_core::RegionKind;
 
-    fn blueprint_with(seeds: Vec<(&str, Option<RegionSeed>)>) -> leviath_core::Blueprint {
+    fn blueprint_with(seeds: Vec<(&str, Option<RegionSeed>)>) -> crate::spec::Blueprint {
         let regions = seeds
             .into_iter()
             .map(|(name, seed)| {
@@ -220,9 +221,9 @@ mod tests {
         let layout = ContextLayout::new(regions, 10_000);
         let stages = vec![Stage::new(
             "main".to_string(),
-            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
         )];
-        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+        crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
     }
 
     fn tools(names: &[&str], refresh: SeedRefresh) -> RegionSeed {

@@ -366,8 +366,8 @@ mod tests {
     use crate::tui::flowgraph::StageGraph;
     use crate::tui::flowgraph::content::NodeStatus;
     use crossterm::event::{KeyEvent, KeyModifiers};
-    use leviath_core::manifest::parse_manifest;
     use leviath_core::run_meta::StageRecord;
+    use leviath_runtime::spec::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;

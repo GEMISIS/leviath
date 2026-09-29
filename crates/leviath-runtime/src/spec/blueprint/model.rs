@@ -158,7 +158,8 @@ impl OutputCap {
     /// The `(0, 100]` percent rule shared with region budgets, in this
     /// setting's words.
     fn fraction(s: &str) -> Result<f64, String> {
-        crate::layout::BudgetSpec::parse_budget(s).map_err(|e| format!("max_output_tokens: {e}"))
+        crate::spec::layout::BudgetSpec::parse_budget(s)
+            .map_err(|e| format!("max_output_tokens: {e}"))
     }
 
     /// The cap in tokens for one request.
