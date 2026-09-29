@@ -102,14 +102,30 @@ impl InteractionHub {
     ///
     /// `<run>-<kind>-<n>`: the run leads because one hub holds every run's
     /// open requests, and `n` counts up for the run's life so no two of its
-    /// requests can share an id. The count is not persisted; a run restored
-    /// after a restart gets no prompt back, so nothing old can answer against
-    /// a new number.
+    /// requests can share an id. A run restored after a restart continues past
+    /// every number it may have drawn before ([`Self::continue_count`]), so a
+    /// question asked again after the restart never takes an old id.
     pub fn next_request_id(&self, run_id: &str, kind: &str) -> String {
         let mut drawn = leviath_core::sync::lock(&self.drawn);
         let n = drawn.entry(run_id.to_string()).or_insert(0);
         *n += 1;
         leviath_core::interaction::request_id(run_id, kind, &n.to_string())
+    }
+
+    /// Carry on `run_id`'s request numbering from `drawn`, when that is past
+    /// where it stands.
+    ///
+    /// The count lives in memory, so a restart would begin it at one again and
+    /// a question asked after the restart could take the id of one asked
+    /// before it. An answer copied from the old prompt would then land on the
+    /// new one. Restart recovery calls this with an upper bound on what the run
+    /// had drawn: every request it settled, which the journal holds, plus
+    /// every call of the batch it was running, which covers the ones still
+    /// open.
+    pub fn continue_count(&self, run_id: &str, drawn: u64) {
+        let mut counts = leviath_core::sync::lock(&self.drawn);
+        let n = counts.entry(run_id.to_string()).or_insert(0);
+        *n = (*n).max(drawn);
     }
 
     /// Forget a run's request count, once it is gone from the world.

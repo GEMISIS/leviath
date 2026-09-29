@@ -814,6 +814,7 @@ type ToolQuery = (
         Option<&'static crate::persistence::RunMetadata>,
         Option<&'static crate::components::AgentState>,
         Option<&'static crate::components::BatchExecutions>,
+        Option<&'static super::tools::RecoveredResults>,
     ),
 );
 
@@ -868,7 +869,7 @@ pub(crate) fn collect_tools(
             progress,
             mut flags,
             activity,
-            (metadata, agent_state, executions),
+            (metadata, agent_state, executions, recovered),
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -905,6 +906,11 @@ pub(crate) fn collect_tools(
         let mut parts = outcome.results;
         if let Some(ctx) = context_results {
             parts.extend(typed_results(&ctx.0));
+        }
+        // And what the batch had finished before a restart, as the journal
+        // recorded it.
+        if let Some(recovered) = recovered {
+            parts.extend(recovered.0.iter().cloned());
         }
         let mut merged = merge_in_call_order(&infer.tool_calls, &parts);
         // Modification accounting: count the file-writing calls this
@@ -1004,6 +1010,7 @@ pub(crate) fn collect_tools(
             .entity(outcome.entity)
             .remove::<AwaitingTools>()
             .remove::<ContextToolResults>()
+            .remove::<super::tools::RecoveredResults>()
             .remove::<InFlightWork>()
             .insert(ReadyToInfer);
     }

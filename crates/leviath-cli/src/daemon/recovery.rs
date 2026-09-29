@@ -18,10 +18,12 @@
 //! `interactions.json` sidecar while blocked. For those, `reload_one` calls
 //! [`leviath_runtime::interaction_points::restore_interaction_point`] to bring the
 //! agent back in the *waiting* state with the same prompt re-opened, rather than
-//! re-inferring and dropping it. Model-initiated dynamic tools
-//! (`ask_user_*`, `present_for_review`, `edit_document`) and taint-gate prompts are
-//! not persisted - they block inside the transient tool-worker turn, so on restart
-//! they take the ordinary re-inference path and the model simply re-asks.
+//! re-inferring and dropping it. A question the model asked with a tool
+//! (`ask_user_*`, `present_for_review`, `edit_document`) comes back too: its
+//! batch is journaled, and `restore_pending_batch` dispatches a batch that was
+//! waiting on one again, so the tool asks the same question anew. A taint-gate
+//! prompt does not: its batch is held before it is journaled, so on restart the
+//! run takes the ordinary re-inference path.
 //!
 //! ## Tool-call delivery contract
 //!
@@ -36,7 +38,10 @@
 //! external effect and its journal append - a window no journal can close,
 //! since an external side effect can't be observed atomically) come back as
 //! verify-first `[error] interrupted` results rather than being silently re-run;
-//! the re-issued inference decides what still needs doing.
+//! the re-issued inference decides what still needs doing. The exception is a
+//! batch stopped on a question to a person: the tool service asks those before
+//! it runs anything else, so nothing unfinished in it had started, and it is
+//! dispatched again with its finished results carried over.
 
 use std::path::Path;
 
@@ -419,6 +424,7 @@ fn reload_one(
         // because `build_agent` reads the config it is handed.
         capture_model_input: false,
     };
+    let hub = deps.hub;
     let entity = build_agent_for_reload(world.world_mut(), deps, &args)?;
 
     // Restore the persisted context, stage, iteration, and token totals.
@@ -435,7 +441,7 @@ fn reload_one(
         .ok()
         .and_then(|bytes| run_archive::read_archive_lenient(&mut bytes.as_slice()).ok())
         .and_then(|(_version, records)| run_archive::fold(&records));
-    let (snapshot, stage_index, iteration, totals, pending_batch) = match folded {
+    let (snapshot, stage_index, iteration, totals, pending_batch, settled) = match folded {
         Some(folded) => {
             let totals = totals_from(&folded.meta);
             (
@@ -444,6 +450,7 @@ fn reload_one(
                 folded.meta.iteration,
                 totals,
                 folded.pending_batch,
+                folded.interactions.len(),
             )
         }
         None => {
@@ -464,6 +471,7 @@ fn reload_one(
                 // No journal ⇒ no batch record ⇒ the pre-journal behavior
                 // (plain re-inference).
                 None,
+                0,
             )
         }
     };
@@ -541,8 +549,18 @@ fn reload_one(
     // reached the window: replay what the journal recorded - real results for
     // completed calls, verify-first errors for interrupted ones - so the
     // re-issued inference sees what already ran instead of re-executing the
-    // batch's side effects. fold() only surfaces a batch that is genuinely
-    // unapplied (same iteration, turn absent from the window).
+    // batch's side effects. A batch that was waiting on a person is dispatched
+    // again instead, so the question comes back. fold() only surfaces a batch
+    // that is genuinely unapplied (same iteration, turn absent from the window).
+    //
+    // A question asked again takes a new request id. The run's numbering
+    // carries on past everything it could have drawn before the restart:
+    // every request it settled, and one per call of the batch it was running.
+    let in_flight = pending_batch.as_ref().map_or(0, |batch| batch.calls.len());
+    hub.continue_count(
+        &meta.run_id,
+        u64::try_from(settled + in_flight).unwrap_or(u64::MAX),
+    );
     if let Some(batch) = pending_batch {
         leviath_runtime::restore::restore_pending_batch(
             world.world_mut(),
@@ -1513,6 +1531,92 @@ mod tests {
                 .get::<leviath_runtime::pipeline::ReadyToInfer>(entity.entity())
                 .is_some()
         );
+    }
+
+    /// A batch that was waiting on a person when the daemon died is dispatched
+    /// again on reload, not replayed: the run is back at the tool lane with the
+    /// finished call carried over, so the question is asked anew rather than
+    /// answered with an "interrupted" stand-in. Its request numbering carries
+    /// on past everything the run drew before, so the new question cannot take
+    /// an old id.
+    #[tokio::test]
+    async fn reload_asks_again_a_question_the_restart_interrupted() {
+        use leviath_core::run_archive::RunRecord;
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        write_run(runs.path(), "run-ask", mpath, RunStatus::WaitingInput, None);
+        let ctx = ContextSnapshot {
+            stage_name: "implement".to_string(),
+            total_tokens: 0,
+            max_tokens: 100_000,
+            regions: vec![],
+        };
+        write_run_archive(runs.path(), "run-ask", mpath, 0, 9, 99, &ctx);
+        append_archive_records(
+            runs.path(),
+            "run-ask",
+            &[
+                RunRecord::ToolBatch {
+                    calls: vec![
+                        batch_call("c_done", "write_file", None),
+                        batch_call("c_ask", "ask_user_text", None),
+                    ],
+                    at: 3,
+                    stage_index: 0,
+                    iteration: 9,
+                    visit_id: String::new(),
+                    requested_by: String::new(),
+                    response: "writing then asking".to_string(),
+                },
+                RunRecord::ToolCallDone {
+                    execution_id: String::new(),
+                    outcome: None,
+                    iteration: 9,
+                    call_id: "c_done".to_string(),
+                    result: "Wrote 42 bytes to x.txt".to_string().into(),
+                    at: 4,
+                },
+            ],
+        );
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            crate::daemon::spawn::SpawnDeps {
+                tool_service: cli.as_ref(),
+                config: &Config::default(),
+                shared_mcp: mcp,
+                mcp_tool_defs: &[],
+                mcp_tool_owners: &Default::default(),
+                hub: &hub,
+                now_secs: 999,
+                subagent_tx: sub_tx().clone(),
+            },
+            runs.path(),
+        )
+        .reloaded;
+
+        assert_eq!(restored.len(), 1);
+        let entity = restored[0].1.entity();
+        let entries = conversation_of(&world, entity);
+        assert!(
+            entries.is_empty(),
+            "nothing lands before the batch finishes, and no stand-in for the question: {entries:?}"
+        );
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::pipeline::ReadyToInfer>(entity)
+                .is_none(),
+            "not re-inferred"
+        );
+        // Two calls in flight, nothing settled: the next id is past both.
+        assert_eq!(hub.next_request_id("run-ask", "ask"), "run-ask-ask-3");
     }
 
     /// A batch the dispatcher answered itself is journaled, and a reload replays

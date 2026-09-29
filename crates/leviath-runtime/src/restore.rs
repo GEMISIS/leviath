@@ -15,6 +15,12 @@
 //! for calls that completed, a verify-first [`INTERRUPTED_TOOL_RESULT`] for calls
 //! that didn't - so the re-issued inference sees exactly what already ran and
 //! completed side effects never run twice.
+//!
+//! The exception is a batch that was waiting on a person. A question has no
+//! side effect to verify, and nothing after it in the batch had started, so
+//! that batch is dispatched again with its finished results carried over: the
+//! question goes back in front of the person rather than an error in front of
+//! the model.
 
 use bevy_ecs::prelude::*;
 use leviath_core::region::RegionEntry;
@@ -201,6 +207,16 @@ pub fn restore_agent(
             .get_mut::<StageCursor>(entity)
             .expect("a spawned agent has a stage cursor")
             .index = stage_index;
+        // The tool service was set up for the entry stage when the agent was
+        // built, and nothing else moves it on a resume: a run restored in a
+        // later stage would ask its questions under the entry stage's name
+        // and be held to the entry stage's permissions.
+        if let Some(service) = world
+            .get_resource::<crate::pipeline::ToolServiceRes>()
+            .map(|s| s.0.clone())
+        {
+            service.sync_stage(entity, stage_index, &snapshot.stage_name);
+        }
     }
 
     // 3. Restore the agent's running state + token totals.
@@ -363,13 +379,80 @@ fn record_abandoned_executions(
 /// One thing is written: every call that got a stand-in is journaled as an
 /// execution whose outcome nobody observed, since the resume is the last moment
 /// that fact is knowable.
+///
+/// A batch that stopped on a question to a person is not replayed but
+/// dispatched again, with the finished calls' results carried over, so the
+/// question is asked again rather than answered with a stand-in.
 pub fn restore_pending_batch(
     world: &mut World,
     entity: Entity,
     batch: &leviath_core::run_archive::PendingToolBatch,
     children: &[String],
 ) {
-    let calls: Vec<crate::components::ToolCall> = batch
+    let calls: Vec<crate::components::ToolCall> = recorded_calls(batch);
+    if waiting_on_a_person(batch) {
+        redispatch_pending_batch(world, entity, batch, calls);
+        return;
+    }
+    replay_pending_batch(world, entity, batch, children, calls);
+}
+
+/// Whether the batch stopped on a question to a person: an unfinished call
+/// to one of the tools that asks one.
+///
+/// The tool service asks every question in a batch, in order, before it
+/// starts any other call. So a batch stopped on one has run nothing after it,
+/// and every unfinished call in it is one that never began.
+fn waiting_on_a_person(batch: &leviath_core::run_archive::PendingToolBatch) -> bool {
+    batch.calls.iter().any(|call| {
+        call.result.is_none()
+            && crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS
+                .contains(&leviath_tools::canonical_tool_name(&call.name))
+    })
+}
+
+/// Put a batch that was waiting on a person back where it was: dispatched,
+/// with the calls that finished carrying the results the journal recorded.
+///
+/// Nothing lands in the window yet. The tool lane asks the question again,
+/// under a new request id, and the run shows as waiting on it exactly as it
+/// did before the restart; the turn and all its results are applied together
+/// when the batch completes, as for any other batch. Not routed through
+/// `process_response`, whose counting the restored totals already include.
+fn redispatch_pending_batch(
+    world: &mut World,
+    entity: Entity,
+    batch: &leviath_core::run_archive::PendingToolBatch,
+    calls: Vec<crate::components::ToolCall>,
+) {
+    let finished: Vec<crate::tool_bridge::ToolResult> = batch
+        .calls
+        .iter()
+        .filter_map(|c| c.result.clone().map(|r| (c.id.clone(), r)))
+        .collect();
+    world
+        .entity_mut(entity)
+        .remove::<crate::pipeline::ReadyToInfer>()
+        .insert((
+            crate::components::InferenceResult {
+                attempt_id: String::new(),
+                response: batch.response.clone(),
+                tool_calls: calls,
+                tokens_used: 0,
+                cut_off_at: None,
+                reasoning: None,
+                parts: Vec::new(),
+            },
+            crate::pipeline::RecoveredResults(finished),
+            crate::pipeline::ReadyForTools,
+        ));
+}
+
+/// The batch's calls as the tool pipeline takes them.
+fn recorded_calls(
+    batch: &leviath_core::run_archive::PendingToolBatch,
+) -> Vec<crate::components::ToolCall> {
+    batch
         .calls
         .iter()
         .map(|c| crate::components::ToolCall {
@@ -382,7 +465,18 @@ pub fn restore_pending_batch(
                 .unwrap_or_else(|_| serde_json::Value::String(c.arguments.clone())),
             thought_signature: c.thought_signature.clone(),
         })
-        .collect();
+        .collect()
+}
+
+/// Land the batch's turn with a result for every call: the journaled one where
+/// it finished, a stand-in where it did not.
+fn replay_pending_batch(
+    world: &mut World,
+    entity: Entity,
+    batch: &leviath_core::run_archive::PendingToolBatch,
+    children: &[String],
+    calls: Vec<crate::components::ToolCall>,
+) {
     let merged: Vec<crate::tool_bridge::ToolResult> = batch
         .calls
         .iter()
@@ -778,6 +872,140 @@ mod tests {
             .unwrap()
             .content
             .clone()
+    }
+
+    /// A batch that stopped on a question to a person is dispatched again
+    /// rather than replayed: the question has no effect to verify, and nothing
+    /// after it had started, so its tool asks it anew. What finished before the
+    /// crash is carried into the dispatch with the result the journal holds,
+    /// nothing lands in the window yet, and nothing is recorded as abandoned.
+    #[test]
+    fn a_batch_waiting_on_a_person_is_dispatched_again() {
+        let (mut world, entity) = agent_world();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        world.insert_resource(crate::pipeline::PersistenceStage(tx));
+        world.entity_mut(entity).insert(run_metadata());
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        let before = conv_entries(&world, entity).len();
+        restore_pending_batch(
+            &mut world,
+            entity,
+            &pending_batch(vec![
+                pending_call("c1", "write_file", Some("Wrote 42 bytes to x.txt")),
+                pending_call("c2", "ask_user_text", None),
+                pending_call("c3", "shell", None),
+            ]),
+            &[],
+        );
+
+        assert!(
+            world.get::<ReadyToInfer>(entity).is_none(),
+            "no re-inference"
+        );
+        assert!(
+            world
+                .get::<crate::pipeline::ReadyForTools>(entity)
+                .is_some()
+        );
+        let result = world
+            .get::<crate::components::InferenceResult>(entity)
+            .expect("the batch is back as the turn that asked for it");
+        let ids: Vec<&str> = result
+            .tool_calls
+            .iter()
+            .map(|c| c.tool_id.as_str())
+            .collect();
+        assert_eq!(ids, ["c1", "c2", "c3"]);
+        assert_eq!(result.response, "writing then checking");
+        let recovered = world
+            .get::<crate::pipeline::RecoveredResults>(entity)
+            .expect("the finished call is carried over");
+        assert_eq!(recovered.0.len(), 1);
+        assert_eq!(recovered.0[0].0, "c1");
+        assert_eq!(recovered.0[0].1.as_str(), "Wrote 42 bytes to x.txt");
+        assert_eq!(
+            conv_entries(&world, entity).len(),
+            before,
+            "nothing landed yet"
+        );
+        assert!(rx.try_recv().is_err(), "nothing is recorded as abandoned");
+    }
+
+    /// Only an unanswered question makes a batch one that waited on a person.
+    #[test]
+    fn only_an_unanswered_question_is_a_wait_on_a_person() {
+        let asking = pending_batch(vec![pending_call("c1", "ask_user_choice", None)]);
+        assert!(waiting_on_a_person(&asking));
+        let answered = pending_batch(vec![pending_call(
+            "c1",
+            "ask_user_choice",
+            Some("User chose: a"),
+        )]);
+        assert!(
+            !waiting_on_a_person(&answered),
+            "a question already answered"
+        );
+        let running = pending_batch(vec![pending_call("c1", "shell", None)]);
+        assert!(
+            !waiting_on_a_person(&running),
+            "a call with an effect to verify"
+        );
+    }
+
+    /// A tool service that records which stage it was told the agent is in.
+    #[derive(Default)]
+    struct StageRecorder(std::sync::Mutex<Vec<(usize, String)>>);
+    impl crate::pipeline::ToolService for StageRecorder {
+        fn exec_for(
+            &self,
+            _entity: Entity,
+            _calls: Vec<leviath_providers::ToolCall>,
+            _progress: crate::pipeline::ToolProgress,
+        ) -> crate::tool_bridge::BoxedToolExec {
+            Box::new(|| Box::pin(async { Vec::new() }))
+        }
+        fn sync_stage(&self, _entity: Entity, stage_index: usize, stage_name: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((stage_index, stage_name.to_string()));
+        }
+    }
+
+    /// A run restored in a later stage asks its questions, and is held to its
+    /// permissions, as that stage: the tool service is told where it is.
+    #[tokio::test]
+    async fn a_restored_run_puts_its_tool_service_in_the_restored_stage() {
+        let (mut world, entity) = agent_world();
+        let service = std::sync::Arc::new(StageRecorder::default());
+        world.insert_resource(crate::pipeline::ToolServiceRes(service.clone()));
+        restore_agent(
+            &mut world,
+            entity,
+            &snapshot(),
+            1,
+            7,
+            TokenTotals::default(),
+        );
+        assert_eq!(
+            *service.0.lock().unwrap(),
+            [(1, snapshot().stage_name.clone())]
+        );
+        // It is an ordinary service otherwise, and runs what it is handed.
+        let exec = crate::pipeline::ToolService::exec_for(
+            service.as_ref(),
+            entity,
+            Vec::new(),
+            crate::pipeline::noop_progress(),
+        );
+        assert!(exec().await.is_empty());
     }
 
     #[test]

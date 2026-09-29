@@ -790,3 +790,20 @@ fn a_forgotten_run_starts_its_count_again() {
     // Forgetting a run the hub never counted for is nothing.
     hub.forget_run("run-z");
 }
+
+/// A run restored after a restart carries its request numbering on past what
+/// it drew before, so a question asked again never takes an old id. Moving the
+/// count back is never done: a run that has drawn more keeps its place.
+#[test]
+fn a_restored_run_continues_its_request_numbering() {
+    let hub = InteractionHub::new();
+    hub.continue_count("run-a", 4);
+    assert_eq!(hub.next_request_id("run-a", "ask"), "run-a-ask-5");
+    hub.continue_count("run-a", 2);
+    assert_eq!(hub.next_request_id("run-a", "ask"), "run-a-ask-6");
+    assert_eq!(
+        hub.next_request_id("run-b", "ask"),
+        "run-b-ask-1",
+        "another run's numbering is its own"
+    );
+}

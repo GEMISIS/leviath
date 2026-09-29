@@ -117,8 +117,8 @@ pub(crate) use gate::taint_block_message;
 pub use gate::{GateScriptRules, PolicyGate, ToolSensitivities};
 mod tools;
 pub(crate) use tools::{
-    AwaitingTools, ContextToolResults, ToolServiceRes, ToolStage, ToolsNeedRefresh,
-    call_had_no_effect, dispatch_tools, merge_in_call_order, one_line,
+    AwaitingTools, ContextToolResults, RecoveredResults, ToolServiceRes, ToolStage,
+    ToolsNeedRefresh, call_had_no_effect, dispatch_tools, merge_in_call_order, one_line,
 };
 pub use tools::{DynamicTools, RescanBeforeDispatch, ToolProgress, ToolService, noop_progress};
 #[cfg(test)]
