@@ -188,12 +188,15 @@ pub trait BindEnv: Send + Sync {
 }
 
 type Insert = Box<dyn FnOnce(&mut EntityWorldMut<'_>) + Send>;
+type AfterInsert = Box<dyn FnOnce(bevy_ecs::entity::Entity) + Send>;
 
 /// Live components to place on a run's entity beside what its spec and state
-/// provide. Built by binding; applied by insertion.
+/// provide, and what the host does once the entity exists (registering it
+/// with a service keyed by entity). Built by binding; applied by insertion.
 #[derive(Default)]
 pub struct Bindings {
     inserts: Vec<Insert>,
+    after: Vec<AfterInsert>,
 }
 
 impl Bindings {
@@ -211,30 +214,49 @@ impl Bindings {
         self
     }
 
-    /// Add every component from another set of bindings.
-    pub fn extend(&mut self, other: Bindings) {
-        self.inserts.extend(other.inserts);
+    /// Run `f` with the run's entity once it is placed.
+    pub fn after_insert(
+        mut self,
+        f: impl FnOnce(bevy_ecs::entity::Entity) + Send + 'static,
+    ) -> Self {
+        self.after.push(Box::new(f));
+        self
     }
 
-    /// How many bundles are waiting to be placed.
+    /// Add everything from another set of bindings.
+    pub fn extend(&mut self, other: Bindings) {
+        self.inserts.extend(other.inserts);
+        self.after.extend(other.after);
+    }
+
+    /// How many bundles and follow-ups are waiting.
     pub fn len(&self) -> usize {
-        self.inserts.len()
+        self.inserts.len() + self.after.len()
     }
 
     /// Whether there are none.
     pub fn is_empty(&self) -> bool {
-        self.inserts.is_empty()
+        self.len() == 0
     }
 
     pub(crate) fn apply(self, entity: &mut EntityWorldMut<'_>) {
+        let id = entity.id();
         for insert in self.inserts {
             insert(entity);
+        }
+        for after in self.after {
+            after(id);
         }
     }
 }
 
 impl std::fmt::Debug for Bindings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Bindings({} bundles)", self.inserts.len())
+        write!(
+            f,
+            "Bindings({} bundles, {} follow-ups)",
+            self.inserts.len(),
+            self.after.len()
+        )
     }
 }

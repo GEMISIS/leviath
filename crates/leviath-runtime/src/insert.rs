@@ -49,15 +49,21 @@ mod tests {
             true,
         );
         let mut world = World::new();
-        let bindings = Bindings::new().with(Marker(7));
-        assert_eq!(bindings.len(), 1);
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let record = seen.clone();
+        let bindings = Bindings::new()
+            .with(Marker(7))
+            .after_insert(move |e| *record.lock().unwrap() = Some(e));
+        assert_eq!(bindings.len(), 2);
         assert!(!bindings.is_empty());
-        assert_eq!(format!("{bindings:?}"), "Bindings(1 bundles)");
+        assert!(Bindings::new().is_empty());
+        assert_eq!(format!("{bindings:?}"), "Bindings(1 bundles, 1 follow-ups)");
         let e = insert(&mut world, spec.clone(), bindings, &state);
         assert_eq!(world.get::<Marker>(e), Some(&Marker(7)));
         assert_eq!(world.get::<RunSpecC>(e).unwrap().0.run_id, spec.run_id);
+        assert_eq!(*seen.lock().unwrap(), Some(e));
         let mut more = Bindings::new();
-        more.extend(Bindings::new().with(Marker(1)));
-        assert_eq!(more.len(), 1);
+        more.extend(Bindings::new().with(Marker(1)).after_insert(|_| {}));
+        assert_eq!(more.len(), 2);
     }
 }
