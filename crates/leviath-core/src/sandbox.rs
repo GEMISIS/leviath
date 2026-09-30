@@ -15,7 +15,9 @@
 use serde::{Deserialize, Serialize};
 
 /// The isolation mechanism used for an agent's shell tool execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxKind {
     /// Run directly on the host - current behavior, explicit opt-out.
@@ -29,7 +31,9 @@ pub enum SandboxKind {
 
 /// What to do when the configured sandbox runtime can't be established (e.g. no
 /// container engine on `PATH`, or `namespace` requested on a non-Linux host).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum OnUnavailable {
     /// Fail agent spawn with a clear error. The safe default for untrusted code.

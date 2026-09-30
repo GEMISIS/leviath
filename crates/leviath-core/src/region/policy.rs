@@ -15,7 +15,9 @@ use super::RegionKind;
 /// The choice of strategy affects prompt caching effectiveness: PerItem eviction
 /// shifts the message prefix every iteration (breaking cache), while Bulk and
 /// Compact keep the prefix stable between eviction events.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
 #[serde(tag = "strategy", rename_all = "snake_case")]
 pub enum EvictionStrategy {
     /// Evict one turn group at a time (current behavior). Default.
@@ -77,7 +79,9 @@ impl RegionKind {
 /// full - and the agent never learns it happened. [`Admission::Reject`] hands
 /// that decision back: the write fails, the agent is told the region is full,
 /// and it releases what it is finished with before adding more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Admission {
     /// Make room for the write - roll off the oldest entry, or let the
@@ -106,7 +110,9 @@ pub enum Admission {
 ///
 /// So the blueprint says. The author knows whether a region is set once at spawn
 /// or written every turn, and nothing else does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Volatility {
     /// Written rarely or never after setup: a task, a system prompt, a

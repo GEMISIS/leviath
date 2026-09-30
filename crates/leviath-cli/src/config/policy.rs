@@ -6,21 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Whether a tool call should execute automatically or require user approval.
-///
-/// The effective policy for a tool is resolved by narrowest scope first:
-/// launch-flag > stage > agent > global config > built-in default.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolPolicy {
-    /// Execute without prompting.
-    Allow,
-    /// Ask the user before each call (or once per session with `allow_session`).
-    #[default]
-    Ask,
-    /// Never execute - return a denied error to the model.
-    Deny,
-}
+// The run graph names tool policies too, so the enum lives in core.
+pub use leviath_core::policy::ToolPolicy;
 
 // `TitleConfig` (plain data used by the engine's title generation) lives in
 // `leviath_core::config` so `leviath-runtime` can reference it without a CLI

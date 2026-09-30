@@ -19,6 +19,7 @@ pub mod error;
 pub mod execution;
 pub mod files;
 pub mod interaction;
+pub mod json_doc;
 pub mod lifecycle;
 pub mod mcp_names;
 pub mod mime;
@@ -45,6 +46,7 @@ pub use credentials::{
     CredentialStore, CredentialStoreKind, MemoryStore, mcp_account, provider_account,
 };
 pub use error::{Error, Result, ValidationError};
+pub use json_doc::JsonDoc;
 pub use lifecycle::CompactionConfig;
 pub use output::{
     FINAL_OUTPUT_FILE, FinalOutput, FinalOutputDescriptor, MAX_FINAL_OUTPUT_BYTES, OutputSpec,

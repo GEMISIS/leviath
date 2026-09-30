@@ -43,6 +43,14 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+postcard = { workspace = true }
+zstd = { workspace = true }
+crc32fast = { workspace = true }
+schemars = { workspace = true }
 
 [dev-dependencies]
 leviath-testkit = { workspace = true }

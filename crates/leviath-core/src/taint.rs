@@ -13,7 +13,9 @@ use std::fmt;
 ///
 /// Ordered from least to most sensitive. When compared, higher sensitivity
 /// levels are "greater than" lower ones.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub enum TaintLevel {
     /// Freely shareable. Web search results, public documentation, open-source code.
     Public,

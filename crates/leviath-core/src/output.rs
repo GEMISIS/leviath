@@ -44,7 +44,9 @@ pub const MAX_FINAL_OUTPUT_BYTES: usize = 256 * 1024;
 /// Distinct from the validator *rejecting* the answer, which always refuses the
 /// submission back to the model. This knob is only about the script itself
 /// failing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OnValidatorError {
     /// Refuse the submission, sending the script's error text to the model as

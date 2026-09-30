@@ -6,7 +6,7 @@ use super::registry::MimeRegistry;
 use super::{MimeType, text_plain};
 
 /// How a stored part should reach a model, overriding the registry's default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Delivery {
     /// As the provider's native block for its family, when the model takes it.
