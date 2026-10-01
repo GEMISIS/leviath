@@ -240,7 +240,8 @@ pub fn load_installed(
     agents_dir: Option<&Path>,
     reference: &BlueprintRef,
 ) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
-    let at = SpecPath::root().field("source").field("blueprint");
+    // Relative to the source: the resolver puts `source.blueprint` in front.
+    let at = SpecPath::root();
     let name = &reference.name;
     let issue = |code: IssueCode, message: String| SpawnIssue::new(at.clone(), code, message);
     let (manifest, content) = agents_dir
@@ -272,7 +273,8 @@ pub fn load_installed(
 /// [`load_installed`] loads an installed one. Named after its `[agent]
 /// name`.
 pub fn load_file(path: &BlueprintPath) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
-    let at = SpecPath::root().field("source").field("blueprint_file");
+    // Relative to the source: the resolver puts `source.blueprint` in front.
+    let at = SpecPath::root();
     let (manifest, content) = read_manifest_in(path.path()).ok_or_else(|| {
         SpawnIssue::new(
             at.clone(),

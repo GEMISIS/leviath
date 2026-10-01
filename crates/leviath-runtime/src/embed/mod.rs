@@ -4,7 +4,10 @@
 //!
 //! The daemon remains the primary interface for the CLI; this module is the
 //! same machinery ([`PipelineWorld`](crate::world::PipelineWorld) +
-//! [`WorldHost`](crate::host::WorldHost)) assembled from plain values.
+//! [`WorldHost`](crate::host::WorldHost)) assembled from plain values. A run
+//! starts from a [`SpawnRequest`](crate::spec::request::SpawnRequest) and goes
+//! through the same resolve, bind and insert the daemon's runs do, against an
+//! [`EmbedEnv`] instead of the daemon's machine.
 
 mod env;
 mod error;
@@ -17,4 +20,7 @@ pub use env::EmbedEnv;
 pub use error::EmbedError;
 pub use stream::EventStream;
 pub use tool_service::BasicToolService;
-pub use world::{AgentWorld, AgentWorldBuilder, BlueprintSource, RunId, SpawnSpec};
+pub use world::{AgentWorld, AgentWorldBuilder};
+
+/// A run's id, as [`AgentWorld::spawn`] hands it back.
+pub use crate::spec::names::RunId;

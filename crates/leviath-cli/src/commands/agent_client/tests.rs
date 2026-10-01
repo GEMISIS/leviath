@@ -1516,10 +1516,9 @@ fn restarting_daemon(
     }
 }
 
-/// The daemon restarts mid-turn: the event stream drops, and the turn used to
-/// end right there with a truncated reply while the run finished unwatched.
-/// Now the bridge follows the run onto the new daemon and the turn ends when
-/// the run does.
+/// The daemon restarts mid-turn: the event stream drops, and the bridge
+/// follows the run onto the new daemon rather than ending the turn with a
+/// truncated reply. The turn ends when the run does.
 #[tokio::test]
 async fn a_dropped_event_stream_is_followed_onto_the_new_daemon() {
     let daemon = restarting_daemon(None, vec![status_event()], vec![completed("complete")]);
@@ -1935,3 +1934,6 @@ async fn a_run_with_no_answer_adds_no_closing_message() {
     assert_eq!(assembled, "streamed work");
     h.close_input().await;
 }
+
+#[path = "extension_tests.rs"]
+mod extension;

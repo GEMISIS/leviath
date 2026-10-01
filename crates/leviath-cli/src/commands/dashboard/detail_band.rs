@@ -506,6 +506,7 @@ condition = "llm_choice"
             // loader that would hand back nothing.
             checked_at_tick: u64::MAX,
             stamp: None,
+            transitions: None,
         });
     }
 

@@ -203,8 +203,22 @@ async fn a_blueprint_that_is_missing_or_will_not_load_is_an_issue() {
     install(&agents, "helper", MANIFEST);
     std::fs::create_dir_all(agents.path().join("empty-dir")).unwrap();
     let missing = env.blueprint(&reference("nope")).await.unwrap_err();
-    assert_eq!(missing.path.to_string(), "source.blueprint");
+    // Relative to the source; the resolver adds `source.blueprint`.
+    assert_eq!(missing.path.to_string(), "(request)");
     assert_eq!(missing.known, ["helper"]);
+    let request = leviath_runtime::spec::request::SpawnRequest::new(
+        leviath_runtime::spec::request::SpawnSource::Blueprint(reference("nope")),
+    );
+    let issues = leviath_runtime::resolve::resolve(
+        &request,
+        &leviath_runtime::spec::env::Caller::TopLevel,
+        &env,
+        leviath_runtime::resolve::ResolveMode::Check,
+    )
+    .await
+    .unwrap_err();
+    let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+    assert!(paths.contains(&"source.blueprint".to_string()), "{paths:?}");
 
     install(&agents, "broken", "this is not toml [");
     let broken = env.blueprint(&reference("broken")).await.unwrap_err();

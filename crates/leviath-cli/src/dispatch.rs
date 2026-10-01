@@ -86,6 +86,12 @@ pub enum Commands {
     /// Validate an agent blueprint
     Validate(commands::validate::ValidateArgs),
 
+    /// Convert an `agent.leviath` manifest into an `agent.toml` blueprint
+    Blueprint(commands::blueprint::BlueprintArgs),
+
+    /// Print the JSON Schema of a spawn request
+    Schema(commands::schema::SchemaArgs),
+
     /// Inspect and install an agent's declared dependencies
     Deps(commands::deps::DepsArgs),
 
@@ -99,7 +105,7 @@ pub enum Commands {
     Tools(commands::tools::ToolsArgs),
 
     // ─── Running agents ───────────────────────────────────────────────────────
-    /// Run an agent
+    /// Run an agent, check a run without starting it, or show a run's file
     Run(commands::run::RunArgs),
 
     /// List agent runs in the shared-world daemon
@@ -200,13 +206,15 @@ Blueprints:
   add           Install a blueprint
   remove        Remove an installed blueprint
   validate      Validate an agent blueprint
+  blueprint     Convert an `agent.leviath` manifest into an `agent.toml` blueprint
+  schema        Print the JSON Schema of a spawn request
   deps          Inspect and install an agent's dependencies
   test          Run blueprint tests
   pack          Bundle a blueprint for distribution
   tools         List and validate the global Rhai script tools
 
 Running agents:
-  run           Run an agent
+  run           Run an agent, check a run without starting it, or show a run's file
   ps            List agent runs in the shared-world daemon
   msg           Send a message to a running agent
   cancel        Cancel a running agent (alias: `kill`)
@@ -377,6 +385,11 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
     match command {
         Commands::Create(args) => commands::create::execute(args).await,
         Commands::Setup(args) => ex.setup(args).await,
+        // Reading a run's file starts nothing and needs no daemon.
+        Commands::Run(commands::run::RunArgs {
+            command: Some(commands::run::RunCommand::Show(args)),
+            ..
+        }) => commands::run::show::execute(args).await,
         Commands::Run(args) => ex.run(args).await,
         Commands::Ps(args) => ex.ps(args).await,
         Commands::Msg(args) => ex.msg(args).await,
@@ -395,6 +408,8 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Models(args) => commands::models::execute(args).await,
         Commands::Mime(args) => commands::mime::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
+        Commands::Blueprint(args) => commands::blueprint::execute(args).await,
+        Commands::Schema(args) => commands::schema::execute(args).await,
         Commands::Tools(args) => commands::tools::execute(args).await,
         Commands::Approvals(args) => commands::approvals::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
@@ -575,6 +590,40 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    /// `lev run show` reads a run's file and starts nothing, so it answers
+    /// here rather than through the executor (which would say Ok): a run
+    /// with no file is the error only a direct read gives. The schema and
+    /// the blueprint conversion answer here too.
+    #[tokio::test]
+    async fn run_show_schema_and_blueprint_answer_without_the_executor() {
+        crate::runstate::with_isolated_runs_dir_async("dispatch-run-show", |_d| async {
+            let show = Commands::Run(commands::run::RunArgs {
+                command: Some(commands::run::RunCommand::Show(
+                    commands::run::show::ShowArgs {
+                        run_id: "ghost".to_string(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            });
+            assert!(dispatch(show, &MockRisky::default()).await.is_err());
+        })
+        .await;
+        let schema = Commands::Schema(commands::schema::SchemaArgs {
+            schema: commands::schema::Schema::SpawnRequest,
+        });
+        assert!(dispatch(schema, &MockRisky::default()).await.is_ok());
+        let migrate = Commands::Blueprint(commands::blueprint::BlueprintArgs {
+            command: commands::blueprint::BlueprintCommand::Migrate(
+                commands::blueprint::MigrateArgs {
+                    path: std::path::PathBuf::from("/no/such/agent.leviath"),
+                    ..Default::default()
+                },
+            ),
+        });
+        assert!(dispatch(migrate, &MockRisky::default()).await.is_err());
     }
 
     #[tokio::test]

@@ -378,7 +378,7 @@ async fn the_tree_includes_children_and_skips_one_with_no_journal() {
         assert_eq!(root.children.len(), 2);
         assert!(load("child-1").is_ok());
         let err = load("child-torn").expect_err("no journal");
-        assert!(err.to_string().contains("no readable journal"), "{err}");
+        assert!(err.to_string().contains("no readable steps"), "{err}");
         execute(TimelineArgs {
             run_id,
             json: true,
@@ -387,6 +387,68 @@ async fn the_tree_includes_children_and_skips_one_with_no_journal() {
         })
         .await
         .expect("json tree");
+    })
+    .await;
+}
+
+/// A run's file is read the same way: each model call in the stage it was
+/// made in, each tool result, and the time spent waiting.
+#[tokio::test]
+async fn a_run_file_reads_as_a_timeline() {
+    use crate::runstate::run_file::tests::{recorded, step_with};
+    use leviath_runtime::spec::names::ModelRef;
+    use leviath_runtime::state::{RunEvent, RunStatus as State, Spend};
+    crate::runstate::with_isolated_runs_dir_async("timeline-run-file", |_d| async {
+        let dir = recorded(&crate::runstate::runs_dir());
+        let run_id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let call = |completion_tokens| RunEvent::Inference {
+            attempt: "a".to_string(),
+            model: ModelRef::parse("anthropic/claude-sonnet-5").unwrap(),
+            spend: Spend {
+                prompt_tokens: 100,
+                completion_tokens,
+                ..Spend::default()
+            },
+            finish_reason: None,
+        };
+        step_with(&dir, 100, vec![call(10)], |s| s.status = State::Active);
+        step_with(&dir, 110, vec![call(20)], |s| s.cursor.iteration = 1);
+        let done = RunEvent::ToolFinished {
+            call_id: "c1".to_string(),
+            result: leviath_runtime::state::ToolResultState {
+                text: "ok".to_string(),
+                is_error: false,
+            },
+            millis: 5,
+        };
+        step_with(&dir, 115, vec![done], |_| {});
+        step_with(&dir, 120, vec![RunEvent::Log("parked".into())], |s| {
+            s.status = State::Waiting
+        });
+        step_with(&dir, 150, Vec::new(), |s| s.status = State::Active);
+        let timeline = load(&run_id).expect("the run file reads");
+        assert_eq!(timeline.calls.len(), 2);
+        assert_eq!(timeline.calls[0].stage, "analyze");
+        assert_eq!(
+            timeline.calls[1].iteration, 0,
+            "made before the step moved it"
+        );
+        assert_eq!(timeline.calls[1].completion_tokens, 20);
+        assert_eq!(timeline.calls[0].model, "claude-sonnet-5");
+        assert_eq!(timeline.totals.waiting, 30);
+        assert_eq!(timeline.totals.tools, 5);
+
+        // A step that will not decode leaves nothing to show.
+        let mut bytes = std::fs::read(dir.join(leviath_core::files::RUN_FILE)).unwrap();
+        bytes.extend(
+            leviath_runtime::runfile::codec::encode(
+                leviath_runtime::runfile::codec::FrameKind::Delta,
+                &9u64,
+            )
+            .unwrap(),
+        );
+        std::fs::write(dir.join(leviath_core::files::RUN_FILE), bytes).unwrap();
+        assert!(load(&run_id).is_err());
     })
     .await;
 }
@@ -401,5 +463,5 @@ async fn a_run_with_no_meta_is_an_error_rather_than_an_empty_table() {
     })
     .await
     .expect_err("a missing run is worth saying");
-    assert!(err.to_string().contains("no readable meta.json"), "{err}");
+    assert!(err.to_string().contains("no readable record"), "{err}");
 }

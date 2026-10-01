@@ -130,7 +130,9 @@ fn on_path(path: Option<std::ffi::OsString>, program: &str) -> bool {
 #[async_trait]
 impl ResolveEnv for EmbedEnv {
     async fn blueprint(&self, reference: &BlueprintRef) -> Result<LoadedBlueprint, SpawnIssue> {
-        let path = SpecPath::root().field("source").field("blueprint");
+        // Relative to the reference: resolving places it under
+        // `source.blueprint`.
+        let path = SpecPath::root();
         let loaded = self
             .blueprints
             .get(reference.name.as_str())
