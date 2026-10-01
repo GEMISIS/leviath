@@ -79,6 +79,47 @@ impl RunFileLane {
         push_events(buffered, record);
     }
 
+    /// Write what was noted for `run_id` since its last step as a step of its
+    /// own, now, with the state as it last was: how a tool batch's record is
+    /// on disk before the batch runs. `None` when the run has no file open or
+    /// nothing was noted. A step that cannot be written closes the file, as
+    /// [`record`](Self::record) does.
+    pub(crate) async fn flush(&mut self, run_id: &str) -> Result<Option<u64>, RunFileError> {
+        let events = self.events.remove(run_id).unwrap_or_default();
+        let Some(mut writer) = self.writers.remove(run_id) else {
+            return Ok(None);
+        };
+        if events.is_empty() {
+            self.writers.insert(run_id.to_string(), writer);
+            return Ok(None);
+        }
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let job = move || {
+            let state = writer.state().clone();
+            let written = writer.record(state, at, events);
+            (writer, written)
+        };
+        // Nothing on the blocking side panics: frames always encode and every
+        // failure is a returned error.
+        let (writer, written) = tokio::task::spawn_blocking(job)
+            .await
+            .expect("writing a run file step does not panic");
+        if written.is_ok() {
+            self.writers.insert(run_id.to_string(), writer);
+        }
+        written
+    }
+
+    /// Make every later write to `run_id`'s open file fail.
+    #[cfg(test)]
+    pub(crate) fn break_writes(&mut self, run_id: &str) {
+        if let Some(writer) = self.writers.get_mut(run_id) {
+            crate::runfile::writer::break_writes(writer);
+        }
+    }
+
     /// Record one step for its run, under `runs_dir`.
     ///
     /// The file is opened (or made) on the run's first step in this process,

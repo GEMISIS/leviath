@@ -312,3 +312,57 @@ async fn a_resumed_run_counts_the_questions_it_already_asked() {
     let found = read_run(&runs.path().join(&run_id)).expect("the run reads");
     assert_eq!(found.asked, 1);
 }
+
+/// `src`'s files and directories, copied under `dst`.
+#[cfg(feature = "legacy-runs")]
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap().flatten() {
+        let to = dst.join(entry.file_name());
+        match entry.path().is_dir() {
+            true => copy_dir(&entry.path(), &to),
+            false => {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
+}
+
+/// A run directory in the older layout becomes a run file the first time
+/// the daemon looks at it, and is then read like any other run. One that is
+/// already a run file, and a directory that is no run at all, are left as
+/// they are.
+#[cfg(feature = "legacy-runs")]
+#[tokio::test]
+async fn an_old_run_directory_is_converted_on_first_load() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("leviath-legacy-runs")
+        .join("tests")
+        .join("fixtures");
+    let runs = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures.join("mid-tool-batch"), &runs.path().join("old"));
+    std::fs::create_dir_all(runs.path().join("empty")).unwrap();
+    // A directory that claims the older layout and cannot be read as it.
+    std::fs::create_dir_all(runs.path().join("broken")).unwrap();
+    std::fs::write(runs.path().join("broken").join("meta.json"), "not json").unwrap();
+
+    crate::test_support::with_tracing(|| {
+        convert_old_runs(runs.path(), Some(&fixtures.join("agents")));
+    });
+
+    let old = runs.path().join("old");
+    assert!(
+        old.join("legacy").join("meta.json").is_file(),
+        "the old files are kept aside"
+    );
+    let found = read_run(&old).expect("the converted run reads as a run file");
+    assert!(!found.run.spec.run_id.as_str().is_empty());
+    assert!(runs.path().join("broken").join("meta.json").is_file());
+
+    // Converting again finds nothing to do.
+    convert_old_run(&old, None);
+    assert!(read_run(&old).is_some());
+    // A runs directory that is not there converts nothing.
+    convert_old_runs(&runs.path().join("gone"), None);
+}

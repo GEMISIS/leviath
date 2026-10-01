@@ -38,11 +38,46 @@ pub(crate) fn force_cancel(run_id: &str) -> ForceCancelOutcome {
 /// the daemon's force-terminator seam and `lev cancel --force` route here so
 /// there is one definition of "terminated on disk".
 ///
-/// A directory whose `meta.json` is missing or unparseable still gets a minimal
-/// `Cancelled` record written: such a run is otherwise skipped by `list_runs`,
-/// which makes it invisible *and* permanent.
+/// A run with a run file has the cancel recorded there as its last step. A
+/// directory in the older layout has its `meta.json` rewritten, and one whose
+/// metadata is missing or unparseable still gets a minimal `Cancelled` record
+/// written: such a run is otherwise skipped by `list_runs`, which makes it
+/// invisible *and* permanent.
 pub(crate) fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
+    if let Some(outcome) = cancel_in_run_file(run_dir, now) {
+        return outcome;
+    }
     force_terminal_in(run_dir, RunStatus::Cancelled, None, now)
+}
+
+/// Record the run in `run_dir` cancelled as the last step of its run file.
+/// `None` when the directory holds no run file to record it in (an older
+/// layout's journal at the same name is not one).
+fn cancel_in_run_file(run_dir: &Path, now: i64) -> Option<ForceCancelOutcome> {
+    use leviath_runtime::state::{PipelinePhase, RunStatus as State};
+    let path = run_dir.join(leviath_core::files::RUN_FILE);
+    let head = std::fs::read(&path).ok()?;
+    if !head.starts_with(leviath_runtime::runfile::codec::MAGIC) {
+        return None;
+    }
+    let recorded = leviath_runtime::runfile::RunFileWriter::open(&path, Default::default())
+        .and_then(|mut writer| {
+            let mut next = writer.state().clone();
+            if matches!(
+                next.status,
+                State::Complete | State::Error(_) | State::Cancelled
+            ) {
+                return Ok(ForceCancelOutcome::AlreadyTerminal);
+            }
+            next.status = State::Cancelled;
+            next.phase = PipelinePhase::Done;
+            writer.record(next, now, Vec::new())?;
+            Ok(ForceCancelOutcome::Terminated)
+        });
+    Some(recorded.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not record a cancel in a run's file");
+        ForceCancelOutcome::WriteFailed
+    }))
 }
 
 /// Rewrite the run in `run_dir` to a terminal `status`, attaching `error` when

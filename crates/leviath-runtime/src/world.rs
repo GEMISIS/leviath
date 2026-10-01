@@ -2353,10 +2353,33 @@ mod tests {
         assert!(err.contains("tools[0]"), "{err}");
     }
 
+    /// The run `run_id` under `runs` as its run file lists it, once it has
+    /// reached `status`; `None` if it does not within two seconds. The
+    /// persistence worker writes on its own task, so this polls, with a short
+    /// real sleep between reads so the write has wall-clock time to land.
+    async fn meta_on_disk(
+        runs: &std::path::Path,
+        run_id: &str,
+        status: leviath_core::run_meta::RunStatus,
+    ) -> Option<leviath_core::run_meta::RunMeta> {
+        let path = runs.join(run_id).join(leviath_core::files::RUN_FILE);
+        for _ in 0..200 {
+            let meta = crate::runfile::RunFileReader::open(&path)
+                .ok()
+                .and_then(|read| crate::runfile::summary(&read).ok())
+                .filter(|meta| meta.status == status);
+            if meta.is_some() {
+                return meta;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        None
+    }
+
     #[tokio::test]
     async fn persists_agent_snapshot_to_runs_dir() {
         // An agent carrying RunMetadata + TokenTotals is snapshotted to disk as it
-        // runs; after it completes, meta.json exists with the final status.
+        // runs; after it completes, its run file holds the final status.
         let dir = tempfile::tempdir().unwrap();
         let mut world = PipelineWorld::new(
             registry_with(vec![with_tool("c1", "do"), text("done")]),
@@ -2411,22 +2434,13 @@ mod tests {
         // polls (rather than a bare `yield_now`) gives the worker's write actual
         // wall-clock time to land under load - otherwise the loop can spin through
         // every iteration before the write completes and spuriously time out.
-        let meta_path = dir.path().join("run-42").join("meta.json");
-        let mut meta = None;
-        for _ in 0..200 {
-            if let Ok(text) = std::fs::read_to_string(&meta_path)
-                && let Ok(m) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text)
-                && m.status == leviath_core::run_meta::RunStatus::Complete
-            {
-                meta = Some(m);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        let meta = meta.expect("final Complete snapshot flushed to disk");
-        assert_eq!(meta.run_id, "run-42");
-        assert!(dir.path().join("run-42").join("context.json").exists());
+        let meta = meta_on_disk(
+            dir.path(),
+            "run-42",
+            leviath_core::run_meta::RunStatus::Complete,
+        )
+        .await
+        .expect("final Complete snapshot flushed to disk");
         // The run kept a working clock, and it is stopped now the run is over -
         // a finished run's duration must not go on climbing when it is read.
         let clock = meta.active.expect("a run carrying a RunClock records one");
@@ -2435,7 +2449,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicked_agent_is_recorded_as_errored_on_disk() {
-        // A crashed run must not be left `"running"` in meta.json forever.
+        // A crashed run must not be left running in its run file forever.
         // `dispatch_persistence` is the *last* system in
         // the chain, so the tick that panics never reaches it - which is exactly
         // why `run_to_fixed_point` keeps driving after failing the agent.
@@ -2498,19 +2512,13 @@ mod tests {
         world.add_test_system(boom_on_active_agent);
         with_silent_panics(|| world.run_to_fixed_point());
 
-        let meta_path = dir.path().join("run-boom").join("meta.json");
-        let mut meta = None;
-        for _ in 0..200 {
-            if let Ok(text) = std::fs::read_to_string(&meta_path)
-                && let Ok(m) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text)
-                && m.status == leviath_core::run_meta::RunStatus::Error
-            {
-                meta = Some(m);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let meta = meta.expect("the panicked run must be persisted as errored");
+        let meta = meta_on_disk(
+            dir.path(),
+            "run-boom",
+            leviath_core::run_meta::RunStatus::Error,
+        )
+        .await
+        .expect("the panicked run must be persisted as errored");
         let error = meta.error.unwrap_or_default();
         assert!(error.contains("a pipeline system panicked"), "got: {error}");
         assert!(error.contains("exploded mid-stage"), "got: {error}");
@@ -2552,8 +2560,8 @@ mod tests {
     #[tokio::test]
     async fn persists_interaction_point_when_a_live_agent_blocks() {
         // Drive a real agent through inference → transition → the interaction-point
-        // lane until it blocks awaiting approval, and assert the daemon wrote the
-        // `interactions.json` sidecar - the persist side, end-to-end
+        // lane until it blocks awaiting approval, and assert its run file records
+        // it waiting on a person - the persist side, end-to-end
         // through the live lane (a tool call first, then a text "plan", so the stage
         // transitions into the interaction point rather than looping on nudges).
         let dir = tempfile::tempdir().unwrap();
@@ -2619,24 +2627,15 @@ mod tests {
         }
         assert_eq!(world.agent_status(e), Some(AgentStatus::Waiting));
 
-        // Poll until the interaction sidecar lands (the persistence worker writes it
-        // on its own task once the agent is parked Waiting at the point).
-        let path = dir.path().join("run-ip").join("interactions.json");
-        let mut sidecar = None;
-        for _ in 0..200 {
-            if let Ok(t) = std::fs::read_to_string(&path)
-                && let Ok(s) =
-                    serde_json::from_str::<crate::interaction_points::InteractionPointState>(&t)
-            {
-                sidecar = Some(s);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let s = sidecar.expect("interaction-point sidecar flushed to disk");
-        assert_eq!(s.cursor, 0);
-        assert_eq!(s.round, 0);
-        assert_eq!(s.body, "## Plan\n1. do it");
+        // Poll until the waiting step lands (the persistence worker writes it on
+        // its own task once the agent is parked Waiting at the point).
+        meta_on_disk(
+            dir.path(),
+            "run-ip",
+            leviath_core::run_meta::RunStatus::WaitingInput,
+        )
+        .await
+        .expect("the run's file records it waiting on a person");
     }
 
     /// A daemon must be able to stop while a run is parked on a person.
@@ -2732,15 +2731,18 @@ mod tests {
         world.flush_and_stop().await;
 
         // Read immediately - the drain guarantees the write landed.
-        let meta_path = dir.path().join("run-flush").join("meta.json");
-        let text = std::fs::read_to_string(&meta_path).expect("meta.json flushed on stop");
-        let meta: leviath_core::run_meta::RunMeta = serde_json::from_str(&text).unwrap();
-        assert_eq!(meta.run_id, "run-flush");
+        let path = dir
+            .path()
+            .join("run-flush")
+            .join(leviath_core::files::RUN_FILE);
+        let read =
+            crate::runfile::RunFileReader::open(&path).expect("the run file flushed on stop");
+        let meta = crate::runfile::summary(&read).unwrap();
         assert_eq!(meta.status, leviath_core::run_meta::RunStatus::Complete);
 
         // A second call is a no-op (resource already removed, task taken) - no panic.
         world.flush_and_stop().await;
-        assert!(meta_path.exists());
+        assert!(path.exists());
     }
 
     #[tokio::test]

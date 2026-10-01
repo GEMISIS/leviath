@@ -1361,7 +1361,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
 
         // The daemon's on-disk layout appeared under the state dir.
         let run_dir = state.path().join("runs").join(run_id.as_ref());
-        assert!(run_dir.join("meta.json").exists());
+        assert!(run_dir.join(leviath_core::files::RUN_FILE).exists());
         assert!(state.path().join("machine-id").exists());
     }
 

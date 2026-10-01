@@ -266,8 +266,8 @@ async fn the_run_file_ends_where_the_run_does() {
     for seq in 0..=file.last_seq() {
         file.state_at(seq).unwrap();
     }
-    // The older files are still written beside it.
-    assert!(dir.path().join("run-42").join("meta.json").exists());
+    // Nothing in the older layout is written beside it.
+    assert!(!dir.path().join("run-42").join("meta.json").exists());
 }
 
 fn persist_world() -> (

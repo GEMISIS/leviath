@@ -31,6 +31,8 @@ use std::sync::Arc;
 mod dashboard_log;
 mod force;
 #[cfg(test)]
+mod run_file_tests;
+#[cfg(test)]
 pub(crate) use dashboard_log::append_dashboard_log;
 #[cfg(test)]
 use dashboard_log::*;
@@ -175,6 +177,23 @@ impl<T> StatCache<T> {
         parse: impl FnOnce(&str) -> Option<T>,
         recheck_after: impl FnOnce(Option<&T>) -> std::time::Duration,
     ) -> Option<Arc<T>> {
+        let read = || {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| parse(&text))
+        };
+        self.get_reading(path, read, recheck_after)
+    }
+
+    /// [`get_with_recheck_by`](Self::get_with_recheck_by), with the value
+    /// worked out by `read` rather than parsed from the file's text: for a
+    /// file that is not text, or a value read from more than the one file.
+    pub(crate) fn get_reading(
+        &mut self,
+        path: &Path,
+        read: impl FnOnce() -> Option<T>,
+        recheck_after: impl FnOnce(Option<&T>) -> std::time::Duration,
+    ) -> Option<Arc<T>> {
         if let Some(entry) = self.entries.get(path)
             && entry.checked.elapsed() < recheck_after(entry.value.as_deref())
         {
@@ -194,10 +213,7 @@ impl<T> StatCache<T> {
             entry.checked = checked;
             return entry.value.clone();
         }
-        let value = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| parse(&text))
-            .map(Arc::new);
+        let value = read().map(Arc::new);
         self.entries.insert(
             path.to_path_buf(),
             CacheEntry {
@@ -584,11 +600,26 @@ pub(crate) fn looks_abandoned(
 }
 
 /// Read run metadata out of an explicit run directory (the daemon works from its
-/// own configured `runs_dir` rather than the home-resolved one).
+/// own configured `runs_dir` rather than the home-resolved one): the run file
+/// as of its last step, or for a directory in the older layout, its
+/// `meta.json`.
 pub(crate) fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
-    let path = dir.join(leviath_core::files::META_FILE);
-    let json = std::fs::read_to_string(&path)?;
+    let run_file = dir.join(leviath_core::files::RUN_FILE);
+    if let Ok(reader) = leviath_runtime::runfile::RunFileReader::open(&run_file) {
+        return Ok(leviath_runtime::runfile::summary(&reader)?);
+    }
+    let json = std::fs::read_to_string(dir.join(leviath_core::files::META_FILE))?;
     Ok(serde_json::from_str(&json)?)
+}
+
+/// The file a run's listing is read from: its run file, or `meta.json` for a
+/// directory in the older layout that has no run file yet.
+fn listing_file(dir: &std::path::Path) -> PathBuf {
+    let run_file = dir.join(leviath_core::files::RUN_FILE);
+    match run_file.is_file() {
+        true => run_file,
+        false => dir.join(leviath_core::files::META_FILE),
+    }
 }
 
 /// Inner implementation of `list_runs`, parameterised so the early-return
@@ -602,10 +633,7 @@ fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.filter_map(|e| e.ok()) {
-            let meta_path = entry.path().join(leviath_core::files::META_FILE);
-            if let Ok(json) = std::fs::read_to_string(&meta_path)
-                && let Ok(meta) = serde_json::from_str::<RunMeta>(&json)
-            {
+            if let Ok(meta) = read_meta_from(&entry.path()) {
                 runs.push(meta);
             }
         }
@@ -703,8 +731,8 @@ pub(crate) fn family_of(root_id: &str) -> Vec<String> {
     ids
 }
 
-/// [`list_runs`] through a [`StatCache`], for pollers: each `meta.json` is
-/// re-parsed only when its stat changes, the runs directory is listed again
+/// [`list_runs`] through a [`StatCache`], for pollers: each run's file is
+/// re-read only when its stat changes, the runs directory is listed again
 /// only when it may have gained or lost a run (see [`RunDirListing`]), and
 /// cache entries for deleted runs are dropped. Same ordering and
 /// skip-unreadable behavior as `list_runs`.
@@ -717,12 +745,11 @@ pub(crate) fn list_runs_cached(
     }
     let mut runs = Vec::with_capacity(listing.dirs.len());
     for dir in &listing.dirs {
-        let meta_path = dir.join(leviath_core::files::META_FILE);
         // A run this poller already knows to be finished is asked about
         // once a second; a live one (or one never seen) every time.
-        if let Some(meta) = cache.get_with_recheck_by(
-            &meta_path,
-            |json| serde_json::from_str::<RunMeta>(json).ok(),
+        if let Some(meta) = cache.get_reading(
+            &listing_file(dir),
+            || read_meta_from(dir).ok(),
             |meta| meta.map_or(std::time::Duration::ZERO, settle_window),
         ) {
             runs.push(meta);

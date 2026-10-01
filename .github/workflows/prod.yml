@@ -349,11 +349,25 @@ jobs:
               echo "$c@$VERSION already on crates.io, skipping"
               continue
             fi
+            # The CLI's converter for run directories in the older layout is
+            # a workspace crate that is not published, behind the CLI's
+            # default `legacy-runs` feature. crates.io takes no dependency it
+            # cannot resolve, optional or not, so the published CLI is built
+            # without it: its manifest loses the feature and the dependency
+            # here, and the package is made from that edited copy. A daemon
+            # built from it reports an older run directory instead of
+            # converting it; the release binaries carry the converter.
+            dirty=""
+            if [ "$c" = leviath-cli ]; then
+              sed -i -e 's/, "legacy-runs"//' -e '/^legacy-runs = /d' \
+                     -e '/^leviath-legacy-[a-z]* = /d' crates/leviath-cli/Cargo.toml
+              dirty="--allow-dirty"
+            fi
             # Retry with a delay: crates.io rate-limits bursts of publishes,
             # and the sparse index takes a moment to serve a just-published
             # dependency to the next crate's verify build.
             tries=0
-            until cargo publish -p "$c"; do
+            until cargo publish -p "$c" $dirty; do
               tries=$((tries + 1))
               if [ "$tries" -ge 15 ]; then
                 echo "::error::giving up on $c after $tries attempts"

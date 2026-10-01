@@ -1,33 +1,39 @@
 //! The names of the files a run directory and an agent directory hold.
 //!
-//! One place for each name. The persistence lane writes these files, the
+//! One place for each name. The persistence lane writes the run file, and the
 //! CLI's run state reader, the recovery scan, the dashboard and the HTTP API
-//! read them back. A name that lives in one constant cannot be misspelled in
-//! one reader and quietly never match again.
+//! read it back. A name that lives in one constant cannot be misspelled in one
+//! reader and quietly never match again.
+//!
+//! A run directory in the older many-file layout holds `meta.json`,
+//! `context.json`, `stages.json`, `fanout.json`, `interactions.json` and an
+//! LVR1 journal at `run.lvr`; those names stay here for the readers and the
+//! converter that still open such a directory. Nothing writes them for a new
+//! run.
 
-/// The run's metadata: status, timings, totals. Written by the persistence
-/// lane on every change and read by everything that lists runs.
+/// A run's metadata in the older layout: status, timings, totals.
 pub const META_FILE: &str = "meta.json";
 
-/// The run's latest context-window snapshot.
+/// A run's latest context-window snapshot in the older layout.
 pub const CONTEXT_FILE: &str = "context.json";
 
-/// The per-stage ledger: which stages ran, in what order, at what cost.
+/// The per-stage ledger in the older layout.
 pub const STAGES_FILE: &str = "stages.json";
 
-/// The fan-out record for a run that split into workers.
+/// The fan-out record in the older layout.
 pub const FANOUT_FILE: &str = "fanout.json";
 
-/// The interactions a paused run is waiting on.
+/// The interactions a paused run waited on, in the older layout.
 pub const INTERACTIONS_FILE: &str = "interactions.json";
 
-/// The run archive: the append-only journal every other file is a view of.
+/// Where the older layout kept its LVR1 journal. The same name as
+/// [`RUN_FILE`]: the two are told apart by the magic their first bytes carry.
 pub const ARCHIVE_FILE: &str = "run.lvr";
 
-/// The run file: the run's spec, the steps it took and checkpoints of its
-/// state, in the LVR2 frame format. Written beside [`ARCHIVE_FILE`] while the
-/// readers of the older files are moved onto it.
-pub const RUN_FILE: &str = "run.lvr2";
+/// The run file: the run's spec, its code and files, the steps it took and
+/// checkpoints of its state, in the LVR2 frame format. Everything about a run
+/// is here.
+pub const RUN_FILE: &str = "run.lvr";
 
 /// The blueprint manifest inside an agent directory.
 pub const MANIFEST_FILENAME: &str = "agent.leviath";

@@ -20,11 +20,13 @@ mod error;
 pub mod frames;
 pub(crate) mod lane;
 pub mod reader;
+mod summary;
 pub mod view;
 pub mod writer;
 
 pub use error::{RunFileError, RunFileErrorKind};
 pub use reader::RunFileReader;
+pub use summary::summary;
 pub use writer::{CheckpointPolicy, RunFileWriter};
 
 /// The JSON Schemas of every type a run file stores, as one document.

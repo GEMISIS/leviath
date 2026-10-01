@@ -352,7 +352,6 @@ type PersistenceQuery = (
     Entity,
     &'static RunMetadata,
     &'static AgentState,
-    &'static ContextWindow,
     &'static StageCursor,
     &'static TokenTotals,
     &'static mut PersistWatermark,
@@ -364,8 +363,6 @@ type PersistenceQuery = (
     Option<&'static crate::fanout::FanOutWaiting>,
     (
         Option<&'static crate::interaction_points::AwaitingInteractionPoint>,
-        Option<&'static crate::interaction_points::InteractionPointCursor>,
-        Option<&'static crate::interaction_points::InteractionPointRounds>,
         Option<&'static crate::persistence::RunOutcomeFlags>,
         Option<&'static crate::components::OutputValidators>,
         Option<&'static crate::persistence::FinalOutput>,
@@ -437,7 +434,6 @@ fn build_snapshots(
         entity,
         md,
         state,
-        window,
         cursor,
         totals,
         mut watermark,
@@ -449,8 +445,6 @@ fn build_snapshots(
         fan_out_waiting,
         (
             awaiting_point,
-            ip_cursor,
-            ip_rounds,
             outcome_flags,
             validators,
             final_output,
@@ -629,8 +623,6 @@ fn build_snapshots(
                 active,
             },
         );
-        let context = build_context_snapshot(window, &state.current_stage);
-        let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
         // Persist the taint gate's audit log (per-stage) when it gained events
         // since the last write, so security decisions are inspectable after
         // the fact. The log is append-only, so an unchanged (stage, count)
@@ -665,35 +657,6 @@ fn build_snapshots(
                         .expect("GateEvent slice always serializes"),
                 ))
             });
-        // A parent parked mid fan-out: persist its waiting state so the
-        // split/merge resumes after a restart (removed once it's no longer
-        // waiting - see the writer).
-        let fanout = fan_out_waiting
-            .map(|w| serde_json::to_string(&w.to_state()).expect("FanOutState always serializes"));
-        // An agent parked at a stage-boundary interaction point: persist the open
-        // point (cursor/round + the reviewed document) so a restart re-presents the
-        // same prompt rather than dropping it and re-inferring. The
-        // document comes from the open request in the hub - which is present by the
-        // time `reflect_interaction_status` (running just before this system) has
-        // flipped the agent to `Waiting`. If the request isn't registered yet, skip
-        // this tick; the next persist captures it (removing any stale sidecar).
-        let interactions = awaiting_point.and_then(|_| {
-            // By prefix rather than by substring: every id this run raises
-            // starts with the run id, and a blueprint whose name holds `point`
-            // would let an approval request read as a point.
-            let point_ids = leviath_core::interaction::request_id_prefix(&state.agent_id, "point");
-            let request = hub
-                .as_ref()?
-                .pending()
-                .into_iter()
-                .find(|(aid, req)| aid == &state.agent_id && req.id.starts_with(&point_ids))?;
-            let ip_state = crate::interaction_points::InteractionPointState {
-                cursor: ip_cursor.map_or(0, |c| c.0),
-                round: ip_rounds.map_or(0, |r| r.0),
-                body: request.1.body.unwrap_or_default(),
-            };
-            Some(serde_json::to_string(&ip_state).expect("InteractionPointState always serializes"))
-        });
         // Always carry the answer's bytes when the agent holds them; the
         // persistence lane decides whether they still need writing.
         //
@@ -717,14 +680,10 @@ fn build_snapshots(
             Box::new(PersistJob {
                 run_id: md.run_id.clone(),
                 meta,
-                context,
-                stages,
                 output_appends,
                 log_appends,
                 taint_audit,
                 final_output: final_output_body,
-                fanout,
-                interactions,
                 run_file: None,
             }),
         ));

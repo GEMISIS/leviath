@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::files::ARCHIVE_FILE;
+use leviath_core::files::RUN_FILE;
 use leviath_runtime::runfile::codec::{self, FrameKind};
 use leviath_runtime::runfile::fingerprint;
 use leviath_runtime::state::{RunState, StateDelta};
@@ -56,7 +56,7 @@ fn frame<T: serde::Serialize>(kind: FrameKind, payload: &T) -> Vec<u8> {
 pub(crate) fn install(dir: &Path, bytes: &[u8]) -> Result<(PathBuf, PathBuf), ConvertError> {
     let partial = dir.join(PARTIAL);
     let legacy = dir.join(LEGACY_DIR);
-    let file = dir.join(ARCHIVE_FILE);
+    let file = dir.join(RUN_FILE);
     leviath_sys::perms::write_private(&partial, bytes)
         .and_then(|()| leviath_sys::perms::create_private_dir_all(&legacy))
         .and_then(|()| std::fs::read_dir(dir))

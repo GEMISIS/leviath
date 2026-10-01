@@ -491,19 +491,26 @@ pub(crate) fn title_request(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, sta
 
 /// `final_output` and `last_transition`, when the run has them.
 pub(crate) fn optional_state(entity: &mut EntityWorldMut<'_>, state: &RunState) {
-    if let Some(out) = &state.final_output {
-        entity.insert(FinalOutput(leviath_core::output::FinalOutput {
+    if let Some(out) = final_output(state) {
+        entity.insert(out);
+    }
+    if let Some(t) = &state.last_transition {
+        entity.insert(LastTransition(t.clone()));
+    }
+}
+
+/// `final_output`, when the run has handed one back.
+pub(crate) fn final_output(state: &RunState) -> Option<FinalOutput> {
+    state.final_output.as_ref().map(|out| {
+        FinalOutput(leviath_core::output::FinalOutput {
             content: out.content.clone(),
             format: out.format.clone(),
             stage: out.stage.to_string(),
             submitted_at: out.submitted_at,
             truncated: out.truncated,
             artifacts: Vec::new(),
-        }));
-    }
-    if let Some(t) = &state.last_transition {
-        entity.insert(LastTransition(t.clone()));
-    }
+        })
+    })
 }
 
 /// `phase` and `pending`: the marker that puts the run in front of the system
