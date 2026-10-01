@@ -3848,6 +3848,7 @@ mod tests {
             points,
             checked_at_tick: u64::MAX,
             stamp: None,
+            transitions: None,
         });
         dash.context_history_idx = Some(0);
         dash
@@ -4243,6 +4244,7 @@ mod tests {
             message: "Started run-7".to_string(),
             ok: true,
             run_id: Some("run-7".to_string()),
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         dash.open_pending_run();
@@ -4278,6 +4280,7 @@ mod tests {
             message: "Started ghost".to_string(),
             ok: true,
             run_id: Some("ghost".to_string()),
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         for _ in 0..crate::commands::dashboard::new_run::OPEN_RUN_TICKS + 1 {
@@ -4295,6 +4298,7 @@ mod tests {
             message: "Started run-7".to_string(),
             ok: true,
             run_id: Some("run-7".to_string()),
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         dash.agents
@@ -4315,6 +4319,7 @@ mod tests {
             message: "The daemon refused the run: nope".to_string(),
             ok: false,
             run_id: None,
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         assert!(dash.pending_open_run.is_none());

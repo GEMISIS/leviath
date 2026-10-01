@@ -83,11 +83,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    // Pre-scan argv for dynamic `--<region>` seed flags on `run` (region names
-    // are blueprint-defined, so clap can't declare them), then parse the rest
-    // and fold the extracted flags back in (both steps are tested lib seams).
+    // Pre-scan argv for inputs given the short way on `run` (`--<name> value`:
+    // input names are blueprint-defined, so clap can't declare them), then
+    // parse the rest and fold the extracted flags back in (both steps are
+    // tested lib seams). What counts as a flag of `run`'s own is asked of clap.
+    let known = commands::run::known_run_flags(&<Cli as clap::CommandFactory>::command());
     let (argv, region_flags) =
-        commands::run::extract_region_flags(std::env::args().collect::<Vec<_>>());
+        commands::run::extract_region_flags(std::env::args().collect::<Vec<_>>(), &known);
     let mut cli = Cli::parse_from(argv);
     apply_region_flags(&mut cli.command, region_flags);
 
@@ -410,15 +412,14 @@ fn ask_yes_no(question: &str) -> bool {
 /// unit-tested; the cwd/home resolution, process spawn, and socket connect are
 /// the un-unit-testable slivers kept here.
 async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
-    // No PATH means the current directory, which is what `find_manifest`'s
-    // directory branch already handles and what the docs have always promised.
-    let path = args.path.as_deref().unwrap_or(".");
-    let workdir = commands::run::effective_workdir(args.workdir, std::env::current_dir()?)?;
+    let cwd = std::env::current_dir()?;
+    let workdir_given = args.workdir.is_some();
+    let workdir = commands::run::effective_workdir(args.workdir, cwd.clone())?;
     // Confirm a workdir an agent probably should not be pointed at. Before
     // resolving the task, so a cancelled run has not opened an editor first;
     // `--yolo` and any non-terminal caller proceed with a warning rather than
-    // being refused.
-    {
+    // being refused. A `--check` starts nothing, so it has nothing to confirm.
+    if !args.check {
         let allowed = leviath_cli::config::Config::load()
             .map(|c| c.security.allowed_workdirs)
             .unwrap_or_default();
@@ -444,33 +445,41 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         }
     }
     // Read here, where the paths the user typed still mean what they meant.
-    let parts = commands::run::attach::attach_all(&args.attach, &std::env::current_dir()?)?;
-    let local_run =
-        leviath_cli::daemon::client::run_request(leviath_cli::daemon::client::RunLine {
-            path,
-            task: args.task.as_deref(),
-            stdin_is_terminal: &|| std::io::IsTerminal::is_terminal(&io::stdin()),
-            model: args.model,
-            workdir: &workdir,
-            yolo: args.yolo.is_some(),
-            yolo_profile: args.yolo.filter(|name| !name.is_empty()),
-            allow: args.allow,
-            max_depth: args.max_depth,
-            regions: args.regions,
-            no_seed_commands: args.no_seed_commands,
-            output_request: commands::run::output_request(
-                args.output_format,
-                args.output_instructions,
-                args.output_schema,
-            )?,
-            parts,
-        })?;
+    let parts = commands::run::attach::attach_all(&args.attach, &cwd)?;
+    let local_run = commands::run::request::run_request(commands::run::request::RunLine {
+        path: args.path.as_deref(),
+        request_file: args.request.as_deref(),
+        task: args.task.as_deref(),
+        stdin_is_terminal: &|| std::io::IsTerminal::is_terminal(&io::stdin()),
+        ask_for_task: !args.check,
+        inputs: args.inputs,
+        named: args.regions,
+        values: std::collections::BTreeMap::new(),
+        parts,
+        cwd: &cwd,
+        model: args.model,
+        workdir: &workdir,
+        workdir_given,
+        yolo: args.yolo.is_some(),
+        yolo_profile: args.yolo.filter(|name| !name.is_empty()),
+        allow: args.allow,
+        max_depth: args.max_depth,
+        no_seed_commands: args.no_seed_commands,
+        output_request: commands::run::output_request(
+            args.output_format,
+            args.output_instructions,
+            args.output_schema,
+        )?,
+    })?;
     // Deliberately after the resolve, not before. No `--task` opens an editor,
     // and a user can sit in vim for twenty minutes: checking daemon liveness
     // and build staleness first would mean spawning against a socket last
     // verified a third of an hour ago. It also stops a run that was never going
-    // to happen (a bad path, a typo'd region) from auto-starting a daemon.
+    // to happen (a bad path, a typo'd input) from auto-starting a daemon.
     ensure_daemon_running().await?;
+    if args.check {
+        return commands::run::check::send_check(&control_client()?, &local_run, args.json).await;
+    }
     leviath_cli::daemon::client::send_spawn_batch(
         &control_client()?,
         local_run,

@@ -1,11 +1,15 @@
 //! On-disk run state for background agent executions.
 //!
 //! Each run lives under `~/.leviath/runs/<run-id>/` with:
-//! - `meta.json`    - run metadata, updated atomically (tmp + rename)
-//! - `stages.json` - index of per-stage records
+//! - `run.lvr` - the run file: its spec, its steps and its state (see
+//!   `run_file` for how it is read)
 //! - `stages/<idx>/output.log` - readable agent output for that stage
 //! - `stages/<idx>/logs.log`   - operational events + tool activity
-//! - `stages/<idx>/context.json` - context snapshot for that stage
+//!
+//! A run directory in the older layout (`meta.json`, `stages.json`,
+//! `context.json` and a journal at `run.lvr`) is converted to a run file
+//! when the daemon starts. Until then the readers here read its files, and
+//! only for a directory with no run file of its own.
 //!
 //! The dashboard's activity log is persisted separately at:
 //! - `~/.leviath/dashboard.log` - never cleared, appended across sessions
@@ -30,6 +34,8 @@ use std::sync::Arc;
 
 mod dashboard_log;
 mod force;
+pub(crate) mod run_file;
+pub(crate) use run_file::RunHistory;
 #[cfg(test)]
 mod run_file_tests;
 #[cfg(test)]
@@ -93,11 +99,33 @@ fn write_context_snapshot_to(dir: &std::path::Path, snap: &ContextSnapshot) -> a
     write_private_atomic(&dir.join(leviath_core::files::CONTEXT_FILE), &json)
 }
 
-/// Read the context snapshot for a run, if present.
+/// Read the context snapshot for a run, if present: its window as of its last
+/// step.
 pub(crate) fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
-    let path = run_dir(run_id).join(leviath_core::files::CONTEXT_FILE);
-    let json = std::fs::read_to_string(&path).ok()?;
+    read_context_in(&run_dir(run_id))
+}
+
+/// [`read_context_snapshot`] for a run directory the caller already holds.
+fn read_context_in(dir: &Path) -> Option<ContextSnapshot> {
+    run_file::context_in(dir).or_else(|| read_older(dir, leviath_core::files::CONTEXT_FILE))
+}
+
+/// A JSON file of a run directory in the older layout, which has no run file
+/// of its own until the daemon converts it.
+fn read_older<T: serde::de::DeserializeOwned>(dir: &Path, name: &str) -> Option<T> {
+    let json = std::fs::read_to_string(dir.join(name)).ok()?;
     serde_json::from_str(&json).ok()
+}
+
+/// The file a reader of the run in `dir` reads, which a poller watches for
+/// change: its run file, or `older` (one of the older layout's files) for a
+/// directory that has no run file.
+fn source_file(dir: &Path, older: &str) -> PathBuf {
+    let run_file = run_file::path_in(dir);
+    match run_file.is_file() {
+        true => run_file,
+        false => dir.join(older),
+    }
 }
 
 /// A parse cache keyed by a file's `(mtime, len)`: the file is re-read and
@@ -331,7 +359,17 @@ pub(crate) fn visit_run_archive(
 /// it. No caller needs the secret: the CLI printer, the dashboard, and the API
 /// all only display these points.
 pub(crate) fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
-    read_run_archive(run_id)
+    run_history(run_id).points
+}
+
+/// A run's history: its window over time (see [`context_history`]) and the
+/// edges it took. Read off its run file, or for a directory in the older
+/// layout, replayed from its journal, which records no edges.
+pub(crate) fn run_history(run_id: &str) -> RunHistory {
+    if let Some(history) = run_file::history_in(&run_dir(run_id)) {
+        return history;
+    }
+    let points = read_run_archive(run_id)
         .map(|records| leviath_core::run_archive::replay_points(&records))
         .unwrap_or_default()
         .into_iter()
@@ -339,7 +377,11 @@ pub(crate) fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::Ru
             meta: point.meta.redacted(),
             ..point
         })
-        .collect()
+        .collect();
+    RunHistory {
+        points,
+        transitions: None,
+    }
 }
 
 /// Inner implementation of `runs_dir`, parameterised so it can be tested
@@ -617,8 +659,7 @@ pub(crate) fn looks_abandoned(
 /// as of its last step, or for a directory in the older layout, its
 /// `meta.json`.
 pub(crate) fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
-    let run_file = dir.join(leviath_core::files::RUN_FILE);
-    if let Ok(reader) = leviath_runtime::runfile::RunFileReader::open(&run_file) {
+    if let Ok(reader) = run_file::open_in(dir) {
         return Ok(leviath_runtime::runfile::summary(&reader)?);
     }
     let json = std::fs::read_to_string(dir.join(leviath_core::files::META_FILE))?;
@@ -628,11 +669,7 @@ pub(crate) fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
 /// The file a run's listing is read from: its run file, or `meta.json` for a
 /// directory in the older layout that has no run file yet.
 fn listing_file(dir: &std::path::Path) -> PathBuf {
-    let run_file = dir.join(leviath_core::files::RUN_FILE);
-    match run_file.is_file() {
-        true => run_file,
-        false => dir.join(leviath_core::files::META_FILE),
-    }
+    source_file(dir, leviath_core::files::META_FILE)
 }
 
 /// Inner implementation of `list_runs`, parameterised so the early-return
@@ -883,9 +920,13 @@ pub(crate) fn read_stages_index_settled(
     cache: &mut StatCache<Vec<StageRecord>>,
     recheck_after: std::time::Duration,
 ) -> Arc<Vec<StageRecord>> {
-    let path = run_dir(run_id).join(leviath_core::files::STAGES_FILE);
+    let dir = run_dir(run_id);
     cache
-        .get_with_recheck(&path, |json| serde_json::from_str(json).ok(), recheck_after)
+        .get_reading(
+            &source_file(&dir, leviath_core::files::STAGES_FILE),
+            || read_stages_in(&dir),
+            |_| recheck_after,
+        )
         .unwrap_or_default()
 }
 
@@ -896,8 +937,12 @@ pub(crate) fn read_context_snapshot_cached(
     run_id: &str,
     cache: &mut StatCache<ContextSnapshot>,
 ) -> Option<Arc<ContextSnapshot>> {
-    let path = run_dir(run_id).join(leviath_core::files::CONTEXT_FILE);
-    cache.get_with(&path, |json| serde_json::from_str(json).ok())
+    let dir = run_dir(run_id);
+    cache.get_reading(
+        &source_file(&dir, leviath_core::files::CONTEXT_FILE),
+        || read_context_in(&dir),
+        |_| std::time::Duration::ZERO,
+    )
 }
 
 /// Read the last `max_bytes` of any file on disk, returning UTF-8 text.
@@ -959,21 +1004,16 @@ fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyho
     write_private_atomic(&dir.join(leviath_core::files::STAGES_FILE), &json)
 }
 
-/// Read the stages index for a run, or return an empty vec on any error.
+/// Read a run's per-stage ledger as of its last step, or return an empty vec
+/// on any error.
 pub(crate) fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
-    read_stages_index_from(&run_dir(run_id))
+    read_stages_in(&run_dir(run_id)).unwrap_or_default()
 }
 
-/// [`read_stages_index`] for a run directory the caller already holds.
-///
-/// Restart recovery works from its configured runs directory rather than the
-/// home one, so it cannot resolve the path itself.
-pub(crate) fn read_stages_index_from(dir: &std::path::Path) -> Vec<StageRecord> {
-    let json = match std::fs::read_to_string(dir.join(leviath_core::files::STAGES_FILE)) {
-        Ok(j) => j,
-        Err(_) => return Vec::new(),
-    };
-    serde_json::from_str(&json).unwrap_or_default()
+/// [`read_stages_index`] for a run directory the caller already holds,
+/// `None` when it records no ledger.
+fn read_stages_in(dir: &Path) -> Option<Vec<StageRecord>> {
+    run_file::stages_in(dir).or_else(|| read_older(dir, leviath_core::files::STAGES_FILE))
 }
 
 /// Ensure the per-stage directory exists (called before first write).
@@ -1007,26 +1047,6 @@ pub(crate) fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
     if let Ok(mut file) = leviath_sys::open_private_append(&path) {
         let _ = writeln!(file, "{}", text);
     }
-}
-
-/// Atomically write a context snapshot for a specific stage.
-///
-/// Test-only; see [`write_context_snapshot`].
-#[cfg(test)]
-pub(crate) fn write_stage_context(
-    run_id: &str,
-    stage_idx: usize,
-    snap: &ContextSnapshot,
-) -> anyhow::Result<()> {
-    ensure_stage_dir(run_id, stage_idx);
-    write_context_snapshot_to(&stage_dir(run_id, stage_idx), snap)
-}
-
-/// Read the context snapshot for a specific stage, if present.
-pub(crate) fn read_stage_context(run_id: &str, stage_idx: usize) -> Option<ContextSnapshot> {
-    let path = stage_dir(run_id, stage_idx).join(leviath_core::files::CONTEXT_FILE);
-    let json = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&json).ok()
 }
 
 /// Read the last `max_bytes` of the readable output log for a specific stage.
@@ -2567,29 +2587,6 @@ mod tests {
             assert!(log.contains("event A"));
             assert!(log.contains("event B"));
         });
-    }
-
-    // ─── write/read stage context ───────────────────────────────────────────
-
-    #[test]
-    fn write_and_read_stage_context_roundtrip() {
-        with_isolated_runs_dir("write-and-read-stage-context-roundtrip", |_d| {
-            let run_id = "test-stage-ctx-unit";
-            let snap = ContextSnapshot {
-                stage_name: "stage-0".into(),
-                total_tokens: 100,
-                max_tokens: 4096,
-                regions: vec![],
-            };
-            write_stage_context(run_id, 0, &snap).unwrap();
-            let back = read_stage_context(run_id, 0).unwrap();
-            assert_eq!(back.stage_name, "stage-0");
-        });
-    }
-
-    #[test]
-    fn read_stage_context_missing_returns_none() {
-        assert!(read_stage_context("nonexistent-run", 99).is_none());
     }
 
     // ─── append_dashboard_log ─────────────────────────────────────────────

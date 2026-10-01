@@ -5,10 +5,14 @@ use std::path::PathBuf;
 
 use crate::lint::{LintEnv, LintFinding, LintSeverity, lint_manifest};
 
+#[path = "validate_toml.rs"]
+mod toml_blueprint;
+
 /// Arguments for `lev validate`.
 #[derive(Args)]
 pub struct ValidateArgs {
-    /// Path to the agent directory or agent.leviath file
+    /// Path to the agent directory, its agent.leviath, or an agent.toml
+    /// blueprint (`lev blueprint migrate` writes one)
     #[arg(default_value = ".")]
     pub(crate) path: String,
 
@@ -1016,6 +1020,10 @@ fn config_note_lines(unread: &[String], missing: &[String]) -> Vec<String> {
 
 /// Run `lev validate`: check a blueprint and print what is wrong with it.
 pub(crate) async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
+    if let Some(file) = toml_blueprint::blueprint_file(std::path::Path::new(&args.path)) {
+        println!("{}", toml_blueprint::validate(&file, args.json)?);
+        return Ok(());
+    }
     // A config that will not load is said out loud. `.ok()` here would turn it
     // into `None` and quietly stop the checks that need a config - which models
     // an install would use, which read paths are granted. The blueprint still

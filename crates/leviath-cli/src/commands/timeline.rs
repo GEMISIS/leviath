@@ -1,10 +1,10 @@
 //! `lev timeline <run-id>` - where a run's wall-clock time went.
 //!
 //! `lev stages` answers "what did each stage cost"; this answers "what was the
-//! run doing for an hour". Everything is read from the journal (`run.lvr`),
-//! which already timestamps every model call, tool batch, tool result and
-//! status change, so the split between model time, tool time and time spent
-//! waiting on children is exact rather than inferred.
+//! run doing for an hour". Everything is read from the run's file
+//! (`run.lvr`), whose every step is timestamped: each model call, each tool
+//! result and each change of status. So the split between model time, tool
+//! time and time spent waiting on children is exact rather than inferred.
 //!
 //! The one heuristic is the warning about repeated large replies. A reply cut
 //! off by the output cap and retried leaves a signature no other behaviour
@@ -161,13 +161,84 @@ pub(crate) async fn execute(args: TimelineArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read one run's metadata and journal and reduce them to a [`RunTimeline`].
+/// Read one run's record and steps and reduce them to a [`RunTimeline`]: from
+/// its run file, or for a directory in the older layout, its journal.
 fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
     let meta = crate::runstate::read_meta(run_id)
-        .map_err(|e| anyhow::anyhow!("no readable meta.json for run '{run_id}': {e}"))?;
-    let records = crate::runstate::read_run_archive(run_id)
-        .ok_or_else(|| anyhow::anyhow!("no readable journal (run.lvr) for run '{run_id}'"))?;
+        .map_err(|e| anyhow::anyhow!("no readable record for run '{run_id}': {e}"))?;
+    let dir = crate::runstate::run_dir(run_id);
+    let records = match crate::runstate::run_file::open_in(&dir) {
+        Ok(reader) => run_file_records(&reader),
+        Err(_) => crate::runstate::read_run_archive(run_id),
+    }
+    .ok_or_else(|| anyhow::anyhow!("no readable steps (run.lvr) for run '{run_id}'"))?;
     Ok(analyze(&meta, &records))
+}
+
+/// A run file's steps as the records [`analyze`] reads: each model call as
+/// its usage, in the stage and iteration it was made in, each finished tool
+/// call, and each change of status. `None` when a step does not decode.
+fn run_file_records(reader: &leviath_runtime::runfile::RunFileReader) -> Option<Vec<RunRecord>> {
+    let start = reader.state_at(0).ok();
+    let deltas = reader.deltas(1, reader.last_seq()).ok();
+    start
+        .zip(deltas)
+        .map(|(state, deltas)| records_of(reader.spec(), state, deltas))
+}
+
+/// The steps `deltas` took from `state`, the run's start, as records.
+fn records_of(
+    spec: &leviath_runtime::spec::run_spec::RunSpec,
+    mut state: leviath_runtime::state::RunState,
+    deltas: Vec<leviath_runtime::state::StateDelta>,
+) -> Vec<RunRecord> {
+    use leviath_runtime::state::{Change, RunEvent};
+    let mut records = Vec::new();
+    for delta in deltas {
+        let before = state.cursor.clone();
+        delta.apply(&mut state);
+        let iteration = before.iteration as usize;
+        for event in &delta.events {
+            match event {
+                RunEvent::Inference { model, spend, .. } => {
+                    records.push(RunRecord::InferenceUsage {
+                        kind: InferenceKind::Stage,
+                        stage: before.stage.to_string(),
+                        iteration,
+                        provider: model
+                            .provider
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                        model: model.model.to_string(),
+                        prompt_tokens: spend.prompt_tokens as usize,
+                        completion_tokens: spend.completion_tokens as usize,
+                        cached_tokens: spend.cached_tokens as usize,
+                        cache_write_tokens: spend.cache_write_tokens as usize,
+                        cost_usd: None,
+                        cost_reported_by_provider: None,
+                        at: delta.at,
+                    });
+                }
+                RunEvent::ToolFinished { call_id, .. } => records.push(RunRecord::ToolCallDone {
+                    iteration,
+                    call_id: call_id.clone(),
+                    execution_id: String::new(),
+                    result: leviath_core::region::EntryContent::text(""),
+                    outcome: None,
+                    at: delta.at,
+                }),
+                _ => {}
+            }
+        }
+        if delta.changes.iter().any(|c| matches!(c, Change::Status(_))) {
+            records.push(RunRecord::StatusChanged {
+                status: leviath_runtime::runfile::summary_of(spec, &state, delta.at).status,
+                at: delta.at,
+            });
+        }
+    }
+    records
 }
 
 /// Reduce a run's journal to its timeline. Pure, so the shape is testable

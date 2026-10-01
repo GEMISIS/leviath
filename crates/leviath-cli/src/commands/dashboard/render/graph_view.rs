@@ -462,6 +462,7 @@ brief = { kind = "pinned", accepts = ["application/pdf"] }
             points,
             checked_at_tick: u64::MAX,
             stamp: None,
+            transitions: None,
         });
     }
 

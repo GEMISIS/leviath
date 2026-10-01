@@ -88,7 +88,7 @@ pub(crate) struct Dashboard {
     /// Loads a run's archived points. Injected (mirroring `clock`/`yank_fn`)
     /// so tests can count loads and pin that `,`/`.` read the archive once
     /// per run, not once per keypress.
-    pub(super) history_loader: fn(&str) -> Vec<leviath_core::run_archive::RunPoint>,
+    pub(super) history_loader: fn(&str) -> runstate::RunHistory,
     /// A run's archive stat, which decides whether `history` is still
     /// current. Injected beside `history_loader` for the same reason.
     pub(super) history_stamp: fn(&str) -> Option<runstate::FileStamp>,
@@ -217,13 +217,16 @@ pub(crate) struct Dashboard {
     /// Workdir-relative file paths the `@` completion offers, walked once when
     /// the screen opens rather than per keystroke.
     pub(super) new_run_files: Vec<String>,
-    /// One slot per caller-input region of the selected blueprint.
+    /// One row per input the selected blueprint declares beside its task.
     pub(super) new_run_inputs: Vec<super::new_run_inputs::NewRunInput>,
-    /// The slot the Inputs pane's cursor is on.
+    /// The row the Inputs pane's cursor is on.
     pub(super) new_run_input_selected: usize,
-    /// The agent path the slots were built for, so a selection that has not
+    /// The agent path the rows were built for, so a selection that has not
     /// moved keeps what was typed.
     pub(super) new_run_inputs_key: String,
+    /// A run the daemon refused for its inputs, waiting for the new-run
+    /// screen to open on it again with each problem beside its row.
+    pub(super) new_run_refused: Option<super::types::RefusedRun>,
     /// True while an `@` file reference is being typed, so the completion
     /// popup has the keys.
     pub(super) new_run_file_ref: bool,
@@ -543,7 +546,10 @@ impl Dashboard {
         // Stat before reading: an append that lands during the read makes the
         // next check read again, rather than hiding behind a newer stamp.
         let stamp = stamp_of(run_id);
-        let points = (self.history_loader)(run_id);
+        let runstate::RunHistory {
+            points,
+            transitions,
+        } = (self.history_loader)(run_id);
         let visits = super::history::derive_visits(&points);
         self.history = Some(RunHistoryCache {
             run_id: run_id.to_string(),
@@ -551,6 +557,7 @@ impl Dashboard {
             visits,
             checked_at_tick: tick,
             stamp,
+            transitions,
         });
     }
 
@@ -615,7 +622,7 @@ impl Dashboard {
         let agent = self.selected_agent()?;
         self.browsed_context_point()
             .map(|p| p.context.clone())
-            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
+            .or_else(|| self.selected_stage_context(agent))
             .or_else(|| agent.context_snapshot.as_deref().cloned())
     }
 
@@ -1321,7 +1328,7 @@ mod tests {
     fn stepping_history_loads_the_archive_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static LOADS: AtomicUsize = AtomicUsize::new(0);
-        fn counting_loader(_run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+        fn counting_loader(_run_id: &str) -> crate::runstate::RunHistory {
             LOADS.fetch_add(1, Ordering::SeqCst);
             let mut meta = fixtures::run_meta("run-1");
             meta.current_stage = "main".to_string();
@@ -1335,7 +1342,10 @@ mod tests {
                 },
                 at,
             };
-            vec![point(1), point(2), point(3)]
+            crate::runstate::RunHistory {
+                points: vec![point(1), point(2), point(3)],
+                transitions: None,
+            }
         }
 
         LOADS.store(0, Ordering::SeqCst);
@@ -1384,18 +1394,21 @@ mod tests {
     /// a cache for another run never serves the browsed point.
     #[test]
     fn a_run_switch_invalidates_the_cache_and_the_browsed_point() {
-        fn one_point_loader(_run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+        fn one_point_loader(_run_id: &str) -> crate::runstate::RunHistory {
             let meta = fixtures::run_meta("x");
-            vec![leviath_core::run_archive::RunPoint {
-                meta,
-                context: leviath_core::run_meta::ContextSnapshot {
-                    stage_name: "s".to_string(),
-                    total_tokens: 0,
-                    max_tokens: 100,
-                    regions: vec![],
-                },
-                at: 1,
-            }]
+            crate::runstate::RunHistory {
+                points: vec![leviath_core::run_archive::RunPoint {
+                    meta,
+                    context: leviath_core::run_meta::ContextSnapshot {
+                        stage_name: "s".to_string(),
+                        total_tokens: 0,
+                        max_tokens: 100,
+                        regions: vec![],
+                    },
+                    at: 1,
+                }],
+                transitions: None,
+            }
         }
         let mut dash = make_test_dashboard();
         dash.history_loader = one_point_loader;

@@ -173,12 +173,8 @@ impl Dashboard {
     /// and status, per-stage ledger and visits, worker counts, the
     /// transitions actually followed.
     pub(super) fn live_overlay_for(&self, agent: &DashboardAgent) -> LiveOverlay {
-        let visits = self
-            .history
-            .as_ref()
-            .filter(|h| h.run_id == agent.id)
-            .map(|h| h.visits.as_slice())
-            .unwrap_or(&[]);
+        let history = self.history.as_ref().filter(|h| h.run_id == agent.id);
+        let visits = history.map(|h| h.visits.as_slice()).unwrap_or(&[]);
         let names: Vec<String> = agent
             .graph
             .as_ref()
@@ -210,10 +206,10 @@ impl Dashboard {
                 }
             })
             .collect();
-        let taken: Vec<(String, String)> = visits
-            .windows(2)
-            .map(|pair| (pair[0].stage.clone(), pair[1].stage.clone()))
-            .collect();
+        // The edges the run's file says it took, rather than ones guessed
+        // from which stage followed which: an edge back into the same stage
+        // never shows in the visits, which merge a stay that re-entered.
+        let taken = history.map(|h| h.taken()).unwrap_or_default();
         let last_transition = taken.last().cloned();
 
         LiveOverlay {
@@ -482,6 +478,7 @@ condition = "llm_choice"
             points,
             checked_at_tick: u64::MAX,
             stamp: None,
+            transitions: None,
         });
     }
 
@@ -946,5 +943,59 @@ condition = "llm_choice"
             .push((PaneId::ExplorerGraph, Rect::new(0, 0, 10, 10)));
         dash.handle_mouse(mouse(MouseEventKind::ScrollUp, 1, 1));
         assert!(dash.stage_explorer.is_some());
+    }
+
+    /// A run whose file records its transitions lights exactly those edges,
+    /// including one back into the stage it left, which its visits cannot
+    /// show.
+    #[test]
+    fn the_explorer_lights_the_edges_the_run_file_recorded() {
+        let mut dash = dash_with_run();
+        seed(&mut dash, "run-1", &[("plan", 10), ("implement", 20)]);
+        let recorded = vec![
+            ("plan".to_string(), "plan".to_string()),
+            ("plan".to_string(), "implement".to_string()),
+        ];
+        dash.history.as_mut().unwrap().transitions = Some(recorded.clone());
+        let live = dash.live_overlay_for(&dash.agents[0].clone());
+        assert_eq!(live.taken, recorded);
+        assert_eq!(live.last_transition, recorded.last().cloned());
+    }
+
+    /// The window of a stage the run has left is the last one its history
+    /// holds for it; the stage it is in shows the live window, as does a run
+    /// whose history is not loaded.
+    #[test]
+    fn a_left_stage_shows_its_last_window_from_the_history() {
+        let mut dash = dash_with_run();
+        let mut run = dash.agents[0].clone();
+        run.stages = vec![
+            leviath_core::run_meta::StageRecord::new("plan".to_string(), 0),
+            leviath_core::run_meta::StageRecord::new("implement".to_string(), 1),
+        ]
+        .into();
+        dash.selected_stage = 0;
+        assert!(dash.selected_stage_context(&run).is_none(), "no history");
+        seed(
+            &mut dash,
+            "run-1",
+            &[("plan", 10), ("plan", 15), ("implement", 20)],
+        );
+        let window = dash.selected_stage_context(&run).expect("plan's window");
+        assert_eq!(window.stage_name, "plan");
+        dash.selected_stage = 1;
+        assert!(
+            dash.selected_stage_context(&run).is_none(),
+            "the live stage"
+        );
+        dash.selected_stage = 7;
+        assert!(dash.selected_stage_context(&run).is_none(), "no such stage");
+        run.stages = vec![leviath_core::run_meta::StageRecord::new(
+            "review".to_string(),
+            0,
+        )]
+        .into();
+        dash.selected_stage = 0;
+        assert!(dash.selected_stage_context(&run).is_none(), "never there");
     }
 }

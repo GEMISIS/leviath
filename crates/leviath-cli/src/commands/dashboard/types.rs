@@ -594,7 +594,7 @@ pub(super) struct NewRunContext {
 ///
 /// Resolving a blueprint reads and parses files and the spawn itself is a
 /// socket round trip, so neither happens on the draw loop.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub(super) struct SpawnCommand {
     /// The agent path or name to resolve.
     pub(super) agent_path: String,
@@ -607,15 +607,15 @@ pub(super) struct SpawnCommand {
     /// The yolo profile it does that under, when one was picked.
     pub(super) yolo_profile: Option<String>,
     /// The files the task named with `@path`, read from the workdir, and
-    /// the files the Inputs pane's slots named, each in its region.
+    /// the files the Inputs pane's slots named.
     pub(super) parts: Vec<leviath_core::mime::InboundPart>,
-    /// Text the Inputs pane's slots seed regions with, by caller key: what
-    /// `--<key> text` sends on the command line.
-    pub(super) regions: std::collections::HashMap<String, String>,
+    /// The Inputs pane's values, each read by its input's declared type:
+    /// what `--input name=value` sends on the command line.
+    pub(super) values: std::collections::BTreeMap<String, leviath_runtime::spec::inputs::RawInput>,
 }
 
 /// The result of a [`SpawnCommand`], drained each tick and shown as a toast.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub(super) struct SpawnOutcome {
     /// Human-readable result to toast.
     pub(super) message: String,
@@ -623,6 +623,20 @@ pub(super) struct SpawnOutcome {
     pub(super) ok: bool,
     /// The id the daemon gave it, so the dashboard can open its page.
     pub(super) run_id: Option<String>,
+    /// A run the daemon refused for something wrong with its inputs: the
+    /// new-run screen opens again on it, each problem beside its input.
+    pub(super) refused: Option<RefusedRun>,
+}
+
+/// A run the daemon refused, as the new-run screen shows it again.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct RefusedRun {
+    /// The agent path or name the run named.
+    pub(super) agent_path: String,
+    /// The task as typed, so it is not lost.
+    pub(super) task: String,
+    /// Every problem the daemon found.
+    pub(super) issues: leviath_runtime::spec::issues::SpawnIssues,
 }
 
 /// Toast notification shown as an overlay.

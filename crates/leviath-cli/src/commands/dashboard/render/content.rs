@@ -43,7 +43,7 @@ impl Dashboard {
         let snap_opt = self
             .browsed_context_point()
             .map(|p| p.context.clone())
-            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
+            .or_else(|| self.selected_stage_context(agent))
             .or_else(|| agent.context_snapshot.as_deref().cloned());
 
         // The card title shows the browsed history position - which point, of
@@ -601,7 +601,7 @@ impl Dashboard {
         let snap_opt = self
             .browsed_context_point()
             .map(|p| p.context.clone())
-            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
+            .or_else(|| self.selected_stage_context(agent))
             .or_else(|| agent.context_snapshot.as_deref().cloned());
         if let Some(snap) = snap_opt {
             let mut lines: Vec<Line> = Vec::new();
@@ -2691,6 +2691,7 @@ transform = "clear"
             points,
             checked_at_tick: u64::MAX, // never considered stale by the TTL
             stamp: None,
+            transitions: None,
         });
     }
 

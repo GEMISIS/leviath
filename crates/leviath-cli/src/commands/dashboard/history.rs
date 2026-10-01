@@ -38,6 +38,50 @@ pub(super) struct RunHistoryCache {
     /// The archive's stat when the points were read, so a reload happens only
     /// when it has grown: a finished run's archive is read once.
     pub(super) stamp: Option<crate::runstate::FileStamp>,
+    /// Each edge the run took, `(from, to)`, from its run file's transition
+    /// records. `None` for a run in the older layout, whose journal never
+    /// recorded one.
+    pub(super) transitions: Option<Vec<(String, String)>>,
+}
+
+impl RunHistoryCache {
+    /// The edges the run took, in order: as its run file recorded them, or
+    /// for a run whose journal recorded none, read off its visits, where each
+    /// move from one stage to the next stands for the edge between them.
+    pub(super) fn taken(&self) -> Vec<(String, String)> {
+        match &self.transitions {
+            Some(taken) => taken.clone(),
+            None => self
+                .visits
+                .windows(2)
+                .map(|pair| (pair[0].stage.clone(), pair[1].stage.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl super::state::Dashboard {
+    /// The window of the stage the detail view has selected, when the run
+    /// has left it: the last point of the run's history taken in that stage.
+    /// `None` for the stage the run is in (its window is the live one), and
+    /// for a run whose history is not loaded.
+    pub(super) fn selected_stage_context(
+        &self,
+        agent: &super::types::DashboardAgent,
+    ) -> Option<leviath_core::run_meta::ContextSnapshot> {
+        let stage = agent.stages.get(self.selected_stage)?;
+        if stage.name == agent.stage {
+            return None;
+        }
+        self.history
+            .as_ref()
+            .filter(|h| h.run_id == agent.id)?
+            .points
+            .iter()
+            .rev()
+            .find(|p| p.meta.current_stage == stage.name)
+            .map(|p| p.context.clone())
+    }
 }
 
 /// Look at the archive no more often than this many ticks (~1s at the 100ms
