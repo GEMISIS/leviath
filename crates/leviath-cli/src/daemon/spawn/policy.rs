@@ -36,7 +36,7 @@ pub(crate) fn model_defaults(config: &Config) -> ModelDefaults {
 /// and a region's command seed all hand the daemon's environment to a child, so
 /// they answer to the same setting. A script that has `shell` would otherwise be
 /// the way around the `env_var` gate.
-pub(super) fn shell_env_policy(config: &Config) -> leviath_tools::ShellEnvPolicy {
+pub(crate) fn shell_env_policy(config: &Config) -> leviath_tools::ShellEnvPolicy {
     leviath_tools::ShellEnvPolicy {
         mode: config.security.shell_env,
         allow_env_vars: config.security.allow_env_vars.clone(),

@@ -17,6 +17,7 @@ pub(crate) mod policy_reload;
 pub mod provider_reload;
 pub mod readiness;
 pub(crate) mod recovery;
+pub mod resolve_env;
 pub(crate) mod sandbox_manager;
 pub(crate) mod script_host;
 pub(crate) mod seed_command;

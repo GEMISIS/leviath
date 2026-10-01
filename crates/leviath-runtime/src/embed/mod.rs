@@ -6,12 +6,14 @@
 //! same machinery ([`PipelineWorld`](crate::world::PipelineWorld) +
 //! [`WorldHost`](crate::host::WorldHost)) assembled from plain values.
 
+mod env;
 mod error;
 mod spawner;
 mod stream;
 mod tool_service;
 mod world;
 
+pub use env::EmbedEnv;
 pub use error::EmbedError;
 pub use stream::EventStream;
 pub use tool_service::BasicToolService;
