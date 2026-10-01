@@ -136,7 +136,13 @@ impl Conv {
             .as_ref()
             .and_then(|e| self.name(at().field("entry"), e));
         let stages: Vec<StageDef> = b.stages.iter().map(|s| self.stage(s)).collect();
-        let edges = b.stages.iter().flat_map(|s| self.edges(s)).collect();
+        let edges = b
+            .stages
+            .iter()
+            .zip(&stages)
+            .enumerate()
+            .flat_map(|(i, (s, def))| self.edges(s, def, stages.get(i + 1)))
+            .collect();
         let layout = self.layout(&b.context_layout, &at().field("layout"));
         RunGraph {
             title: Some(b.name.clone()),
@@ -255,7 +261,10 @@ impl Conv {
             max_revisits: self.opt_small(p.field("max_revisits"), s.max_revisits),
             transition_prompt: s.transition_prompt.clone(),
             accepts_messages: s.accepts_messages,
-            allow_complete: s.allow_complete,
+            // Ending the run instead is offered only where the model picks
+            // among declared edges; a stage that declares none falls through
+            // or ends without being asked.
+            allow_complete: s.allow_complete && s.transitions.is_some(),
             allow_as_worker: s.allow_as_worker,
             allow_blocking_tools: s.allow_blocking_tools,
             taint_tracking: s.security.as_ref().map(|c| c.taint_tracking),
@@ -475,9 +484,24 @@ impl Conv {
         })
     }
 
-    fn edges(&mut self, s: &bp::Stage) -> Vec<EdgeDef> {
+    /// The edges leaving a stage. A stage with no `transitions` table goes on
+    /// to `next`, the stage after it, along an [`FALL_THROUGH_EDGE`]; one
+    /// with an empty table, or the last stage, has none and ends the run.
+    fn edges(&mut self, s: &bp::Stage, def: &StageDef, next: Option<&StageDef>) -> Vec<EdgeDef> {
         let Some(transitions) = &s.transitions else {
-            return Vec::new();
+            return next
+                .map(|to| EdgeDef {
+                    name: EdgeName::new(FALL_THROUGH_EDGE).expect("a valid edge name"),
+                    from: def.name.clone(),
+                    to: to.name.clone(),
+                    when: EdgeCondition::Always,
+                    hint: None,
+                    carry: EdgeCarry::Direct,
+                    gate: None,
+                    stuck: None,
+                })
+                .into_iter()
+                .collect();
         };
         let mut names: Vec<&String> = transitions.keys().collect();
         names.sort();
@@ -601,8 +625,12 @@ impl Conv {
                     .then(|| self.small(p.field("kind"), *threshold_tokens)),
             },
             CoreKind::Clearable => RegionKind::Clearable,
+            // A blueprint that names no source writes it as empty text.
             CoreKind::CompactHistory { source_region } => RegionKind::CompactHistory {
-                source: self.name(p.field("kind"), source_region)?,
+                source: match source_region.is_empty() {
+                    true => None,
+                    false => Some(self.name(p.field("kind"), source_region)?),
+                },
             },
             CoreKind::HashMap { max_entries } => RegionKind::Keyed {
                 max_entries: self.opt_small(p.field("kind"), *max_entries),
@@ -621,14 +649,10 @@ impl Conv {
                 max: self.opt_small(p.field("budget"), *max),
             },
         };
-        let seed = match &r.seed {
-            Some(RegionSeed::CallerInput { name: input }) => {
-                self.caller_input(input, &name, r, &p.field("seed"));
-                None
-            }
-            Some(other) => self.seed(other, &p.field("seed")),
-            None => None,
-        };
+        let seed = r
+            .seed
+            .as_ref()
+            .and_then(|s| self.seed(s, &name, r, &p.field("seed")));
         Some(RegionDef {
             name,
             kind,
@@ -681,9 +705,20 @@ impl Conv {
         decl.binds.push(binding);
     }
 
-    fn seed(&mut self, s: &RegionSeed, p: &SpecPath) -> Option<Seed> {
+    /// What fills a region at spawn. A caller-input seed fills nothing here:
+    /// it becomes an input bound to the region instead.
+    fn seed(
+        &mut self,
+        s: &RegionSeed,
+        region: &RegionName,
+        r: &crate::spec::layout::RegionDefinition,
+        p: &SpecPath,
+    ) -> Option<Seed> {
         Some(match s {
-            RegionSeed::CallerInput { .. } => return None,
+            RegionSeed::CallerInput { name: input } => {
+                self.caller_input(input, region, r, p);
+                return None;
+            }
             RegionSeed::Glob { pattern } => Seed::Glob(pattern.clone()),
             RegionSeed::Files { paths } => Seed::Files(self.names::<WorkdirPath>(p.clone(), paths)),
             RegionSeed::Literal { text } => Seed::Literal(text.clone()),
@@ -931,3 +966,7 @@ fn scalar(v: &serde_json::Value) -> Option<ParamScalar> {
         V::Null | V::Object(_) => None,
     }
 }
+
+#[cfg(test)]
+#[path = "from_blueprint_tests.rs"]
+mod tests;

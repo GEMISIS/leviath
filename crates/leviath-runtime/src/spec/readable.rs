@@ -706,8 +706,9 @@ impl From<&RegionKind> for KindText {
             RegionKind::Compacting { threshold_tokens } => {
                 table("compacting", &|kt| kt.threshold_tokens = threshold_tokens)
             }
+            RegionKind::CompactHistory { source: None } => Self::Name("compact_history".into()),
             RegionKind::CompactHistory { source } => {
-                table("compact_history", &|kt| kt.source = Some(source.clone()))
+                table("compact_history", &|kt| kt.source = source.clone())
             }
             RegionKind::Keyed { max_entries } => table("keyed", &|kt| kt.max_entries = max_entries),
             RegionKind::Custom { code, pinned } => table("custom", &|kt| {
@@ -769,9 +770,7 @@ impl TryFrom<KindText> for RegionKind {
             "compacting" => Self::Compacting {
                 threshold_tokens: kt.threshold_tokens,
             },
-            "compact_history" => Self::CompactHistory {
-                source: kt.source.ok_or_else(|| need("source"))?,
-            },
+            "compact_history" => Self::CompactHistory { source: kt.source },
             "keyed" => Self::Keyed {
                 max_entries: kt.max_entries,
             },

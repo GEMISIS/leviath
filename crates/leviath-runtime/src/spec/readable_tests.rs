@@ -231,6 +231,14 @@ fn input_types_are_a_name_or_a_kind_table() {
         },
     );
     same(
+        json!({"kind": "list", "item": "text", "max": 3}),
+        InputType::List {
+            item: Box::new(text.clone()),
+            min: None,
+            max: Some(3),
+        },
+    );
+    same(
         json!({"kind": "record", "fields": [{"name": "a", "type": "bool", "required": false, "default": null, "description": null, "binds": []}]}),
         InputType::Record {
             fields: vec![InputDecl {
@@ -291,6 +299,11 @@ fn a_mistyped_input_type_says_what_is_wrong() {
     refused::<InputType>(json!({"kind": "list"}), "needs `item`");
     refused::<InputType>(json!({"kind": "record"}), "needs `fields`");
     refused::<InputType>(json!({"kind": "int", "min": 1.5}), "is a whole number");
+    refused::<InputType>(json!({"kind": "int", "max": 1.5}), "is a whole number");
+    refused::<InputType>(
+        json!({"kind": "list", "item": "text", "min": -1}),
+        "is a count",
+    );
     refused::<InputType>(
         json!({"kind": "list", "item": "text", "max": -1}),
         "is a count",
@@ -311,6 +324,10 @@ fn region_kinds_are_a_name_or_a_kind_table() {
         ("clearable", RegionKind::Clearable),
         ("checklist", RegionKind::Checklist),
         ("keyed", RegionKind::Keyed { max_entries: None }),
+        (
+            "compact_history",
+            RegionKind::CompactHistory { source: None },
+        ),
         (
             "compacting",
             RegionKind::Compacting {
@@ -343,7 +360,7 @@ fn region_kinds_are_a_name_or_a_kind_table() {
     same(
         json!({"kind": "compact_history", "source": "chat"}),
         RegionKind::CompactHistory {
-            source: region("chat"),
+            source: Some(region("chat")),
         },
     );
     same(
@@ -365,7 +382,6 @@ fn region_kinds_are_a_name_or_a_kind_table() {
         "does not take `max_items`",
     );
     refused::<RegionKind>(json!({"kind": "sliding_window"}), "needs `max_items`");
-    refused::<RegionKind>(json!({"kind": "compact_history"}), "needs `source`");
     refused::<RegionKind>(json!({"kind": "custom"}), "needs `code`");
 }
 
@@ -375,6 +391,11 @@ fn a_short_form_of_the_wrong_shape_is_named() {
     refused::<Budget>(json!(-1), "is not a token count");
     refused::<Budget>(json!(true), "a number, a name or a table");
     refused::<OutputCap>(json!(u64::MAX), "is too large");
+    refused::<OutputCap>(json!(-1), "is not a token count");
+    assert_eq!(
+        <KindText as schemars::JsonSchema>::schema_name(),
+        "Short_KindTable"
+    );
     refused::<OutputCap>(json!({"tokens": 3}), "takes a number or text, not a table");
     refused::<InputSlot>(json!(3), "is not a slot");
     refused::<InputType>(json!(3), "is not an input type");

@@ -113,6 +113,13 @@ fn a_region_an_input_is_bound_to_is_filled_by_the_caller() {
     assert!(!input_fills(&graph, "system"));
 }
 
+/// A 1000-token region of `kind`, in the window's vocabulary.
+fn kind_of(kind: RegionKind) -> leviath_core::RegionKind {
+    let mut r = region("r");
+    r.kind = kind;
+    region_kind(&r, 1000)
+}
+
 #[test]
 fn every_region_kind_reads_as_the_kind_the_window_keeps() {
     use leviath_core::EvictionStrategy as E;
@@ -124,10 +131,10 @@ fn every_region_kind_reads_as_the_kind_the_window_keeps() {
         (RegionKind::Checklist, "Checklist"),
     ];
     for (kind, name) in cases {
-        assert_eq!(format!("{:?}", region_kind(&kind)), name);
+        assert_eq!(format!("{:?}", kind_of(kind)), name);
     }
     let window = |e| {
-        region_kind(&RegionKind::SlidingWindow {
+        kind_of(RegionKind::SlidingWindow {
             max_items: 9,
             eviction: e,
         })
@@ -154,15 +161,15 @@ fn every_region_kind_reads_as_the_kind_the_window_keeps() {
         }
     ));
     assert!(matches!(
-        region_kind(&RegionKind::Compacting {
+        kind_of(RegionKind::Compacting {
             threshold_tokens: None
         }),
         K::Compacting {
-            threshold_tokens: usize::MAX
+            threshold_tokens: 800
         }
     ));
     assert!(matches!(
-        region_kind(&RegionKind::Compacting {
+        kind_of(RegionKind::Compacting {
             threshold_tokens: Some(7)
         }),
         K::Compacting {
@@ -170,11 +177,15 @@ fn every_region_kind_reads_as_the_kind_the_window_keeps() {
         }
     ));
     assert!(matches!(
-        region_kind(&RegionKind::CompactHistory { source: rn("conversation") }),
+        kind_of(RegionKind::CompactHistory { source: Some(rn("conversation")) }),
         K::CompactHistory { source_region } if source_region == "conversation"
     ));
     assert!(matches!(
-        region_kind(&RegionKind::Keyed {
+        kind_of(RegionKind::CompactHistory { source: None }),
+        K::CompactHistory { source_region } if source_region.is_empty()
+    ));
+    assert!(matches!(
+        kind_of(RegionKind::Keyed {
             max_entries: Some(4)
         }),
         K::HashMap {
@@ -182,7 +193,7 @@ fn every_region_kind_reads_as_the_kind_the_window_keeps() {
         }
     ));
     assert!(matches!(
-        region_kind(&RegionKind::Custom { code: CodeRef::File("r.rhai".into()), pinned: true }),
+        kind_of(RegionKind::Custom { code: CodeRef::File("r.rhai".into()), pinned: true }),
         K::Custom { script, pinned: true } if script == "r.rhai"
     ));
 }
@@ -581,6 +592,29 @@ fn a_compacting_region_is_summarized_at_its_share_of_the_budget_it_is_given() {
         region_definition(&r, 1000).kind,
         leviath_core::RegionKind::Pinned
     ));
+}
+
+/// A compacting region that names neither a threshold nor a share is
+/// summarized at 80% of its budget, as a blueprint region written that way
+/// always was: a fixed budget's 80% rounded down, a share of the window's
+/// 80% rounded to the nearest token.
+#[test]
+fn a_compacting_region_with_no_trigger_is_summarized_at_four_fifths_of_its_budget() {
+    let mut r = region("log");
+    r.kind = RegionKind::Compacting {
+        threshold_tokens: None,
+    };
+    let threshold = |r: &RegionDef| match region_definition(r, 1001).kind {
+        leviath_core::RegionKind::Compacting { threshold_tokens } => threshold_tokens,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(threshold(&r), 800);
+    r.budget = Budget::Percent {
+        percent: 0.5,
+        min: None,
+        max: None,
+    };
+    assert_eq!(threshold(&r), 801);
 }
 
 #[test]

@@ -9174,6 +9174,79 @@ fn transition_empty_transitions_is_terminal() {
     );
 }
 
+/// The three stage endings a blueprint can write without naming an edge, in
+/// one graph: `a` has no `transitions` table, `b` has an empty one, and `c`
+/// is the last stage and has no table.
+fn fall_through_blueprint(allow_complete: bool) -> crate::spec::Blueprint {
+    blueprint(vec![
+        stage_named("a", None, allow_complete, None),
+        stage_named("b", Some(vec![]), false, None),
+        stage_named("c", None, false, None),
+    ])
+}
+
+/// Resolve one completed stage of [`fall_through_blueprint`], starting at
+/// `index`, and hand back the world and the run.
+fn resolve_fall_through_at(index: usize, allow_complete: bool) -> (World, Entity) {
+    let mut world = World::new();
+    let e = spawn_transition_agent(
+        &mut world,
+        fall_through_blueprint(allow_complete),
+        vec![si("m0"), si("m1"), si("m2")],
+        VisitCounts::default(),
+    );
+    world.get_mut::<StageCursor>(e).unwrap().index = index;
+    run_transition(&mut world);
+    (world, e)
+}
+
+/// A stage with no `transitions` table goes on to the next stage in order,
+/// along the edge the graph writes for it.
+#[test]
+fn a_stage_with_no_transitions_table_falls_through_to_the_next() {
+    let (world, e) = resolve_fall_through_at(0, false);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let moved = &world.get::<LastTransition>(e).unwrap().0;
+    assert_eq!(moved.to.as_str(), "b");
+    assert_eq!(
+        moved.edge.as_ref().map(|n| n.as_str()),
+        Some(crate::spec::graph::FALL_THROUGH_EDGE)
+    );
+}
+
+/// Falling through is not a choice, so a stage that may end the run still
+/// falls through rather than asking its model.
+#[test]
+fn a_stage_with_no_table_falls_through_even_when_it_may_complete() {
+    let (world, e) = resolve_fall_through_at(0, true);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert!(world.get::<AwaitingTransitionChoice>(e).is_none());
+}
+
+/// A stage with an explicitly empty `transitions` table ends the run, even
+/// with a stage after it.
+#[test]
+fn a_stage_with_an_empty_transitions_table_ends_the_run() {
+    let (world, e) = resolve_fall_through_at(1, false);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Complete
+    );
+}
+
+/// The last stage with no table has nowhere to fall, and ends the run.
+#[test]
+fn the_last_stage_with_no_transitions_table_ends_the_run() {
+    let (world, e) = resolve_fall_through_at(2, false);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 2);
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Complete
+    );
+}
+
 #[test]
 fn transition_multiple_edges_awaits_choice() {
     use crate::spec::blueprint::TransitionCondition;
@@ -14675,7 +14748,7 @@ fn match_choice_reads_decision_from_the_concluding_line() {
 
 #[test]
 fn build_transition_prompt_default_variants() {
-    let mut with_complete = stage_named("s", None, true, None);
+    let mut with_complete = stage_named("s", Some(vec![]), true, None);
     with_complete.transition_prompt = None;
     let edges = vec![{
         let mut e = plain_edge("next");
@@ -14695,7 +14768,7 @@ fn build_transition_prompt_default_variants() {
 
 #[test]
 fn build_transition_prompt_custom_variants() {
-    let mut custom = stage_named("s", None, true, None);
+    let mut custom = stage_named("s", Some(vec![]), true, None);
     custom.transition_prompt = Some("Pick wisely.".to_string());
     let edges = vec![plain_edge("a")];
     let p = build_transition_prompt(&custom, &edges);
@@ -15423,7 +15496,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
 #[test]
 fn collect_choice_done_completes() {
     let (mut world, tx) = world_with_transition_results();
-    let bp = blueprint(vec![stage_named("a", None, true, None)]); // allow_complete
+    let bp = blueprint(vec![stage_named("a", Some(vec![]), true, None)]); // allow_complete
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
     tx.send(InferenceOutcome {
         latency: std::time::Duration::ZERO,

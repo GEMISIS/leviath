@@ -178,28 +178,17 @@ pub(crate) fn find_conditioned_edge(
 /// Resolve the next stage for a normally-completed stage without any LLM call.
 /// The `Error`/`MaxIterations` edges don't apply to a normal completion, and
 /// the LLM-choice case is returned as [`StageResolution::Choose`]. A stage no
-/// edge leaves goes on to the next stage in the graph, or ends the run when it
-/// is the last.
+/// edge leaves ends the run: going on to the next stage is an edge like any
+/// other, which a blueprint's graph writes out as
+/// [`FALL_THROUGH_EDGE`](crate::spec::graph::FALL_THROUGH_EDGE).
 pub(crate) fn resolve_transition_sync(
     graph: &RunGraph,
     stage: &StageDef,
-    stage_idx: usize,
     visits: &std::collections::HashMap<String, usize>,
 ) -> StageResolution {
     let edges = spec_view::edges_from(graph, stage);
     if edges.is_empty() {
-        return match stage_idx + 1 < graph.stages.len() {
-            // A fall-through carries context as-is and has no edge to hang a
-            // gate on.
-            true => StageResolution::Next(Box::new(NextStage {
-                idx: stage_idx + 1,
-                carry: EdgeCarry::Direct,
-                gate: None,
-                edge: None,
-                reason: TransitionReason::Condition,
-            })),
-            false => StageResolution::Terminal,
-        };
+        return StageResolution::Terminal;
     }
     let normal = |e: &EdgeDef| matches!(e.when, EdgeCondition::Always | EdgeCondition::LlmChoice);
     // Only Always/LlmChoice edges are auto/LLM-followable on completion, and
@@ -437,9 +426,7 @@ pub(crate) fn resolve_transition(
                 );
                 find_conditioned_edge(graph, stage, &visits.0, EdgeCondition::MaxIterations)
                     .map(|next| StageResolution::Next(Box::new(next)))
-                    .unwrap_or_else(|| {
-                        resolve_transition_sync(graph, stage, cursor.index, &visits.0)
-                    })
+                    .unwrap_or_else(|| resolve_transition_sync(graph, stage, &visits.0))
             }
             Some(StageOutcome::Stuck(_)) => {
                 // A stuck interrupt is mid-stage, not a stage end. If the escape
@@ -451,7 +438,7 @@ pub(crate) fn resolve_transition(
                     .map(|next| StageResolution::Next(Box::new(next)))
                     .unwrap_or(StageResolution::Resume)
             }
-            None => resolve_transition_sync(graph, stage, cursor.index, &visits.0),
+            None => resolve_transition_sync(graph, stage, &visits.0),
         };
         // A dead end resolves like a stage error: down the `dead_end` edge, then
         // the `error` edge, and otherwise the run FAILS. Resolving it as

@@ -357,6 +357,7 @@ fn durations_sum_their_parts() {
         "1h5",
         "99999999999999999999s",
         "999999999999999d",
+        "18446744073709551615s1s",
     ] {
         assert_eq!(parse_duration(bad), None, "{bad}");
     }
@@ -496,6 +497,8 @@ fn templates_fill_placeholders_and_escape_braces() {
     assert_eq!(t.render(&values), "Focus on perf {literal} at ");
     assert_eq!(t.to_string(), "Focus on {focus} {{literal}} at {depth}");
     assert!(Template::parse("a } b").is_err());
+    let leading = Template::parse("{focus}!").unwrap();
+    assert_eq!(leading.render(&values), "perf!");
     assert!(Template::parse("{9bad}").is_err());
     let json = serde_json::to_string(&t).unwrap();
     assert_eq!(json, "\"Focus on {focus} {{literal}} at {depth}\"");

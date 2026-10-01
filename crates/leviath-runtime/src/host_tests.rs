@@ -476,8 +476,8 @@ async fn serve_redrives_the_world_on_its_own_timer_with_no_wake() {
 }
 
 /// A two-stage linear blueprint (`one` -> `two`), for the stage-boundary
-/// tests. No transitions declared: `resolve_transition_sync` falls through to
-/// the next stage in order, which is the ordinary case.
+/// tests. No transitions declared, so the graph goes from `one` to `two`
+/// along its fall-through edge, which is the ordinary case.
 fn two_stage_blueprint() -> crate::spec::Blueprint {
     let layout = crate::spec::layout::ContextLayout::new(
         vec![crate::spec::layout::RegionDefinition::new(

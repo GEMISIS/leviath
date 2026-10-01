@@ -270,7 +270,7 @@ fn fan_out_gates_carry_and_layout_refs_are_checked() {
     });
     g.edges[0].when = EdgeCondition::Stuck;
     g.layout.regions[0].kind = RegionKind::CompactHistory {
-        source: RegionName::new("ghost").unwrap(),
+        source: Some(RegionName::new("ghost").unwrap()),
     };
     g.layout.regions[1].budget = Budget::Percent {
         percent: 40.0,
@@ -330,7 +330,7 @@ fn a_stage_layout_and_interaction_points_are_checked_against_that_layout() {
         eviction_order: vec![RegionName::new("task").unwrap()],
     });
     g.stages[1].hide.push(RegionName::new("task").unwrap());
-    g.stages[1].mode = StageMode::InteractivePoints(vec![InteractionPointDef {
+    let point = InteractionPointDef {
         name: "review".into(),
         prompt: "ok?".into(),
         required: true,
@@ -341,7 +341,13 @@ fn a_stage_layout_and_interaction_points_are_checked_against_that_layout() {
         abort_options: vec![],
         edit_options: vec![],
         document_region: Some(RegionName::new("task").unwrap()),
-    }]);
+    };
+    // A point that names no document region has nothing to check.
+    let plain = InteractionPointDef {
+        document_region: None,
+        ..point.clone()
+    };
+    g.stages[1].mode = StageMode::InteractivePoints(vec![point, plain]);
     let got = codes(&g);
     assert_eq!(
         got,
@@ -421,6 +427,25 @@ fn every_bundled_blueprint_reads_as_a_valid_graph() {
             .unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
         let bin = postcard::to_stdvec(&graph).unwrap();
         assert_eq!(postcard::from_bytes::<RunGraph>(&bin).unwrap(), graph);
+        // Every stage leaves along exactly the edges it declares, or falls
+        // through to the next stage when it declares no table at all.
+        for (i, stage) in bp.stages.iter().enumerate() {
+            let mut got: Vec<(String, String)> = graph
+                .edges_from(&stage.name)
+                .map(|e| (e.name.to_string(), e.to.to_string()))
+                .collect();
+            got.sort();
+            let mut want: Vec<(String, String)> = match (&stage.transitions, bp.stages.get(i + 1)) {
+                (Some(t), _) => t
+                    .iter()
+                    .map(|(k, e)| (k.clone(), e.target.clone()))
+                    .collect(),
+                (None, Some(next)) => vec![(FALL_THROUGH_EDGE.to_string(), next.name.clone())],
+                (None, None) => Vec::new(),
+            };
+            want.sort();
+            assert_eq!(got, want, "{}: stage {}", manifest.display(), stage.name);
+        }
         seen += 1;
     }
     assert!(seen >= 7, "found {seen} bundled blueprints");

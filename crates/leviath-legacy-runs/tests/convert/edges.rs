@@ -148,7 +148,18 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
     assert!(spec.inputs.get("extra").is_none());
     assert!(report.defaulted("inputs.extra").is_some());
     assert!(spec.seeded.contains_key("brief"));
-    assert!(report.defaulted("layout.regions.notes.kind").is_some());
+    // A history region with no source converts as one, not as a stand-in.
+    assert!(report.defaulted("layout.regions.notes.kind").is_none());
+    let notes = spec
+        .graph
+        .layout
+        .regions
+        .iter()
+        .find(|r| r.name.as_str() == "notes");
+    assert_eq!(
+        notes.map(|r| &r.kind),
+        Some(&leviath_runtime::spec::graph::RegionKind::CompactHistory { source: None })
+    );
     assert!(report.defaulted("origin.blueprint.digest").is_some());
     let main = spec.stage("main").unwrap();
     assert_eq!(main.max_output_tokens, Some(4096));

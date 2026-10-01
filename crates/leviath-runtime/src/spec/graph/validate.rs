@@ -265,7 +265,10 @@ impl<'a> Validator<'a> {
                     format!("region \"{}\" is declared twice", region.name),
                 );
             }
-            if let RegionKind::CompactHistory { source } = &region.kind {
+            if let RegionKind::CompactHistory {
+                source: Some(source),
+            } = &region.kind
+            {
                 self.need_region(at.field("kind").field("source"), source, &names);
             }
             if let Budget::Percent { percent, min, max } = &region.budget {
