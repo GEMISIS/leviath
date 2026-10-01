@@ -20,21 +20,21 @@ use leviath::prelude::*;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let coder = leviath::blueprint::load("coder/agent.toml".as_ref())?;
     let world = AgentWorld::builder()
         .provider(ProviderCreds {
             api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             ..ProviderCreds::simple("anthropic")
         })
+        .blueprint(coder)
+        .workdir(std::env::current_dir()?)
         .build()?;
 
+    let request = SpawnRequest::new(SpawnSource::Blueprint(BlueprintRef::parse("coder")?))
+        .input("task", RawInput::Text("Build a CSV parser".into()));
+
     let mut events = world.events();
-    let run = world
-        .spawn(SpawnSpec::new(
-            BlueprintSource::Path("coder.leviath".into()),
-            "Build a CSV parser",
-            std::env::current_dir()?,
-        ))
-        .await?;
+    let run = world.spawn(request).await?;
 
     while let Some(event) = events.next().await {
         match event {
@@ -50,6 +50,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+A run is asked for with a `SpawnRequest`, the same typed request the CLI,
+the HTTP API and the agent tools take. It names a blueprint the world was
+given and fills the inputs that blueprint declares, or it carries a whole
+graph of its own. A request that cannot run comes back as `SpawnIssues`,
+every problem at once, each naming the place in the request it is about.
+`world.validate(request)` makes the same checks without starting anything,
+and `world.inspect(&run)` reads a run's whole state.
 
 A full program that also answers the agent's questions lives in
 `examples/embedded_agent.rs` (`cargo run --example embedded_agent -p

@@ -7,27 +7,34 @@
 //! crate) is the packaged product; this crate is for embedding the same
 //! machinery in your own application.
 //!
-//! Build a world, spawn an agent, watch the events:
+//! Build a world with a blueprint, ask for a run of it, watch the events:
 //!
 //! ```no_run
 //! use leviath::prelude::*;
 //!
 //! # async fn embed() -> std::result::Result<(), Box<dyn std::error::Error>> {
+//! let coder = leviath::blueprint::load("coder/agent.toml".as_ref())?;
 //! let world = AgentWorld::builder()
 //!     .provider(ProviderCreds {
 //!         api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
 //!         ..ProviderCreds::simple("anthropic")
 //!     })
+//!     .blueprint(coder)
+//!     .workdir(std::env::current_dir()?)
 //!     .build()?;
 //!
+//! // A run is asked for with the same typed request every front door takes:
+//! // a blueprint and its inputs here, or a whole graph of your own.
+//! let request = SpawnRequest::new(SpawnSource::Blueprint(BlueprintRef::parse("coder")?))
+//!     .input("task", RawInput::Text("Build a CSV parser".into()));
+//!
+//! // `validate` runs the same checks without starting anything. A request
+//! // that cannot run comes back with every problem at once.
+//! let summary = world.validate(request.clone()).await?;
+//! println!("would run {} on {:?}", summary.title, summary.stages);
+//!
 //! let mut events = world.events();
-//! let run = world
-//!     .spawn(SpawnSpec::new(
-//!         BlueprintSource::Path("coder.leviath".into()),
-//!         "Build a CSV parser",
-//!         std::env::current_dir()?,
-//!     ))
-//!     .await?;
+//! let run = world.spawn(request).await?;
 //!
 //! while let Some(event) = events.next().await {
 //!     match event {
@@ -95,10 +102,18 @@ pub use leviath_agent_client as agent_client;
 pub mod prelude {
     pub use leviath_core::interaction::{InteractionRequest, InteractionResponse};
     pub use leviath_core::{Error, PolicyConfig, Result};
+    pub use leviath_runtime::spec::env::LoadedBlueprint;
+    pub use leviath_runtime::spec::graph::RunGraph;
+    pub use leviath_runtime::spec::inputs::RawInput;
+    pub use leviath_runtime::spec::issues::{SpawnIssue, SpawnIssues};
+    pub use leviath_runtime::spec::names::BlueprintRef;
+    pub use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
+    pub use leviath_runtime::spec::summary::SpawnSummary;
     pub use leviath_runtime::spec::{Blueprint, BudgetSpec, ContextLayout, RegionDefinition};
+    pub use leviath_runtime::state::RunState;
     pub use leviath_runtime::{
         AgentEvent, AgentState, AgentStatus, AgentWorld, AgentWorldBuilder, BasicToolService,
-        BlueprintSource, ContextWindow, EmbedError, EventStream, ProviderCreds, ProviderRegistry,
-        RunId, SpawnSpec, ToolService, WorldEvent, build_provider_registry,
+        ContextWindow, EmbedError, EventStream, ProviderCreds, ProviderRegistry, RunId,
+        ToolService, WorldEvent, build_provider_registry,
     };
 }

@@ -3,8 +3,8 @@
 //!
 //! Pure helpers: turning a `session/new`'s working directory (and an optional
 //! `--agent` name) into a resolved blueprint, and a resolved blueprint plus a
-//! `session/prompt`'s task into the [`SpawnRequest`] the shared-world daemon
-//! consumes.
+//! `session/prompt`'s text into the [`SpawnRequest`] the shared-world daemon
+//! consumes, with the text as the blueprint's `task` input.
 
 use std::path::PathBuf;
 
@@ -53,20 +53,19 @@ pub(super) fn resolve_blueprint(
 /// `cwd` becomes the tool-execution working directory; `--yolo` / `--allow` /
 /// `--max-depth` from the CLI flow through to the daemon's tool-policy
 /// resolution. The model is left unset so the blueprint's own per-stage model
-/// selection stands. `regions` are the text each named region was given, sent
-/// as the inputs of those names.
+/// selection stands. The prompt's text is the `task` input and nothing else:
+/// a host that wants to fill other inputs sends a whole request with
+/// `_leviath/spawn`.
 pub(super) fn spawn_request(
     blueprint: &ResolvedBlueprint,
     task: &str,
     cwd: &str,
     args: &AgentClientArgs,
-    regions: std::collections::HashMap<String, String>,
     parts: Vec<leviath_core::mime::InboundPart>,
 ) -> Result<SpawnRequest, String> {
     crate::daemon::requests::TaskLaunch {
         blueprint: blueprint.manifest_path.to_string_lossy().into_owned(),
         task: task.to_string(),
-        regions,
         parts,
         workdir: Some(cwd.to_string()),
         unattended: args.yolo.is_some(),
@@ -160,17 +159,7 @@ system_prompt = "Plan the work"
             output_format: None,
             output_instructions: None,
         };
-        let regions =
-            std::collections::HashMap::from([("criteria".to_string(), "be safe".to_string())]);
-        let spawn = spawn_request(
-            &resolved,
-            "do the thing",
-            "/work",
-            &args,
-            regions,
-            Vec::new(),
-        )
-        .unwrap();
+        let spawn = spawn_request(&resolved, "do the thing", "/work", &args, Vec::new()).unwrap();
         // The blueprint is named by its directory, which the daemon reads it
         // and the files beside it from.
         let source = serde_json::to_value(&spawn.source).unwrap();
@@ -185,10 +174,7 @@ system_prompt = "Plan the work"
             spawn.inputs.get("task"),
             Some(&RawInput::Text("do the thing".to_string()))
         );
-        assert_eq!(
-            spawn.inputs.get("criteria"),
-            Some(&RawInput::Text("be safe".to_string()))
-        );
+        assert_eq!(spawn.inputs.len(), 1, "the task is the only input");
         assert_eq!(spawn.workdir, Some(std::path::PathBuf::from("/work")));
         assert!(spawn.model.is_none());
         assert_eq!(
@@ -218,15 +204,7 @@ system_prompt = "Plan the work"
             output_format: Some("a2ui".to_string()),
             output_instructions: Some("One card per finding.".to_string()),
         };
-        let spawn = spawn_request(
-            &resolved,
-            "do the thing",
-            "/work",
-            &args,
-            std::collections::HashMap::new(),
-            Vec::new(),
-        )
-        .unwrap();
+        let spawn = spawn_request(&resolved, "do the thing", "/work", &args, Vec::new()).unwrap();
         let spec = spawn.output.expect("the host asked for a shape");
         assert_eq!(spec.format.as_deref(), Some("a2ui"));
         assert_eq!(spec.instructions.as_deref(), Some("One card per finding."));
@@ -253,28 +231,12 @@ system_prompt = "Plan the work"
             output_instructions: None,
         };
         use leviath_runtime::spec::launch::Unattended;
-        let spawn = spawn_request(
-            &resolved,
-            "t",
-            "/work",
-            &args,
-            Default::default(),
-            Vec::new(),
-        )
-        .unwrap();
+        let spawn = spawn_request(&resolved, "t", "/work", &args, Vec::new()).unwrap();
         assert!(
             matches!(&spawn.launch.unattended, Unattended::Profile(p) if p.as_str() == "careful")
         );
         args.yolo = Some(String::new());
-        let spawn = spawn_request(
-            &resolved,
-            "t",
-            "/work",
-            &args,
-            Default::default(),
-            Vec::new(),
-        )
-        .unwrap();
+        let spawn = spawn_request(&resolved, "t", "/work", &args, Vec::new()).unwrap();
         assert_eq!(spawn.launch.unattended, Unattended::All);
     }
 }
