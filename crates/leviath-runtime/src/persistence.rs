@@ -137,26 +137,6 @@ pub struct TokenTotals {
 #[derive(Component, Clone, Default, Debug, PartialEq)]
 pub struct RunOutcomeFlags(pub leviath_core::run_meta::RunFlags);
 
-impl RunOutcomeFlags {
-    /// Seed a fresh run's flags from the blueprint it is about to run.
-    ///
-    /// Every counter starts at zero; the one thing decided here is
-    /// [`no_output_tools`], which is fixed for the run's lifetime and so is
-    /// answered once rather than re-derived on every persist tick.
-    ///
-    /// Judged across *every* stage, not only the ones the run reaches: a run
-    /// cancelled in the first stage of an agent that writes files really did
-    /// produce nothing, and should still say so.
-    ///
-    /// [`no_output_tools`]: leviath_core::run_meta::RunFlags::no_output_tools
-    pub fn for_blueprint(bp: &crate::spec::Blueprint) -> Self {
-        Self(leviath_core::run_meta::RunFlags {
-            no_output_tools: !bp.stages.iter().any(stage_can_modify),
-            ..Default::default()
-        })
-    }
-}
-
 /// The final output an agent has submitted, held on the agent entity until the
 /// persistence lane copies it into `meta.json`.
 ///
@@ -166,40 +146,6 @@ impl RunOutcomeFlags {
 /// "an earlier one did".
 #[derive(Component, Clone, Debug, PartialEq)]
 pub struct FinalOutput(pub leviath_core::output::FinalOutput);
-
-/// Whether `stage` advertises a tool whose writes the framework would record:
-/// a built-in [`MODIFYING_TOOLS`] name, or one that this stage's own outgoing
-/// transition gates name (the declared escape hatch for agents whose writes go
-/// through MCP or script tools).
-///
-/// Deliberately the same test the transition gate applies in `gate_blocks`, so
-/// a gated stage and the run's flags cannot disagree about what "can modify"
-/// means.
-/// `shell` is absent from both: an agent can edit through `sed -i` without the
-/// framework seeing it, so shell capability is real but unverifiable - which
-/// is exactly why such a run should still be reported as empty rather than
-/// excused.
-///
-/// [`MODIFYING_TOOLS`]: crate::spec::blueprint::MODIFYING_TOOLS
-fn stage_can_modify(stage: &crate::spec::Stage) -> bool {
-    if stage.grants_all_builtins() {
-        return true;
-    }
-    stage.available_tools.iter().any(|t| {
-        let canonical = leviath_tools::canonical_tool_name(t);
-        crate::spec::blueprint::MODIFYING_TOOLS.contains(&canonical)
-            || stage
-                .transitions
-                .iter()
-                .flat_map(|edges| edges.values())
-                .filter_map(|edge| edge.gate.as_ref())
-                .any(|gate| {
-                    gate.tools
-                        .iter()
-                        .any(|extra| leviath_tools::canonical_tool_name(extra) == canonical)
-                })
-    })
-}
 
 impl TokenTotals {
     /// Add one inference response's usage to the running totals.
@@ -550,100 +496,6 @@ mod tests {
             output_request: None,
             model_override: None,
         }
-    }
-
-    /// A stage advertising `tools`, with `gate_tools` named by the gate on its
-    /// single outgoing edge. `gate_tools: None` gives the stage no transitions
-    /// at all, which is the other half of the `Option` the scan walks.
-    fn stage_with(tools: &[&str], gate_tools: Option<&[&str]>) -> crate::spec::Stage {
-        let mut stage = crate::spec::Stage::new(
-            "s".to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        stage.available_tools = tools.iter().map(|t| (*t).to_string()).collect();
-        stage.transitions = gate_tools.map(|extra| {
-            let gate = (!extra.is_empty()).then(|| crate::spec::blueprint::TransitionGate {
-                require_modifications: true,
-                tools: extra.iter().map(|t| (*t).to_string()).collect(),
-                ..Default::default()
-            });
-            std::collections::HashMap::from([(
-                "next".to_string(),
-                crate::spec::blueprint::TransitionEdge {
-                    target: "next".to_string(),
-                    condition: crate::spec::blueprint::TransitionCondition::Always,
-                    hint: None,
-                    transform: crate::spec::blueprint::EdgeTransform::Direct,
-                    gate,
-                    stuck: None,
-                },
-            )])
-        });
-        stage
-    }
-
-    fn blueprint_of(stages: Vec<crate::spec::Stage>) -> crate::spec::Blueprint {
-        crate::spec::Blueprint::new(
-            "bp".to_string(),
-            "d".to_string(),
-            stages,
-            crate::spec::ContextLayout::new(vec![], 1000),
-        )
-    }
-
-    fn no_output_tools(stages: Vec<crate::spec::Stage>) -> bool {
-        RunOutcomeFlags::for_blueprint(&blueprint_of(stages))
-            .0
-            .no_output_tools
-    }
-
-    #[test]
-    fn for_blueprint_asks_whether_any_stage_could_have_written() {
-        // A blueprint with no stages at all offers nothing.
-        assert!(no_output_tools(vec![]));
-        // Read-only, and the sub-agent tools a router would use: nothing the
-        // framework tracks as a file change.
-        assert!(no_output_tools(vec![stage_with(
-            &["read_file", "spawn_agent", "context_write"],
-            None
-        )]));
-        // `shell` confers no tracked write: an agent editing through `sed -i`
-        // leaves no record, so silence from it stays suspicious rather than
-        // excused. The alias resolves, so `bash` is judged as `shell`.
-        assert!(no_output_tools(vec![stage_with(&["bash"], None)]));
-        // A built-in group carries `write_file` and `edit_file` unnamed.
-        assert!(!no_output_tools(vec![stage_with(&["@builtin"], None)]));
-        assert!(no_output_tools(vec![stage_with(&["@scripts"], None)]));
-        // A built-in modifying tool, under either name.
-        assert!(!no_output_tools(vec![stage_with(&["write_file"], None)]));
-        assert!(!no_output_tools(vec![stage_with(&["edit_file"], None)]));
-        // Only one stage needs it.
-        assert!(!no_output_tools(vec![
-            stage_with(&["read_file"], None),
-            stage_with(&["write_file"], None),
-        ]));
-    }
-
-    #[test]
-    fn for_blueprint_honors_a_gate_declaring_its_own_write_tool() {
-        // An MCP/script write tool the stage advertises AND a gate names is a
-        // tracked write - the same escape hatch `stage_modifying_tools` gives.
-        assert!(!no_output_tools(vec![stage_with(
-            &["mcp__fs__put"],
-            Some(&["mcp__fs__put"])
-        )]));
-        // Declared by the gate but never advertised: the stage cannot call it.
-        assert!(no_output_tools(vec![stage_with(
-            &["read_file"],
-            Some(&["mcp__fs__put"])
-        )]));
-        // Transitions present, but no gate on the edge.
-        assert!(no_output_tools(vec![stage_with(&["read_file"], Some(&[]))]));
-        // A gate that names a tool unrelated to what the stage advertises.
-        assert!(no_output_tools(vec![stage_with(
-            &["mcp__fs__put"],
-            Some(&["mcp__other__put"])
-        )]));
     }
 
     #[test]

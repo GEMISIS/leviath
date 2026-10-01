@@ -6,9 +6,8 @@
 //! parsed can still fail here, and each failure is reported with the path of
 //! the field that caused it.
 //!
-//! Only the runtime's own tests and the `legacy-blueprint` feature compile
-//! this: a spawn reads a graph, never a parsed manifest, and the crate that
-//! converts old runs is the one caller outside the tests.
+//! A spawn reads a graph, never a parsed manifest: this is how an old run's
+//! manifest, and `lev blueprint migrate`'s, become one.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -16,30 +15,27 @@ use std::str::FromStr;
 use leviath_core::JsonDoc;
 use leviath_core::policy::ToolPolicy;
 use leviath_core::region::RegionKind as CoreKind;
-
-use super::*;
-use crate::spec::blueprint::{self as bp, Blueprint};
-use crate::spec::inputs::{InputDecl, InputSlot, InputType, RegionBinding};
-use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
-use crate::spec::layout::{BudgetSpec, ContextLayout, RegionSeed};
-use crate::spec::names::{
+use leviath_runtime::spec::graph::*;
+use leviath_runtime::spec::inputs::{InputDecl, InputSlot, InputType, RegionBinding};
+use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use leviath_runtime::spec::names::{
     BlueprintName, EdgeName, InputName, McpServerName, MimePattern, ModelId, ModelRef, NameError,
     ProviderName, RegionName, StageName, ToolName, WorkdirPath,
 };
 
-impl RunGraph {
-    /// Read a parsed blueprint as a run graph, reporting every field that
-    /// does not fit.
-    pub fn from_blueprint(blueprint: &Blueprint) -> Result<RunGraph, SpawnIssues> {
-        let mut c = Conv {
-            issues: SpawnIssues::new(),
-            inputs: BTreeMap::new(),
-        };
-        let graph = c.graph(blueprint);
-        let mut graph = graph;
-        graph.inputs = c.inputs.into_values().collect();
-        c.issues.into_result(graph)
-    }
+use crate::old::blueprint::{self as bp, Blueprint};
+use crate::old::layout::{BudgetSpec, ContextLayout, RegionSeed};
+
+/// Read a parsed blueprint as a run graph, reporting every field that does
+/// not fit.
+pub(crate) fn from_blueprint(blueprint: &Blueprint) -> Result<RunGraph, SpawnIssues> {
+    let mut c = Conv {
+        issues: SpawnIssues::new(),
+        inputs: BTreeMap::new(),
+    };
+    let mut graph = c.graph(blueprint);
+    graph.inputs = c.inputs.into_values().collect();
+    c.issues.into_result(graph)
 }
 
 struct Conv {
@@ -612,7 +608,7 @@ impl Conv {
 
     fn region(
         &mut self,
-        r: &crate::spec::layout::RegionDefinition,
+        r: &crate::old::layout::RegionDefinition,
         p: &SpecPath,
     ) -> Option<RegionDef> {
         let name: RegionName = self.name(p.field("name"), &r.name)?;
@@ -683,7 +679,7 @@ impl Conv {
         &mut self,
         input: &str,
         region: &RegionName,
-        r: &crate::spec::layout::RegionDefinition,
+        r: &crate::old::layout::RegionDefinition,
         p: &SpecPath,
     ) {
         let Some(name) = self.name::<InputName>(p.clone(), input) else {
@@ -720,7 +716,7 @@ impl Conv {
         &mut self,
         s: &RegionSeed,
         region: &RegionName,
-        r: &crate::spec::layout::RegionDefinition,
+        r: &crate::old::layout::RegionDefinition,
         p: &SpecPath,
     ) -> Option<Seed> {
         Some(match s {
@@ -752,8 +748,8 @@ impl Conv {
                     })
                     .collect(),
                 refresh: match refresh {
-                    crate::spec::layout::SeedRefresh::Once => SeedRefresh::Once,
-                    crate::spec::layout::SeedRefresh::EachStage => SeedRefresh::EachStage,
+                    crate::old::layout::SeedRefresh::Once => SeedRefresh::Once,
+                    crate::old::layout::SeedRefresh::EachStage => SeedRefresh::EachStage,
                 },
             },
         })
@@ -963,5 +959,5 @@ fn scalar(v: &serde_json::Value) -> Option<ParamScalar> {
 }
 
 #[cfg(test)]
-#[path = "from_blueprint_tests.rs"]
+#[path = "graph_tests.rs"]
 mod tests;

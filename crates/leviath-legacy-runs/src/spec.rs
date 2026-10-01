@@ -3,10 +3,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::old::blueprint::Blueprint;
+use crate::old::layout::RegionSeed;
 use leviath_core::JsonDoc;
 use leviath_core::output::OutputSpec;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageModelUse, StageRecord as OldStage};
-use leviath_runtime::spec::Blueprint;
 use leviath_runtime::spec::graph::{
     ArtifactDef, CodeRef, OutputCap, OutputDef, RunGraph, StageDef,
 };
@@ -14,7 +15,6 @@ use leviath_runtime::spec::inputs::{InputValue, InputValues};
 use leviath_runtime::spec::launch::{
     Callback, Delivery, LaunchPolicy, Placement, Secret, Unattended,
 };
-use leviath_runtime::spec::layout::RegionSeed;
 use leviath_runtime::spec::names::{
     BlueprintName, BlueprintRef, Digest, HttpUrl, MimePattern, ModelId, ModelRef, ProfileName,
     ProviderName, RegionName, RunId,
@@ -59,7 +59,7 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
         path: blueprint_path,
         why: e.to_string(),
     })?;
-    let mut graph = RunGraph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
+    let mut graph = crate::old::graph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
     read_manifest_tables(&mut graph, &old.blueprint.text).map_err(ConvertError::Graph)?;
     let digest = match meta.blueprint_digest.as_deref().map(Digest::new) {
         Some(Ok(d)) => d,

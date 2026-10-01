@@ -5,13 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::spec::names::{EdgeName, RegionName, StageName, ToolName};
 
-/// The name of the edge `RunGraph::from_blueprint` (behind the
-/// `legacy-blueprint` feature) writes for a blueprint stage with no `transitions` table: an `always`
-/// edge to the stage after it, with nothing carried differently and no gate.
+/// The name of the edge a manifest-format stage with no `transitions` table is
+/// given when it is read as a graph: an `always` edge to the stage after it,
+/// with nothing carried differently and no gate.
 ///
-/// It cannot collide with a declared edge. A blueprint names each edge after
-/// the stage it enters, and only a stage that declares no edges at all is
-/// given this one, so it is always the only edge leaving its stage.
+/// It cannot collide with a declared edge. Such a manifest names each edge
+/// after the stage it enters, and only a stage that declares no edges at all
+/// is given this one, so it is always the only edge leaving its stage.
 pub const FALL_THROUGH_EDGE: &str = "next";
 
 /// An edge from one stage to another.
@@ -126,6 +126,16 @@ pub struct GateDef {
     #[serde(default)]
     pub require_region_entries: Option<RegionCount>,
 }
+
+impl GateDef {
+    /// How many times a gate holds the run back when it sets no
+    /// `max_attempts`.
+    pub const DEFAULT_MAX_ATTEMPTS: usize = 3;
+}
+
+/// The built-in tools that change files on disk, which a gate's
+/// `require_modifications` counts. A gate's own `tools` add to them.
+pub const MODIFYING_TOOLS: &[&str] = &["write_file", "edit_file"];
 
 /// A region and how many entries it must hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

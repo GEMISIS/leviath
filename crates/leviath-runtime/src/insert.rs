@@ -116,18 +116,18 @@ pub(crate) fn seeded_window(
     scripts: &HashMap<String, Arc<leviath_scripting::region_hook::RegionScript>>,
 ) -> ContextWindow {
     let layout = spec_view::graph_layout(spec);
-    let mut window = ContextWindow::new(layout.total_budget_tokens);
+    let mut window = ContextWindow::new(layout.total);
     // Before seeding, so seed writes pass through each region's `on_write`
     // hook like any other entry.
     window.region_scripts = scripts.clone();
-    crate::context_setup::lay_out(&mut window, &layout);
+    crate::context_setup::lay_out(&mut window, layout.regions);
     if spec.graph.taint_tracking == Some(true) {
         window.enable_taint_tracking();
     }
     for (name, seeded) in &spec.seeded {
         let budget = window.get_region(name.as_str()).map_or(0, |r| r.max_tokens);
         if !seeded.text.is_empty() || seeded.parts.is_empty() {
-            let fitted = fit_seed_to_budget(&seeded.text, budget);
+            let fitted = crate::context_setup::fit_seed_to_budget(&seeded.text, budget);
             let tokens = leviath_core::estimate_tokens(&fitted);
             let _ = window.add_to_region_caused(
                 leviath_core::ContextCause::Seed,
@@ -151,27 +151,6 @@ pub(crate) fn seeded_window(
         }
     }
     window
-}
-
-/// Marker appended to a seed that was trimmed to fit its region.
-const SEED_TRUNCATION_MARKER: &str =
-    "\n[...truncated by leviath: seed exceeded this region's budget]";
-
-/// Trim `content` so that its token estimate fits `max_tokens`, leaving room
-/// for [`SEED_TRUNCATION_MARKER`]; unchanged when it already fits. A region too
-/// small to hold even the marker gets nothing.
-fn fit_seed_to_budget(content: &str, max_tokens: usize) -> String {
-    let allowed = max_tokens.saturating_sub(1).saturating_mul(4);
-    if content.len() <= allowed {
-        return content.to_string();
-    }
-    let Some(room) = allowed.checked_sub(SEED_TRUNCATION_MARKER.len()) else {
-        return String::new();
-    };
-    format!(
-        "{}{SEED_TRUNCATION_MARKER}",
-        leviath_core::truncate_at_boundary(content, room)
-    )
 }
 
 /// Enter the run's entry stage in `window`: give stage prompts a region of

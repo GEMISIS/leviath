@@ -21,6 +21,8 @@ mod serve;
 pub(crate) use serve::*;
 mod mime;
 pub(crate) use mime::*;
+mod nudge;
+pub(crate) use nudge::NudgeSettings;
 
 // Why a config file would not load, kept structured rather than flattened into
 // a string, so the surfaces that have to explain a broken file can point at
@@ -293,14 +295,11 @@ pub struct Config {
     #[serde(default = "leviath_core::default_true")]
     pub shell_hint: bool,
 
-    /// Machine-wide defaults for the empty-response nudge (`[nudge]`): the
-    /// `[System]` message injected when a stage's model replies with text
-    /// before making any tool call. All three keys (`enabled`, `max`, `text`)
-    /// are optional; an agent's `[agent.nudge]` or a stage's
-    /// `[stages.<name>.nudge]` overrides each field independently. See
-    /// [`leviath_runtime::spec::resolve_nudge`].
+    /// Machine-wide defaults for the empty-response nudge (`[nudge]`); a
+    /// graph's or a stage's `nudge` overrides each field independently. See
+    /// [`NudgeDef::resolve`](leviath_runtime::spec::graph::NudgeDef::resolve).
     #[serde(default)]
-    pub nudge: leviath_runtime::spec::NudgeConfig,
+    pub nudge: NudgeSettings,
 
     /// Completion-webhook delivery tuning (retry/backoff/timeout).
     #[serde(default)]
@@ -394,7 +393,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
             shell_hint: true,
-            nudge: leviath_runtime::spec::NudgeConfig::default(),
+            nudge: NudgeSettings::default(),
             webhook: WebhookConfig::default(),
             observability: ObservabilityConfig::default(),
             sandbox: None,
@@ -1955,8 +1954,8 @@ some_custom_thing = \"forwarded to the script\"
                 true,
             ),
             (
-                "NudgeConfig",
-                "../leviath-runtime/src/spec/blueprint/transition.rs",
+                "NudgeSettings",
+                "src/config/nudge.rs",
                 &["properties", "nudge", "properties"],
                 true,
             ),
@@ -4477,7 +4476,7 @@ anthropic_api_key = "sk-ant-test-key"
             Some("sk-ant-test-key")
         );
         // No [nudge] section ⇒ every field unset ⇒ built-in defaults apply.
-        assert_eq!(config.nudge, leviath_runtime::spec::NudgeConfig::default());
+        assert_eq!(config.nudge, NudgeSettings::default());
     }
 
     #[test]
@@ -4651,7 +4650,7 @@ enabled = false
             },
             batch_tool_hint: true,
             shell_hint: false,
-            nudge: leviath_runtime::spec::NudgeConfig {
+            nudge: NudgeSettings {
                 enabled: Some(true),
                 max: Some(2),
                 text: Some("Use your tools.".to_string()),
@@ -4761,7 +4760,7 @@ enabled = false
         );
         assert_eq!(
             deserialized.nudge,
-            leviath_runtime::spec::NudgeConfig {
+            NudgeSettings {
                 enabled: Some(true),
                 max: Some(2),
                 text: Some("Use your tools.".to_string()),

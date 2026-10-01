@@ -469,7 +469,7 @@ fn seed_window(
     task: &str,
 ) {
     for def in &layout.regions {
-        let budget = context_setup::budget_tokens(&def.budget, context_window);
+        let budget = def.budget.resolve(context_window);
         window.add_region(context_setup::region_from_def(def, budget));
     }
     if window.get_region("tool_results").is_none() {

@@ -401,6 +401,11 @@ impl ModelRef {
             }),
         }
     }
+
+    /// The provider's name, or empty text when the reference names none.
+    pub fn provider_or_empty(&self) -> &str {
+        self.provider.as_ref().map_or("", ProviderName::as_str)
+    }
 }
 
 impl fmt::Display for ModelRef {
@@ -526,6 +531,13 @@ mod tests {
     fn opaque_ids_refuse_whitespace() {
         assert!(ModelId::new("claude-sonnet-5-5").is_ok());
         assert!(ProviderName::new("open router").is_err());
+    }
+
+    #[test]
+    fn a_reference_with_no_provider_names_the_empty_one() {
+        assert_eq!(ModelRef::parse("p/m").unwrap().provider_or_empty(), "p");
+        assert_eq!(ModelRef::parse("m").unwrap().provider_or_empty(), "");
+        assert!(ModelRef::parse("p/has space").is_err());
     }
 
     #[test]

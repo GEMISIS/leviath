@@ -30,7 +30,7 @@ use leviath_runtime::spec::env::{
     SpawnLimits, StageTools,
 };
 use leviath_runtime::spec::graph::{
-    CodeRef, DependencyDef, MimeRows, Needs, NudgeDef, RunGraph, Seed, StageDef,
+    CodeRef, DependencyDef, MimeRows, Needs, RunGraph, Seed, StageDef,
 };
 use leviath_runtime::spec::inputs::PathKind;
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
@@ -286,7 +286,6 @@ impl ResolveEnv for DaemonEnv {
 
     fn limits(&self) -> SpawnLimits {
         let config = &self.config;
-        let nudge = &config.nudge;
         SpawnLimits {
             default_max_depth: u8::try_from(crate::daemon::spawn::DEFAULT_SUBAGENT_DEPTH)
                 .unwrap_or(u8::MAX),
@@ -299,11 +298,7 @@ impl ResolveEnv for DaemonEnv {
             defaults: OperatorDefaults {
                 batch_tool_hint: config.batch_tool_hint,
                 shell_hint: config.shell_hint,
-                nudge: NudgeDef {
-                    enabled: nudge.enabled,
-                    max: nudge.max.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
-                    text: nudge.text.clone(),
-                },
+                nudge: config.nudge.def(),
                 taint_tracking: config.taint_tracking,
                 capture_model_input: config.observability.capture_model_input,
             },

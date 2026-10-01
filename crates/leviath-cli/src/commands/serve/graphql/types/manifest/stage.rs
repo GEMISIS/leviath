@@ -516,16 +516,10 @@ impl Stage {
             Mode::InteractivePoints(points) if !points.is_empty()
         );
         let graph = &self.blueprint.graph;
-        let nudge_config =
-            |def: &leviath_runtime::spec::graph::NudgeDef| leviath_runtime::spec::NudgeConfig {
-                enabled: def.enabled,
-                max: def.max.map(|max| max as usize),
-                text: def.text.clone(),
-            };
-        let nudge = leviath_runtime::spec::resolve_nudge(
-            Some(&config.nudge),
-            graph.nudge.as_ref().map(nudge_config).as_ref(),
-            stage.nudge.as_ref().map(nudge_config).as_ref(),
+        let nudge = leviath_runtime::spec::graph::NudgeDef::resolve(
+            Some(&config.nudge.def()),
+            graph.nudge.as_ref(),
+            stage.nudge.as_ref(),
             reviewed,
         );
         let security = |taint_tracking: Option<bool>| {

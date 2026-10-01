@@ -164,35 +164,16 @@ impl From<&ToolSelector> for ToolSelectorText {
     fn from(t: &ToolSelector) -> Self {
         Self(match t {
             ToolSelector::Tool(name) => name.to_string(),
-            ToolSelector::Group(g) => group_token(*g).to_string(),
+            ToolSelector::Group(g) => g.token().to_string(),
         })
-    }
-}
-
-fn group_token(g: ToolGroup) -> &'static str {
-    match g {
-        ToolGroup::All => "@all",
-        ToolGroup::Builtin => "@builtin",
-        ToolGroup::Subagent => "@subagent",
-        ToolGroup::Scripts => "@scripts",
-        ToolGroup::Mcp => "@mcp",
     }
 }
 
 impl TryFrom<ToolSelectorText> for ToolSelector {
     type Error = String;
     fn try_from(t: ToolSelectorText) -> Result<Self, String> {
-        if t.0.starts_with('@') {
-            let groups = [
-                ToolGroup::All,
-                ToolGroup::Builtin,
-                ToolGroup::Subagent,
-                ToolGroup::Scripts,
-                ToolGroup::Mcp,
-            ];
-            return groups
-                .into_iter()
-                .find(|g| group_token(*g) == t.0)
+        if ToolGroup::is_token(&t.0) {
+            return ToolGroup::parse(&t.0)
                 .map(ToolSelector::Group)
                 .ok_or_else(|| format!("{:?} is not a tool group; the groups are @all, @builtin, @subagent, @scripts and @mcp", t.0));
         }

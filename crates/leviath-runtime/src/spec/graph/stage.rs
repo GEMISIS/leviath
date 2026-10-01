@@ -182,6 +182,34 @@ pub enum OutputCap {
     },
 }
 
+impl OutputCap {
+    /// The cap in tokens for one request.
+    ///
+    /// `model_window` and `model_max_output` are the model's own limits;
+    /// `region_budget` answers "how many tokens may region X hold" for the
+    /// window the request is built from. A relative cap is clamped to the
+    /// model's maximum. A region cap naming a region the stage does not carry
+    /// falls back to the model's maximum, which is the same "as much as you
+    /// can" the author was reaching for. Never less than one token.
+    pub fn resolve(
+        &self,
+        model_window: usize,
+        model_max_output: usize,
+        region_budget: impl Fn(&str) -> Option<usize>,
+    ) -> usize {
+        let share = |whole: usize, fraction: f64| (whole as f64 * fraction).round() as usize;
+        match self {
+            OutputCap::Tokens(t) => *t as usize,
+            OutputCap::WindowPercent(p) => share(model_window, *p).min(model_max_output),
+            OutputCap::RegionPercent { percent, region } => match region_budget(region.as_str()) {
+                Some(budget) => share(budget, *percent).min(model_max_output),
+                None => model_max_output,
+            },
+        }
+        .max(1)
+    }
+}
+
 /// A provider-specific model setting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(remote = "Self", rename_all = "snake_case")]
@@ -222,6 +250,57 @@ pub enum ToolGroup {
     Scripts,
     /// Every connected MCP server's tools.
     Mcp,
+}
+
+impl ToolGroup {
+    /// Every group.
+    pub const ALL: [ToolGroup; 5] = [
+        ToolGroup::All,
+        ToolGroup::Builtin,
+        ToolGroup::Subagent,
+        ToolGroup::Scripts,
+        ToolGroup::Mcp,
+    ];
+
+    /// The token a tool grant list writes for this group. A tool name never
+    /// starts with `@`, so a token cannot be mistaken for a tool.
+    pub fn token(self) -> &'static str {
+        match self {
+            ToolGroup::All => "@all",
+            ToolGroup::Builtin => "@builtin",
+            ToolGroup::Subagent => "@subagent",
+            ToolGroup::Scripts => "@scripts",
+            ToolGroup::Mcp => "@mcp",
+        }
+    }
+
+    /// The group a grant names, or `None` for a tool name (or a token that
+    /// names no group).
+    pub fn parse(entry: &str) -> Option<ToolGroup> {
+        ToolGroup::ALL.into_iter().find(|g| g.token() == entry)
+    }
+
+    /// Whether `entry` is spelled like a group token, whether or not it names
+    /// one.
+    pub fn is_token(entry: &str) -> bool {
+        entry.starts_with('@')
+    }
+
+    /// The groups a grant list names, in list order, each once.
+    pub fn named_in(entries: &[String]) -> Vec<ToolGroup> {
+        let mut groups = Vec::new();
+        for group in entries.iter().filter_map(|e| ToolGroup::parse(e)) {
+            if !groups.contains(&group) {
+                groups.push(group);
+            }
+        }
+        groups
+    }
+
+    /// Whether a tool from `source` is covered by this group.
+    pub fn covers(self, source: ToolGroup) -> bool {
+        self == ToolGroup::All || self == source
+    }
 }
 
 /// How a stage runs.
@@ -337,6 +416,15 @@ pub struct FanOutDef {
 
 fn default_max_workers() -> u32 {
     4
+}
+
+impl FanOutDef {
+    /// How many times a fan-out stage that ends without calling `fan_out` is
+    /// asked again before it is let through without workers, when it sets no
+    /// `max_attempts`. The same bound as a gate's, for the same reason: a
+    /// model that cannot do the one thing its stage is for should cost a fixed
+    /// number of prompts.
+    pub const DEFAULT_MAX_ATTEMPTS: usize = 3;
 }
 
 impl FanOutDef {

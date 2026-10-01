@@ -7,6 +7,30 @@ use serde::{Deserialize, Serialize};
 use super::stage::{CodeRef, SeedToolCall};
 use crate::spec::names::{MimePattern, RegionName, WorkdirPath};
 
+/// The region a stage's `system_prompt` is written into.
+///
+/// Stage instructions are pinned context, which is why they read as
+/// instruction rather than history, and a region of their own is what lets the
+/// stage ledger bill the prompt's tokens under a name that says what they are,
+/// sizes them, and places them in the cached prefix on purpose rather than
+/// wherever the first pinned region happens to sit. A layout that declares no
+/// region by this name still gets one: the runtime adds it at spawn, sized to
+/// the widest stage prompt the graph carries.
+pub const STAGE_INSTRUCTIONS_REGION: &str = "stage_instructions";
+
+/// Regions every stage can see, whatever its own layout says.
+///
+/// The runtime adds the first three when a layout declares none, and carries
+/// all four visible through a stage's layout swap: the first two hold the
+/// typed tool_use/tool_result turns, an answer submitted early has to survive
+/// to the end, and the last holds the instructions of the stage being entered.
+pub const ALWAYS_VISIBLE_REGIONS: [&str; 4] = [
+    "conversation",
+    "tool_results",
+    "final_output",
+    STAGE_INSTRUCTIONS_REGION,
+];
+
 /// A context layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -169,6 +193,29 @@ pub enum Budget {
         #[serde(default)]
         max: Option<u32>,
     },
+}
+
+impl Budget {
+    /// This budget in tokens against a model window of `window` tokens.
+    ///
+    /// A percentage rounds `window * percent`, then applies the cap, then the
+    /// floor, so a floor above the cap wins: a region starved below a usable
+    /// size is worse than one slightly over its cap.
+    pub fn resolve(&self, window: usize) -> usize {
+        match self {
+            Budget::Tokens(n) => *n as usize,
+            Budget::Percent { percent, min, max } => {
+                let mut v = (window as f64 * percent).round() as usize;
+                if let Some(max) = max {
+                    v = v.min(*max as usize);
+                }
+                if let Some(min) = min {
+                    v = v.max(*min as usize);
+                }
+                v
+            }
+        }
+    }
 }
 
 /// What fills a region at spawn.

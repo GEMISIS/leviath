@@ -221,13 +221,13 @@ fn resolve_title_model(
 pub fn stage_pairs(
     provider: &str,
     model: &str,
-    fallbacks: &[crate::spec::blueprint::ModelEntry],
+    fallbacks: &[crate::spec::names::ModelRef],
 ) -> Vec<(String, String)> {
     std::iter::once((provider.to_string(), model.to_string()))
         .chain(
             fallbacks
                 .iter()
-                .map(|e| (e.provider.clone(), e.model.clone())),
+                .map(|e| (e.provider_or_empty().to_string(), e.model.to_string())),
         )
         .collect()
 }
@@ -1568,14 +1568,8 @@ mod tests {
     #[test]
     fn stage_pairs_puts_the_resolved_model_ahead_of_its_fallbacks() {
         let fallbacks = vec![
-            crate::spec::blueprint::ModelEntry {
-                provider: "openai".to_string(),
-                model: "gpt-5-mini".to_string(),
-            },
-            crate::spec::blueprint::ModelEntry {
-                provider: "ollama".to_string(),
-                model: "qwen3".to_string(),
-            },
+            crate::spec::names::ModelRef::parse("openai/gpt-5-mini").unwrap(),
+            crate::spec::names::ModelRef::parse("ollama/qwen3").unwrap(),
         ];
         assert_eq!(
             stage_pairs("anthropic", "claude-x", &fallbacks),

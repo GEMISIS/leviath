@@ -9,7 +9,6 @@
 //!
 //! [`ResolveEnv`]: crate::spec::env::ResolveEnv
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use leviath_core::JsonDoc;
@@ -17,16 +16,14 @@ use leviath_providers::Tool;
 
 use crate::pipeline::{
     ModelDefaults, ToolCatalog, ToolOwners, expand_connector_grants, filter_tools_for_stage,
-    resolve_stages,
+    resolve_stage_route,
 };
 use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
-use crate::spec::blueprint::{Blueprint, ModelConfig, ModelEntry, Stage};
 use crate::spec::env::{CodeUse, ModelPlan};
 use crate::spec::graph::{CodeRef, StageDef, ToolSelector};
 use crate::spec::inputs::PathKind;
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
-use crate::spec::layout::ContextLayout;
 use crate::spec::names::{
     Digest, McpServerName, MimePattern, ModelId, ModelRef, ProviderName, ToolName, WorkdirPath,
 };
@@ -97,67 +94,35 @@ fn model_path(stage: &StageDef) -> SpecPath {
 /// has chosen one: the stage's own models, then the operator's override and
 /// fallback models and failover chain, over the providers they prefer.
 ///
-/// The choice is made by the same stage resolver a run has always used, over
-/// a one-stage stand-in for the stage, so a gateway's unread model list, a
-/// provider that refuses the model and a model that cannot run with zero data
-/// retention are refused here exactly as they were.
+/// The choice is made by the stage resolver every spawn uses, so a gateway's
+/// unread model list, a provider that refuses the model and a model that
+/// cannot run with zero data retention are refused here. The model is chosen
+/// for the mime types the stage's own `input_accepts` names.
 pub fn choose_model(
     stage: &StageDef,
     requested: Option<&ModelRef>,
     defaults: &ModelDefaults,
     registry: &ProviderRegistry,
 ) -> Result<ModelPlan, Box<SpawnIssue>> {
-    let config = ModelConfig {
-        models: stage
-            .model
-            .models
-            .iter()
-            .map(|m| {
-                ModelEntry::new(
-                    m.provider
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                    m.model.to_string(),
-                )
-            })
-            .collect(),
-        allow_user_default: stage.model.allow_user_default,
-        parameters: HashMap::new(),
-        request_timeout_secs: stage.model.request_timeout_secs,
-    };
-    let mut legacy = Stage::new(stage.name.to_string(), config);
-    legacy.input_accepts = stage
-        .input_accepts
-        .iter()
-        .map(ToString::to_string)
-        .collect();
-    let blueprint = Blueprint::new(
-        stage.name.to_string(),
-        String::new(),
-        vec![legacy],
-        ContextLayout::new(Vec::new(), 0),
-    );
-    let owners = ToolOwners::new();
     let requested_text = requested.map(ToString::to_string);
     let unresolvable = |message: String| {
         SpawnIssue::new(model_path(stage), IssueCode::Unresolvable, message)
             .known(registry.resolvable_names())
     };
-    let resolved = resolve_stages(
-        &blueprint,
+    let needs: Vec<String> = stage
+        .input_accepts
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let resolved = resolve_stage_route(
+        stage.name.as_str(),
+        &stage.model,
+        &needs,
         requested_text.as_deref(),
         defaults,
         registry,
-        ToolCatalog {
-            defs: &[],
-            owners: &owners,
-        },
-        false,
-        None,
     )
-    .map_err(unresolvable)?
-    .remove(0);
+    .map_err(unresolvable)?;
     let provider = ProviderName::new(&resolved.provider_name)
         .map_err(|e| unresolvable(format!("the chosen provider: {e}")))?;
     let model = ModelId::new(&resolved.model)
@@ -171,17 +136,12 @@ pub fn choose_model(
         .map(|p| p.capabilities(model.as_str()).max_output_tokens)
         .unwrap_or(leviath_providers::ModelCapabilities::default().max_output_tokens);
     let max_output_tokens = u32::try_from(max_output_tokens).unwrap_or(u32::MAX);
-    let fallbacks = resolved
-        .fallbacks
-        .iter()
-        .filter_map(|f| ModelRef::parse(&format!("{}/{}", f.provider, f.model)).ok())
-        .collect();
     Ok(ModelPlan {
         provider,
         model,
         context_window,
         max_output_tokens,
-        fallbacks,
+        fallbacks: resolved.fallbacks,
         notes: resolved.notes,
     })
 }
@@ -379,25 +339,11 @@ pub fn stage_grants(stage: &StageDef, owners: &ToolOwners) -> Vec<String> {
         .iter()
         .map(|s| match s {
             ToolSelector::Tool(name) => name.to_string(),
-            ToolSelector::Group(group) => group_token(*group).to_string(),
+            ToolSelector::Group(group) => group.token().to_string(),
         })
         .collect();
     let connectors: Vec<String> = stage.connectors.iter().map(ToString::to_string).collect();
     expand_connector_grants(&available, &connectors, owners)
-}
-
-/// The token a group is written as in a stage's tool list.
-fn group_token(group: crate::spec::graph::ToolGroup) -> &'static str {
-    use crate::spec::blueprint::ToolGroup as Legacy;
-    use crate::spec::graph::ToolGroup;
-    match group {
-        ToolGroup::All => Legacy::All,
-        ToolGroup::Builtin => Legacy::Builtin,
-        ToolGroup::Subagent => Legacy::Subagent,
-        ToolGroup::Scripts => Legacy::Scripts,
-        ToolGroup::Mcp => Legacy::Mcp,
-    }
-    .token()
 }
 
 /// The type of attached bytes, by `registry`.

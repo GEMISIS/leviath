@@ -5,13 +5,216 @@
 use super::*;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
 use crate::insert::RunSpecC;
-#[path = "tests_old_vocab.rs"]
-mod old_vocab;
-use old_vocab::{
-    apply_edge_transform, build_transition_prompt, detect_stuck, edges_of, find_conditioned_edge,
-    gate_blocks, match_transition_choice, spec_of, spec_with, stage_expected_media,
-    stage_setup_from, watched_region_digests,
-};
+use crate::spec::graph::EdgeCarry;
+use crate::spec::graph::EdgeCondition;
+use crate::test_graph::{self as tg, spec_of, spec_with};
+
+/// `edge`, renamed `name`.
+fn named(name: &str, edge: crate::spec::graph::EdgeDef) -> crate::spec::graph::EdgeDef {
+    crate::spec::graph::EdgeDef {
+        name: crate::spec::names::EdgeName::new(name).unwrap(),
+        ..edge
+    }
+}
+
+/// How many times a stage owing a final output is re-run before it is let
+/// through: the cap `require_final_output` holds every stage to.
+const OUTPUT_REENTRY_CAP: usize = 3;
+
+/// A seed tool call to `tool` with no arguments.
+fn seed_call(tool: &str) -> crate::spec::graph::SeedToolCall {
+    crate::spec::graph::SeedToolCall {
+        tool: crate::spec::names::ToolName::new(tool).unwrap(),
+        args: leviath_core::JsonDoc::new(serde_json::json!({})),
+    }
+}
+
+/// A region marked required (or not), with an optional custom message.
+trait WithRequired {
+    fn with_required(self, required: bool, message: Option<String>) -> Self;
+}
+
+impl WithRequired for crate::spec::graph::RegionDef {
+    fn with_required(mut self, required: bool, message: Option<String>) -> Self {
+        self.required = required;
+        self.required_message = message;
+        self
+    }
+}
+
+/// `edges` as edges leaving a stage named `s`.
+fn edges_of(edges: &[crate::spec::graph::EdgeDef]) -> Vec<crate::spec::graph::EdgeDef> {
+    edges
+        .iter()
+        .map(|e| crate::spec::graph::EdgeDef {
+            from: crate::spec::names::StageName::new("s").unwrap(),
+            ..e.clone()
+        })
+        .collect()
+}
+
+/// [`super::find_conditioned_edge`] for the stage `stage` of `graph`: the
+/// target's position and the edge's context transform.
+fn find_conditioned_edge(
+    graph: &crate::spec::graph::RunGraph,
+    stage: &crate::spec::graph::StageDef,
+    visits: &std::collections::HashMap<String, usize>,
+    c: crate::spec::graph::EdgeCondition,
+) -> Option<(usize, crate::spec::graph::EdgeCarry)> {
+    super::find_conditioned_edge(graph, stage, visits, c).map(|next| (next.idx, next.carry))
+}
+
+/// The digests [`crate::pipeline::transition::watched_region_digests`] takes
+/// for `stage` on entry, as the only stage of a graph.
+fn watched_region_digests(
+    stage: &Staged,
+    window: &ContextWindow,
+) -> std::collections::HashMap<String, u64> {
+    let graph = graph_of_staged(vec![stage.clone()], tg::layout(Vec::new(), 1000));
+    crate::pipeline::transition::watched_region_digests(&graph, &graph.stages[0], window)
+}
+
+/// How `stage` is entered, as a one-stage spawn of it would enter it: `agent`
+/// is the graph's own hint settings, `global` the operator's, and `output`
+/// the stage's resolved output shape.
+fn stage_setup_from(
+    stage: &crate::spec::graph::StageDef,
+    global: leviath_core::config::PromptHints,
+    agent: leviath_core::config::PromptHintOverrides,
+    output: Option<leviath_core::output::OutputSpec>,
+) -> StageSetup {
+    let mut graph = tg::graph(vec![stage.clone()], tg::layout(Vec::new(), 1000));
+    graph.batch_tool_hint = agent.batch_tool;
+    graph.shell_hint = agent.shell;
+    let mut inference = tg::plan_inference(0);
+    inference.output = output;
+    let mut spec = spec_with(graph, &[inference]);
+    let graph = &mut Arc::make_mut(&mut spec.0).graph;
+    graph.batch_tool_hint = Some(graph.batch_tool_hint.unwrap_or(global.batch_tool));
+    graph.shell_hint = Some(graph.shell_hint.unwrap_or(global.shell));
+    crate::pipeline::spec_view::stage_setup(&spec.0, 0)
+}
+
+/// A provider setting as a graph writes it.
+fn param_scalar(v: &serde_json::Value) -> crate::spec::graph::ParamScalar {
+    use crate::spec::graph::ParamScalar;
+    match v {
+        serde_json::Value::Bool(b) => ParamScalar::Bool(*b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => ParamScalar::Int(i),
+            None => ParamScalar::Float(n.as_f64().unwrap()),
+        },
+        serde_json::Value::Array(items) => ParamScalar::TextList(
+            items
+                .iter()
+                .map(|i| i.as_str().unwrap().to_string())
+                .collect(),
+        ),
+        other => ParamScalar::Text(other.as_str().unwrap().to_string()),
+    }
+}
+
+/// A window region as a graph declares it, holding its budget.
+fn region_def_of(r: &Region) -> crate::spec::graph::RegionDef {
+    let mut def = tg::region(&r.name, r.kind.clone(), r.max_tokens as u32);
+    def.summarizable = r.summarizable;
+    def.admission = r.admission;
+    def.volatility = r.volatility;
+    def.description = r.description.clone();
+    def.describe_in_prompt = r.describe_in_prompt;
+    def
+}
+
+/// A stage named `name` that a spawn would enter with `setup`.
+fn stage_from_setup(name: &str, setup: &StageSetup) -> crate::spec::graph::StageDef {
+    let mut s = tg::stage(name);
+    s.system_prompt = setup.system_prompt.clone();
+    let cfg = &setup.inference_config;
+    s.model.params.temperature = cfg.temperature;
+    s.model.params.max_output_tokens = cfg.max_output_tokens.clone();
+    for (k, v) in &cfg.extra_params {
+        s.model.params.extra.insert(k.clone(), param_scalar(v));
+    }
+    s.model.request_timeout_secs = cfg.request_timeout_secs;
+    s.batch_tool_hint = Some(cfg.batch_tool_hint);
+    s.shell_hint = Some(cfg.shell_hint);
+    s.input_as_text = cfg
+        .as_text
+        .iter()
+        .map(|m| crate::spec::names::MimePattern::new(m).unwrap())
+        .collect();
+    s.tool_routing = setup.routing.clone();
+    s.accepts_messages = setup.accepts_messages;
+    s.layout = setup.context_layout.as_ref().map(|regions| {
+        tg::layout(
+            regions.iter().map(region_def_of).collect(),
+            regions.iter().map(|r| r.max_tokens as u32).sum(),
+        )
+    });
+    s.hide = setup
+        .context_hide
+        .iter()
+        .map(|h| tg::region_name(h))
+        .collect();
+    s.reset = setup
+        .context_reset
+        .iter()
+        .map(|h| tg::region_name(h))
+        .collect();
+    s
+}
+
+#[test]
+fn a_setup_reads_back_through_the_stage_written_for_it() {
+    use crate::spec::graph::OutputCap as Cap;
+    let mut setup = StageSetup::default();
+    setup
+        .inference_config
+        .extra_params
+        .insert("top_p".to_string(), serde_json::json!(0.9));
+    setup
+        .inference_config
+        .extra_params
+        .insert("seed".to_string(), serde_json::json!(7));
+    setup
+        .inference_config
+        .extra_params
+        .insert("stream".to_string(), serde_json::json!(true));
+    setup
+        .inference_config
+        .extra_params
+        .insert("stop".to_string(), serde_json::json!(["x"]));
+    setup
+        .inference_config
+        .extra_params
+        .insert("mode".to_string(), serde_json::json!("fast"));
+    let read = stage_from_setup("s", &setup);
+    assert_eq!(read.model.params.extra.len(), 5);
+    for cap in [
+        Cap::Tokens(9),
+        Cap::WindowPercent(0.5),
+        Cap::RegionPercent {
+            percent: 0.25,
+            region: tg::region_name("task"),
+        },
+    ] {
+        setup.inference_config.max_output_tokens = Some(cap.clone());
+        let read = stage_from_setup("s", &setup);
+        assert_eq!(read.model.params.max_output_tokens, Some(cap));
+    }
+}
+
+/// A region with its budget replaced.
+trait WithBudget {
+    fn with_budget(self, budget: crate::spec::graph::Budget) -> Self;
+}
+
+impl WithBudget for crate::spec::graph::RegionDef {
+    fn with_budget(mut self, budget: crate::spec::graph::Budget) -> Self {
+        self.budget = budget;
+        self
+    }
+}
 
 /// The graph of a test run's spec, to change before the run is spawned.
 fn graph_mut(spec: &mut RunSpecC) -> &mut crate::spec::graph::RunGraph {
@@ -494,7 +697,7 @@ fn build_request_threads_stage_meta_into_custom_region_render() {
 fn build_request_filters_tools_and_uses_config_overrides() {
     let cfg = InferenceConfig {
         temperature: Some(0.1),
-        max_output_tokens: Some(crate::spec::blueprint::OutputCap::Tokens(42)),
+        max_output_tokens: Some(crate::spec::graph::OutputCap::Tokens(42)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -1658,10 +1861,7 @@ fn stage_with_fallback() -> StageInference {
         model: "model-a".to_string(),
         tools: Vec::new(),
         tool_filter: None,
-        fallbacks: vec![crate::spec::blueprint::ModelEntry::new(
-            "alive".to_string(),
-            "model-b".to_string(),
-        )],
+        fallbacks: vec![crate::spec::names::ModelRef::parse("alive/model-b").unwrap()],
         output: None,
     }
 }
@@ -3985,14 +4185,9 @@ fn dispatch_persistence_skips_taint_audit_when_the_gate_is_empty() {
 
 #[test]
 fn spawn_agent_seeds_the_stage_ledger_with_names() {
-    let mk = |name: &str| {
-        crate::spec::Stage::new(
-            name.to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        )
-    };
+    let mk = |name: &str| tg::stage(name);
     let mut bp = blueprint(vec![mk("plan"), mk("build")]);
-    bp.repetition_detection = Some(crate::spec::blueprint::RepetitionDetectionConfig {
+    bp.repetition = Some(crate::spec::graph::RepetitionDef {
         max_repeat_calls: Some(2),
         max_readonly_streak: None,
         enabled: Some(true),
@@ -4020,23 +4215,19 @@ fn spawn_agent_seeds_the_stage_ledger_with_names() {
     );
 }
 
-fn percent_region_blueprint(percent: f64) -> crate::spec::Blueprint {
-    let layout = crate::spec::layout::ContextLayout::new(
-        vec![
-            crate::spec::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(crate::spec::BudgetSpec::Percent {
-                    percent,
-                    min: None,
-                    max: None,
-                }),
-        ],
+fn percent_region_blueprint(percent: f64) -> crate::spec::graph::RunGraph {
+    let layout = tg::layout(
+        vec![tg::region("sys", RegionKind::Pinned, 0).with_budget(
+            crate::spec::graph::Budget::Percent {
+                percent,
+                min: None,
+                max: None,
+            },
+        )],
         0,
     );
-    let stages = vec![crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    )];
-    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    let stages = vec![tg::stage("main")];
+    graph_of_staged(stages, layout)
 }
 
 fn world_with_provider() -> World {
@@ -4093,10 +4284,7 @@ fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
     // A pure-absolute blueprint resolves to itself: region max_tokens and the
     // window total match the declared values, provider or not.
     let mut world = world_with_provider();
-    let bp = blueprint(vec![crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    )]);
+    let bp = blueprint(vec![tg::stage("main")]);
     let e = spawn_agent(
         &mut world,
         "run".to_string(),
@@ -4118,30 +4306,19 @@ fn spawn_agent_seeded_resolves_per_stage_layout() {
     // Stage 0 carries its own percentage layout; it must be resolved against
     // that stage's model window and applied on entry (swapping the global one).
     let mut world = world_with_provider();
-    let global = crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "sys".to_string(),
-            RegionKind::Pinned,
-            5000,
+    let global = tg::layout(vec![tg::region("sys", RegionKind::Pinned, 5000)], 5000);
+    let mut stage = tg::stage("main");
+    stage.layout = Some(tg::layout(
+        vec![tg::region("sys", RegionKind::Pinned, 0).with_budget(
+            crate::spec::graph::Budget::Percent {
+                percent: 0.10,
+                min: None,
+                max: None,
+            },
         )],
-        5000,
-    );
-    let mut stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    stage.context_layout = Some(crate::spec::layout::ContextLayout::new(
-        vec![
-            crate::spec::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(crate::spec::BudgetSpec::Percent {
-                    percent: 0.10,
-                    min: None,
-                    max: None,
-                }),
-        ],
         0,
     ));
-    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
+    let bp = graph_of_staged(vec![stage], global);
     let e = spawn_agent(
         &mut world,
         "run".to_string(),
@@ -4179,30 +4356,22 @@ fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
     // The global layout is valid, but stage 0's per-stage layout resolves to a
     // starved working budget → the per-stage validation branch fails the spawn.
     let mut world = world_with_provider();
-    let global = crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "scratch".to_string(),
-            RegionKind::Clearable,
-            5000,
-        )],
+    let global = tg::layout(
+        vec![tg::region("scratch", RegionKind::Clearable, 5000)],
         5000,
     );
-    let mut stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    stage.context_layout = Some(crate::spec::layout::ContextLayout::new(
-        vec![
-            crate::spec::layout::RegionDefinition::new("sys".to_string(), RegionKind::Pinned, 0)
-                .with_budget(crate::spec::BudgetSpec::Percent {
-                    percent: 0.95,
-                    min: None,
-                    max: None,
-                }),
-        ],
+    let mut stage = tg::stage("main");
+    stage.layout = Some(tg::layout(
+        vec![tg::region("sys", RegionKind::Pinned, 0).with_budget(
+            crate::spec::graph::Budget::Percent {
+                percent: 0.95,
+                min: None,
+                max: None,
+            },
+        )],
         0,
     ));
-    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], global);
+    let bp = graph_of_staged(vec![stage], global);
     let err = spawn_agent(
         &mut world,
         "run".to_string(),
@@ -4265,14 +4434,12 @@ fn world_with_wide_and_narrow() -> World {
     world
 }
 
-fn pct_region(name: &str, percent: f64) -> crate::spec::layout::RegionDefinition {
-    crate::spec::layout::RegionDefinition::new(name.to_string(), RegionKind::Pinned, 0).with_budget(
-        crate::spec::BudgetSpec::Percent {
-            percent,
-            min: None,
-            max: None,
-        },
-    )
+fn pct_region(name: &str, percent: f64) -> crate::spec::graph::RegionDef {
+    tg::region(name, RegionKind::Pinned, 0).with_budget(crate::spec::graph::Budget::Percent {
+        percent,
+        min: None,
+        max: None,
+    })
 }
 
 fn wide_then_narrow_stages() -> Vec<ResolvedStage> {
@@ -4303,25 +4470,15 @@ fn spawn_sizes_a_region_against_the_smallest_window_that_actually_sees_it() {
     // stage that never sees it - and the narrow stage's working-room floor is
     // judged over just the regions it does see, so the spawn succeeds.
     let mut world = world_with_wide_and_narrow();
-    let layout = crate::spec::layout::ContextLayout::new(
-        vec![pct_region("big", 0.80), pct_region("small", 0.05)],
-        0,
-    );
-    let mk = |name: &str, provider: &str| {
-        crate::spec::Stage::new(
-            name.to_string(),
-            crate::spec::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
-        )
+    let layout = tg::layout(vec![pct_region("big", 0.80), pct_region("small", 0.05)], 0);
+    let mk = |name: &str, provider: &str| crate::spec::graph::StageDef {
+        model: tg::model(provider, "m"),
+        ..tg::stage(name)
     };
     let mut narrow = mk("b", "narrow");
     // The narrow stage never reads the big region.
-    narrow.context_hide = vec!["big".to_string()];
-    let bp = crate::spec::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![mk("a", "wide"), narrow],
-        layout,
-    );
+    narrow.hide = tg::regions(&["big"]);
+    let bp = graph_of_staged(vec![mk("a", "wide"), narrow], layout);
     let e = spawn_agent(
         &mut world,
         "run".to_string(),
@@ -4349,26 +4506,19 @@ fn spawn_fails_when_a_shared_region_starves_the_narrow_stage() {
     // that catches the starvation. This is the branch the single-window check
     // cannot make.
     let mut world = world_with_wide_and_narrow();
-    let layout = crate::spec::layout::ContextLayout::new(
+    let layout = tg::layout(
         vec![pct_region("shared", 0.80), pct_region("wideonly", 0.10)],
         0,
     );
-    let mk = |name: &str, provider: &str| {
-        crate::spec::Stage::new(
-            name.to_string(),
-            crate::spec::blueprint::ModelConfig::new(provider.to_string(), "m".to_string()),
-        )
+    let mk = |name: &str, provider: &str| crate::spec::graph::StageDef {
+        model: tg::model(provider, "m"),
+        ..tg::stage(name)
     };
     let mut narrow = mk("b", "narrow");
     // The narrow stage never sees the wide-only region, so it does not count
     // against its floor - only the shared region does.
-    narrow.context_hide = vec!["wideonly".to_string()];
-    let bp = crate::spec::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![mk("a", "wide"), narrow],
-        layout,
-    );
+    narrow.hide = tg::regions(&["wideonly"]);
+    let bp = graph_of_staged(vec![mk("a", "wide"), narrow], layout);
     let err = spawn_agent(
         &mut world,
         "run".to_string(),
@@ -4590,21 +4740,19 @@ fn run_empty(world: &mut World) {
 fn nudge_bp(reviewed: bool) -> RunSpecC {
     let mut stage = stage_named("a", None, false, None);
     if reviewed {
-        let point = crate::spec::blueprint::InteractionPoint {
+        let point = crate::spec::graph::InteractionPointDef {
             name: "plan_approval".to_string(),
             prompt: "Review the plan above.".to_string(),
             required: true,
-            unattended: crate::spec::blueprint::UnattendedPolicy::AutoApprove,
-            style: crate::spec::blueprint::InteractionStyle::MultipleChoice,
+            unattended: crate::spec::graph::UnattendedPoint::AutoApprove,
+            style: crate::spec::graph::AnswerStyle::MultipleChoice,
             options: vec!["Approve".to_string()],
-            directives: std::collections::HashMap::new(),
+            directives: std::collections::BTreeMap::new(),
             abort_options: Vec::new(),
             edit_options: Vec::new(),
-            document_region: Some("plan".to_string()),
+            document_region: Some(tg::region_name("plan")),
         };
-        stage.mode = crate::spec::blueprint::StageMode::InteractivePoints {
-            points: vec![point],
-        };
+        stage.mode = crate::spec::graph::StageMode::InteractivePoints(vec![point]);
     }
     spec_of(blueprint(vec![stage]))
 }
@@ -4687,7 +4835,7 @@ fn empty_response_finishes_after_max_nudges() {
     let mut world = World::new();
     let progress = StageProgress {
         total_tool_calls: 0,
-        text_only_nudges: crate::spec::blueprint::DEFAULT_MAX_NUDGES,
+        text_only_nudges: crate::spec::graph::DEFAULT_MAX_NUDGES,
         iterations: 0,
         ..Default::default()
     };
@@ -4822,7 +4970,7 @@ fn empty_response_nudges_and_loops_back_when_text_only() {
     let injected = conversation_text(&world, e);
     assert!(injected.contains(&format!(
         "[System] {}",
-        crate::spec::blueprint::DEFAULT_NUDGE_TEXT
+        crate::spec::graph::DEFAULT_NUDGE_TEXT
     )));
 }
 
@@ -4861,7 +5009,7 @@ fn image_bp() -> RunSpecC {
     let mut stage = stage_named("draw", None, false, None);
     stage
         .output_routing
-        .insert("image/*".to_string(), "conversation".to_string());
+        .insert("image/*".to_string(), tg::region_name("conversation"));
     spec_of(blueprint(vec![stage]))
 }
 
@@ -4879,37 +5027,39 @@ fn infer_with_image() -> crate::components::InferenceResult {
 fn stage_expected_media_reads_format_and_routing() {
     assert_eq!(stage_expected_media(None), None);
     let plain = stage_named("a", None, false, None);
-    assert_eq!(stage_expected_media(Some(&plain)), None);
+    assert_eq!(stage_expected_media(Some(&*plain)), None);
 
     let mut routed = stage_named("b", None, false, None);
-    routed.output_routing.insert("image/*".into(), "r".into());
-    assert_eq!(stage_expected_media(Some(&routed)), Some("image"));
+    routed
+        .output_routing
+        .insert("image/*".to_string(), tg::region_name("r"));
+    assert_eq!(stage_expected_media(Some(&*routed)), Some("image"));
 
     let mut fmt_image = stage_named("c", None, false, None);
-    fmt_image.output = Some(leviath_core::output::OutputSpec {
+    fmt_image.output = Some(crate::spec::graph::OutputDef {
         format: Some("image/*".into()),
         ..Default::default()
     });
-    assert_eq!(stage_expected_media(Some(&fmt_image)), Some("image"));
+    assert_eq!(stage_expected_media(Some(&*fmt_image)), Some("image"));
 
     let mut fmt_text = stage_named("d", None, false, None);
-    fmt_text.output = Some(leviath_core::output::OutputSpec {
+    fmt_text.output = Some(crate::spec::graph::OutputDef {
         format: Some("markdown".into()),
         ..Default::default()
     });
-    assert_eq!(stage_expected_media(Some(&fmt_text)), None);
+    assert_eq!(stage_expected_media(Some(&*fmt_text)), None);
 
     let mut video = stage_named("e", None, false, None);
     video
         .output_routing
-        .insert("video/mp4".into(), "clip".into());
-    assert_eq!(stage_expected_media(Some(&video)), Some("video"));
+        .insert("video/mp4".to_string(), tg::region_name("clip"));
+    assert_eq!(stage_expected_media(Some(&*video)), Some("video"));
     let mut speech = stage_named("f", None, false, None);
-    speech.output = Some(leviath_core::output::OutputSpec {
+    speech.output = Some(crate::spec::graph::OutputDef {
         format: Some("audio/mpeg".into()),
         ..Default::default()
     });
-    assert_eq!(stage_expected_media(Some(&speech)), Some("audio"));
+    assert_eq!(stage_expected_media(Some(&*speech)), Some("audio"));
 }
 
 #[test]
@@ -5096,7 +5246,7 @@ fn empty_response_reads_the_global_nudge_component() {
             nudge_bp(false),
             StageCursor { index: 0 },
             ReadyForTransition,
-            GlobalNudge(crate::spec::NudgeConfig {
+            GlobalNudge(crate::spec::graph::NudgeDef {
                 enabled: Some(false),
                 ..Default::default()
             }),
@@ -5125,7 +5275,7 @@ fn empty_response_with_an_out_of_range_cursor_uses_blueprint_defaults() {
         .id();
     run_empty(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
-    assert!(conversation_text(&world, e).contains(crate::spec::blueprint::DEFAULT_NUDGE_TEXT));
+    assert!(conversation_text(&world, e).contains(crate::spec::graph::DEFAULT_NUDGE_TEXT));
 }
 
 // ── tool-dispatch ──
@@ -6440,16 +6590,13 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
     // Four stages, and the one under the cursor caps its iterations. The cap is
     // read from the blueprint at the cursor's index rather than from the agent,
     // so a blueprint with distinct caps is what proves the right one is read.
-    let stages: Vec<crate::spec::Stage> = ["a", "b", "gather", "d"]
+    let stages: Vec<Staged> = ["a", "b", "gather", "d"]
         .iter()
         .enumerate()
         .map(|(i, name)| {
-            let mut st = crate::spec::Stage::new(
-                (*name).to_string(),
-                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            );
-            st.max_iterations = Some(10 + i);
-            st
+            let mut st = tg::stage(name);
+            st.max_iterations = Some(10 + i as u32);
+            Staged::from(st)
         })
         .collect();
     let e = world
@@ -6544,39 +6691,24 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
     world.insert_resource(ToolStage::detached(jtx));
 
     // One region that refreshes, one that does not.
-    let mut layout = crate::spec::layout::ContextLayout::new(
+    let mut layout = tg::layout(
         vec![
-            crate::spec::layout::RegionDefinition::new(
-                "conversation".to_string(),
-                RegionKind::Clearable,
-                10_000,
-            ),
-            crate::spec::layout::RegionDefinition::new(
-                "environment".to_string(),
-                RegionKind::Pinned,
-                1000,
-            ),
-            crate::spec::layout::RegionDefinition::new(
-                "machine".to_string(),
-                RegionKind::Pinned,
-                1000,
-            ),
+            tg::region("conversation", RegionKind::Clearable, 10_000),
+            tg::region("environment", RegionKind::Pinned, 1000),
+            tg::region("machine", RegionKind::Pinned, 1000),
         ],
         12_000,
     );
-    layout.regions[1].seed = Some(crate::spec::layout::RegionSeed::Tools {
-        calls: vec![crate::spec::layout::SeedToolCall::new("current_time")],
-        refresh: crate::spec::layout::SeedRefresh::EachStage,
+    layout.regions[1].seed = Some(crate::spec::graph::Seed::Tools {
+        calls: vec![seed_call("current_time")],
+        refresh: crate::spec::graph::SeedRefresh::EachStage,
     });
-    layout.regions[2].seed = Some(crate::spec::layout::RegionSeed::Tools {
-        calls: vec![crate::spec::layout::SeedToolCall::new("system_info")],
-        refresh: crate::spec::layout::SeedRefresh::Once,
+    layout.regions[2].seed = Some(crate::spec::graph::Seed::Tools {
+        calls: vec![seed_call("system_info")],
+        refresh: crate::spec::graph::SeedRefresh::Once,
     });
-    let stages = vec![crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    )];
-    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout);
+    let stages = vec![tg::stage("main")];
+    let bp = graph_of_staged(stages, layout);
 
     let mut window = ContextWindow::new(12_000);
     window.add_region(Region::new(
@@ -6743,10 +6875,7 @@ fn a_stage_entry_with_nothing_to_refresh_is_not_held() {
     let e = world
         .spawn((
             agent_state(),
-            spec_of(blueprint(vec![crate::spec::Stage::new(
-                "main".to_string(),
-                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )])),
+            spec_of(blueprint(vec![tg::stage("main")])),
             conv_window(),
             StageJustEntered {
                 index: 0,
@@ -8137,28 +8266,29 @@ fn routing(
     default: &str,
     overrides: &[(&str, &str)],
     keep_results: bool,
-    max_result: Option<usize>,
-) -> crate::spec::blueprint::ToolResultRouting {
-    crate::spec::blueprint::ToolResultRouting {
-        default_region: default.to_string(),
-        tool_overrides: overrides
+    max_result: Option<u32>,
+) -> crate::spec::graph::ToolRoutingDef {
+    crate::spec::graph::ToolRoutingDef {
+        default_region: tg::region_name(default),
+        tool_regions: overrides
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| {
+                (
+                    crate::spec::names::ToolName::new(*k).unwrap(),
+                    tg::region_name(v),
+                )
+            })
             .collect(),
         keep_results,
         max_result_tokens: max_result,
-        tool_max_result_tokens: std::collections::HashMap::new(),
+        tool_max_result_tokens: std::collections::BTreeMap::new(),
     }
 }
 
 // ── Per-tool result ceilings ──
 
 /// The text a tool's result ends up as, after routing applied its ceiling.
-fn routed_result(
-    routing: &crate::spec::blueprint::ToolResultRouting,
-    tool: &str,
-    text: &str,
-) -> String {
+fn routed_result(routing: &crate::spec::graph::ToolRoutingDef, tool: &str, text: &str) -> String {
     let mut w = ctx(&[("conversation", 1_000_000), ("results", 1_000_000)]);
     apply_tool_results(
         &mut w,
@@ -8185,9 +8315,10 @@ fn routed_result(
 #[test]
 fn a_per_tool_ceiling_overrides_the_stage_one() {
     let mut routing = routing("results", &[], true, Some(10));
-    routing
-        .tool_max_result_tokens
-        .insert("read_file".to_string(), 1000);
+    routing.tool_max_result_tokens.insert(
+        crate::spec::names::ToolName::new("read_file").unwrap(),
+        1000,
+    );
 
     // 400 chars is ~100 tokens: over the stage's 10, under read_file's 1000.
     let text = "a".repeat(400);
@@ -8201,14 +8332,14 @@ fn a_per_tool_ceiling_overrides_the_stage_one() {
     );
 }
 
-/// Keyed by canonical name, like `tool_overrides`: `bash` is an alias of
+/// Keyed by canonical name, like `tool_regions`: `bash` is an alias of
 /// `shell`, and a literal lookup would silently miss the tool the model calls.
 #[test]
 fn a_per_tool_ceiling_is_matched_by_canonical_name() {
     let mut routing = routing("results", &[], true, Some(10));
     routing
         .tool_max_result_tokens
-        .insert("bash".to_string(), 1000);
+        .insert(crate::spec::names::ToolName::new("bash").unwrap(), 1000);
     let text = "a".repeat(400);
     assert!(
         !routed_result(&routing, "shell", &text).contains("[...truncated]"),
@@ -8807,51 +8938,103 @@ fn deliver_honors_target_region() {
 
 // ── transition resolution ──
 
-fn edge(
-    target: &str,
-    cond: crate::spec::blueprint::TransitionCondition,
-) -> (String, crate::spec::blueprint::TransitionEdge) {
-    (
-        target.to_string(),
-        crate::spec::blueprint::TransitionEdge {
-            target: target.to_string(),
-            condition: cond,
-            hint: None,
-            transform: crate::spec::blueprint::EdgeTransform::Direct,
-            gate: None,
-            stuck: None,
-        },
-    )
+/// An edge to `target`, taken when `cond`. The stage it leaves is filled in
+/// by [`blueprint`], from the [`Staged`] that holds it.
+fn edge(target: &str, cond: crate::spec::graph::EdgeCondition) -> crate::spec::graph::EdgeDef {
+    tg::edge_when(target, target, cond)
+}
+
+/// A stage of a test graph, with the edges leaving it. `None` goes on to the
+/// stage after it; an empty list leaves it nowhere to go.
+#[derive(Clone)]
+struct Staged {
+    def: crate::spec::graph::StageDef,
+    edges: Option<Vec<crate::spec::graph::EdgeDef>>,
+}
+
+impl From<crate::spec::graph::StageDef> for Staged {
+    fn from(def: crate::spec::graph::StageDef) -> Self {
+        Self { def, edges: None }
+    }
+}
+
+impl std::ops::Deref for Staged {
+    type Target = crate::spec::graph::StageDef;
+    fn deref(&self) -> &Self::Target {
+        &self.def
+    }
+}
+
+impl std::ops::DerefMut for Staged {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.def
+    }
 }
 
 fn stage_named(
     name: &str,
-    edges: Option<Vec<(String, crate::spec::blueprint::TransitionEdge)>>,
+    edges: Option<Vec<crate::spec::graph::EdgeDef>>,
     allow_complete: bool,
-    max_revisits: Option<usize>,
-) -> crate::spec::Stage {
-    let mut s = crate::spec::Stage::new(
-        name.to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    max_revisits: Option<u32>,
+) -> Staged {
+    let mut s = tg::stage(name);
     s.allow_complete = allow_complete;
     s.max_revisits = max_revisits;
-    if let Some(edges) = edges {
-        s.transitions = Some(edges.into_iter().collect());
-    }
-    s
+    Staged { def: s, edges }
 }
 
-fn blueprint(stages: Vec<crate::spec::Stage>) -> crate::spec::Blueprint {
-    let layout = crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "conversation".to_string(),
-            RegionKind::Clearable,
-            10_000,
-        )],
+/// A graph of `stages` over `layout`: each stage's edges leave it, in name
+/// order, and a stage with no list goes on to the one after it and may not
+/// end the run.
+fn graph_of_staged<S: Into<Staged>>(
+    stages: Vec<S>,
+    layout: crate::spec::graph::RegionLayoutDef,
+) -> crate::spec::graph::RunGraph {
+    let stages: Vec<Staged> = stages.into_iter().map(Into::into).collect();
+    let mut edges = Vec::new();
+    for (i, s) in stages.iter().enumerate() {
+        match &s.edges {
+            None => {
+                if let Some(next) = stages.get(i + 1) {
+                    edges.push(crate::spec::graph::EdgeDef {
+                        name: crate::spec::names::EdgeName::new(
+                            crate::spec::graph::FALL_THROUGH_EDGE,
+                        )
+                        .unwrap(),
+                        ..tg::edge(s.def.name.as_str(), next.def.name.as_str())
+                    });
+                }
+            }
+            Some(own) => {
+                let mut own = own.clone();
+                own.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+                for mut e in own {
+                    e.from = s.def.name.clone();
+                    edges.push(e);
+                }
+            }
+        }
+    }
+    let mut graph = tg::graph(Vec::new(), layout);
+    // A stage that only falls through has no choice to make, so it may not end
+    // the run on its own: going on is the one way out it was given.
+    graph.stages = stages
+        .into_iter()
+        .map(|s| crate::spec::graph::StageDef {
+            allow_complete: s.def.allow_complete && s.edges.is_some(),
+            ..s.def
+        })
+        .collect();
+    graph.edges = edges;
+    graph
+}
+
+fn blueprint<S: Into<Staged>>(stages: Vec<S>) -> crate::spec::graph::RunGraph {
+    let layout = tg::layout(
+        vec![tg::region("conversation", RegionKind::Clearable, 10_000)],
         12_000,
     );
-    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    graph_of_staged(stages, layout)
 }
 
 fn si(model: &str) -> StageInference {
@@ -8888,7 +9071,7 @@ fn setup() -> StageSetup {
 
 fn spawn_transition_agent(
     world: &mut World,
-    bp: crate::spec::Blueprint,
+    bp: crate::spec::graph::RunGraph,
     stage_infs: Vec<StageInference>,
     visits: VisitCounts,
 ) -> Entity {
@@ -8994,11 +9177,10 @@ fn transition_terminal_marks_complete() {
 
 #[test]
 fn transition_single_graph_edge_advances() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
-            Some(vec![edge("b", TransitionCondition::Always)]),
+            Some(vec![edge("b", EdgeCondition::Always)]),
             false,
             None,
         ),
@@ -9035,7 +9217,7 @@ fn transition_empty_transitions_is_terminal() {
 /// The three stage endings a blueprint can write without naming an edge, in
 /// one graph: `a` has no `transitions` table, `b` has an empty one, and `c`
 /// is the last stage and has no table.
-fn fall_through_blueprint(allow_complete: bool) -> crate::spec::Blueprint {
+fn fall_through_blueprint(allow_complete: bool) -> crate::spec::graph::RunGraph {
     blueprint(vec![
         stage_named("a", None, allow_complete, None),
         stage_named("b", Some(vec![]), false, None),
@@ -9107,13 +9289,12 @@ fn the_last_stage_with_no_transitions_table_ends_the_run() {
 
 #[test]
 fn transition_multiple_edges_awaits_choice() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("c", TransitionCondition::Always),
+                edge("b", EdgeCondition::Always),
+                edge("c", EdgeCondition::Always),
             ]),
             false,
             None,
@@ -9139,11 +9320,10 @@ fn transition_multiple_edges_awaits_choice() {
 
 #[test]
 fn transition_allow_complete_single_edge_awaits_choice() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
-            Some(vec![edge("b", TransitionCondition::Always)]),
+            Some(vec![edge("b", EdgeCondition::Always)]),
             true, // allow_complete: LLM must be asked (can say DONE)
             None,
         ),
@@ -9165,7 +9345,7 @@ fn transition_allow_complete_single_edge_awaits_choice() {
 // ─── A run that owed an answer and gave none is not complete ─────────────────
 
 /// A stage requiring an output that no stage ever produced.
-fn owing_output(require: bool) -> crate::spec::Blueprint {
+fn owing_output(require: bool) -> crate::spec::graph::RunGraph {
     let mut stages = vec![stage_named("only", None, false, None)];
     stages[0].require_output = require;
     blueprint(stages)
@@ -9260,7 +9440,7 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
     stage.require_output = true;
     stage
         .output_routing
-        .insert("model/*".to_string(), "model".to_string());
+        .insert("model/*".to_string(), tg::region_name("model"));
     let bp = blueprint(vec![stage]);
 
     // The routed mesh sits in the model region; the pinned final_output region
@@ -9336,11 +9516,10 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
 
 #[test]
 fn transition_visit_exhausted_edge_is_a_dead_end_error() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
-            Some(vec![edge("b", TransitionCondition::Always)]),
+            Some(vec![edge("b", EdgeCondition::Always)]),
             false,
             None,
         ),
@@ -9372,13 +9551,12 @@ fn transition_visit_exhausted_edge_is_a_dead_end_error() {
 /// with everything it established thrown away.
 #[test]
 fn a_dead_end_edge_catches_the_strand() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("answer", TransitionCondition::DeadEnd),
+                edge("b", EdgeCondition::Always),
+                edge("answer", EdgeCondition::DeadEnd),
             ]),
             false,
             None,
@@ -9411,13 +9589,12 @@ fn a_dead_end_edge_catches_the_strand() {
 /// offered on every visit, which is what collapsed the measured pipelines.
 #[test]
 fn a_dead_end_edge_is_not_offered_while_the_graph_is_healthy() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("answer", TransitionCondition::DeadEnd),
+                edge("b", EdgeCondition::Always),
+                edge("answer", EdgeCondition::DeadEnd),
             ]),
             false,
             None,
@@ -9447,14 +9624,13 @@ fn a_dead_end_edge_is_not_offered_while_the_graph_is_healthy() {
 /// edge is also carrying provider failures and may want to go elsewhere.
 #[test]
 fn a_dead_end_edge_wins_over_an_error_edge() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("recover", TransitionCondition::Error),
-                edge("answer", TransitionCondition::DeadEnd),
+                edge("b", EdgeCondition::Always),
+                edge("recover", EdgeCondition::Error),
+                edge("answer", EdgeCondition::DeadEnd),
             ]),
             false,
             None,
@@ -9486,13 +9662,12 @@ fn a_dead_end_edge_wins_over_an_error_edge() {
 /// now a failure mode `error_recovery` can actually catch.
 #[test]
 fn transition_dead_end_routes_down_the_error_edge_when_present() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         stage_named(
             "a",
             Some(vec![
-                edge("b", TransitionCondition::Always),
-                edge("rescue", TransitionCondition::Error),
+                edge("b", EdgeCondition::Always),
+                edge("rescue", EdgeCondition::Error),
             ]),
             false,
             None,
@@ -9522,13 +9697,12 @@ fn transition_dead_end_routes_down_the_error_edge_when_present() {
 
 #[test]
 fn transition_non_choosable_edge_is_terminal() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![
         // Only an Error-condition edge, which isn't followable on a normal
         // completion ⇒ filtered out of the choosable set ⇒ terminal.
         stage_named(
             "a",
-            Some(vec![edge("b", TransitionCondition::Error)]),
+            Some(vec![edge("b", EdgeCondition::Error)]),
             false,
             None,
         ),
@@ -9552,10 +9726,9 @@ fn transition_non_choosable_edge_is_terminal() {
 
 #[test]
 fn transition_unknown_target_edge_is_a_dead_end_error() {
-    use crate::spec::blueprint::TransitionCondition;
     let bp = blueprint(vec![stage_named(
         "a",
-        Some(vec![edge("ghost", TransitionCondition::Always)]),
+        Some(vec![edge("ghost", EdgeCondition::Always)]),
         false,
         None,
     )]);
@@ -9591,7 +9764,7 @@ fn pinned_window() -> ContextWindow {
 fn spawn_setup_agent(world: &mut World, dest_setup: StageSetup, window: ContextWindow) -> Entity {
     let bp = blueprint(vec![
         stage_named("a", None, false, None),
-        old_vocab::stage_from_setup("b", &dest_setup),
+        stage_from_setup("b", &dest_setup).into(),
     ]);
     world
         .spawn((
@@ -9632,7 +9805,7 @@ fn enter_stage_injects_system_prompt_and_config() {
     s.system_prompt = Some("be terse".to_string());
     s.inference_config = InferenceConfig {
         temperature: Some(0.3),
-        max_output_tokens: Some(crate::spec::blueprint::OutputCap::Tokens(99)),
+        max_output_tokens: Some(crate::spec::graph::OutputCap::Tokens(99)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -9658,7 +9831,7 @@ fn enter_stage_injects_system_prompt_and_config() {
     let cfg = world.get::<InferenceConfig>(e).unwrap();
     assert_eq!(
         cfg.max_output_tokens,
-        Some(crate::spec::blueprint::OutputCap::Tokens(99))
+        Some(crate::spec::graph::OutputCap::Tokens(99))
     );
     assert!(!world.get::<AgentState>(e).unwrap().accepts_messages);
     assert!(world.get::<ReadyToInfer>(e).is_some());
@@ -9667,14 +9840,11 @@ fn enter_stage_injects_system_prompt_and_config() {
 #[test]
 fn enter_stage_swaps_context_layout() {
     let mut s = setup();
-    s.context_layout = Some(crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "scratch".to_string(),
-            RegionKind::Clearable,
-            5000,
-        )],
-        8000,
-    ));
+    s.context_layout = Some(vec![Region::new(
+        "scratch".to_string(),
+        RegionKind::Clearable,
+        5000,
+    )]);
     let mut world = World::new();
     let e = spawn_setup_agent(&mut world, s, pinned_window());
 
@@ -9700,8 +9870,6 @@ fn enter_stage_swaps_context_layout() {
 /// contents back, rather than an empty region.
 #[test]
 fn a_region_hidden_by_one_stage_comes_back_with_its_content() {
-    use crate::spec::layout::{ContextLayout, RegionDefinition};
-
     let mut w = pinned_window();
     w.add_to_region("sys", "the data preview".to_string(), 4)
         .expect("seeded");
@@ -9709,14 +9877,11 @@ fn a_region_hidden_by_one_stage_comes_back_with_its_content() {
     // A stage that does not declare `sys`.
     crate::context_setup::apply_layout(
         &mut w,
-        &ContextLayout::new(
-            vec![RegionDefinition::new(
-                "scratch".to_string(),
-                RegionKind::Clearable,
-                5000,
-            )],
-            8000,
-        ),
+        vec![Region::new(
+            "scratch".to_string(),
+            RegionKind::Clearable,
+            5000,
+        )],
     );
     assert!(w.hidden.contains("sys"));
     assert!(
@@ -9727,14 +9892,7 @@ fn a_region_hidden_by_one_stage_comes_back_with_its_content() {
     // A later stage that declares it again.
     crate::context_setup::apply_layout(
         &mut w,
-        &ContextLayout::new(
-            vec![RegionDefinition::new(
-                "sys".to_string(),
-                RegionKind::Pinned,
-                5000,
-            )],
-            8000,
-        ),
+        vec![Region::new("sys".to_string(), RegionKind::Pinned, 5000)],
     );
     assert!(!w.hidden.contains("sys"), "declared again, so shown again");
     let restored = w.get_region("sys").expect("still there");
@@ -9780,8 +9938,6 @@ fn a_hidden_region_is_not_assembled_into_the_prompt() {
 /// typed turns have to attach to.
 #[test]
 fn the_message_regions_are_never_hidden() {
-    use crate::spec::layout::{ContextLayout, RegionDefinition};
-
     let mut w = ContextWindow::new(10_000);
     w.add_region(Region::new(
         "conversation".to_string(),
@@ -9795,14 +9951,11 @@ fn the_message_regions_are_never_hidden() {
 
     crate::context_setup::apply_layout(
         &mut w,
-        &ContextLayout::new(
-            vec![RegionDefinition::new(
-                "scratch".to_string(),
-                RegionKind::Clearable,
-                5000,
-            )],
-            8000,
-        ),
+        vec![Region::new(
+            "scratch".to_string(),
+            RegionKind::Clearable,
+            5000,
+        )],
     );
 
     assert!(!w.hidden.contains("conversation"));
@@ -9812,10 +9965,7 @@ fn the_message_regions_are_never_hidden() {
 #[test]
 fn enter_stage_inserts_tool_result_routing() {
     let mut s = setup();
-    s.routing = Some(crate::spec::ToolResultRouting {
-        default_region: "notes".to_string(),
-        ..Default::default()
-    });
+    s.routing = Some(routing("notes", &[], true, None));
     let mut world = World::new();
     let e = spawn_setup_agent(&mut world, s, pinned_window());
 
@@ -9824,7 +9974,7 @@ fn enter_stage_inserts_tool_result_routing() {
     let routing = world
         .get::<crate::components::ToolResultRoutingComponent>(e)
         .unwrap();
-    assert_eq!(routing.routing.default_region, "notes");
+    assert_eq!(routing.routing.default_region.as_str(), "notes");
 }
 
 #[test]
@@ -9871,7 +10021,7 @@ fn collect_choice_errors_when_system_prompt_overflows() {
     dest.system_prompt = Some("x".repeat(100_000));
     let bp = blueprint(vec![
         stage_named("a", None, false, None),
-        old_vocab::stage_from_setup("b", &dest),
+        stage_from_setup("b", &dest).into(),
     ]);
     let e = world
         .spawn((
@@ -9922,16 +10072,10 @@ fn resolved(model: &str) -> ResolvedStage {
 /// settings made is the first thing a reader of the log sees.
 #[test]
 fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
-    let layout = crate::spec::layout::ContextLayout::new(vec![], 1000);
-    let s0 = crate::spec::Stage::new(
-        "plan".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    let s1 = crate::spec::Stage::new(
-        "fix".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout);
+    let layout = tg::layout(vec![], 1000);
+    let s0 = tg::stage("plan");
+    let s1 = tg::stage("fix");
+    let bp = graph_of_staged(vec![s0, s1], layout);
     let mut noted = resolved("m");
     noted.notes = vec![
         "[model] stage 'fix' starts on p/m (override_model); blueprint asked for q/n".to_string(),
@@ -9964,33 +10108,13 @@ fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
 fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     // A stage with model parameters, routing, and a system prompt should
     // produce a ready agent carrying all of them.
-    let layout = crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "task".to_string(),
-            RegionKind::Pinned,
-            4000,
-        )],
-        8000,
-    );
-    let mut s = crate::spec::Stage::new(
-        "start".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    s.model
-        .parameters
-        .insert("temperature".to_string(), serde_json::json!(0.5));
-    s.model
-        .parameters
-        .insert("max_output_tokens".to_string(), serde_json::json!(128));
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("be helpful".to_string()),
-    );
-    s.tool_result_routing = Some(crate::spec::ToolResultRouting {
-        default_region: "notes".to_string(),
-        ..Default::default()
-    });
-    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+    let layout = tg::layout(vec![tg::region("task", RegionKind::Pinned, 4000)], 8000);
+    let mut s = tg::stage("start");
+    s.model.params.temperature = Some(0.5);
+    s.model.params.max_output_tokens = Some(crate::spec::graph::OutputCap::Tokens(128));
+    s.system_prompt = Some("be helpful".to_string());
+    s.tool_routing = Some(routing("notes", &[], true, None));
+    let bp = graph_of_staged(vec![s], layout);
 
     let mut world = World::new();
     let e = spawn_agent(
@@ -10009,14 +10133,15 @@ fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     assert_eq!(cfg.temperature, Some(0.5));
     assert_eq!(
         cfg.max_output_tokens,
-        Some(crate::spec::blueprint::OutputCap::Tokens(128))
+        Some(crate::spec::graph::OutputCap::Tokens(128))
     );
     assert_eq!(
         world
             .get::<crate::components::ToolResultRoutingComponent>(e)
             .unwrap()
             .routing
-            .default_region,
+            .default_region
+            .as_str(),
         "notes"
     );
     assert_eq!(world.get::<AgentState>(e).unwrap().agent_id, "agent-x");
@@ -10065,29 +10190,18 @@ fn spawn_agent_defaults_config_and_no_routing() {
 
 #[test]
 fn stage_setup_from_folds_fanout_split_prompt() {
-    use crate::spec::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
-    let fanout = |split: &str| StageMode::FanOut {
-        config: FanOutConfig {
-            worker_agent: None,
-            worker_stage: Some("w".to_string()),
-            worker_query: None,
-            merge_stage: None,
-            max_workers: 4,
-            on_worker_failure: WorkerFailurePolicy::Continue,
+    use crate::spec::graph::{FanOutDef, StageMode};
+    let fanout = |split: &str| {
+        StageMode::FanOut(FanOutDef {
             split_prompt: split.to_string(),
-            results_region: None,
-            max_items: None,
-            max_attempts: None,
-        },
+            ..FanOutDef::same_graph(crate::spec::names::StageName::new("w").unwrap())
+        })
     };
 
     // Fan-out stage with a base prompt: split prompt is appended.
     let mut s = stage_named("fan", None, false, None);
     s.mode = fanout("SPLIT NOW");
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("base instructions".to_string()),
-    );
+    s.system_prompt = Some("base instructions".to_string());
     let sp = stage_setup_from(&s, hints(true), Default::default(), None)
         .system_prompt
         .unwrap();
@@ -10153,24 +10267,22 @@ fn stage_setup_from_collects_extra_model_parameters() {
     let mut s = stage_named("plan", None, false, None);
     // temperature/max_output_tokens are consumed specially; everything else
     // is collected as pass-through extra_params.
+    s.model.params.temperature = Some(0.3);
+    s.model.params.max_output_tokens = Some(crate::spec::graph::OutputCap::Tokens(256));
     s.model
-        .parameters
-        .insert("temperature".to_string(), serde_json::json!(0.3));
+        .params
+        .extra
+        .insert("top_p".to_string(), param_scalar(&serde_json::json!(0.9)));
     s.model
-        .parameters
-        .insert("max_output_tokens".to_string(), serde_json::json!(256));
-    s.model
-        .parameters
-        .insert("top_p".to_string(), serde_json::json!(0.9));
-    s.model
-        .parameters
-        .insert("seed".to_string(), serde_json::json!(11));
+        .params
+        .extra
+        .insert("seed".to_string(), param_scalar(&serde_json::json!(11)));
 
     let setup = stage_setup_from(&s, hints(true), Default::default(), None);
     assert_eq!(setup.inference_config.temperature, Some(0.3));
     assert_eq!(
         setup.inference_config.max_output_tokens,
-        Some(crate::spec::blueprint::OutputCap::Tokens(256))
+        Some(crate::spec::graph::OutputCap::Tokens(256))
     );
     let extra = &setup.inference_config.extra_params;
     assert_eq!(extra.len(), 2);
@@ -10270,23 +10382,10 @@ fn the_default_retry_tuning_is_the_shipped_schedule() {
 
 #[test]
 fn spawn_agent_errors_on_oversized_system_prompt() {
-    let layout = crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "task".to_string(),
-            RegionKind::Pinned,
-            40,
-        )],
-        1000,
-    );
-    let mut s = crate::spec::Stage::new(
-        "only".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("z".repeat(100_000)),
-    );
-    let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+    let layout = tg::layout(vec![tg::region("task", RegionKind::Pinned, 40)], 1000);
+    let mut s = tg::stage("only");
+    s.system_prompt = Some("z".repeat(100_000));
+    let bp = graph_of_staged(vec![s], layout);
 
     let mut world = World::new();
     let err = spawn_agent(
@@ -10609,8 +10708,6 @@ async fn compaction_skips_region_with_empty_content() {
 
 // ── edge transforms ──
 
-use crate::spec::blueprint::EdgeTransform;
-
 /// A window with a pinned `sys` region and a stage-specific `scratch` region,
 /// both with content.
 fn transform_window() -> ContextWindow {
@@ -10629,7 +10726,7 @@ fn transform_window() -> ContextWindow {
 fn apply_edge_transform_direct_is_a_noop() {
     let mut w = transform_window();
     let before = w.current_tokens;
-    assert!(apply_edge_transform(&mut w, &EdgeTransform::Direct).is_empty());
+    assert!(apply_edge_transform(&mut w, &EdgeCarry::Direct).is_empty());
     assert_eq!(w.current_tokens, before);
     assert!(w.get_region("scratch").unwrap().current_tokens > 0);
 }
@@ -10637,7 +10734,7 @@ fn apply_edge_transform_direct_is_a_noop() {
 #[test]
 fn apply_edge_transform_clear_wipes_stage_specific_keeps_pinned() {
     let mut w = transform_window();
-    assert!(apply_edge_transform(&mut w, &EdgeTransform::Clear).is_empty());
+    assert!(apply_edge_transform(&mut w, &EdgeCarry::Clear).is_empty());
     assert_eq!(w.get_region("scratch").unwrap().current_tokens, 0);
     assert!(w.get_region("sys").unwrap().current_tokens > 0);
 }
@@ -10669,7 +10766,7 @@ fn edge_transforms_respect_custom_region_persistence() {
     w.add_region(vault);
     w.current_tokens = w.calculate_tokens();
 
-    assert!(apply_edge_transform(&mut w, &EdgeTransform::Clear).is_empty());
+    assert!(apply_edge_transform(&mut w, &EdgeCarry::Clear).is_empty());
     assert_eq!(w.get_region("scratch_custom").unwrap().current_tokens, 0);
     assert!(w.get_region("vault").unwrap().current_tokens > 0);
 }
@@ -10679,7 +10776,7 @@ fn apply_edge_transform_compact_returns_stage_specific_with_content() {
     let mut w = transform_window();
     // Pinned excluded; scratch (stage-specific, has content) returned; not cleared.
     assert_eq!(
-        apply_edge_transform(&mut w, &EdgeTransform::Compact { prompt: None }),
+        apply_edge_transform(&mut w, &EdgeCarry::Compact { prompt: None }),
         vec!["scratch".to_string()]
     );
     assert!(w.get_region("scratch").unwrap().current_tokens > 0);
@@ -10696,20 +10793,12 @@ fn apply_edge_transform_custom_respects_carry_clear_and_compact() {
     w.add_region(drop);
     w.current_tokens = w.calculate_tokens();
 
-    let transform = EdgeTransform::Custom {
-        carry: vec!["keep".to_string()],
+    let transform = EdgeCarry::Custom {
+        carry: tg::regions(&["keep"]),
         // scratch has content ⇒ kept; keep excluded (carry); ghost absent ⇒ filtered.
-        compact: vec![
-            "scratch".to_string(),
-            "keep".to_string(),
-            "ghost".to_string(),
-        ],
+        compact: tg::regions(&["scratch", "keep", "ghost"]),
         // drop cleared; keep protected by carry; missing region is a no-op.
-        clear: vec![
-            "drop".to_string(),
-            "keep".to_string(),
-            "missing".to_string(),
-        ],
+        clear: tg::regions(&["drop", "keep", "missing"]),
         compact_prompt: None,
     };
     let out = apply_edge_transform(&mut w, &transform);
@@ -10848,25 +10937,20 @@ async fn edge_compact_drops_marker_when_pool_full() {
     assert!(world.get::<AwaitingCompaction>(e).is_none());
 }
 
-fn clear_edge(target: &str) -> crate::spec::blueprint::TransitionEdge {
-    crate::spec::blueprint::TransitionEdge {
-        target: target.to_string(),
-        condition: crate::spec::blueprint::TransitionCondition::Always,
+fn clear_edge(target: &str) -> crate::spec::graph::EdgeDef {
+    crate::spec::graph::EdgeDef {
+        when: crate::spec::graph::EdgeCondition::Always,
         hint: None,
-        transform: EdgeTransform::Clear,
+        carry: EdgeCarry::Clear,
         gate: None,
         stuck: None,
+        ..tg::edge(target, target)
     }
 }
 
 #[test]
 fn resolve_transition_applies_the_edge_clear_transform() {
-    let a = stage_named(
-        "a",
-        Some(vec![("go".to_string(), clear_edge("b"))]),
-        false,
-        None,
-    );
+    let a = stage_named("a", Some(vec![named("go", clear_edge("b"))]), false, None);
     let b = stage_named("b", None, false, None);
     let bp = blueprint(vec![a, b]);
     let mut world = World::new();
@@ -10900,8 +10984,8 @@ fn resolve_transition_applies_the_edge_clear_transform() {
 #[test]
 fn resolve_transition_with_compact_transform_marks_pending_edge_compact() {
     let mut edge = clear_edge("b");
-    edge.transform = EdgeTransform::Compact { prompt: None };
-    let a = stage_named("a", Some(vec![("go".to_string(), edge)]), false, None);
+    edge.carry = EdgeCarry::Compact { prompt: None };
+    let a = stage_named("a", Some(vec![named("go", edge)]), false, None);
     let b = stage_named("b", None, false, None);
     let bp = blueprint(vec![a, b]);
     let mut world = World::new();
@@ -10926,20 +11010,15 @@ fn resolve_transition_with_compact_transform_marks_pending_edge_compact() {
 
 // ── max_iterations + error/max-iter edges (#3+#4) ──
 
-use crate::spec::blueprint::TransitionCondition;
-
-fn conditioned_edge(
-    target: &str,
-    condition: TransitionCondition,
-) -> crate::spec::blueprint::TransitionEdge {
+fn conditioned_edge(target: &str, condition: EdgeCondition) -> crate::spec::graph::EdgeDef {
     let mut e = plain_edge(target);
-    e.condition = condition;
+    e.when = condition;
     e
 }
 
 fn spawn_ready_agent(
     world: &mut World,
-    max_iterations: Option<usize>,
+    max_iterations: Option<u32>,
     iterations: usize,
     status: AgentStatus,
 ) -> Entity {
@@ -11062,12 +11141,12 @@ fn enforce_max_iterations_below_limit_or_unlimited_or_paused_is_noop() {
 // ── stuck detection ─────────────────────────────────────────────────────
 
 fn stuck_cfg(
-    iterations: Option<usize>,
-    minutes: Option<usize>,
-    edits: Option<usize>,
-    tool_calls: Option<usize>,
-) -> crate::spec::blueprint::StuckConfig {
-    crate::spec::blueprint::StuckConfig {
+    iterations: Option<u32>,
+    minutes: Option<u32>,
+    edits: Option<u32>,
+    tool_calls: Option<u32>,
+) -> crate::spec::graph::StuckDef {
+    crate::spec::graph::StuckDef {
         after_iterations: iterations,
         after_minutes: minutes,
         after_same_file_edits: edits,
@@ -11297,16 +11376,16 @@ fn note_max_iterations_prefers_the_error_report_region_then_conversation() {
 /// `stuck` edge to `b` armed on `cfg`.
 fn spawn_stuck_agent(
     world: &mut World,
-    cfg: Option<crate::spec::blueprint::StuckConfig>,
+    cfg: Option<crate::spec::graph::StuckDef>,
     progress: StageProgress,
     status: AgentStatus,
-    target_max_revisits: Option<usize>,
+    target_max_revisits: Option<u32>,
     visits: VisitCounts,
 ) -> Entity {
     let edges = cfg.map(|cfg| {
-        let mut e = conditioned_edge("b", TransitionCondition::Stuck);
+        let mut e = conditioned_edge("b", EdgeCondition::Stuck);
         e.stuck = Some(cfg);
-        vec![("b".to_string(), e)]
+        vec![named("b", e)]
     });
     let a = stage_named("a", edges, false, None);
     let b = stage_named("b", None, false, target_max_revisits);
@@ -11478,64 +11557,48 @@ fn detect_stuck_stage_is_a_noop_without_an_available_stuck_edge() {
 
 #[test]
 fn find_conditioned_edge_matches_condition_target_and_budget() {
-    let err = conditioned_edge("recovery", TransitionCondition::Error);
-    let a = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+    let err = conditioned_edge("recovery", EdgeCondition::Error);
+    let a = stage_named("a", Some(vec![named("e", err)]), false, None);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
     let visits = std::collections::HashMap::new();
     assert_eq!(
-        find_conditioned_edge(&bp, &bp.stages[0], &visits, TransitionCondition::Error)
-            .map(|(i, _)| i),
+        find_conditioned_edge(&bp, &bp.stages[0], &visits, EdgeCondition::Error).map(|(i, _)| i),
         Some(1)
     );
     // No max_iterations edge present.
     assert!(
-        find_conditioned_edge(
-            &bp,
-            &bp.stages[0],
-            &visits,
-            TransitionCondition::MaxIterations
-        )
-        .is_none()
+        find_conditioned_edge(&bp, &bp.stages[0], &visits, EdgeCondition::MaxIterations).is_none()
     );
     // A stage with no transitions at all yields nothing.
     let none_bp = blueprint(vec![stage_named("solo", None, false, None)]);
     assert!(
-        find_conditioned_edge(
-            &none_bp,
-            &none_bp.stages[0],
-            &visits,
-            TransitionCondition::Error
-        )
-        .is_none()
+        find_conditioned_edge(&none_bp, &none_bp.stages[0], &visits, EdgeCondition::Error)
+            .is_none()
     );
 }
 
 #[test]
 fn find_conditioned_edge_skips_unknown_target_and_exhausted_revisits() {
-    let ghost = conditioned_edge("nope", TransitionCondition::Error);
-    let a = stage_named("a", Some(vec![("g".to_string(), ghost)]), false, None);
+    let ghost = conditioned_edge("nope", EdgeCondition::Error);
+    let a = stage_named("a", Some(vec![named("g", ghost)]), false, None);
     let bp = blueprint(vec![a]);
     let visits = std::collections::HashMap::new();
-    assert!(
-        find_conditioned_edge(&bp, &bp.stages[0], &visits, TransitionCondition::Error).is_none()
-    );
+    assert!(find_conditioned_edge(&bp, &bp.stages[0], &visits, EdgeCondition::Error).is_none());
 
     // Target exists but its revisit budget is exhausted.
-    let err = conditioned_edge("recovery", TransitionCondition::Error);
-    let a2 = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+    let err = conditioned_edge("recovery", EdgeCondition::Error);
+    let a2 = stage_named("a", Some(vec![named("e", err)]), false, None);
     let recovery = stage_named("recovery", None, false, Some(0));
     let bp2 = blueprint(vec![a2, recovery]);
     let mut visited = std::collections::HashMap::new();
     visited.insert("recovery".to_string(), 1);
-    assert!(
-        find_conditioned_edge(&bp2, &bp2.stages[0], &visited, TransitionCondition::Error).is_none()
-    );
+    assert!(find_conditioned_edge(&bp2, &bp2.stages[0], &visited, EdgeCondition::Error).is_none());
 }
 
 fn spawn_outcome_agent(
     world: &mut World,
-    bp: crate::spec::Blueprint,
+    bp: crate::spec::graph::RunGraph,
     outcome: StageOutcome,
     status: AgentStatus,
 ) -> Entity {
@@ -11576,8 +11639,8 @@ fn fail_stage_world_survives_a_gone_or_stateless_entity() {
 
 #[test]
 fn resolve_transition_routes_error_to_error_edge() {
-    let err = conditioned_edge("recovery", TransitionCondition::Error);
-    let a = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+    let err = conditioned_edge("recovery", EdgeCondition::Error);
+    let a = stage_named("a", Some(vec![named("e", err)]), false, None);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
     let mut world = World::new();
@@ -11609,8 +11672,8 @@ fn resolve_transition_routes_error_to_error_edge() {
 /// author who declared only the one escape should get it either way.
 #[test]
 fn resolve_transition_routes_error_down_a_dead_end_edge_when_that_is_the_only_escape() {
-    let escape = conditioned_edge("recovery", TransitionCondition::DeadEnd);
-    let a = stage_named("a", Some(vec![("e".to_string(), escape)]), false, None);
+    let escape = conditioned_edge("recovery", EdgeCondition::DeadEnd);
+    let a = stage_named("a", Some(vec![named("e", escape)]), false, None);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
     let mut world = World::new();
@@ -11656,12 +11719,7 @@ fn an_error_outcome_with_no_escape_becomes_the_run_status() {
 #[test]
 fn resolve_transition_errors_terminally_without_an_error_edge() {
     // Stage 'a' has only an Always edge to 'b' - no error edge.
-    let a = stage_named(
-        "a",
-        Some(vec![("go".to_string(), plain_edge("b"))]),
-        false,
-        None,
-    );
+    let a = stage_named("a", Some(vec![named("go", plain_edge("b"))]), false, None);
     let b = stage_named("b", None, false, None);
     let bp = blueprint(vec![a, b]);
     let mut world = World::new();
@@ -11691,8 +11749,8 @@ fn resolve_transition_errors_terminally_without_an_error_edge() {
 #[test]
 fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
     // With a max_iterations edge → follow it.
-    let mi = conditioned_edge("recovery", TransitionCondition::MaxIterations);
-    let mut a = stage_named("a", Some(vec![("m".to_string(), mi)]), false, None);
+    let mi = conditioned_edge("recovery", EdgeCondition::MaxIterations);
+    let mut a = stage_named("a", Some(vec![named("m", mi)]), false, None);
     a.max_iterations = Some(7);
     let recovery = stage_named("recovery", None, false, None);
     let bp = blueprint(vec![a, recovery]);
@@ -11737,9 +11795,9 @@ fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
 
 #[test]
 fn resolve_transition_routes_stuck_down_the_stuck_edge() {
-    let mut stuck = conditioned_edge("reassess", TransitionCondition::Stuck);
+    let mut stuck = conditioned_edge("reassess", EdgeCondition::Stuck);
     stuck.stuck = Some(stuck_cfg(Some(20), None, None, None));
-    let a = stage_named("a", Some(vec![("s".to_string(), stuck)]), false, None);
+    let a = stage_named("a", Some(vec![named("s", stuck)]), false, None);
     let reassess = stage_named("reassess", None, false, Some(2));
     let bp = blueprint(vec![a, reassess]);
     let mut world = World::new();
@@ -11762,12 +11820,7 @@ fn resolve_transition_routes_stuck_down_the_stuck_edge() {
 fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
     // Stage 'a' has only an ordinary edge to 'b' - no stuck edge at all,
     // which is what an exhausted revisit budget looks like from here.
-    let a = stage_named(
-        "a",
-        Some(vec![("n".to_string(), plain_edge("b"))]),
-        false,
-        None,
-    );
+    let a = stage_named("a", Some(vec![named("n", plain_edge("b"))]), false, None);
     let b = stage_named("b", None, false, None);
     let bp = blueprint(vec![a, b]);
     let mut world = World::new();
@@ -11795,19 +11848,13 @@ fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
 // ── required-region gating ───────
 
 fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> RunSpecC {
-    let region =
-        crate::spec::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
-            .with_required(true, custom_msg.map(str::to_string));
-    let layout = crate::spec::layout::ContextLayout::new(vec![region], 10_000);
+    let region = tg::region("plan", RegionKind::Pinned, 4000)
+        .with_required(true, custom_msg.map(str::to_string));
+    let layout = tg::layout(vec![region], 10_000);
     let mut stage = stage_named("a", None, false, None);
-    stage.available_tools = tools.iter().map(|s| s.to_string()).collect();
-    stage.context_layout = Some(layout.clone());
-    spec_of(crate::spec::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![stage],
-        layout,
-    ))
+    stage.tools = tg::tools(tools);
+    stage.layout = Some(layout.clone());
+    spec_of(graph_of_staged(vec![stage], layout))
 }
 
 fn window_with_plan(filled: bool) -> ContextWindow {
@@ -11875,22 +11922,17 @@ fn unmet_required_regions_skips_caller_input_seeded_regions() {
     // A required region whose content comes from the caller at spawn must NOT
     // be flagged by the agent-facing gate, even when empty and the stage can
     // write context - the caller owns it, not the agent.
-    let region =
-        crate::spec::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
-            .with_required(true, None)
-            .with_seed(crate::spec::layout::RegionSeed::CallerInput {
-                name: "plan".to_string(),
-            });
-    let layout = crate::spec::layout::ContextLayout::new(vec![region], 10_000);
+    let region = tg::region("plan", RegionKind::Pinned, 4000).with_required(true, None);
+    let layout = tg::layout(vec![region], 10_000);
     let mut stage = stage_named("a", None, false, None);
-    stage.available_tools = vec!["context_write".to_string()];
-    stage.context_layout = Some(layout.clone());
-    let bp = spec_of(crate::spec::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![stage],
-        layout,
-    ));
+    stage.tools = tg::tools(&["context_write"]);
+    stage.layout = Some(layout.clone());
+    let mut graph = graph_of_staged(vec![stage], layout);
+    graph.inputs.push(
+        toml::from_str("name = \"plan\"\ntype = \"text\"\nbinds = [{ region = \"plan\" }]\n")
+            .unwrap(),
+    );
+    let bp = spec_of(graph);
     assert!(
         super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(false))
             .is_empty(),
@@ -12033,9 +12075,9 @@ fn require_context_regions_proceeds_when_met_capped_or_errored() {
 // ── transition gates: require_region_updated ─────────
 
 /// A gate that watches a region for change rather than for content.
-fn change_gate(region: &str) -> crate::spec::blueprint::TransitionGate {
-    crate::spec::blueprint::TransitionGate {
-        require_region_updated: Some(region.to_string()),
+fn change_gate(region: &str) -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
+        require_region_updated: Some(tg::region_name(region)),
         ..Default::default()
     }
 }
@@ -12119,7 +12161,7 @@ fn a_gate_on_a_missing_region_passes() {
 fn an_unchanged_region_gives_up_after_the_budget() {
     let w = plan_window("unchanged");
     let mut progress = progress_with_baseline(&w);
-    progress.gate_reentries = crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS;
+    progress.gate_reentries = crate::spec::graph::GateDef::DEFAULT_MAX_ATTEMPTS;
     let stage = stage_named("plan", None, false, None);
 
     assert!(matches!(
@@ -12150,8 +12192,6 @@ fn a_custom_message_is_used() {
 /// selectivity is what these four cases pin.
 #[test]
 fn only_watched_regions_get_a_baseline() {
-    use crate::spec::blueprint::TransitionCondition;
-
     let w = plan_window("the plan");
 
     // No transitions at all.
@@ -12161,15 +12201,15 @@ fn only_watched_regions_get_a_baseline() {
     // An edge with no gate.
     let ungated = stage_named(
         "plan",
-        Some(vec![edge("compute", TransitionCondition::Always)]),
+        Some(vec![edge("compute", EdgeCondition::Always)]),
         false,
         None,
     );
     assert!(watched_region_digests(&ungated, &w).is_empty());
 
     // An edge whose gate watches a region the window holds.
-    let mut watching_edge = edge("compute", TransitionCondition::Always);
-    watching_edge.1.gate = Some(change_gate("plan"));
+    let mut watching_edge = edge("compute", EdgeCondition::Always);
+    watching_edge.gate = Some(change_gate("plan"));
     let watching = stage_named("plan", Some(vec![watching_edge]), false, None);
     let digests = watched_region_digests(&watching, &w);
     assert_eq!(digests.len(), 1);
@@ -12177,8 +12217,8 @@ fn only_watched_regions_get_a_baseline() {
 
     // And one that watches a region it does not hold: no baseline, which the
     // gate reads as "cannot demand an update to something absent".
-    let mut missing_edge = edge("compute", TransitionCondition::Always);
-    missing_edge.1.gate = Some(change_gate("nope"));
+    let mut missing_edge = edge("compute", EdgeCondition::Always);
+    missing_edge.gate = Some(change_gate("nope"));
     let missing = stage_named("plan", Some(vec![missing_edge]), false, None);
     assert!(watched_region_digests(&missing, &w).is_empty());
 }
@@ -12242,10 +12282,9 @@ fn a_zero_baseline_cannot_run_away() {
 /// from too few views on exactly that path.
 #[test]
 fn a_hyphenated_target_is_matched_whole() {
-    use crate::spec::blueprint::TransitionCondition;
     let edges = vec![
-        edge("build-model", TransitionCondition::LlmChoice).1,
-        edge("generate-more", TransitionCondition::LlmChoice).1,
+        edge("build-model", EdgeCondition::LlmChoice),
+        edge("generate-more", EdgeCondition::LlmChoice),
     ];
     assert_eq!(
         match_transition_choice("generate-more", &edges, false).as_deref(),
@@ -12273,10 +12312,10 @@ fn counted_window(n: usize) -> ContextWindow {
     w
 }
 
-fn count_gate(at_least: usize, message: Option<&str>) -> crate::spec::blueprint::TransitionGate {
-    crate::spec::blueprint::TransitionGate {
-        require_region_entries: Some(crate::spec::blueprint::RegionCount {
-            region: "views".to_string(),
+fn count_gate(at_least: u32, message: Option<&str>) -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
+        require_region_entries: Some(crate::spec::graph::RegionCount {
+            region: tg::region_name("views"),
             at_least,
         }),
         message: message.map(str::to_string),
@@ -12358,9 +12397,9 @@ fn checklist_window(open: usize, done: usize) -> ContextWindow {
     w
 }
 
-fn items_gate() -> crate::spec::blueprint::TransitionGate {
-    crate::spec::blueprint::TransitionGate {
-        require_no_open_items: Some("todos".to_string()),
+fn items_gate() -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
+        require_no_open_items: Some(tg::region_name("todos")),
         ..Default::default()
     }
 }
@@ -12409,7 +12448,7 @@ fn an_empty_checklist_gate_passes() {
 fn open_items_give_up_after_the_budget() {
     let w = checklist_window(2, 0);
     let progress = StageProgress {
-        gate_reentries: crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS,
+        gate_reentries: crate::spec::graph::GateDef::DEFAULT_MAX_ATTEMPTS,
         ..Default::default()
     };
     let stage = stage_named("implement", None, false, None);
@@ -12562,11 +12601,11 @@ fn the_checklist_path_holds_together() {
 
 // ── transition gates: require_modifications ─────────
 
-fn gate(region: Option<&str>, message: Option<&str>) -> crate::spec::blueprint::TransitionGate {
-    crate::spec::blueprint::TransitionGate {
+fn gate(region: Option<&str>, message: Option<&str>) -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
         require_modifications: true,
         message: message.map(str::to_string),
-        region: region.map(str::to_string),
+        region: region.map(tg::region_name),
         tools: Vec::new(),
         max_attempts: None,
         require_region_updated: None,
@@ -12577,30 +12616,20 @@ fn gate(region: Option<&str>, message: Option<&str>) -> crate::spec::blueprint::
 }
 
 /// A stage that can write files, with `edges` attached.
-fn writing_stage(
-    name: &str,
-    edges: Vec<(String, crate::spec::blueprint::TransitionEdge)>,
-) -> crate::spec::Stage {
+fn writing_stage(name: &str, edges: Vec<crate::spec::graph::EdgeDef>) -> Staged {
     let mut s = stage_named(name, Some(edges), false, None);
-    s.available_tools = vec!["write_file".to_string(), "bash".to_string()];
+    s.tools = tg::tools(&["write_file", "bash"]);
     s
 }
 
 fn gated_edge(
     target: &str,
-    gate: Option<crate::spec::blueprint::TransitionGate>,
-) -> (String, crate::spec::blueprint::TransitionEdge) {
-    (
-        target.to_string(),
-        crate::spec::blueprint::TransitionEdge {
-            target: target.to_string(),
-            condition: crate::spec::blueprint::TransitionCondition::Always,
-            hint: None,
-            transform: crate::spec::blueprint::EdgeTransform::Direct,
-            gate,
-            stuck: None,
-        },
-    )
+    gate: Option<crate::spec::graph::GateDef>,
+) -> crate::spec::graph::EdgeDef {
+    crate::spec::graph::EdgeDef {
+        gate,
+        ..tg::edge(target, target)
+    }
 }
 
 /// The nudge a gate would show, or `None` when it let the transition
@@ -12637,7 +12666,7 @@ fn gate_blocks_only_an_unsatisfied_require_modifications_edge() {
         gate_blocks(None, &stage, &zero, &window),
         GateDecision::Pass
     );
-    let off = crate::spec::blueprint::TransitionGate::default();
+    let off = crate::spec::graph::GateDef::default();
     assert_eq!(
         gate_blocks(Some(&off), &stage, &zero, &window),
         GateDecision::Pass
@@ -12695,7 +12724,7 @@ fn gate_passes_a_stage_that_cannot_modify_anything() {
     // Gating a stage with no write tool would loop pointlessly; the blueprint
     // validator rejects that combination, but the runtime never relies on it.
     let mut stage = writing_stage("review", vec![]);
-    stage.available_tools = vec!["read_file".to_string()];
+    stage.tools = tg::tools(&["read_file"]);
     let g = gate(None, None);
     assert_eq!(
         gate_blocks(Some(&g), &stage, &progress_with(0, 0, 0), &conv_window()),
@@ -12703,7 +12732,7 @@ fn gate_passes_a_stage_that_cannot_modify_anything() {
     );
     // ...unless the gate itself names the tool the stage does have.
     let mut custom = gate(None, None);
-    custom.tools = vec!["read_file".to_string()];
+    custom.tools = vec![crate::spec::names::ToolName::new("read_file").unwrap()];
     assert!(
         block_message(gate_blocks(
             Some(&custom),
@@ -12715,7 +12744,7 @@ fn gate_passes_a_stage_that_cannot_modify_anything() {
     );
     // ...or the stage grants the built-ins as a group, which carries the
     // modifying tools without naming them.
-    stage.available_tools = vec!["@builtin".to_string()];
+    stage.tools = tg::tools(&["@builtin"]);
     assert!(
         block_message(gate_blocks(
             Some(&g),
@@ -12845,11 +12874,10 @@ fn resolve_transition_records_a_forced_gate_and_advances() {
 
 #[test]
 fn resolve_transition_skips_the_gate_on_an_error_edge() {
-    use crate::spec::blueprint::TransitionCondition;
     // The error edge is followed even with zero modifications: a failed stage
     // must be able to reach recovery.
     let mut error_edge = gated_edge("recover", Some(gate(None, None)));
-    error_edge.1.condition = TransitionCondition::Error;
+    error_edge.when = EdgeCondition::Error;
     let bp = blueprint(vec![
         writing_stage("impl", vec![error_edge]),
         stage_named("recover", None, false, None),
@@ -12874,13 +12902,9 @@ fn resolve_transition_skips_the_gate_on_an_error_edge() {
 
 // ── file tracking ───────
 
-fn ftc(
-    reads: bool,
-    writes: bool,
-    max: Option<usize>,
-) -> crate::spec::blueprint::FileTrackingConfig {
-    crate::spec::blueprint::FileTrackingConfig {
-        region: "files".to_string(),
+fn ftc(reads: bool, writes: bool, max: Option<u32>) -> crate::spec::graph::FileTrackingDef {
+    crate::spec::graph::FileTrackingDef {
+        region: tg::region_name("files"),
         track_reads: reads,
         track_writes: writes,
         max_file_tokens: max,
@@ -13069,13 +13093,8 @@ fn collect_tools_applies_file_tracking_from_blueprint() {
         10_000,
     ));
     // A blueprint carrying a file_tracking config.
-    let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
-    let mut bp = crate::spec::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![stage_named("a", None, false, None)],
-        layout,
-    );
+    let layout = tg::layout(vec![], 10_000);
+    let mut bp = graph_of_staged(vec![stage_named("a", None, false, None)], layout);
     bp.file_tracking = Some(ftc(true, true, None));
     let e = world
         .spawn((
@@ -13122,7 +13141,10 @@ fn count_modifications(
     let mut world = World::new();
     world.insert_resource(ToolResults(rx));
     let mut g = gate(None, None);
-    g.tools = extra_tools.iter().map(|t| (*t).to_string()).collect();
+    g.tools = extra_tools
+        .iter()
+        .map(|t| crate::spec::names::ToolName::new(*t).unwrap())
+        .collect();
     let bp = blueprint(vec![writing_stage(
         "impl",
         vec![gated_edge("review", Some(g))],
@@ -13358,7 +13380,7 @@ fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
     );
     // A gate that re-lists a built-in doesn't duplicate it.
     let mut dup = gate(None, None);
-    dup.tools = vec!["write_file".to_string()];
+    dup.tools = vec![crate::spec::names::ToolName::new("write_file").unwrap()];
     let deduped = spec_of(blueprint(vec![writing_stage(
         "a",
         vec![gated_edge("b", Some(dup))],
@@ -14509,14 +14531,14 @@ fn last_progress_at_tracks_progress_and_not_the_heartbeat() {
 
 // ── async LLM-choice transition ──
 
-fn plain_edge(target: &str) -> crate::spec::blueprint::TransitionEdge {
-    crate::spec::blueprint::TransitionEdge {
-        target: target.to_string(),
-        condition: crate::spec::blueprint::TransitionCondition::LlmChoice,
+fn plain_edge(target: &str) -> crate::spec::graph::EdgeDef {
+    crate::spec::graph::EdgeDef {
+        when: crate::spec::graph::EdgeCondition::LlmChoice,
         hint: None,
-        transform: crate::spec::blueprint::EdgeTransform::Direct,
+        carry: crate::spec::graph::EdgeCarry::Direct,
         gate: None,
         stuck: None,
+        ..tg::edge(target, target)
     }
 }
 
@@ -14652,9 +14674,9 @@ fn conv_window() -> ContextWindow {
 
 fn spawn_choosing_agent(
     world: &mut World,
-    bp: crate::spec::Blueprint,
+    bp: crate::spec::graph::RunGraph,
     stage_infs: Vec<StageInference>,
-    edges: Vec<crate::spec::blueprint::TransitionEdge>,
+    edges: Vec<crate::spec::graph::EdgeDef>,
 ) -> Entity {
     world
         .spawn((
@@ -14831,9 +14853,9 @@ fn world_with_transition_results() -> (World, mpsc::UnboundedSender<InferenceOut
 
 fn spawn_responding_agent(
     world: &mut World,
-    bp: crate::spec::Blueprint,
+    bp: crate::spec::graph::RunGraph,
     stage_infs: Vec<StageInference>,
-    edges: Vec<crate::spec::blueprint::TransitionEdge>,
+    edges: Vec<crate::spec::graph::EdgeDef>,
 ) -> Entity {
     world
         .spawn((
@@ -15239,7 +15261,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
         stage_named("b", None, false, None),
     ]);
     let mut edge = plain_edge("b");
-    edge.transform = EdgeTransform::Compact { prompt: None };
+    edge.carry = EdgeCarry::Compact { prompt: None };
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0"), si("m1")], vec![edge]);
     world
         .get_mut::<ContextWindow>(e)
@@ -15275,7 +15297,7 @@ fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
         stage_named("review", None, false, None),
     ]);
     let mut edge = plain_edge("review");
-    edge.transform = EdgeTransform::Compact { prompt: None };
+    edge.carry = EdgeCarry::Compact { prompt: None };
     edge.gate = Some(gate(None, None));
     let e = spawn_responding_agent(&mut world, bp, vec![si("m0"), si("m1")], vec![edge]);
     world
@@ -15920,10 +15942,7 @@ fn stage_setup_from_folds_a_required_output_into_the_system_prompt() {
     };
     let mut s = stage_named("summary", None, false, None);
     s.require_output = true;
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("base instructions".to_string()),
-    );
+    s.system_prompt = Some("base instructions".to_string());
     let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
         .system_prompt
         .expect("a required output always produces instructions");
@@ -15948,10 +15967,7 @@ fn a_required_outputs_shape_comes_after_the_stage_prompt_and_outranks_it() {
     };
     let mut s = stage_named("summary", None, false, None);
     s.require_output = true;
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("Lead with the diagnosis.".to_string()),
-    );
+    s.system_prompt = Some("Lead with the diagnosis.".to_string());
     let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
         .system_prompt
         .expect("a required output always produces instructions");
@@ -15977,10 +15993,7 @@ fn stage_setup_from_leaves_an_unrequired_stage_prompt_alone() {
         ..Default::default()
     };
     let mut s = stage_named("plan", None, false, None);
-    s.config.insert(
-        "system_prompt".to_string(),
-        serde_json::Value::String("base instructions".to_string()),
-    );
+    s.system_prompt = Some("base instructions".to_string());
     let prompt = stage_setup_from(&s, hints(true), Default::default(), Some(spec))
         .system_prompt
         .expect("the base prompt survives");
@@ -16007,17 +16020,12 @@ fn stage_setup_from_demands_an_output_even_with_no_declared_shape() {
 // ── Required-output gate ─────────────────────────────────────────────────────
 
 /// A blueprint whose single stage owes a final output.
-fn owing_bp(max_revisits: Option<usize>) -> RunSpecC {
+fn owing_bp(max_revisits: Option<u32>) -> RunSpecC {
     let mut stage = stage_named("summary", None, true, max_revisits);
-    stage.available_tools = vec![leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()];
+    stage.tools = tg::tools(&[leviath_tools::SUBMIT_OUTPUT_TOOL]);
     stage.require_output = true;
-    let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
-    spec_of(crate::spec::Blueprint::new(
-        "t".to_string(),
-        "d".to_string(),
-        vec![stage],
-        layout,
-    ))
+    let layout = tg::layout(vec![], 10_000);
+    spec_of(graph_of_staged(vec![stage], layout))
 }
 
 fn owing_state() -> AgentState {
@@ -16051,22 +16059,18 @@ fn fanning_bp() -> RunSpecC {
 }
 
 /// The same, with an explicit `max_attempts`.
-fn fanning_bp_with(max_attempts: Option<usize>) -> RunSpecC {
+fn fanning_bp_with(max_attempts: Option<u32>) -> RunSpecC {
     let mut stage = stage_named("investigate", None, false, None);
-    stage.mode = crate::spec::blueprint::StageMode::FanOut {
-        config: crate::spec::blueprint::FanOutConfig {
-            worker_agent: Some("researcher".to_string()),
-            worker_stage: None,
-            worker_query: None,
-            merge_stage: None,
-            max_workers: 4,
-            on_worker_failure: crate::spec::blueprint::WorkerFailurePolicy::Continue,
-            split_prompt: "split it".to_string(),
-            results_region: None,
-            max_items: None,
-            max_attempts,
-        },
-    };
+    stage.mode = crate::spec::graph::StageMode::FanOut(crate::spec::graph::FanOutDef {
+        worker: crate::spec::graph::WorkerSource::Blueprint(
+            crate::spec::names::BlueprintRef::parse("researcher").unwrap(),
+        ),
+        split_prompt: "split it".to_string(),
+        max_attempts,
+        ..crate::spec::graph::FanOutDef::same_graph(
+            crate::spec::names::StageName::new("x").unwrap(),
+        )
+    });
     spec_of(blueprint(vec![stage]))
 }
 
@@ -16224,7 +16228,7 @@ fn a_fan_out_stage_uses_its_own_max_attempts() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            FanOutReentries(crate::spec::blueprint::DEFAULT_FAN_OUT_ATTEMPTS + 1),
+            FanOutReentries(crate::spec::graph::FanOutDef::DEFAULT_MAX_ATTEMPTS + 1),
         ))
         .id();
 
@@ -16411,7 +16415,7 @@ fn a_generous_max_revisits_does_not_buy_more_output_retries() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(crate::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(OUTPUT_REENTRY_CAP),
             crate::persistence::RunOutcomeFlags::default(),
         ))
         .id();
@@ -16440,7 +16444,7 @@ fn an_exhausted_budget_proceeds_and_records_that_it_was_forced() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(crate::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(OUTPUT_REENTRY_CAP),
             crate::persistence::RunOutcomeFlags::default(),
         ))
         .id();
@@ -16473,7 +16477,7 @@ fn an_exhausted_budget_proceeds_even_with_nowhere_to_record_it() {
             owing_state(),
             conversation_window(),
             ResolveTransition,
-            OutputReentries(crate::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            OutputReentries(OUTPUT_REENTRY_CAP),
         ))
         .id();
     run_require_output(&mut world);
@@ -16613,11 +16617,8 @@ fn hook_scripts(src: &str, wanted: &[&str]) -> crate::components::StageHookScrip
 
 /// A one-stage blueprint whose stage names `h.rhai` for `on_stage_enter`.
 fn hooked_bp() -> RunSpecC {
-    let mut stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
-    stage.hooks.on_stage_enter = Some("h.rhai".to_string());
+    let mut stage = tg::stage("main");
+    stage.hooks.on_stage_enter = Some(crate::spec::graph::CodeRef::File("h.rhai".to_string()));
     spec_of(blueprint(vec![stage]))
 }
 
@@ -16847,10 +16848,7 @@ fn an_out_of_range_stage_index_is_skipped() {
 #[test]
 fn a_stage_that_declares_no_hook_does_not_run_one() {
     let mut world = World::new();
-    let stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let e = world
         .spawn((
             spec_of(blueprint(vec![stage])),
@@ -16964,12 +16962,14 @@ fn a_refusal_without_a_reason_still_says_it_was_refused() {
 
 // ─── before_inference / after_inference ──────────────────────────────────────
 
-fn stage_hooked(field: impl FnOnce(&mut crate::spec::blueprint::StageHooks, String)) -> RunSpecC {
-    let mut stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+fn stage_hooked(
+    field: impl FnOnce(&mut crate::spec::graph::StageHooks, crate::spec::graph::CodeRef),
+) -> RunSpecC {
+    let mut stage = tg::stage("main");
+    field(
+        &mut stage.hooks,
+        crate::spec::graph::CodeRef::File("h.rhai".to_string()),
     );
-    field(&mut stage.hooks, "h.rhai".to_string());
     spec_of(blueprint(vec![stage]))
 }
 
@@ -17135,10 +17135,7 @@ fn before_inference_skips_an_out_of_range_stage() {
 #[test]
 fn before_inference_skips_a_stage_that_declared_none() {
     let mut world = World::new();
-    let stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let e = world
         .spawn((
             spec_of(blueprint(vec![stage])),
@@ -17345,10 +17342,7 @@ fn after_inference_skips_an_out_of_range_stage() {
 #[test]
 fn after_inference_skips_a_stage_that_declared_none() {
     let mut world = World::new();
-    let stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let e = world
         .spawn((
             spec_of(blueprint(vec![stage])),
@@ -17722,10 +17716,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
             ),
         ))
         .id();
-    let stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let undeclared = world
         .spawn((
             spec_of(blueprint(vec![stage])),
@@ -18018,10 +18009,7 @@ fn a_terminal_run_with_no_hook_is_marked_so_it_is_not_rechecked() {
     let mut world = World::new();
     let mut state = agent_state();
     state.status = AgentStatus::Complete;
-    let stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let undeclared = world
         .spawn((
             spec_of(blueprint(vec![stage])),
@@ -18192,10 +18180,7 @@ fn on_stage_exit_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
             ),
         ))
         .id();
-    let stage = crate::spec::Stage::new(
-        "main".to_string(),
-        crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-    );
+    let stage = tg::stage("main");
     let undeclared = world
         .spawn((
             spec_of(blueprint(vec![stage])),
@@ -18412,18 +18397,13 @@ fn a_stage_without_a_prompt_clears_the_previous_one() {
 /// run, which is why the test exists.
 #[test]
 fn stage_instructions_survive_a_stage_layout_that_does_not_declare_them() {
-    use crate::spec::{ContextLayout, RegionDefinition};
-
     let mut window = instructions_window(&["stage_instructions", "task"]);
     // A stage layout naming only `task`.
-    let layout = ContextLayout::new(
-        vec![RegionDefinition::new(
-            "task".to_string(),
-            leviath_core::RegionKind::Pinned,
-            10_000,
-        )],
+    let layout = vec![leviath_core::Region::new(
+        "task".to_string(),
+        leviath_core::RegionKind::Pinned,
         10_000,
-    );
+    )];
     let setup = StageSetup {
         context_layout: Some(layout),
         ..setup_carrying_prompt("still visible")
@@ -18470,11 +18450,8 @@ fn routed_window(regions: &[&str], hidden: &[&str]) -> ContextWindow {
     window
 }
 
-fn routed_to(region: &str) -> crate::spec::blueprint::ToolResultRouting {
-    crate::spec::blueprint::ToolResultRouting {
-        default_region: region.to_string(),
-        ..Default::default()
-    }
+fn routed_to(region: &str) -> crate::spec::graph::ToolRoutingDef {
+    routing(region, &[], true, None)
 }
 
 fn one_read_call() -> (
@@ -18961,9 +18938,9 @@ fn a_pointer_to_a_hidden_region_says_it_cannot_be_read_here() {
 
 /// A gate that asks only for regions, so these tests isolate the new condition
 /// from `require_modifications`. The two together are covered separately.
-fn requiring_gate(regions: &[&str]) -> crate::spec::blueprint::TransitionGate {
-    crate::spec::blueprint::TransitionGate {
-        require_regions: regions.iter().map(|s| (*s).to_string()).collect(),
+fn requiring_gate(regions: &[&str]) -> crate::spec::graph::GateDef {
+    crate::spec::graph::GateDef {
+        require_regions: tg::regions(regions),
         require_modifications: false,
         ..gate(None, None)
     }
@@ -19063,7 +19040,7 @@ fn require_regions_gives_up_with_the_shared_budget() {
     let stage = writing_stage("plan", Vec::new());
     let window = gate_window(&["plan"], &[]);
     let progress = StageProgress {
-        gate_reentries: crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS,
+        gate_reentries: crate::spec::graph::GateDef::DEFAULT_MAX_ATTEMPTS,
         ..Default::default()
     };
     let decision = gate_blocks(Some(&requiring_gate(&["plan"])), &stage, &progress, &window);
@@ -19095,8 +19072,8 @@ fn require_regions_passes_when_the_window_does_not_hold_the_region() {
 #[test]
 fn require_regions_and_require_modifications_must_both_hold() {
     let stage = writing_stage("plan", Vec::new());
-    let both = crate::spec::blueprint::TransitionGate {
-        require_regions: vec!["plan".to_string()],
+    let both = crate::spec::graph::GateDef {
+        require_regions: tg::regions(&["plan"]),
         ..gate(None, None) // require_modifications: true
     };
 
@@ -19295,8 +19272,8 @@ fn compact_window(results_summarizable: bool) -> ContextWindow {
     window
 }
 
-fn bare_compact() -> crate::spec::blueprint::EdgeTransform {
-    crate::spec::blueprint::EdgeTransform::Compact { prompt: None }
+fn bare_compact() -> crate::spec::graph::EdgeCarry {
+    crate::spec::graph::EdgeCarry::Compact { prompt: None }
 }
 
 /// The bug: a bare `compact` hands every non-pinned region to the summarizer,
@@ -19335,9 +19312,9 @@ fn a_region_declared_not_summarizable_is_left_alone() {
 fn a_custom_compact_list_cannot_override_the_region_flag() {
     let _guard = leviath_testkit::tracing_guard();
     let mut window = compact_window(false);
-    let custom = crate::spec::blueprint::EdgeTransform::Custom {
+    let custom = crate::spec::graph::EdgeCarry::Custom {
         carry: Vec::new(),
-        compact: vec!["results".to_string(), "conversation".to_string()],
+        compact: tg::regions(&["results", "conversation"]),
         clear: Vec::new(),
         compact_prompt: None,
     };
@@ -19354,7 +19331,7 @@ fn a_custom_compact_list_cannot_override_the_region_flag() {
 #[test]
 fn not_summarizable_does_not_protect_a_region_from_clear() {
     let mut window = compact_window(false);
-    let cleared = apply_edge_transform(&mut window, &crate::spec::blueprint::EdgeTransform::Clear);
+    let cleared = apply_edge_transform(&mut window, &crate::spec::graph::EdgeCarry::Clear);
     assert!(cleared.is_empty(), "clear compacts nothing");
     assert!(
         window
@@ -19379,7 +19356,7 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    let mut call = tc("c1", crate::spec::blueprint::SUBMIT_OUTPUT_TOOL);
+    let mut call = tc("c1", leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL);
     call.arguments = serde_json::json!({ "content": "analyze" });
     let (_, result) = infer_with(vec![call]);
     let bp = blueprint(vec![
@@ -19390,7 +19367,7 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
     let e = world
         .spawn((
             agent_state(),
-            offering(&[crate::spec::blueprint::SUBMIT_OUTPUT_TOOL]),
+            offering(&[leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL]),
             result,
             conv_window(),
             spec_of(bp),
@@ -19417,14 +19394,14 @@ async fn dispatch_tools_records_a_real_submission_with_the_blueprint_present() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    let mut call = tc("c1", crate::spec::blueprint::SUBMIT_OUTPUT_TOOL);
+    let mut call = tc("c1", leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL);
     call.arguments = serde_json::json!({ "content": "Three regressions, listed below." });
     let (_, result) = infer_with(vec![call]);
     let bp = blueprint(vec![stage_named("analyze", None, true, None)]);
     let e = world
         .spawn((
             agent_state(),
-            offering(&[crate::spec::blueprint::SUBMIT_OUTPUT_TOOL]),
+            offering(&[leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL]),
             result,
             conv_window(),
             spec_of(bp),
@@ -19648,7 +19625,7 @@ fn process_response_arms_the_raised_cap_when_the_reply_was_cut_off() {
 fn build_request_raises_the_cap_to_the_model_maximum_after_a_cut_off() {
     let cfg = InferenceConfig {
         temperature: None,
-        max_output_tokens: Some(crate::spec::blueprint::OutputCap::Tokens(100)),
+        max_output_tokens: Some(crate::spec::graph::OutputCap::Tokens(100)),
         extra_params: Default::default(),
         batch_tool_hint: false,
         shell_hint: false,
@@ -20192,7 +20169,7 @@ fn empty_response_keeps_the_reply_it_accepts() {
 /// and a region the stage does not carry falls back to that maximum.
 #[test]
 fn build_request_resolves_relative_output_caps() {
-    use crate::spec::blueprint::OutputCap;
+    use crate::spec::graph::OutputCap;
     let cfg = |cap: OutputCap| InferenceConfig {
         temperature: None,
         max_output_tokens: Some(cap),
@@ -20224,14 +20201,14 @@ fn build_request_resolves_relative_output_caps() {
     assert_eq!(
         cap_of(OutputCap::RegionPercent {
             percent: 0.5,
-            region: "claims".to_string()
+            region: tg::region_name("claims")
         }),
         1_500
     );
     assert_eq!(
         cap_of(OutputCap::RegionPercent {
             percent: 1.0,
-            region: "no_such_region".to_string()
+            region: tg::region_name("no_such_region")
         }),
         4_000
     );
@@ -20456,35 +20433,6 @@ fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
     );
 }
 
-/// `spawn_agent_seeded` is `pub`, so a hand-built `Blueprint` can reach it
-/// without `parse_manifest`'s "at least one stage" guarantee. Both invariants
-/// it indexes by are refused up front rather than panicking on `stages[0]`.
-#[test]
-fn spawning_refuses_a_blueprint_with_no_stages_or_a_stage_count_mismatch() {
-    let mut world = World::new();
-    let err = spawn_agent(
-        &mut world,
-        "r".to_string(),
-        blueprint(vec![]),
-        "task",
-        vec![],
-        hints(true),
-    )
-    .unwrap_err();
-    assert!(err.contains("no stages"), "{err}");
-
-    let err = spawn_agent(
-        &mut world,
-        "r".to_string(),
-        blueprint(vec![stage_named("a", None, false, None)]),
-        "task",
-        vec![],
-        hints(true),
-    )
-    .unwrap_err();
-    assert!(err.contains("0 resolved stages"), "{err}");
-}
-
 // ── message delivery with parts ──
 
 mod message_parts {
@@ -20670,13 +20618,11 @@ mod typed_tool_results {
         // With a blueprint on the agent, the stage's limit for the tool is
         // looked up before the tool answers; the answer is the same here,
         // since there is still no store to read from.
-        let mut stage = crate::spec::Stage::new(
-            "main".to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        let mut stage = tg::stage("main");
+        stage.tool_accepts.insert(
+            crate::spec::names::ToolName::new("context_export").unwrap(),
+            vec![crate::spec::names::MimePattern::new("text/*").unwrap()],
         );
-        stage
-            .tool_accepts
-            .insert("context_export".to_string(), vec!["text/*".to_string()]);
         let mut call = tc("c2", "context_export");
         call.arguments = serde_json::json!({"name": "shot.png"});
         let limited = ready_for_tools(&mut world, vec![call]);
@@ -20975,13 +20921,11 @@ mod model_parts {
         let stored =
             Part::stored(png("hero.png").describe(&leviath_core::mime::MimeRegistry::builtin()))
                 .named("hero.png");
-        let mut stage = crate::spec::blueprint::Stage::new(
-            "draw".to_string(),
-            crate::spec::blueprint::ModelConfig::new("openrouter".to_string(), "m".to_string()),
-        );
+        let mut stage = tg::stage("draw");
+        stage.model = tg::model("openrouter", "m");
         stage
             .output_routing
-            .insert("image/*".to_string(), "artwork".to_string());
+            .insert("image/*".to_string(), tg::region_name("artwork"));
 
         let mut w = ctx(&[("conversation", 100_000), ("artwork", 100_000)]);
         apply_tool_results_with_parts(
@@ -20989,7 +20933,7 @@ mod model_parts {
             Reply {
                 text: "drawn",
                 parts: std::slice::from_ref(&stored),
-                stage: Some(&old_vocab::stage_def(&stage)),
+                stage: Some(&stage),
                 sink: None,
             },
             &[tc("c1", "render")],
@@ -21184,7 +21128,7 @@ fn collect_tools_merges_recovered_results() {
 fn spawn_forceable(world: &mut World, dest: StageSetup) -> Entity {
     let bp = blueprint(vec![
         stage_named("a", None, false, None),
-        old_vocab::stage_from_setup("b", &dest),
+        stage_from_setup("b", &dest).into(),
         stage_named("c", None, false, None),
     ]);
     world
@@ -21204,7 +21148,7 @@ fn spawn_forceable(world: &mut World, dest: StageSetup) -> Entity {
 #[test]
 fn force_transition_enters_the_stage_and_records_a_forced_move() {
     let mut routed = setup();
-    routed.routing = Some(crate::spec::ToolResultRouting::default());
+    routed.routing = Some(routing("tool_results", &[], true, None));
     let mut world = World::new();
     let e = spawn_forceable(&mut world, routed);
     let agent = crate::world::AgentId::in_world(&world, e);
@@ -21320,7 +21264,7 @@ fn a_blueprint_spawn_seeds_by_region_and_takes_the_operators_nudge() {
         &mut world,
         SeededSpawn {
             agent_id: "r".to_string(),
-            blueprint: blueprint(vec![stage_named("a", None, false, None)]),
+            graph: blueprint(vec![stage_named("a", None, false, None)]),
             seeds: [
                 ("conversation".to_string(), "seeded".to_string()),
                 ("nowhere".to_string(), "dropped".to_string()),
@@ -21328,7 +21272,7 @@ fn a_blueprint_spawn_seeds_by_region_and_takes_the_operators_nudge() {
             .into(),
             stages: vec![resolved_on("p", "m")],
             global_hints: hints(false),
-            global_nudge: crate::spec::NudgeConfig {
+            global_nudge: crate::spec::graph::NudgeDef {
                 enabled: Some(false),
                 max: Some(2),
                 text: Some("go on".into()),

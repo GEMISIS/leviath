@@ -158,7 +158,7 @@ fn placement(world: &World, e: Entity) -> String {
             .get::<crate::components::ToolResultRoutingComponent>(e)
             .map(|r| r
                 .routing
-                .tool_overrides
+                .tool_regions
                 .iter()
                 .collect::<std::collections::BTreeMap<_, _>>()),
         world
@@ -170,49 +170,37 @@ fn placement(world: &World, e: Entity) -> String {
     )
 }
 
-/// A parsed blueprint shaped like a coding agent: an entry stage that maps
-/// the project with its tool results routed into their own region, two more
-/// stages after it (the last one writing files), caller inputs, and a
-/// compaction model.
-fn coding_blueprint() -> crate::spec::Blueprint {
-    use crate::spec::blueprint::{ModelConfig, Stage, ToolResultRouting};
-    use crate::spec::layout::{ContextLayout, RegionDefinition, RegionSeed};
+/// A graph shaped like a coding agent: an entry stage that maps the project
+/// with its tool results routed into their own region, two more stages after
+/// it (the last one writing files), caller inputs, and a compaction model.
+fn coding_graph() -> crate::spec::graph::RunGraph {
+    use crate::spec::graph::{CompactionDef, ToolRoutingDef};
+    use crate::spec::inputs::{InputDecl, InputSlot, InputType, RegionBinding};
+    use crate::spec::names::{InputName, ModelRef, ToolName};
+    use crate::test_graph::{layout, region, region_name, tools};
     use leviath_core::region::{EvictionStrategy, RegionKind};
-    let stage = |name: &str, prompt: &str| {
-        let mut s = Stage::new(
-            name.to_string(),
-            ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        s.available_tools = vec!["read_file".to_string()];
-        s.config.insert(
-            "system_prompt".to_string(),
-            serde_json::Value::String(prompt.to_string()),
-        );
-        s
+    let stage = |name: &str, prompt: &str| crate::spec::graph::StageDef {
+        model: crate::test_graph::model("p", "m"),
+        tools: tools(&["read_file"]),
+        system_prompt: Some(prompt.to_string()),
+        ..crate::test_graph::stage(name)
     };
     let mut discover = stage("discover", "Before any planning, map the project.");
-    discover.tool_result_routing = Some(ToolResultRouting {
-        default_region: "conversation".to_string(),
-        tool_overrides: HashMap::from([("read_file".to_string(), "codebase".to_string())]),
-        ..ToolResultRouting::default()
+    discover.tool_routing = Some(ToolRoutingDef {
+        default_region: region_name("conversation"),
+        tool_regions: [(ToolName::new("read_file").unwrap(), region_name("codebase"))].into(),
+        keep_results: false,
+        max_result_tokens: None,
+        tool_max_result_tokens: Default::default(),
     });
     let mut implement = stage("implement", "Make the change.");
-    implement
-        .available_tools
-        .extend(["write_file".to_string(), "edit_file".to_string()]);
-    let caller = |name: &str| {
-        let mut r = RegionDefinition::new(name.to_string(), RegionKind::Pinned, 2_000);
-        r.seed = Some(RegionSeed::CallerInput {
-            name: name.to_string(),
-        });
-        r
-    };
+    implement.tools.extend(tools(&["write_file", "edit_file"]));
     let regions = vec![
-        caller("task"),
-        caller("constraints"),
-        RegionDefinition::new("codebase".to_string(), RegionKind::Pinned, 20_000),
-        RegionDefinition::new(
-            "conversation".to_string(),
+        region("task", RegionKind::Pinned, 2_000),
+        region("constraints", RegionKind::Pinned, 2_000),
+        region("codebase", RegionKind::Pinned, 20_000),
+        region(
+            "conversation",
             RegionKind::SlidingWindow {
                 max_items: 30,
                 eviction_strategy: EvictionStrategy::default(),
@@ -220,25 +208,50 @@ fn coding_blueprint() -> crate::spec::Blueprint {
             40_000,
         ),
     ];
-    let mut bp = crate::spec::Blueprint::new(
-        "coder".to_string(),
-        "Plans, writes and checks a change.".to_string(),
+    let mut graph = crate::test_graph::graph(
         vec![discover, stage("plan", "Plan the change."), implement],
-        ContextLayout::new(regions, 64_000),
+        layout(regions, 64_000),
     );
-    bp.entry_stage = Some("discover".to_string());
-    bp.compaction_config = Some(leviath_core::lifecycle::CompactionConfig::default());
-    bp
+    graph.title = Some("coder".into());
+    graph.description = Some("Plans, writes and checks a change.".into());
+    graph.entry = Some(sn("discover"));
+    graph.inputs = ["constraints", "task"]
+        .iter()
+        .map(|name| InputDecl {
+            name: InputName::new(*name).unwrap(),
+            ty: InputType::Text {
+                multiline: true,
+                min_len: None,
+                max_len: None,
+            },
+            required: false,
+            default: None,
+            description: None,
+            binds: vec![InputSlot::Region(RegionBinding {
+                region: region_name(name),
+                template: None,
+            })],
+        })
+        .collect();
+    let compaction = leviath_core::lifecycle::CompactionConfig::default();
+    graph.compaction = Some(CompactionDef {
+        model: ModelRef::parse(&format!("{}/{}", compaction.provider, compaction.model)).unwrap(),
+        system_prompt: compaction.system_prompt,
+        user_prompt_template: compaction.user_prompt_template,
+        max_summary_tokens: u32::try_from(compaction.max_summary_tokens).unwrap(),
+        temperature: compaction.temperature,
+    });
+    graph
 }
 
-/// A parsed blueprint spawned through the test bridge places exactly what
-/// inserting its spec at its initial state places, and that is the run the
-/// blueprint describes: at its entry stage, visited once, with the stage's
-/// instructions, inference and routing in place.
+/// A graph spawned through the test bridge places exactly what inserting its
+/// spec at its initial state places, and that is the run the graph describes:
+/// at its entry stage, visited once, with the stage's instructions, inference
+/// and routing in place.
 #[test]
-fn a_blueprint_lands_the_same_through_spawn_and_through_insert() {
-    let blueprint = coding_blueprint();
-    let stages = blueprint
+fn a_graph_lands_the_same_through_spawn_and_through_insert() {
+    let graph = coding_graph();
+    let stages = graph
         .stages
         .iter()
         .enumerate()
@@ -250,10 +263,7 @@ fn a_blueprint_lands_the_same_through_spawn_and_through_insert() {
                 description: "read".to_string(),
                 parameters: serde_json::json!({"type": "object"}),
             }],
-            fallbacks: vec![crate::spec::blueprint::ModelEntry::new(
-                "q".to_string(),
-                "n".to_string(),
-            )],
+            fallbacks: vec![crate::spec::names::ModelRef::parse("q/n").unwrap()],
             output: None,
             notes: match i {
                 0 => vec!["moved".to_string()],
@@ -266,7 +276,7 @@ fn a_blueprint_lands_the_same_through_spawn_and_through_insert() {
         &mut spawned,
         crate::pipeline::SeededSpawn {
             agent_id: "coder-1".to_string(),
-            blueprint: blueprint.clone(),
+            graph: graph.clone(),
             seeds: [("task".to_string(), "fix the bug".to_string())].into(),
             stages,
             global_hints: crate::test_support::hints(true),
@@ -285,7 +295,7 @@ fn a_blueprint_lands_the_same_through_spawn_and_through_insert() {
     );
     assert_eq!(placement(&spawned, a), placement(&inserted, b));
 
-    // And it is the run the blueprint describes.
+    // And it is the run the graph describes.
     let state = spawned.get::<AgentState>(a).unwrap();
     assert_eq!(state.current_stage, "discover");
     assert_eq!(
@@ -296,7 +306,7 @@ fn a_blueprint_lands_the_same_through_spawn_and_through_insert() {
     assert_eq!(spawned.get::<StageCursor>(a).unwrap().index, 0);
     assert_eq!(spawned.get::<VisitCounts>(a).unwrap().0["discover"], 1);
     let ledger = &spawned.get::<StageLedger>(a).unwrap().0;
-    assert_eq!(ledger.len(), blueprint.stages.len());
+    assert_eq!(ledger.len(), graph.stages.len());
     assert_eq!(ledger[0].visits[0].id, state.current_visit);
     assert!(ledger.iter().skip(1).all(|r| r.visits.is_empty()));
     let window = spawned.get::<ContextWindow>(a).unwrap();
@@ -311,7 +321,7 @@ fn a_blueprint_lands_the_same_through_spawn_and_through_insert() {
     assert!(prompt.content.as_str().contains("Before any planning"));
     let si = spawned.get::<StageInference>(a).unwrap();
     assert_eq!((si.provider_name.as_str(), si.model.as_str()), ("p", "m"));
-    assert_eq!(si.fallbacks[0].provider, "q");
+    assert_eq!(si.fallbacks[0].provider_or_empty(), "q");
     assert!(
         spawned
             .get::<crate::components::ToolResultRoutingComponent>(a)
@@ -1052,9 +1062,10 @@ fn a_new_run_starts_seeded_at_its_entry_stage() {
 
 #[test]
 fn a_seed_is_trimmed_to_its_region_or_dropped_when_nothing_fits() {
+    use crate::context_setup::fit_seed_to_budget;
     assert_eq!(fit_seed_to_budget("short", 100), "short");
     let trimmed = fit_seed_to_budget(&"x".repeat(1000), 50);
-    assert!(trimmed.ends_with(SEED_TRUNCATION_MARKER));
+    assert!(trimmed.ends_with("seed exceeded this region's budget]"));
     assert!(trimmed.len() <= 49 * 4);
     assert_eq!(fit_seed_to_budget(&"x".repeat(1000), 3), "");
 }
@@ -1189,7 +1200,7 @@ fn a_binding_edits_what_insertion_placed() {
 /// graph's entry.
 #[test]
 fn a_worker_starts_in_its_worker_stage() {
-    let graph = crate::spec_bridge::test_support::graph_of(
+    let graph = crate::test_graph::graph_of(
         "entry = \"a\"\n\
          edges = [{ name = \"next\", from = \"a\", to = \"b\" }]\n\
          layout = { total_budget_tokens = 1000, regions = [\
@@ -1198,7 +1209,7 @@ fn a_worker_starts_in_its_worker_stage() {
          [[stages]]\nname = \"a\"\nsystem_prompt = \"first\"\n\
          [[stages]]\nname = \"b\"\nsystem_prompt = \"second\"\nallow_as_worker = true\n",
     );
-    let mut spec = crate::spec_bridge::test_support::spec_named("t", graph);
+    let mut spec = crate::test_graph::spec_named("t", graph);
     assert_eq!(initial_state(&spec).cursor.stage.as_str(), "a");
     spec.placement.worker_stage = Some(crate::spec::names::StageName::new("b").unwrap());
     let state = initial_state(&spec);

@@ -9,7 +9,7 @@ use super::*;
 /// The note appended when the resolved provider is not the one the user named
 /// as their default.
 ///
-/// This check resolves an empty `ModelConfig`, so `default_provider` really
+/// This check resolves an empty `ModelChoice`, so `default_provider` really
 /// does lose here without a `default_model`: there is no blueprint entry to
 /// promote and no model to send. A real run is the opposite case, so the note
 /// must not say the default provider "is never chosen": that reads as a
@@ -35,7 +35,7 @@ pub(super) fn default_provider_note(
         return String::new();
     }
     // The missing model is the only reason a registered default provider loses
-    // from here: this check resolves an empty `ModelConfig`, so one with a
+    // from here: this check resolves an empty `ModelChoice`, so one with a
     // model set has no competition to lose to. An *unregistered* default
     // provider is a different complaint, and one the `config` line already
     // makes by listing what is registered.

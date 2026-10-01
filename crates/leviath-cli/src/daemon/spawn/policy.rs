@@ -46,23 +46,20 @@ pub(crate) fn shell_env_policy(config: &Config) -> leviath_tools::ShellEnvPolicy
 
 pub(super) fn parse_fallback_order(
     entries: &[String],
-) -> Vec<leviath_runtime::spec::blueprint::ModelEntry> {
+) -> Vec<leviath_runtime::spec::names::ModelRef> {
     entries
         .iter()
-        .filter_map(|raw| match raw.split_once('/') {
-            Some((provider, model)) if !provider.is_empty() && !model.is_empty() => {
-                Some(leviath_runtime::spec::blueprint::ModelEntry::new(
-                    provider.to_string(),
-                    model.to_string(),
-                ))
-            }
-            _ => {
-                tracing::warn!(
-                    entry = %raw,
-                    "ignoring [providers] fallback_order entry: expected \"provider/model\""
-                );
-                None
-            }
-        })
+        .filter_map(
+            |raw| match leviath_runtime::spec::names::ModelRef::parse(raw) {
+                Ok(route) if route.provider.is_some() => Some(route),
+                _ => {
+                    tracing::warn!(
+                        entry = %raw,
+                        "ignoring [providers] fallback_order entry: expected \"provider/model\""
+                    );
+                    None
+                }
+            },
+        )
         .collect()
 }

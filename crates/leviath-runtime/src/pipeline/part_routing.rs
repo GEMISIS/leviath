@@ -117,7 +117,6 @@ pub(crate) fn store_routed(window: &mut ContextWindow, routed: &RoutedParts) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::blueprint::{ModelConfig, Stage};
     use leviath_core::mime::{Blob, MimeRegistry, MimeType};
 
     fn stored_part(mime: &str, name: &str) -> Part {
@@ -127,16 +126,17 @@ mod tests {
     }
 
     fn stage_routing(rules: &[(&str, &str)]) -> StageDef {
-        let mut stage = Stage::new(
-            "draw".to_string(),
-            ModelConfig::new("openrouter".to_string(), "m".to_string()),
-        );
+        let mut stage = StageDef {
+            model: crate::test_graph::model("openrouter", "m"),
+            ..crate::test_graph::stage("draw")
+        };
         for (pattern, region) in rules {
-            stage
-                .output_routing
-                .insert((*pattern).to_string(), (*region).to_string());
+            stage.output_routing.insert(
+                (*pattern).to_string(),
+                crate::test_graph::region_name(region),
+            );
         }
-        crate::pipeline::spec_view::tests::stage_def_of(stage)
+        stage
     }
 
     #[test]

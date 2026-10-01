@@ -90,6 +90,11 @@ pub(crate) fn gate_requires_children(world: &mut World) {
 /// warning). Overridable per stage via `max_revisits`.
 pub(crate) const DEFAULT_REQUIRED_REENTRY_CAP: usize = 3;
 
+/// How many times a stage is re-run for a missing final output before it is
+/// let through with the run's `output_forced` flag set. The same as the gate
+/// budget, and independent of a stage's `max_revisits`.
+const OUTPUT_REENTRY_CAP: usize = 3;
+
 /// Counts how many times the current stage has been re-run to satisfy required
 /// context regions. Absent ⇒ 0; reset when a new stage is entered.
 #[derive(Component, Debug, Clone, Copy)]
@@ -363,7 +368,7 @@ pub(crate) fn require_final_output(
         // context, and an output stage runs last, when that context is at its
         // largest: an agent with `max_revisits = 10` billed ten full prompts to
         // fail to say one word.
-        let cap = crate::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP;
+        let cap = OUTPUT_REENTRY_CAP;
         let round = reentries.map_or(0, |r| r.0);
         if round >= cap {
             tracing::warn!(
@@ -442,7 +447,7 @@ pub(crate) fn require_fan_out(
         // refusal rather than pay for retries that will not land.
         let cap = config
             .max_attempts
-            .map_or(crate::spec::blueprint::DEFAULT_FAN_OUT_ATTEMPTS, |n| {
+            .map_or(crate::spec::graph::FanOutDef::DEFAULT_MAX_ATTEMPTS, |n| {
                 n as usize
             });
         // Set by every accepted call and cleared on stage entry, so its

@@ -158,35 +158,8 @@ impl OutputCap {
     /// The `(0, 100]` percent rule shared with region budgets, in this
     /// setting's words.
     fn fraction(s: &str) -> Result<f64, String> {
-        crate::spec::layout::BudgetSpec::parse_budget(s)
+        crate::old::layout::BudgetSpec::parse_budget(s)
             .map_err(|e| format!("max_output_tokens: {e}"))
-    }
-
-    /// The cap in tokens for one request.
-    ///
-    /// `model_window` and `model_max_output` are the model's own limits;
-    /// `region_budget` answers "how many tokens may region X hold" for the
-    /// window the request is built from. A relative cap is clamped to the
-    /// model's maximum. A region cap naming a region the stage does not carry
-    /// falls back to the model's maximum, which is the same "as much as you
-    /// can" the author was reaching for; the loader already warned about the
-    /// name.
-    pub fn resolve(
-        &self,
-        model_window: usize,
-        model_max_output: usize,
-        region_budget: impl Fn(&str) -> Option<usize>,
-    ) -> usize {
-        let share = |whole: usize, fraction: f64| (whole as f64 * fraction).round() as usize;
-        match self {
-            OutputCap::Tokens(t) => *t,
-            OutputCap::WindowPercent(p) => share(model_window, *p).min(model_max_output),
-            OutputCap::RegionPercent { percent, region } => match region_budget(region) {
-                Some(budget) => share(budget, *percent).min(model_max_output),
-                None => model_max_output,
-            },
-        }
-        .max(1)
     }
 }
 
@@ -207,22 +180,6 @@ impl ModelConfig {
             parameters: HashMap::new(),
             request_timeout_secs: None,
         }
-    }
-
-    /// Convenience: provider of the first model entry (for backward compat).
-    pub fn provider(&self) -> &str {
-        self.models
-            .first()
-            .map(|e| e.provider.as_str())
-            .unwrap_or("anthropic")
-    }
-
-    /// Convenience: model name of the first model entry (for backward compat).
-    pub fn model(&self) -> &str {
-        self.models
-            .first()
-            .map(|e| e.model.as_str())
-            .unwrap_or("claude-sonnet-4-6")
     }
 }
 
@@ -275,35 +232,6 @@ mod tests {
         assert!(err(json!({"percent": 10, "of": 3})).contains("must name a region"));
         assert!(err(json!({"percent": 10, "of": ""})).contains("must name a region"));
         assert!(err(json!(true)).contains("not a token count"));
-    }
-
-    #[test]
-    fn a_cap_resolves_against_the_model_and_the_region_and_never_below_one() {
-        let budget = |name: &str| (name == "claims").then_some(3_000);
-        assert_eq!(
-            OutputCap::Tokens(70_000).resolve(200_000, 65_535, budget),
-            70_000
-        );
-        assert_eq!(
-            OutputCap::WindowPercent(0.4).resolve(200_000, 65_535, budget),
-            65_535
-        );
-        assert_eq!(
-            OutputCap::WindowPercent(0.1).resolve(200_000, 65_535, budget),
-            20_000
-        );
-        let claims = OutputCap::RegionPercent {
-            percent: 1.0,
-            region: "claims".to_string(),
-        };
-        assert_eq!(claims.resolve(200_000, 65_535, budget), 3_000);
-        assert_eq!(claims.resolve(200_000, 2_000, budget), 2_000);
-        let missing = OutputCap::RegionPercent {
-            percent: 1.0,
-            region: "gone".to_string(),
-        };
-        assert_eq!(missing.resolve(200_000, 65_535, budget), 65_535);
-        assert_eq!(OutputCap::WindowPercent(0.001).resolve(10, 10, budget), 1);
     }
 
     #[test]

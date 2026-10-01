@@ -33,8 +33,8 @@ pub(super) fn str_of<'a>(v: &'a impl Fields, key: &str) -> Option<&'a str> {
     v.field(key).and_then(|x| x.as_str())
 }
 
-/// A required-shaped string field, defaulting to empty when absent (the value's
-/// meaning is validated later by `Blueprint::validate`).
+/// A required-shaped string field, defaulting to empty when absent (reading
+/// the manifest as a run graph checks what it names).
 pub(super) fn str_field(v: &impl Fields, key: &str) -> String {
     str_of(v, key).unwrap_or_default().to_string()
 }

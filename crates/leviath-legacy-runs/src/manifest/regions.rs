@@ -2,7 +2,7 @@
 //! budget, seed, and the tool-output routing that targets it.
 
 use super::*;
-use leviath_runtime::spec::layout::SeedToolCall;
+use crate::old::layout::SeedToolCall;
 
 /// Parse a `[context.regions]` (or `[stages.<name>.context.regions]`) table into
 /// region definitions plus the summed absolute-budget total.
@@ -13,9 +13,8 @@ use leviath_runtime::spec::layout::SeedToolCall;
 /// (default 5000). Compacting regions may set `compact_at = "80%"`
 /// (compact at that fraction of the resolved budget) and/or an absolute
 /// `threshold_tokens` cap. Percentage regions carry a provisional `max_tokens`
-/// (the cap, or 0) that is finalized when the layout is resolved against a model
-/// window at spawn - see [`ContextLayout::resolved`]. The returned total sums
-/// only the absolute maxes; percentage regions contribute at resolution time.
+/// (the cap, or 0); the run graph carries the percentage itself. The returned
+/// total sums only the absolute maxes.
 ///
 /// Malformed `budget`/`compact_at` strings are a hard error so `leviath validate`
 /// catches them at load.
@@ -32,27 +31,25 @@ pub(super) fn parse_region_layout(
         // becomes the absolute cap and `min_tokens` the absolute floor. Without a
         // `budget`, `max_tokens` is the literal ceiling.
         let percent = match str_of(region_value, "budget") {
-            Some(s) => {
-                Some(leviath_runtime::spec::BudgetSpec::parse_budget(s).map_err(Error::Other)?)
-            }
+            Some(s) => Some(crate::old::layout::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
             None => None,
         };
         let max_tokens_opt = count("max_tokens")?;
         let min_tokens = count("min_tokens")?;
 
         let budget = match percent {
-            Some(percent) => leviath_runtime::spec::BudgetSpec::Percent {
+            Some(percent) => crate::old::layout::BudgetSpec::Percent {
                 percent,
                 min: min_tokens,
                 max: max_tokens_opt,
             },
-            None => leviath_runtime::spec::BudgetSpec::Absolute(max_tokens_opt.unwrap_or(5000)),
+            None => crate::old::layout::BudgetSpec::Absolute(max_tokens_opt.unwrap_or(5000)),
         };
         // Provisional resolved ceiling: the literal value for absolute regions,
         // the cap (or 0) for percentage regions until resolution overwrites it.
         let provisional_max_tokens = match &budget {
-            leviath_runtime::spec::BudgetSpec::Absolute(n) => *n,
-            leviath_runtime::spec::BudgetSpec::Percent { max, .. } => max.unwrap_or(0),
+            crate::old::layout::BudgetSpec::Absolute(n) => *n,
+            crate::old::layout::BudgetSpec::Percent { max, .. } => max.unwrap_or(0),
         };
 
         // Compacting regions carry a compaction trigger. Parse `compact_at` (a
@@ -61,9 +58,7 @@ pub(super) fn parse_region_layout(
         // stored on RegionKind::Compacting) per the resolution contract in
         // `ContextLayout::resolve_compacting_threshold`.
         let compact_at = match str_of(region_value, "compact_at") {
-            Some(s) => {
-                Some(leviath_runtime::spec::BudgetSpec::parse_budget(s).map_err(Error::Other)?)
-            }
+            Some(s) => Some(crate::old::layout::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
             None => None,
         };
         let explicit_threshold = count("threshold_tokens")?;
@@ -362,14 +357,14 @@ pub(super) fn parse_region_seed(
     }
 }
 
-/// The `refresh` key of a tool seed, defaulting to [`SeedRefresh::Once`].
+/// The `refresh` key of a tool seed, defaulting to `SeedRefresh::Once`.
 ///
 /// An unreadable value falls back to the default rather than failing the
 /// manifest, matching how the rest of this parser treats a key it cannot make
 /// sense of; `lev validate` is where a typo is reported.
-fn parse_seed_refresh(table: &toml::value::Table) -> leviath_runtime::spec::layout::SeedRefresh {
+fn parse_seed_refresh(table: &toml::value::Table) -> crate::old::layout::SeedRefresh {
     str_of(table, "refresh")
-        .and_then(leviath_runtime::spec::layout::SeedRefresh::from_str_loose)
+        .and_then(crate::old::layout::SeedRefresh::from_str_loose)
         .unwrap_or_default()
 }
 

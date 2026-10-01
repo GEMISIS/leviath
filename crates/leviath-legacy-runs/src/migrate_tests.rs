@@ -32,7 +32,7 @@ available_tools = ["read_file", "list_dir", "bash", "write_file", "edit_file", "
     let file = BlueprintFile::parse(&text).unwrap();
     assert_eq!(file.run_graph().title.as_deref(), Some("small"));
     // Reading the written file gives the graph the manifest describes.
-    let expected = RunGraph::from_blueprint(&parse_manifest(old).unwrap()).unwrap();
+    let expected = crate::old::graph::from_blueprint(&parse_manifest(old).unwrap()).unwrap();
     assert_eq!(file.run_graph(), expected);
 }
 

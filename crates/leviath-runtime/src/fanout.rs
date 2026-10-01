@@ -31,7 +31,7 @@
 //!
 //! A single sub-agent is `spawn_agent`, not a fan-out of one.
 //!
-//! [`FAN_OUT_TOOL`]: crate::spec::blueprint::FAN_OUT_TOOL
+//! [`FAN_OUT_TOOL`]: leviath_core::stage_tools::FAN_OUT_TOOL
 mod items;
 mod report;
 mod worker_sources;
@@ -329,7 +329,7 @@ pub(crate) fn frame_split_round(
 
 /// What a re-entered fan-out stage is told before it splits again.
 fn split_round_framing(round: usize, previous: &[String]) -> String {
-    let tool = crate::spec::blueprint::FAN_OUT_TOOL;
+    let tool = leviath_core::stage_tools::FAN_OUT_TOOL;
     let already = match previous.is_empty() {
         // A previous round whose ids were lost - a daemon restart between the
         // two entries drops the component - still gets the framing, because the
@@ -873,13 +873,14 @@ fn routed_region(world: &World, parent: Entity) -> String {
         .get::<crate::components::ToolResultRoutingComponent>(parent)
         .map(|r| {
             r.routing
-                .tool_overrides
+                .tool_regions
                 .iter()
                 .find(|(k, _)| {
-                    leviath_tools::canonical_tool_name(k) == crate::spec::blueprint::FAN_OUT_TOOL
+                    leviath_tools::canonical_tool_name(k.as_str())
+                        == leviath_core::stage_tools::FAN_OUT_TOOL
                 })
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| r.routing.default_region.clone())
+                .map_or(&r.routing.default_region, |(_, v)| v)
+                .to_string()
         })
         .unwrap_or_else(|| "conversation".to_string())
 }
@@ -898,7 +899,7 @@ fn answer_call(world: &mut World, parent: Entity, call_id: &str, text: String) {
     if let Some(mut window) = world.get_mut::<ContextWindow>(parent) {
         crate::pipeline::apply_one_tool_result(
             &mut window,
-            crate::spec::blueprint::FAN_OUT_TOOL,
+            leviath_core::stage_tools::FAN_OUT_TOOL,
             call_id,
             text.into(),
             routing.as_ref(),
@@ -1095,13 +1096,9 @@ mod tests {
     use super::*;
     use crate::components::ToolResultRoutingComponent;
     use crate::pipeline::{ProcessResponse, ReadyToInfer, StageProgress, VisitCounts};
-    use crate::spec::Blueprint;
-    use crate::spec::blueprint::{
-        FanOutConfig, ModelConfig, Stage, StageMode as BpMode, WorkerFailurePolicy,
-    };
-    use crate::spec::layout::{ContextLayout, RegionDefinition};
+    use crate::spec::graph::{RunGraph, StageDef, StageMode as Mode};
     use crate::spec::names::{RegionName, StageName};
-    use crate::spec_bridge::test_support::{both, spec_c};
+    use crate::test_graph::{both, layout, model, region, spec_c};
     use leviath_core::{Region, RegionKind};
     use std::collections::HashSet;
 
@@ -1197,50 +1194,6 @@ mod tests {
         }
     }
 
-    /// A fan-out as a parsed blueprint writes it.
-    fn legacy(def: &FanOutDef) -> FanOutConfig {
-        let (agent, stage, query) = match &def.worker {
-            WorkerSource::Blueprint(b) => (Some(b.to_string()), None, None),
-            WorkerSource::BlueprintFile(p) => (Some(p.to_string()), None, None),
-            WorkerSource::Stage(s) => (None, Some(s.to_string()), None),
-            WorkerSource::Query(q) => (None, None, Some(q.clone())),
-        };
-        FanOutConfig {
-            worker_agent: agent,
-            worker_stage: stage,
-            worker_query: query,
-            merge_stage: def.merge_stage.as_ref().map(ToString::to_string),
-            max_workers: def.max_workers as usize,
-            on_worker_failure: match def.on_worker_failure {
-                WorkerFailure::Continue => WorkerFailurePolicy::Continue,
-                WorkerFailure::FailAll => WorkerFailurePolicy::FailAll,
-            },
-            split_prompt: def.split_prompt.clone(),
-            results_region: def.results_region.as_ref().map(ToString::to_string),
-            max_items: def.max_items.map(|n| n as usize),
-            max_attempts: def.max_attempts.map(|n| n as usize),
-        }
-    }
-
-    /// A fan-out whose worker `legacy` reads back as each blueprint source.
-    #[test]
-    fn every_worker_source_reads_back_as_a_blueprint_writes_it() {
-        let mut def = cfg(None, 1, WorkerFailure::FailAll);
-        def.max_attempts = Some(2);
-        assert_eq!(legacy(&def).max_attempts, Some(2));
-        def.worker = WorkerSource::Blueprint(BlueprintRef::parse("fixer").unwrap());
-        assert_eq!(legacy(&def).worker_agent.as_deref(), Some("fixer"));
-        def.worker = WorkerSource::Query("tests".into());
-        assert_eq!(legacy(&def).worker_query.as_deref(), Some("tests"));
-        assert_eq!(legacy(&def).on_worker_failure, WorkerFailurePolicy::FailAll);
-        let dir = std::env::temp_dir()
-            .join("fixer")
-            .to_string_lossy()
-            .into_owned();
-        def.worker = WorkerSource::named(&dir).unwrap();
-        assert_eq!(legacy(&def).worker_agent, Some(dir));
-    }
-
     fn window() -> ContextWindow {
         let mut w = ContextWindow::new(12_000);
         w.add_region(Region::new(
@@ -1257,28 +1210,22 @@ mod tests {
         both(bp).0.graph.clone()
     }
 
-    /// A blueprint whose stage 0 is a fan-out stage and stage 1 is `merge`.
-    fn fanout_blueprint(config: FanOutDef) -> Blueprint {
-        let layout = ContextLayout::new(
-            vec![RegionDefinition::new(
-                "conversation".to_string(),
-                RegionKind::Clearable,
-                10_000,
-            )],
+    /// A graph whose stage 0 is a fan-out stage and stage 1 is `merge`.
+    fn fanout_blueprint(config: FanOutDef) -> RunGraph {
+        let layout = layout(
+            vec![region("conversation", RegionKind::Clearable, 10_000)],
             12_000,
         );
-        let mut s0 = Stage::new(
-            "fan".to_string(),
-            ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        s0.mode = BpMode::FanOut {
-            config: legacy(&config),
+        let s0 = StageDef {
+            model: model("script", "m"),
+            mode: Mode::FanOut(config),
+            ..crate::test_graph::stage("fan")
         };
-        let s1 = Stage::new(
-            "merge".to_string(),
-            ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout)
+        let s1 = StageDef {
+            model: model("script", "m"),
+            ..crate::test_graph::stage("merge")
+        };
+        crate::test_graph::graph(vec![s0, s1], layout)
     }
 
     fn parent_state() -> AgentState {
@@ -1296,7 +1243,7 @@ mod tests {
 
     /// Spawn a parent sitting on `ProcessResponse` with `response` as its
     /// (split) inference output.
-    fn spawn_parent(world: &mut World, bp: Blueprint, response: &str) -> Entity {
+    fn spawn_parent(world: &mut World, bp: RunGraph, response: &str) -> Entity {
         world
             .spawn((
                 both(bp),
@@ -1588,7 +1535,7 @@ mod tests {
     fn a_stage_that_is_not_a_fan_out_is_not_framed() {
         let mut world = World::new();
         let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
-        bp.stages[0].mode = BpMode::Autonomous;
+        bp.stages[0].mode = Mode::Autonomous;
         let e = spawn_parent(&mut world, bp, "");
 
         let convo = run_framing(&mut world, e, &[("fan", 2)]);
@@ -1771,7 +1718,7 @@ mod tests {
         // An ordinary stage, so this is the tool door: a fan-out stage's own
         // call is a stage fan-out and is covered separately.
         let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
-        bp.stages[0].mode = BpMode::Autonomous;
+        bp.stages[0].mode = Mode::Autonomous;
         let e = spawn_parent(&mut world, bp, "");
         world.entity_mut(e).insert(PendingFanOut {
             call_id: "call-1".to_string(),
@@ -1910,7 +1857,7 @@ mod tests {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
         let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
-        bp.stages[0].mode = BpMode::Autonomous;
+        bp.stages[0].mode = Mode::Autonomous;
         let e = spawn_parent(&mut world, bp, "");
         world.entity_mut(e).insert(PendingFanOut {
             call_id: "call-1".to_string(),
@@ -2115,14 +2062,14 @@ mod tests {
         world
             .entity_mut(e)
             .insert(crate::components::ToolResultRoutingComponent {
-                routing: crate::spec::ToolResultRouting {
-                    default_region: "notes".to_string(),
-                    tool_overrides: std::collections::HashMap::from([(
-                        "read_file".to_string(),
-                        "sources".to_string(),
+                routing: crate::spec::graph::ToolRoutingDef {
+                    default_region: RegionName::new("notes").unwrap(),
+                    tool_regions: std::collections::BTreeMap::from([(
+                        crate::spec::names::ToolName::new("read_file").unwrap(),
+                        RegionName::new("sources").unwrap(),
                     )]),
                     max_result_tokens: None,
-                    tool_max_result_tokens: std::collections::HashMap::new(),
+                    tool_max_result_tokens: std::collections::BTreeMap::new(),
                     keep_results: true,
                 },
             })
@@ -2187,16 +2134,22 @@ mod tests {
         world
             .entity_mut(e)
             .insert(crate::components::ToolResultRoutingComponent {
-                routing: crate::spec::ToolResultRouting {
-                    default_region: "conversation".to_string(),
+                routing: crate::spec::graph::ToolRoutingDef {
+                    default_region: RegionName::new("conversation").unwrap(),
                     // A second rule that does not match, so the lookup has
                     // something to reject as well as something to find.
-                    tool_overrides: std::collections::HashMap::from([
-                        ("fan_out".to_string(), "findings".to_string()),
-                        ("read_file".to_string(), "sources".to_string()),
+                    tool_regions: std::collections::BTreeMap::from([
+                        (
+                            crate::spec::names::ToolName::new("fan_out").unwrap(),
+                            RegionName::new("findings").unwrap(),
+                        ),
+                        (
+                            crate::spec::names::ToolName::new("read_file").unwrap(),
+                            RegionName::new("sources").unwrap(),
+                        ),
                     ]),
                     max_result_tokens: None,
-                    tool_max_result_tokens: std::collections::HashMap::new(),
+                    tool_max_result_tokens: std::collections::BTreeMap::new(),
                     keep_results: true,
                 },
             });
@@ -2773,20 +2726,17 @@ mod tests {
 
     /// Spawn a worker sitting in a stage that demands a final output.
     fn spawn_required_output_worker(world: &mut World) -> Entity {
-        let mut stage = Stage::new(
-            "w".to_string(),
-            ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        stage.require_output = true;
-        let layout = ContextLayout::new(
-            vec![RegionDefinition::new(
-                "conversation".to_string(),
-                RegionKind::Clearable,
-                10_000,
-            )],
+        let stage = StageDef {
+            model: model("script", "m"),
+            require_output: true,
+            ..crate::test_graph::stage("w")
+        };
+        let layout = layout(
+            vec![region("conversation", RegionKind::Clearable, 10_000)],
             12_000,
         );
-        let bp = Blueprint::new("w".to_string(), "d".to_string(), vec![stage], layout);
+        let mut bp = crate::test_graph::graph(vec![stage], layout);
+        bp.title = Some("w".into());
         let worker = world
             .spawn((parent_state(), both(bp), StageCursor { index: 0 }))
             .id();
@@ -3555,12 +3505,15 @@ mod tests {
         use crate::pipeline::force_transition;
         // Routing present on the target stage ⇒ ToolResultRoutingComponent added.
         let mut world = World::new();
-        let routing = crate::spec::ToolResultRouting {
-            default_region: "conversation".to_string(),
-            ..crate::spec::ToolResultRouting::default()
+        let routing = crate::spec::graph::ToolRoutingDef {
+            default_region: RegionName::new("conversation").unwrap(),
+            tool_regions: Default::default(),
+            keep_results: false,
+            max_result_tokens: None,
+            tool_max_result_tokens: Default::default(),
         };
         let mut bp = fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue));
-        bp.stages[1].tool_result_routing = Some(routing);
+        bp.stages[1].tool_routing = Some(routing);
         let e = world
             .spawn((
                 both(bp),
@@ -3588,30 +3541,18 @@ mod tests {
     fn force_transition_marks_error_on_prompt_overflow() {
         use crate::pipeline::force_transition;
         // A tiny pinned region + a huge stage system prompt ⇒ overflow on entry.
-        let layout = ContextLayout::new(
-            vec![RegionDefinition::new(
-                "task".to_string(),
-                RegionKind::Pinned,
-                20,
-            )],
-            1000,
-        );
-        let mut s0 = Stage::new(
-            "fan".to_string(),
-            ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        s0.mode = BpMode::FanOut {
-            config: legacy(&cfg(Some("merge"), 2, WorkerFailure::Continue)),
+        let layout = layout(vec![region("task", RegionKind::Pinned, 20)], 1000);
+        let s0 = StageDef {
+            model: model("script", "m"),
+            mode: Mode::FanOut(cfg(Some("merge"), 2, WorkerFailure::Continue)),
+            ..crate::test_graph::stage("fan")
         };
-        let mut s1 = Stage::new(
-            "merge".to_string(),
-            ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        s1.config.insert(
-            "system_prompt".to_string(),
-            serde_json::Value::String("x".repeat(10_000)),
-        );
-        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout);
+        let s1 = StageDef {
+            model: model("script", "m"),
+            system_prompt: Some("x".repeat(10_000)),
+            ..crate::test_graph::stage("merge")
+        };
+        let bp = crate::test_graph::graph(vec![s0, s1], layout);
 
         let mut w = ContextWindow::new(1000);
         w.add_region(Region::new("task".to_string(), RegionKind::Pinned, 20));
@@ -3622,7 +3563,7 @@ mod tests {
     }
 
     /// Build a world with one agent carrying the given blueprint and window.
-    fn world_with(bp: Blueprint, w: ContextWindow) -> (World, Entity) {
+    fn world_with(bp: RunGraph, w: ContextWindow) -> (World, Entity) {
         let mut world = World::new();
         let e = world
             .spawn((
@@ -3640,15 +3581,27 @@ mod tests {
     // ── typed work items ──────────────────────────────────────────────────────
 
     /// A fan-out stage whose graph declares a `topic` text input.
-    fn topic_blueprint(config: FanOutDef) -> Blueprint {
+    fn topic_blueprint(config: FanOutDef) -> RunGraph {
+        use crate::spec::inputs::{InputDecl, InputSlot, InputType, RegionBinding};
         let mut bp = fanout_blueprint(config);
-        bp.context_layout.regions.push(
-            RegionDefinition::new("topic".to_string(), RegionKind::Pinned, 1000).with_seed(
-                crate::spec::layout::RegionSeed::CallerInput {
-                    name: "topic".to_string(),
-                },
-            ),
-        );
+        bp.layout
+            .regions
+            .push(region("topic", RegionKind::Pinned, 1000));
+        bp.inputs.push(InputDecl {
+            name: crate::spec::names::InputName::new("topic").unwrap(),
+            ty: InputType::Text {
+                multiline: true,
+                min_len: None,
+                max_len: None,
+            },
+            required: false,
+            default: None,
+            description: None,
+            binds: vec![InputSlot::Region(RegionBinding {
+                region: RegionName::new("topic").unwrap(),
+                template: None,
+            })],
+        });
         bp
     }
 
@@ -3711,7 +3664,7 @@ mod tests {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
         let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
-        bp.stages[0].mode = BpMode::Autonomous;
+        bp.stages[0].mode = Mode::Autonomous;
         let e = spawn_parent(&mut world, bp, "");
         pending(&mut world, e, serde_json::json!({"items": [{"id": "a"}]}));
 

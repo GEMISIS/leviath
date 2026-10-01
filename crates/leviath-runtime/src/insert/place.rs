@@ -254,17 +254,7 @@ pub(crate) fn context_window(spec: &RunSpec, state: &RunState) -> ContextWindow 
         declared.flat_map(|l| l.regions.iter()).collect();
     let shape = |name: &str, max_tokens: usize| -> leviath_core::Region {
         match defs.iter().find(|d| d.name.as_str() == name) {
-            Some(def) => {
-                let def = spec_view::region_definition(def, max_tokens);
-                let mut region = leviath_core::Region::new(def.name, def.kind, max_tokens);
-                region.summarizable = def.summarizable;
-                region.admission = def.admission;
-                region.volatility = def.volatility;
-                region.accepts = def.accepts;
-                region.description = def.description;
-                region.describe_in_prompt = def.describe_in_prompt;
-                region
-            }
+            Some(def) => crate::context_setup::region_from_def(def, max_tokens),
             None => runtime_region(name, max_tokens),
         }
     };
@@ -440,15 +430,7 @@ pub(crate) fn spec_components(
         ));
     }
     if let Some(r) = &graph.repetition {
-        entity.insert(
-            crate::repetition::RepetitionDetector::from_detection_config(
-                &crate::spec::blueprint::RepetitionDetectionConfig {
-                    max_repeat_calls: r.max_repeat_calls.map(|n| n as usize),
-                    max_readonly_streak: r.max_readonly_streak.map(|n| n as usize),
-                    enabled: r.enabled,
-                },
-            ),
-        );
+        entity.insert(crate::repetition::RepetitionDetector::from_def(r));
     }
     if spec.launch.capture_model_input {
         entity.insert(crate::pipeline::CaptureModelInput);

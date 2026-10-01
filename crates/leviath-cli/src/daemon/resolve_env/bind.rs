@@ -410,23 +410,10 @@ impl DaemonEnv {
             .entry_stage()
             .and_then(|s| spec.stage(s.name.as_str()));
         let candidates = entry.map_or_else(Vec::new, |plan| {
-            let fallbacks: Vec<leviath_runtime::spec::blueprint::ModelEntry> = plan
-                .fallbacks
-                .iter()
-                .map(|f| {
-                    leviath_runtime::spec::blueprint::ModelEntry::new(
-                        f.provider
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_default(),
-                        f.model.to_string(),
-                    )
-                })
-                .collect();
             leviath_runtime::title::stage_pairs(
                 plan.provider.as_str(),
                 plan.model.as_str(),
-                &fallbacks,
+                &plan.fallbacks,
             )
         });
         let label = spec

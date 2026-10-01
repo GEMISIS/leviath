@@ -13,23 +13,26 @@ use leviath_core::policy::ToolPolicy;
 use serde::{Deserialize, Serialize};
 
 pub mod edge;
-#[cfg(any(test, feature = "legacy-blueprint"))]
-mod from_blueprint;
 pub mod policy;
 pub mod region;
 pub mod stage;
 mod validate;
 
 pub use edge::{
-    EdgeCarry, EdgeCondition, EdgeDef, FALL_THROUGH_EDGE, GateDef, RegionCount, StuckDef,
+    EdgeCarry, EdgeCondition, EdgeDef, FALL_THROUGH_EDGE, GateDef, MODIFYING_TOOLS, RegionCount,
+    StuckDef,
 };
 pub use policy::{
-    ArtifactDef, CompactionDef, ContentTransform, ContextTransformDef, DependencyDef,
-    FileTrackingDef, InstallDef, McpServerDef, McpServerTemplate, McpTransport, MimeRowDef,
-    MimeRows, Needs, NudgeDef, OutputDef, RegionMappingDef, RepetitionDef, SafeCommandsDef,
-    SandboxDef, ScriptPermission, ScriptPermissionsDef, TokenRule, ToolRescan,
+    ArtifactDef, CompactionDef, ContentTransform, ContextTransformDef, DEFAULT_MAX_NUDGES,
+    DEFAULT_NUDGE_TEXT, DependencyDef, FileTrackingDef, InstallDef, McpServerDef,
+    McpServerTemplate, McpTransport, MimeRowDef, MimeRows, Needs, NudgeDef, OutputDef,
+    RegionMappingDef, RepetitionDef, ResolvedNudge, SafeCommandsDef, SandboxDef, ScriptPermission,
+    ScriptPermissionsDef, TokenRule, ToolRescan,
 };
-pub use region::{Budget, Eviction, RegionDef, RegionKind, RegionLayoutDef, Seed, SeedRefresh};
+pub use region::{
+    ALWAYS_VISIBLE_REGIONS, Budget, Eviction, RegionDef, RegionKind, RegionLayoutDef,
+    STAGE_INSTRUCTIONS_REGION, Seed, SeedRefresh,
+};
 pub use stage::{
     AnswerStyle, CodeRef, FanOutDef, InteractionPointDef, ModelChoice, ModelParams, OutputCap,
     ParamScalar, SeedToolCall, StageDef, StageHooks, StageMode, ToolGroup, ToolRoutingDef,
@@ -143,6 +146,37 @@ impl RunGraph {
     /// The layout a stage uses: its own, or the graph's.
     pub fn layout_for<'a>(&'a self, stage: &'a StageDef) -> &'a RegionLayoutDef {
         stage.layout.as_ref().unwrap_or(&self.layout)
+    }
+
+    /// The mime type patterns a stage takes as parts: its own
+    /// `input_accepts` when it names any, else the union of `accepts` across
+    /// the regions of its layout it does not hide. Text is always taken and
+    /// never listed, so an empty answer means "text only". A region that
+    /// accepts anything is reported as `*/*`.
+    pub fn stage_inputs(&self, stage: &StageDef) -> Vec<String> {
+        if !stage.input_accepts.is_empty() {
+            return stage
+                .input_accepts
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+        }
+        let mut out: Vec<String> = Vec::new();
+        for region in &self.layout_for(stage).regions {
+            if stage.hide.contains(&region.name) {
+                continue;
+            }
+            let patterns: Vec<String> = match region.accepts.is_empty() {
+                true => vec!["*/*".to_string()],
+                false => region.accepts.iter().map(ToString::to_string).collect(),
+            };
+            for p in patterns {
+                if !p.starts_with("text/") && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        out
     }
 }
 

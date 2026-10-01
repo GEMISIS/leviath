@@ -13,10 +13,8 @@
 //!    the first configured provider in the preference, with the model to
 //!    probe picked from its catalogue. Fails, naming the provider the config
 //!    asked for, when nothing in the preference is configured. The placeholder
-//!    a model-less stage carries
-//!    ([`ModelConfig::provider`](leviath_runtime::spec::blueprint::ModelConfig::provider))
-//!    is the resolver's last resort, not a finding, and is never reported as
-//!    one.
+//!    a model-less stage carries is the resolver's last resort, not a
+//!    finding, and is never reported as one.
 //! 4. `inference` - one real call to that provider, straight through
 //!    [`Provider::infer`]. No world, no run, nothing on disk.
 //! 5. `daemon` - a throwaway one-stage agent spawned over the control socket
@@ -41,7 +39,7 @@ use leviath_runtime::ProviderRegistry;
 use leviath_runtime::control_socket::{
     ControlClient, ControlRequest, ControlResponse, DaemonIdentity,
 };
-use leviath_runtime::spec::blueprint::ModelConfig;
+use leviath_runtime::spec::graph::ModelChoice;
 
 use crate::commands::run::session::build_provider_registry_from_config;
 use crate::config::Config;

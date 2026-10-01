@@ -4,15 +4,15 @@
 //! dependencies. Filesystem-based manifest discovery (`find_manifest`) lives in
 //! `leviath-cli`, since it depends on cli-only path helpers.
 
-use leviath_core::error::{Error, Result};
-use leviath_core::lifecycle::CompactionConfig;
-use leviath_core::{EvictionStrategy, RegionKind};
-use leviath_runtime::spec::blueprint::{
+use crate::old::blueprint::{Blueprint, Stage};
+use crate::old::blueprint::{
     ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
     StageMode, StuckConfig, ToolRescan, TransitionCondition, TransitionEdge,
 };
-use leviath_runtime::spec::layout::{RegionDefinition, RegionSeed};
-use leviath_runtime::spec::{Blueprint, ContextLayout, Stage};
+use crate::old::layout::{ContextLayout, RegionDefinition, RegionSeed};
+use leviath_core::error::{Error, Result};
+use leviath_core::lifecycle::CompactionConfig;
+use leviath_core::{EvictionStrategy, RegionKind};
 
 /// Parse an agent.leviath TOML manifest into a Blueprint.
 pub fn parse_manifest(content: &str) -> Result<Blueprint> {

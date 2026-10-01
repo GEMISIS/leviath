@@ -4,7 +4,7 @@
 
 use super::*;
 
-/// Decide whether a chosen edge's [gate](crate::spec::blueprint::TransitionGate)
+/// Decide whether a chosen edge's [gate](crate::spec::graph::GateDef)
 /// blocks the transition.
 ///
 /// The failure this guards against: an agent can read and reason about a
@@ -173,7 +173,7 @@ pub(crate) fn gate_blocks(
     let can_modify = super::spec_view::grants_all_builtins(stage)
         || super::spec_view::named_tools(stage).any(|t| {
             let canonical = leviath_tools::canonical_tool_name(t);
-            crate::spec::blueprint::MODIFYING_TOOLS.contains(&canonical)
+            crate::spec::graph::MODIFYING_TOOLS.contains(&canonical)
                 || gate
                     .tools
                     .iter()
@@ -230,7 +230,7 @@ fn spend_gate_attempt(
 ) -> GateDecision {
     let cap = gate
         .max_attempts
-        .map_or(crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS, |n| {
+        .map_or(crate::spec::graph::GateDef::DEFAULT_MAX_ATTEMPTS, |n| {
             n as usize
         });
 

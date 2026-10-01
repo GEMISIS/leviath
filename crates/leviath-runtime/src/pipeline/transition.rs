@@ -30,11 +30,12 @@ pub(crate) struct StageSetup {
     /// Per-stage inference config (temperature / max output tokens).
     pub inference_config: InferenceConfig,
     /// Optional per-stage tool-result routing.
-    pub routing: Option<crate::spec::ToolResultRouting>,
+    pub routing: Option<crate::spec::graph::ToolRoutingDef>,
     /// Whether the stage delivers live user messages to the agent.
     pub accepts_messages: bool,
-    /// Optional stage-specific context layout to swap to on entry.
-    pub context_layout: Option<crate::spec::ContextLayout>,
+    /// The regions of the stage's own layout, each holding its budget, to swap
+    /// the window to on entry. `None` keeps the window's regions.
+    pub context_layout: Option<Vec<leviath_core::Region>>,
     /// Regions this stage leaves out of its prompt.
     pub context_hide: Vec<String>,
     /// Regions this stage empties on entry.
@@ -738,9 +739,9 @@ pub(crate) fn emit_stage_transition(
 /// Otherwise the fallback target: the first pinned region, or `conversation`
 /// when a layout declares no pinned region at all.
 ///
-/// [`STAGE_INSTRUCTIONS_REGION`]: crate::spec::layout::STAGE_INSTRUCTIONS_REGION
+/// [`STAGE_INSTRUCTIONS_REGION`]: crate::spec::graph::STAGE_INSTRUCTIONS_REGION
 fn stage_instructions_target(window: &mut ContextWindow) -> String {
-    let declared = crate::spec::layout::STAGE_INSTRUCTIONS_REGION;
+    let declared = crate::spec::graph::STAGE_INSTRUCTIONS_REGION;
     if let Some(at) = window.regions.iter().position(|r| r.name == declared) {
         if at + 1 < window.regions.len() {
             let region = window.regions.remove(at);
@@ -772,11 +773,11 @@ pub(crate) fn apply_stage_context(
     // it never asked to lose); and `hide` then removes what this stage's own
     // instructions never read.
     match &setup.context_layout {
-        Some(layout) => crate::context_setup::apply_layout(window, layout),
+        Some(regions) => crate::context_setup::apply_layout(window, regions.clone()),
         None => window.hidden.clear(),
     }
     for name in &setup.context_hide {
-        if !crate::spec::blueprint::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
+        if !crate::spec::graph::ALWAYS_VISIBLE_REGIONS.contains(&name.as_str()) {
             window.hidden.insert(name.clone());
         }
     }
@@ -792,7 +793,7 @@ pub(crate) fn apply_stage_context(
 
     let target = stage_instructions_target(window);
     if let Some(region) = window.regions.iter_mut().find(|r| r.name == target) {
-        if target == crate::spec::layout::STAGE_INSTRUCTIONS_REGION {
+        if target == crate::spec::graph::STAGE_INSTRUCTIONS_REGION {
             // The whole region is ours, so the previous stage's prompt goes by
             // emptying it. The fallback below cannot do that - it shares a
             // region with the author's own content - and has to identify its

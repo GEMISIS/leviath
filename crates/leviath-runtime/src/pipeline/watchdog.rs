@@ -139,7 +139,7 @@ pub(crate) const STUCK_REPORT_REGION: &str = "stuck_report";
 /// stage that has to act on it.
 pub(crate) const ERROR_REPORT_REGION: &str = "error_report";
 
-/// The per-stage numbers a [`StuckConfig`](crate::spec::blueprint::StuckConfig)
+/// The per-stage numbers a [`StuckDef`](crate::spec::graph::StuckDef)
 /// is evaluated against.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StuckMetrics {

@@ -182,7 +182,7 @@ fn parse_tool_override(
     stage_name: &str,
     tool_name: &str,
     value: &toml::Value,
-    routing: &mut leviath_runtime::spec::blueprint::ToolResultRouting,
+    routing: &mut crate::old::blueprint::ToolResultRouting,
 ) -> Result<()> {
     let where_ = || format!("stage '{stage_name}': tool_routing.overrides.{tool_name}");
 
@@ -338,7 +338,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
             routing_table,
             TOOL_ROUTING_KEYS,
         )?;
-        let mut routing = leviath_runtime::spec::blueprint::ToolResultRouting::default();
+        let mut routing = crate::old::blueprint::ToolResultRouting::default();
 
         if let Some(dr) = str_of(routing_table, "default_region") {
             routing.default_region = dr.to_string();
@@ -388,7 +388,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
     // `[stages.<name>.output_routing]`: where the model's produced parts go by
     // mime type. Each key is a mime pattern and each value a region name. The
     // pattern is validated here (shape only); that the region exists is checked
-    // in `Blueprint::validate`, once every layout is known.
+    // when the run graph is validated, once every layout is known.
     if let Some(routing_table) = table_of(stage_value, "output_routing") {
         for (pattern, region_val) in routing_table {
             leviath_core::mime::MimeType::parse(pattern).map_err(|_| {
@@ -445,11 +445,11 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         if !stage
             .available_tools
             .iter()
-            .any(|t| t == leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL)
+            .any(|t| t == crate::old::blueprint::SUBMIT_OUTPUT_TOOL)
         {
             stage
                 .available_tools
-                .push(leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL.to_string());
+                .push(crate::old::blueprint::SUBMIT_OUTPUT_TOOL.to_string());
         }
         // An output stage is normally the last thing a run does, so it
         // may end the run. An author who routes onward can say
@@ -472,11 +472,11 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         && !stage
             .available_tools
             .iter()
-            .any(|t| t == leviath_runtime::spec::blueprint::FAN_OUT_TOOL)
+            .any(|t| t == crate::old::blueprint::FAN_OUT_TOOL)
     {
         stage
             .available_tools
-            .push(leviath_runtime::spec::blueprint::FAN_OUT_TOOL.to_string());
+            .push(crate::old::blueprint::FAN_OUT_TOOL.to_string());
     }
 
     // Parse allow_blocking_tools flag: says this autonomous stage means
@@ -611,11 +611,14 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         )?;
         if let Some(regions_table) = table_of(context_table, "regions") {
             let (stage_regions, stage_total) = parse_region_layout(regions_table)?;
-            stage.context_layout = Some(ContextLayout::new(stage_regions, stage_total));
+            stage.context_layout = Some(crate::old::layout::ContextLayout::new(
+                stage_regions,
+                stage_total,
+            ));
         }
         // `hide = ["sources"]`: the regions this stage leaves out of its
-        // prompt. Names are checked against the blueprint once every layout is
-        // known (`Blueprint::validate`); here only the shape is.
+        // prompt. Names are checked when the run graph is validated, once every
+        // layout is known; here only the shape is.
         if let Some(hide) = context_table.get("hide") {
             let names = hide
                 .as_array()
@@ -634,8 +637,8 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
             stage.context_hide = names;
         }
         // `reset = ["conversation"]`: the regions this stage empties on entry.
-        // Names are checked against the blueprint in `Blueprint::validate`;
-        // here only the shape is.
+        // Names are checked when the run graph is validated; here only the
+        // shape is.
         if let Some(reset) = context_table.get("reset") {
             let names = reset
                 .as_array()
@@ -731,9 +734,9 @@ pub(super) fn apply_stage_mode(
                     // it is an error rather than a fallback.
                     let pt_unattended = match str_of(pt, "unattended") {
                         None | Some("auto_approve") => {
-                            leviath_runtime::spec::blueprint::UnattendedPolicy::AutoApprove
+                            crate::old::blueprint::UnattendedPolicy::AutoApprove
                         }
-                        Some("ask") => leviath_runtime::spec::blueprint::UnattendedPolicy::Ask,
+                        Some("ask") => crate::old::blueprint::UnattendedPolicy::Ask,
                         Some(other) => {
                             return Err(Error::Other(format!(
                                 "stage '{stage_name}': interaction point '{pt_name}' \
@@ -744,13 +747,11 @@ pub(super) fn apply_stage_mode(
                     };
                     let pt_style = match str_of(pt, "style") {
                         Some("multiple_choice") => {
-                            leviath_runtime::spec::blueprint::InteractionStyle::MultipleChoice
+                            crate::old::blueprint::InteractionStyle::MultipleChoice
                         }
-                        Some("confirm") => {
-                            leviath_runtime::spec::blueprint::InteractionStyle::Confirm
-                        }
+                        Some("confirm") => crate::old::blueprint::InteractionStyle::Confirm,
                         Some("free_text") | None => {
-                            leviath_runtime::spec::blueprint::InteractionStyle::FreeText
+                            crate::old::blueprint::InteractionStyle::FreeText
                         }
                         // Its neighbour `unattended` has always rejected an
                         // unknown value; this arm quietly turned a mistyped
@@ -811,7 +812,7 @@ pub(super) fn apply_stage_mode(
                     // document: document_region = "plan"
                     let pt_document_region: Option<String> =
                         str_of(pt, "document_region").map(|s| s.to_string());
-                    points.push(leviath_runtime::spec::blueprint::InteractionPoint {
+                    points.push(crate::old::blueprint::InteractionPoint {
                         name: pt_name,
                         prompt: pt_prompt,
                         required: pt_required,
@@ -835,10 +836,8 @@ pub(super) fn apply_stage_mode(
                     .map(|s| s.to_string())
             };
             let on_worker_failure = match str_of(stage_value, "on_worker_failure") {
-                Some("fail_all") => leviath_runtime::spec::blueprint::WorkerFailurePolicy::FailAll,
-                Some("continue") | None => {
-                    leviath_runtime::spec::blueprint::WorkerFailurePolicy::Continue
-                }
+                Some("fail_all") => crate::old::blueprint::WorkerFailurePolicy::FailAll,
+                Some("continue") | None => crate::old::blueprint::WorkerFailurePolicy::Continue,
                 // Refused rather than folded into continue: a misspelled
                 // `fail_all` would let a fan-out swallow every worker failure -
                 // the opposite of what was written, and invisible in a run that
@@ -850,13 +849,13 @@ pub(super) fn apply_stage_mode(
                     )));
                 }
             };
-            let config = leviath_runtime::spec::blueprint::FanOutConfig {
+            let config = crate::old::blueprint::FanOutConfig {
                 worker_agent: str_field("worker_agent"),
                 worker_stage: str_field("worker_stage"),
                 worker_query: str_field("worker_query"),
                 merge_stage: str_field("merge_stage"),
                 max_workers: fan_out_number(stage_value, stage_name, "max_workers", "unlimited")?
-                    .unwrap_or(leviath_runtime::spec::blueprint::DEFAULT_MAX_WORKERS),
+                    .unwrap_or(crate::old::blueprint::DEFAULT_MAX_WORKERS),
                 on_worker_failure,
                 split_prompt: str_field("split_prompt").unwrap_or_default(),
                 results_region: str_field("results_region"),
@@ -888,7 +887,7 @@ pub(super) fn apply_stage_mode(
     })
 }
 
-/// Parse `[stages.<name>.hooks]` into the stage's [`StageHooks`].
+/// Parse `[stages.<name>.hooks]` into the stage's `StageHooks`.
 ///
 /// An unknown key is a hard error rather than an ignored line. A blueprint that
 /// writes `on_stage_entry` (or a hook this build does not implement yet) has
@@ -897,8 +896,8 @@ pub(super) fn apply_stage_mode(
 pub(super) fn parse_stage_hooks(
     stage_name: &str,
     table: &toml::value::Table,
-) -> Result<leviath_runtime::spec::blueprint::StageHooks> {
-    let mut hooks = leviath_runtime::spec::blueprint::StageHooks::default();
+) -> Result<crate::old::blueprint::StageHooks> {
+    let mut hooks = crate::old::blueprint::StageHooks::default();
     for (key, value) in table {
         let Some(path) = value.as_str() else {
             return Err(Error::Other(format!(
