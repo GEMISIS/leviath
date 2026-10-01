@@ -30,12 +30,10 @@ flowchart LR
 Add a stage with `mode = "output"`:
 
 ```toml
-[stages.review.transitions.summary]
-hint = "The work is done"
-
-[stages.summary]
+[[graph.stages]]
+name = "summary"
 mode = "output"
-model = { models = ["claude-sonnet-5"] }
+model = { models = [{ model = "claude-sonnet-5" }] }
 description = "Say what changed"
 max_iterations = 8
 system_prompt = """
@@ -43,8 +41,14 @@ Say what you changed, for whoever asked for it. List the files you touched and
 what each change does. Then anything they need to know before merging.
 """
 
-[stages.summary.transitions]
+[[graph.edges]]
+name = "summary"
+from = "review"
+to = "summary"
+hint = "The work is done"
 ```
+
+No edge leaves `summary`, so the run ends there.
 
 Then read it back:
 
@@ -63,7 +67,7 @@ You name a shape, and the model produces it. There is no fixed list: the label r
 nothing converts between formats.
 
 ```toml
-[stages.summary.output]
+[graph.stages.output]   # on the summary stage, after its [[graph.stages]] entry
 format = "a2ui"
 instructions = "One card per finding, highest severity first."
 example = """
@@ -135,17 +139,18 @@ its best attempt, not an error.
 
 ### From the API
 
-`POST /api/agents` takes the same three fields:
+`POST /api/runs` takes the same fields in the request's `output` (`format`, `instructions`,
+`example`, `schema`):
 
 ```bash
-curl -X POST http://localhost:3000/api/agents \
+curl -X POST http://localhost:3000/api/runs \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"blueprint":"reviewer","task":"review the auth module",
-       "output_format":"xml",
-       "output_instructions":"One <finding> element per issue."}'
+  -d '{"source":{"blueprint":{"name":"reviewer"}},
+       "inputs":{"task":"review the auth module"},
+       "output":{"format":"xml","instructions":"One <finding> element per issue."}}'
 ```
 
-Then `GET /api/agents/{id}/result`, where `final_output` carries the answer and its label. The
+Then `GET /api/runs/{id}/result`, where `final_output` carries the answer and its label. The
 completion webhook carries the same, so a receiver needs no second request.
 
 ### From a host over ACP
@@ -159,6 +164,8 @@ lev agent-client --agent reviewer --output-format xml \
 ```
 
 The answer arrives as the turn's closing `agent_message_chunk`, set apart from the streamed output.
+A host that starts runs through the `_leviath/spawn` extension method sends a whole spawn request,
+so it sets `output` there instead.
 
 ### From a parent agent
 
@@ -169,16 +176,15 @@ Three levels combine, and the later one wins per field.
 
 ```mermaid
 flowchart LR
-  A["[agent.output]<br/>the blueprint's default"] --> B["[stages.X.output]<br/>this stage's override"]
-  B --> C["the launch request<br/>lev run, REST, spawn_agent"]
+  A["[graph.output]<br/>the blueprint's default"] --> B["a stage's output<br/>this stage's override"]
+  B --> C["the spawn request's output<br/>lev run, REST, spawn_agent"]
   C --> D["what the model is asked for"]
 ```
 
 One rule breaks that pattern on purpose. If you name a `format` other than the one the blueprint
-declares, any Rhai validator and any JSON schema it declared are retired together. A check written
-for one shape says nothing about another. The retirement is not silent: `lev run` warns on stderr,
-the REST spawn response carries a `warnings` array naming what was retired, and the daemon logs a
-line for every spawn path. Re-stating the format the blueprint already declares retires nothing.
+declares, any Rhai validator, JSON schema and declared artifacts are retired together. A check
+written for one shape says nothing about another. `lev run` warns on stderr, naming what was
+retired. Re-stating the format the blueprint already declares retires nothing.
 Supply your own schema alongside your format when you want the answer validated.
 
 ### It outranks the stage's prompt
@@ -200,14 +206,14 @@ model to disregard what the stage prompt asked it to *do*.
 ## Checking the shape, with a JSON Schema
 
 ```toml
-[stages.summary.output]
+[graph.stages.output]
 format = "json"
 
-[stages.summary.output.schema]
+[graph.stages.output.schema]
 type = "object"
 required = ["summary", "files_changed"]
 
-[stages.summary.output.schema.properties]
+[graph.stages.output.schema.properties]
 summary = { type = "string" }
 files_changed = { type = "array", items = { type = "string" } }
 ```
@@ -254,7 +260,7 @@ precedence over the nudge, and the run records both flags, `max_iterations_hit` 
 |---|---|
 | `lev result <run-id>` | The whole answer, and the files it named, each with its type, size and hash. `--raw` for pipelines |
 | `lev ps --json` | `has_final_output` only. Fetch the answer itself with `lev result` |
-| `GET /api/agents/{id}/result` | `final_output`, beside the existing `output` log tail |
+| `GET /api/runs/{id}/result` | `final_output`, beside the `output` log tail |
 | Completion webhook | `final_output`. The `result` field is the run's error, as it always was |
 | `wait_for_agent`, `check_agent` | The child's answer, with its status |
 | Fan-out merge stage | Each worker's answer, in the consolidated report |
@@ -270,9 +276,9 @@ because a worker whose final action was a tool call has no trailing prose. Set `
 worker stage when the merge depends on its answer.
 
 ```toml
-[stages.fix_worker]
-mode = "autonomous"
-available_tools = ["read_file", "edit_file", "shell", "submit_output"]
+[[graph.stages]]
+name = "fix_worker"
+tools = ["read_file", "edit_file", "shell", "submit_output"]
 allow_as_worker = true
 require_output = true
 ```
@@ -307,7 +313,7 @@ else, and reporting those runs as empty was wrong.
 
 With [taint tracking](/docs/security#taint-tracking-experimental) on, `submit_output` counts as a
 way off the machine, the same as `shell` or `web_fetch`. The answer is what `lev serve` hands to
-anyone who reads `GET /api/agents/{id}/result`, and what the dashboard shows.
+anyone who reads `GET /api/runs/{id}/result`, and what the dashboard shows.
 
 So a stage that read a Private region and then submits it meets the gate before the answer is
 recorded. Your policy decides what happens: allow it, deny it, or ask. A blocked submission is not
@@ -316,7 +322,7 @@ tracking is off unless you turn it on, so this changes nothing for an install th
 
 An unattended run is the exception. `--yolo` waives the gate along with everything else it stops
 asking about, so the submission goes through and the answer, private regions and all, is served from
-`GET /api/agents/{id}/result`. The waiver is recorded rather than silent: the run's
+`GET /api/runs/{id}/result`. The waiver is recorded rather than silent: the run's
 `stages/<n>/taint_audit.json` carries the block and the `YoloAutoApprove` that overrode it. See
 [when there is nobody to ask](/docs/security#when-there-is-nobody-to-ask) for what every other
 unattended shape does, which is not the same thing.
@@ -341,7 +347,7 @@ flowchart LR
 | | Holds | Size | Read it with |
 |---|---|---|---|
 | Answer | The findings, the summary, the verdict | One model response | `lev result` |
-| Artifact | The dataset, the long report, the generated file | Unbounded | `GET /api/agents/{id}/files?path=` |
+| Artifact | The dataset, the long report, the generated file | Unbounded | `GET /api/runs/{id}/files?path=` |
 
 A file larger than one response is read a window at a time. Pass `offset`, then continue from the
 `next_offset` each response carries until it comes back null. Concatenating the windows gives you the
@@ -380,8 +386,8 @@ nothing is written. If it holds something else, it is left alone, the part is wr
 model is told about. To replace the file instead, set `overwrite_artifacts`:
 
 ```toml
-[agent.output]
-overwrite_artifacts = true
+[graph]
+output = { overwrite_artifacts = true }
 ```
 
 It can go on a stage's output table too, and a caller's requested shape can set it. When no level
@@ -391,15 +397,19 @@ unless you turn it on.
 A stage can say up front which files it hands back:
 
 ```toml
-[[stages.assemble.output.artifacts]]
+[[graph.stages]]
+name = "assemble"
+mode = "output"
+
+[[graph.stages.output.artifacts]]
 name = "final"
-type = "video/mp4"
+mime_type = "video/mp4"
 required = true
 description = "the finished cut"
 
-[[stages.assemble.output.artifacts]]
+[[graph.stages.output.artifacts]]
 name = "shots"
-type = "text/*"
+mime_type = "text/*"
 ```
 
 The model is told to submit each by name. A `required` one that is missing is refused back to the
@@ -408,8 +418,8 @@ as a `video/*` that turns out to be a PNG. That refusal names both types. Declar
 like the rest of the shape: the nearest non-empty list wins whole, and a caller who reshapes the
 output with `--output-format` retires them with the schema and validator.
 
-Files are what a stage hands back; what it takes is its regions' `accepts`, and
-`[stages.<name>.input]` can narrow or widen that. See [Mime](/docs/mime).
+Files are what a stage hands back; what it takes is its regions' `accepts`, and the stage's
+`input_accepts` can narrow or widen that. See [Mime](/docs/mime).
 
 ### A model that makes files answers on its own
 
@@ -420,23 +430,12 @@ the produced part into a region with `output_routing`, declare it as an artifact
 it back with no tool call and no text turn.
 
 ```toml
-[stages.build]
+[[graph.stages]]
+name = "build"
 mode = "output"
-
-[stages.build.model]
-allow_user_default = false
-
-[[stages.build.model.models]]
-provider = "meshy"
-model = "image-to-3d"
-
-[stages.build.output_routing]
-"model/*" = "model"
-
-[[stages.build.output.artifacts]]
-name = "model"
-type = "model/gltf-binary"
-required = true
+model = { models = [{ provider = "meshy", model = "image-to-3d" }], allow_user_default = false }
+output_routing = { "model/*" = "model" }
+output = { artifacts = [{ name = "model", mime_type = "model/gltf-binary", required = true }] }
 ```
 
 When the stage finishes, the parts it routed are matched against the artifacts it declared, by type
@@ -452,21 +451,16 @@ Image, video and speech models work the same way. A stage on xAI's video model h
 MP4, one on `grok-tts` an audio file, and one on Meta's image model a picture:
 
 ```toml
-[stages.clip]
-mode = "output"
-
-[stages.clip.model]
-models = ["xai/grok-imagine-video"]
-parameters = { duration = 6, resolution = "720p" }
-request_timeout_secs = 900
-
-[stages.clip.output_routing]
-"video/*" = "clip"
-
-[[stages.clip.output.artifacts]]
+[[graph.stages]]
 name = "clip"
-type = "video/mp4"
-required = true
+mode = "output"
+output_routing = { "video/*" = "clip" }
+output = { artifacts = [{ name = "clip", mime_type = "video/mp4", required = true }] }
+
+[graph.stages.model]
+models = [{ provider = "xai", model = "grok-imagine-video" }]
+params = { extra = { duration = 6, resolution = "720p" } }
+request_timeout_secs = 900
 ```
 
 A stage whose routing or format names an image, video or audio type, and whose model answers with

@@ -24,6 +24,10 @@ lev run coder --yolo=careful      # run under the profile named "careful"
 The equals sign is required. `lev run --yolo careful` still means "run the agent `careful`
 under bare `--yolo`", so the name has to attach to the flag.
 
+A spawn request names a profile in its launch policy, as `launch.unattended = { profile =
+"careful" }`, and bare `--yolo` is `launch.unattended = "all"`. See
+[launch policy](/docs/starting-a-run#launch-policy).
+
 > [!TIP]
 > Want a walkthrough rather than a field list? See
 > [Write your first yolo profile](/docs/first-yolo-profile).
@@ -188,7 +192,9 @@ run only.
 
 A name the file does not have fails the spawn before the daemon is asked, and lists the names
 the file does have. Sub-agents, fan-out workers and recovered runs inherit the profile by name,
-so a child of a `careful` run is `careful` rather than bare `--yolo`.
+so a child of a `careful` run is `careful` rather than bare `--yolo`. A child never runs less
+attended than its parent: see
+[a child never gets more than its parent](/docs/sub-agents#a-child-never-gets-more-than-its-parent).
 
 ## What a profile can never loosen
 

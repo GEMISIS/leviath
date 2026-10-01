@@ -39,7 +39,7 @@ A small screen asks what the problem was about. For a run, it asks which one. Th
 | `agents/` | Every installed blueprint |
 | `tools/`, `providers/` | Your drop-in Rhai scripts |
 | `logs/` | `daemon.log`, `daemon.stdio.log`, each `serve-<name>.log` and `dashboard.log`, with their rolled copies |
-| `runs/<id>/` | The run you picked and its sub-agent runs: metadata, stages, context, journal, media, blueprint |
+| `runs/<id>/` | The run you picked and its sub-agent runs: each run file (`run.lvr`), stage logs and media |
 | `blueprint/` | The blueprint you were building, with a check that says whether it parses |
 | `setup/imports.json` | Which other tools' config files exist on this machine, by path only |
 
@@ -82,7 +82,7 @@ stdout that is not a terminal skips it too, so `lev rage` works from a script.
 |---|---|
 | `--about <setup\|run\|agent\|other>` | What the problem was about. Answers the first question |
 | `--run <RUN_ID>` | The run it happened in: an exact id, or a prefix only one run starts with. Implies `--about run` |
-| `--agent <PATH>` | The blueprint you were building: its directory or its `agent.leviath`. Implies `--about agent` |
+| `--agent <PATH>` | The blueprint you were building: its directory or its `agent.toml`. Implies `--about agent` |
 | `--note <TEXT>` | What happened, in your words. Lands at the top of the zip's README |
 | `-o`, `--output <PATH>` | Where to write the zip. Default: `./leviath-rage-<timestamp>.zip` |
 | `--no-blobs` | Leave a run's stored media parts out |

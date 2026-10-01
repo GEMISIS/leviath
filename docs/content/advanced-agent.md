@@ -8,8 +8,8 @@ order: 6
 
 # Build an advanced agent
 
-[Build your first agent](/docs/first-agent) wrote an agent whose stages pass text to each other.
-This page builds one whose stages pass pictures and video. You give it a one-line idea. A text
+[Build your first agent](/docs/first-agent) wrote a blueprint whose stages pass text to each other.
+This page builds one whose stages pass pictures and video. You give each run a one-line idea. A text
 model writes a prompt for concept art, and an image model paints it. A model that can see looks at
 the painting and plans a shot to match, and a video model films that shot. What you get back is a
 short film whose look came from the painting, not only from your words.
@@ -43,63 +43,77 @@ lev create idea-to-film
 cd idea-to-film
 ```
 
-Open `agent.leviath`, delete what `lev create` wrote, and start with the header:
+Open `agent.toml`, delete what `lev create` wrote, and start with the header:
 
 ```toml
-[agent]
+[blueprint]
 name = "idea-to-film"
 version = "0.1.0"
 description = "Turn a one-line idea into concept art and a short film"
-entry_stage = "pitch"
+
+[graph]
+entry = "pitch"
 ```
 
 ## Step 2: regions for words, a picture and a film
 
-In the first agent every region held text. A region can hold any kind of file: an entry is a list
-of **parts**, and a part is text or a stored file with a mime type. `accepts` says which types a
-region takes, so a write of the wrong kind is refused with the reason. See
+In the first blueprint every region held text. A region can hold any kind of file: an entry is a
+list of **parts**, and a part is text or a stored file with a mime type. `accepts` says which types
+a region takes, so a write of the wrong kind is refused with the reason. See
 [More than text](/docs/mime).
 
 ```toml
-# The idea, as the task you run the agent with.
-[context.regions.idea]
-kind = "pinned"
-seed = "task"
+# The idea, as the task you start the run with.
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
 required = true
+binds = [{ region = "idea" }]
+
+[graph.layout]
+total_budget_tokens = 0
+
+# Where the idea lands.
+[[graph.layout.regions]]
+name = "idea"
+kind = "pinned"
 budget = "5%"
+required = true
 
 # The prompt the pitch stage writes for the concept art.
-[context.regions.art_prompt]
+[[graph.layout.regions]]
+name = "art_prompt"
 kind = "pinned"
 budget = "5%"
 
 # The concept art: one picture, the latest one drawn.
-[context.regions.concept_art]
-kind = "sliding_window"
-max_items = 1
-max_tokens = 4000
-budget = "30%"
+[[graph.layout.regions]]
+name = "concept_art"
+kind = { kind = "sliding_window", max_items = 1 }
+budget = { percent = "30%", max = 4000 }
 accepts = ["image/*"]
 
 # The shot the director writes after looking at the art.
-[context.regions.shot]
+[[graph.layout.regions]]
+name = "shot"
 kind = "pinned"
 budget = "5%"
 
 # The finished film.
-[context.regions.film]
-kind = "sliding_window"
-max_items = 1
-max_tokens = 2000
-budget = "10%"
+[[graph.layout.regions]]
+name = "film"
+kind = { kind = "sliding_window", max_items = 1 }
+budget = { percent = "10%", max = 2000 }
 accepts = ["video/*"]
 
-[context.regions.conversation]
-kind = "sliding_window"
-max_items = 20
-max_tokens = 8000
-budget = "20%"
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = { percent = "20%", max = 8000 }
 ```
+
+The `task` input is what `--task` fills, and `binds` places it in the `idea` region rather than one
+called `task`. An input's name is what the caller types; the region is where the run keeps it.
 
 The picture and the film are not copied into every request. Each file is stored once in the run, by
 its hash, and a region holds a reference to it. A model that can take the file is sent its bytes; a
@@ -111,11 +125,13 @@ The first stage is a text model with one tool, `context_write`, which saves text
 That is how a stage hands words to a later stage without handing over its whole conversation.
 
 ```toml
-[stages.pitch]
-mode = "autonomous"
+[[graph.stages]]
+name = "pitch"
 description = "Turn the idea into a prompt for one piece of concept art"
-available_tools = ["context_write"]
+tools = ["context_write"]
 max_iterations = 6
+hide = ["concept_art", "shot", "film"]
+model = { models = [{ provider = "openai", model = "gpt-5.4-mini" }], allow_user_default = false }
 system_prompt = """
 You are the art lead on a short film. Read the idea and write one prompt for a
 single piece of concept art: the subject, the setting, the light and the style,
@@ -123,17 +139,10 @@ in two or three sentences. Save it with context_write to the region
 "art_prompt", then reply "done".
 """
 
-[stages.pitch.context]
-hide = ["concept_art", "shot", "film"]
-
-[stages.pitch.model]
-allow_user_default = false
-
-[[stages.pitch.model.models]]
-provider = "openai"
-model = "gpt-5.4-mini"
-
-[stages.pitch.transitions.draw]
+[[graph.edges]]
+name = "draw"
+from = "pitch"
+to = "draw"
 hint = "Once the art prompt is saved."
 gate = { require_region_updated = "art_prompt", message = "Save the art prompt to the art_prompt region first.", max_attempts = 3 }
 ```
@@ -150,35 +159,28 @@ the stage can see: the regions it has not hidden, and its conversation. So the s
 everything but the art prompt, and starts with an empty conversation:
 
 ```toml
-[stages.draw]
-mode = "autonomous"
+[[graph.stages]]
+name = "draw"
 description = "Paint the concept art from the art prompt"
 max_iterations = 3
-
-[stages.draw.context]
 hide = ["idea", "shot", "concept_art", "film"]
 reset = ["conversation"]
+output_routing = { "image/*" = "concept_art" }
 
-[stages.draw.model]
+[graph.stages.model]
+models = [{ provider = "openai", model = "gpt-image-1-mini" }]
 allow_user_default = false
+params = { extra = { size = "1536x1024", quality = "medium" } }
 
-[[stages.draw.model.models]]
-provider = "openai"
-model = "gpt-image-1-mini"
-
-[stages.draw.model.parameters]
-size = "1536x1024"
-quality = "medium"
-
-[stages.draw.output_routing]
-"image/*" = "concept_art"
-
-[stages.draw.transitions.direct]
+[[graph.edges]]
+name = "direct"
+from = "draw"
+to = "direct"
 hint = "Once the concept art is drawn."
 gate = { require_region_updated = "concept_art", message = "Draw the concept art first.", max_attempts = 3 }
 ```
 
-`[stages.draw.model.parameters]` is sent to the image route as written; each model's parameters are
+`params.extra` is sent to the image route as written; each model's parameters are
 listed in [Image, video and audio models](/docs/providers#image-video-and-audio-models).
 `output_routing` is the other half of the hand-off: the picture the model makes goes to
 `concept_art`, by its mime type, instead of into the conversation.
@@ -189,11 +191,14 @@ listed in [Image, video and audio models](/docs/providers#image-video-and-audio-
 itself. The director looks at it beside the idea and writes the shot:
 
 ```toml
-[stages.direct]
-mode = "autonomous"
+[[graph.stages]]
+name = "direct"
 description = "Look at the concept art and write the shot to film"
-available_tools = ["context_write"]
+tools = ["context_write"]
 max_iterations = 6
+hide = ["art_prompt", "shot", "film"]
+reset = ["conversation"]
+model = { models = [{ provider = "openai", model = "gpt-5.4-mini" }], allow_user_default = false }
 system_prompt = """
 You are the director. Look at the concept art and the idea, and write the one
 shot to film: what the camera sees, how it moves, and what happens, in four
@@ -202,18 +207,10 @@ subject. Two or three sentences. Save it with context_write to the region
 "shot", then reply "done".
 """
 
-[stages.direct.context]
-hide = ["art_prompt", "shot", "film"]
-reset = ["conversation"]
-
-[stages.direct.model]
-allow_user_default = false
-
-[[stages.direct.model.models]]
-provider = "openai"
-model = "gpt-5.4-mini"
-
-[stages.direct.transitions.film]
+[[graph.edges]]
+name = "film"
+from = "direct"
+to = "film"
 hint = "Once the shot is saved."
 gate = { require_region_updated = "shot", message = "Save the shot to the shot region first.", max_attempts = 3 }
 ```
@@ -229,34 +226,21 @@ and waited for, so it gets a long `request_timeout_secs`. The film is routed int
 declared as an artifact, so the run hands it back without any `submit_output` call:
 
 ```toml
-[stages.film]
+[[graph.stages]]
+name = "film"
 mode = "output"
 description = "Film the shot"
 max_iterations = 2
-
-[stages.film.context]
 hide = ["idea", "art_prompt", "concept_art", "film"]
 reset = ["conversation"]
+output_routing = { "video/*" = "film" }
+output = { artifacts = [{ name = "film", mime_type = "video/mp4", required = true }] }
 
-[stages.film.model]
+[graph.stages.model]
+models = [{ provider = "openai", model = "sora-2" }]
 allow_user_default = false
 request_timeout_secs = 900
-
-[[stages.film.model.models]]
-provider = "openai"
-model = "sora-2"
-
-[stages.film.model.parameters]
-seconds = 4
-size = "1280x720"
-
-[stages.film.output_routing]
-"video/*" = "film"
-
-[[stages.film.output.artifacts]]
-name = "film"
-type = "video/mp4"
-required = true
+params = { extra = { seconds = 4, size = "1280x720" } }
 ```
 
 Why is the painting hidden here? `sora-2` can start from an image, but only one exactly the size of
@@ -271,8 +255,17 @@ stage and the film starts from the painting itself.
 lev validate .
 ```
 
-A clean blueprint says `✓ Blueprint 'idea-to-film' is valid.` and lists the model each stage would
-use on your install. Then run it:
+A clean blueprint says so, and lists its stages and the inputs a run takes:
+
+```console
+✓ idea-to-film 0.1.0 is valid
+  stages: pitch, draw, direct, film
+  inputs:
+    task: text, required
+```
+
+Add `--check` to the run command below to see the model each stage would use on your install,
+without starting anything. Then run it:
 
 ```bash
 lev run . --yolo --task "A lighthouse keeper's cat who guards the light on stormy nights"
@@ -295,51 +288,63 @@ eyes steady in the rain..."*. The film that came back is that cat, in that light
 ## The whole file
 
 ```toml
-[agent]
+[blueprint]
 name = "idea-to-film"
 version = "0.1.0"
 description = "Turn a one-line idea into concept art and a short film"
-entry_stage = "pitch"
 
-[context.regions.idea]
-kind = "pinned"
-seed = "task"
+[graph]
+entry = "pitch"
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
 required = true
-budget = "5%"
+binds = [{ region = "idea" }]
 
-[context.regions.art_prompt]
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "idea"
+kind = "pinned"
+budget = "5%"
+required = true
+
+[[graph.layout.regions]]
+name = "art_prompt"
 kind = "pinned"
 budget = "5%"
 
-[context.regions.concept_art]
-kind = "sliding_window"
-max_items = 1
-max_tokens = 4000
-budget = "30%"
+[[graph.layout.regions]]
+name = "concept_art"
+kind = { kind = "sliding_window", max_items = 1 }
+budget = { percent = "30%", max = 4000 }
 accepts = ["image/*"]
 
-[context.regions.shot]
+[[graph.layout.regions]]
+name = "shot"
 kind = "pinned"
 budget = "5%"
 
-[context.regions.film]
-kind = "sliding_window"
-max_items = 1
-max_tokens = 2000
-budget = "10%"
+[[graph.layout.regions]]
+name = "film"
+kind = { kind = "sliding_window", max_items = 1 }
+budget = { percent = "10%", max = 2000 }
 accepts = ["video/*"]
 
-[context.regions.conversation]
-kind = "sliding_window"
-max_items = 20
-max_tokens = 8000
-budget = "20%"
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = { percent = "20%", max = 8000 }
 
-[stages.pitch]
-mode = "autonomous"
+[[graph.stages]]
+name = "pitch"
 description = "Turn the idea into a prompt for one piece of concept art"
-available_tools = ["context_write"]
+tools = ["context_write"]
 max_iterations = 6
+hide = ["concept_art", "shot", "film"]
+model = { models = [{ provider = "openai", model = "gpt-5.4-mini" }], allow_user_default = false }
 system_prompt = """
 You are the art lead on a short film. Read the idea and write one prompt for a
 single piece of concept art: the subject, the setting, the light and the style,
@@ -347,52 +352,41 @@ in two or three sentences. Save it with context_write to the region
 "art_prompt", then reply "done".
 """
 
-[stages.pitch.context]
-hide = ["concept_art", "shot", "film"]
-
-[stages.pitch.model]
-allow_user_default = false
-
-[[stages.pitch.model.models]]
-provider = "openai"
-model = "gpt-5.4-mini"
-
-[stages.pitch.transitions.draw]
+[[graph.edges]]
+name = "draw"
+from = "pitch"
+to = "draw"
 hint = "Once the art prompt is saved."
 gate = { require_region_updated = "art_prompt", message = "Save the art prompt to the art_prompt region first.", max_attempts = 3 }
 
-[stages.draw]
-mode = "autonomous"
+[[graph.stages]]
+name = "draw"
 description = "Paint the concept art from the art prompt"
 max_iterations = 3
-
-[stages.draw.context]
 hide = ["idea", "shot", "concept_art", "film"]
 reset = ["conversation"]
+output_routing = { "image/*" = "concept_art" }
 
-[stages.draw.model]
+[graph.stages.model]
+models = [{ provider = "openai", model = "gpt-image-1-mini" }]
 allow_user_default = false
+params = { extra = { size = "1536x1024", quality = "medium" } }
 
-[[stages.draw.model.models]]
-provider = "openai"
-model = "gpt-image-1-mini"
-
-[stages.draw.model.parameters]
-size = "1536x1024"
-quality = "medium"
-
-[stages.draw.output_routing]
-"image/*" = "concept_art"
-
-[stages.draw.transitions.direct]
+[[graph.edges]]
+name = "direct"
+from = "draw"
+to = "direct"
 hint = "Once the concept art is drawn."
 gate = { require_region_updated = "concept_art", message = "Draw the concept art first.", max_attempts = 3 }
 
-[stages.direct]
-mode = "autonomous"
+[[graph.stages]]
+name = "direct"
 description = "Look at the concept art and write the shot to film"
-available_tools = ["context_write"]
+tools = ["context_write"]
 max_iterations = 6
+hide = ["art_prompt", "shot", "film"]
+reset = ["conversation"]
+model = { models = [{ provider = "openai", model = "gpt-5.4-mini" }], allow_user_default = false }
 system_prompt = """
 You are the director. Look at the concept art and the idea, and write the one
 shot to film: what the camera sees, how it moves, and what happens, in four
@@ -401,49 +395,28 @@ subject. Two or three sentences. Save it with context_write to the region
 "shot", then reply "done".
 """
 
-[stages.direct.context]
-hide = ["art_prompt", "shot", "film"]
-reset = ["conversation"]
-
-[stages.direct.model]
-allow_user_default = false
-
-[[stages.direct.model.models]]
-provider = "openai"
-model = "gpt-5.4-mini"
-
-[stages.direct.transitions.film]
+[[graph.edges]]
+name = "film"
+from = "direct"
+to = "film"
 hint = "Once the shot is saved."
 gate = { require_region_updated = "shot", message = "Save the shot to the shot region first.", max_attempts = 3 }
 
-[stages.film]
+[[graph.stages]]
+name = "film"
 mode = "output"
 description = "Film the shot"
 max_iterations = 2
-
-[stages.film.context]
 hide = ["idea", "art_prompt", "concept_art", "film"]
 reset = ["conversation"]
+output_routing = { "video/*" = "film" }
+output = { artifacts = [{ name = "film", mime_type = "video/mp4", required = true }] }
 
-[stages.film.model]
+[graph.stages.model]
+models = [{ provider = "openai", model = "sora-2" }]
 allow_user_default = false
 request_timeout_secs = 900
-
-[[stages.film.model.models]]
-provider = "openai"
-model = "sora-2"
-
-[stages.film.model.parameters]
-seconds = 4
-size = "1280x720"
-
-[stages.film.output_routing]
-"video/*" = "film"
-
-[[stages.film.output.artifacts]]
-name = "film"
-type = "video/mp4"
-required = true
+params = { extra = { seconds = 4, size = "1280x720" } }
 ```
 
 ## Make it yours
@@ -456,7 +429,7 @@ required = true
 - **Mix providers.** Nothing ties the stages to one vendor. Paint with `gemini-3.1-flash-image` or
   a Stability model on Bedrock, and film with `grok-imagine-video`; list more than one model on a
   stage and the first one you have a key for is used.
-- **Choose between drafts.** Raise `max_items` on `concept_art`, set the draw model's `n` to 3, and
+- **Choose between drafts.** Raise `max_items` on `concept_art`, add `n = 3` to the draw stage's `params.extra`, and
   give `direct` the job of picking the best one.
 
 ## Where to go next

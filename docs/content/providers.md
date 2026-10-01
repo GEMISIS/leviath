@@ -121,13 +121,14 @@ The rest of the list is kept, not discarded. If the provider in use stops being 
 through a run, the stage moves to the next entry and carries on rather than failing:
 
 ```toml
-[[stages.analyze.model.models]]
-provider = "openrouter"
-model    = "deepseek/deepseek-v4-flash"
+[[graph.stages]]
+name = "analyze"
 
-[[stages.analyze.model.models]]
-provider = "anthropic"
-model    = "claude-sonnet-5"
+[graph.stages.model]
+models = [
+    { provider = "openrouter", model = "deepseek/deepseek-v4-flash" },
+    { provider = "anthropic", model = "claude-sonnet-5" },
+]
 ```
 
 "Stops being usable" is narrow. The account is out of credits, the key was rejected or is not
@@ -432,8 +433,9 @@ sentences waits through several hundred tokens of deliberation first.
 of the stage's parameters for you:
 
 ```toml
-[stages.classify.model.parameters]
-think = false
+[[graph.stages]]
+name = "classify"
+model = { models = [{ provider = "ollama", model = "qwen3.5:9b" }], params = { extra = { think = false } } }
 ```
 
 Left unset, nothing is sent and the model does whatever it does by default. Set it per stage, not
@@ -627,26 +629,34 @@ bundled sprite-to-3d hands back the unrigged model when that happens.
 A stage's texture prompt, text prompt, or animation action comes from the text of a visible region.
 Text in the conversation comes first. When there is none, the pinned regions the stage sees answer
 instead (the `task` region a caller fills, say). A stage can also pin the action or texture prompt
-in `[stages.<name>.model.parameters]` as `action` or `texture_prompt`, which wins over any region
+in its model's `params.extra` as `action` or `texture_prompt`, which wins over any region
 text. `text-to-3d` and `animate` each run more than one Meshy job in turn (a preview then a refine;
 a rig, a library lookup, then the animation) under one `request_timeout_secs`. The action is a
 search of Meshy's animation library, and the first match is applied, so name a clip the way the
 library does (`Idle 1`, `Run`) rather than describing it.
 
 ```toml
-[context.regions]
-views = { kind = "pinned", seed = "input", accepts = ["image/*"], max_stored = 4 }
-mesh  = { kind = "hashmap", accepts = ["model/gltf-binary"] }
+[[graph.layout.regions]]
+name = "views"                      # attach the photos here: --attach front.png:views
+kind = "pinned"
+budget = "20%"
+accepts = ["image/*"]
 
-[stages.build]
-[[stages.build.model.models]]
-provider = "meshy"
-model    = "multi-image-to-3d"
-[stages.build.output_routing]
-"model/gltf-binary" = "mesh"        # hand the produced mesh to the next stage
+[[graph.layout.regions]]
+name = "mesh"
+kind = "keyed"
+budget = "10%"
+accepts = ["model/gltf-binary"]
 
-[stages.build.model.parameters]     # optional static hints, all documented Meshy fields
-ai_model         = "meshy-7"
+[[graph.stages]]
+name = "build"
+output_routing = { "model/gltf-binary" = "mesh" }   # hand the produced mesh to the next stage
+
+[graph.stages.model]
+models = [{ provider = "meshy", model = "multi-image-to-3d" }]
+
+[graph.stages.model.params.extra]   # optional static hints, all documented Meshy fields
+ai_model = "meshy-7"
 target_polycount = 30000
 texture_resolution = "4k"
 ```
@@ -654,7 +664,7 @@ texture_resolution = "4k"
 The images a stage can see become the request. A texture prompt an upstream stage wrote becomes
 the texturing hint. The produced mesh lands in the region `output_routing` names, so the next
 stage (a `rig`, say) can see it. A Meshy job runs for minutes, so give the stage a generous
-`[stages.<name>.model] request_timeout_secs`; the provider polls to completion under it.
+`model.request_timeout_secs`; the provider polls to completion under it.
 
 A generated mesh is a large file. A full-resolution GLB can run to tens of megabytes, past the
 `[mime] max_part_bytes` ceiling. That ceiling is 32 MiB when no configured provider names a larger
@@ -788,24 +798,15 @@ refuse anything but the prompt. Give the stage an `output_routing` for what the 
 artifact to hand it back:
 
 ```toml
-[stages.picture]
-mode = "output"
-
-[[stages.picture.model.models]]
-provider = "openai"
-model = "gpt-image-2"
-
-[stages.picture.model.parameters]
-size = "1536x1024"
-quality = "medium"
-
-[stages.picture.output_routing]
-"image/*" = "pictures"
-
-[[stages.picture.output.artifacts]]
+[[graph.stages]]
 name = "picture"
-type = "image/png"
-required = true
+mode = "output"
+output_routing = { "image/*" = "pictures" }
+output = { artifacts = [{ name = "picture", mime_type = "image/png", required = true }] }
+
+[graph.stages.model]
+models = [{ provider = "openai", model = "gpt-image-2" }]
+params = { extra = { size = "1536x1024", quality = "medium" } }
 ```
 
 A video is made in the background at the vendor and waited for. Give a video stage a generous
@@ -901,11 +902,10 @@ per second of video, per million characters, per hour of audio. A call that repo
 is billed at that instead.
 
 ```toml
-[stages.picture.model]
-models = ["xai/grok-imagine-image"]
-parameters = { aspect_ratio = "16:9" }
-[stages.picture.output_routing]
-"image/*" = "pictures"
+[[graph.stages]]
+name = "picture"
+output_routing = { "image/*" = "pictures" }
+model = { models = [{ provider = "xai", model = "grok-imagine-image" }], params = { extra = { aspect_ratio = "16:9" } } }
 ```
 
 ## Grok (SuperGrok or X Premium+)

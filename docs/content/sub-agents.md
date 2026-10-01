@@ -36,8 +36,8 @@ are no extra processes to start and nothing has to be serialized between a paren
 | One sub-agent | [`spawn_agent`](#one-sub-agent) | Its answer, or its id if you did not wait |
 | Many at once | [`fan_out`](#fan-out) | One merged report covering all of them |
 
-Both are ordinary tools: a stage grants them in `available_tools` and the agent calls them when it
-decides it needs help. `fan_out` is also what a `mode = "fan_out"` stage runs, which is covered
+Both are ordinary tools: a stage grants them in `tools` and the agent calls them when it
+decides it needs help. `fan_out` is also what a fan-out stage runs, which is covered
 below. The stage is sugar over the same tool, not a separate mechanism.
 
 ## One sub-agent
@@ -57,7 +57,7 @@ itself. `inputs` carries the values the blueprint declares, each checked against
 
 A graph the model wrote can declare its own seed commands and MCP servers, so it answers to the
 `spawn_raw_graph` permission as well as `spawn_agent`'s. That permission defaults to `ask`; set it
-under `[tool_permissions]` like any tool.
+in `[graph.tool_permissions]`, or in your config's `[tool_permissions]`, like any tool.
 
 Four tools help an agent get a spawn right the first time, and none of them starts anything:
 
@@ -92,8 +92,8 @@ spawn_agent({
 })
 ```
 
-A stage can say what a child may be handed: `[stages.<name>.tool_accepts] spawn_agent =
-["image/*"]` refuses a `parts` entry of any other type by name. See
+A stage can say what a child may be handed: `tool_accepts = { spawn_agent = ["image/*"] }` on
+the stage refuses a `parts` entry of any other type by name. See
 [What a tool may be handed](/docs/mime#what-a-tool-may-be-handed).
 
 Each named part is read from this run's store and lands in the child's task region as a typed
@@ -103,8 +103,26 @@ by name. A child started without the file its parent meant to hand it would work
 and never know.
 
 Override with care. An `output.format` that differs from what the child's blueprint
-declares retires any Rhai validator and JSON schema it declared, since a check written for one
-shape cannot judge another. The only warning goes to the daemon log.
+declares retires any Rhai validator, JSON schema and declared artifacts, since a check written for one
+shape cannot judge another. Nothing warns the parent that this happened.
+
+### A child never gets more than its parent
+
+Every child, from `spawn_agent` or `fan_out`, starts from a spawn request with a launch policy of
+its own. Leviath narrows that policy against the parent's before the child starts:
+
+| Setting | What the child gets |
+| --- | --- |
+| `unattended` | The less trusting of the child's and the parent's |
+| `allow` | Only the tools both approve outright |
+| Depth | At most one less than the parent's |
+| Seed commands | Only when both allow them |
+
+Both tools ask for the parent's `unattended` setting, so a child of a `--yolo=careful` run runs
+under `careful`. They ask for nothing in `allow`, so a child approves no tool outright that its
+config does not. `spawn_agent`'s `max_child_depth` can ask for a shallower tree, never a
+deeper one. Fan-out workers never run seed commands, since the parent already scoped the work. See
+[launch policy](/docs/starting-a-run#launch-policy) for what each setting means.
 
 ## Fan-out
 
@@ -123,7 +141,9 @@ workspace. Every item starts one worker, they all run at once, and the call retu
 report covering all of them. Three things are worth knowing:
 
 **Each item's `inputs` are everything its worker gets.** They are the inputs the worker's blueprint
-declares, each checked against its type before any worker starts. A worker is a separate agent
+declares, each checked against its type. A worker that runs a stage of this blueprint has every
+item checked before any worker starts. A worker that runs another blueprint is checked as it starts,
+and a bad item fails that worker alone. A worker is a separate agent
 with a clean context window and never sees the caller's conversation, so a reference to "the topic
 above" reaches nobody.
 
@@ -136,18 +156,20 @@ for its workers.
 moves on. That matters most in a stage a run enters more than once, where the honest answer the
 second time is often that the work is already done.
 
-The result is routed like any other tool result, so `[stages.<name>.tool_routing]` decides where
+The result is routed like any other tool result, so the stage's `tool_routing` decides where
 it lands. It can go to a region of its own, to the conversation, or to a cheap drop for a blueprint
 whose workers write files and whose parent does not need their prose.
 
 ```toml
-[stages.investigate.tool_routing.overrides]
-fan_out = "sub_findings"
+[[graph.stages]]
+name = "investigate"
+tools = ["fan_out"]
+tool_routing = { default_region = "conversation", tool_regions = { fan_out = "sub_findings" } }
 ```
 
 ## The fan-out stage
 
-`mode = "fan_out"` is a stage whose whole job is one `fan_out` call. It grants the tool
+A fan-out stage is a stage whose whole job is one `fan_out` call. It grants the tool
 automatically. It takes its worker and caps from the blueprint rather than from the call, and
 moves to `merge_stage` once the workers are done:
 
@@ -166,23 +188,23 @@ after it. Reach for the bare tool when an agent needs helpers in the middle of d
 and should carry on afterwards with what they found.
 
 ```toml
-[stages.fix]
-mode         = "fan_out"
-worker_stage = "fix_one"    # which worker to run, see below
-split_prompt = "..."        # tells the stage what to split the work into
-merge_stage  = "verify"     # stage the parent resumes at once workers finish
-max_workers  = 8            # how many run at once, default 30; 0 is unlimited
+[[graph.stages]]
+name = "fix"
+
+[graph.stages.mode.fan_out]
+worker = { stage = "fix_one" }   # which worker to run, see below
+split_prompt = "..."             # tells the stage what to split the work into
+merge_stage = "verify"           # stage the parent resumes at once workers finish
+max_workers = 8                  # how many run at once, default 30; 0 is unlimited
 on_worker_failure = "continue"
-max_attempts = 3            # times to ask again if it never calls fan_out
+max_attempts = 3                 # times to ask again if it never calls fan_out
 ```
 
-Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-table.
+The `[graph.stages.mode.fan_out]` table is what makes the stage a fan-out stage. Its keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `worker_agent` | unset | A separate installed blueprint to run as the worker |
-| `worker_stage` | unset | A stage in *this* blueprint, which must set `allow_as_worker = true` |
-| `worker_query` | unset | A hint matched against installed agent types |
+| `worker` | required | What each item runs: `{ stage = "x" }`, `{ blueprint = { name = "x" } }`, or `{ query = "..." }` |
 | `merge_stage` | unset | Stage that reconciles worker results before the parent moves on |
 | `results_region` | `conversation` | Where the consolidated worker report lands |
 | `max_items` | unset | Most work items the split may produce. `0` or unset means however many it produces |
@@ -194,8 +216,10 @@ Those keys sit directly on the stage next to `mode = "fan_out"`, not in a sub-ta
 The stage answers a `split_prompt` with a `fan_out` call. `max_attempts = 0` lets the stage through
 on the first refusal.
 
-Set exactly one of `worker_agent`, `worker_stage`, or `worker_query`. `lev validate` checks that,
-and checks that a named `worker_stage` exists and has opted in with `allow_as_worker`.
+`worker` takes one of three shapes. `{ stage = "x" }` runs a stage of *this* blueprint, which must
+set `allow_as_worker = true`. `{ blueprint = { name = "x" } }` runs a separate installed blueprint.
+`{ query = "..." }` is a hint matched against installed blueprints. `lev validate` checks that a
+named worker stage exists.
 
 ### If the stage never fans out
 
@@ -207,7 +231,8 @@ merge stage knows it is working from nothing. `lev ps` renders the run as
 `complete (fan-out empty)`.
 
 ```toml
-[stages.investigate]
+[graph.stages.mode.fan_out]
+worker = { blueprint = { name = "researcher" } }
 max_attempts = 5   # a small local model may need more than a nudge
 # max_attempts = 0 # or none at all, when an empty fan-out is an acceptable outcome
 ```
@@ -238,29 +263,35 @@ Without it the model sees a prompt it has already answered, over a context holdi
 answered with, and reasonably reports that the work is done. That is not a hypothetical: it is what
 ended a `deep-researcher` run whose four workers had already finished.
 
-A `worker_stage` worker is spawned with its work item as its task, the way `lev run --task` hands
-one in. So the blueprint needs a region seeded from the task to receive it. `lev validate` reports
-`fanout-worker-task-unheld` when there is none.
+A worker is spawned from its work item's `inputs`, the way `lev run --input` hands them in. So the
+worker's blueprint must declare every input its items carry, usually `task`, bound to a region that
+receives it. For a `{ stage = "x" }` worker, that is this blueprint's own `[[graph.inputs]]`. Every
+item is checked against them before any worker starts, and a name nothing declares is refused at
+its item's path. `task` is the one exception: it passes that check undeclared, and then every
+worker is refused as it starts. Declare it.
 
-The caller inputs the blueprint requires of a run started from the outside, a `--diff` say, are not
+The inputs the blueprint requires of a run started from the outside, a `--diff` say, are not
 demanded of the worker. The parent met that contract, and the worker's share of the diff travels
 inside its work item.
 
 ### A worker that is a whole other agent
 
-`worker_stage` keeps the work inside this blueprint. `worker_agent` hands each item to a separate
-installed agent instead, which is worth doing when one already does the job:
+A `{ stage = "x" }` worker keeps the work inside this blueprint. `{ blueprint = { name = "x" } }`
+hands each item to a separate installed blueprint instead, which is worth doing when one already
+does the job:
 
 ```toml
-[stages.investigate]
-mode = "fan_out"
-worker_agent = "researcher"    # every item is a full researcher run
+[[graph.stages]]
+name = "investigate"
+
+[graph.stages.mode.fan_out]
+worker = { blueprint = { name = "researcher" } }   # every item is a full researcher run
 merge_stage = "analyze"
 max_workers = 30
 ```
 
 That is what the bundled `deep-researcher` and `wide-researcher` do. The difference is not only who
-does the work. A `worker_agent` worker is a run of its own, so it brings its own stages, its own
+does the work. A blueprint worker is a run of its own, so it brings its own stages, its own
 tools, and its own clean context window, rather than a share of the parent's.
 
 It also brings its own ability to fan out. The bundled `researcher` grants the `fan_out` tool to its
@@ -268,7 +299,7 @@ gathering stage. A worker that finds its slice is really several independent sub
 out in parallel, rather than working through them one at a time. `max_child_depth` bounds how far
 that can go.
 
-Note the distinction. A `mode = "fan_out"` STAGE is only entered when the current stage ends, which
+Note the distinction. A fan-out STAGE is only entered when the current stage ends, which
 for a gathering stage means after the gathering is done. A split meant to parallelise work would
 arrive too late to save any. Granting the tool is what lets the decision happen while it still
 matters.
@@ -278,7 +309,7 @@ entries name the worker they came from and carry no `[n]` marker, because number
 renumbering would repoint the citations already in the merged findings.
 
 The cost is a dependency. The named blueprint has to be installed. `lev validate` cannot check
-that for you the way it checks a `worker_stage`, because what is installed is a property of the
+that for you the way it checks a worker stage, because what is installed is a property of the
 machine rather than of the blueprint. A missing one fails per item, so with the default
 `on_worker_failure = "continue"` the run reports it rather than dying. `lev setup` installs the
 bundled agents together, so this only bites when an agent has been installed on its own.
@@ -293,9 +324,9 @@ because a worker whose final action was a tool call has no trailing prose. Set `
 the worker stage when the merge depends on its answer.
 
 ```toml
-[stages.fix_worker]
-mode = "autonomous"
-available_tools = ["read_file", "edit_file", "shell", "submit_output"]
+[[graph.stages]]
+name = "fix_worker"
+tools = ["read_file", "edit_file", "shell", "submit_output"]
 allow_as_worker = true
 require_output = true
 ```
@@ -325,9 +356,8 @@ workers, so all of them appear. A section that had to be cut says so, and the wo
 has the whole thing.
 
 ```toml
-[stages.split]
-mode = "fan_out"
-worker_stage = "gather_worker"
+[graph.stages.mode.fan_out]
+worker = { stage = "gather_worker" }
 merge_stage = "build"
 results_region = "worker_rows"   # default: conversation
 max_items = 12                   # default: however many the split produces
@@ -360,7 +390,7 @@ whatever the split produces is what runs.
 Both caps take `0` to mean no cap. `max_workers = 0` starts every work item the moment the split
 has produced it; `max_items = 0` is the same as leaving the key out. A negative value, or a value
 that is not a whole number, is a validation error rather than a quiet fallback. So a typo shows up
-in `lev validate`, not as a fan-out wider than the manifest appeared to allow.
+in `lev validate`, not as a fan-out wider than the blueprint appeared to allow.
 
 ## `max_workers` is not the knob you might think
 
@@ -379,7 +409,7 @@ it is also why an unlimited fan-out is safe to run. See
 [inference pools](/docs/engine#inference-pools).
 
 Both caps can be read and changed over the [HTTP API](/docs/api#fan-out-limits): the blueprint
-detail route reports them resolved, and writing the manifest back is how they change.
+detail route reports them resolved, and writing the blueprint back is how they change.
 
 ## Any sub-agent can ask you a question
 
@@ -400,5 +430,5 @@ sequenceDiagram
 See [Human-in-the-loop](/docs/interaction) for how the question reaches you and how you answer it.
 
 > [!TIP]
-> The [dashboard](/docs/dashboard) and the API's `GET /api/agents/tree` show the whole sub-agent
+> The [dashboard](/docs/dashboard) and the API's `GET /api/runs/tree` show the whole sub-agent
 > tree with token totals per subtree, so you can see where the budget is actually going.

@@ -119,12 +119,13 @@ lev run log-analyzer --task "Find what caused the error spike in ./logs last nig
 ### 4. Create your own
 
 ```bash
-lev create my-agent        # scaffolds a new agent directory
+lev create my-agent        # scaffolds a new blueprint directory
 cd my-agent
+lev validate .             # checks it and lists the inputs it takes
 lev run . --task "Your task here"
 ```
 
-This writes an `agent.leviath` config you can customize: models per stage, context regions and their budgets, tools, and the workflow graph. [Agent configuration →](https://leviath.dev/docs/agents)
+This writes an `agent.toml` blueprint you can customize: the inputs it takes, models per stage, context regions and their budgets, tools, and the workflow graph. [Blueprint format →](https://leviath.dev/docs/blueprint-format)
 
 ## Agents
 
@@ -135,7 +136,7 @@ one after another. `coder` is the largest:
 
 <p align="center">
   <picture>
-    <source mime="(prefers-color-scheme: dark)" srcset="docs/assets/agents/coder-dark.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agents/coder-dark.svg">
     <img src="docs/assets/agents/coder.svg" alt="The coder agent's workflow graph" width="560">
   </picture>
 </p>
@@ -236,13 +237,13 @@ ask you questions directly.
 export LEVIATH_API_TOKEN="$(openssl rand -hex 16)"
 lev serve --port 3000
 
-# spawn an agent (with a completion webhook + signing secret)
-curl -X POST http://localhost:3000/api/agents \
+# start a run (with a completion webhook + signing secret)
+curl -X POST http://localhost:3000/api/runs \
   -H "Authorization: Bearer $LEVIATH_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"blueprint": "coder", "task": "Add input validation",
-       "callback_url": "https://example.com/hook",
-       "callback_secret": "whsec_…"}'
+  -d '{"source": {"blueprint": {"name": "coder"}},
+       "inputs": {"task": "Add input validation"},
+       "delivery": {"callback": {"url": "https://example.com/hook", "secret": "whsec_…"}}}'
 ```
 
 [Full API reference →](https://leviath.dev/docs/api)
@@ -320,6 +321,7 @@ graph TD
     MCP["leviath-mcp"]
     ACP["leviath-agent-client"]
     BP["leviath-blueprint"]
+    LEGACY["leviath-legacy-runs"]
     PKG["leviath-package"]
     SCRIPT["leviath-scripting"]
     TELEM["leviath-telemetry"]
@@ -332,11 +334,13 @@ graph TD
     CLI --> BP
     CLI --> PKG
     CLI --> NET
+    CLI -.->|optional| LEGACY
     LIB --> RT
     LIB --> MCP
     LIB --> ACP
     LIB --> PKG
     LIB --> TELEM
+    LIB --> BP
     RT --> TOOLS
     RT --> PROV
     RT --> SCRIPT
@@ -349,6 +353,7 @@ graph TD
     ACP --> CORE
     PKG --> BP
     BP --> RT
+    LEGACY --> RT
     SCRIPT --> CORE
     TELEM --> CORE
 ```
@@ -358,18 +363,20 @@ graph TD
 | `leviath-cli` | The `lev` binary: args, TUI, daemon, serve |
 | `leviath` | Library facade for embedding the runtime |
 | `leviath-runtime` | ECS engine (bevy_ecs) and stage-run orchestration |
-| `leviath-core` | Regions, layouts, blueprints, manifest, run metadata |
+| `leviath-core` | Regions, layouts, run metadata, policy and sandbox types |
 | `leviath-tools` | Built-in tool implementations |
 | `leviath-providers` | Anthropic, OpenAI, Codex, Google, xAI, Grok, Meta, OpenRouter, Bedrock, Meshy, Ollama |
 | `leviath-mcp` | MCP tool servers over stdio and HTTP/SSE |
 | `leviath-agent-client` | Agent Client Protocol wire types (JSON-RPC over stdio) |
 | `leviath-blueprint` | The `agent.toml` blueprint format, migration and lint findings |
-| `leviath-package` | Agent bundling and install |
+| `leviath-legacy-runs` | Converts run directories from older versions into run files. Used by `lev` only, never published |
+| `leviath-package` | Blueprint bundling and install |
 | `leviath-scripting` | Rhai sandbox |
 | `leviath-telemetry` | OpenTelemetry export |
 | `leviath-net` | Outbound request policy and the shared HTTP client |
 | `leviath-sys` | Every OS-specific syscall (permissions, signals, TTY) |
 | `leviath-alloc` | One audited mimalloc option call for the binary |
+| `leviath-graphql-derive` | The `#[mirror]` attribute that writes GraphQL filter inputs |
 | `leviath-testkit` | Shared test support |
 
 </details>
