@@ -414,8 +414,16 @@ pub struct FanOutDef {
     pub max_attempts: Option<u32>,
 }
 
+/// The most workers a fan-out runs at once when it does not say.
+///
+/// Thirty, so a fan-out that splits ten ways runs in one wave rather than
+/// three. The inference pool caps concurrent model requests either way, so a
+/// wide fan-out over a narrow pool queues at the provider rather than at the
+/// stage.
+pub const DEFAULT_MAX_WORKERS: u32 = 30;
+
 fn default_max_workers() -> u32 {
-    4
+    DEFAULT_MAX_WORKERS
 }
 
 impl FanOutDef {

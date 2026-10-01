@@ -27,12 +27,8 @@ use std::path::Path;
 pub(crate) const TASK_INPUT: &str = "task";
 
 /// The most workers at once for a `fan_out` called outside a fan-out stage,
-/// which has no `max_workers` of its own.
-///
-/// Thirty, so a fan-out that splits ten ways runs in one wave rather than
-/// three. The inference pool caps concurrent model requests either way, so a
-/// wide fan-out over a narrow pool queues at the provider rather than here.
-const CALLED_MAX_WORKERS: u32 = 30;
+/// which has no `max_workers` of its own: the same default a stage gets.
+const CALLED_MAX_WORKERS: u32 = crate::spec::graph::stage::DEFAULT_MAX_WORKERS;
 
 /// The label a worker's request carries its work item's id under, so the
 /// host can name the worker after the item it runs.
