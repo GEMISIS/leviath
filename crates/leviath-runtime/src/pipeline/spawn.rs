@@ -421,14 +421,21 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
     // Attach compiled custom-region scripts BEFORE seeding, so seed writes
     // pass through each region's on_write hook like any other entry.
     window.region_scripts = region_scripts;
-    crate::context_setup::init_window_seeded(&mut window, &blueprint, seeds);
+    let spec = crate::spec_bridge::run_spec_from_blueprint(
+        &blueprint,
+        &agent_id,
+        &stage_infs,
+        &stage_windows,
+    )
+    .map_err(|e| e.to_string())?;
+    crate::context_setup::init_window_from_spec(&mut window, &spec, seeds);
     if !parts.is_empty() {
         let Some((store, registry)) = mime_store else {
             return Err("this world has no blob store, so it cannot take an attached part".into());
         };
-        crate::context_setup::ingest_parts(
+        crate::context_setup::ingest_parts_into(
             &mut window,
-            &blueprint,
+            crate::context_setup::task_region(&spec.graph.layout),
             parts,
             &crate::context_setup::PartSink {
                 store: store.as_ref(),
@@ -522,6 +529,7 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
             logs: notes,
         },
         crate::pipeline::response::GlobalNudge(global_nudge),
+        crate::insert::RunSpecC(std::sync::Arc::new(spec)),
     ));
     if let Some(detector) = repetition {
         world.entity_mut(entity).insert(detector);

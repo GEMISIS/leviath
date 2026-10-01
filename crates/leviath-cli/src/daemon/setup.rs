@@ -912,14 +912,21 @@ async fn warm_fanout_worker_mcp(
         if config.worker_stage.is_some() {
             continue;
         }
-        let Ok((resolve_path, _)) = crate::daemon::fanout_spawner::resolve_worker_source(
-            config,
-            blueprint_path,
-            agents_dir,
-        ) else {
+        // A parsed fan-out names exactly one worker source, and the stage
+        // one was skipped above, so this is a named agent or a query.
+        let found = match &config.worker_agent {
+            Some(agent) => Ok(std::path::PathBuf::from(agent)),
+            None => crate::daemon::fanout_spawner::discover_worker(
+                agents_dir,
+                config.worker_query.as_deref().unwrap_or_default(),
+            ),
+        };
+        let Ok(resolve_path) = found else {
             continue;
         };
-        let Ok(manifest) = crate::commands::run::manifest::find_manifest(&resolve_path) else {
+        let Ok(manifest) =
+            crate::commands::run::manifest::find_manifest(&resolve_path.to_string_lossy())
+        else {
             continue;
         };
         if let Ok(worker_toml) = std::fs::read_to_string(&manifest) {

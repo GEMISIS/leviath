@@ -1,12 +1,12 @@
-//! The daemon-side [`FanOutSpawner`]: resolves a fan-out worker's blueprint
-//! (self-at-worker-stage / a named agent / a capability query) and starts it in
-//! the shared world, seeded with its work item.
+//! The daemon-side [`FanOutSpawner`]: starts a fan-out worker from the
+//! request the runtime hands it, in the shared world, seeded with its work
+//! item's inputs.
 //!
 //! The runtime's fan-out systems only *start and track* workers; *finding* the
 //! blueprint is CLI policy, so it lives here - mirroring how [`build_agent`]
-//! resolves any spawn. For `worker_stage` the worker runs the parent's own
-//! blueprint entered at that stage (via [`leviath_runtime::pipeline::force_transition`]);
-//! for `worker_agent` / `worker_query` it runs a separate installed blueprint.
+//! resolves any spawn. A same-graph worker runs the parent's own blueprint
+//! entered at its stage (via [`leviath_runtime::pipeline::force_transition`]);
+//! any other runs a separate installed blueprint, found by name or by a query.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,7 +19,10 @@ use leviath_runtime::host::SubAgentOp;
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::persistence::RunMetadata;
 use leviath_runtime::pipeline::{AgentBlueprint, force_transition};
-use leviath_runtime::spec::blueprint::FanOutConfig;
+use leviath_runtime::spec::env::Caller;
+use leviath_runtime::spec::inputs::RawInput;
+use leviath_runtime::spec::names::BlueprintRef;
+use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -91,9 +94,8 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         &self,
         world: &mut World,
         parent: Entity,
-        config: &FanOutConfig,
-        item_id: &str,
-        item_context: &serde_json::Value,
+        request: SpawnRequest,
+        caller: Caller,
     ) -> Result<Entity, String> {
         // The parent supplies the worker's workdir, run id (parentage), and (for
         // `worker_stage`) its blueprint path.
@@ -126,13 +128,12 @@ impl FanOutSpawner for DaemonFanOutSpawner {
                 .ok_or_else(|| "fan-out parent has no run metadata".to_string())?;
         let (unattended, yolo_profile) = unattended;
 
-        let (resolve_path, entry_stage) =
-            resolve_worker_source(config, &parent_path, self.agents_dir.as_deref())?;
+        let (resolve_path, entry_stage) = resolve_worker_source(&request, &caller, &parent_path)?;
 
-        let task = format_worker_task(item_id, item_context);
+        let (task, regions) = worker_seeds(&request);
         let mut args = resolve_spawn_args(crate::daemon::client::LaunchRequest {
             path: &resolve_path,
-            task: Some(&task),
+            task: task.as_deref(),
             stdin_is_terminal: &never_interactive,
             model: model_override,
             workdir: &workdir,
@@ -140,8 +141,9 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             yolo_profile,
             allow: Vec::new(),
             max_depth: None,
-            // Fan-out workers get their split of the parent task via `task`.
-            regions: std::collections::HashMap::new(),
+            // A work item's other inputs fill the caller-input regions they
+            // name.
+            regions,
             // Workers share the parent's workdir and are splits of a task the
             // parent already scoped, so re-running a repo-scan command seed once
             // per worker would be pure waste (and up to `max_workers` copies of
@@ -200,38 +202,57 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         }
         Ok(child)
     }
+
+    fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
+        let path = discover_worker(self.agents_dir.as_deref(), query)?;
+        BlueprintRef::parse(&path.to_string_lossy()).map_err(|e| e.to_string())
+    }
 }
 
-/// Resolve a fan-out config's worker source to `(path_to_resolve, entry_stage)`.
+/// Resolve a worker's request to `(path_to_resolve, entry_stage)`.
 /// `path_to_resolve` is fed to [`resolve_spawn_args`] (which resolves a file,
-/// directory, or installed-agent name); `entry_stage` is `Some` only for
-/// `worker_stage` (self-as-worker).
+/// directory, or installed-agent name); `entry_stage` is `Some` only for a
+/// same-graph worker, which runs the parent's own blueprint.
 pub(crate) fn resolve_worker_source(
-    config: &FanOutConfig,
+    request: &SpawnRequest,
+    caller: &Caller,
     parent_path: &str,
-    agents_dir: Option<&Path>,
 ) -> Result<(String, Option<String>), String> {
-    if let Some(stage) = &config.worker_stage {
-        return Ok((parent_path.to_string(), Some(stage.clone())));
+    if let Caller::Worker {
+        stage: Some(stage), ..
+    } = caller
+    {
+        return Ok((parent_path.to_string(), Some(stage.to_string())));
     }
-    if let Some(agent) = &config.worker_agent {
-        return Ok((agent.clone(), None));
+    match &request.source {
+        SpawnSource::Blueprint(blueprint) => Ok((blueprint.to_string(), None)),
+        SpawnSource::Raw(_) => Err("a fan-out worker's own graph needs a worker stage".to_string()),
     }
-    if let Some(query) = &config.worker_query {
-        let path = discover_worker(agents_dir, query)?;
-        return Ok((path.to_string_lossy().to_string(), None));
-    }
-    Err("fan-out config has no worker source".to_string())
 }
 
-/// The task text seeded into a worker: its id plus the compact JSON context.
-fn format_worker_task(item_id: &str, item_context: &serde_json::Value) -> String {
-    format!("Work item id: {item_id}\nContext: {item_context}")
+/// A worker's `task` text and its other inputs, as the seeds a spawn takes.
+fn worker_seeds(
+    request: &SpawnRequest,
+) -> (Option<String>, std::collections::HashMap<String, String>) {
+    let mut regions: std::collections::HashMap<String, String> = request
+        .inputs
+        .iter()
+        .map(|(name, value)| (name.clone(), input_text(value)))
+        .collect();
+    (regions.remove("task"), regions)
+}
+
+/// An input value as seed text: text as written, anything else as JSON.
+fn input_text(value: &RawInput) -> String {
+    match value {
+        RawInput::Text(text) => text.clone(),
+        other => serde_json::to_string(other).expect("an input value always serializes"),
+    }
 }
 
 /// Find an installed agent whose directory name or manifest description contains
 /// `query` (case-insensitive). Returns the agent's directory.
-fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, String> {
+pub(crate) fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, String> {
     let dir = agents_dir.ok_or_else(|| "no agents directory to search for a worker".to_string())?;
     let needle = query.to_lowercase();
     let entries =
@@ -263,40 +284,92 @@ mod tests {
     use crate::config::Config;
     use crate::test_support::{FakeProvider, fixtures};
 
-    fn cfg(stage: Option<&str>, agent: Option<&str>, query: Option<&str>) -> FanOutConfig {
-        FanOutConfig {
-            worker_agent: agent.map(String::from),
-            worker_stage: stage.map(String::from),
-            worker_query: query.map(String::from),
-            max_workers: 4,
-            split_prompt: "split".to_string(),
-            ..fixtures::fanout_config()
-        }
+    /// A worker's request and caller: a same-graph worker entering `stage`,
+    /// or one running the installed `agent`.
+    fn cfg(stage: Option<&str>, agent: Option<&str>) -> (SpawnRequest, Caller) {
+        let source = match agent {
+            Some(agent) => SpawnSource::Blueprint(BlueprintRef::parse(agent).unwrap()),
+            None => SpawnSource::Raw(Box::new(leviath_runtime::spec::graph::RunGraph {
+                title: None,
+                description: None,
+                entry: None,
+                stages: vec![],
+                edges: vec![],
+                layout: leviath_runtime::spec::graph::RegionLayoutDef {
+                    regions: vec![],
+                    total_budget_tokens: 1,
+                    eviction_order: vec![],
+                },
+                inputs: vec![],
+                output: None,
+                compaction: None,
+                max_child_depth: None,
+                taint_tracking: None,
+                tool_permissions: Default::default(),
+                sandbox: None,
+                read_paths: vec![],
+                safe_commands: Default::default(),
+                batch_tool_hint: None,
+                shell_hint: None,
+                nudge: None,
+                repetition: None,
+                file_tracking: None,
+                tool_rescan: Default::default(),
+                transforms: vec![],
+                mime_types: Default::default(),
+                dependencies: vec![],
+            })),
+        };
+        let request =
+            SpawnRequest::new(source).input("task", RawInput::Text("Work item id: item-1".into()));
+        let caller = Caller::Worker {
+            parent: leviath_runtime::spec::names::RunId::new("parent").unwrap(),
+            policy: leviath_runtime::spec::launch::LaunchPolicy {
+                unattended: Default::default(),
+                allow: vec![],
+                max_depth: 3,
+                seed_commands: false,
+                capture_model_input: false,
+            },
+            depth: 0,
+            stage: stage.map(|s| leviath_runtime::spec::names::StageName::new(s).unwrap()),
+        };
+        (request, caller)
+    }
+
+    /// A worker's task is its `task` input, and every other input seeds the
+    /// caller-input region of that name, as text or as JSON.
+    #[test]
+    fn a_work_items_inputs_become_the_workers_seeds() {
+        let (request, _) = cfg(Some("w"), None);
+        let request = request
+            .input("topic", RawInput::Text("rust".into()))
+            .input("depth", RawInput::Int(2));
+        let (task, regions) = worker_seeds(&request);
+        assert_eq!(task.as_deref(), Some("Work item id: item-1"));
+        assert_eq!(regions["topic"], "rust");
+        assert_eq!(regions["depth"], "2");
+        assert_eq!(regions.len(), 2);
     }
 
     #[test]
-    fn format_worker_task_includes_id_and_context() {
-        let t = format_worker_task("t1", &serde_json::json!({"file": "a.rs"}));
-        assert!(t.contains("Work item id: t1"));
-        assert!(t.contains("a.rs"));
-    }
-
-    #[test]
-    fn resolve_worker_source_picks_the_configured_source() {
-        // worker_stage → parent path + entry stage.
+    fn resolve_worker_source_picks_the_requested_source() {
+        // A worker stage → parent path + entry stage.
+        let (request, caller) = cfg(Some("w"), None);
         assert_eq!(
-            resolve_worker_source(&cfg(Some("w"), None, None), "/p/agent.leviath", None).unwrap(),
+            resolve_worker_source(&request, &caller, "/p/agent.leviath").unwrap(),
             ("/p/agent.leviath".to_string(), Some("w".to_string()))
         );
-        // worker_agent → the agent name, no entry stage.
+        // A named blueprint → the agent name, no entry stage.
+        let (request, caller) = cfg(None, Some("fixer"));
         assert_eq!(
-            resolve_worker_source(&cfg(None, Some("fixer"), None), "/p", None).unwrap(),
+            resolve_worker_source(&request, &caller, "/p").unwrap(),
             ("fixer".to_string(), None)
         );
     }
 
     #[test]
-    fn resolve_worker_source_worker_query_discovers_an_agent() {
+    fn find_worker_discovers_an_agent_by_query() {
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("test-fixer");
         std::fs::create_dir_all(&agent).unwrap();
@@ -305,22 +378,31 @@ mod tests {
             "[agent]\nname = \"test-fixer\"\nversion = \"0.1.0\"\ndescription = \"fixes tests\"\n\n[stages.main]\nmodel = { provider = \"anthropic\", model = \"claude-sonnet-4-6\" }\n",
         )
         .unwrap();
-        let (path, entry) =
-            resolve_worker_source(&cfg(None, None, Some("fixer")), "/p", Some(dir.path())).unwrap();
-        assert!(path.contains("test-fixer"));
-        assert_eq!(entry, None);
+        let mut spawner = spawner_with(Arc::new(CliToolService::new()));
+        spawner.agents_dir = Some(dir.path().to_path_buf());
+        let found = spawner.find_worker("fixer").unwrap();
+        assert!(found.name.as_str().contains("test-fixer"));
 
-        // A worker_query with no match propagates discover_worker's error.
+        // A query with no match propagates discover_worker's error.
         let empty = tempfile::tempdir().unwrap();
-        assert!(
-            resolve_worker_source(&cfg(None, None, Some("zzz")), "/p", Some(empty.path())).is_err()
-        );
+        spawner.agents_dir = Some(empty.path().to_path_buf());
+        assert!(spawner.find_worker("zzz").is_err());
+        // A path that does not read as a blueprint reference is refused.
+        let odd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(odd.path().join("x@fixer")).unwrap();
+        std::fs::write(
+            odd.path().join("x@fixer").join("agent.leviath"),
+            "[agent]\nname = \"x\"\n",
+        )
+        .unwrap();
+        spawner.agents_dir = Some(odd.path().to_path_buf());
+        assert!(spawner.find_worker("fixer").is_err());
     }
 
     #[test]
-    fn resolve_worker_source_errors_without_a_source() {
-        let empty = cfg(None, None, None);
-        assert!(resolve_worker_source(&empty, "/p", None).is_err());
+    fn resolve_worker_source_refuses_an_unstaged_own_graph() {
+        let (request, caller) = cfg(None, None);
+        assert!(resolve_worker_source(&request, &caller, "/p").is_err());
     }
 
     #[test]
@@ -564,9 +646,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(Some("second"), None, None),
-                "item-1",
-                &serde_json::json!({"k": "v"}),
+                cfg(Some("second"), None).0,
+                cfg(Some("second"), None).1,
             )
             .expect("worker spawns");
         // The worker entered the `second` stage (index 1).
@@ -603,9 +684,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(Some("second"), None, None),
-                "item-1",
-                &serde_json::json!({"code": "- a\n+ b"}),
+                cfg(Some("second"), None).0,
+                cfg(Some("second"), None).1,
             )
             .expect("a worker is spawned without the parent's --diff");
         assert_eq!(world.world().get::<StageCursor>(child).unwrap().index, 1);
@@ -627,9 +707,8 @@ mod tests {
                 .spawn_worker(
                     world.world_mut(),
                     parent,
-                    &cfg(Some("second"), None, None),
-                    "item-1",
-                    &serde_json::json!({"k": "v"}),
+                    cfg(Some("second"), None).0,
+                    cfg(Some("second"), None).1,
                 )
                 .expect("worker spawns");
 
@@ -664,9 +743,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(Some("second"), None, None),
-                "item-1",
-                &serde_json::json!({"k": "v"}),
+                cfg(Some("second"), None).0,
+                cfg(Some("second"), None).1,
             )
             .expect("worker spawns");
 
@@ -703,9 +781,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(Some("second"), None, None),
-                "item-1",
-                &serde_json::json!({}),
+                cfg(Some("second"), None).0,
+                cfg(Some("second"), None).1,
             )
             .expect("worker spawns");
 
@@ -739,9 +816,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(None, Some(&worker_dir.to_string_lossy()), None),
-                "item-1",
-                &serde_json::json!({}),
+                cfg(None, Some(&worker_dir.to_string_lossy())).0,
+                cfg(None, Some(&worker_dir.to_string_lossy())).1,
             )
             .expect("worker spawns");
         // A separate blueprint enters at its own entry stage (index 0).
@@ -760,9 +836,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 bare,
-                &cfg(Some("second"), None, None),
-                "i",
-                &serde_json::json!({}),
+                cfg(Some("second"), None).0,
+                cfg(Some("second"), None).1,
             )
             .unwrap_err();
         assert!(err.contains("no run metadata"));
@@ -778,9 +853,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(Some("ghost"), None, None),
-                "i",
-                &serde_json::json!({}),
+                cfg(Some("ghost"), None).0,
+                cfg(Some("ghost"), None).1,
             )
             .unwrap_err();
         assert!(err.contains("ghost"));
@@ -813,9 +887,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(None, Some(&bad_dir.to_string_lossy()), None),
-                "i",
-                &serde_json::json!({}),
+                cfg(None, Some(&bad_dir.to_string_lossy())).0,
+                cfg(None, Some(&bad_dir.to_string_lossy())).1,
             )
             .unwrap_err();
         assert!(err.contains("invalid blueprint"));
@@ -827,17 +900,16 @@ mod tests {
         let manifest = dir.path().join("agent.leviath");
         std::fs::write(&manifest, two_stage_manifest()).unwrap();
         let (mut world, spawner, parent) = world_with_parent(&manifest.to_string_lossy());
-        // A config with no worker source ⇒ resolve_worker_source errors.
+        // An own-graph worker with no stage to enter ⇒ resolve_worker_source errors.
         let err = spawner
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(None, None, None),
-                "i",
-                &serde_json::json!({}),
+                cfg(None, None).0,
+                cfg(None, None).1,
             )
             .unwrap_err();
-        assert!(err.contains("no worker source"));
+        assert!(err.contains("needs a worker stage"));
     }
 
     #[tokio::test]
@@ -868,9 +940,8 @@ mod tests {
             .spawn_worker(
                 world.world_mut(),
                 parent,
-                &cfg(None, Some("/no/such/agent/xyz"), None),
-                "i",
-                &serde_json::json!({}),
+                cfg(None, Some("/no/such/agent/xyz")).0,
+                cfg(None, Some("/no/such/agent/xyz")).1,
             )
             .unwrap_err();
         assert!(err.contains("resolve worker blueprint"));
@@ -914,9 +985,8 @@ mod tests {
                 .spawn_worker(
                     world.world_mut(),
                     parent,
-                    &cfg(Some("second"), None, None),
-                    "item-1",
-                    &serde_json::json!({"k": "v"}),
+                    cfg(Some("second"), None).0,
+                    cfg(Some("second"), None).1,
                 )
                 .expect("worker spawns");
             let md = world

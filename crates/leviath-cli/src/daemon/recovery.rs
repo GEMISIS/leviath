@@ -2049,7 +2049,6 @@ mod tests {
     #[tokio::test]
     async fn resumes_a_parent_parked_mid_fan_out() {
         use leviath_runtime::fanout::{FanOutState, FanOutWaiting};
-        use leviath_runtime::spec::blueprint::FanOutConfig;
 
         let agent = agent_dir();
         let manifest = agent.path().join("agent.leviath");
@@ -2066,9 +2065,17 @@ mod tests {
         );
         let state = FanOutState {
             origin: leviath_runtime::fanout::FanOutOrigin::Stage,
-            config: FanOutConfig {
-                worker_stage: Some("w".to_string()),
-                ..fixtures::fanout_config()
+            config: leviath_runtime::spec::graph::FanOutDef {
+                worker: leviath_runtime::spec::graph::WorkerSource::Stage(
+                    leviath_runtime::spec::names::StageName::new("w").unwrap(),
+                ),
+                merge_stage: None,
+                max_workers: 1,
+                on_worker_failure: Default::default(),
+                split_prompt: String::new(),
+                results_region: None,
+                max_items: None,
+                max_attempts: None,
             },
             max_workers: 1,
             pending: vec![],

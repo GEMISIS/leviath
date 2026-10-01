@@ -1,43 +1,227 @@
-//! Context-window setup helpers shared by the ECS pipeline's spawner and
-//! stage-entry.
+//! Context-window setup shared by the ECS pipeline's spawner and stage entry.
 //!
-//! These are pure operations over a [`ContextWindow`] driven by a
-//! blueprint/layout.
+//! These are pure operations over a [`ContextWindow`], driven by a run's
+//! resolved spec: its layout's regions, and the token budget each region was
+//! resolved to.
 
 use std::collections::HashMap;
 
-use crate::spec::{Blueprint, ContextLayout};
 use leviath_core::{EvictionStrategy, Region, RegionKind, truncate_at_boundary};
 
 use crate::ContextWindow;
+use crate::spec::graph::{
+    Budget, CodeRef, Eviction, RegionDef, RegionKind as Kind, RegionLayoutDef,
+};
+use crate::spec::run_spec::RunSpec;
+use crate::spec::{Blueprint, ContextLayout};
 
 pub(crate) mod parts;
-pub(crate) use parts::{PartSink, ingest_parts, text_part};
+pub(crate) use parts::{PartSink, ingest_parts_into, text_part};
 
-/// Initialize a [`ContextWindow`] from a blueprint and seed its regions from a
-/// name→content map. Adds each layout region plus the infra
-/// `tool_results`/`conversation` regions, then fills each seed whose key matches
-/// a declared region. The `task` key gets a fallback of its own: if there is no
-/// region literally named `task`, it seeds the first pinned region instead.
-/// Pure over the window (no engine/entity), so both the imperative engine and
-/// the ECS pipeline's spawner can share it.
+/// A region's budget as tokens, against a model window of `window` tokens.
+///
+/// A percentage rounds `window * percent`, then applies the cap, then the
+/// floor, so a floor above the cap wins.
+pub fn budget_tokens(budget: &Budget, window: usize) -> usize {
+    match budget {
+        Budget::Tokens(n) => *n as usize,
+        Budget::Percent { percent, min, max } => {
+            let mut v = (window as f64 * percent).round() as usize;
+            if let Some(max) = max {
+                v = v.min(*max as usize);
+            }
+            if let Some(min) = min {
+                v = v.max(*min as usize);
+            }
+            v
+        }
+    }
+}
+
+/// The tokens a region of the graph's own layout gets.
+///
+/// The smallest budget any stage using that layout resolved it to, which is
+/// the budget sized against the smallest window that sees the region. A
+/// region no such stage sees is sized against the entry stage's window.
+pub(crate) fn layout_region_budget(spec: &RunSpec, def: &RegionDef) -> usize {
+    spec.graph
+        .stages
+        .iter()
+        .zip(&spec.stages)
+        .filter(|(stage, _)| stage.layout.is_none())
+        .filter_map(|(_, plan)| plan.region_budgets.get(&def.name))
+        .min()
+        .map(|n| *n as usize)
+        .unwrap_or_else(|| {
+            let window = spec.stages.first().map_or(0, |p| p.context_window);
+            budget_tokens(&def.budget, window as usize)
+        })
+}
+
+/// The tokens a region gets in one stage: what that stage's plan resolved it
+/// to, or its budget against that stage's window when the plan has no entry
+/// for it (a region the stage hides).
+pub fn stage_region_budget(spec: &RunSpec, stage: usize, def: &RegionDef) -> usize {
+    let plan = spec.stages.get(stage);
+    match plan.and_then(|p| p.region_budgets.get(&def.name)) {
+        Some(n) => *n as usize,
+        None => budget_tokens(&def.budget, plan.map_or(0, |p| p.context_window) as usize),
+    }
+}
+
+/// The window's region for a declared one, holding `budget` tokens.
+pub fn region_from_def(def: &RegionDef, budget: usize) -> Region {
+    let mut region = Region::new(def.name.to_string(), core_kind(def, budget), budget);
+    region.summarizable = def.summarizable;
+    region.admission = def.admission;
+    region.volatility = def.volatility;
+    region.accepts = def.accepts.iter().map(|m| m.to_string()).collect();
+    region.description = def.description.clone();
+    region.describe_in_prompt = def.describe_in_prompt;
+    region
+}
+
+/// How the window keeps a declared region's entries.
+fn core_kind(def: &RegionDef, budget: usize) -> RegionKind {
+    match &def.kind {
+        Kind::Pinned => RegionKind::Pinned,
+        Kind::SlidingWindow {
+            max_items,
+            eviction,
+        } => RegionKind::SlidingWindow {
+            max_items: *max_items as usize,
+            eviction_strategy: match eviction {
+                Eviction::PerItem => EvictionStrategy::PerItem,
+                Eviction::Bulk(n) => EvictionStrategy::Bulk {
+                    overflow: *n as usize,
+                },
+                Eviction::Compact(n) => EvictionStrategy::Compact {
+                    compact_count: *n as usize,
+                },
+            },
+        },
+        Kind::Temporary => RegionKind::Temporary,
+        Kind::Compacting { threshold_tokens } => RegionKind::Compacting {
+            threshold_tokens: compaction_threshold(*threshold_tokens, def.compact_at, budget),
+        },
+        Kind::Clearable => RegionKind::Clearable,
+        Kind::CompactHistory { source } => RegionKind::CompactHistory {
+            source_region: source.to_string(),
+        },
+        Kind::Keyed { max_entries } => RegionKind::HashMap {
+            max_entries: max_entries.map(|n| n as usize),
+        },
+        Kind::Checklist => RegionKind::Checklist,
+        Kind::Custom { code, pinned } => RegionKind::Custom {
+            script: match code {
+                CodeRef::File(path) => path.clone(),
+                CodeRef::Inline(source) => source.clone(),
+            },
+            pinned: *pinned,
+        },
+    }
+}
+
+/// Where a compacting region compacts: its `compact_at` share of the budget,
+/// under any fixed threshold; the fixed threshold alone; or never, when it
+/// names neither.
+fn compaction_threshold(threshold: Option<u32>, compact_at: Option<f64>, budget: usize) -> usize {
+    let fixed = threshold.map_or(usize::MAX, |t| t as usize);
+    match compact_at {
+        Some(fraction) => ((budget as f64 * fraction).round() as usize).min(fixed),
+        None => fixed,
+    }
+}
+
+/// The region the `task` text seeds: a pinned region named `task`, else the
+/// first pinned region.
+pub(crate) fn task_region(layout: &RegionLayoutDef) -> Option<String> {
+    layout
+        .regions
+        .iter()
+        .find(|r| r.name.as_str() == "task" && matches!(r.kind, Kind::Pinned))
+        .or_else(|| {
+            layout
+                .regions
+                .iter()
+                .find(|r| matches!(r.kind, Kind::Pinned))
+        })
+        .map(|r| r.name.to_string())
+}
+
+/// Initialize a [`ContextWindow`] from a run's spec and seed its regions from
+/// a name→content map. Adds each region of the graph's layout at the budget
+/// it was resolved to, plus the infra `tool_results`/`conversation`/
+/// `final_output` regions, then fills each seed whose key matches a declared
+/// region. The `task` key falls back to the first pinned region when no pinned
+/// region is named `task`.
+pub(crate) fn init_window_from_spec(
+    window: &mut ContextWindow,
+    spec: &RunSpec,
+    seeds: &HashMap<String, String>,
+) {
+    let layout = &spec.graph.layout;
+    let regions = layout
+        .regions
+        .iter()
+        .map(|def| region_from_def(def, layout_region_budget(spec, def)))
+        .collect();
+    fill_window(window, regions, task_region(layout), seeds);
+}
+
+/// Initialize a window from a parsed blueprint's (already resolved) layout:
+/// [`init_window_from_spec`] for a caller holding a blueprint.
 pub(crate) fn init_window_seeded(
     window: &mut ContextWindow,
     blueprint: &Blueprint,
     seeds: &HashMap<String, String>,
 ) {
-    for region_def in &blueprint.context_layout.regions {
-        let mut region = Region::new(
-            region_def.name.clone(),
-            region_def.kind.clone(),
-            region_def.max_tokens,
-        );
-        region.summarizable = region_def.summarizable;
-        region.admission = region_def.admission;
-        region.volatility = region_def.volatility;
-        region.accepts = region_def.accepts.clone();
-        region.description = region_def.description.clone();
-        region.describe_in_prompt = region_def.describe_in_prompt;
+    let regions: Vec<Region> = blueprint
+        .context_layout
+        .regions
+        .iter()
+        .map(region_from_definition)
+        .collect();
+    let task = task_region_of(&regions);
+    fill_window(window, regions, task, seeds);
+}
+
+/// The window's region for a parsed blueprint's (already resolved) one.
+fn region_from_definition(def: &crate::spec::layout::RegionDefinition) -> Region {
+    let mut region = Region::new(def.name.clone(), def.kind.clone(), def.max_tokens);
+    region.summarizable = def.summarizable;
+    region.admission = def.admission;
+    region.volatility = def.volatility;
+    region.accepts = def.accepts.clone();
+    region.description = def.description.clone();
+    region.describe_in_prompt = def.describe_in_prompt;
+    region
+}
+
+/// The task region among regions already built: a pinned `task`, else the
+/// first pinned one.
+fn task_region_of(regions: &[Region]) -> Option<String> {
+    regions
+        .iter()
+        .find(|r| r.name == "task" && matches!(r.kind, RegionKind::Pinned))
+        .or_else(|| {
+            regions
+                .iter()
+                .find(|r| matches!(r.kind, RegionKind::Pinned))
+        })
+        .map(|r| r.name.clone())
+}
+
+/// Add `regions` and the infra regions to `window`, then write each seed into
+/// its region. `task` is where the `task` key goes.
+fn fill_window(
+    window: &mut ContextWindow,
+    regions: Vec<Region>,
+    task: Option<String>,
+    seeds: &HashMap<String, String>,
+) {
+    let declared: Vec<String> = regions.iter().map(|r| r.name.clone()).collect();
+    for region in regions {
         window.add_region(region);
     }
 
@@ -78,15 +262,9 @@ pub(crate) fn init_window_seeded(
         // else the first pinned region. Every other key targets its region by
         // exact name (unknown names are already rejected upstream, so ignore
         // them here to keep this pure/infallible).
-        let target = if name == "task" {
-            task_region_name(blueprint)
-        } else {
-            blueprint
-                .context_layout
-                .regions
-                .iter()
-                .find(|r| &r.name == name)
-                .map(|r| r.name.clone())
+        let target = match name == "task" {
+            true => task.clone(),
+            false => declared.iter().find(|r| *r == name).cloned(),
         };
         if let Some(region_name) = target {
             // Trim to the region's (already-resolved) budget first: `add_entry`
@@ -134,53 +312,47 @@ fn fit_seed_to_budget(content: &str, max_tokens: usize) -> String {
     )
 }
 
-/// Resolve which region the `task` text seeds into: prefer a pinned region named
-/// `task`, else the first pinned region.
-fn task_region_name(blueprint: &Blueprint) -> Option<String> {
-    blueprint
-        .context_layout
-        .regions
-        .iter()
-        .find(|r| r.name == "task" && matches!(r.kind, RegionKind::Pinned))
-        .or_else(|| {
-            blueprint
-                .context_layout
-                .regions
-                .iter()
-                .find(|r| matches!(r.kind, RegionKind::Pinned))
-        })
-        .map(|r| r.name.clone())
-}
-
-/// Initialize a [`ContextWindow`] seeding only the task text - the one-seed
-/// convenience over `init_window_seeded`, for callers that carry a single task
-/// string.
+/// Initialize a window from a blueprint, seeding only the task text: the
+/// one-seed convenience over `init_window_seeded`, for callers that carry a
+/// single task string.
 pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str) {
     let seeds = HashMap::from([("task".to_string(), task.to_string())]);
     init_window_seeded(window, blueprint, &seeds);
 }
 
-/// Swap a [`ContextWindow`] to a stage-specific layout in place, preserving each
-/// carried-over region's existing content by name. Pure over the window (no
-/// engine/entity), so both the imperative engine and the ECS pipeline's
-/// stage-entry can share it.
-pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
-    let mut new_regions = Vec::new();
-    let mut kept: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for region_def in &layout.regions {
-        let mut new_region = Region::new(
-            region_def.name.clone(),
-            region_def.kind.clone(),
-            region_def.max_tokens,
-        );
-        new_region.summarizable = region_def.summarizable;
-        new_region.admission = region_def.admission;
-        new_region.volatility = region_def.volatility;
-        new_region.accepts = region_def.accepts.clone();
-        new_region.description = region_def.description.clone();
-        new_region.describe_in_prompt = region_def.describe_in_prompt;
+/// Swap a [`ContextWindow`] to one stage's own layout in place, keeping each
+/// carried-over region's content by name. Each region gets the budget the
+/// stage's plan resolved it to.
+pub fn apply_stage_layout(
+    window: &mut ContextWindow,
+    spec: &RunSpec,
+    stage: usize,
+    layout: &RegionLayoutDef,
+) {
+    let regions = layout
+        .regions
+        .iter()
+        .map(|def| region_from_def(def, stage_region_budget(spec, stage, def)))
+        .collect();
+    swap_layout(window, regions);
+}
 
-        if let Some(existing) = window.get_region(&region_def.name) {
+/// Swap a window to a parsed blueprint's (already resolved) stage layout.
+/// Stage entry still reads the blueprint; [`apply_stage_layout`] is the same
+/// step from a spec.
+pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
+    let regions = layout.regions.iter().map(region_from_definition).collect();
+    swap_layout(window, regions);
+}
+
+/// Replace the window's regions with `declared`, carrying every existing
+/// region's entries into its namesake, and keeping (hidden) any region the
+/// new layout leaves out.
+fn swap_layout(window: &mut ContextWindow, declared: Vec<Region>) {
+    let mut new_regions = Vec::new();
+    let mut kept: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for mut new_region in declared {
+        if let Some(existing) = window.get_region(&new_region.name) {
             // Carry entries verbatim - kind, metadata, key, timestamp survive
             // the swap. Rebuilding via `add_entry` flattened every carried
             // entry to `EntryKind::Text`, which destroyed the typed tool_use/
@@ -194,7 +366,7 @@ pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
             new_region.taint = existing.taint.clone();
         }
 
-        kept.insert(region_def.name.as_str());
+        kept.insert(new_region.name.clone());
         new_regions.push(new_region);
     }
 
@@ -222,7 +394,7 @@ pub(crate) fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     let always_visible = crate::spec::blueprint::ALWAYS_VISIBLE_REGIONS;
     let mut hidden = std::collections::HashSet::new();
     for existing in &window.regions {
-        if kept.contains(existing.name.as_str()) {
+        if kept.contains(&existing.name) {
             continue;
         }
         let mut carried = Region::new(
@@ -322,15 +494,13 @@ const INSTRUCTIONS_SHARE_OF_WINDOW: usize = 4;
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SEED_TRUNCATION_MARKER, apply_layout, fit_seed_to_budget, init_window, init_window_seeded,
-    };
+    use super::*;
     use crate::ContextWindow;
+    use crate::spec::run_spec::RunSpec;
     use crate::spec::{
         Blueprint, ContextLayout, Stage, blueprint::ModelConfig, layout::RegionDefinition,
     };
     use leviath_core::{EvictionStrategy, RegionKind};
-    use std::collections::HashMap;
 
     fn blueprint_with(regions: Vec<RegionDefinition>) -> Blueprint {
         let layout = ContextLayout::new(regions, 100_000);
@@ -341,10 +511,42 @@ mod tests {
         Blueprint::new("bp".to_string(), "desc".to_string(), stages, layout)
     }
 
+    /// The spec a spawn of `bp` on a 100k-token model resolves.
+    fn spec_of(bp: &Blueprint) -> RunSpec {
+        crate::spec_bridge::run_spec_from_blueprint(
+            bp,
+            "t",
+            &[crate::pipeline::StageInference {
+                provider_name: "p".into(),
+                model: "m".into(),
+                tools: vec![],
+                tool_filter: None,
+                fallbacks: vec![],
+                output: None,
+            }],
+            &[100_000],
+        )
+        .unwrap()
+    }
+
+    fn seed(window: &mut ContextWindow, bp: &Blueprint, seeds: &HashMap<String, String>) {
+        init_window_from_spec(window, &spec_of(bp), seeds);
+    }
+
     fn seeded_window(bp: &Blueprint, task: &str) -> ContextWindow {
         let mut window = ContextWindow::new(100_000);
-        init_window(&mut window, bp, task);
+        seed(
+            &mut window,
+            bp,
+            &HashMap::from([("task".to_string(), task.to_string())]),
+        );
         window
+    }
+
+    /// Swap `window` to `layout` as a stage whose own layout it is.
+    fn swap_to(window: &mut ContextWindow, layout: &ContextLayout) {
+        let spec = spec_of(&blueprint_with(layout.regions.clone()));
+        apply_stage_layout(window, &spec, 0, &spec.graph.layout);
     }
 
     /// The infra region is added when the layout does not already declare it. A
@@ -407,7 +609,7 @@ mod tests {
             ("ghost".to_string(), "no such region".to_string()),
         ]);
         let mut window = ContextWindow::new(100_000);
-        init_window_seeded(&mut window, &bp, &seeds);
+        seed(&mut window, &bp, &seeds);
 
         assert!(
             window
@@ -495,7 +697,7 @@ mod tests {
         )]);
         let seeds = HashMap::from([("facts".to_string(), "y".repeat(10_000))]);
         let mut window = ContextWindow::new(100_000);
-        init_window_seeded(&mut window, &bp, &seeds);
+        seed(&mut window, &bp, &seeds);
 
         let region = window.get_region("facts").unwrap();
         assert!(
@@ -516,7 +718,7 @@ mod tests {
         )]);
         let seeds = HashMap::from([("task".to_string(), "fallback text".to_string())]);
         let mut window = ContextWindow::new(100_000);
-        init_window_seeded(&mut window, &bp, &seeds);
+        seed(&mut window, &bp, &seeds);
         assert!(
             window
                 .get_region("system")
@@ -654,7 +856,7 @@ mod tests {
             8000,
         );
 
-        apply_layout(&mut window, &new_layout);
+        swap_to(&mut window, &new_layout);
 
         // system + scratch from the new layout, PLUS the auto-added infra regions
         // carried across the transition even though the new layout doesn't declare
@@ -736,7 +938,7 @@ mod tests {
             )],
             8000,
         );
-        apply_layout(&mut window, &omitting);
+        swap_to(&mut window, &omitting);
 
         // Swap 2: layout declares conversation (the by-name carry loop).
         let declaring = ContextLayout::new(
@@ -753,7 +955,7 @@ mod tests {
             ],
             20_000,
         );
-        apply_layout(&mut window, &declaring);
+        swap_to(&mut window, &declaring);
 
         let conv = window.get_region("conversation").unwrap();
         assert!(
@@ -807,7 +1009,7 @@ mod tests {
             )],
             8000,
         );
-        apply_layout(&mut window, &next);
+        swap_to(&mut window, &next);
 
         let conv = window
             .get_region("conversation")
@@ -818,5 +1020,221 @@ mod tests {
                 .any(|e| e.content.contains("hello from stage 0")),
             "carried conversation must retain its history"
         );
+    }
+
+    /// The blueprint forms still build the same window as the spec forms,
+    /// while spawning and stage entry hand them a blueprint.
+    #[test]
+    fn the_blueprint_forms_build_the_same_window() {
+        let bp = blueprint_with(vec![
+            RegionDefinition::new("task".to_string(), RegionKind::Pinned, 5000),
+            RegionDefinition::new("notes".to_string(), RegionKind::Temporary, 3000),
+        ]);
+        let mut old = ContextWindow::new(100_000);
+        init_window(&mut old, &bp, "the task");
+        let new = seeded_window(&bp, "the task");
+        let shape = |w: &ContextWindow| {
+            w.regions
+                .iter()
+                .map(|r| (r.name.clone(), r.max_tokens, r.content.len()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shape(&old), shape(&new));
+        let next = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "task".to_string(),
+                RegionKind::Pinned,
+                4000,
+            )],
+            8000,
+        );
+        let mut by_spec = new.clone();
+        apply_layout(&mut old, &next);
+        swap_to(&mut by_spec, &next);
+        assert_eq!(shape(&old), shape(&by_spec));
+        assert_eq!(old.hidden, by_spec.hidden);
+        // No pinned `task`: the task lands in the first pinned region.
+        let bp = blueprint_with(vec![
+            RegionDefinition::new("task".to_string(), RegionKind::Temporary, 3000),
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 5000),
+        ]);
+        let mut old = ContextWindow::new(100_000);
+        init_window(&mut old, &bp, "fallback");
+        assert_eq!(old.get_region("system").unwrap().content.len(), 1);
+    }
+
+    #[test]
+    fn a_percentage_budget_is_capped_then_floored() {
+        let pct = |percent, min, max| Budget::Percent { percent, min, max };
+        assert_eq!(budget_tokens(&Budget::Tokens(7), 100), 7);
+        assert_eq!(budget_tokens(&pct(0.5, None, None), 1000), 500);
+        assert_eq!(budget_tokens(&pct(0.5, None, Some(100)), 1000), 100);
+        assert_eq!(budget_tokens(&pct(0.5, Some(900), Some(100)), 1000), 900);
+    }
+
+    fn def(kind: crate::spec::graph::RegionKind) -> RegionDef {
+        RegionDef {
+            name: crate::spec::names::RegionName::new("r").unwrap(),
+            kind,
+            budget: Budget::Tokens(1000),
+            compact_at: None,
+            description: Some("d".into()),
+            describe_in_prompt: true,
+            required: false,
+            required_message: None,
+            summarizable: false,
+            admission: Default::default(),
+            volatility: Default::default(),
+            seed: None,
+            accepts: vec![crate::spec::names::MimePattern::new("image/*").unwrap()],
+        }
+    }
+
+    /// Every declared kind becomes the window's own, with the declared
+    /// settings carried across.
+    #[test]
+    fn every_region_kind_reaches_the_window() {
+        use crate::spec::graph::RegionKind as K;
+        use crate::spec::names::RegionName;
+        let cases: Vec<(K, RegionKind)> = vec![
+            (K::Pinned, RegionKind::Pinned),
+            (
+                K::SlidingWindow {
+                    max_items: 3,
+                    eviction: Eviction::PerItem,
+                },
+                RegionKind::SlidingWindow {
+                    max_items: 3,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
+            ),
+            (
+                K::SlidingWindow {
+                    max_items: 3,
+                    eviction: Eviction::Bulk(2),
+                },
+                RegionKind::SlidingWindow {
+                    max_items: 3,
+                    eviction_strategy: EvictionStrategy::Bulk { overflow: 2 },
+                },
+            ),
+            (
+                K::SlidingWindow {
+                    max_items: 3,
+                    eviction: Eviction::Compact(4),
+                },
+                RegionKind::SlidingWindow {
+                    max_items: 3,
+                    eviction_strategy: EvictionStrategy::Compact { compact_count: 4 },
+                },
+            ),
+            (K::Temporary, RegionKind::Temporary),
+            (
+                K::Compacting {
+                    threshold_tokens: Some(9),
+                },
+                RegionKind::Compacting {
+                    threshold_tokens: 9,
+                },
+            ),
+            (K::Clearable, RegionKind::Clearable),
+            (
+                K::CompactHistory {
+                    source: RegionName::new("conversation").unwrap(),
+                },
+                RegionKind::CompactHistory {
+                    source_region: "conversation".into(),
+                },
+            ),
+            (
+                K::Keyed {
+                    max_entries: Some(2),
+                },
+                RegionKind::HashMap {
+                    max_entries: Some(2),
+                },
+            ),
+            (K::Checklist, RegionKind::Checklist),
+            (
+                K::Custom {
+                    code: CodeRef::File("r.rhai".into()),
+                    pinned: true,
+                },
+                RegionKind::Custom {
+                    script: "r.rhai".into(),
+                    pinned: true,
+                },
+            ),
+            (
+                K::Custom {
+                    code: CodeRef::Inline("fn render() {}".into()),
+                    pinned: false,
+                },
+                RegionKind::Custom {
+                    script: "fn render() {}".into(),
+                    pinned: false,
+                },
+            ),
+        ];
+        for (kind, want) in cases {
+            let region = region_from_def(&def(kind), 1000);
+            assert_eq!(region.kind, want);
+            assert_eq!(region.max_tokens, 1000);
+            assert!(!region.summarizable && region.describe_in_prompt);
+            assert_eq!(region.accepts, vec!["image/*".to_string()]);
+            assert_eq!(region.description.as_deref(), Some("d"));
+        }
+    }
+
+    #[test]
+    fn a_compacting_region_compacts_at_its_share_under_its_threshold() {
+        assert_eq!(compaction_threshold(None, None, 1000), usize::MAX);
+        assert_eq!(compaction_threshold(Some(50), None, 1000), 50);
+        assert_eq!(compaction_threshold(None, Some(0.8), 1000), 800);
+        assert_eq!(compaction_threshold(Some(50), Some(0.8), 1000), 50);
+    }
+
+    /// A region only per-stage layouts see, or one every global-layout stage
+    /// hides, is sized against the entry stage's window; a stage with no
+    /// plan entry for a region sizes it against its own.
+    #[test]
+    fn a_region_no_stage_resolved_is_sized_against_a_window() {
+        let bp = blueprint_with(vec![RegionDefinition::new(
+            "task".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )]);
+        let mut spec = spec_of(&bp);
+        spec.stages[0].region_budgets.clear();
+        let mut half = spec.graph.layout.regions[0].clone();
+        half.budget = Budget::Percent {
+            percent: 0.5,
+            min: None,
+            max: None,
+        };
+        assert_eq!(layout_region_budget(&spec, &half), 50_000);
+        assert_eq!(stage_region_budget(&spec, 0, &half), 50_000);
+        assert_eq!(
+            stage_region_budget(&spec, 9, &half),
+            0,
+            "no plan, no window"
+        );
+        spec.stages.clear();
+        assert_eq!(layout_region_budget(&spec, &half), 0);
+    }
+
+    #[test]
+    fn the_task_region_is_a_pinned_task_or_the_first_pinned_one() {
+        let spec = spec_of(&blueprint_with(vec![
+            RegionDefinition::new("task".to_string(), RegionKind::Temporary, 5000),
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 5000),
+        ]));
+        assert_eq!(task_region(&spec.graph.layout).as_deref(), Some("system"));
+        let spec = spec_of(&blueprint_with(vec![RegionDefinition::new(
+            "scratch".to_string(),
+            RegionKind::Temporary,
+            5000,
+        )]));
+        assert_eq!(task_region(&spec.graph.layout), None);
     }
 }

@@ -4210,10 +4210,10 @@ async fn pausing_a_fan_out_parent_holds_its_worker_queue() {
             crate::fanout::FanOutState {
                 origin: crate::fanout::FanOutOrigin::Stage,
                 parts: Vec::new(),
-                config: crate::spec::blueprint::FanOutConfig {
-                    worker_agent: None,
-                    worker_stage: Some("work".to_string()),
-                    worker_query: None,
+                config: crate::spec::graph::FanOutDef {
+                    worker: crate::spec::graph::WorkerSource::Stage(
+                        crate::spec::names::StageName::new("work").unwrap(),
+                    ),
                     merge_stage: None,
                     max_workers: 1,
                     on_worker_failure: Default::default(),
@@ -4293,10 +4293,10 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
             crate::fanout::FanOutState {
                 origin: crate::fanout::FanOutOrigin::Stage,
                 parts: Vec::new(),
-                config: crate::spec::blueprint::FanOutConfig {
-                    worker_agent: None,
-                    worker_stage: Some("work".to_string()),
-                    worker_query: None,
+                config: crate::spec::graph::FanOutDef {
+                    worker: crate::spec::graph::WorkerSource::Stage(
+                        crate::spec::names::StageName::new("work").unwrap(),
+                    ),
                     merge_stage: None,
                     max_workers: 2,
                     on_worker_failure: Default::default(),

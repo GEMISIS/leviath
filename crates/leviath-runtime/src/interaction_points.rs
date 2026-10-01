@@ -2,7 +2,7 @@
 //!
 //! Unlike the model-driven `ask_user_*` / `edit_document` tools (which fire only
 //! if the model chooses to call them - see [`crate::dynamic_interaction`]), an
-//! interaction point is declared statically in the blueprint and fired by the
+//! interaction point is declared statically in the run graph and fired by the
 //! framework at the stage boundary, *always*, before the stage may transition.
 //! The canonical example is `plan_approval`: after the plan stage produces a
 //! plan, the user is shown a choice - approve / revise / edit / abort - and the
@@ -24,10 +24,11 @@
 //! The routing is deterministic (code); only the input capture is a user
 //! interaction.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::spec::blueprint::{InteractionPoint, InteractionStyle, StageMode, UnattendedPolicy};
+use crate::insert::RunSpecC;
+use crate::spec::graph::{AnswerStyle, InteractionPointDef, StageMode, UnattendedPoint};
 use bevy_ecs::prelude::*;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 use serde::{Deserialize, Serialize};
@@ -38,9 +39,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::components::{AgentState, AgentStatus, ContextWindow, InferenceResult};
 use crate::dynamic_interaction::InteractionBackend;
 use crate::interaction_hub::{InteractionHub, PromptLane};
-use crate::pipeline::{
-    AgentBlueprint, ReadyToInfer, ResolveTransition, StageCursor, StageIoBuffer,
-};
+use crate::pipeline::{ReadyToInfer, ResolveTransition, StageCursor, StageIoBuffer};
 
 /// Maximum directive/edit revision rounds at one interaction point before the
 /// stage proceeds regardless, so a revise/edit loop can never run forever.
@@ -180,7 +179,7 @@ fn option_matches(candidates: &[String], user_text: &str) -> bool {
 
 /// Look up a directive by option label (exact first, then normalized).
 fn lookup_directive<'a>(
-    directives: &'a HashMap<String, String>,
+    directives: &'a BTreeMap<String, String>,
     user_text: &str,
 ) -> Option<&'a str> {
     if let Some(d) = directives.get(user_text) {
@@ -196,16 +195,16 @@ fn lookup_directive<'a>(
 /// Build the interaction request for a point in its declared style, attaching
 /// `body` (the document the stage produced - e.g. the plan) so the client can
 /// show just this instance's document to review, rather than the full history.
-fn build_point_request(point: &InteractionPoint, id: String, body: &str) -> InteractionRequest {
+fn build_point_request(point: &InteractionPointDef, id: String, body: &str) -> InteractionRequest {
     let mut req = match point.style {
-        InteractionStyle::MultipleChoice => InteractionRequest::multiple_choice(
+        AnswerStyle::MultipleChoice => InteractionRequest::multiple_choice(
             id,
             &point.prompt,
             point.options.clone(),
             &point.name,
         ),
-        InteractionStyle::Confirm => InteractionRequest::confirm(id, &point.prompt, &point.name),
-        InteractionStyle::FreeText => {
+        AnswerStyle::Confirm => InteractionRequest::confirm(id, &point.prompt, &point.name),
+        AnswerStyle::FreeText => {
             InteractionRequest::free_text(id, &point.prompt, &point.name, point.required)
         }
     };
@@ -217,7 +216,7 @@ fn build_point_request(point: &InteractionPoint, id: String, body: &str) -> Inte
 }
 
 /// What a confirm point's "yes" reads as, for routing and for the directive
-/// and option lists a blueprint keys on it.
+/// and option lists a graph keys on it.
 const CONFIRM_YES: &str = "Yes";
 
 /// What a confirm point's "no" reads as.
@@ -250,7 +249,7 @@ fn is_unanswered(resp: &InteractionResponse) -> bool {
 
 /// Route a resolved answer to a [`PointOutcome`] (pure; the edit branch's second
 /// ask is done by the caller, which knows the edited text).
-fn route_answer(point: &InteractionPoint, user_text: String) -> Routed {
+fn route_answer(point: &InteractionPointDef, user_text: String) -> Routed {
     if option_matches(&point.abort_options, &user_text) {
         Routed::Abort
     } else if option_matches(&point.edit_options, &user_text) {
@@ -260,7 +259,7 @@ fn route_answer(point: &InteractionPoint, user_text: String) -> Routed {
             user_text,
             directive: directive.to_string(),
         }
-    } else if point.style == InteractionStyle::Confirm && user_text == CONFIRM_NO {
+    } else if point.style == AnswerStyle::Confirm && user_text == CONFIRM_NO {
         // Anything not named in a list approves, which is right for a
         // choice's options and wrong for a refusal: "No" to "go ahead?" that
         // no list claims stops the run rather than going ahead.
@@ -303,8 +302,8 @@ pub(crate) struct PointAsk {
     /// That agent's run id, which the request id is namespaced by so two runs
     /// at the same point never collide in the shared hub.
     pub agent_id: String,
-    /// The point as the blueprint declared it.
-    pub point: InteractionPoint,
+    /// The point as the graph declared it.
+    pub point: InteractionPointDef,
     /// The text being asked about.
     pub body: String,
     /// Which round of this point the run is on.
@@ -342,7 +341,7 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
     //
     // The default `auto_approve` policy never takes this arm, so a point that
     // does not claim to need a person behaves exactly as before.
-    if point.unattended == UnattendedPolicy::Ask && is_unanswered(&resp) {
+    if point.unattended == UnattendedPoint::Ask && is_unanswered(&resp) {
         let _ = outcomes.send(InteractionPointOutcome {
             entity,
             decision: PointOutcome::Unanswered,
@@ -384,7 +383,7 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
 /// the default `Active` + `ReadyToInfer` restore, which would re-issue inference and
 /// drop the prompt.
 ///
-/// Looks up the point from the agent's (already-restored) blueprint + stage cursor,
+/// Looks up the point from the agent's (already-restored) spec + stage cursor,
 /// restores the point cursor/round, flips the agent to `Waiting` (clearing the
 /// spawn-set `ReadyToInfer`, marking `AwaitingInteractionPoint`), and re-spawns the
 /// ask task so the request re-registers in the hub with the same id
@@ -394,7 +393,7 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
 ///
 /// A no-op (leaving the default restore in place) when the interaction-point lane
 /// isn't wired (a test world), or when the stage is no longer an interactive-points
-/// stage / the cursor is out of range (e.g. the blueprint changed under the run).
+/// stage / the cursor is out of range (e.g. the graph changed under the run).
 pub fn restore_interaction_point(
     world: &mut World,
     agent: crate::world::AgentId,
@@ -415,8 +414,8 @@ pub fn restore_interaction_point(
         return;
     };
 
-    // Resolve the point from the restored blueprint + stage cursor. A reloaded agent
-    // always carries these; a blueprint that changed out from under the run (stage no
+    // Resolve the point from the restored spec + stage cursor. A reloaded agent
+    // always carries these; a graph that changed out from under the run (stage no
     // longer interactive, or fewer points) leaves the default restore in place rather
     // than resuming a stale prompt.
     let agent_id = world
@@ -425,13 +424,13 @@ pub fn restore_interaction_point(
         .agent_id
         .clone();
     let point = {
-        let bp = world
-            .get::<AgentBlueprint>(entity)
-            .expect("a reloaded agent has a blueprint");
+        let spec = world
+            .get::<RunSpecC>(entity)
+            .expect("a reloaded agent has a spec");
         let cursor = world
             .get::<StageCursor>(entity)
             .expect("a reloaded agent has a stage cursor");
-        stage_points(bp, cursor)
+        stage_points(spec, cursor)
             .and_then(|p| p.get(state.cursor))
             .cloned()
     };
@@ -478,12 +477,9 @@ pub fn restore_interaction_point(
 
 /// Read the interaction points of an agent's current stage, or `None` if the
 /// stage isn't an interactive-points stage.
-fn stage_points<'a>(
-    bp: &'a AgentBlueprint,
-    cursor: &StageCursor,
-) -> Option<&'a [InteractionPoint]> {
-    match &bp.0.stages[cursor.index].mode {
-        StageMode::InteractivePoints { points } => Some(points),
+fn stage_points<'a>(spec: &'a RunSpecC, cursor: &StageCursor) -> Option<&'a [InteractionPointDef]> {
+    match &spec.0.graph.stages[cursor.index].mode {
+        StageMode::InteractivePoints(points) => Some(points),
         _ => None,
     }
 }
@@ -494,7 +490,7 @@ fn stage_points<'a>(
 /// lifetimes: the borrow is bound when the query is fetched.
 type InteractionPointQuery = (
     Entity,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static StageCursor,
     Option<&'static InteractionPointCursor>,
 );
@@ -531,7 +527,7 @@ pub(crate) fn gate_interaction_points(
 type DispatchInteractionPointQuery = (
     Entity,
     &'static AgentState,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static StageCursor,
     &'static InferenceResult,
     &'static mut ContextWindow,
@@ -592,7 +588,7 @@ pub(crate) fn dispatch_interaction_point(
             let tokens = leviath_core::estimate_tokens(&content);
             window.replace_region(
                 leviath_core::ContextCause::Interaction,
-                region,
+                region.as_str(),
                 content,
                 tokens,
             );
@@ -606,7 +602,7 @@ pub(crate) fn dispatch_interaction_point(
         // code is written - and their author would rather the run wait than have
         // it wave itself through. That wait lasts until somebody answers,
         // unless `[limits] interaction_timeout_secs` bounds it.
-        if auto_approve.is_some() && point.unattended == UnattendedPolicy::AutoApprove {
+        if auto_approve.is_some() && point.unattended == UnattendedPoint::AutoApprove {
             tracing::info!(
                 agent = %state.agent_id,
                 point = %point.name,
@@ -655,7 +651,7 @@ pub(crate) fn dispatch_interaction_point(
 type CollectInteractionPointQuery = (
     &'static mut AgentState,
     &'static mut ContextWindow,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static StageCursor,
     Option<&'static InteractionPointCursor>,
     Option<&'static InteractionPointRounds>,
@@ -843,15 +839,15 @@ mod tests {
 
     // ── builders ──
 
-    fn point(name: &str, style: InteractionStyle, options: &[&str]) -> InteractionPoint {
-        InteractionPoint {
+    fn point(name: &str, style: AnswerStyle, options: &[&str]) -> InteractionPointDef {
+        InteractionPointDef {
             name: name.to_string(),
             prompt: "Choose".to_string(),
             required: true,
-            unattended: UnattendedPolicy::AutoApprove,
+            unattended: UnattendedPoint::AutoApprove,
             style,
             options: options.iter().map(|s| s.to_string()).collect(),
-            directives: HashMap::new(),
+            directives: BTreeMap::new(),
             abort_options: Vec::new(),
             edit_options: Vec::new(),
             document_region: None,
@@ -859,44 +855,37 @@ mod tests {
     }
 
     /// The plan_approval point: approve / revise (directive) / edit / abort.
-    fn plan_point() -> InteractionPoint {
+    fn plan_point() -> InteractionPointDef {
         let mut p = point(
             "plan_approval",
-            InteractionStyle::MultipleChoice,
+            AnswerStyle::MultipleChoice,
             &["Approve", "Revise", "Add detail", "Abort"],
         );
         p.directives
             .insert("Revise".to_string(), "revise the plan".to_string());
         p.abort_options = vec!["Abort".to_string()];
         p.edit_options = vec!["Add detail".to_string()];
-        p.document_region = Some("plan".to_string());
+        p.document_region = Some(crate::spec::names::RegionName::new("plan").unwrap());
         p
     }
 
-    fn blueprint_with(points: Vec<InteractionPoint>) -> AgentBlueprint {
-        let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
-        let mut stage = crate::spec::Stage::new(
-            "plan".to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        stage.mode = StageMode::InteractivePoints { points };
-        let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
-        AgentBlueprint(bp)
+    /// A one-stage spec whose stage is `mode`.
+    fn spec_with_mode(name: &str, mode: StageMode) -> RunSpecC {
+        let mut stage = crate::spec_bridge::test_support::stage(name);
+        stage.mode = mode;
+        let mut graph = crate::spec::run_spec::tests::spec().graph;
+        graph.stages = vec![stage];
+        graph.edges.clear();
+        crate::spec_bridge::test_support::spec_c("t", graph)
     }
 
-    /// A single-stage blueprint whose stage is *not* an interactive-points stage.
-    fn noninteractive_bp() -> AgentBlueprint {
-        let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
-        let stage = crate::spec::Stage::new(
-            "auto".to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        AgentBlueprint(crate::spec::Blueprint::new(
-            "t".to_string(),
-            "d".to_string(),
-            vec![stage],
-            layout,
-        ))
+    fn blueprint_with(points: Vec<InteractionPointDef>) -> RunSpecC {
+        spec_with_mode("plan", StageMode::InteractivePoints(points))
+    }
+
+    /// A single-stage spec whose stage is *not* an interactive-points stage.
+    fn noninteractive_bp() -> RunSpecC {
+        spec_with_mode("auto", StageMode::Autonomous)
     }
 
     fn agent_state(status: AgentStatus) -> AgentState {
@@ -962,7 +951,7 @@ mod tests {
 
     #[test]
     fn lookup_directive_exact_normalized_and_none() {
-        let mut d = HashMap::new();
+        let mut d = BTreeMap::new();
         d.insert("Revise \u{2014} x".to_string(), "do it".to_string());
         assert_eq!(lookup_directive(&d, "Revise \u{2014} x"), Some("do it"));
         assert_eq!(lookup_directive(&d, "Revise - x"), Some("do it"));
@@ -973,7 +962,7 @@ mod tests {
     fn build_point_request_by_style() {
         use leviath_core::interaction::InteractionKind;
         let mc = build_point_request(
-            &point("p", InteractionStyle::MultipleChoice, &["a", "b"]),
+            &point("p", AnswerStyle::MultipleChoice, &["a", "b"]),
             "id".to_string(),
             "## Plan\n1. do it",
         );
@@ -985,16 +974,12 @@ mod tests {
             mc.body_format,
             leviath_core::interaction::BodyFormat::Markdown
         );
-        let cf = build_point_request(
-            &point("p", InteractionStyle::Confirm, &[]),
-            "id".to_string(),
-            "",
-        );
+        let cf = build_point_request(&point("p", AnswerStyle::Confirm, &[]), "id".to_string(), "");
         assert_eq!(cf.kind, InteractionKind::Confirm);
         // A blank body is not attached.
         assert_eq!(cf.body, None);
         let ft = build_point_request(
-            &point("p", InteractionStyle::FreeText, &[]),
+            &point("p", AnswerStyle::FreeText, &[]),
             "id".to_string(),
             "   ",
         );
@@ -1054,17 +1039,7 @@ mod tests {
         let bp = blueprint_with(vec![plan_point()]);
         assert!(stage_points(&bp, &StageCursor { index: 0 }).is_some());
         // A non-interactive stage.
-        let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
-        let stage = crate::spec::Stage::new(
-            "auto".to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        let bp2 = AgentBlueprint(crate::spec::Blueprint::new(
-            "t".to_string(),
-            "d".to_string(),
-            vec![stage],
-            layout,
-        ));
+        let bp2 = noninteractive_bp();
         assert!(stage_points(&bp2, &StageCursor { index: 0 }).is_none());
     }
 
@@ -1305,7 +1280,7 @@ mod tests {
             runtime: Handle::current(),
         });
         let mut point = plan_point();
-        point.unattended = UnattendedPolicy::Ask;
+        point.unattended = UnattendedPoint::Ask;
         let e = world
             .spawn((
                 agent_state(AgentStatus::Active),
@@ -1339,9 +1314,9 @@ mod tests {
     #[tokio::test]
     async fn an_expired_prompt_stops_a_held_point_and_approves_an_auto_one() {
         for (policy, expected) in [
-            (UnattendedPolicy::Ask, PointOutcome::Unanswered),
+            (UnattendedPoint::Ask, PointOutcome::Unanswered),
             (
-                UnattendedPolicy::AutoApprove,
+                UnattendedPoint::AutoApprove,
                 PointOutcome::Approve {
                     user_text: String::new(),
                 },
@@ -1393,7 +1368,7 @@ mod tests {
         let e = world
             .spawn((
                 agent_state(AgentStatus::Active),
-                blueprint_with(vec![point("p", InteractionStyle::Confirm, &[])]),
+                blueprint_with(vec![point("p", AnswerStyle::Confirm, &[])]),
                 window_with_plan(),
                 StageCursor { index: 0 },
                 infer("some output"),
@@ -1492,7 +1467,7 @@ mod tests {
         s.run(world);
     }
 
-    fn spawn_awaiting(world: &mut World, points: Vec<InteractionPoint>) -> Entity {
+    fn spawn_awaiting(world: &mut World, points: Vec<InteractionPointDef>) -> Entity {
         world
             .spawn((
                 agent_state(AgentStatus::Waiting),
@@ -1531,8 +1506,8 @@ mod tests {
         let e = spawn_awaiting(
             &mut world,
             vec![
-                point("first", InteractionStyle::Confirm, &[]),
-                point("second", InteractionStyle::Confirm, &[]),
+                point("first", AnswerStyle::Confirm, &[]),
+                point("second", AnswerStyle::Confirm, &[]),
             ],
         );
         tx.send(InteractionPointOutcome {
@@ -1871,7 +1846,7 @@ mod tests {
     // ── the async ask task ──
 
     async fn drive_point(
-        point: InteractionPoint,
+        point: InteractionPointDef,
         answer: impl FnOnce(&InteractionHub, String),
     ) -> PointOutcome {
         let hub = InteractionHub::new();
@@ -1924,7 +1899,7 @@ mod tests {
     /// through to Approve: the person refused and the stage moved on.
     #[tokio::test]
     async fn a_confirm_point_hears_yes_and_no() {
-        let confirm = || point("go_ahead", InteractionStyle::Confirm, &[]);
+        let confirm = || point("go_ahead", AnswerStyle::Confirm, &[]);
         let yes = drive_point(confirm(), |hub, id| {
             assert!(hub.answer(InteractionResponse::approval(
                 &id,
@@ -2081,7 +2056,7 @@ mod tests {
 
     /// A freshly "restored" agent as `restore_agent` leaves it (Active +
     /// ReadyToInfer) before interaction-point restore runs.
-    fn restored_agent(world: &mut World, bp: AgentBlueprint) -> Entity {
+    fn restored_agent(world: &mut World, bp: RunSpecC) -> Entity {
         world
             .spawn((
                 agent_state(AgentStatus::Active),

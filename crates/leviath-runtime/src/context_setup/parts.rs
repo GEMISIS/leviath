@@ -117,20 +117,20 @@ pub(crate) fn text_part(sink: Option<&PartSink<'_>>, name: &str, text: &str) -> 
 
 /// Write every attached part into its region, after the seeds are in.
 ///
-/// A part with no region goes to the task region, which is where the text it
-/// came with went. A part naming a region the blueprint does not declare is
-/// refused: the CLI checks this before dialling, and the API and ACP paths
-/// reach here directly.
-pub(crate) fn ingest_parts(
+/// A part with no region goes to `task` (the task region, see
+/// [`super::task_region`]), which is where the text it came with went. A part
+/// naming a region the run does not declare is refused: the CLI checks this
+/// before dialling, and the API and ACP paths reach here directly.
+pub(crate) fn ingest_parts_into(
     window: &mut ContextWindow,
-    blueprint: &crate::spec::Blueprint,
+    task: Option<String>,
     parts: Vec<InboundPart>,
     sink: &PartSink<'_>,
 ) -> Result<(), String> {
     for inbound in parts {
         let region = match &inbound.region {
             Some(name) => name.clone(),
-            None => super::task_region_name(blueprint).ok_or_else(|| {
+            None => task.clone().ok_or_else(|| {
                 format!(
                     "part '{}' names no region and this agent takes no task",
                     inbound.name
@@ -201,11 +201,17 @@ mod tests {
         window
     }
 
-    fn blueprint() -> crate::spec::Blueprint {
-        crate::spec::manifest::parse_manifest(
-            "[agent]\nname = \"t\"\n\n[context.regions]\ntask = { kind = \"pinned\" }\nart = { kind = \"pinned\", accepts = [\"image/*\"] }\n",
+    /// The task region of a graph read from `manifest`.
+    fn task_of(manifest: &str) -> Option<String> {
+        let bp = crate::spec::manifest::parse_manifest(manifest).unwrap();
+        let graph = crate::spec::graph::RunGraph::from_blueprint(&bp).unwrap();
+        super::super::task_region(&graph.layout)
+    }
+
+    fn task() -> Option<String> {
+        task_of(
+            "[agent]\nname = \"t\"\n\n[context.regions]\ntask = { kind = \"pinned\" }\n[stages.main]\n",
         )
-        .unwrap()
     }
 
     #[test]
@@ -226,7 +232,7 @@ mod tests {
             .typed(MimeType::parse("text/plain").unwrap())
             .delivered(leviath_core::mime::Delivery::Text)
             .captioned("my notes");
-        ingest_parts(&mut window, &blueprint(), vec![png, note], &sink).unwrap();
+        ingest_parts_into(&mut window, task(), vec![png, note], &sink).unwrap();
         let art = window.get_region("art").unwrap();
         assert_eq!(art.content.len(), 1);
         assert_eq!(
@@ -265,7 +271,7 @@ mod tests {
         };
         let mut window = window();
         let big = InboundPart::from_bytes("big.bin", vec![0; 5]);
-        let err = ingest_parts(&mut window, &blueprint(), vec![big], &sink).unwrap_err();
+        let err = ingest_parts_into(&mut window, task(), vec![big], &sink).unwrap_err();
         assert!(err.contains("big.bin") && err.contains("ceiling"), "{err}");
         let sink = PartSink {
             store: &store,
@@ -275,28 +281,28 @@ mod tests {
             inline_text_bytes: 1024,
         };
         let wrong_type = InboundPart::from_bytes("song.wav", vec![1, 2, 3]).in_region("art");
-        let err = ingest_parts(&mut window, &blueprint(), vec![wrong_type], &sink).unwrap_err();
+        let err = ingest_parts_into(&mut window, task(), vec![wrong_type], &sink).unwrap_err();
         assert!(err.contains("refused by region 'art'"), "{err}");
         let no_region = InboundPart::from_bytes("x.png", vec![1]).in_region("ghost");
-        let err = ingest_parts(&mut window, &blueprint(), vec![no_region], &sink).unwrap_err();
+        let err = ingest_parts_into(&mut window, task(), vec![no_region], &sink).unwrap_err();
         assert!(err.contains("does not declare"), "{err}");
         let captioned = InboundPart::from_bytes("x.png", b"\x89PNG\r\n\x1a\n".to_vec())
             .in_region("art")
             .captioned("look");
-        let err = ingest_parts(&mut window, &blueprint(), vec![captioned], &sink).unwrap_err();
+        let err = ingest_parts_into(&mut window, task(), vec![captioned], &sink).unwrap_err();
         assert!(
             err.contains("caption on 'x.png' has nowhere to go"),
             "{err}"
         );
-        let taskless = crate::spec::manifest::parse_manifest(
-            "[agent]\nname = \"t\"\n\n[context.regions]\nlog = { kind = \"temporary\" }\n",
-        )
-        .unwrap();
+        let taskless = task_of(
+            "[agent]\nname = \"t\"\n\n[context.regions]\nlog = { kind = \"temporary\" }\n[stages.main]\n",
+        );
+        assert_eq!(taskless, None);
         let mut window = ContextWindow::new(1000);
         window.add_region(Region::new("log".into(), RegionKind::Temporary, 1000));
-        let err = ingest_parts(
+        let err = ingest_parts_into(
             &mut window,
-            &taskless,
+            taskless.clone(),
             vec![InboundPart::from_bytes("x.png", vec![1])],
             &sink,
         )
@@ -304,9 +310,9 @@ mod tests {
         assert!(err.contains("takes no task"), "{err}");
         // A stored part is charged its small stand-in, not the native estimate,
         // so an image now fits an ordinary region rather than overflowing it.
-        ingest_parts(
+        ingest_parts_into(
             &mut window,
-            &taskless,
+            taskless,
             vec![InboundPart::from_bytes("x.png", b"\x89PNG\r\n\x1a\n".to_vec()).in_region("log")],
             &sink,
         )
