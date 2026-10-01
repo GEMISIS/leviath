@@ -135,3 +135,45 @@ async fn a_run_file_whose_state_does_not_decode_is_not_listed() {
     std::fs::write(dir.join(leviath_core::files::RUN_FILE), bytes).unwrap();
     assert!(read_meta_from(&dir).is_err());
 }
+
+/// The context, the ledger and the history every view reads come off the run
+/// file, plain and through the pollers' caches, and a run file is never read
+/// for an older run's files beside it.
+#[tokio::test]
+async fn the_views_of_a_run_read_its_run_file() {
+    use super::run_file::tests::{say, step, take};
+    with_isolated_runs_dir_async("runstate-run-file-views", |_d| async move {
+        let dir = super::run_file::tests::recorded(&runs_dir());
+        let run_id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        step(&dir, 10, |s| say(s, "first words"));
+        step(&dir, 20, |s| take(s, "analyze", "implement", "next"));
+        // A stale file of the older layout beside it is never what is read.
+        std::fs::write(dir.join(leviath_core::files::CONTEXT_FILE), "{}").unwrap();
+
+        let window = read_context_snapshot(&run_id).expect("a window");
+        let said = |w: &ContextSnapshot| {
+            w.regions
+                .iter()
+                .flat_map(|r| &r.entries)
+                .any(|e| e.content == "first words")
+        };
+        assert!(said(&window));
+        let mut contexts = StatCache::default();
+        assert!(said(
+            &read_context_snapshot_cached(&run_id, &mut contexts).unwrap()
+        ));
+
+        let stages = read_stages_index(&run_id);
+        let mut cache = StatCache::default();
+        let cached = read_stages_index_settled(&run_id, &mut cache, std::time::Duration::ZERO);
+        assert_eq!(cached.len(), stages.len());
+
+        let history = run_history(&run_id);
+        assert_eq!(
+            history.transitions,
+            Some(vec![("analyze".to_string(), "implement".to_string())])
+        );
+        assert_eq!(context_history(&run_id).len(), history.points.len());
+    })
+    .await;
+}

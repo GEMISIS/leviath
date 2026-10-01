@@ -19,11 +19,12 @@ use tokio::sync::mpsc;
 
 use super::state::Dashboard;
 use super::types::{
-    ConfirmAction, NewRunAgent, NewRunContext, NewRunPane, SpawnCommand, SpawnOutcome, ToastLevel,
+    ConfirmAction, NewRunAgent, NewRunContext, NewRunPane, RefusedRun, SpawnCommand, SpawnOutcome,
+    ToastLevel,
 };
 use crate::commands::list::{ListFilter, build_list_report};
+use crate::commands::run::request::{RunLine, issues_report, run_request};
 use crate::config::Config;
-use crate::daemon::client::{RunLine, never_interactive, run_request};
 use crate::tui::widgets::confirm::Confirm;
 use crate::tui::widgets::markdown_edit::MarkdownEdit;
 
@@ -72,10 +73,31 @@ impl Dashboard {
         self.refresh_new_run_agents();
         self.select_last_launched_agent();
         self.new_run_files = collect_workdir_files(&self.new_run_ctx.workdir, FILE_CANDIDATE_CAP);
-        // Fresh slots for the agent the screen opened on: what was typed for
-        // a run already started is not what the next one wants.
-        self.new_run_inputs_key.clear();
+        let refused = self.new_run_refused.take();
+        // Fresh rows for the agent the screen opened on: what was typed for a
+        // run already started is not what the next one wants. A run the daemon
+        // refused never started, so it comes back as it was sent, with each
+        // problem beside its input.
+        match &refused {
+            Some(run) => {
+                if let Some(index) = self
+                    .new_run_agents
+                    .iter()
+                    .position(|a| a.path == run.agent_path)
+                {
+                    self.new_run_selected = index;
+                }
+                if self.new_run_inputs_key != run.agent_path {
+                    self.new_run_inputs_key.clear();
+                }
+                self.new_run_task.area_mut().insert_str(&run.task);
+            }
+            None => self.new_run_inputs_key.clear(),
+        }
         self.sync_new_run_inputs();
+        if let Some(run) = refused {
+            self.show_new_run_issues(&run.issues);
+        }
     }
 
     /// Open on the agent last launched from here, when it is still offered.
@@ -192,18 +214,29 @@ impl Dashboard {
                 return;
             }
         };
-        // The Inputs pane's slots, each to its own region.
-        let regions = match self.new_run_input_values() {
-            Ok(inputs) => {
-                parts.extend(inputs.parts);
-                unresolved.extend(inputs.unresolved);
-                inputs.regions
-            }
+        // The Inputs pane's rows, each read by its input's type and checked
+        // against it here, so a number out of range is shown beside its row
+        // rather than refused by the daemon after the screen has closed.
+        let inputs = match self.new_run_input_values() {
+            Ok(inputs) => inputs,
             Err(e) => {
                 self.toast(format!("Could not read an input: {e}"), ToastLevel::Error);
                 return;
             }
         };
+        match self.check_new_run_inputs(&inputs) {
+            0 => {}
+            1 => {
+                self.toast("An input needs attention", ToastLevel::Error);
+                return;
+            }
+            n => {
+                self.toast(format!("{n} inputs need attention"), ToastLevel::Error);
+                return;
+            }
+        }
+        parts.extend(inputs.parts);
+        unresolved.extend(inputs.unresolved);
         for token in &unresolved {
             self.toast(
                 format!("'@{token}' names no file in the working directory; sent as text"),
@@ -222,7 +255,7 @@ impl Dashboard {
             yolo: self.new_run_yolo,
             yolo_profile: self.new_run_yolo_profile.clone(),
             parts,
-            regions,
+            values: inputs.values,
         });
         // An unattended start is the warning the toggle gave, restated at the
         // moment it takes effect; an attended one is work in flight, not done.
@@ -261,6 +294,20 @@ impl Dashboard {
             // and the run reaches the list on a later sync.
             if let Some(run_id) = outcome.run_id {
                 self.pending_open_run = Some((run_id, OPEN_RUN_TICKS));
+            }
+            // A run refused for its inputs goes back on the new-run screen,
+            // each problem beside its input: now, from the list, or the next
+            // time the screen opens.
+            let about_inputs = |run: &super::types::RefusedRun| {
+                run.issues
+                    .iter()
+                    .any(|issue| super::new_run_inputs::issue_input(&issue.path).is_some())
+            };
+            if let Some(run) = outcome.refused.filter(about_inputs) {
+                self.new_run_refused = Some(run);
+                if !(self.detail_view || self.mcp_screen || self.new_run_screen) {
+                    self.open_new_run_screen();
+                }
             }
         }
     }
@@ -685,58 +732,45 @@ pub(super) async fn spawn_background_loop(
 
 /// One spawn: resolve the blueprint locally, then hand it to the daemon.
 async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
+    let failed = |message: String| SpawnOutcome {
+        message,
+        ..SpawnOutcome::default()
+    };
+    let workdir = std::path::PathBuf::from(&cmd.workdir);
     let run = match run_request(RunLine {
-        path: &cmd.agent_path,
         // Always `Some`, never `None`: `None` opens `$EDITOR`, which would
         // start a second full-screen program inside this one.
         task: Some(&cmd.task),
-        stdin_is_terminal: &never_interactive,
-        model: None,
-        workdir: &cmd.workdir,
+        values: cmd.values,
+        parts: cmd.parts,
         yolo: cmd.yolo,
         yolo_profile: cmd.yolo_profile.clone(),
-        allow: Vec::new(),
-        max_depth: None,
-        regions: cmd.regions,
-        no_seed_commands: false,
-        output_request: None,
-        parts: cmd.parts,
+        ..RunLine::new(Some(&cmd.agent_path), &cmd.workdir, &workdir)
     }) {
         Ok(run) => run,
-        Err(e) => {
-            return SpawnOutcome {
-                message: format!("Could not start '{}': {e}", cmd.agent_path),
-                ok: false,
-                run_id: None,
-            };
-        }
+        Err(e) => return failed(format!("Could not start '{}': {e}", cmd.agent_path)),
     };
     match control.spawn(run.request).await {
         Ok(ControlResponse::Spawned { run_id }) => SpawnOutcome {
             message: format!("Started {run_id}"),
             ok: true,
             run_id: Some(run_id),
+            refused: None,
         },
         Ok(ControlResponse::Rejected { issues }) => SpawnOutcome {
-            message: format!("The daemon refused the run: {issues}"),
-            ok: false,
-            run_id: None,
+            message: format!("The daemon refused the run.\n{}", issues_report(&issues)),
+            refused: Some(RefusedRun {
+                agent_path: cmd.agent_path,
+                task: cmd.task,
+                issues,
+            }),
+            ..SpawnOutcome::default()
         },
-        Ok(ControlResponse::Error { message }) => SpawnOutcome {
-            message: format!("The daemon refused the run: {message}"),
-            ok: false,
-            run_id: None,
-        },
-        Ok(other) => SpawnOutcome {
-            message: format!("Unexpected daemon response to spawn: {other:?}"),
-            ok: false,
-            run_id: None,
-        },
-        Err(e) => SpawnOutcome {
-            message: format!("Could not reach the daemon: {e}"),
-            ok: false,
-            run_id: None,
-        },
+        Ok(ControlResponse::Error { message }) => {
+            failed(format!("The daemon refused the run: {message}"))
+        }
+        Ok(other) => failed(format!("Unexpected daemon response to spawn: {other:?}")),
+        Err(e) => failed(format!("Could not reach the daemon: {e}")),
     }
 }
 
@@ -1618,11 +1652,13 @@ mod tests {
             message: "Started run-1".to_string(),
             ok: true,
             run_id: Some("run-1".to_string()),
+            refused: None,
         });
         dash.inject_spawn_outcome_for_test(SpawnOutcome {
             message: "boom".to_string(),
             ok: false,
             run_id: None,
+            refused: None,
         });
         dash.drain_spawn_outcomes();
         assert_eq!(
@@ -1683,7 +1719,7 @@ mod tests {
                 yolo: false,
                 yolo_profile: None,
                 parts: Vec::new(),
-                regions: std::collections::HashMap::new(),
+                values: Default::default(),
             })
             .unwrap();
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
@@ -1745,7 +1781,7 @@ mod tests {
                 yolo: false,
                 yolo_profile: None,
                 parts: Vec::new(),
-                regions: std::collections::HashMap::new(),
+                values: Default::default(),
             },
         )
         .await;
@@ -1773,7 +1809,7 @@ mod tests {
                 yolo: false,
                 yolo_profile: None,
                 parts: Vec::new(),
-                regions: std::collections::HashMap::new(),
+                values: Default::default(),
             })
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
