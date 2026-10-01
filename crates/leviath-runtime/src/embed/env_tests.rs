@@ -39,7 +39,9 @@ async fn registered_blueprints_load_by_name_and_revision() {
     );
 
     let unknown = env.blueprint(&reference("nope")).await.unwrap_err();
-    assert_eq!(unknown.path.to_string(), "source.blueprint");
+    // Relative to the blueprint reference: resolving places it at
+    // `source.blueprint`.
+    assert_eq!(unknown.path, SpecPath::root());
     assert_eq!(unknown.known, ["coder"]);
 
     let other = Digest::of(b"two");
@@ -413,4 +415,21 @@ fn a_manifest_that_does_not_read_as_a_graph_is_refused() {
     );
     let err = LoadedBlueprint::from_manifest(&bad_name, base()).unwrap_err();
     assert!(err.contains("blueprint name"), "{err}");
+}
+
+/// Text that is not a manifest, or a manifest that does not validate, is
+/// refused with why; a blueprint parsed without its text is not pinned.
+#[test]
+fn a_blueprint_that_does_not_parse_or_validate_is_refused() {
+    let base = || PathBuf::from("/nowhere");
+    let err = LoadedBlueprint::from_manifest("not = [valid", base()).unwrap_err();
+    assert!(err.starts_with("parse manifest"), "{err}");
+    let text =
+        "[agent]\nname = \"a\"\nentry_stage = \"main\"\n\n[stages.main]\nmode = \"autonomous\"\n";
+    let mut parsed = crate::spec::manifest::parse_manifest(text).unwrap();
+    let unpinned = LoadedBlueprint::from_parsed(parsed.clone(), None, base()).unwrap();
+    assert_eq!(unpinned.reference.digest, None);
+    parsed.entry_stage = Some("ghost".to_string());
+    let err = LoadedBlueprint::from_parsed(parsed, None, base()).unwrap_err();
+    assert!(err.starts_with("invalid blueprint"), "{err}");
 }

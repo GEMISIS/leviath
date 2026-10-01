@@ -1,7 +1,8 @@
 //! The embedded world's [`RunStarter`]: resolves and binds each run against
 //! an [`EmbedEnv`] built from the values the embedder gave the builder.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -13,17 +14,16 @@ use crate::providers::ProviderRegistry;
 use crate::resolve::{ResolveMode, resolve};
 use crate::spec::env::{Caller, LoadedBlueprint, ResolveEnv as _};
 use crate::spec::issues::SpawnIssues;
-use crate::spec::request::{SpawnRequest, SpawnSource};
+use crate::spec::request::SpawnRequest;
 use crate::spec::summary::SpawnSummary;
 
 /// How long a spawn waits for a gateway's model list it has not read yet.
 /// Bounded so an unreachable gateway costs a spawn this and no more.
 const PRIME_TIMEOUT_SECS: u64 = 10;
 
-/// Blueprints handed to [`AgentWorld::spawn`](super::AgentWorld::spawn),
-/// loaded, parked under the name the spawn's request carries until the
-/// starter picks them up.
-pub(crate) type StagedBlueprints = Arc<Mutex<HashMap<String, LoadedBlueprint>>>;
+/// The blueprints a world's requests may name, by name. Shared between the
+/// world, which adds to it, and its starter, which reads it at each spawn.
+pub(crate) type Blueprints = Arc<Mutex<BTreeMap<String, LoadedBlueprint>>>;
 
 /// Everything an embedded world starts its runs with.
 pub(crate) struct EmbedStarter {
@@ -38,8 +38,10 @@ pub(crate) struct EmbedStarter {
     /// The default tool service, which each bound run is registered with;
     /// `None` when the embedder installed its own.
     pub basic_tools: Option<Arc<BasicToolService>>,
-    /// Blueprints waiting for their spawn.
-    pub staged: StagedBlueprints,
+    /// The blueprints requests may name.
+    pub blueprints: Blueprints,
+    /// The workdir of a request that names none.
+    pub workdir: Option<PathBuf>,
     /// The providers a bare model name may route to: the only ones whose
     /// unread model list can hold a stage back.
     pub preferred: Vec<String>,
@@ -47,9 +49,8 @@ pub(crate) struct EmbedStarter {
 
 impl EmbedStarter {
     /// The env a request is resolved and bound against: the world's
-    /// providers and model defaults, with the request's staged blueprint
-    /// registered under its own name, which the request is rewritten to name.
-    fn env_for(&self, request: &mut SpawnRequest) -> EmbedEnv {
+    /// providers, model defaults and blueprints as they are now.
+    fn env(&self) -> EmbedEnv {
         let env = EmbedEnv::new(self.registry.clone(), self.defaults.clone());
         let mut limits = env.limits();
         limits.defaults.batch_tool_hint = self.hints.batch_tool;
@@ -58,14 +59,13 @@ impl EmbedStarter {
         if let Some(tools) = &self.basic_tools {
             env = env.with_basic_tools(tools.clone());
         }
-        if let SpawnSource::Blueprint(reference) = &mut request.source {
-            let staged = leviath_core::sync::lock(&self.staged).remove(reference.name.as_str());
-            if let Some(loaded) = staged {
-                *reference = loaded.reference.clone();
-                env = env.with_blueprint(loaded);
-            }
+        if let Some(dir) = &self.workdir {
+            env = env.with_default_workdir(dir.clone());
         }
-        env
+        let blueprints = leviath_core::sync::lock(&self.blueprints).clone();
+        blueprints
+            .into_values()
+            .fold(env, |env, blueprint| env.with_blueprint(blueprint))
     }
 
     /// Ask any gateway whose model list is unread for it, so a stage that
@@ -86,11 +86,11 @@ impl EmbedStarter {
 impl RunStarter for EmbedStarter {
     async fn start(
         &self,
-        mut request: SpawnRequest,
+        request: SpawnRequest,
         caller: Caller,
     ) -> Result<PreparedRun, SpawnIssues> {
         self.prime().await;
-        let env = self.env_for(&mut request);
+        let env = self.env();
         let resolved = resolve(&request, &caller, &env, ResolveMode::Spawn).await?;
         let bindings = crate::bind::bind(&resolved.spec, &resolved.code, &env).await?;
         let state = crate::insert::initial_state(&resolved.spec);
@@ -103,11 +103,11 @@ impl RunStarter for EmbedStarter {
 
     async fn check(
         &self,
-        mut request: SpawnRequest,
+        request: SpawnRequest,
         caller: Caller,
     ) -> Result<SpawnSummary, SpawnIssues> {
         self.prime().await;
-        let env = self.env_for(&mut request);
+        let env = self.env();
         let resolved = resolve(&request, &caller, &env, ResolveMode::Check).await?;
         Ok(SpawnSummary::of(&resolved.spec))
     }

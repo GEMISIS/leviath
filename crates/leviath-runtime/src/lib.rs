@@ -118,10 +118,7 @@ pub mod world;
 mod test_support;
 
 pub use components::{AgentState, AgentStatus, ContextWindow, ParentRef, SubAgentChildren};
-pub use embed::{
-    AgentWorld, AgentWorldBuilder, BasicToolService, BlueprintSource, EmbedError, EventStream,
-    RunId, SpawnSpec,
-};
+pub use embed::{AgentWorld, AgentWorldBuilder, BasicToolService, EmbedError, EventStream, RunId};
 pub use fanout::{FanOutSpawner, FanOutSpawnerRes};
 pub use host::{ControlOp, PreparedRun, RunStarter, WorldEvent, WorldHost};
 pub use inference_bridge::{
