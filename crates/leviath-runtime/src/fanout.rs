@@ -3521,14 +3521,16 @@ mod tests {
         // Routing present on the target stage ⇒ ToolResultRoutingComponent added.
         let mut world = World::new();
         let mut setups = vec![setup(), setup()];
-        setups[1].routing = Some(crate::spec::ToolResultRouting::default());
+        let routing = crate::spec::ToolResultRouting {
+            default_region: "conversation".to_string(),
+            ..crate::spec::ToolResultRouting::default()
+        };
+        setups[1].routing = Some(routing.clone());
+        let mut bp = fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue));
+        bp.stages[1].tool_result_routing = Some(routing);
         let e = world
             .spawn((
-                both(fanout_blueprint(cfg(
-                    Some("merge"),
-                    2,
-                    WorkerFailure::Continue,
-                ))),
+                both(bp),
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),

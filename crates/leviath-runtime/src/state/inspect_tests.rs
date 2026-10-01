@@ -201,73 +201,20 @@ fn each_pipeline_marker_reads_as_its_phase() {
     assert_eq!(phase_with(p::ReadyToInfer), PipelinePhase::ReadyToInfer);
 }
 
-fn edge(target: &str) -> crate::spec::blueprint::TransitionEdge {
-    crate::spec::blueprint::TransitionEdge {
-        target: target.into(),
-        condition: crate::spec::blueprint::TransitionCondition::LlmChoice,
-        hint: None,
-        transform: crate::spec::blueprint::EdgeTransform::Direct,
-        gate: None,
-        stuck: None,
-    }
-}
-
-fn blueprint(transitions: Option<Vec<(&str, &str)>>) -> p::AgentBlueprint {
-    let mut stage = crate::spec::Stage::new(
-        "plan".into(),
-        crate::spec::blueprint::ModelConfig::new("p".into(), "m".into()),
-    );
-    stage.transitions = transitions.map(|t| {
-        t.into_iter()
-            .map(|(name, target)| (name.to_string(), edge(target)))
-            .collect()
-    });
-    p::AgentBlueprint(crate::spec::Blueprint::new(
-        "bp".into(),
-        "d".into(),
-        vec![stage],
-        crate::spec::ContextLayout::new(vec![], 1000),
-    ))
-}
-
 #[test]
 fn a_choice_names_its_edges_as_the_graph_does() {
-    let choice = p::AwaitingTransitionChoice(vec![edge("build"), edge("review"), edge(" ")]);
-    let named = blueprint(Some(vec![("go_build", "build"), ("ask", "review")]));
-    assert_eq!(
-        phase_with((choice.clone(), named)),
-        PipelinePhase::AwaitingChoice(vec![
-            EdgeName::new("go_build").unwrap(),
-            EdgeName::new("ask").unwrap()
-        ])
-    );
-    // With no names to find, an edge is called by where it goes.
-    for unnamed in [blueprint(None), blueprint(Some(vec![]))] {
-        assert_eq!(
-            phase_with((choice.clone(), unnamed)),
-            PipelinePhase::AwaitingChoice(vec![
-                EdgeName::new("build").unwrap(),
-                EdgeName::new("review").unwrap()
-            ])
-        );
-    }
-    let other_stage = {
-        let mut bp = blueprint(Some(vec![("x", "build")]));
-        bp.0.stages[0].name = "elsewhere".into();
-        bp
+    let edge = |name: &str, to: &str| {
+        let mut e = crate::spec::graph::tests::edge(name, "plan", to);
+        e.when = crate::spec::graph::EdgeCondition::LlmChoice;
+        e
     };
-    assert_eq!(
-        phase_with((choice.clone(), other_stage)),
-        PipelinePhase::AwaitingChoice(vec![
-            EdgeName::new("build").unwrap(),
-            EdgeName::new("review").unwrap()
-        ])
-    );
+    let choice =
+        p::AwaitingTransitionChoice(vec![edge("go_build", "build"), edge("ask", "review")]);
     assert_eq!(
         phase_with(choice),
         PipelinePhase::AwaitingChoice(vec![
-            EdgeName::new("build").unwrap(),
-            EdgeName::new("review").unwrap()
+            EdgeName::new("go_build").unwrap(),
+            EdgeName::new("ask").unwrap()
         ])
     );
 }

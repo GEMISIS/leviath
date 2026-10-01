@@ -29,8 +29,22 @@ use crate::components::ContextWindow;
 /// The produced parts are read only from the regions the stage's
 /// `output_routing` names, never the whole window: an input mesh in some other
 /// region must not be mistaken for the animated one this stage made.
+#[cfg(test)]
 pub(crate) fn try_emit(
     stage: &crate::spec::blueprint::Stage,
+    spec: Option<&OutputSpec>,
+    now: i64,
+    window: &mut ContextWindow,
+) -> Option<FinalOutput> {
+    let targets: Vec<&str> = stage.output_routing.values().map(String::as_str).collect();
+    try_emit_for(&stage.name, &targets, spec, now, window)
+}
+
+/// [`try_emit`] for the stage named `stage`, whose output routing sends parts
+/// to the regions `targets`.
+pub(crate) fn try_emit_for(
+    stage: &str,
+    targets: &[&str],
     spec: Option<&OutputSpec>,
     now: i64,
     window: &mut ContextWindow,
@@ -39,17 +53,16 @@ pub(crate) fn try_emit(
     if specs.is_empty() {
         return None;
     }
-    let targets: Vec<&str> = stage.output_routing.values().map(String::as_str).collect();
     if targets.is_empty() {
         return None;
     }
-    let produced = window.stored_parts_in(&targets);
+    let produced = window.stored_parts_in(targets);
     let records = match_artifacts(specs, &produced)?;
     let content = describe(&records);
     let output = FinalOutput::new(
         content.as_str(),
         spec.and_then(|s| s.format.clone()),
-        stage.name.clone(),
+        stage.to_string(),
         now,
     )
     .with_artifacts(records);

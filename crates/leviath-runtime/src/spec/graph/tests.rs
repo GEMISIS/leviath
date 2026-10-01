@@ -4,7 +4,7 @@ use crate::spec::issues::SpecPath;
 use crate::spec::names::{EdgeName, InputName, RegionName};
 use leviath_core::region::{Admission, Volatility};
 
-fn stage(name: &str) -> StageDef {
+pub(crate) fn stage(name: &str) -> StageDef {
     StageDef {
         name: StageName::new(name).unwrap(),
         description: None,
@@ -42,7 +42,7 @@ fn stage(name: &str) -> StageDef {
     }
 }
 
-fn region(name: &str) -> RegionDef {
+pub(crate) fn region(name: &str) -> RegionDef {
     RegionDef {
         name: RegionName::new(name).unwrap(),
         kind: RegionKind::Pinned,
@@ -60,7 +60,7 @@ fn region(name: &str) -> RegionDef {
     }
 }
 
-fn edge(name: &str, from: &str, to: &str) -> EdgeDef {
+pub(crate) fn edge(name: &str, from: &str, to: &str) -> EdgeDef {
     EdgeDef {
         name: EdgeName::new(name).unwrap(),
         from: StageName::new(from).unwrap(),

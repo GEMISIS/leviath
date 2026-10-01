@@ -352,6 +352,9 @@ pub struct ToolResultState {
 pub struct FanOutState {
     /// The stage that started it.
     pub stage: StageName,
+    /// What it runs and how: the stage's fan-out settings, or the ones a
+    /// `fan_out` call gave.
+    pub config: crate::spec::graph::FanOutDef,
     /// The most workers at once.
     pub max_workers: u32,
     /// Items not yet started.

@@ -335,6 +335,23 @@ fn default_max_workers() -> u32 {
     4
 }
 
+impl FanOutDef {
+    /// A fan-out whose workers run `stage` of the same graph, with every
+    /// other setting at its default.
+    pub fn same_graph(stage: StageName) -> Self {
+        Self {
+            worker: WorkerSource::Stage(stage),
+            merge_stage: None,
+            max_workers: default_max_workers(),
+            on_worker_failure: WorkerFailure::Continue,
+            split_prompt: String::new(),
+            results_region: None,
+            max_items: None,
+            max_attempts: None,
+        }
+    }
+}
+
 /// What a fan-out worker runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]

@@ -391,12 +391,12 @@ pub fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
 /// as-is.)
 pub(crate) fn apply_edge_transform(
     window: &mut ContextWindow,
-    transform: &crate::spec::blueprint::EdgeTransform,
+    transform: &crate::spec::graph::EdgeCarry,
 ) -> Vec<String> {
-    use crate::spec::blueprint::EdgeTransform;
+    use crate::spec::graph::EdgeCarry;
     match transform {
-        EdgeTransform::Direct => Vec::new(),
-        EdgeTransform::Clear => {
+        EdgeCarry::Direct => Vec::new(),
+        EdgeCarry::Clear => {
             window
                 .regions
                 .iter_mut()
@@ -408,13 +408,13 @@ pub(crate) fn apply_edge_transform(
         // Kind cannot tell a transcript from a table of results, so a region
         // whose author said its content does not survive a paraphrase is left
         // alone however the edge is spelled.
-        EdgeTransform::Compact { .. } => window
+        EdgeCarry::Compact { .. } => window
             .regions
             .iter()
             .filter(|r| is_stage_specific(&r.kind) && r.summarizable && !r.content.is_empty())
             .map(|r| r.name.clone())
             .collect(),
-        EdgeTransform::Custom {
+        EdgeCarry::Custom {
             carry,
             compact,
             clear,
@@ -426,7 +426,7 @@ pub(crate) fn apply_edge_transform(
             let cleared: Vec<&str> = clear
                 .iter()
                 .filter(|n| !carry.contains(n))
-                .map(String::as_str)
+                .map(|n| n.as_str())
                 .collect();
             let emptying = window.begin_changes(cleared.iter().copied());
             for name in &cleared {
@@ -450,7 +450,7 @@ pub(crate) fn apply_edge_transform(
                     // rather than at each of the N edges that might touch it.
                     // Said out loud, because refusing an explicit instruction
                     // silently is the thing this issue is about.
-                    match window.get_region(n) {
+                    match window.get_region(n.as_str()) {
                         Some(r) if !r.summarizable => {
                             tracing::warn!(
                                 region = %n,
@@ -463,7 +463,7 @@ pub(crate) fn apply_edge_transform(
                         None => false,
                     }
                 })
-                .cloned()
+                .map(ToString::to_string)
                 .collect()
         }
     }

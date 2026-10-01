@@ -20,8 +20,8 @@ use tokio::sync::oneshot;
 use crate::dynamic_interaction::InteractionBackend;
 use crate::inference_pool::InferencePoolConfig;
 use crate::pipeline::{
-    AgentBlueprint, ReadyToInfer, StageCursor, StageInference, StageInferences, StageProgress,
-    StageSetup, StageSetups, ToolService, VisitCounts, WaitingForChildren,
+    ReadyToInfer, StageCursor, StageInference, StageProgress, StageSetup, ToolService, VisitCounts,
+    WaitingForChildren,
 };
 use crate::tool_bridge::BoxedToolExec;
 use leviath_core::{Region, RegionKind};
@@ -208,16 +208,22 @@ fn setup() -> StageSetup {
     }
 }
 
+/// A blueprint as the spec a spawn of it runs, every stage on [`si`].
+fn spec(bp: crate::spec::Blueprint) -> crate::insert::RunSpecC {
+    let infs: Vec<StageInference> = bp.stages.iter().map(|_| si()).collect();
+    let spec = crate::pipeline::run_spec_from_blueprint(&bp, "t-run", &infs)
+        .expect("a test blueprint reads as a spec");
+    crate::insert::RunSpecC(Arc::new(spec))
+}
+
 /// Spawn a simple agent into the host and register it under `run_id`.
 fn spawn(host: &mut WorldHost, run_id: &str, agent_id: &str) -> AgentId {
     let e = host.world_mut().spawn_agent((
-        AgentBlueprint(blueprint()),
+        spec(blueprint()),
         StageCursor { index: 0 },
         agent_state(agent_id),
         crate::components::MessageInbox::default(),
         StageProgress::default(),
-        StageInferences(vec![si()]),
-        StageSetups(vec![setup()]),
         VisitCounts::default(),
         window(),
         si(),
@@ -500,13 +506,11 @@ fn spawn_two_stage(host: &mut WorldHost, run_id: &str, agent_id: &str) -> Entity
     let mut state = agent_state(agent_id);
     state.current_stage = "one".to_string();
     let e = host.world_mut().spawn_agent((
-        AgentBlueprint(two_stage_blueprint()),
+        spec(two_stage_blueprint()),
         StageCursor { index: 0 },
         state,
         crate::components::MessageInbox::default(),
         StageProgress::default(),
-        StageInferences(vec![si(), si()]),
-        StageSetups(vec![setup(), setup()]),
         VisitCounts::default(),
         window(),
         si(),

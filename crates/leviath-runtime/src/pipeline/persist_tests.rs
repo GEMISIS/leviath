@@ -187,8 +187,9 @@ fn agent(stage: &str) -> AgentState {
     }
 }
 
+/// The spec a spawn of [`blueprint`] places.
 fn spec() -> Arc<crate::spec::run_spec::RunSpec> {
-    Arc::new(crate::spec::run_spec::tests::spec())
+    crate::spec_bridge::test_support::both(blueprint()).1.0
 }
 
 /// A mock agent runs a few turns; afterwards its run file's last state is the

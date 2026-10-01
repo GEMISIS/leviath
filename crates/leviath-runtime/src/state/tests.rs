@@ -167,6 +167,7 @@ fn busy() -> RunState {
     });
     s.fan_out = Some(FanOutState {
         stage: stage("split"),
+        config: crate::spec::graph::FanOutDef::same_graph(stage("split")),
         max_workers: 2,
         queued: vec![WorkItemState {
             id: "i1".into(),

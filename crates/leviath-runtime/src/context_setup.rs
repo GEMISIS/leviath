@@ -43,6 +43,7 @@ pub fn budget_tokens(budget: &Budget, window: usize) -> usize {
 /// The smallest budget any stage using that layout resolved it to, which is
 /// the budget sized against the smallest window that sees the region. A
 /// region no such stage sees is sized against the entry stage's window.
+#[cfg(test)]
 pub(crate) fn layout_region_budget(spec: &RunSpec, def: &RegionDef) -> usize {
     spec.graph
         .stages
@@ -155,6 +156,7 @@ pub(crate) fn task_region(layout: &RegionLayoutDef) -> Option<String> {
 /// `final_output` regions, then fills each seed whose key matches a declared
 /// region. The `task` key falls back to the first pinned region when no pinned
 /// region is named `task`.
+#[cfg(test)]
 pub(crate) fn init_window_from_spec(
     window: &mut ContextWindow,
     spec: &RunSpec,
@@ -170,7 +172,7 @@ pub(crate) fn init_window_from_spec(
 }
 
 /// Initialize a window from a parsed blueprint's (already resolved) layout:
-/// [`init_window_from_spec`] for a caller holding a blueprint.
+/// The window a spawn from a blueprint starts with.
 pub(crate) fn init_window_seeded(
     window: &mut ContextWindow,
     blueprint: &Blueprint,

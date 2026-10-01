@@ -883,23 +883,6 @@ pub(crate) fn edited_path(call: &crate::components::ToolCall) -> Option<&str> {
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct GlobalNudge(pub crate::spec::NudgeConfig);
 
-/// Whether this stage's deliverable *is* its text response.
-///
-/// A stage with interaction points presents what it writes for the user to
-/// approve, revise or edit - the text is the work product, not a model stalling
-/// before it starts. Nudging one is worse than wasteful: the nudge says "use
-/// your tools to complete the task", and a stage built to produce a document
-/// usually has no tool that could. A planning stage told to complete the task
-/// went looking for a way to write the file, found none, and asked the user to
-/// grant it a write tool or create the file by hand - instead of ending the
-/// stage and presenting the plan it had already finished writing.
-pub(crate) fn stage_output_is_reviewed(bp: &AgentBlueprint, cursor: &StageCursor) -> bool {
-    matches!(
-        bp.0.stages.get(cursor.index).map(|s| &s.mode),
-        Some(crate::spec::blueprint::StageMode::InteractivePoints { points }) if !points.is_empty()
-    )
-}
-
 /// What `handle_empty_response` selects.
 ///
 /// `&'static` is bevy's `WorldQuery` convention, not a claim about
@@ -910,7 +893,7 @@ type EmptyResponseQuery = (
     &'static mut ContextWindow,
     &'static crate::components::InferenceResult,
     &'static mut StageProgress,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageCursor,
     Option<&'static GlobalNudge>,
 );
@@ -927,29 +910,28 @@ type EmptyResponseQuery = (
 /// (`[agent.nudge]`), and globally (config `[nudge]`), each field cascading
 /// independently through [`crate::spec::resolve_nudge`]. With nothing
 /// configured, a stage whose output is reviewed is never nudged - see
-/// `stage_output_is_reviewed` - but an explicit `enabled` at any level speaks
-/// for itself. The text supports `{stage}` and `{regions}` placeholders.
+/// [`stage_nudge`](super::spec_view::stage_nudge) - but an explicit `enabled`
+/// at any level speaks for itself. The text supports `{stage}` and `{regions}`
+/// placeholders.
 pub(crate) fn handle_empty_response(
     mut agents: Query<EmptyResponseQuery, With<ReadyForTransition>>,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, state, mut window, infer, mut progress, bp, cursor, global) in agents.iter_mut() {
+    for (entity, state, mut window, infer, mut progress, spec, cursor, global) in agents.iter_mut()
+    {
         crate::tick_scope::enter(entity);
-        let stage = bp.0.stages.get(cursor.index);
+        let graph = &spec.0.graph;
+        let stage = graph.stages.get(cursor.index);
         // Where a long reply is stored, when the world has a store and this
         // run is known by id.
         let (sources, _) = mime.hydration_inputs(entity);
         let sink = state.and_then(|state| {
             crate::context_setup::PartSink::over(&sources, &state.agent_id, &mime)
         });
-        let nudge = crate::spec::resolve_nudge(
-            global.map(|g| &g.0),
-            bp.0.nudge.as_ref(),
-            stage.and_then(|s| s.nudge.as_ref()),
-            stage_output_is_reviewed(bp, cursor),
-        );
+        let nudge = super::spec_view::stage_nudge(graph, stage, global.map(|g| &g.0));
+
         // A reply the output cap cut off is not the stage's answer, however
         // many tool calls came before it. Keep what arrived so the model can
         // see it, say what happened, and go again with the cap raised (see
@@ -1047,8 +1029,8 @@ pub(crate) fn handle_empty_response(
             );
             let stage_name = stage.map(|s| s.name.as_str()).unwrap_or("");
             let regions = stage
-                .and_then(|s| s.context_layout.as_ref())
-                .unwrap_or(&bp.0.context_layout)
+                .and_then(|s| s.layout.as_ref())
+                .unwrap_or(&graph.layout)
                 .regions
                 .iter()
                 .filter(|r| r.required)
@@ -1080,7 +1062,7 @@ pub(crate) const MAX_NO_IMAGE_NUDGES: usize = 3;
 /// manifest already validated as mime patterns. Image first, then video, then
 /// audio, when a stage names more than one.
 pub(crate) fn stage_expected_media(
-    stage: Option<&crate::spec::blueprint::Stage>,
+    stage: Option<&crate::spec::graph::StageDef>,
 ) -> Option<&'static str> {
     let stage = stage?;
     let format = stage.output.as_ref().and_then(|o| o.format.as_deref());
@@ -1137,7 +1119,7 @@ fn store_reply(
     window: &mut ContextWindow,
     infer: &crate::components::InferenceResult,
     reasoning: Option<String>,
-    stage: Option<&crate::spec::blueprint::Stage>,
+    stage: Option<&crate::spec::graph::StageDef>,
     sink: Option<&crate::context_setup::PartSink<'_>>,
 ) {
     // The stage may send some produced parts to regions of their own

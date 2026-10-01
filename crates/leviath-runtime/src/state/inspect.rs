@@ -147,7 +147,7 @@ fn phase_of(world: &World, entity: Entity, agent: &AgentState) -> PipelinePhase 
         return PipelinePhase::WaitingForChildren;
     }
     if let Some(choice) = world.get::<p::AwaitingTransitionChoice>(entity) {
-        return PipelinePhase::AwaitingChoice(edge_names(world, entity, agent, &choice.0));
+        return PipelinePhase::AwaitingChoice(edge_names(&choice.0));
     }
     if world.get::<p::AwaitingCompaction>(entity).is_some() {
         return PipelinePhase::AwaitingCompaction;
@@ -177,35 +177,9 @@ fn asking_a_person(world: &World, entity: Entity) -> bool {
 
 /// The names of the edges a stage is choosing between, as the graph names
 /// them. An edge is matched by its target among the stage's own edges.
-fn edge_names(
-    world: &World,
-    entity: Entity,
-    agent: &AgentState,
-    edges: &[crate::spec::blueprint::TransitionEdge],
-) -> Vec<EdgeName> {
-    let named: Vec<(String, String)> = world
-        .get::<crate::pipeline::AgentBlueprint>(entity)
-        .and_then(|bp| bp.0.stages.iter().find(|s| s.name == agent.current_stage))
-        .and_then(|s| s.transitions.as_ref())
-        .map(|t| {
-            let mut all: Vec<(String, String)> = t
-                .iter()
-                .map(|(name, e)| (name.clone(), e.target.clone()))
-                .collect();
-            all.sort();
-            all
-        })
-        .unwrap_or_default();
-    edges
-        .iter()
-        .filter_map(|e| {
-            let name = named
-                .iter()
-                .find(|(_, target)| *target == e.target)
-                .map_or(e.target.as_str(), |(name, _)| name.as_str());
-            EdgeName::new(name).ok()
-        })
-        .collect()
+/// The edges the model is choosing between, by their names in the graph.
+fn edge_names(edges: &[crate::spec::graph::EdgeDef]) -> Vec<EdgeName> {
+    edges.iter().map(|e| e.name.clone()).collect()
 }
 
 fn visits_of(world: &World, entity: Entity) -> BTreeMap<StageName, u32> {
@@ -535,6 +509,7 @@ fn fan_out_of(waiting: &crate::fanout::FanOutWaiting, stage: &StageName) -> FanO
     let s = waiting.to_state();
     FanOutState {
         stage: stage.clone(),
+        config: s.config.clone(),
         max_workers: s.max_workers as u32,
         queued: s
             .pending

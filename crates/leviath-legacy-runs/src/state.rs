@@ -9,7 +9,7 @@ use leviath_core::run_meta::{
     RunFlags, RunMeta, RunStatus as OldStatus, StageRecord as OldStage, StageRunStatus,
     StageVisitRecord, WaitReason,
 };
-use leviath_runtime::spec::graph::{RunGraph, StageDef, StageMode};
+use leviath_runtime::spec::graph::{FanOutDef, RunGraph, StageDef, StageMode};
 use leviath_runtime::spec::inputs::{InputValue, InputValues};
 use leviath_runtime::spec::names::{InputName, RunId, StageName};
 use leviath_runtime::spec::run_spec::RunSpec;
@@ -422,8 +422,19 @@ fn fan_out(f: &FanOutFile, stage: &StageDef, report: &mut Report) -> FanOutState
             f.parts.len()
         ));
     }
+    let config = match &stage.mode {
+        StageMode::FanOut(def) => def.clone(),
+        _ => {
+            report.note(format!(
+                "the fan-out a `fan_out` call started in stage \"{}\" resumes with that stage as its worker: an old run did not keep the call's settings",
+                stage.name
+            ));
+            FanOutDef::same_graph(stage.name.clone())
+        }
+    };
     FanOutState {
         stage: stage.name.clone(),
+        config,
         max_workers: n32(f.max_workers),
         queued,
         active,

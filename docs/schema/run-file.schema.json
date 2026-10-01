@@ -787,6 +787,73 @@
         ],
         "type": "object"
       },
+      "FanOutDef": {
+        "additionalProperties": false,
+        "description": "A fan-out stage: split work over worker runs, then merge.",
+        "properties": {
+          "max_attempts": {
+            "default": null,
+            "description": "How many times a failed worker is retried.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_items": {
+            "default": null,
+            "description": "The most work items one fan-out may have.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_workers": {
+            "default": 4,
+            "description": "The most workers at once.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "merge_stage": {
+            "default": null,
+            "description": "The stage the merged results go to.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "on_worker_failure": {
+            "$ref": "#/$defs/WorkerFailure",
+            "default": "continue",
+            "description": "What one worker's failure does to the rest."
+          },
+          "results_region": {
+            "default": null,
+            "description": "The region the workers' results land in.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "split_prompt": {
+            "default": "",
+            "description": "The prompt that asks the model to split the work.",
+            "type": "string"
+          },
+          "worker": {
+            "$ref": "#/$defs/WorkerSource",
+            "description": "What each worker runs."
+          }
+        },
+        "required": [
+          "worker"
+        ],
+        "type": "object"
+      },
       "FanOutState": {
         "description": "A fan-out in progress.",
         "properties": {
@@ -807,6 +874,10 @@
               "type": "array"
             },
             "type": "array"
+          },
+          "config": {
+            "$ref": "#/$defs/FanOutDef",
+            "description": "What it runs and how: the stage's fan-out settings, or the ones a\n`fan_out` call gave."
           },
           "done": {
             "description": "Items done, with each worker's summary.",
@@ -866,6 +937,7 @@
         },
         "required": [
           "stage",
+          "config",
           "max_workers",
           "queued",
           "active",
@@ -2290,6 +2362,66 @@
           "inputs"
         ],
         "type": "object"
+      },
+      "WorkerFailure": {
+        "description": "What one fan-out worker's failure does to the rest.",
+        "oneOf": [
+          {
+            "const": "continue",
+            "description": "The others carry on and the merge sees the failure.",
+            "type": "string"
+          },
+          {
+            "const": "fail_all",
+            "description": "The whole fan-out fails.",
+            "type": "string"
+          }
+        ]
+      },
+      "WorkerSource": {
+        "description": "What a fan-out worker runs.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "An installed blueprint.",
+            "properties": {
+              "blueprint": {
+                "$ref": "#/$defs/BlueprintRef"
+              }
+            },
+            "required": [
+              "blueprint"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A stage of this same graph.",
+            "properties": {
+              "stage": {
+                "description": "A stage name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "stage"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An installed blueprint picked at run time by a query the model answers.",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7126,6 +7258,73 @@
         ],
         "type": "object"
       },
+      "FanOutDef": {
+        "additionalProperties": false,
+        "description": "A fan-out stage: split work over worker runs, then merge.",
+        "properties": {
+          "max_attempts": {
+            "default": null,
+            "description": "How many times a failed worker is retried.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_items": {
+            "default": null,
+            "description": "The most work items one fan-out may have.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_workers": {
+            "default": 4,
+            "description": "The most workers at once.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "merge_stage": {
+            "default": null,
+            "description": "The stage the merged results go to.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "on_worker_failure": {
+            "$ref": "#/$defs/WorkerFailure",
+            "default": "continue",
+            "description": "What one worker's failure does to the rest."
+          },
+          "results_region": {
+            "default": null,
+            "description": "The region the workers' results land in.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "split_prompt": {
+            "default": "",
+            "description": "The prompt that asks the model to split the work.",
+            "type": "string"
+          },
+          "worker": {
+            "$ref": "#/$defs/WorkerSource",
+            "description": "What each worker runs."
+          }
+        },
+        "required": [
+          "worker"
+        ],
+        "type": "object"
+      },
       "FanOutState": {
         "description": "A fan-out in progress.",
         "properties": {
@@ -7146,6 +7345,10 @@
               "type": "array"
             },
             "type": "array"
+          },
+          "config": {
+            "$ref": "#/$defs/FanOutDef",
+            "description": "What it runs and how: the stage's fan-out settings, or the ones a\n`fan_out` call gave."
           },
           "done": {
             "description": "Items done, with each worker's summary.",
@@ -7205,6 +7408,7 @@
         },
         "required": [
           "stage",
+          "config",
           "max_workers",
           "queued",
           "active",
@@ -8429,6 +8633,66 @@
           "inputs"
         ],
         "type": "object"
+      },
+      "WorkerFailure": {
+        "description": "What one fan-out worker's failure does to the rest.",
+        "oneOf": [
+          {
+            "const": "continue",
+            "description": "The others carry on and the merge sees the failure.",
+            "type": "string"
+          },
+          {
+            "const": "fail_all",
+            "description": "The whole fan-out fails.",
+            "type": "string"
+          }
+        ]
+      },
+      "WorkerSource": {
+        "description": "What a fan-out worker runs.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "An installed blueprint.",
+            "properties": {
+              "blueprint": {
+                "$ref": "#/$defs/BlueprintRef"
+              }
+            },
+            "required": [
+              "blueprint"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A stage of this same graph.",
+            "properties": {
+              "stage": {
+                "description": "A stage name.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "stage"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An installed blueprint picked at run time by a query the model answers.",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
