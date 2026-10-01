@@ -12,6 +12,10 @@ use leviath_runtime::state::{Change, RunEvent as CoreEvent, StateDelta as CoreDe
 use super::super::super::scalars::{BigInt, Timestamp};
 use super::big;
 use super::context::{ContextDiff, StateToolCall};
+use super::journal::{
+    ArtifactsStep, AttemptStep, CompletedStep, ContextCommittedStep, ContextNotedStep,
+    DispatchedStep, ProducedFile, SettledStep, outcome_of,
+};
 use super::state::{
     FanOutProgress, LedgerStage, OpenQuestion, PendingToolBatch, RunPhase, RunStateStatus,
     StageProgress, StageTransition, StageVisitCount, StateAnswer, StateClock, StateCursor,
@@ -396,6 +400,20 @@ pub(crate) enum StepEvent {
     Message(MessageStep),
     /// A line was logged.
     Log(LogStep),
+    /// A model call, in full.
+    Attempt(Box<AttemptStep>),
+    /// A tool call was dispatched as one execution.
+    Dispatched(DispatchedStep),
+    /// An execution ended.
+    Completed(CompletedStep),
+    /// An execution produced files.
+    Artifacts(ArtifactsStep),
+    /// A question was settled, whole.
+    Settled(SettledStep),
+    /// The context changed, with its cause and revisions.
+    ContextCommitted(ContextCommittedStep),
+    /// One region changed, with its cause.
+    ContextNoted(ContextNotedStep),
 }
 
 impl From<&CoreEvent> for StepEvent {
@@ -438,6 +456,48 @@ impl From<&CoreEvent> for StepEvent {
                 message: StateMessage::from(message),
             }),
             CoreEvent::Log(line) => Self::Log(LogStep { line: line.clone() }),
+            CoreEvent::Attempt(a) => Self::Attempt(Box::new(AttemptStep::from(&**a))),
+            CoreEvent::Dispatched {
+                call_id,
+                execution_id,
+                requested_by,
+            } => Self::Dispatched(DispatchedStep {
+                call_id: call_id.clone(),
+                execution_id: ID(execution_id.clone()),
+                requested_by: requested_by.clone(),
+            }),
+            CoreEvent::Completed {
+                call_id,
+                execution_id,
+                outcome,
+                parts,
+            } => Self::Completed(CompletedStep {
+                call_id: call_id.clone(),
+                execution_id: ID(execution_id.clone()),
+                outcome: outcome.map(outcome_of),
+                parts: parts.clone(),
+            }),
+            CoreEvent::Artifacts {
+                execution_id,
+                artifacts,
+            } => Self::Artifacts(ArtifactsStep {
+                producer_id: ID(execution_id.clone()),
+                files: artifacts
+                    .iter()
+                    .map(|a| ProducedFile {
+                        name: a.name.clone(),
+                        path: a.path.clone(),
+                        mime_type: a.mime_type.clone(),
+                        size: big(a.size),
+                        sha256: a.sha256.clone(),
+                    })
+                    .collect(),
+            }),
+            CoreEvent::Settled(settled) => Self::Settled(SettledStep::from(&**settled)),
+            CoreEvent::ContextCommitted(commit) => {
+                Self::ContextCommitted(ContextCommittedStep::from(&**commit))
+            }
+            CoreEvent::ContextNoted(note) => Self::ContextNoted(ContextNotedStep::from(note)),
         }
     }
 }

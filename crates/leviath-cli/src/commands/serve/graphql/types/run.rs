@@ -379,7 +379,8 @@ impl Run {
     async fn context(&self) -> Option<ContextWindow> {
         counted(&self.meta.run_id);
         let run_id = self.meta.run_id.clone();
-        let snapshot = blocking(move || crate::runstate::read_context_snapshot(&run_id)).await;
+        let snapshot =
+            blocking(move || super::super::super::core::inspect::context(&run_id).ok()).await;
         snapshot.map(|snapshot| ContextWindow {
             snapshot: Arc::new(snapshot),
         })

@@ -5,18 +5,21 @@
 //! tool call is indistinguishable from one no policy ever stopped, and a run
 //! that paused for somebody looks exactly like one that never asked.
 //!
-//! A question shows up twice in a run file. The step that asked it adds it to
-//! the run's open questions, with its prompt and its options, and the step
-//! that settled it records an answer event carrying the settlement. This pairs
-//! the two by id. A question's kind is not stored, so it is read off what it
-//! carried: a settlement that grants or refuses is a tool approval, a question
-//! with options is a choice, and anything else took text.
+//! The step that settled a question records it whole: its kind, the tool an
+//! approval was for, the prompt, the stage it was asked in, when, and how it
+//! settled. A file written without that (one converted from an older layout)
+//! has the question twice instead: the step that asked it added it to the
+//! run's open questions, and the step that settled it records an answer event
+//! carrying the settlement. That pairing is by id, and the kind is read off
+//! what the question carried: a settlement that grants or refuses is a tool
+//! approval, a question with options is a choice, and anything else took text.
 
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
 use leviath_core::interaction::{InteractionKind, Settlement};
 use leviath_core::run_archive::InteractionRecord;
+use leviath_runtime::state::journal::{QuestionKind, SettledState};
 use leviath_runtime::state::{OpenInteraction, RunEvent};
 
 use super::error::ServeError;
@@ -46,6 +49,7 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<InteractionRecord>, ServeError> {
     };
     let mut asked: BTreeMap<String, Asked> = BTreeMap::new();
     let mut records = Vec::new();
+    let mut whole = Vec::new();
     run_file::walk(run_id, &reader, &mut |step| {
         for question in &step.after.interactions {
             asked.entry(question.id.clone()).or_insert_with(|| Asked {
@@ -55,20 +59,55 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<InteractionRecord>, ServeError> {
             });
         }
         for event in &step.delta.events {
-            let RunEvent::Answered { id, answer } = event else {
-                continue;
-            };
-            records.push(record(
-                id,
-                answer,
-                asked.remove(id),
-                step.cursor.stage.as_str(),
-                step.delta.at,
-            ));
+            match event {
+                RunEvent::Settled(settled) => whole.push(kept(settled, step.delta.at)),
+                RunEvent::Answered { id, answer } => records.push(record(
+                    id,
+                    answer,
+                    asked.remove(id),
+                    step.cursor.stage.as_str(),
+                    step.delta.at,
+                )),
+                _ => {}
+            }
         }
         ControlFlow::Continue(())
     })?;
-    Ok(records)
+    Ok(match whole.is_empty() {
+        true => records,
+        false => whole,
+    })
+}
+
+/// A question the run file kept whole, as the journal's record of it.
+fn kept(settled: &SettledState, at: i64) -> InteractionRecord {
+    InteractionRecord {
+        request_id: settled.id.clone(),
+        kind: match settled.kind {
+            QuestionKind::FreeText => InteractionKind::FreeText,
+            QuestionKind::MultipleChoice => InteractionKind::MultipleChoice,
+            QuestionKind::Confirm => InteractionKind::Confirm,
+            QuestionKind::ToolApproval => InteractionKind::ToolApproval,
+            QuestionKind::EditText => InteractionKind::EditText,
+        },
+        tool: settled.tool.clone(),
+        prompt: settled.prompt.clone(),
+        stage: settled.stage.clone(),
+        settlement: settlement_of(&settled.settlement),
+        asked_at: settled.asked_at,
+        at,
+    }
+}
+
+/// A recorded settlement, or what a person typed, kept as their text.
+fn settlement_of(answer: &str) -> Settlement {
+    serde_json::from_str::<Settlement>(answer).unwrap_or_else(|_| Settlement::Answered {
+        approved: None,
+        scope: None,
+        choice: None,
+        text: Some(answer.to_string()),
+        feedback: None,
+    })
 }
 
 /// The record of the question `id`, settled by `answer` at `at`.
@@ -76,14 +115,7 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<InteractionRecord>, ServeError> {
 /// An answer that is not a recorded settlement is what a person typed, kept as
 /// their text.
 fn record(id: &str, answer: &str, asked: Option<Asked>, stage: &str, at: i64) -> InteractionRecord {
-    let settlement =
-        serde_json::from_str::<Settlement>(answer).unwrap_or_else(|_| Settlement::Answered {
-            approved: None,
-            scope: None,
-            choice: None,
-            text: Some(answer.to_string()),
-            feedback: None,
-        });
+    let settlement = settlement_of(answer);
     let (prompt, options, stage, asked_at) = match asked {
         Some(a) => (a.question.prompt, a.question.options, a.stage, a.at),
         None => (String::new(), Vec::new(), stage.to_string(), at),

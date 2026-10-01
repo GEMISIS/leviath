@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::context::{ContextDiff, ToolCallState};
+use super::journal::{
+    ArtifactState, AttemptState, ContextCommitState, ContextNoteState, SettledState,
+    ToolOutcomeState,
+};
 use super::*;
 use crate::spec::names::{EdgeName, ModelRef};
 
@@ -151,6 +155,45 @@ pub enum RunEvent {
     Message(MessageState),
     /// A line for the run's log.
     Log(String),
+    /// A model call, in full: how it ended, how long it took, what was sent,
+    /// and the request itself when it was captured. Recorded for every call,
+    /// beside the `Inference` that carries a successful one's spend.
+    Attempt(Box<AttemptState>),
+    /// A tool call was dispatched as one execution.
+    Dispatched {
+        /// The provider's id for the call.
+        call_id: String,
+        /// The execution's own id.
+        execution_id: String,
+        /// The model call that asked for it.
+        requested_by: String,
+    },
+    /// An execution ended: how, and the stored parts its result carried.
+    /// Recorded beside the `ToolFinished` that carries the result.
+    Completed {
+        /// The provider's id for the call.
+        call_id: String,
+        /// The execution's own id.
+        execution_id: String,
+        /// How it ended, when that was observed.
+        outcome: Option<ToolOutcomeState>,
+        /// The names of the stored parts its result carried.
+        parts: Vec<String>,
+    },
+    /// An execution produced files.
+    Artifacts {
+        /// The execution.
+        execution_id: String,
+        /// The files.
+        artifacts: Vec<ArtifactState>,
+    },
+    /// A question was settled, recorded whole beside the `Answered` that
+    /// carries its answer.
+    Settled(Box<SettledState>),
+    /// The context changed, with its cause and the revisions on either side.
+    ContextCommitted(Box<ContextCommitState>),
+    /// One region changed, with its cause.
+    ContextNoted(ContextNoteState),
 }
 
 macro_rules! diff_fields {

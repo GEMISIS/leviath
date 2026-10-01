@@ -10,8 +10,7 @@ use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 use leviath_core::run_archive::{
-    self, AttemptOutcome, AttemptRecord, FailoverRecord, RequestDigest, Retry, RunIdentity,
-    RunRecord,
+    self, AttemptOutcome, AttemptRecord, FailoverRecord, RequestDigest, Retry, RunRecord,
 };
 
 use super::super::run::Run;
@@ -151,33 +150,10 @@ fn failover(kind: &str) -> RunRecord {
     })
 }
 
-/// Write a journal of `records` for the run.
+/// Record a run file of `records` for the run, one step per record, the way
+/// the persistence lane would have.
 fn write_journal(records: Vec<RunRecord>) {
-    let meta = meta();
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-        .expect("a preamble");
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: meta.run_id.clone(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta.clone()),
-        },
-    )
-    .expect("a header");
-    for record in &records {
-        run_archive::write_record(&mut buf, record).expect("a record");
-    }
-    std::fs::write(
-        crate::runstate::run_dir(&meta.run_id).join(leviath_core::files::ARCHIVE_FILE),
-        &buf,
-    )
-    .expect("the journal");
+    super::super::journal_fixture::journal(&meta().run_id, &records);
 }
 
 /// Every field reads back typed: the failure detail is present only where the
@@ -523,14 +499,12 @@ async fn an_unreadable_journal_says_so() {
         "graphql-inferences-corrupt",
         |_dir| async move {
             create_run(&meta()).expect("run written");
-            std::fs::write(
-                crate::runstate::run_dir("called-providers")
-                    .join(leviath_core::files::ARCHIVE_FILE),
-                b"not an archive",
-            )
-            .expect("a corrupt journal");
+            crate::commands::serve::core::run_file::tests::garbage(
+                "called-providers",
+                b"not a run file",
+            );
             let message = error("{ run { inferences(first: 10) { total } } }").await;
-            assert!(message.contains("unreadable journal"), "{message}");
+            assert!(message.contains("cannot read"), "{message}");
         },
     )
     .await;

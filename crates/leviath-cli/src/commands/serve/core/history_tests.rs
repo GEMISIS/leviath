@@ -37,8 +37,10 @@ fn history_run() -> String {
 #[tokio::test]
 async fn the_points_are_the_start_and_every_step_that_moved_the_window() {
     crate::runstate::with_isolated_runs_dir_async("history-points", |_d| async move {
-        record_window_reads(Box::new(|_| {}));
+        // The process-wide recorder the GraphQL paging tests count with, so
+        // whichever test installs it first, every one of them is counted.
         let run_id = history_run();
+        let _ = crate::commands::serve::testutil::windows_read_for(&run_id);
         assert_eq!(point_count(&run_id), Some(4));
 
         let every = every_window(&run_id);

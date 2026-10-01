@@ -5,9 +5,13 @@
 //! calls that failed or were refused, which the last state no longer shows.
 //!
 //! A call starts as an event in the step that dispatched it and ends as an
-//! event in the step its result came back in. The run file names a call by the
-//! provider's call id and nothing else, so that id is the execution's id too,
-//! and a step is where an execution and its result sit.
+//! event in the step its result came back in. The dispatch names the
+//! execution's own id and the model call that asked for it, the ending says
+//! how it ended and which stored parts its result carried, and the files an
+//! execution produced follow as an event of their own. A file written without
+//! those (one converted from an older layout) names a call by the provider's
+//! call id alone, so that id stands for the execution's, and an ending is read
+//! off whether the result was an error.
 //!
 //! The payloads stay out of the listing on purpose. Every execution is a
 //! handful of facts plus the arguments the model sent, and a result is fetched
@@ -20,6 +24,7 @@ use std::ops::ControlFlow;
 use leviath_core::execution::ToolOutcome;
 use leviath_core::run_archive::Execution;
 use leviath_runtime::state::RunEvent;
+use leviath_runtime::state::journal::{ArtifactState, ToolOutcomeState};
 
 use super::error::ServeError;
 use super::run_file;
@@ -99,12 +104,75 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<Execution>, ServeError> {
                         });
                     }
                 }
+                RunEvent::Dispatched {
+                    call_id,
+                    execution_id,
+                    requested_by,
+                } => {
+                    let open = executions
+                        .iter_mut()
+                        .rev()
+                        .find(|e| e.call_id == *call_id && e.id == *call_id);
+                    if let Some(execution) = open {
+                        execution.id = execution_id.clone();
+                        execution.requested_by = requested_by.clone();
+                    }
+                }
+                RunEvent::Completed {
+                    call_id,
+                    execution_id,
+                    outcome,
+                    ..
+                } => {
+                    if let Some(execution) = executions
+                        .iter_mut()
+                        .rev()
+                        .find(|e| e.id == *execution_id && e.call_id == *call_id)
+                    {
+                        execution.outcome = outcome.map(tool_outcome);
+                    }
+                }
+                RunEvent::Artifacts {
+                    execution_id,
+                    artifacts,
+                } => {
+                    if let Some(execution) =
+                        executions.iter_mut().rev().find(|e| e.id == *execution_id)
+                    {
+                        execution
+                            .artifacts
+                            .extend(artifacts.iter().filter_map(artifact));
+                    }
+                }
                 _ => {}
             }
         }
         ControlFlow::Continue(())
     })?;
     Ok(executions)
+}
+
+/// How an execution ended, as the journal names it.
+fn tool_outcome(outcome: ToolOutcomeState) -> ToolOutcome {
+    match outcome {
+        ToolOutcomeState::Succeeded => ToolOutcome::Succeeded,
+        ToolOutcomeState::Failed => ToolOutcome::Failed,
+        ToolOutcomeState::Blocked => ToolOutcome::Blocked,
+        ToolOutcomeState::Denied => ToolOutcome::Denied,
+        ToolOutcomeState::Indeterminate => ToolOutcome::Indeterminate,
+    }
+}
+
+/// A file an execution produced, as the journal names it. One whose type no
+/// longer reads as a mime type is left out rather than given one it never had.
+fn artifact(a: &ArtifactState) -> Option<leviath_core::output::Artifact> {
+    Some(leviath_core::output::Artifact {
+        name: a.name.clone(),
+        path: a.path.clone(),
+        mime_type: leviath_core::mime::MimeType::parse(&a.mime_type).ok()?,
+        size: a.size,
+        sha256: a.sha256.clone(),
+    })
 }
 
 /// One execution's result, as far as it fits.
@@ -123,9 +191,23 @@ pub(crate) fn result(
     let steps = reader
         .deltas(position, position)
         .map_err(|e| run_file::unreadable(run_id, &e))?;
-    let found = steps
+    let events: Vec<&RunEvent> = steps.iter().flat_map(|step| &step.events).collect();
+    // The stored parts the result carried, by name, where its ending kept
+    // them. A part with no name is referenced by its hash, which the run's
+    // own parts listing carries.
+    let parts: Vec<String> = events
         .iter()
-        .flat_map(|step| &step.events)
+        .find_map(|event| match event {
+            RunEvent::Completed {
+                call_id: done,
+                parts,
+                ..
+            } if done == call_id => Some(parts.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let found = events
+        .iter()
         .find_map(|event| match event {
             RunEvent::ToolFinished {
                 call_id: done,
@@ -137,9 +219,7 @@ pub(crate) fn result(
         .map(|text| ResultText {
             bytes: text.len(),
             text: leviath_core::text::truncate_at_boundary(text, RESULT_MAX_BYTES).to_string(),
-            // A result's stored parts land in the context as parts of their
-            // own; the run's parts listing is where they are read.
-            parts: Vec::new(),
+            parts,
         });
     Ok(found)
 }

@@ -6,16 +6,23 @@
 //! step that delivered a message changed the window by the message, a step in
 //! which a tool finished by its result, and so on.
 //!
-//! A step whose events name no cause, or name more than one, is left out. A
+//! A run file keeps each change with its cause as an event of the step it
+//! landed in: the window revisions on either side, the regions it moved and
+//! the execution it came from. A file written without those (one converted
+//! from an older layout) has its causes read off the step's other events, and
+//! a step whose events name no cause, or name more than one, is left out. A
 //! history that mislabels a change is worse than one that admits it does not
 //! know, which is the rule [`ContextCause`] is written to.
 
 use std::ops::ControlFlow;
 
 use leviath_core::context_cause::ContextCause;
-use leviath_core::run_archive::{ContextChangeRecord, IndexedChange, RegionTransition};
+use leviath_core::run_archive::{
+    ContextChangeRecord, IndexedChange, RegionCommit, RegionTransition,
+};
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::context::RegionChange;
+use leviath_runtime::state::journal::CauseState;
 use leviath_runtime::state::{Change, ContextDiff, ContextState, RunEvent, RunState};
 
 use super::error::ServeError;
@@ -58,19 +65,99 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<IndexedChange>, ServeError> {
     };
     let spec = reader.spec();
     let mut changes = Vec::new();
+    let mut kept = Vec::new();
     run_file::walk_pairs(run_id, &reader, &mut |step| {
+        let position = step.delta.seq;
+        kept.extend(
+            step.delta
+                .events
+                .iter()
+                .filter_map(|event| recorded(event, step.delta.at))
+                .map(|record| IndexedChange { position, record }),
+        );
         let diff = step.delta.changes.iter().find_map(|change| match change {
             Change::Context(diff) => Some(diff),
             _ => None,
         });
         let found = diff.and_then(|diff| change(spec, &step, diff));
-        changes.extend(found.map(|record| IndexedChange {
-            position: step.delta.seq,
-            record,
-        }));
+        changes.extend(found.map(|record| IndexedChange { position, record }));
         ControlFlow::Continue(())
     })?;
+    if !kept.is_empty() {
+        return Ok(kept);
+    }
     Ok(changes)
+}
+
+/// What caused a change, as the journal names it.
+fn cause(c: CauseState) -> ContextCause {
+    match c {
+        CauseState::Seed => ContextCause::Seed,
+        CauseState::Message => ContextCause::Message,
+        CauseState::ModelReply => ContextCause::ModelReply,
+        CauseState::ToolResult => ContextCause::ToolResult,
+        CauseState::ProducedPart => ContextCause::ProducedPart,
+        CauseState::Compaction => ContextCause::Compaction,
+        CauseState::Transform => ContextCause::Transform,
+        CauseState::ContextTool => ContextCause::ContextTool,
+        CauseState::Hook => ContextCause::Hook,
+        CauseState::FanOut => ContextCause::FanOut,
+        CauseState::Interaction => ContextCause::Interaction,
+        CauseState::Resume => ContextCause::Resume,
+        CauseState::Framework => ContextCause::Framework,
+    }
+}
+
+/// The change an event kept whole, at `at`.
+fn recorded(event: &RunEvent, at: i64) -> Option<ContextChangeRecord> {
+    match event {
+        RunEvent::ContextCommitted(commit) => Some(ContextChangeRecord {
+            cause: cause(commit.cause),
+            revision_before: Some(commit.revision_before.clone()),
+            revision_after: Some(commit.revision_after.clone()),
+            execution_id: commit.execution_id.clone(),
+            regions: commit
+                .regions
+                .iter()
+                .map(|r| {
+                    RegionTransition::from(RegionCommit {
+                        region: r.region.clone(),
+                        digest_before: r.digest_before.clone(),
+                        digest_after: r.digest_after.clone(),
+                        tokens_before: r.tokens_before as usize,
+                        tokens_after: r.tokens_after as usize,
+                        entries_before: r.entries_before as usize,
+                        entries_after: r.entries_after as usize,
+                        entries_added: r.entries_added as usize,
+                    })
+                })
+                .collect(),
+            at,
+        }),
+        // A change recorded one region at a time names neither the window it
+        // moved nor what the region held, so a reader gets the counts it does
+        // carry and nothing invented around them.
+        RunEvent::ContextNoted(note) => Some(ContextChangeRecord {
+            cause: cause(note.cause),
+            revision_before: None,
+            revision_after: None,
+            execution_id: None,
+            regions: vec![RegionTransition {
+                region: note.region.clone(),
+                digest_before: None,
+                digest_after: None,
+                tokens_before: None,
+                tokens_after: None,
+                token_delta: note.token_delta,
+                entries_before: None,
+                entries_after: None,
+                entries_added: note.entries_added as usize,
+                entries_removed: note.entries_removed as usize,
+            }],
+            at,
+        }),
+        _ => None,
+    }
 }
 
 /// The change `diff` made in `step`, when the step names its cause and it

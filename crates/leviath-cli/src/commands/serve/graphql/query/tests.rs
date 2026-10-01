@@ -409,15 +409,10 @@ async fn a_filter_reaches_the_listing_and_pages_under_it() {
 
 /// A run with a stage ledger, which is the file a `stages` filter has to read.
 fn with_ledger(id: &str, started_at: i64) {
-    create_run(&meta_at(id, started_at)).expect("run written");
-    crate::runstate::write_stages_index(
-        id,
-        &[leviath_core::run_meta::StageRecord::new(
-            "build".to_string(),
-            0,
-        )],
-    )
-    .expect("the ledger");
+    use crate::commands::serve::graphql::types::journal_fixture::{ledger, started_at as start};
+    start(id, Some(started_at), |state| {
+        state.ledger = ledger(&["build"])
+    });
 }
 
 /// Every run that has opened one of its own files to answer a field, in the
@@ -562,7 +557,7 @@ async fn a_record_only_filter_opens_no_file() {
         }
         let mark = read_mark();
         let answer = run_query(
-            r#"{ runs(filter: { status: { in: [STARTING] } }) { results { id } total } }"#,
+            r#"{ runs(filter: { status: { in: [RUNNING] } }) { results { id } total } }"#,
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
@@ -1835,25 +1830,23 @@ async fn a_run_with_nothing_recorded_reads_as_empty() {
 #[tokio::test]
 async fn a_run_carries_its_context_window() {
     crate::runstate::with_isolated_runs_dir_async("graphql-run-window", |_d| async move {
-        let meta = meta_at("coder-1788924523-win000", 100);
-        create_run(&meta).expect("run written");
-        crate::runstate::write_context_snapshot(
-            &meta.run_id,
-            &leviath_core::run_meta::ContextSnapshot {
-                stage_name: "build".to_string(),
-                total_tokens: 42,
-                max_tokens: 8_000,
-                regions: vec![leviath_core::run_meta::RegionSnapshot {
-                    name: "plan".to_string(),
-                    kind: "pinned".to_string(),
-                    current_tokens: 42,
+        crate::commands::serve::graphql::types::journal_fixture::started_at(
+            "coder-1788924523-win000",
+            Some(100),
+            |state| {
+                use leviath_runtime::spec::names::{RegionName, StageName};
+                state.cursor.stage = StageName::new("build").expect("a stage");
+                state.context.max_tokens = 8_000;
+                state.context.regions = vec![leviath_runtime::state::RegionState {
+                    name: RegionName::new("plan").expect("a region"),
                     max_tokens: 2_000,
-                    description: None,
+                    current_tokens: 42,
+                    needs_message_compaction: false,
+                    taint: None,
                     entries: Vec::new(),
-                }],
+                }];
             },
-        )
-        .expect("window written");
+        );
 
         let answer = run_query(
             "{ runs { results { context { totalTokens maxTokens stageName

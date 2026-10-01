@@ -53,6 +53,167 @@
   },
   "delta": {
     "$defs": {
+      "ArtifactState": {
+        "description": "A file an execution produced.",
+        "properties": {
+          "mime_type": {
+            "description": "Its mime type.",
+            "type": "string"
+          },
+          "name": {
+            "description": "What it is called.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Where it is, inside the run's workdir.",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "The sha256 of its bytes, when it was taken.",
+            "type": "string"
+          },
+          "size": {
+            "description": "Its size in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "mime_type",
+          "size",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "AttemptOutcomeState": {
+        "description": "How a model call ended.",
+        "oneOf": [
+          {
+            "const": "Succeeded",
+            "description": "The provider answered.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "It did not.",
+            "properties": {
+              "Failed": {
+                "properties": {
+                  "capacity": {
+                    "description": "Whether the provider was out of capacity.",
+                    "type": "boolean"
+                  },
+                  "kind": {
+                    "description": "The kind of failure, as the provider layer names it.",
+                    "type": "string"
+                  },
+                  "next": {
+                    "$ref": "#/$defs/RetryState",
+                    "description": "What happened next."
+                  },
+                  "transient": {
+                    "description": "Whether a retry could work.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "transient",
+                  "capacity",
+                  "next"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Failed"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AttemptState": {
+        "description": "One trip to a provider, whether or not it produced an answer.",
+        "properties": {
+          "backoff_ms": {
+            "description": "How long it waited before it was sent.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "digest": {
+            "$ref": "#/$defs/RequestDigestState",
+            "description": "What was sent, in brief."
+          },
+          "duration_ms": {
+            "description": "How long it took.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "finish_reason": {
+            "description": "Why the model stopped, in this build's words.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The attempt's id.",
+            "type": "string"
+          },
+          "model": {
+            "description": "The model asked.",
+            "type": "string"
+          },
+          "model_input": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelInputState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The request itself, when it was captured."
+          },
+          "number": {
+            "description": "Which try at this request it was, from 1.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "outcome": {
+            "$ref": "#/$defs/AttemptOutcomeState",
+            "description": "How it ended."
+          },
+          "provider": {
+            "description": "The provider asked.",
+            "type": "string"
+          },
+          "stopped_for": {
+            "description": "Why it stopped, in the provider's words, when this build has no name\nfor it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "provider",
+          "model",
+          "outcome",
+          "duration_ms",
+          "backoff_ms",
+          "digest"
+        ],
+        "type": "object"
+      },
       "BlobState": {
         "description": "A stored part's bytes, by digest.",
         "properties": {
@@ -133,6 +294,101 @@
           "name"
         ],
         "type": "object"
+      },
+      "CaptureState": {
+        "description": "Whether a request's body was kept.",
+        "oneOf": [
+          {
+            "const": "Retained",
+            "description": "Kept, and readable.",
+            "type": "string"
+          },
+          {
+            "const": "NotCaptured",
+            "description": "Capture was off.",
+            "type": "string"
+          },
+          {
+            "const": "Redacted",
+            "description": "Kept with its secrets taken out.",
+            "type": "string"
+          },
+          {
+            "const": "Expired",
+            "description": "Kept once and removed since.",
+            "type": "string"
+          }
+        ]
+      },
+      "CauseState": {
+        "description": "What changed a run's context.",
+        "oneOf": [
+          {
+            "const": "Seed",
+            "description": "A seed at spawn.",
+            "type": "string"
+          },
+          {
+            "const": "Message",
+            "description": "A message.",
+            "type": "string"
+          },
+          {
+            "const": "ModelReply",
+            "description": "The model's reply.",
+            "type": "string"
+          },
+          {
+            "const": "ToolResult",
+            "description": "A tool's result.",
+            "type": "string"
+          },
+          {
+            "const": "ProducedPart",
+            "description": "A part a tool produced.",
+            "type": "string"
+          },
+          {
+            "const": "Compaction",
+            "description": "A compaction.",
+            "type": "string"
+          },
+          {
+            "const": "Transform",
+            "description": "A stage transform.",
+            "type": "string"
+          },
+          {
+            "const": "ContextTool",
+            "description": "A context tool the model called.",
+            "type": "string"
+          },
+          {
+            "const": "Hook",
+            "description": "A hook.",
+            "type": "string"
+          },
+          {
+            "const": "FanOut",
+            "description": "A fan-out's results.",
+            "type": "string"
+          },
+          {
+            "const": "Interaction",
+            "description": "A person's answer.",
+            "type": "string"
+          },
+          {
+            "const": "Resume",
+            "description": "A resume.",
+            "type": "string"
+          },
+          {
+            "const": "Framework",
+            "description": "The runtime's own bookkeeping: a nudge, a watchdog note.",
+            "type": "string"
+          }
+        ]
       },
       "Change": {
         "description": "One field of [`RunState`] that changed, with its new value.",
@@ -498,6 +754,44 @@
         ],
         "type": "object"
       },
+      "ContextCommitState": {
+        "description": "A change to a run's context, with its cause: the regions it moved and the\nwindow revisions on either side.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/CauseState",
+            "description": "What caused it."
+          },
+          "execution_id": {
+            "description": "The execution it came from, when a tool's did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "regions": {
+            "description": "Each region it moved.",
+            "items": {
+              "$ref": "#/$defs/RegionCommitState"
+            },
+            "type": "array"
+          },
+          "revision_after": {
+            "description": "The window's revision after.",
+            "type": "string"
+          },
+          "revision_before": {
+            "description": "The window's revision before.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cause",
+          "revision_before",
+          "revision_after",
+          "regions"
+        ],
+        "type": "object"
+      },
       "ContextDiff": {
         "description": "How the context changed between two states.",
         "properties": {
@@ -572,6 +866,44 @@
         "required": [
           "regions",
           "removed"
+        ],
+        "type": "object"
+      },
+      "ContextNoteState": {
+        "description": "A change to one region with its cause, where no revision was taken.",
+        "properties": {
+          "cause": {
+            "$ref": "#/$defs/CauseState",
+            "description": "What caused it."
+          },
+          "entries_added": {
+            "description": "Entries it added.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "entries_removed": {
+            "description": "Entries it removed.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "region": {
+            "description": "The region.",
+            "type": "string"
+          },
+          "token_delta": {
+            "description": "How many tokens it moved the region by.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "region",
+          "cause",
+          "entries_added",
+          "entries_removed",
+          "token_delta"
         ],
         "type": "object"
       },
@@ -1303,6 +1635,52 @@
         ],
         "type": "object"
       },
+      "ModelInputState": {
+        "description": "A captured model request: the body when it was kept, and what it was\nbuilt from either way.",
+        "properties": {
+          "assembly_version": {
+            "description": "The version of the assembly that built it.",
+            "type": "string"
+          },
+          "bytes": {
+            "description": "The body's size in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "capture": {
+            "$ref": "#/$defs/CaptureState",
+            "description": "Whether the body was kept."
+          },
+          "parameters": {
+            "additionalProperties": {
+              "description": "Any JSON document."
+            },
+            "description": "The sampling parameters it was sent with.",
+            "type": "object"
+          },
+          "request": {
+            "description": "The request as sent, when it was kept."
+          },
+          "source_context_digest": {
+            "description": "A digest of the context it was assembled from.",
+            "type": "string"
+          },
+          "tool_catalog_version": {
+            "description": "The version of the tool catalog it offered.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "capture",
+          "bytes",
+          "source_context_digest",
+          "parameters",
+          "tool_catalog_version",
+          "assembly_version"
+        ],
+        "type": "object"
+      },
       "ModelRef": {
         "additionalProperties": false,
         "description": "A model to run, and optionally the provider to run it on.\n\nWith no provider, the operator's `provider_order` picks one at spawn.",
@@ -1522,6 +1900,36 @@
           }
         ]
       },
+      "QuestionKind": {
+        "description": "What a question asked a person for.",
+        "oneOf": [
+          {
+            "const": "FreeText",
+            "description": "Free text.",
+            "type": "string"
+          },
+          {
+            "const": "MultipleChoice",
+            "description": "One of a set of options.",
+            "type": "string"
+          },
+          {
+            "const": "Confirm",
+            "description": "Yes or no.",
+            "type": "string"
+          },
+          {
+            "const": "ToolApproval",
+            "description": "Whether a tool call may run.",
+            "type": "string"
+          },
+          {
+            "const": "EditText",
+            "description": "An edit to a document.",
+            "type": "string"
+          }
+        ]
+      },
       "RegionChange": {
         "description": "How one region changed.",
         "oneOf": [
@@ -1558,6 +1966,64 @@
             "type": "object"
           }
         ]
+      },
+      "RegionCommitState": {
+        "description": "One region's side of a context change.",
+        "properties": {
+          "digest_after": {
+            "description": "Its content digest after.",
+            "type": "string"
+          },
+          "digest_before": {
+            "description": "Its content digest before.",
+            "type": "string"
+          },
+          "entries_added": {
+            "description": "Entries the change itself pushed, which the counts either side do not\nshow when the region evicted one to make room.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "entries_after": {
+            "description": "Its entries after.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "entries_before": {
+            "description": "Its entries before.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "region": {
+            "description": "The region.",
+            "type": "string"
+          },
+          "tokens_after": {
+            "description": "Its tokens after.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tokens_before": {
+            "description": "Its tokens before.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "region",
+          "digest_before",
+          "digest_after",
+          "tokens_before",
+          "tokens_after",
+          "entries_before",
+          "entries_after",
+          "entries_added"
+        ],
+        "type": "object"
       },
       "RegionHead": {
         "description": "A region's fields besides its entries.",
@@ -1596,6 +2062,68 @@
           "needs_message_compaction"
         ],
         "type": "object"
+      },
+      "RequestDigestState": {
+        "description": "What one model request was, in brief: enough to tell two requests apart\nwithout keeping either.",
+        "properties": {
+          "max_tokens": {
+            "description": "The reply cap it asked for.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "messages": {
+            "description": "How many messages the request carried.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "system_hash": {
+            "description": "A hash of the system prompt.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "temperature": {
+            "description": "The sampling temperature.",
+            "format": "float",
+            "type": "number"
+          },
+          "tools": {
+            "description": "How many tools it offered.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "system_hash",
+          "messages",
+          "tools",
+          "max_tokens",
+          "temperature"
+        ],
+        "type": "object"
+      },
+      "RetryState": {
+        "description": "What a failed model call went on to do.",
+        "oneOf": [
+          {
+            "const": "Reported",
+            "description": "Nothing: the failure was reported.",
+            "type": "string"
+          },
+          {
+            "const": "SameModel",
+            "description": "The same model was asked again.",
+            "type": "string"
+          },
+          {
+            "const": "RenewedFiles",
+            "description": "The same model was asked again with its uploaded files renewed.",
+            "type": "string"
+          }
+        ]
       },
       "RunEvent": {
         "description": "Something that happened during a step that the state does not keep.",
@@ -1770,6 +2298,166 @@
               "Log"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A model call, in full: how it ended, how long it took, what was sent,\nand the request itself when it was captured. Recorded for every call,\nbeside the `Inference` that carries a successful one's spend.",
+            "properties": {
+              "Attempt": {
+                "$ref": "#/$defs/AttemptState"
+              }
+            },
+            "required": [
+              "Attempt"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A tool call was dispatched as one execution.",
+            "properties": {
+              "Dispatched": {
+                "properties": {
+                  "call_id": {
+                    "description": "The provider's id for the call.",
+                    "type": "string"
+                  },
+                  "execution_id": {
+                    "description": "The execution's own id.",
+                    "type": "string"
+                  },
+                  "requested_by": {
+                    "description": "The model call that asked for it.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "call_id",
+                  "execution_id",
+                  "requested_by"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Dispatched"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An execution ended: how, and the stored parts its result carried.\nRecorded beside the `ToolFinished` that carries the result.",
+            "properties": {
+              "Completed": {
+                "properties": {
+                  "call_id": {
+                    "description": "The provider's id for the call.",
+                    "type": "string"
+                  },
+                  "execution_id": {
+                    "description": "The execution's own id.",
+                    "type": "string"
+                  },
+                  "outcome": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/ToolOutcomeState"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "How it ended, when that was observed."
+                  },
+                  "parts": {
+                    "description": "The names of the stored parts its result carried.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "call_id",
+                  "execution_id",
+                  "parts"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Completed"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An execution produced files.",
+            "properties": {
+              "Artifacts": {
+                "properties": {
+                  "artifacts": {
+                    "description": "The files.",
+                    "items": {
+                      "$ref": "#/$defs/ArtifactState"
+                    },
+                    "type": "array"
+                  },
+                  "execution_id": {
+                    "description": "The execution.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "execution_id",
+                  "artifacts"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Artifacts"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A question was settled, recorded whole beside the `Answered` that\ncarries its answer.",
+            "properties": {
+              "Settled": {
+                "$ref": "#/$defs/SettledState"
+              }
+            },
+            "required": [
+              "Settled"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The context changed, with its cause and the revisions on either side.",
+            "properties": {
+              "ContextCommitted": {
+                "$ref": "#/$defs/ContextCommitState"
+              }
+            },
+            "required": [
+              "ContextCommitted"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One region changed, with its cause.",
+            "properties": {
+              "ContextNoted": {
+                "$ref": "#/$defs/ContextNoteState"
+              }
+            },
+            "required": [
+              "ContextNoted"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1820,6 +2508,52 @@
             "type": "string"
           }
         ]
+      },
+      "SettledState": {
+        "description": "A question a person settled, whole.",
+        "properties": {
+          "asked_at": {
+            "description": "When it was asked, in unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "The question's id.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/QuestionKind",
+            "description": "What it asked for."
+          },
+          "prompt": {
+            "description": "The question as the person saw it.",
+            "type": "string"
+          },
+          "settlement": {
+            "description": "How it ended, as the settlement's JSON.",
+            "type": "string"
+          },
+          "stage": {
+            "description": "The stage the run was in when it asked.",
+            "type": "string"
+          },
+          "tool": {
+            "description": "The tool an approval was for.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "prompt",
+          "stage",
+          "settlement",
+          "asked_at"
+        ],
+        "type": "object"
       },
       "Spend": {
         "description": "Tokens and cost.",
@@ -2199,6 +2933,36 @@
           "args"
         ],
         "type": "object"
+      },
+      "ToolOutcomeState": {
+        "description": "How a tool execution ended.",
+        "oneOf": [
+          {
+            "const": "Succeeded",
+            "description": "The tool ran and answered.",
+            "type": "string"
+          },
+          {
+            "const": "Failed",
+            "description": "The tool ran and failed.",
+            "type": "string"
+          },
+          {
+            "const": "Blocked",
+            "description": "A gate refused it before it ran.",
+            "type": "string"
+          },
+          {
+            "const": "Denied",
+            "description": "A person refused it.",
+            "type": "string"
+          },
+          {
+            "const": "Indeterminate",
+            "description": "Nobody saw how it ended.",
+            "type": "string"
+          }
+        ]
       },
       "ToolResultState": {
         "description": "A tool call's result.",

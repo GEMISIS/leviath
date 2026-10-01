@@ -164,7 +164,10 @@ impl ToolExecution {
             return Ok(None);
         };
         let run_id = self.run_id.clone();
-        let records = blocking(move || crate::runstate::read_stages_index(&run_id)).await;
+        let records = blocking(move || {
+            super::super::super::core::inspect::stages(&run_id).unwrap_or_default()
+        })
+        .await;
         Ok(records
             .iter()
             .map(super::run_detail::StageRecord::from)

@@ -23,6 +23,7 @@ use crate::spec::env::CodeFiles;
 use crate::spec::names::{Digest, ModelId, ModelRef, ProviderName};
 use crate::spec::run_spec::RunSpec;
 use crate::state::context::{PartBody, ToolCallState};
+use crate::state::journal::{ContextCommitState, ContextNoteState, SettledState};
 use crate::state::{MessageState, RunEvent, RunState, RunStatus, Spend, ToolResultState};
 
 /// One run's state, to record in its run file.
@@ -246,24 +247,175 @@ fn model_ref(provider: &str, model: &str) -> Option<ModelRef> {
     })
 }
 
+/// The events a journal record becomes in a run file's step.
+pub fn journal_events(record: &RunRecord) -> Vec<RunEvent> {
+    let mut events = Vec::new();
+    push_events(&mut events, record);
+    events
+}
+
 /// Add the events `record` describes to `events`.
 pub(crate) fn push_events(events: &mut Vec<RunEvent>, record: &RunRecord) {
-    use leviath_core::run_archive::AttemptOutcome;
+    use super::recorded;
     match record {
-        RunRecord::InferenceAttempt(a) => match &a.outcome {
-            AttemptOutcome::Succeeded => events.extend(model_ref(&a.provider, &a.model).map(
-                |model| RunEvent::Inference {
+        RunRecord::InferenceAttempt(a) => {
+            push_attempt(events, a);
+            events.push(RunEvent::Attempt(Box::new(recorded::attempt(a))));
+        }
+        RunRecord::ToolBatch {
+            calls,
+            requested_by,
+            ..
+        } => {
+            events.extend(calls.iter().map(|c| {
+                RunEvent::ToolStarted(ToolCallState {
+                    id: c.id.clone(),
+                    name: c.name.clone(),
+                    args: JsonDoc::parse(&c.arguments)
+                        .unwrap_or(JsonDoc::new(c.arguments.clone().into())),
+                    thought_signature: c.thought_signature.clone(),
+                })
+            }));
+            events.extend(calls.iter().map(|c| RunEvent::Dispatched {
+                call_id: c.id.clone(),
+                execution_id: c.execution_id.clone(),
+                requested_by: requested_by.clone(),
+            }));
+            // A call that came back in the batch record itself (a refusal, a
+            // result settled before dispatch) ends there.
+            for c in calls {
+                if let Some(result) = &c.result {
+                    push_done(events, &c.id, &c.execution_id, result, None);
+                }
+            }
+        }
+        RunRecord::ToolCallDone {
+            call_id,
+            execution_id,
+            result,
+            outcome,
+            ..
+        } => push_done(events, call_id, execution_id, result, *outcome),
+        RunRecord::ArtifactsProduced {
+            execution_id,
+            artifacts,
+            ..
+        } => events.push(RunEvent::Artifacts {
+            execution_id: execution_id.clone(),
+            artifacts: artifacts.iter().map(recorded::artifact).collect(),
+        }),
+        RunRecord::Interaction {
+            request_id,
+            kind,
+            tool,
+            prompt,
+            stage,
+            settlement,
+            asked_at,
+            ..
+        } => {
+            let answer = serde_json::to_string(settlement).expect("a settlement is plain data");
+            events.push(RunEvent::Answered {
+                id: request_id.clone(),
+                answer: answer.clone(),
+            });
+            events.push(RunEvent::Settled(Box::new(SettledState {
+                id: request_id.clone(),
+                kind: recorded::question_kind(kind),
+                tool: tool.clone(),
+                prompt: prompt.clone(),
+                stage: stage.clone(),
+                settlement: answer,
+                asked_at: *asked_at,
+            })));
+        }
+        RunRecord::ContextTransaction {
+            revision_before,
+            revision_after,
+            cause,
+            regions,
+            execution_id,
+            ..
+        } => events.push(RunEvent::ContextCommitted(Box::new(ContextCommitState {
+            cause: recorded::cause(*cause),
+            execution_id: (!execution_id.is_empty()).then(|| execution_id.clone()),
+            revision_before: revision_before.clone(),
+            revision_after: revision_after.clone(),
+            regions: regions.iter().map(recorded::region_commit).collect(),
+        }))),
+        RunRecord::ContextChange {
+            region,
+            cause,
+            entries_added,
+            entries_removed,
+            token_delta,
+            ..
+        } => events.push(RunEvent::ContextNoted(ContextNoteState {
+            region: region.clone(),
+            cause: recorded::cause(*cause),
+            entries_added: u32::try_from(*entries_added).unwrap_or(u32::MAX),
+            entries_removed: u32::try_from(*entries_removed).unwrap_or(u32::MAX),
+            token_delta: *token_delta,
+        })),
+        other => push_plain(events, other),
+    }
+}
+
+/// A finished call: its result, and how it ended with the parts it carried.
+fn push_done(
+    events: &mut Vec<RunEvent>,
+    call_id: &str,
+    execution_id: &str,
+    result: &leviath_core::region::EntryContent,
+    outcome: Option<leviath_core::execution::ToolOutcome>,
+) {
+    let is_error = match outcome {
+        Some(o) => o != leviath_core::execution::ToolOutcome::Succeeded,
+        None => result.as_str().starts_with("[error]"),
+    };
+    events.push(RunEvent::ToolFinished {
+        call_id: call_id.to_string(),
+        result: ToolResultState {
+            text: result.as_str().to_string(),
+            is_error,
+        },
+        millis: 0,
+    });
+    events.push(RunEvent::Completed {
+        call_id: call_id.to_string(),
+        execution_id: execution_id.to_string(),
+        outcome: outcome.map(super::recorded::outcome),
+        parts: result
+            .stored()
+            .filter_map(|part| part.name.clone())
+            .collect(),
+    });
+}
+
+/// A model call's spend-bearing event: an answer, or a line saying it failed.
+fn push_attempt(events: &mut Vec<RunEvent>, a: &leviath_core::run_archive::AttemptRecord) {
+    use leviath_core::run_archive::AttemptOutcome;
+    match &a.outcome {
+        AttemptOutcome::Succeeded => {
+            events.extend(
+                model_ref(&a.provider, &a.model).map(|model| RunEvent::Inference {
                     attempt: a.id.clone(),
                     model,
                     spend: Spend::default(),
                     finish_reason: (!a.finish_reason.is_empty()).then(|| a.finish_reason.clone()),
-                },
-            )),
-            AttemptOutcome::Failed { kind, .. } => events.push(RunEvent::Log(format!(
-                "model call {} on {}/{} failed: {kind}",
-                a.id, a.provider, a.model
-            ))),
-        },
+                }),
+            )
+        }
+        AttemptOutcome::Failed { kind, .. } => events.push(RunEvent::Log(format!(
+            "model call {} on {}/{} failed: {kind}",
+            a.id, a.provider, a.model
+        ))),
+    }
+}
+
+/// The events of the records that carry nothing beyond what they say.
+fn push_plain(events: &mut Vec<RunEvent>, record: &RunRecord) {
+    match record {
         RunRecord::InferenceUsage {
             provider,
             model,
@@ -303,44 +455,6 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, record: &RunRecord) {
                 });
             }
         }
-        RunRecord::ToolBatch { calls, .. } => {
-            events.extend(calls.iter().map(|c| {
-                RunEvent::ToolStarted(ToolCallState {
-                    id: c.id.clone(),
-                    name: c.name.clone(),
-                    args: JsonDoc::parse(&c.arguments)
-                        .unwrap_or(JsonDoc::new(c.arguments.clone().into())),
-                    thought_signature: c.thought_signature.clone(),
-                })
-            }));
-        }
-        RunRecord::ToolCallDone {
-            call_id,
-            result,
-            outcome,
-            ..
-        } => {
-            let is_error = match outcome {
-                Some(o) => *o != leviath_core::execution::ToolOutcome::Succeeded,
-                None => result.as_str().starts_with("[error]"),
-            };
-            events.push(RunEvent::ToolFinished {
-                call_id: call_id.clone(),
-                result: ToolResultState {
-                    text: result.as_str().to_string(),
-                    is_error,
-                },
-                millis: 0,
-            });
-        }
-        RunRecord::Interaction {
-            request_id,
-            settlement,
-            ..
-        } => events.push(RunEvent::Answered {
-            id: request_id.clone(),
-            answer: serde_json::to_string(settlement).expect("a settlement is plain data"),
-        }),
         RunRecord::Message { message, .. } => events.push(RunEvent::Message(MessageState {
             from: message.role.clone(),
             text: message.content.clone(),

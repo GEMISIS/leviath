@@ -20,11 +20,13 @@ mod error;
 pub mod frames;
 pub(crate) mod lane;
 pub mod reader;
+mod recorded;
 mod summary;
 pub mod view;
 pub mod writer;
 
 pub use error::{RunFileError, RunFileErrorKind};
+pub use lane::journal_events;
 pub use reader::RunFileReader;
 pub use summary::{context_snapshot, stage_records, summary, summary_of};
 pub use writer::{CheckpointPolicy, RunFileWriter};

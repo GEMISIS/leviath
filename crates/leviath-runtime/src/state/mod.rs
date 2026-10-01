@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 pub mod context;
 mod delta;
 pub mod inspect;
+pub mod journal;
 
 pub use context::{ContextDiff, ContextState, EntryKind, EntryMeta, EntryState, RegionState};
 pub use delta::{Change, RunEvent, StateDelta, TransitionReason, TransitionRecord};

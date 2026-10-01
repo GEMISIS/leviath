@@ -229,6 +229,14 @@ type ArtifactOutput {
 	url: String!
 }
 
+"The files an execution produced."
+type ArtifactsStepOutput {
+	"The execution."
+	producerId: ID!
+	"The files."
+	files: [ProducedFileOutput!]!
+}
+
 "Arguments for the `ask_user_choice` tool."
 type AskUserChoiceArgsOutput {
 	"The question asked."
@@ -474,6 +482,37 @@ type AttemptOutcomeOutput {
 	capacity: Boolean
 	"What the loop did next."
 	retry: RetryDecision
+}
+
+"A model call, in full."
+type AttemptStepOutput {
+	"The attempt's id."
+	attemptId: ID!
+	"Which try at this request it was, from 1."
+	number: Int!
+	"The provider asked."
+	provider: String!
+	"The model asked."
+	model: String!
+	"Whether it answered."
+	ended: AttemptOutcomeKind!
+	"How it failed, when it did."
+	failure: CallFailureOutput
+	"Why the model stopped, in this build's words."
+	stopReason: String
+	"""
+	Why it stopped, in the provider's words, when this build has no name
+	for it.
+	"""
+	stoppedFor: String
+	"How long it took."
+	durationMs: BigInt!
+	"How long it waited before it was sent."
+	backoffMs: BigInt!
+	"What was sent, in brief."
+	digest: RequestBriefOutput!
+	"The request itself, when it was captured."
+	modelInput: CapturedRequestOutput
 }
 
 "What a run answers for itself instead of asking a person."
@@ -1372,6 +1411,18 @@ type BuiltinToolOutput implements Tool {
 	origin: ToolOrigin!
 }
 
+"How a failed model call failed, and what happened next."
+type CallFailureOutput {
+	"The kind of failure, as the provider layer names it."
+	kind: String!
+	"Whether a retry could work."
+	transient: Boolean!
+	"Whether the provider was out of capacity."
+	capacity: Boolean!
+	"What happened next."
+	next: RetryDecision!
+}
+
 """
 Where a run posts its events, and what signs them.
 
@@ -1467,6 +1518,24 @@ input CaptureStatusFilter {
 	notIn: [CaptureStatus!]
 	"Match where there is no value at all."
 	isNull: Boolean
+}
+
+"A captured model request."
+type CapturedRequestOutput {
+	"Whether the body was kept."
+	capture: CaptureStatus!
+	"The request as sent, when it was kept."
+	request: JSON
+	"The body's size in bytes."
+	bytes: BigInt!
+	"A digest of the context it was assembled from."
+	sourceContextDigest: String!
+	"The sampling parameters it was sent with, by name."
+	parameters: JSON!
+	"The version of the tool catalog it offered."
+	toolCatalogVersion: String!
+	"The version of the assembly that built it."
+	assemblyVersion: String!
 }
 
 "Arguments for the `check_agent` tool."
@@ -1684,6 +1753,26 @@ enum CodexVerbosity {
 	HIGH
 }
 
+"One region's side of a committed context change."
+type CommittedRegionOutput {
+	"The region."
+	region: String!
+	"Its content digest before."
+	digestBefore: String!
+	"Its content digest after."
+	digestAfter: String!
+	"Its tokens before."
+	tokensBefore: BigInt!
+	"Its tokens after."
+	tokensAfter: BigInt!
+	"Its entries before."
+	entriesBefore: BigInt!
+	"Its entries after."
+	entriesAfter: BigInt!
+	"Entries the change itself pushed."
+	entriesAdded: BigInt!
+}
+
 """
 Filter on `CompactionConfigOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -1759,6 +1848,18 @@ type CompactionConfigOutput {
 	maxSummaryTokens: Int!
 	"How much it may wander. A summary wants little."
 	temperature: Float!
+}
+
+"An execution that ended."
+type CompletedStepOutput {
+	"The provider's id for the call."
+	callId: String!
+	"The execution's own id."
+	executionId: ID!
+	"How it ended, when that was observed."
+	outcome: ToolOutcome
+	"The names of the stored parts its result carried."
+	parts: [String!]!
 }
 
 """
@@ -2259,6 +2360,20 @@ type ContextChangeOutput {
 	at: Timestamp!
 }
 
+"A context change with its cause and the window revisions on either side."
+type ContextCommittedStepOutput {
+	"What caused it."
+	cause: ContextCause!
+	"The execution it came from, when a tool's did."
+	committedBy: ID
+	"The window's revision before."
+	revisionBefore: String!
+	"The window's revision after."
+	revisionAfter: String!
+	"Each region it moved."
+	regions: [CommittedRegionOutput!]!
+}
+
 "Arguments for the `context_delete` tool."
 type ContextDeleteArgsOutput {
 	"The region released from, by name."
@@ -2405,6 +2520,20 @@ type ContextListCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: ContextListArgsOutput!
+}
+
+"A change to one region with its cause."
+type ContextNotedStepOutput {
+	"The region."
+	region: String!
+	"What caused it."
+	cause: ContextCause!
+	"Entries it added."
+	entriesAdded: Int!
+	"Entries it removed."
+	entriesRemoved: Int!
+	"How many tokens it moved the region by."
+	tokenDelta: BigInt!
 }
 
 "Arguments for the `context_read` tool."
@@ -3515,6 +3644,16 @@ type DirectoryOutput {
 	cwd: String!
 	"The directories inside, by name."
 	entries: [String!]!
+}
+
+"A tool call dispatched as one execution."
+type DispatchedStepOutput {
+	"The provider's id for the call."
+	callId: String!
+	"The execution's own id."
+	executionId: ID!
+	"The model call that asked for it."
+	requestedBy: String!
 }
 
 "One environment or configuration check."
@@ -8752,6 +8891,20 @@ type PresentForReviewCallOutput implements ToolCall {
 	args: PresentForReviewArgsOutput!
 }
 
+"A file an execution produced."
+type ProducedFileOutput {
+	"What it is called."
+	name: String!
+	"Where it is, inside the run's working directory."
+	path: String!
+	"Its mime type."
+	mimeType: String!
+	"Its size in bytes."
+	size: BigInt!
+	"The sha256 of its bytes, when it was taken."
+	sha256: String!
+}
+
 "The current stage's counters moved."
 type ProgressChangeOutput {
 	"The counters now."
@@ -10522,6 +10675,20 @@ type RepetitionDetectionOutput {
 	them.
 	"""
 	maxReadonlyStreak: Int
+}
+
+"What one model request was, in brief."
+type RequestBriefOutput {
+	"A hash of the system prompt."
+	systemHash: BigInt!
+	"How many messages it carried."
+	messages: Int!
+	"How many tools it offered."
+	tools: Int!
+	"The reply cap it asked for."
+	maxTokens: Int!
+	"The sampling temperature."
+	temperature: Float!
 }
 
 """
@@ -13238,6 +13405,24 @@ type ServerInfoOutput {
 	limits: ServeLimitsOutput!
 }
 
+"A question a person settled, whole."
+type SettledStepOutput {
+	"The question."
+	settledId: ID!
+	"What it asked for."
+	kind: InteractionKind!
+	"The tool an approval was for."
+	tool: String
+	"The question as the person saw it."
+	prompt: String!
+	"The stage the run was in when it asked."
+	stage: String!
+	"How it ended, as the settlement's JSON."
+	settlement: JSON!
+	"When it was asked."
+	askedAt: Timestamp!
+}
+
 """
 Filter on `SettlementOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -15402,7 +15587,7 @@ type StatusChangeOutput {
 }
 
 "Something that happened during a step that the state alone does not show."
-union StepEvent = InferenceStepOutput | FailoverStepOutput | ToolStartedStepOutput | ToolFinishedStepOutput | AnsweredStepOutput | MessageStepOutput | LogStepOutput
+union StepEvent = InferenceStepOutput | FailoverStepOutput | ToolStartedStepOutput | ToolFinishedStepOutput | AnsweredStepOutput | MessageStepOutput | LogStepOutput | AttemptStepOutput | DispatchedStepOutput | CompletedStepOutput | ArtifactsStepOutput | SettledStepOutput | ContextCommittedStepOutput | ContextNotedStepOutput
 
 "A part's bytes, stored once in the run file by digest."
 type StoredBlobOutput {

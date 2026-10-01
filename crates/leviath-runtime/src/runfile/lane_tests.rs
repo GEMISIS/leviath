@@ -1,6 +1,9 @@
 use super::*;
 use crate::runfile::reader::RunFileReader;
 use crate::runfile::reader_tests::{image, initial, scripted_run, spec};
+use crate::state::journal::{
+    AttemptOutcomeState, AttemptState, CauseState, QuestionKind, RetryState, ToolOutcomeState,
+};
 use leviath_core::region::EntryContent;
 use serde_json::json;
 
@@ -52,7 +55,7 @@ fn a_model_call_and_its_usage_become_one_inference_event() {
         attempt("mock", "m", json!("succeeded"), "stop"),
         usage("m", Some(0.5), Some(true)),
     ]);
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2, "the answer, and the call kept whole");
     let RunEvent::Inference {
         attempt,
         model,
@@ -62,6 +65,12 @@ fn a_model_call_and_its_usage_become_one_inference_event() {
     else {
         unreachable!()
     };
+    let RunEvent::Attempt(whole) = &events[1] else {
+        unreachable!()
+    };
+    assert_eq!(whole.id, "a1");
+    assert_eq!(whole.duration_ms, 5);
+    assert_eq!(whole.finish_reason.as_deref(), Some("stop"));
     assert_eq!(attempt, "a1");
     assert_eq!(*model, mock("m"));
     assert_eq!(spend.prompt_tokens, 10);
@@ -103,11 +112,28 @@ fn a_failed_call_is_a_log_line_and_a_nameless_model_is_nothing() {
         attempt("mock", "", json!("succeeded"), ""),
     ]);
     assert_eq!(
-        events,
-        vec![RunEvent::Log(
-            "model call a1 on mock/m failed: rate_limit".into()
-        )]
+        events[0],
+        RunEvent::Log("model call a1 on mock/m failed: rate_limit".into())
     );
+    let kept: Vec<&AttemptState> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Attempt(a) => Some(&**a),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kept.len(), 2, "both calls are kept whole, named or not");
+    assert_eq!(
+        kept[0].outcome,
+        AttemptOutcomeState::Failed {
+            kind: "rate_limit".into(),
+            transient: true,
+            capacity: false,
+            next: RetryState::SameModel,
+        }
+    );
+    assert_eq!(kept[1].model, "");
+    assert_eq!(events.len(), 3);
 }
 
 #[test]
@@ -137,7 +163,7 @@ fn failovers_tools_answers_and_messages_become_events() {
     let message =
         record(json!({"Message": {"message": {"role": "user", "content": "hi"}, "at": 1}}));
     let status = record(json!({"StatusChanged": {"status": "complete", "at": 1}}));
-    let events = events_of(&[
+    let all = events_of(&[
         failover("n"),
         failover(""),
         batch,
@@ -149,6 +175,36 @@ fn failovers_tools_answers_and_messages_become_events() {
         message,
         status,
     ]);
+    // The events that keep a record whole sit beside the ones it always
+    // became: one dispatch per call, one ending per result, one settlement.
+    let (whole, events): (Vec<RunEvent>, Vec<RunEvent>) = all.into_iter().partition(|e| {
+        matches!(
+            e,
+            RunEvent::Dispatched { .. } | RunEvent::Completed { .. } | RunEvent::Settled(_)
+        )
+    });
+    assert_eq!(whole.len(), 2 + 4 + 1);
+    let RunEvent::Settled(settled) = &whole[6] else {
+        unreachable!()
+    };
+    assert_eq!(settled.kind, QuestionKind::FreeText);
+    assert_eq!(settled.stage, "plan");
+    let outcomes: Vec<Option<ToolOutcomeState>> = whole
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Completed { outcome, .. } => Some(*outcome),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![
+            Some(ToolOutcomeState::Succeeded),
+            Some(ToolOutcomeState::Failed),
+            None,
+            None
+        ]
+    );
     assert_eq!(events.len(), 9);
     assert_eq!(
         events[0],
@@ -369,4 +425,134 @@ async fn a_step_that_cannot_be_written_is_an_error_and_closes_the_file() {
             .await
             .is_err()
     );
+}
+
+/// A call that came back in its batch record ends there, with the parts its
+/// result carried named, and the dispatch names the execution and the call
+/// that asked for it.
+#[test]
+fn a_batch_names_its_executions_and_ends_the_calls_it_carries() {
+    let stored = leviath_core::mime::Part::stored(leviath_core::mime::BlobRef {
+        sha256: "abc".into(),
+        mime_type: leviath_core::mime::MimeType::parse("image/png").unwrap(),
+        size: 3,
+        width: None,
+        height: None,
+        duration_ms: None,
+        tokens: 1,
+        stand_in: "[image]".into(),
+    })
+    .named("chart.png");
+    let mut refused = leviath_core::run_archive::ToolCallRecord {
+        id: "c1".into(),
+        execution_id: "x1".into(),
+        name: "shell".into(),
+        arguments: "{}".into(),
+        result: Some(EntryContent::from_parts(vec![
+            leviath_core::mime::Part::text("[blocked] no"),
+            stored,
+        ])),
+        thought_signature: None,
+    };
+    let batch = RunRecord::ToolBatch {
+        calls: vec![refused.clone()],
+        at: 1,
+        stage_index: 0,
+        iteration: 1,
+        visit_id: String::new(),
+        requested_by: "a1".into(),
+        response: String::new(),
+    };
+    let events = journal_events(&batch);
+    assert!(events.contains(&RunEvent::Dispatched {
+        call_id: "c1".into(),
+        execution_id: "x1".into(),
+        requested_by: "a1".into(),
+    }));
+    assert!(events.contains(&RunEvent::Completed {
+        call_id: "c1".into(),
+        execution_id: "x1".into(),
+        outcome: None,
+        parts: vec!["chart.png".into()],
+    }));
+    refused.result = None;
+    let quiet = journal_events(&RunRecord::ToolBatch {
+        calls: vec![refused],
+        at: 1,
+        stage_index: 0,
+        iteration: 1,
+        visit_id: String::new(),
+        requested_by: String::new(),
+        response: String::new(),
+    });
+    assert_eq!(quiet.len(), 2, "a start and a dispatch, and no ending");
+}
+
+/// What an execution produced, and a context change with its cause, are kept
+/// as they were recorded.
+#[test]
+fn artifacts_and_context_changes_are_kept_whole() {
+    let artifacts = journal_events(&RunRecord::ArtifactsProduced {
+        execution_id: "x1".into(),
+        artifacts: vec![leviath_core::output::Artifact {
+            name: "report".into(),
+            path: "out/r.md".into(),
+            mime_type: leviath_core::mime::MimeType::parse("text/markdown").unwrap(),
+            size: 9,
+            sha256: "beef".into(),
+        }],
+        at: 1,
+    });
+    let RunEvent::Artifacts {
+        execution_id,
+        artifacts,
+    } = &artifacts[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(execution_id, "x1");
+    assert_eq!(artifacts[0].mime_type, "text/markdown");
+
+    let commit = |execution: &str| RunRecord::ContextTransaction {
+        revision_before: "cw1-a".into(),
+        revision_after: "cw1-b".into(),
+        cause: leviath_core::ContextCause::ToolResult,
+        regions: vec![leviath_core::run_archive::RegionCommit {
+            region: "plan".into(),
+            digest_before: "d1".into(),
+            digest_after: "d2".into(),
+            tokens_before: 1,
+            tokens_after: 5,
+            entries_before: 0,
+            entries_after: 1,
+            entries_added: 1,
+        }],
+        execution_id: execution.into(),
+        at: 1,
+    };
+    let RunEvent::ContextCommitted(kept) = &journal_events(&commit("x1"))[0] else {
+        unreachable!()
+    };
+    assert_eq!(kept.execution_id.as_deref(), Some("x1"));
+    assert_eq!(kept.cause, CauseState::ToolResult);
+    assert_eq!(kept.regions[0].entries_added, 1);
+    let RunEvent::ContextCommitted(anonymous) = &journal_events(&commit(""))[0] else {
+        unreachable!()
+    };
+    assert_eq!(anonymous.execution_id, None);
+
+    let noted = journal_events(&RunRecord::ContextChange {
+        region: "plan".into(),
+        cause: leviath_core::ContextCause::Compaction,
+        entries_added: 1,
+        entries_removed: 3,
+        token_delta: -40,
+        at: 1,
+    });
+    let RunEvent::ContextNoted(note) = &noted[0] else {
+        unreachable!()
+    };
+    assert_eq!(note.cause, CauseState::Compaction);
+    assert_eq!(note.entries_removed, 3);
+    assert_eq!(note.token_delta, -40);
 }

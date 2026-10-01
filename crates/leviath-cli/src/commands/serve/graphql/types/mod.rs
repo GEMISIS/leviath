@@ -21,6 +21,9 @@ pub(crate) mod tool_calls;
 pub(crate) mod update;
 
 #[cfg(test)]
+pub(crate) mod journal_fixture;
+
+#[cfg(test)]
 #[path = "execution_tests.rs"]
 mod execution_tests;
 

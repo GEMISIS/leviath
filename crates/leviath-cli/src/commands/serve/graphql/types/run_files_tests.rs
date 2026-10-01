@@ -51,47 +51,10 @@ async fn data(meta: RunMeta, query: &str) -> serde_json::Value {
     serde_json::to_value(&answer.data).expect("data serializes")
 }
 
-/// A journal with one context point per token total, so the history has
+/// A run file with one context point per token total, so the history has
 /// something to page over.
 fn write_journal(meta: &RunMeta, totals: &[usize]) {
-    use leviath_core::run_archive::{self, RunIdentity, RunRecord};
-
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-        .expect("a preamble");
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: meta.run_id.clone(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta.clone()),
-        },
-    )
-    .expect("a header");
-    for (i, total) in totals.iter().enumerate() {
-        run_archive::write_record(
-            &mut buf,
-            &RunRecord::ContextCheckpoint {
-                snapshot: crate::runstate::ContextSnapshot {
-                    stage_name: "review".to_string(),
-                    total_tokens: *total,
-                    max_tokens: 1000,
-                    regions: Vec::new(),
-                },
-                at: 1 + i as i64,
-            },
-        )
-        .expect("a point");
-    }
-    std::fs::write(
-        crate::runstate::run_dir(&meta.run_id).join(leviath_core::files::ARCHIVE_FILE),
-        &buf,
-    )
-    .expect("the journal");
+    super::journal_fixture::windows(&meta.run_id, "review", totals);
 }
 
 /// A root handing out one run.
@@ -1000,13 +963,18 @@ async fn a_stage_record_carries_its_region_peaks() {
         let workdir = tempfile::tempdir().expect("a workdir");
         let meta = meta_in(workdir.path());
         crate::runstate::create_run(&meta).expect("run written");
-        let mut record = leviath_core::run_meta::StageRecord::new("review".to_string(), 0);
-        record.region_tokens = std::collections::BTreeMap::from([("plan".to_string(), 120usize)]);
-        record.visits = vec![leviath_core::run_meta::StageVisitRecord::opened_at(
-            100,
-            "v-one".to_string(),
-        )];
-        crate::runstate::write_stages_index(&meta.run_id, &[record]).expect("the ledger");
+        super::journal_fixture::journal_with(
+            &meta.run_id,
+            |state| {
+                let mut record = super::journal_fixture::stay("v-one", 100);
+                record.stage =
+                    leviath_runtime::spec::names::StageName::new("review").expect("a stage");
+                record.region_tokens =
+                    std::collections::BTreeMap::from([("plan".to_string(), 120)]);
+                state.ledger = vec![record];
+            },
+            &[],
+        );
 
         let json = data(
             meta,
@@ -1034,14 +1002,11 @@ async fn stages_are_filtered_ordered_and_paged_with_a_cursor() {
         let workdir = tempfile::tempdir().expect("a workdir");
         let meta = meta_in(workdir.path());
         crate::runstate::create_run(&meta).expect("run written");
-        crate::runstate::write_stages_index(
+        super::journal_fixture::journal_with(
             &meta.run_id,
-            &[
-                leviath_core::run_meta::StageRecord::new("plan".to_string(), 0),
-                leviath_core::run_meta::StageRecord::new("build".to_string(), 1),
-            ],
-        )
-        .expect("the ledger");
+            |state| state.ledger = super::journal_fixture::ledger(&["plan", "build"]),
+            &[],
+        );
 
         // Declared order by default.
         let json = data(meta.clone(), "{ run { stages(first: 1) { total cursor results { name } } } }").await;

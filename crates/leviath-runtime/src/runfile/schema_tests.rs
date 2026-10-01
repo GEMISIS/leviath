@@ -27,7 +27,7 @@ fn the_published_schemas_match_this_build() {
 /// The hash of the binary samples below as this build encodes them. When it
 /// changes, the binary layout changed: bump `LAYOUT_VERSION`, then record
 /// the new hash here.
-const LAYOUT_HASH: &str = "882c346c8559ae18b8b278e9544f44ae8d34c7e886a40745adf910dc7935d321";
+const LAYOUT_HASH: &str = "cecf9425e03215ccbd1c04e3e84dfda1330a1257d4a7eb1c09c535aaa5f3be8d";
 
 /// A fully populated sample of every frame type, so a change to any type's
 /// binary encoding changes the bytes.
@@ -88,7 +88,12 @@ fn layout_samples() -> Vec<u8> {
     }
     let base = crate::state::tests::base();
     let busy = crate::state::tests::busy();
-    let delta = crate::state::StateDelta::between(&base, &busy, 1, vec![]);
+    let delta = crate::state::StateDelta::between(
+        &base,
+        &busy,
+        1,
+        crate::state::journal::tests::every_event(),
+    );
     let mut bytes = postcard::to_stdvec(&spec).unwrap();
     bytes.extend(postcard::to_stdvec(&busy).unwrap());
     bytes.extend(postcard::to_stdvec(&delta).unwrap());
