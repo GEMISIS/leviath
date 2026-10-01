@@ -69,8 +69,8 @@ The most-used types are one import away with `use leviath::prelude::*;`.
 
 The modules map one-to-one onto the underlying crates: `leviath::core`,
 `leviath::runtime`, `leviath::providers`, `leviath::tools`, `leviath::mcp`,
-`leviath::scripting`, `leviath::telemetry`, `leviath::package`, and
-`leviath::agent_client`. If you only need one layer, you can depend on that
+`leviath::scripting`, `leviath::telemetry`, `leviath::blueprint`,
+`leviath::package`, and `leviath::agent_client`. If you only need one layer, you can depend on that
 crate directly instead.
 
 If you want the `lev` command-line tool rather than a library, install

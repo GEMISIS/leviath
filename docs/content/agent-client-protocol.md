@@ -28,7 +28,9 @@ JSON-RPC 2.0), with a 64 KiB ceiling per frame. The handshake and turn cycle are
 
 - `initialize`: capability exchange; the protocol version is `1`.
 - `session/new`: open a session (carries the working directory).
-- `session/prompt`: send a prompt turn; spawns (or, on later prompts, messages) an agent in the daemon.
+- `session/prompt`: send a prompt turn; starts a run in the daemon on the first prompt, and messages it on later ones.
+- `_leviath/spawn` and `_leviath/validate_spawn`: Leviath's own methods, which take a whole
+  [spawn request](#typed-inputs-and-other-blueprints).
 - `session/update`: notifications streaming the agent's live output back to the host.
 - `session/cancel`: cancel the in-flight turn.
 
@@ -59,7 +61,8 @@ flowchart LR
 lev agent-client --agent my-agent
 ```
 
-With no `--agent`, each session's working directory is searched for an `agent.leviath` blueprint.
+With no `--agent`, each session's working directory is searched for a blueprint's `agent.toml`.
+A session runs that blueprint, and each prompt's text becomes its `task` input.
 
 Flags (run `lev agent-client --help` for the authoritative list):
 
@@ -67,6 +70,7 @@ Flags (run `lev agent-client --help` for the authoritative list):
 |---|---|
 | `--agent <name-or-path>` | Blueprint to serve: an installed [agent](/docs/agents) name, or a path to one. Omitted, the session's working directory is searched. |
 | `--yolo` | Approve every tool call without prompting. Recommended when the host does not implement `session/request_permission` (e.g. Gas City). |
+| `--yolo=<profile>` | Run under a named profile from `yolo.toml` instead. The equals sign is required. |
 | `--allow <tool>` | Allow a tool outright. Repeatable. |
 | `--max-depth <n>` | Override the blueprint's max sub-agent tree depth. |
 | `--no-seed-commands` | Refuse the blueprint's `seed = { command = "..." }` regions, which run at spawn before any approval prompt. |
@@ -75,6 +79,73 @@ Flags (run `lev agent-client --help` for the authoritative list):
 
 An `--output-format` label that differs from the blueprint's retires the validator and schema the
 blueprint declared.
+
+## Typed inputs and other blueprints
+
+A `session/new` session runs the blueprint the operator chose, with the prompt as its `task`
+input. A host that wants another blueprint, typed inputs or a graph of its own calls one of
+Leviath's two extension methods instead. Both take a
+[spawn request](/docs/starting-a-run#one-request-every-front-door) as their params: the same JSON
+`POST /api/runs` and `lev run --request` take.
+
+| Method | What it does | Result |
+|---|---|---|
+| `_leviath/spawn` | Starts the run and opens a session bound to it | `{"sessionId", "runId"}` |
+| `_leviath/validate_spawn` | Checks the request and starts nothing | A summary of the run it would start |
+
+`initialize` lists both in `agentCapabilities._meta`, the place the protocol keeps for extensions:
+
+```json
+{"leviath": {"methods": ["_leviath/spawn", "_leviath/validate_spawn"]}}
+```
+
+A host that finds no such entry should not call them. Here is a spawn, spread over lines for
+reading. On the wire each message is one line.
+
+```json
+{"jsonrpc": "2.0", "id": 2, "method": "_leviath/spawn", "params": {
+  "source": {"blueprint": {"name": "release-notes"}},
+  "inputs": {"since": "v0.6.0", "audience": "developers", "max_items": 15}
+}}
+```
+
+```json
+{"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "release-notes-1790849143-488f17f99eef", "runId": "release-notes-1790849143-008fe93c8e58"}}
+```
+
+The new session replaces any session that was open. A `session/prompt` on it streams the run. An
+empty prompt only follows the run, and a prompt with content is delivered to it as a message first.
+
+A refused request is the JSON-RPC error `-32602` (invalid params). `message` lists the problems in
+words, and `data` holds every one of them, each with its path in the request:
+
+```json
+{"jsonrpc": "2.0", "id": 3, "error": {"code": -32602,
+  "message": "2 problems with this spawn:\n1. launch.unattended: not allowed: ...\n2. launch.allow[0]: not allowed: ...",
+  "data": [
+    {"code": "not_allowed", "expected": "off", "got": null, "hint": "the operator allows unattended runs by starting `lev agent-client --yolo`", "known": [], "message": "this server runs nothing unattended", "path": [{"Field": "launch"}, {"Field": "unattended"}]},
+    {"code": "not_allowed", "expected": null, "got": null, "hint": "the operator allows a tool with `lev agent-client --allow <tool>`", "known": [], "message": "this server does not allow 'shell' outright", "path": [{"Field": "launch"}, {"Field": "allow"}, {"Index": 0}]}
+  ]}}
+```
+
+`_leviath/validate_spawn` answers the same refusal for a bad request. For a good one its result
+names the entry stage, each stage's provider, model and tools, the checked inputs with their
+defaults, the launch policy and the working directory.
+
+### What a host may ask for
+
+A host runs on your machine, but it relays what its user or a model wrote. So these methods treat
+every request the way the HTTP API treats one from the network:
+
+- A blueprint read from a directory (`blueprint_file`) is refused. Name an installed blueprint, or
+  send the graph itself.
+- An unattended run needs the operator to have started `lev agent-client --yolo`.
+- A tool in `launch.allow` needs `--yolo`, or the operator's own `--allow` for that tool.
+- `--no-seed-commands` turns a request's seed commands off.
+- A request with no `workdir` runs in the directory `lev agent-client` was started in.
+
+The blueprint `session/new` runs is different. The operator chose it when they set the host up, so
+it is read from wherever `--agent` points.
 
 ## The agent's answer
 

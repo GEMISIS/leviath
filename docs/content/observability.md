@@ -133,10 +133,11 @@ at a collector you would trust with the run's transcript.
 
 ## Capturing what went to the model
 
-A run's journal records the shape of every request it sent: how many messages, how
-many tools, which sampling knobs, and a hash of the system prefix. That is enough
-to prove two attempts sent the same thing, and it is not the prompt. Turning on
-`capture_model_input` writes the prompt itself, once per provider attempt.
+A run's [run file](/docs/run-file) records every model call it made as a typed event. The event
+holds the shape of the request: how many messages, how many tools, which sampling knobs, and a
+hash of the system prefix. That is enough to prove two attempts sent the same thing, and it is not the prompt.
+Turning on `capture_model_input` writes the prompt itself into the same event, once per provider
+attempt.
 
 ```toml
 [observability]
@@ -148,29 +149,34 @@ capture_model_input = true
 A captured request holds whatever the run's context held at that moment. That
 means file contents a tool read, command output, pages a fetch brought back, the
 task somebody typed, and any credential that passed through any of them. A run
-directory is a plain file with no encryption of its own, so every reader of
+file is a plain file with no encryption of its own, so every reader of
 `~/.leviath/runs/` becomes a reader of every prompt. Off by default is the safety
 property, and it is the reason the setting exists rather than the capture always
 happening.
 
 There is no size cap. Every call re-sends the whole window, so a captured run's
-journal grows by roughly the context size per attempt. A long run on a large
+file grows by roughly the context size per attempt. A long run on a large
 window writes hundreds of megabytes, and a retried call writes its window again
 per retry. That is deliberate: a capped capture would hand back a truncated prompt
 that reads like a whole one.
 
 The setting is read at spawn, so it applies to runs started after the change and
 leaves the runs already going alone. To capture one run without turning it on for
-the machine, ask at spawn instead: `"capture_model_input": true` on
-[`POST /api/agents`](/docs/api#capturing-one-runs-prompts), or `captureModelInput`
-on [`spawnRun`](/docs/graphql#what-one-call-sent). A per-run request is not
-carried across a daemon restart, because losing it writes less rather than more.
+the machine, ask at spawn instead: `"launch": {"capture_model_input": true}` on
+[`POST /api/runs`](/docs/api#capturing-one-runs-prompts), or `launch.captureModelInput`
+on [`spawnRun`](/docs/graphql#what-one-call-sent). The request is part of the run's
+spec, so a run resumed after a daemon restart keeps capturing.
 
 Read the captured requests back on `InferenceAttempt.modelInput`, which also
 carries the parameters that were really in force, the tool set the model was
 offered, and a fingerprint of the window the request came from. Those three are
 recorded whether capture is on or off. See
 [what one call sent](/docs/graphql#what-one-call-sent).
+
+At a terminal, `lev run show <run-id> --deltas ..` prints the same events, step by step. Each
+model call is an `Inference` event and an `Attempt` event, and the captured request sits under
+`model_input.request`. Tool calls, answered questions and context changes are events in the same
+steps. See [Inspecting a run](/docs/inspecting-a-run#from-the-command-line).
 
 ## Trying it locally
 
@@ -186,7 +192,7 @@ lifecycle.
 
 The metrics above answer "is the fleet healthy". For "what did this one run spend, and on which
 stage", read its stage ledger instead: [`lev stages <run-id>`](/docs/cli#lev-stages-run-id) at a terminal,
-or [`GET /api/agents/{id}/stages`](/docs/api#where-a-runs-cost-went) over HTTP. Both carry the
+or [`GET /api/runs/{id}/stages`](/docs/api#where-a-runs-cost-went) over HTTP. Both carry the
 per-stage token split, the cache read and write halves, what each stage spent in dollars, and the
 split of that by each stay in the stage. They also carry the largest each context region reached
 while that stage was active, which is the number to look at before trimming a layout.

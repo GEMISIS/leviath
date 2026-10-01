@@ -179,8 +179,9 @@ boundary around what an agent can run, add a [sandbox](/docs/security).
 ## An agent is an entity
 
 When the daemon starts a run, it first resolves the request into a **run spec**: the blueprint's
-stage graph with every model, tool, input and limit decided. It writes that spec to the run's file,
-then places the run in the world. Placing it is all that happens in the world:
+stage graph with every model, tool, input and limit decided. It writes that spec to the
+[run file](/docs/run-file), `run.lvr`, then places the run in the world. Placing it is all that
+happens in the world:
 
 ```rust
 world.spawn((
@@ -201,9 +202,9 @@ Every line is a component, and most come from the run spec:
 
 | Component | Filled from |
 |---|---|
-| `RunSpecC` | the run spec, resolved from `agent.leviath` and the request |
-| `ContextWindow` | `[context.regions]`, with percentage budgets resolved against the model's window |
-| `StageInference` | the current stage's model and its `available_tools`, as the spec decided them |
+| `RunSpecC` | the run spec, resolved from the [spawn request](/docs/starting-a-run): its blueprint or raw graph, and its inputs |
+| `ContextWindow` | the graph's `[[graph.layout.regions]]`, with percentage budgets resolved against the model's window |
+| `StageInference` | the current stage's model and its `tools`, as the spec decided them |
 | `StageProgress` | nothing, these are the runtime's own counters |
 
 Every stage is worked out once, when the run is resolved. A stage is not an entity of its own: it
@@ -262,7 +263,7 @@ flowchart TD
 3. **`process_response`** reads the reply. Tool calls go down the tool path; plain text goes toward
    a transition.
 4. **`dispatch_tools`** checks each requested call before it runs. A tool the stage never
-   advertised in `available_tools` was never sent to the model, and is refused here too if it
+   lists in `tools` was never sent to the model, and is refused here too if it
    guesses the name. [Permissions](/docs/tools) decide
    whether the call needs you, and [taint tracking](/docs/security#taint-tracking-experimental)
    blocks a call that would carry sensitive data somewhere it should not go. Calls that only edit
@@ -270,8 +271,8 @@ flowchart TD
 5. **`collect_tools`** merges the results back into the order the model asked for them, files each
    into the [context region](/docs/context) the stage routes it to, and returns the agent to
    `ReadyToInfer`.
-6. **`resolve_transition`** picks what happens at the end of a stage. A stage's outgoing edges are
-   its [transitions](/docs/stages), including ones that fire on an error or when the agent is
+6. **`resolve_transition`** picks what happens at the end of a stage. A stage's outgoing
+   [edges](/docs/stages) include ones that fire on an error or when the agent is
    detected going in circles. There are six answers. Four are ordinary: `Terminal` (done),
    `TerminalError` (failed, with no `error` edge to catch it), `Next` (take this edge), and
    `Choose` (ask the model which edge). `Resume` means the agent looked stuck but the stage has no
@@ -279,7 +280,7 @@ flowchart TD
    `error` edge or fails the run rather than reporting a completion that did not happen.
 
 Those are six of the roughly forty-five. See [Multi-stage workflows](/docs/stages) for what the
-transition conditions mean and [Structured context](/docs/context) for what the regions do.
+edge conditions mean and [Structured context](/docs/context) for what the regions do.
 
 ## What a tick is
 

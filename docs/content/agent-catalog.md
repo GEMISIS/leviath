@@ -9,12 +9,16 @@ order: 4
 # Agent catalog
 
 Leviath ships with seven pre-built agents. `lev setup` installs them into `~/.leviath/agents/`
-(scripting it? pass `--install-agents`), one directory per agent, each holding an `agent.leviath`
+(scripting it? pass `--install-agents`), one directory per agent, each holding an `agent.toml`
 [blueprint](/docs/agents). Run any of them by name:
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
 ```
+
+`--task` fills the blueprint's `task` input. Some blueprints declare more inputs, given as
+`--<name> value` or `--input name=value`; each section below shows the ones that matter.
+`lev validate ~/.leviath/agents/<name>` lists every input a blueprint takes.
 
 Each entry names the models its stages prefer. Those are first choices, not requirements: every
 bundled agent lists all five providers, and a stage falls back to the one you configured.
@@ -23,7 +27,7 @@ This page is also a set of worked examples. Each section shows the agent's real 
 they route, so you can copy the patterns into your own blueprint (`lev create my-agent` scaffolds
 one, then read [Agents](/docs/agents)). The diagrams are simplified: they show each agent's main
 path, and most draw the edge into its error-recovery stage, but a real graph has more edges than
-these. `lev validate <agent>` prints every one of them.
+these. The `[[graph.edges]]` entries in each blueprint's `agent.toml` list every one of them.
 
 > [!TIP]
 > Pick by the shape of the work: a codebase change (the coding agents), a question to answer from
@@ -89,12 +93,15 @@ flowchart LR
 ```
 
 ```bash
-lev run reviewer --task "Review the changes on the feature/auth branch"
+git diff main...feature/auth > change.patch
+lev run reviewer --task "Review the changes on the feature/auth branch" --diff @change.patch
 lev run reviewer --diff @change.patch --criteria "does the code produce what after.png shows?" \
   --attach before.png:screenshots --attach after.png:screenshots
 ```
 
-Screenshots are a typed input: the `screenshots` region accepts `image/*` and holds six, so a
+`diff` is a required input, and `@change.patch` reads it from the file. `criteria` is optional.
+
+Screenshots are attachments: the `screenshots` region accepts `image/*` and holds six, so a
 mockup or a before-and-after reaches the model. A model that can see gets it as pixels, and any
 other gets a line naming the file. A `@path` in `--criteria` attaches the same way. See
 [Mime](/docs/mime).

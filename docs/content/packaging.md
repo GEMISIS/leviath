@@ -8,7 +8,7 @@ order: 6
 
 # Packaging & sharing blueprints
 
-A [blueprint](/docs/agents) is a directory with an `agent.leviath` file. To hand one to
+A [blueprint](/docs/agents) is a directory with an [`agent.toml`](/docs/blueprint-format) file. To hand one to
 someone else you bundle that directory into a single `.leviath-bundle` file, or share the
 directory as-is. There is no hosted registry, and installation is always from a local path. `lev`
 gives you four commands for the round trip: `pack` to build a bundle, `add` to install one,
@@ -17,7 +17,7 @@ gives you four commands for the round trip: `pack` to build a bundle, `add` to i
 ## Pack a blueprint
 
 `lev pack` bundles a blueprint project into a distributable `.leviath-bundle` archive (a
-gzip-compressed tarball of the blueprint, scripts, tests, and docs).
+gzip-compressed tarball of the `agent.toml`, its scripts, tests, and docs).
 
 ```bash
 lev pack                              # pack the current directory
@@ -25,7 +25,7 @@ lev pack ./my-agent                   # pack a specific project directory
 lev pack ./my-agent -o my-agent.leviath-bundle   # choose the output path
 ```
 
-- `PATH` (optional positional): the project directory, or a path to an `agent.leviath` file.
+- `PATH` (optional positional): the project directory, or a path to its `agent.toml`.
   Defaults to the current directory.
 - `-o`, `--output <FILE>`: where to write the bundle. Defaults to
   `{name}-{version}.leviath-bundle`, taken from the blueprint.
@@ -47,23 +47,22 @@ lev add ./my-agent                    # install from a directory
 - `PACKAGE` (required positional): a path to a `.leviath-bundle` file or to an agent
   directory. Anything else is rejected; `lev add` never reaches out to a network.
 
-The install is named after the blueprint's `name` in `agent.leviath`, not after the bundle
+The install is named after the `[blueprint] name` in `agent.toml`, not after the bundle
 file or the source directory. `lev add ./my-agent-1.0.0.leviath-bundle` installs `my-agent`,
-and that is the name `lev run` and `lev remove` take. Only a package whose
-manifest declares no name falls back to the file's or directory's name.
+and that is the name `lev run` and `lev remove` take.
 
 Installing under a name that already exists replaces the previous install.
 
 When a blueprint asks for anything unusual, `lev add` prints an inventory of exactly what it wants
 so you can look before running it. Unusual means pre-approved tools, script host access, shipped
-executable script tools, `[read_paths]` declarations with their grant status, a disabled sandbox,
+executable script tools, `read_paths` declarations with their grant status, a disabled sandbox,
 or a command that runs at startup.
 
 > [!WARNING]
 > A blueprint can carry executable `.rhai` tool scripts, grant its own tool permissions, and
 > declare seed commands that run at spawn, before the first prompt. Treat a third-party
-> blueprint like any other code you install: read its [`agent.leviath`](/docs/agents) and the capability
-> inventory `lev add` prints, and inspect it with `lev validate <name>`. See
+> blueprint like any other code you install: read its [`agent.toml`](/docs/blueprint-format) and the capability
+> inventory `lev add` prints, and inspect it with `lev validate ~/.leviath/agents/<name>`. See
 > [Security](/docs/security) for the full trust model.
 
 ## List installed blueprints

@@ -36,7 +36,7 @@ flowchart TB
   end
   POOLS -->|inference| PROV["LLM providers"]
   LANE -->|"shell, files, MCP"| TOOLS["Tools, in the run's workdir"]
-  DAEMON -->|"journal, context, outputs"| DISK["Disk"]
+  DAEMON -->|"run files, logs, outputs"| DISK["Disk"]
 ```
 
 Agents never talk to a provider or run a tool themselves. The world builds each request and each
@@ -78,10 +78,30 @@ reads it when it starts. `lev rage` packs all of these files into a bug report. 
 On start, the daemon reloads any runs that were interrupted, so a crash or a restart does not lose
 work.
 
+Each run lives in one file, `run.lvr`, in its directory under `~/.leviath/runs/<run-id>/`. The
+[run file](/docs/run-file) holds the run's spec, the code and blobs it needs, every step, and state
+checkpoints. A reload reads the spec and the last state from it. It then checks the run against this
+machine: the providers it was started on, its MCP servers, and its code. A run that still fits is
+placed back in the world where it stopped.
+
+A run that no longer fits ends in `error`, with every problem recorded in its file. A provider whose
+key, base URL or model list changed since the run started is the usual cause. The daemon log names
+the run and each problem:
+
+```
+ERROR leviath_cli::daemon::recovery: a run could not be resumed on this machine run_id=release-notes-1790848481-4774f2f3b6fa issues=2 problems with this spawn:
+1. stages.gather.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
+```
+
+That run stays ended, so start a new one. See
+[when the machine changed](/docs/run-file#when-the-machine-changed). A run directory from an older
+Leviath is converted to a run file the first time the daemon loads it. Its old files move to a
+`legacy/` directory inside it.
+
 The tricky part is tool calls that were mid-batch when it went down. Some of those already had real
 effects: a file written, a shell command run. Re-running them would do the damage twice. So the
-daemon keeps a **journal**, an append-only record of every tool batch when it is dispatched and
-every result as it arrives. On reload it uses the journal to work out what actually happened:
+run file keeps a **journal**: each tool batch is recorded when it is dispatched, and each result as
+it arrives. On reload the daemon uses the journal to work out what actually happened:
 
 - **A call that finished** is replayed from the journal, not run again. A file write that already
   landed does not land twice.
@@ -99,12 +119,9 @@ every result as it arrives. On reload it uses the journal to work out what actua
   this cannot close, because no journal can watch an external side effect happen atomically. Those
   calls come back as the same check-first error rather than being quietly re-run.
 
-A reloaded run keeps the launch options that shape it: `--yolo`, the output format it was asked for,
-and a `--model` override, replayed exactly as given. A run launched with no `--model` resolves each
-stage afresh on reload, the same way the launch did, so its failover list is intact.
-
-Before 0.4.1, the reload handed back the entry stage's resolved `provider/model` as if it had been
-the override. That pinned every stage of a reloaded run to that one pair.
+A reloaded run is not resolved again. It carries on with the models, tools, launch policy and
+inputs its spec recorded when it started, including `--yolo`, the output format it was asked for,
+and each stage's failover list.
 
 If something on your end consumes completion webhooks, deduplicate on `delivery_id`, described in
 the [API guide](/docs/api). A completion that re-fires after a restart carries the same id as the

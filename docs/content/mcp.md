@@ -79,7 +79,7 @@ or remove takes effect without `lev daemon restart`. See
 ## Discovery and invocation
 
 On connect, Leviath discovers the server's tools and exposes them to any stage whose
-`available_tools` includes them.
+`tools` list includes them.
 
 ### How an MCP tool is named
 
@@ -134,8 +134,8 @@ in the text with its URI and type, since its bytes were never sent. A part the r
 Tools used to be advertised bare, with the server prefixed only on a clash, so a blueprint written
 against that naming grants `create_issue` where the tool is now `tracker__create_issue`. Such a grant
 still resolves, **as long as exactly one server offers a tool by that name**. Two do and the name is
-genuinely ambiguous: it resolves to nothing and the manifest has to say which. Worth updating the
-manifest either way, since the ambiguity can arrive later when somebody adds a second server.
+genuinely ambiguous: it resolves to nothing and the blueprint has to say which. Worth updating the
+blueprint either way, since the ambiguity can arrive later when somebody adds a second server.
 
 A built-in is never captured this way. `read_file` matches the built-in, whatever any server
 calls its own tools.
@@ -155,7 +155,7 @@ sequenceDiagram
 
 ## Granting a whole server
 
-`available_tools` is an exact-match list, so granting a server tool by tool means knowing what it
+A stage's `tools` is an exact-match list, so granting a server tool by tool means knowing what it
 advertises, and that is not yours to know. It is whatever the server ships today. GitHub's
 server, to name a public one, advertises dozens of tools. A house server gains one when somebody
 deploys. A tool added later is never offered, and nothing says so, so the stage quietly cannot do
@@ -164,9 +164,10 @@ a thing you believed it could.
 Name the server instead:
 
 ```toml
-[stages.triage]
-available_tools = ["read_file", "wiki__search"]
-available_connectors = ["tracker"]
+[[graph.stages]]
+name = "triage"
+tools = ["read_file", "wiki__search"]
+connectors = ["tracker"]
 ```
 
 That stage gets the built-in `read_file`, one named tool from `wiki`, and everything `tracker`
@@ -174,10 +175,10 @@ advertises. The two forms mix freely, and a tool named individually *and* covere
 granted once.
 
 The connector is resolved at spawn against what the server actually advertises then, and merged
-with `available_tools`, so the two mix freely. A tool the server gains next month is offered
-without touching the manifest.
+with `tools`, so the two mix freely. A tool the server gains next month is offered
+without touching the blueprint.
 
-A connector that resolves to nothing grants nothing, exactly as an `available_tools` name
+A connector that resolves to nothing grants nothing, exactly as a `tools` name
 matching nothing does. That covers a server which is not installed, and one that did not connect
 this run. Whether a server is
 present is not a property of your blueprint, so `lev validate` says nothing about connector names
@@ -189,11 +190,11 @@ you named by hand.
 
 > [!NOTE]
 > A connector grant is per server. To grant every connected server at once, put `@mcp` in
-> `available_tools` instead (see [tool groups](/docs/tools#tool-groups)); `@mcp` and
-> `available_connectors` compose, so `["@builtin", "@mcp"]` with no connector list is the
-> "all built-ins and every MCP tool" shape in one line. `available_tools` has no pattern form such
+> `tools` instead (see [tool groups](/docs/tools#tool-groups)); `@mcp` and
+> `connectors` compose, so `["@builtin", "@mcp"]` with no connector list is the
+> "all built-ins and every MCP tool" shape in one line. `tools` has no pattern form such
 > as `tracker__*`, because a server name may itself contain `_`: in `a__b__c` there is no way to
-> tell `a`'s `b__c` from `a__b`'s `c`. `available_connectors` asks Leviath which tools a server owns
+> tell `a`'s `b__c` from `a__b`'s `c`. `connectors` asks Leviath which tools a server owns
 > rather than inferring it from how they are spelled.
 
 ## OAuth, safely

@@ -52,12 +52,13 @@ a test, so a client generator or an agent can consume the contract directly.
   | `DELETE /api/mcp/servers/{name}` | 404, because nothing else is mounted on that path |
   | `POST /api/update` | 405, because `GET /api/update` is mounted |
   | `POST /api/models/probe` | 404, because nothing else is mounted on that path |
-- **`--workdir-root`** confines agent workdirs. **`--no-remote-yolo`** forbids `"yolo": true` and
-  `"allow": [...]` on spawn, which are one lever rather than two.
-- **`--no-remote-seed-commands`** runs every spawn as if it carried `"no_seed_commands": true`, so
-  a blueprint's `seed = { command = ... }` regions, which execute at spawn before any approval
-  prompt, never run for a run that arrived over the API. `lev run` on the host is unaffected;
-  `[security] allow_seed_commands = false` is the machine-wide version.
+- **`--workdir-root`** confines run workdirs. **`--no-remote-yolo`** refuses `launch.unattended`
+  other than `"off"` and any `launch.allow` list on a spawn, which are one lever rather than two.
+  See [refusals only this server makes](#refusals-only-this-server-makes).
+- **`--no-remote-seed-commands`** runs every spawn as if it carried `"launch": {"seed_commands":
+  false}`. A blueprint's `seed = { command = ... }` regions execute at spawn, before any approval
+  prompt, so they never run for a run that arrived over the API. `lev run` on the host is
+  unaffected; `[security] allow_seed_commands = false` is the machine-wide version.
 
 > [!CAUTION]
 > `lev serve` runs LLM-driven tools with whatever permissions the blueprint grants. Treat it as
@@ -75,8 +76,8 @@ off. A flag wins over the config file, and the config file over the default.
 | Seconds per request | 30 | `--request-timeout-secs <SECS>` | `[serve] request_timeout_secs` | 408, and the handler is dropped |
 | Bytes per request body | 32 MiB | none | `[serve] max_upload_bytes` | 413; this is what bounds a multipart upload |
 
-Both answers carry the usual `{"error": "..."}` body. The websocket routes (`/ws` and
-`/ws/agents/{id}`) are outside both: a subscription is meant to stay open. They are the only
+Both answers carry the usual `{"error": "..."}` body. The websocket routes (`/ws`,
+`/ws/agents/{id}` and `/ws/graphql`) are outside both: a subscription is meant to stay open. They are the only
 place the API streams, so every other route has built its whole body before the deadline could
 cut it. An unauthenticated request takes a slot while it is being refused, so a flood without a
 token is refused at the cap like any other.
@@ -224,23 +225,27 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 | Method · Path | Purpose |
 |---|---|
 | `GET /api/runs` · `DELETE /api/runs` | List runs: paginated, sortable, searchable · prune many at once. See [below](#listing-and-searching-runs) |
+| `POST /api/runs` · `POST /api/runs/validate` | Start a run from a spawn request · check one without starting it. See [starting a run](#starting-a-run) |
+| `GET /api/schema/spawn-request` | The JSON Schema of the spawn request, to write one against |
+| `GET /api/runs/{id}` | One run's record. Reads the run's file, so a finished run answers too |
 | `DELETE /api/runs/{id}` | Delete one finished run's record, and its sub-agent runs. Not the same as cancelling it. See [below](#deleting-runs) |
-| `GET /api/agents` · `POST /api/agents` | List runs *(deprecated, use `/api/runs`)* · spawn an agent. Reads the persisted records, so finished runs stay listed |
-| `GET /api/agents/{id}` · `DELETE …` | Get one · cancel. Cancelling stops the work and **keeps** the record; see [deleting runs](#deleting-runs) for removing it |
-| `GET /api/agents/{id}/result` · `/context` | The run's answer and log tail · current context window |
-| `GET /api/agents/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage`, `stream` and `tail` pick which stage, which stream, and how much |
-| `GET /api/agents/{id}/context/history` | How the context window changed over the run, paginated |
-| `GET /api/agents/{id}/stages` | The per-stage ledger: tokens, dollars and regions per stage. See [below](#where-a-runs-cost-went) |
-| `GET /api/agents/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
-| `GET /api/agents/{id}/files/raw?path=` | A workdir file's bytes under its own content type, for an `<img>` or a download. See [below](#a-runs-parts) |
-| `GET /api/agents/{id}/blobs` · `/blobs/{sha256}` | The stored parts a run holds, and one part's bytes. See [below](#a-runs-parts) |
+| `POST /api/runs/{id}/cancel` | Cancel a run and the runs it started. The record **stays**; see [deleting runs](#deleting-runs) |
+| `GET /api/runs/{id}/spec` · `/state?at=` · `/deltas?from=&to=` · `/graph` | The run's spec, its state at any step, its steps, and its graph. See [reading a run's file](#reading-a-runs-file) |
+| `GET /api/runs/{id}/result` · `/context` | The run's answer and log tail · current context window |
+| `GET /api/runs/{id}/logs?stage=&stream=&tail=` | A run's logs. `stage`, `stream` and `tail` pick which stage, which stream, and how much |
+| `GET /api/runs/{id}/context/history` | How the context window changed over the run, paginated |
+| `GET /api/runs/{id}/stages` | The per-stage ledger: tokens, dollars and regions per stage. See [below](#where-a-runs-cost-went) |
+| `GET /api/runs/{id}/files` | List a run's files, or read one with `?path=`. `offset` pages a large one. See [below](#a-runs-files) |
+| `GET /api/runs/{id}/files/raw?path=` | A workdir file's bytes under its own content type, for an `<img>` or a download. See [below](#a-runs-parts) |
+| `GET /api/runs/{id}/blobs` · `/blobs/{sha256}` | The stored parts a run holds, and one part's bytes. See [below](#a-runs-parts) |
 | The three byte routes above | Also take a short-lived `?exp=&sig=` link in place of the bearer token, which is what a browser needs for an `<img src>`. Mint one with the [GraphQL API](/docs/graphql) |
-| `GET /api/agents/{id}/artifacts/{name}` | The bytes of one file the run handed back, by the name its answer lists. See [below](#a-runs-parts) |
-| `GET /api/agents/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
-| `POST /api/agents/{id}/pause` · `/resume` | Pause a run · resume it |
-| `POST /api/agents/{id}/message` | Steer a running agent. Takes files too; see [attaching files](#attaching-files) |
-| `GET/POST /api/agents/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
+| `GET /api/runs/{id}/artifacts/{name}` | The bytes of one file the run handed back, by the name its answer lists. See [below](#a-runs-parts) |
+| `GET /api/runs/tree` · `/{id}/tree-status` · `/{id}/children` | Sub-agent tree + token roll-ups |
+| `POST /api/runs/{id}/pause` · `/resume` | Pause a run · resume it |
+| `POST /api/runs/{id}/message` | Steer a running run. Takes files too; see [attaching files](#attaching-files) |
+| `GET/POST /api/runs/{id}/interaction` | Read / answer a pending question. See [below](#answering-a-question) |
 | `GET/POST/PUT/DELETE /api/blueprints[/{name}]` · `/validate` | Blueprint CRUD + validation, paginated and searchable with `q` |
+| `GET /api/blueprints/{name}/inputs` | The inputs a blueprint declares, with each one's type, default and destination |
 | `GET /api/config` · `PUT /api/config` *(admin)* · `POST /api/config/validate` | Read redacted config · write or clear keys (`null` clears one) · validate a key |
 | `GET /api/models?provider=&refresh=` | Enumerate models with their token limits and where they came from. See [the model catalogue](#the-model-catalogue) |
 | `POST /api/models/probe` *(admin)* | Ask an OpenAI-compatible server what it serves, before writing a gateway for it. See [below](#gateways) |
@@ -261,7 +266,7 @@ handle that on all of them rather than on a few. The body is a line of plain tex
 
 Several routes in that table take more explaining than a cell allows.
 
-`GET /api/agents/{id}/stages` reports what each stage spent per visit as well as in total, and
+`GET /api/runs/{id}/stages` reports what each stage spent per visit as well as in total, and
 whether the stage ran at all. The blueprint detail route carries the manifest, the regions and the
 [fan-out limits](#fan-out-limits).
 
@@ -299,27 +304,15 @@ directory already exists, and is announced as `fs.mkdir`.
 answers 409 while one is already going. A failing check is `ok: false` inside a 200, never an HTTP
 error.
 
-### Spawning under a yolo profile
-
-`POST /api/agents` takes `"yolo": true` for a plain unattended run, and `"yolo_profile":
-"<name>"` to run under a named profile from [`yolo.toml`](/docs/yolo) instead.
-A profile implies `yolo`, so the two need not both be sent. A name the file does not have fails
-the spawn with a 400 that lists the profiles it does have. Under `--no-remote-yolo` a profile is
-refused with `yolo` and `allow`: the operator's flag says nothing about which one.
-
-The run listing and `GET /api/agents/{id}` carry the name back as `yolo_profile` beside
-`unattended`, so a console can show that a run is unattended *under* something rather than
-unattended outright.
-
 ### Capturing one run's prompts
 
-`POST /api/agents` takes `"capture_model_input": true` to write that run's exact requests into its
-journal, once per provider attempt. It applies to the one run and leaves every other alone, so it
-is the switch to reach for when the question is about a single run rather than a machine.
+A spawn request with `"launch": {"capture_model_input": true}` writes that run's exact requests
+into its file, once per provider attempt. It applies to the one run and leaves every other alone.
+Reach for it when the question is about a single run rather than a machine.
 
 **Read the warning before you send it.** A captured request is the whole prompt, holding whatever
 the run's context held: file contents a tool read, command output, and anything somebody pasted.
-There is no size cap, so the journal grows by roughly the context size per attempt. See
+There is no size cap, so the run's file grows by roughly the context size per attempt. See
 [capturing what went to the model](/docs/observability#capturing-what-went-to-the-model).
 
 `[observability] capture_model_input` does the same for every run on the machine, and either one is
@@ -328,7 +321,7 @@ enough. Read the captured requests back on `InferenceAttemptOutput.modelInput` o
 
 ### Answering a question
 
-`GET /api/agents/{id}/interaction` is the request the run is parked on: its `id`, `kind`, `prompt`
+`GET /api/runs/{id}/interaction` is the request the run is parked on: its `id`, `kind`, `prompt`
 and `options`, plus `tool_name` and `tool_arguments` on a tool approval. `POST` the answer with
 the request's id as `request_id` and one of three fields. `value` is free text or an edited
 document. `choice_index` is a multiple choice, zero-based. `approved` carries an optional `scope`
@@ -373,8 +366,8 @@ beside `searches_empty`, and `gates_forced` say whether the run actually did any
 `empty_output` sums up the verdict. `flags.broken_scripts` names each Rhai script the run needed
 but could not use, such as an [output validator](/docs/rhai-validators#when-the-validator-itself-fails)
 that threw. It is the same list `lev ps` renders as `(broken script)`, and the key is omitted
-while the list is empty. The flags live in the run's `meta.json`, so they come back wherever a
-run object does.
+while the list is empty. The flags are part of the run's record, so they come back wherever a run
+object does.
 
 ### How long a run has taken
 
@@ -391,14 +384,13 @@ stuck while a stuck one looks healthy.
 `last_progress_at` is how you tell a wedged run from a slow one.
 
 `age_secs` and `working_secs` are computed server-side and appear on every run object this API
-serves: `GET /api/runs`, `GET /api/agents`, `GET /api/agents/{id}` and
-`GET /api/agents/{id}/children`, alongside the raw stamps they come from. `?fields=` selects them
+serves: `GET /api/runs`, `GET /api/runs/{id}` and `GET /api/runs/{id}/children`, alongside the raw stamps they come from. `?fields=` selects them
 like any other key. The same two keys, on the same definitions, come back from `lev ps --json`.
 
 The working clock stops for everything that is not the run's doing: paused, blocked on a person,
 parked until the machine is fixed, finished. It keeps running while the run is inferring, calling
-tools, or held for its own fan-out workers and sub-agents. Each stage in `stages.json` keeps one of
-its own on the same rule.
+tools, or held for its own fan-out workers and sub-agents. Each stage on
+[`GET /api/runs/{id}/stages`](#where-a-runs-cost-went) keeps one of its own on the same rule.
 
 To track a live run between the daemon's writes, read the clock itself rather than the computed
 figure, which was true at `server_time`:
@@ -414,10 +406,194 @@ began, or `null` when the clock is stopped. The working total is `banked_secs`, 
 `active` is `null` on runs written before this existed, and `working_secs` then falls back to
 `updated_at` minus `started_at`. A finished run has `since: null`, so its total never moves again.
 
+## Starting a run
+
+`POST /api/runs` starts a run from a spawn request. That is the same typed request `lev run`,
+GraphQL and the `spawn_agent` tool build. It names what to run, gives values for the inputs it
+declares, and says how far the run is trusted. [Starting a run](/docs/starting-a-run) covers every
+field. This section covers what is particular to REST: status codes, bodies and refusals.
+
+```bash
+curl -X POST http://localhost:3000/api/runs \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"source": {"blueprint": {"name": "coder"}},
+       "inputs": {"task": "Add input validation"},
+       "model": {"provider": "anthropic", "model": "claude-sonnet-5"},
+       "launch": {"unattended": "all"},
+       "delivery": {"metadata": {"ticket": "REL-12"}}}'
+```
+
+A run that starts answers `201` with its id:
+
+```json
+{"run_id": "coder-1790848889-ecc01e84ab94"}
+```
+
+The body is JSON, or `multipart/form-data` when it carries files; see
+[attaching files](#attaching-files). Every key is checked, so a misspelled one is a refusal rather
+than a setting that silently does nothing. `source` is `{"blueprint": {"name": "coder"}}` for an
+installed blueprint, optionally pinned with a `digest`, or `{"raw": {...}}` for a whole graph. See
+[blueprint or raw graph](/docs/starting-a-run#blueprint-or-raw-graph).
+
+Leave `workdir` out and the run works in the directory `lev serve` was started in.
+
+### When a request is refused
+
+A request that cannot run answers `422` with every problem at once, not the first one found:
+
+```json
+{"issues": [
+  {"at": "inputs.since_tag", "path": [{"Field": "inputs"}, {"Key": "since_tag"}],
+   "code": "unknown", "message": "nothing declares this input",
+   "expected": null, "got": null, "hint": null, "known": ["since", "audience", "max_items"]},
+  {"at": "inputs.max_items", "path": [{"Field": "inputs"}, {"Key": "max_items"}],
+   "code": "out_of_range", "message": "0 is out of range",
+   "expected": "an integer 1 to 50", "got": "the integer 0", "hint": null, "known": []}
+]}
+```
+
+| Key | Holds |
+|---|---|
+| `at` | Where the problem is, written the way a person reads it: `inputs.max_items`, `source.raw.layout.regions[0]` |
+| `path` | The same place as a list of steps, for a client to walk |
+| `code` | What kind of problem it is. The list is below |
+| `message` | One line saying what is wrong |
+| `expected` · `got` | What the field takes and what arrived, when either can be said |
+| `hint` | How to fix it, when there is one obvious fix |
+| `known` | The names that would have been accepted, such as the declared inputs |
+
+`code` is one of `missing`, `unknown`, `wrong_type`, `out_of_range`, `invalid`, `duplicate`,
+`dangling`, `conflict`, `not_allowed`, `unresolvable`, `unavailable` or `changed`.
+[Reading the problems](/docs/starting-a-run#reading-the-problems) says what each one means.
+
+A body that is JSON but not a spawn request is a `422` too, with one issue at `(request)` naming the
+key the decoder choked on. Its `hint` points at `GET /api/schema/spawn-request`. A body that is not
+JSON at all is a `400` with the usual `{"error": "..."}`, and so is a multipart body with no
+`request` field.
+
+### Refusals only this server makes
+
+Some refusals depend on where the request came from, so the daemon cannot make them. `lev serve`
+makes them itself, as issues in the same list. A request with a refused workdir and a misspelled
+input hears about both in one answer.
+
+| `at` | Refused when |
+|---|---|
+| `workdir` | The workdir sits outside `--workdir-root`. A symlink under the root that points out of it counts as outside |
+| `launch.unattended` | The server runs with `--no-remote-yolo` and the value is anything but `"off"` |
+| `launch.allow` | The server runs with `--no-remote-yolo` and the list is not empty |
+| `delivery.callback.url` | The URL fails the outbound policy: loopback, private and link-local addresses are refused |
+| `source.blueprint_file` | Always. A blueprint is read from a directory only for a caller on this machine |
+
+The callback check is the one a model-supplied URL gets. `[security] allow_local_network = true`
+lets a webhook reach a local service. A raw graph whose fan-out reads its worker from a directory is
+refused the same way as `source.blueprint_file`, at that stage's `mode.fan_out.worker`.
+
+A blueprint this server lists from an `agent_paths` directory can still be named by name: the server
+points the request at that directory for you. `--no-remote-seed-commands` is not a refusal: the run
+starts with `launch.seed_commands` turned off.
+
+### Unattended runs and yolo profiles
+
+`launch.unattended` is `"off"` (the default), `"all"` for a plain unattended run, or
+`{"profile": "<name>"}` to run under a named profile from [`yolo.toml`](/docs/yolo). A profile the
+file does not have is an `unresolvable` issue at `launch.unattended`, with a hint to name one
+`lev yolo` lists. Under `--no-remote-yolo` a profile is refused like `"all"`: the operator's flag
+says nothing about which one.
+
+The run's record says how it was launched: `yolo` is true for an unattended run, and
+`yolo_profile` names the profile when there was one. A console can then show that a run is
+unattended *under* something rather than unattended outright.
+
+### Checking a request first
+
+`POST /api/runs/validate` takes the same body, JSON or multipart, and resolves it without starting
+anything. The server's own refusals apply here too. A request that would start answers `200` with
+a summary of the run it would be:
+
+```json
+{
+  "title": "release-notes",
+  "origin": "Raw",
+  "entry_stage": "gather",
+  "stages": [
+    {"stage": "gather", "provider": "anthropic", "model": "claude-sonnet-5",
+     "tools": ["read_file", "shell", "context_append"]},
+    {"stage": "write", "provider": "openai", "model": "gpt-5.5", "tools": []}
+  ],
+  "inputs": {"audience": {"choice": "developers"}, "max_items": {"int": 20},
+             "since": {"text": "v0.6.0"}},
+  "launch": {"unattended": "all", "allow": [], "max_depth": 0, "seed_commands": true,
+             "capture_model_input": false},
+  "workdir": "/home/you/project"
+}
+```
+
+Each stage shows the model it resolved to on this machine, and each input its value after
+defaults. A request that would be refused answers `422` with the same issues `POST /api/runs` would
+give. See [check before you start](/docs/starting-a-run#check-before-you-start).
+
+### The request's schema, and a blueprint's inputs
+
+`GET /api/schema/spawn-request` is the JSON Schema of the request, raw graph included. Point a
+client generator or an agent at it rather than at this page.
+
+`GET /api/blueprints/{name}/inputs` lists what one blueprint takes, which is what a form needs to
+draw itself:
+
+```json
+[{"name": "task", "type": {"kind": "text", "multiline": true}, "required": true,
+  "default": null, "description": null, "binds": [{"region": "task"}]}]
+```
+
+`binds` says where each value goes. It answers `404` for a blueprint this server does not list, and
+`422` for one that does not load. [Inputs](/docs/starting-a-run#inputs) covers the types.
+
+## Reading a run's file
+
+Every run keeps one [run file](/docs/run-file): the spec it was resolved to, every step it took,
+and checkpoints of its state. Four routes read it. Each answers from the file, so each works for a
+run that finished last week and while the daemon is down. The one exception is `/state` with no
+`at`, which the daemon answers for a run it holds.
+
+| Route | Answers |
+|---|---|
+| `GET /api/runs/{id}/spec` | The spec the run was resolved to: graph, inputs, launch policy, delivery, and the machine it was placed on |
+| `GET /api/runs/{id}/state?at=<seq>` | The run's whole state after step `seq`. Without `at`, as it is now |
+| `GET /api/runs/{id}/deltas?from=&to=` | The steps between `from` and `to`, both inclusive, oldest first |
+| `GET /api/runs/{id}/graph` | The run's stages and edges, with how often it entered each stage and took each edge |
+
+A step is one numbered change to the run, and `seq` counts them from 1. Each delta carries its
+`seq`, the unix second it happened `at`, the state `changes` it made, and the `events` it
+recorded, such as an inference attempt or a tool call:
+
+```json
+[{"seq": 2, "at": 1790848532, "changes": [],
+  "events": [{"ToolStarted": {"id": "call_1", "name": "shell", "args": {"command": "ls"}}}]}]
+```
+
+The graph is small enough to draw directly. Each node carries `stage`, its `visits` and whether it
+is `current`:
+
+```json
+{"nodes": [{"stage": "gather", "visits": 1, "current": false},
+           {"stage": "write", "visits": 1, "current": true}],
+ "edges": [...]}
+```
+
+Each edge carries `from`, `to`, `name`, its `condition` (`always`, `error` and so on), and
+`taken`, counted from the transitions the run file records.
+
+A run id that names nothing is a `404`. A `seq` past the run's last step is a `416` whose error
+names the last step there is. [Inspecting a run](/docs/inspecting-a-run#over-rest) walks through
+using these to answer what a run did and why.
+
 ## Statuses
 
 A run's status is one word, and it is the same word everywhere: on the run itself, in a tree node,
-on `GET /api/agents/{id}/result`, and on the `agent_status` frames coming off the WebSocket.
+on `GET /api/runs/{id}/result`, and on the `agent_status` frames coming off the WebSocket. The
+exception is the raw state on `/state` and `/deltas`, which carries the engine's own words, such as
+`Active` and `Complete`.
 
 | Status | Means |
 |---|---|
@@ -434,16 +610,12 @@ Leviath pauses a run itself when something outside the run has to change first, 
 is then `needs_setup`. A paused run comes back paused after a daemon restart.
 
 The engine keeps its own vocabulary inside the daemon, where a run that is going is `idle` or
-`active` and a parked one is `waiting`. Those words used to reach the socket untranslated, so a
-client watching `/ws` was matching on three words no route ever sent, and a status frame quietly did
-nothing for it. They are translated on the way out now.
-
-Two older spellings are gone with them: `GET /api/agents/{id}/result` and the two tree routes
-rendered the status for a human reader, which meant `WaitingInput` and `CompleteInteractive` where
-every other route said `waiting_input` and `complete_interactive`.
+`active` and a parked one is `waiting`. The socket and the routes above translate those words on
+the way out.
 
 `events.run_status` in the `capabilities` list is how you tell. A server without it sends the
-engine's words on `agent_status` and the older spellings on those three routes.
+engine's words on `agent_status`. Its result route and two tree routes spell the status for a human
+reader, as `WaitingInput` and `CompleteInteractive`.
 
 The `status=` filter on `GET /api/runs` stays looser than this list on purpose: it also takes
 `waitinginput` and `Waiting-Input`, so a status read off any response can be handed straight back as
@@ -451,13 +623,14 @@ a filter.
 
 ## Region kinds
 
-A region's `kind`, wherever one appears (`GET /api/agents/{id}/context`, its history, the blueprint
-detail route), is the word the blueprint's own TOML uses: `pinned`, `temporary`, `clearable`,
-`sliding_window`, `compacting`, `compact_history`, `hashmap`, `checklist`, `custom`.
+A region's `kind`, wherever one appears (`GET /api/runs/{id}/context`, its history, the blueprint
+detail route), is one word: `pinned`, `temporary`, `clearable`, `sliding_window`, `compacting`,
+`compact_history`, `hashmap`, `checklist`, `custom`. A region the blueprint declares as `keyed`
+reads `hashmap` here.
 
 Context snapshots written by an older daemon say `sliding` and `history` for the two multi-word
 kinds, and those files stay on disk, so accept both spellings wherever you render one.
-`context.region_kinds` says a server writes the blueprint's words.
+`context.region_kinds` says a server writes the words above.
 
 ## Listing and searching runs
 
@@ -504,7 +677,7 @@ forty-three workers hanging off them is a real page.
 under a sidebar drawing forty rows is comparing runs the reader can see against runs they cannot.
 
 `parent=<run_id>` is also the paged, sorted, searchable form of
-[`GET /api/agents/{id}/children`](#endpoints), which answers the same question in one unbounded
+[`GET /api/runs/{id}/children`](#endpoints), which answers the same question in one unbounded
 array. A fan-out of two hundred workers has no windowed form there.
 
 A run id that names nothing gives an empty page rather than a `404`: a run with no children yet is
@@ -525,9 +698,9 @@ operators or phrase quoting, and case folding is ASCII-only.
 |---|---|---|
 | `meta` | title, task, agent name, workdir, run id, error, metadata values | free |
 | `files` | the paths the run recorded modifying | free |
-| `context` | the run's current context window | one file read per run |
+| `context` | the run's current context window | one read of the run's file per run |
 | `logs` | the tail of each stage's logs | two reads per stage per run |
-| `journal` | the whole run journal: tool calls and context history | one file read per run |
+| `journal` | the run's whole history: tool calls and context changes | one read of the run's file per run |
 
 The last three read from disk, which is why they are opt-in. Surface them as a "search inside
 runs" toggle rather than making every keystroke pay for them. They also stop after a bounded number
@@ -554,9 +727,12 @@ run recorded, and composes with everything above.
 
 ## Deleting runs
 
-Cancelling and deleting are different verbs on purpose. `DELETE /api/agents/{id}` stops the run and
-leaves everything it wrote; `DELETE /api/runs/{id}` removes the record. One stops the work, the
+Cancelling and deleting are different verbs on purpose. `POST /api/runs/{id}/cancel` stops the run
+and leaves everything it wrote; `DELETE /api/runs/{id}` removes the record. One stops the work, the
 other forgets it happened.
+
+Cancelling answers `204`, and takes the runs this one started with it. A run that has already
+finished answers `409`, because there is nothing left to stop.
 
 Deletion is real and irreversible. The run's directory goes, transcript included. That is the point
 of the route: a "Delete" button that only hid the run in one browser would tell somebody clearing a
@@ -587,7 +763,7 @@ leaves the run that started it, and the workers beside it, exactly where they we
 A live sub-agent is a **409** on the parent's delete, and the reason names the run to cancel.
 Half a tree is not a state anything downstream knows how to read.
 
-A run whose `meta.json` will not parse is a **409** too, overridden with `?force=true`:
+A run whose record cannot be read is a **409** too, overridden with `?force=true`:
 
 ```
 DELETE /api/runs/{id}?force=true
@@ -595,7 +771,7 @@ DELETE /api/runs/{id}?force=true
 
 A record that cannot be read says nothing about whether the run finished, and "cannot read it" must
 not quietly read as "finished". That is exactly what a live run looks like to a binary whose
-`RunMeta` has moved on. Such a run is also skipped by the listing, which would leave it both
+record format has moved on. Such a run is also skipped by the listing, which would leave it both
 invisible and permanent, so the escape hatch stays; it is something you type rather than
 something that happens to you. The bulk route never forces.
 
@@ -679,7 +855,7 @@ running, or after it failed, the file route answers 409 and `runExport` carries 
 
 ## Where a run's cost went
 
-`GET /api/agents/{id}/stages` returns one record per declared stage, in blueprint
+`GET /api/runs/{id}/stages` returns one record per declared stage, in blueprint
 order:
 
 ```json
@@ -808,40 +984,73 @@ stage into its stays, and `--json` is this shape read straight off disk.
 
 ## Attaching files
 
-A run takes files three ways, and all three end as typed [parts](/docs/mime) on the region they
-were aimed at, exactly as `lev run --attach` sends them.
+Every file a run takes ends as a typed [part](/docs/mime) in one of its regions, exactly as
+`lev run --attach` sends it. Starting a run and talking to one take files in different shapes.
 
-`multipart/form-data` on `POST /api/agents` and `POST /api/agents/{id}/message` carries the bytes
-themselves. A `request` field holds the JSON the route takes as a plain body. After it come any
-number of file fields named `part` (bound for the task region, or the message's region) or
-`part:<region>`, each with a `filename` and a `Content-Type`:
+### Files with a spawn request
+
+A spawn request carries its files in `attachments`. A `file` input names one by its `name`, and
+the file goes wherever that input goes. One that no input names goes to the `region` it gives, or
+else to the graph's pinned `task` region. See
+[where an input goes](/docs/starting-a-run#where-an-input-goes).
+
+In a JSON body each attachment is `{ name, data, mime_type?, region?, deliver?, caption? }`, with
+the bytes in `data` as base64. To send the bytes as they are, use `multipart/form-data`. The
+`request` field holds the JSON request. Every other field is one file, and becomes an attachment
+named after the field:
 
 ```bash
-curl -X POST http://localhost:3000/api/agents -H "Authorization: Bearer $TOKEN" \
-  -F 'request={"blueprint":"storyteller","task":"a 30 second trailer"}' \
-  -F 'part:voice_samples=@voice.wav;type=audio/wav' \
+curl -X POST http://localhost:3000/api/runs -H "Authorization: Bearer $TOKEN" \
+  -F 'request={"source": {"blueprint": {"name": "coder"}},
+               "inputs": {"task": "Match the layout in the mockup"}}' \
+  -F 'mockup=@mockup.png;type=image/png'
+```
+
+That run holds a part named `mockup` in its `task` region. A field's `Content-Type` is the file's
+mime type, except `application/octet-stream`, which leaves the type to be read from the bytes. A
+multipart file has no way to name a region, so give it one through a `file` input, or send that
+file in the JSON `attachments` instead.
+
+A file over `[serve] max_upload_bytes` is a `413` before the request is read. Every other problem
+is an issue in the `422`, at `attachments[<n>]`:
+
+- two attachments with the same name (`duplicate`);
+- a file over `[mime] max_part_bytes` (`out_of_range`);
+- bytes that do not match the declared type (`invalid`);
+- a region whose `accepts` does not take the file's type, or that does not exist.
+
+### Files with a message or an answer
+
+`POST /api/runs/{id}/message` takes `multipart/form-data` too. A `request` field holds the JSON the
+route takes as a plain body. After it come any number of file fields named `part` (bound for the
+message's region) or `part:<region>`, each with a `filename` and a `Content-Type`:
+
+```bash
+curl -X POST http://localhost:3000/api/runs/$RUN/message -H "Authorization: Bearer $TOKEN" \
+  -F 'request={"message": "Use these frames for the storyboard"}' \
   -F 'part:storyboard=@frame1.png'
 ```
 
-`POST /api/agents/{id}/interaction` takes both forms too, for a text answer: the files land beside
+`POST /api/runs/{id}/interaction` takes both forms too, for a text answer: the files land beside
 the words in the tool result, and a choice or an approval with files is refused with 400.
 
 A JSON body instead names files already inside the run's working directory under `parts`, each
-`{ path, region?, name?, mime_type?, deliver?, caption? }`. And a `@path` token inside `task`, a
-region's text, or a message names a workdir file the same way; the text keeps the token, so the
-model reads the same name the part carries. A path that escapes the working directory is refused
-with 403, a missing or empty file with 400, and a file over `[serve] max_upload_bytes` with 413.
+`{ path, region?, name?, mime_type?, deliver?, caption? }`. A `@path` token inside a message names
+a workdir file the same way. The text keeps the token, so the model reads the same name the part
+carries. A path that escapes the working directory is refused with 403, a missing or empty file
+with 400, and a file over `[serve] max_upload_bytes` with 413. A part aimed at a region whose
+`accepts` excludes it drops from the message, and the text is still delivered.
+
 The daemon types every part with its registry, so `Content-Type` and `mime_type` only need to be
-right when the bytes and the name do not say. A part aimed at a region whose `accepts` excludes it
-refuses the spawn with the region's list, and drops from a message with the text still delivered.
+right when the bytes and the name do not say.
 
 ## A run's parts
 
-`GET /api/agents/{id}/blobs` lists every stored part the run's context holds: a user's attachment,
+`GET /api/runs/{id}/blobs` lists every stored part the run's context holds: a user's attachment,
 a file `read_file` stored, an image an MCP tool returned, an artifact the run submitted. Each item
 carries `sha256`, `mime_type`, `name`, `size`, `width`, `height`, `duration_ms`, `tokens`, the
 `regions` carrying it, and `stored`, which is false for a part the context names but the run
-directory no longer holds. `GET /api/agents/{id}/blobs/{sha256}` serves one part's bytes under its
+directory no longer holds. `GET /api/runs/{id}/blobs/{sha256}` serves one part's bytes under its
 own `Content-Type`, so an `<img src=...>` pointed at it renders, and `?download=1` adds a
 `Content-Disposition: attachment` carrying the part's name.
 
@@ -852,12 +1061,12 @@ an open end (`bytes=1024-`) or a suffix (`bytes=-4096`, the last 4 KiB) works to
 starts past the end is `416 Range Not Satisfiable` with `Content-Range: bytes */<total>`. A
 malformed or multi-range header is ignored and the whole body served.
 
-`GET /api/agents/{id}/files/raw?path=` does the same for any file inside the working directory,
+`GET /api/runs/{id}/files/raw?path=` does the same for any file inside the working directory,
 typed by the registry from its bytes and name, where the JSON `files` route wraps text. A path the
 directory does not hold but the answer lists as an artifact is served from the blob store instead,
 so a file a model made and nothing wrote to disk answers here too.
 
-`GET /api/agents/{id}/artifacts/{name}` is the route that follows an artifact the way the runtime
+`GET /api/runs/{id}/artifacts/{name}` is the route that follows an artifact the way the runtime
 does: by the name the answer's `artifacts` list it under. It looks in the blob store by hash first
 and the working directory second, and serves the bytes under the artifact's own mime type. It is
 the one to use when a client has the answer in hand. The answer's `artifacts` carry each file's
@@ -866,7 +1075,7 @@ bytes.
 
 ## A run's files
 
-`GET /api/agents/{id}/files` answers two different questions, and neither substitutes for the other.
+`GET /api/runs/{id}/files` answers two different questions, and neither substitutes for the other.
 
 `source=modified` (the default) is the run's own record of what it changed. It is free, but it is a
 claim about the run rather than about the disk, and it is capped when recorded, so check
@@ -888,7 +1097,7 @@ request per row or a guess of its own. It is typed by extension only, not sniffe
 a directory. `GET .../files/raw` types the same bytes, sniffing them, when an exact answer is
 needed.
 
-With `?path=<file>` the response is the file's contents, unchanged from earlier versions. A listing
+With `?path=<file>` the response is the file's contents. A listing
 carries `"kind": "listing"`, so check that field rather than guessing from the shape.
 
 ### Reading a file larger than one response
@@ -898,7 +1107,7 @@ at a time with `offset`:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:3000/api/agents/$RUN/files?path=data/dataset.csv&offset=0"
+  "http://localhost:3000/api/runs/$RUN/files?path=data/dataset.csv&offset=0"
 ```
 
 Each response carries `next_offset`. Ask again from there until it comes back `null`, and
@@ -1241,7 +1450,7 @@ them at `<agent>/<name>.rhai`.
 A [mime check](/docs/rhai-mime-checks) is named by a mime row's `check`, and rows live in two
 places, so the kind is listed from both. The operator's rows (`mime_types.toml` and
 `[mime_types]` in the config) put their checks in the global half, resolved against the config's
-directory. A blueprint's own `[mime_types]` puts its checks beside the agent's hooks. Address
+directory. A blueprint's own `[graph.mime_types]` puts its checks beside the agent's hooks. Address
 one with `?agent=<name>` for the blueprint's, or without for the operator's. Check
 `scripts.mime_checks` in the `capabilities` list before offering the kind.
 
@@ -1285,8 +1494,8 @@ agent's directory that nothing declares:
 the declaration says that, and it has not happened yet. `unknown` is not a `{kind}` the read and
 write routes accept, so a client picks a real one to open the file with. `compiles` is absent
 for the same reason: which compiler would have to accept it is not yet decided. Write
-`relative_path` into `validator = "..."` or a `[stages.<name>.hooks]` entry and the next listing
-reports the same file as declared.
+`relative_path` into a stage's `output = { validator = { file = "..." } }` or its `hooks` and the
+next listing reports the same file as declared.
 
 Without the parameter the listing is exactly what it was, so a client that reads it as "what will
 load" keeps getting that. `include` takes a comma-separated list and refuses a token it does not
@@ -1694,8 +1903,8 @@ That is what lets a console show the catalog without fetching and re-parsing eve
 kind carries the key at all.
 
 Validation checks more than syntax here. A provider needs `initialize(config)` and
-`inference(state, request)`, and a script defining only the first used to compile, initialize, cache
-and then fail at the first inference, part-way into a run. `POST /api/scripts/validate` with
+`inference(state, request)`. A script defining only the first would compile, initialize and cache,
+then fail at the first inference, part-way into a run. `POST /api/scripts/validate` with
 `kind: "provider"` answers that before the file is saved, and the loader refuses the same script
 rather than accepting one the API called invalid. Nothing runs during validation: `initialize` is
 read off the compiled AST, never called.
@@ -1732,25 +1941,25 @@ than that feature, not broken.
 | `runs.search` | `q=`, a case-insensitive substring over the run listing |
 | `runs.search.context` | `q_in=context`, searching each run's current context window |
 | `runs.search.logs` | `q_in=logs`, searching the tail of each stage's logs |
-| `runs.search.journal` | `q_in=journal`, searching the whole run journal |
+| `runs.search.journal` | `q_in=journal`, searching the run's whole history of tool calls and context changes |
 | `runs.fields` | `fields=`, trimming each item to the named top-level fields |
 | `runs.ids` | `ids=a,b,c`, fetching exactly those runs in one request |
 | `runs.since` | `since=`, filtering on whichever timestamp `sort` names |
 | `runs.parent` | `parent=none` / `parent=<run_id>`. See [listing by place in the tree](#listing-by-place-in-the-tree) |
-| `runs.files.listing` | `GET /api/agents/{id}/files`, the run's own record of what it changed |
+| `runs.files.listing` | `GET /api/runs/{id}/files`, the run's own record of what it changed |
 | `runs.files.workdir` | `source=workdir` on that route, reading the filesystem a directory at a time |
 | `runs.files.mime_type` | `mime_type` on every file-listing entry, typed by the run's registry from the file's name |
 | `models.mime_types` | `input_types` and `output_types` on every `GET /api/models` entry: the mime type patterns a model takes and hands back |
 | `models.cached` | `GET /api/models` answers from a catalogue the server keeps. See [the model catalogue](#the-model-catalogue) |
-| `spawn.parts` | `parts` and `multipart/form-data` on `POST /api/agents`. See [attaching files](#attaching-files) |
-| `messages.parts` | The same on `POST /api/agents/{id}/message` |
-| `runs.blobs` | `GET /api/agents/{id}/blobs` and `/blobs/{sha256}`: the stored parts a run holds and their bytes. See [a run's parts](#a-runs-parts) |
-| `runs.files.raw` | `GET /api/agents/{id}/files/raw?path=`, a workdir file's bytes under its own content type |
-| `runs.artifacts` | `GET /api/agents/{id}/artifacts/{name}`, the bytes of one file the run handed back, from the blob store or the workdir |
+| `spawn.parts` | `attachments`, and `multipart/form-data` file fields named after them, on `POST /api/runs`. See [attaching files](#attaching-files) |
+| `messages.parts` | `parts`, `multipart/form-data` and `@path` tokens on `POST /api/runs/{id}/message` |
+| `runs.blobs` | `GET /api/runs/{id}/blobs` and `/blobs/{sha256}`: the stored parts a run holds and their bytes. See [a run's parts](#a-runs-parts) |
+| `runs.files.raw` | `GET /api/runs/{id}/files/raw?path=`, a workdir file's bytes under its own content type |
+| `runs.artifacts` | `GET /api/runs/{id}/artifacts/{name}`, the bytes of one file the run handed back, from the blob store or the workdir |
 | `runs.result.artifacts` | `artifacts` on a run's answer as `{ name, path, mime_type, size, sha256 }` objects rather than paths |
 | `mime.registry` | `GET /api/mime`, the effective mime registry with each row's source |
 | `mime.write` | `PUT /api/mime` and `DELETE /api/mime`, admin-gated, write a row into `mime_types.toml` or take one out |
-| `runs.stages` | `GET /api/agents/{id}/stages`, the per-stage ledger |
+| `runs.stages` | `GET /api/runs/{id}/stages`, the per-stage ledger |
 | `runs.stages.cost` | `cost_usd`, `unpriced_calls` and `cost_is_exact` on each stage record, and the `visits` split beneath them |
 | `runs.stages.models` | `models` on each stage record: the provider and model pairs that stage ran on, oldest first |
 | `runs.waiting_on` | `wait_reason` on a run, saying what a parked run is parked on |
@@ -1758,8 +1967,8 @@ than that feature, not broken.
 | `runs.delete.bulk` | `DELETE /api/runs` with `before` or `ids`, bounded by `max_ids` |
 | `logs.stage` | `?stage=` on the logs route: an index, or `all` |
 | `logs.stream` | `?stream=` on it: `output` or `logs` |
-| `context.history.page` | Paging on `GET /api/agents/{id}/context/history` |
-| `context.region_kinds` | Region kinds spelled as the blueprint spells them. See [region kinds](#region-kinds) |
+| `context.history.page` | Paging on `GET /api/runs/{id}/context/history` |
+| `context.region_kinds` | Region kinds spelled as one word each. See [region kinds](#region-kinds) |
 | `events.waiting_on` | `wait_reason` on the socket too, not only on the run |
 | `events.stage_and_tool` | `stage_transition`, `tool_call_started` and `tool_call_finished` as flat frames instead of the old `world` envelope |
 | `events.spawn_parent` | `parent_id` on `agent_spawned`, placing a sub-agent in the tree the moment it starts |
@@ -1785,7 +1994,7 @@ than that feature, not broken.
 | `config.gateways.kinds` | `kind`, `header_names` and `models` on each gateway, and `kind`, `headers` and `models` accepted by `PUT /api/config` |
 | `models.probe` | `POST /api/models/probe`, which asks an OpenAI-compatible server what it serves before a gateway for it is written; admin only |
 | `fs.mkdir` | `POST /api/fs/dirs`, so a folder picker can offer "New Folder" rather than one that 404s |
-| `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/agents/{id}/interaction`. See [answering a question](#answering-a-question) |
+| `interaction.feedback` | `feedback` beside `approved: false` on `POST /api/runs/{id}/interaction`. See [answering a question](#answering-a-question) |
 | `providers.signin` | `GET /api/providers` and the three admin routes under it. See [signing in to a subscription provider](#signing-in-to-a-subscription-provider) |
 | `providers.quota` | `?quota=true` on `GET /api/providers`, and the `quota` object it adds. See [subscription usage](#subscription-usage) |
 | `graphql` | `POST /graphql`, the [GraphQL API](/docs/graphql) beside these routes |
@@ -1795,7 +2004,7 @@ than that feature, not broken.
 | `graphql.inferences` | `RunOutput.inferences`: every trip a run made to a provider, retries and failovers included |
 | `graphql.context_changes` | `RunOutput.contextChanges`: why each of a run's regions changed, beside the snapshots |
 | `bytes.signed_urls` | Short-lived `exp`/`sig` links on the byte routes, minted by the [GraphQL API](/docs/graphql) |
-| `runs.blueprint_snapshot` | `blueprint_digest` on every run, and the manifest copy each run keeps |
+| `runs.blueprint_snapshot` | `blueprint_digest` on every run, so a client can tell whether the installed blueprint is the one that ran |
 | `runs.export` | `startRunExport` and `GET /api/exports/{id}`, the whole store as one file. See [below](#exporting-the-whole-store) |
 | `config.health` | `config_error` and `config_mtime` on `GET /api/config`, and the `config_health` frame on the socket. See [below](#when-the-config-file-will-not-load) |
 
@@ -1803,8 +2012,7 @@ A few of those promises carry a consequence worth spelling out.
 
 `models.cached` also covers `X-Leviath-Catalog-Age` and `X-Leviath-Catalog-Complete` on the
 response, and `?refresh=1` to ask the providers again. It is safe to call when a page opens.
-`spawn.parts` also covers `@path` tokens in `task` and region text, resolved inside the working
-directory.
+`messages.parts` also covers `@path` tokens in a message, resolved inside the working directory.
 
 Without `runs.stages.cost`, a stage record carries tokens and no price, and the missing field is
 not a zero. Without `runs.stages.models`, no stage record says what it ran on, which is not the
@@ -1981,43 +2189,47 @@ daemon that is not answering at all is a **503**. Retrying helps the second; onl
 
 ## Asking for a shape
 
-Add `output_format` to ask for the answer in a particular shape. Any label works, because nothing
+Add `output` to ask for the answer in a particular shape. `format` is any label, because nothing
 converts between shapes: the label reaches the model, which produces the bytes.
 
 ```bash
-curl -X POST http://localhost:3000/api/agents \
+curl -X POST http://localhost:3000/api/runs \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"blueprint":"reviewer","task":"Review the auth module",
-       "output_format":"a2ui",
-       "output_instructions":"One card per finding, highest severity first."}'
+  -d '{"source": {"blueprint": {"name": "reviewer"}},
+       "inputs": {"task": "Review the auth module"},
+       "output": {"format": "a2ui",
+                  "instructions": "One card per finding, highest severity first."}}'
 ```
 
-Then read it back from `GET /api/agents/{id}/result`, where `final_output` carries the answer, its
-format label, and the stage that produced it. Add `output_schema` when you want the answer validated
-against a JSON Schema. A format that differs from the blueprint's retires any Rhai validator and
-JSON schema the blueprint declared, and the spawn response says so: a `warnings` array beside the
-run id names each retired check. [Final outputs](/docs/outputs) covers the whole cascade.
+Then read it back from `GET /api/runs/{id}/result`, where `final_output` carries the answer, its
+format label, and the stage that produced it. Add `schema` beside `format` when you want the answer
+validated against a JSON Schema. A format that differs from the blueprint's retires any Rhai
+validator and JSON schema the blueprint declared. `lev run` names each retired check when it starts
+the run; the REST answer carries only the run id. [Final outputs](/docs/outputs) covers the whole
+cascade.
 
 ## Spawning with a signed webhook
 
 ```bash
-curl -X POST http://localhost:3000/api/agents \
+curl -X POST http://localhost:3000/api/runs \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"blueprint":"coder","task":"Add input validation",
-       "callback_url":"https://example.com/hook","callback_secret":"whsec_…"}'
+  -d '{"source": {"blueprint": {"name": "coder"}},
+       "inputs": {"task": "Add input validation"},
+       "delivery": {"callback": {"url": "https://example.com/hook", "secret": "whsec_…"}}}'
 ```
+
+`delivery.callback.url` has to pass the server's outbound policy, or the spawn is refused; see
+[refusals only this server makes](#refusals-only-this-server-makes). `delivery.metadata` is a map of
+your own string labels, carried on the run's record as `metadata`.
 
 Four things to know about the delivery.
 
-**It carries the answer.** `final_output` holds whatever the agent submitted, so your receiver
+**It carries the answer.** `final_output` holds whatever the run submitted, so your receiver
 learns what the run concluded without a second request. The `result` field beside it is the run's
-error, which is what it has always been. See [Final outputs](/docs/outputs).
+error. See [Final outputs](/docs/outputs).
 
-**It is signed.** Verify the `X-Leviath-Signature: sha256=<hex>` header against your
-`callback_secret` before trusting the body. A `callback_secret` without a
-`callback_url` is refused with a `400`: the secret signs the callback body, so a
-request that sends one and no URL is asking for a signed callback that can never
-fire.
+**It is signed.** Verify the `X-Leviath-Signature: sha256=<hex>` header against your callback's
+`secret` before trusting the body.
 
 **It carries a stable `delivery_id`**, of the form `agent_completed:<run_id>`, in both the signed
 body and the `X-Leviath-Delivery` header. Stable is the important word: a retried attempt, and a

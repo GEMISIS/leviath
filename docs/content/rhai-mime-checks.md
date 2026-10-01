@@ -41,21 +41,33 @@ family: a `check` on `image/*` sees `"image/png"` and `"image/webp"` in turn.
 ## Name it in a row
 
 ```toml
-# ~/.leviath/mime_types.toml, or [mime_types] in a blueprint
+# ~/.leviath/mime_types.toml
 ["application/x-acme-scene"]
 family = "model"
 extensions = ["scene"]
 check = "checks/scene.rhai"
 ```
 
+A blueprint declares its own rows under `[graph.mime_types]` in its `agent.toml`, and names the
+script the way it names every other one:
+
+```toml
+# agent.toml
+[graph.mime_types."application/x-acme-scene"]
+family = "model"
+extensions = ["scene"]
+check = { file = "checks/scene.rhai" }
+```
+
 The path is relative to the file that names it: the config's directory for
 [`mime_types.toml`](/docs/configuration#mime_typestoml) and a `[mime_types]` table in
-`config.toml`, the blueprint's own directory for a row in a manifest. It has to resolve inside
+`config.toml`, the blueprint's own directory for a row in `agent.toml`. It has to resolve inside
 that directory, the same fence every other script gets. `lev mime add <type> --check <path>`
 writes the row for you.
 
-A check resolves like every other field in a row. A subtype inherits its family's check, a row
-that names its own replaces it, and `check = ""` lifts one a broader row put on the type.
+A check resolves like every other field in a row. A subtype inherits its family's check, and a row
+that names its own replaces it. In the operator's files, `check = ""` lifts one a broader row put on
+the type.
 `lev mime list` shows the check each type answers to, and `lev mime check <file>` runs it and
 prints the verdict.
 
