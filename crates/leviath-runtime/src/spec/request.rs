@@ -23,6 +23,7 @@ use super::inputs::RawInput;
 use super::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use super::launch::{Delivery as RunDelivery, LaunchRequest};
 use super::names::{BlueprintPath, BlueprintRef, MimePattern, ModelRef, RegionName};
+use super::readable::{WriteWith, pick};
 
 /// A request for a run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -167,25 +168,24 @@ impl fmt::Debug for Bytes {
 
 impl Serialize for Bytes {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match s.is_human_readable() {
-            true => s.serialize_str(&STANDARD.encode(&self.0)),
-            false => s.serialize_bytes(&self.0),
-        }
+        let raw: WriteWith<Self, S> = |b, s| s.serialize_bytes(&b.0);
+        let text: WriteWith<Self, S> = |b, s| s.serialize_str(&STANDARD.encode(&b.0));
+        pick(s.is_human_readable(), raw, text)(self, s)
     }
 }
 
 impl<'de> Deserialize<'de> for Bytes {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        match d.is_human_readable() {
-            true => {
-                let text = String::deserialize(d)?;
+        let raw: fn(D) -> Result<Self, D::Error> = |d| Vec::<u8>::deserialize(d).map(Bytes);
+        let text: fn(D) -> Result<Self, D::Error> = |d| {
+            String::deserialize(d).and_then(|text| {
                 STANDARD
                     .decode(text.as_bytes())
                     .map(Bytes)
                     .map_err(|e| D::Error::custom(format!("base64: {e}")))
-            }
-            false => Vec::<u8>::deserialize(d).map(Bytes),
-        }
+            })
+        };
+        pick(d.is_human_readable(), raw, text)(d)
     }
 }
 

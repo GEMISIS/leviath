@@ -1369,6 +1369,44 @@ async fn journal_highlights_stop_at_the_cap() {
     .await;
 }
 
+/// Text a step appended to a region is found and named by that region, past
+/// a step that changed the region's size and none of its text.
+#[tokio::test]
+async fn a_journal_match_in_appended_text_names_its_region() {
+    crate::runstate::with_isolated_runs_dir_async("runs-journal-append", |_d| async move {
+        plant_journal("run-append", "first words", None);
+        let dir = crate::runstate::run_dir("run-append");
+        use crate::runstate::run_file::tests::{say, step_with};
+        step_with(&dir, 3, Vec::new(), |s| {
+            s.context.regions[0].current_tokens += 1
+        });
+        step_with(&dir, 4, Vec::new(), |s| say(s, "an appendedneedle arrives"));
+
+        let page = page_of(&[("q", "appendedneedle"), ("q_in", "journal")]).await;
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].highlights[0].field, "journal.context.system");
+    })
+    .await;
+}
+
+/// A run with no run file, or one that does not read, has no highlight to
+/// give: not in its history, and not in its window.
+#[tokio::test]
+async fn a_run_without_a_readable_run_file_has_no_highlight() {
+    use crate::commands::serve::core::runs::matching::{context_highlight, journal_highlights};
+    crate::runstate::with_isolated_runs_dir_async("runs-journal-missing", |_d| async move {
+        let missing = meta_at("run-missing", 1);
+        assert!(journal_highlights(&missing, "x").is_none());
+        assert!(context_highlight(&missing, "x").is_none());
+        let broken = meta_at("run-broken", 1);
+        let dir = crate::runstate::run_dir("run-broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(leviath_core::files::RUN_FILE), b"not a run file").unwrap();
+        assert!(journal_highlights(&broken, "x").is_none());
+    })
+    .await;
+}
+
 /// A match in the run's current context window, named by the region it is in.
 #[tokio::test]
 async fn a_context_search_names_the_region_that_matched() {

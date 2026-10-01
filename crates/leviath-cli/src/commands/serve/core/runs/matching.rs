@@ -200,16 +200,15 @@ pub(crate) fn journal_highlights(meta: &RunMeta, q: &str) -> Option<Highlight> {
     let reader = run_file::open(&meta.run_id).ok()??;
     let stages = &reader.spec().graph.stages;
     let mut found = None;
-    run_file::walk(&meta.run_id, &reader, &mut |step| {
+    let walked = run_file::walk(&meta.run_id, &reader, &mut |step| {
         let stage = stages.iter().position(|s| s.name == step.cursor.stage);
         found = in_step(step.delta, stage, q);
         match found {
             Some(_) => ControlFlow::Break(()),
             None => ControlFlow::Continue(()),
         }
-    })
-    .ok()?;
-    found
+    });
+    walked.ok().and(found)
 }
 
 /// The first match in one step: its events, then the text its context

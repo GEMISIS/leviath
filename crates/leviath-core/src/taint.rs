@@ -1266,6 +1266,14 @@ mod tests {
         assert!(resolve_batch_tool_hint(false, Some(false), Some(true)));
     }
 
+    /// The shell hint cascades exactly as the batch hint does.
+    #[test]
+    fn resolve_shell_hint_cascade() {
+        assert!(resolve_shell_hint(true, None, None));
+        assert!(!resolve_shell_hint(true, Some(false), None));
+        assert!(resolve_shell_hint(false, Some(false), Some(true)));
+    }
+
     #[test]
     fn gate_decision_blocked_levels() {
         let blocked = GateDecision::Blocked {

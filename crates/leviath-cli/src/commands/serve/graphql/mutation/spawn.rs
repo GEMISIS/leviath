@@ -231,22 +231,21 @@ fn policy(state: &AppState) -> Policy {
 
 /// The request read, or every issue with it. A request with values that did
 /// not read is still checked the whole way, with those values left out, so
-/// its other issues are listed beside them rather than after a resubmit.
+/// its other issues are listed beside them rather than after a resubmit. A
+/// daemon that cannot be asked adds nothing: the issues already found are
+/// the answer, and the resubmit meets the daemon again.
 async fn read(
     state: &AppState,
     request: SpawnRunRequest,
-) -> async_graphql::Result<Result<leviath_runtime::spec::request::SpawnRequest, SpawnIssues>> {
-    let (request, mut issues) = match request.read(&policy(state)) {
-        Ok(read) => read,
-        Err(issues) => return Ok(Err(issues)),
-    };
+) -> Result<leviath_runtime::spec::request::SpawnRequest, SpawnIssues> {
+    let (request, mut issues) = request.read(&policy(state))?;
     if issues.is_empty() {
-        return Ok(Ok(request));
+        return Ok(request);
     }
-    if let Verdict::Rejected(more) = spawn_core::validate(state, request).await.gql()? {
+    if let Ok(Verdict::Rejected(more)) = spawn_core::validate(state, request).await {
         issues.absorb(more);
     }
-    Ok(Err(issues))
+    Err(issues)
 }
 
 /// Start a run, or say every reason it cannot start.
@@ -259,7 +258,7 @@ pub(crate) async fn spawn_run(
     request: SpawnRunRequest,
 ) -> async_graphql::Result<SpawnRunResult> {
     let state = ctx.data_unchecked::<AppState>();
-    let request = match read(state, request).await? {
+    let request = match read(state, request).await {
         Ok(request) => request,
         Err(issues) => return Ok(SpawnRunResult::Rejected(SpawnRejected::from(&issues))),
     };
@@ -275,7 +274,7 @@ pub(crate) async fn validate_spawn(
     request: SpawnRunRequest,
 ) -> async_graphql::Result<ValidateSpawnResult> {
     let state = ctx.data_unchecked::<AppState>();
-    let request = match read(state, request).await? {
+    let request = match read(state, request).await {
         Ok(request) => request,
         Err(issues) => return Ok(ValidateSpawnResult::Rejected(SpawnRejected::from(&issues))),
     };

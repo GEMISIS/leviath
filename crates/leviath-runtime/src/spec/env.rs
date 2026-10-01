@@ -325,6 +325,17 @@ pub trait BindEnv: Send + Sync {
 type Insert = Box<dyn FnOnce(&mut EntityWorldMut<'_>) + Send>;
 type AfterInsert = Box<dyn FnOnce(bevy_ecs::entity::Entity) + Send>;
 
+/// The insertion step that runs `f` on an entity's `C`, if it has one.
+fn editing<C: bevy_ecs::component::Component<Mutability = bevy_ecs::component::Mutable>>(
+    f: Box<dyn FnOnce(&mut C) + Send>,
+) -> Insert {
+    Box::new(move |e: &mut EntityWorldMut<'_>| {
+        if let Some(mut c) = e.get_mut::<C>() {
+            f(&mut c);
+        }
+    })
+}
+
 /// Live components to place on a run's entity beside what its spec and state
 /// provide, and what the host does once the entity exists (registering it
 /// with a service keyed by entity). Built by binding; applied by insertion.
@@ -356,12 +367,7 @@ impl Bindings {
         mut self,
         f: impl FnOnce(&mut C) + Send + 'static,
     ) -> Self {
-        self.inserts
-            .push(Box::new(move |e: &mut EntityWorldMut<'_>| {
-                if let Some(mut c) = e.get_mut::<C>() {
-                    f(&mut c);
-                }
-            }));
+        self.inserts.push(editing::<C>(Box::new(f)));
         self
     }
 

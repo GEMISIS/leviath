@@ -319,3 +319,24 @@ fn the_log_options_round_trip() {
     round_trip(&LogStageOptions::Index(0));
     round_trip(&LogStageOptions::All(true));
 }
+
+/// A run whose file cannot be read answers its blueprint with null and an
+/// error, and the rest of the run still answers.
+#[tokio::test]
+async fn a_run_with_no_file_has_a_null_blueprint_and_an_error() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-run-no-file", |_d| async move {
+        let run = Run {
+            meta: Arc::new(meta()),
+            now: 1_788_925_000,
+        };
+        let schema = Schema::build(RunProbe { run }, EmptyMutation, EmptySubscription).finish();
+        let answer = schema
+            .execute(Request::new("{ run { id blueprint { name } } }"))
+            .await;
+        assert_eq!(answer.errors.len(), 1, "{:?}", answer.errors);
+        let json = serde_json::to_value(&answer.data).expect("data serializes");
+        assert_eq!(json["run"]["id"], "coder-1788924523-abc123");
+        assert_eq!(json["run"]["blueprint"], serde_json::Value::Null);
+    })
+    .await;
+}

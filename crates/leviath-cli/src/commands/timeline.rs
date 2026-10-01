@@ -164,13 +164,18 @@ pub(crate) async fn execute(args: TimelineArgs) -> anyhow::Result<()> {
 /// Read one run's record and steps and reduce them to a [`RunTimeline`]: from
 /// its run file.
 fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
-    let meta = crate::runstate::read_meta(run_id)
-        .map_err(|e| anyhow::anyhow!("no readable record for run '{run_id}': {e}"))?;
+    use std::borrow::Cow;
     let dir = crate::runstate::run_dir(run_id);
-    let records = crate::runstate::run_file::open_in(&dir)
-        .ok()
-        .and_then(|reader| run_file_records(&reader))
-        .ok_or_else(|| anyhow::anyhow!("no readable steps (run.lvr) for run '{run_id}'"))?;
+    let (meta, records) = crate::runstate::read_meta(run_id)
+        .map_err(|e| Cow::Owned(e.to_string()))
+        .and_then(|meta| {
+            crate::runstate::run_file::open_in(&dir)
+                .ok()
+                .and_then(|reader| run_file_records(&reader))
+                .map(|records| (meta, records))
+                .ok_or(Cow::Borrowed("its steps do not decode"))
+        })
+        .map_err(|why| anyhow::anyhow!("no readable record for run '{run_id}': {why}"))?;
     Ok(analyze(&meta, &records))
 }
 

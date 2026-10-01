@@ -3683,6 +3683,87 @@ mod tests {
         );
     }
 
+    /// A snapshot holding exactly these run records, as a list-only pass
+    /// would read them.
+    fn snapshot_of(metas: &[runstate::RunMeta]) -> super::super::run_loader::RunSnapshot {
+        super::super::run_loader::RunSnapshot {
+            taken_at: std::time::Instant::now(),
+            runs: metas
+                .iter()
+                .cloned()
+                .map(super::super::run_loader::RunEntry::listed)
+                .collect(),
+            context: None,
+        }
+    }
+
+    /// A run that finished and still takes a follow-up shows as such and
+    /// offers its open question, but it does not ask for input in a toast:
+    /// answering it is optional.
+    #[test]
+    fn a_complete_interactive_run_offers_its_question_without_a_toast() {
+        let mut dash = make_test_dashboard();
+        dash.initial_sync_done = true;
+        let meta = make_run_meta("snap-ci", RunStatus::CompleteInteractive);
+        let req = interaction::InteractionRequest::free_text("req1", "More?", "review", false);
+        dash.pending_interactions.insert("snap-ci".to_string(), req);
+
+        let snapshot = snapshot_of(&[meta]);
+        dash.apply_run_snapshot(&snapshot);
+
+        let agent = &dash.agents[0];
+        assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
+        assert_eq!(agent.waiting_prompt.as_deref(), Some("More?"));
+        assert!(
+            !dash
+                .toasts
+                .iter()
+                .any(|t| t.message.contains("needs input"))
+        );
+
+        // With no question open it still takes a follow-up, and keeps
+        // offering what it last asked.
+        dash.pending_interactions.clear();
+        dash.apply_run_snapshot(&snapshot);
+        assert_eq!(dash.agents[0].waiting_prompt.as_deref(), Some("More?"));
+    }
+
+    /// A running run that opens a question (a tool asking for approval, say)
+    /// takes the question, but only a run parked on its input is announced
+    /// as needing it.
+    #[test]
+    fn a_running_run_that_opens_a_question_is_not_announced_as_waiting() {
+        let mut dash = make_test_dashboard();
+        let snapshot = snapshot_of(&[make_run_meta("snap-run", RunStatus::Running)]);
+        dash.apply_run_snapshot(&snapshot);
+        let req = interaction::InteractionRequest::free_text("req1", "Allow?", "main", true);
+        dash.pending_interactions
+            .insert("snap-run".to_string(), req);
+
+        dash.apply_run_snapshot(&snapshot);
+
+        assert_eq!(dash.agents[0].waiting_prompt.as_deref(), Some("Allow?"));
+        assert!(dash.toasts.is_empty());
+    }
+
+    /// A question already answered here is not offered again while the run
+    /// has yet to move past it.
+    #[test]
+    fn an_answered_question_is_not_offered_again() {
+        let mut dash = make_test_dashboard();
+        let snapshot = snapshot_of(&[make_run_meta("snap-answered", RunStatus::WaitingInput)]);
+        dash.apply_run_snapshot(&snapshot);
+        dash.agents[0].last_answered_request_id = Some("req1".to_string());
+        let req = interaction::InteractionRequest::free_text("req1", "Q?", "main", true);
+        dash.pending_interactions
+            .insert("snap-answered".to_string(), req);
+
+        dash.apply_run_snapshot(&snapshot);
+
+        assert!(dash.agents[0].waiting_prompt.is_none());
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
     #[test]
     fn sync_from_run_state_no_reptoast_when_already_waiting() {
         crate::runstate::with_isolated_runs_dir(

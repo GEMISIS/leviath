@@ -25,6 +25,17 @@ use super::graph::{
 use super::inputs::{InputDecl, InputSlot, InputType, PathKind, RegionBinding, Template};
 use super::names::{ChoiceName, MimePattern, RegionName, StageName, ToolName};
 
+/// The way to read or write a value in the format at hand: `text` in a
+/// human-readable one, `binary` otherwise. Each way is its own function, so
+/// a format only ever runs the one it picks.
+pub(crate) fn pick<F: Copy>(readable: bool, binary: F, text: F) -> F {
+    [binary, text][usize::from(readable)]
+}
+
+/// One way of writing a `T` with serializer `S`.
+pub(crate) type WriteWith<T, S> =
+    fn(&T, S) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>;
+
 /// Give `$ty` a short form in readable formats. `$ty` derives its tagged form
 /// with `#[serde(remote = "Self")]`; `$short` is the short form, convertible
 /// both ways.
@@ -32,20 +43,20 @@ macro_rules! readable {
     ($ty:ty, $short:ty) => {
         impl Serialize for $ty {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                match s.is_human_readable() {
-                    true => <$short>::from(self).serialize(s),
-                    false => <$ty>::serialize(self, s),
-                }
+                let tagged: WriteWith<Self, S> = |v, s| <$ty>::serialize(v, s);
+                let short: WriteWith<Self, S> = |v, s| <$short>::from(v).serialize(s);
+                pick(s.is_human_readable(), tagged, short)(self, s)
             }
         }
 
         impl<'de> Deserialize<'de> for $ty {
             fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                match d.is_human_readable() {
-                    true => <$short>::deserialize(d)
-                        .and_then(|short| <$ty>::try_from(short).map_err(serde::de::Error::custom)),
-                    false => <$ty>::deserialize(d),
-                }
+                let tagged: fn(D) -> Result<Self, D::Error> = |d| <$ty>::deserialize(d);
+                let short: fn(D) -> Result<Self, D::Error> = |d| {
+                    <$short>::deserialize(d)
+                        .and_then(|short| <$ty>::try_from(short).map_err(serde::de::Error::custom))
+                };
+                pick(d.is_human_readable(), tagged, short)(d)
             }
         }
 

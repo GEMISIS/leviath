@@ -1207,6 +1207,12 @@ fn a_binding_edits_what_insertion_placed() {
     let md = world.get::<crate::persistence::RunMetadata>(e).unwrap();
     assert_eq!(md.agent_path, "/agents/coder/agent.toml");
     assert!(world.get::<Marker>(e).is_none());
+
+    let bindings = Bindings::new()
+        .with(Marker(1))
+        .edit(|m: &mut Marker| m.0 = 9);
+    let e = insert(&mut world, spec.clone(), bindings, &initial_state(&spec));
+    assert_eq!(world.get::<Marker>(e), Some(&Marker(9)));
 }
 
 /// A fan-out worker starts in the stage it was started to run, not at the

@@ -50,6 +50,13 @@ impl From<serde_json::Value> for JsonDoc {
     }
 }
 
+impl JsonDoc {
+    /// A document a binary format stored as text, or why it does not read.
+    fn parse_stored(text: &str) -> Result<Self, String> {
+        Self::parse(text).map_err(|e| format!("stored JSON document: {e}"))
+    }
+}
+
 impl schemars::JsonSchema for JsonDoc {
     fn inline_schema() -> bool {
         true
@@ -62,24 +69,26 @@ impl schemars::JsonSchema for JsonDoc {
     }
 }
 
+/// One way of writing a document with serializer `S`.
+type WriteWith<S> = fn(&JsonDoc, S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>;
+
 impl Serialize for JsonDoc {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        if s.is_human_readable() {
-            self.0.serialize(s)
-        } else {
-            s.serialize_str(&self.to_text())
-        }
+        // Each way is its own function, so a format runs only the one it picks.
+        let text: WriteWith<S> = |v, s| s.serialize_str(&v.to_text());
+        let nested: WriteWith<S> = |v, s| v.0.serialize(s);
+        [text, nested][usize::from(s.is_human_readable())](self, s)
     }
 }
 
 impl<'de> Deserialize<'de> for JsonDoc {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        if d.is_human_readable() {
-            serde_json::Value::deserialize(d).map(Self)
-        } else {
-            let text = String::deserialize(d)?;
-            Self::parse(&text).map_err(|e| D::Error::custom(format!("stored JSON document: {e}")))
-        }
+        let text: fn(D) -> Result<Self, D::Error> = |d| {
+            String::deserialize(d).and_then(|t| Self::parse_stored(&t).map_err(D::Error::custom))
+        };
+        let nested: fn(D) -> Result<Self, D::Error> =
+            |d| serde_json::Value::deserialize(d).map(Self);
+        [text, nested][usize::from(d.is_human_readable())](d)
     }
 }
 
@@ -114,6 +123,16 @@ mod tests {
             err.to_string().contains("Serde Deserialization Error"),
             "{err}"
         );
+    }
+
+    /// A document's schema is any JSON, described once, in place.
+    #[test]
+    fn its_schema_is_any_document() {
+        let schema = schemars::schema_for!(JsonDoc);
+        let value = serde_json::to_value(&schema).unwrap();
+        assert_eq!(value["description"], "Any JSON document.");
+        assert!(<JsonDoc as schemars::JsonSchema>::inline_schema());
+        assert_eq!(<JsonDoc as schemars::JsonSchema>::schema_name(), "JsonDoc");
     }
 
     #[test]

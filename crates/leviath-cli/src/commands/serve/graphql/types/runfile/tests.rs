@@ -675,6 +675,7 @@ fn delta() -> CoreDelta {
             Change::Title(Some("renamed".into())),
             Change::FinalOutput(Some(answer())),
             Change::WaitReason(None),
+            Change::WaitReason(Some(leviath_runtime::state::WaitState::UserPrompt)),
             Change::LastTransition(Some(transition(TransitionReason::Gate))),
         ],
         events: vec![
@@ -1090,7 +1091,7 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];
-    assert_eq!(step["changes"].as_array().map(Vec::len), Some(21));
+    assert_eq!(step["changes"].as_array().map(Vec::len), Some(22));
     assert_eq!(
         step["events"].as_array().map(Vec::len),
         Some(7 + 8 + 6 + 5 + 13)

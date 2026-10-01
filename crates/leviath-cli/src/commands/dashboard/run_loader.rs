@@ -38,6 +38,19 @@ pub(crate) struct RunEntry {
     pub(crate) graph: Option<Arc<StageGraph>>,
 }
 
+#[cfg(test)]
+impl RunEntry {
+    /// A run as a list-only pass reads it, from its record alone.
+    pub(crate) fn listed(meta: RunMeta) -> Self {
+        Self {
+            meta: Arc::new(meta),
+            stages: Arc::default(),
+            stages_read: false,
+            graph: None,
+        }
+    }
+}
+
 /// Everything read from the runs directory in one pass.
 #[derive(Debug, Clone)]
 pub(crate) struct RunSnapshot {

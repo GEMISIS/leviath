@@ -130,17 +130,17 @@ pub fn check_header(bytes: &[u8], fingerprint: &[u8; 32]) -> Result<(), CodecErr
 
 /// Encode one frame.
 pub fn encode<T: Serialize>(kind: FrameKind, payload: &T) -> Result<Vec<u8>, CodecError> {
-    encode_within(kind, payload, u32::MAX)
+    frame_of(kind, postcard::to_stdvec(payload), u32::MAX)
 }
 
-/// Encode one frame whose compressed body is at most `max_body` bytes, the
-/// most a frame's length field can say.
-fn encode_within<T: Serialize>(
+/// The frame around a payload's postcard bytes, whose compressed body is at
+/// most `max_body` bytes, the most a frame's length field can say.
+fn frame_of(
     kind: FrameKind,
-    payload: &T,
+    raw: Result<Vec<u8>, postcard::Error>,
     max_body: u32,
 ) -> Result<Vec<u8>, CodecError> {
-    let raw = postcard::to_stdvec(payload).map_err(|e| CodecError::Encode(e.to_string()))?;
+    let raw = raw.map_err(|e| CodecError::Encode(e.to_string()))?;
     // Compressing bytes already in memory at a fixed, valid level only
     // fails when allocation does.
     let body = zstd::bulk::compress(&raw, ZSTD_LEVEL).expect("zstd compresses bytes in memory");
@@ -378,7 +378,8 @@ mod tests {
             encode(FrameKind::Spec, &Refuses),
             Err(CodecError::Encode("Serde Serialization Error".into()))
         );
-        let err = encode_within(FrameKind::Spec, &"payload".to_string(), 4).unwrap_err();
+        let raw = postcard::to_stdvec(&"payload".to_string());
+        let err = frame_of(FrameKind::Spec, raw, 4).unwrap_err();
         assert!(err.to_string().contains("over the 4-byte limit"));
     }
 

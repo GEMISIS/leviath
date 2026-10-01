@@ -59,6 +59,33 @@ fn a_run_is_listed_as_of_its_last_step() {
     assert_eq!(meta.final_output.unwrap().submitted_at, 7);
 }
 
+/// A run of a blueprint read from its directory names the file it ran, and
+/// a parked run says why it is parked.
+#[test]
+fn a_run_names_its_blueprint_file_and_why_it_waits() {
+    use crate::spec::names::{BlueprintName, BlueprintPath};
+    let mut spec = spec();
+    let dir = std::env::temp_dir();
+    spec.origin = crate::spec::run_spec::SpecOrigin::BlueprintFile {
+        path: BlueprintPath::new(dir.to_string_lossy()).unwrap(),
+        name: BlueprintName::new("coder").unwrap(),
+        digest: None,
+        version: "1.0.0".to_string(),
+    };
+    let mut state = initial();
+    state.status = RunStatus::Waiting;
+    state.wait_reason = Some(crate::state::WaitState::Children(2));
+    let meta = summary_of(&spec, &state, 5);
+    assert_eq!(
+        std::path::PathBuf::from(&meta.agent_path),
+        dir.join(leviath_core::files::BLUEPRINT_MANIFEST)
+    );
+    assert_eq!(
+        meta.waiting_on,
+        Some(leviath_core::run_meta::WaitReason::Children { outstanding: 2 })
+    );
+}
+
 /// A run file whose state does not decode lists nothing, and says why.
 #[test]
 fn a_run_file_whose_state_does_not_decode_is_an_error() {

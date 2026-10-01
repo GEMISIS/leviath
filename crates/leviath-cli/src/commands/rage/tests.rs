@@ -744,6 +744,56 @@ async fn an_unreadable_run_file_is_left_out_and_says_why() {
     .await
 }
 
+/// A run of an installed blueprint looks for it among the installed ones; a
+/// run whose blueprint directory is gone says so; a run directory with no
+/// run file says that; and a run's webhook secret never reaches the bundle.
+#[tokio::test]
+async fn each_run_says_what_of_it_could_not_be_copied() {
+    with_env(|root| async move {
+        let runs = root.join("runs");
+        let mut installed = meta("r-installed", &root.join("not-installed"));
+        installed.agent_name = "not-installed".to_string();
+        installed.callback_url = Some("https://example.com/hook".to_string());
+        write_meta(&runs, &installed);
+        let gone = root.join("gone-blueprint");
+        write(&gone.join("agent.toml"), manifest_text());
+        write_meta(&runs, &meta("r-gone", &gone.join("agent.toml")));
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::create_dir_all(runs.join("r-empty")).unwrap();
+
+        let env = env_for(&root);
+        let mut skipped = Vec::new();
+        let mut members = Vec::new();
+        for id in ["r-installed", "r-gone", "r-empty"] {
+            let mut sel = selection(About::Run);
+            sel.run_id = Some(id.to_string());
+            let bundle = collect::collect(&env, &sel, "now").await;
+            skipped.extend(bundle.skipped);
+            members.extend(bundle.members);
+        }
+        let reason = |path: &str| {
+            skipped
+                .iter()
+                .find(|s| s.path == path)
+                .map(|s| s.reason.clone())
+                .unwrap_or_else(|| panic!("{path} is not in {skipped:?}"))
+        };
+        let installed_dir = env.agents_dir.join("not-installed");
+        assert!(
+            reason("runs/r-installed/blueprint/").contains(&installed_dir.display().to_string())
+        );
+        assert!(reason("runs/r-gone/blueprint/").contains(&gone.display().to_string()));
+        assert_eq!(reason("runs/r-empty/run.lvr"), "not present");
+        let run = members
+            .iter()
+            .find(|m| m.path == "runs/r-installed/run.json")
+            .unwrap();
+        assert!(contains(&run.bytes, "https://example.com/hook"));
+        assert!(!contains(&run.bytes, CALLBACK_SECRET));
+    })
+    .await
+}
+
 // ─── Readers ─────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1232,7 +1282,7 @@ async fn a_short_skipped_list_is_shown_whole() {
                 },
             ],
             redactions: 0,
-            notes: vec![],
+            notes: vec!["a planted note".to_string()],
         });
         let mut terminal = test_terminal();
         terminal
@@ -1240,6 +1290,7 @@ async fn a_short_skipped_list_is_shown_whole() {
             .unwrap();
         let text = terminal.backend().text();
         assert!(text.contains("logs/dashboard.log"), "{text}");
+        assert!(text.contains("note: a planted note"), "{text}");
         assert!(!text.contains("more, listed"), "{text}");
         // And nothing left out at all: no list.
         ui.outcome.as_mut().unwrap().skipped.clear();

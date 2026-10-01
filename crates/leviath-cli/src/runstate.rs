@@ -57,19 +57,6 @@ pub(crate) use leviath_core::run_meta::{
 #[cfg(test)]
 pub(crate) use leviath_core::run_meta::{RegionEntrySnapshot, RegionSnapshot};
 
-/// Write `body` to `path` atomically (via a `.tmp` sibling and a rename),
-/// readable only by this user.
-#[cfg(test)]
-pub(crate) fn write_private_atomic(path: &std::path::Path, body: &str) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
-    // `write_private`: what a run writes carries its task, its conversation
-    // and its tool output. A mode on the file itself keeps it private even
-    // where the run directory's own mode is loosened.
-    leviath_sys::write_private(&tmp, body.as_bytes())?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 /// Read the context snapshot for a run, if present: its window as of its last
 /// step.
 pub(crate) fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
@@ -388,7 +375,10 @@ pub(crate) fn final_output_path(dir: &std::path::Path) -> PathBuf {
 /// Test-only; the runtime's persistence lane writes a live run's.
 #[cfg(test)]
 pub(crate) fn write_final_output(dir: &std::path::Path, content: &str) -> anyhow::Result<()> {
-    write_private_atomic(&final_output_path(dir), content)
+    // `write_private`: an answer carries what the run found. A mode on the
+    // file itself keeps it private even where the run directory's own mode
+    // is loosened. It writes a sibling and renames it into place.
+    leviath_sys::write_private(&final_output_path(dir), content.as_bytes()).map_err(Into::into)
 }
 
 /// Whether an on-disk run status means the run has finished and should be left
@@ -1460,6 +1450,11 @@ mod tests {
             assert_eq!(read.content, "the answer");
             assert_eq!(read.format.as_deref(), Some("markdown"));
             assert_eq!(read.stage, "present");
+
+            // A record that claims an answer, read against a directory that
+            // holds neither half, has none.
+            let empty = tempfile::tempdir().unwrap();
+            assert!(read_final_output_in(empty.path(), &claimed).is_none());
         });
     }
 

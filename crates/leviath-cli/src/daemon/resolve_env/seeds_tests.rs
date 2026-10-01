@@ -157,6 +157,8 @@ fn a_blueprint_path_reads_the_files_the_blueprint_ships() {
     assert!(escaped.contains("blueprint's directory"), "{escaped}");
     let nowhere = go(style, None).unwrap_err();
     assert!(nowhere.contains("has none"), "{nowhere}");
+    let nowhere = go(Seed::Glob("blueprint:rubrics/*.md".into()), None).unwrap_err();
+    assert!(nowhere.contains("has none"), "{nowhere}");
 }
 
 /// A workdir path may leave the workdir where the run's `[read_paths]` are
@@ -184,6 +186,9 @@ fn a_seed_reads_outside_the_workdir_where_read_paths_are_granted() {
     let mut broken = Run::new(None);
     broken.graph.read_paths = vec!["regex:relative".to_string()];
     let err = seed_in(&env, &broken, &work, &Seed::Glob("*.md".into()), false).unwrap_err();
+    assert!(err.contains("[read_paths]"), "{err}");
+    let files = Seed::Files(vec![WorkdirPath::new("a.md").unwrap()]);
+    let err = seed_in(&env, &broken, &work, &files, false).unwrap_err();
     assert!(err.contains("[read_paths]"), "{err}");
 }
 

@@ -561,9 +561,10 @@ fn copy_run_file(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundl
         if let Some(callback) = spec.delivery.callback.as_mut() {
             callback.secret = None;
         }
-        let state = r.latest_state()?;
-        let steps = r.deltas(1, r.last_seq())?;
-        Ok(serde_json::json!({ "spec": spec, "state": state, "steps": steps }))
+        r.latest_state().and_then(|state| {
+            r.deltas(1, r.last_seq())
+                .map(|steps| serde_json::json!({ "spec": spec, "state": state, "steps": steps }))
+        })
     });
     match read {
         Ok(value) => bundle.json(format!("{dest}/run.json"), scrubber, value),
