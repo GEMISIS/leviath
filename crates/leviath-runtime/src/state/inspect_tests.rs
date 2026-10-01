@@ -697,32 +697,23 @@ fn a_parked_run_says_why() {
     assert!(inspect(&world, paused).unwrap().wait_reason.is_some());
 }
 
-fn tool_window() -> ContextWindow {
-    let mut w = ContextWindow::new(1000);
-    let mut conv = Region::new("conversation".into(), RegionKind::Clearable, 1000);
-    let call = |id: &str| SerializedToolCall {
-        id: id.into(),
+/// The reply whose calls are being run: three calls, `c1` to `c3`.
+fn tool_reply() -> crate::components::InferenceResult {
+    let call = |id: &str| crate::components::ToolCall {
+        tool_id: id.into(),
         name: "do".into(),
-        arguments: json!({}),
+        arguments: json!({"n": id}),
         thought_signature: None,
     };
-    let mut older = entry(
-        EntryContent::text("first"),
-        CoreKind::AssistantTurn {
-            tool_calls: vec![call("old")],
-        },
-    );
-    older.timestamp = 1;
-    let mut newer = entry(
-        EntryContent::text("second"),
-        CoreKind::AssistantTurn {
-            tool_calls: vec![call("c1"), call("c2"), call("c3")],
-        },
-    );
-    newer.timestamp = 2;
-    conv.content = vec![older, newer];
-    w.add_region(conv);
-    w
+    crate::components::InferenceResult {
+        attempt_id: String::new(),
+        response: String::new(),
+        tool_calls: vec![call("c1"), call("c2"), call("c3")],
+        tokens_used: 0,
+        cut_off_at: None,
+        reasoning: None,
+        parts: Vec::new(),
+    }
 }
 
 #[test]
@@ -731,41 +722,48 @@ fn a_tool_batch_in_flight_reads_with_the_results_already_in() {
     let e = spawn(&mut world, AgentStatus::Active);
     world.entity_mut(e).insert((
         p::AwaitingTools,
-        tool_window(),
+        tool_reply(),
+        busy_window_with_old_calls(),
         p::ContextToolResults(vec![("c1".into(), "[error] nope".into())]),
         p::RecoveredResults(vec![("c2".into(), "fine".into())]),
     ));
     let pending = inspect(&world, e).unwrap().pending.unwrap();
     let ids: Vec<&str> = pending.calls.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, vec!["c1", "c2", "c3"]);
+    assert_eq!(pending.calls[0].args.value(), &json!({"n": "c1"}));
     assert!(pending.done["c1"].is_error);
     assert!(!pending.done["c2"].is_error);
     assert_eq!(pending.done.len(), 2);
-    // Without a window, or with no turn that made calls, there is no batch.
+    // Without the reply there is no batch, whatever the window holds.
     let bare = spawn(&mut world, AgentStatus::Active);
-    world.entity_mut(bare).insert(p::AwaitingTools);
-    assert_eq!(inspect(&world, bare).unwrap().pending, None);
-    let quiet = spawn(&mut world, AgentStatus::Active);
     world
-        .entity_mut(quiet)
-        .insert((p::AwaitingTools, busy_window_without_calls()));
-    assert_eq!(inspect(&world, quiet).unwrap().pending, None);
+        .entity_mut(bare)
+        .insert((p::AwaitingTools, busy_window_with_old_calls()));
+    assert_eq!(inspect(&world, bare).unwrap().pending, None);
     let no_results = spawn(&mut world, AgentStatus::Active);
     world
         .entity_mut(no_results)
-        .insert((p::AwaitingTools, tool_window()));
+        .insert((p::AwaitingTools, tool_reply()));
     let batch = inspect(&world, no_results).unwrap().pending.unwrap();
     assert!(batch.done.is_empty());
 }
 
-fn busy_window_without_calls() -> ContextWindow {
+/// A window whose last turn made a call that has already settled.
+fn busy_window_with_old_calls() -> ContextWindow {
     let mut w = ContextWindow::new(1000);
     let mut conv = Region::new("conversation".into(), RegionKind::Clearable, 1000);
     conv.content = vec![
         entry(EntryContent::text("hi"), CoreKind::UserMessage),
         entry(
-            EntryContent::text("no calls"),
-            CoreKind::AssistantTurn { tool_calls: vec![] },
+            EntryContent::text("one call"),
+            CoreKind::AssistantTurn {
+                tool_calls: vec![SerializedToolCall {
+                    id: "old".into(),
+                    name: "do".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
         ),
     ];
     w.add_region(conv);

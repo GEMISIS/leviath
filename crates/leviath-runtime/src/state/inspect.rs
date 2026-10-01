@@ -59,7 +59,7 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
             .map(|l| l.0.iter().filter_map(stage_record_of).collect())
             .unwrap_or_default(),
         context: window.map(context_of).unwrap_or_default(),
-        pending: pending_of(world, entity, window),
+        pending: pending_of(world, entity),
         fan_out: world
             .get::<crate::fanout::FanOutWaiting>(entity)
             .map(|w| fan_out_of(w, &stage)),
@@ -458,28 +458,24 @@ fn part_from(part: &PartState) -> Option<Part> {
     })
 }
 
-/// The tool batch in flight: the calls of the last model turn that made
-/// any, and the results already in for them.
-fn pending_of(
-    world: &World,
-    entity: Entity,
-    window: Option<&ContextWindow>,
-) -> Option<PendingBatch> {
+/// The tool batch in flight: the calls of the reply being run, and the
+/// results already in for them.
+///
+/// The calls come from the reply itself, not the context window: the turn
+/// that made them is written to the window only once every result is in.
+fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> {
     world.get::<crate::pipeline::AwaitingTools>(entity)?;
-    let calls = window?
-        .regions
+    let calls: Vec<ToolCallState> = world
+        .get::<crate::components::InferenceResult>(entity)?
+        .tool_calls
         .iter()
-        .flat_map(|r| r.content.iter())
-        .filter_map(|e| match &e.kind {
-            leviath_core::region::EntryKind::AssistantTurn { tool_calls }
-                if !tool_calls.is_empty() =>
-            {
-                Some((e.timestamp, tool_calls))
-            }
-            _ => None,
+        .map(|c| ToolCallState {
+            id: c.tool_id.clone(),
+            name: c.name.clone(),
+            args: JsonDoc::new(c.arguments.clone()),
+            thought_signature: c.thought_signature.clone(),
         })
-        .max_by_key(|(at, _)| *at)
-        .map(|(_, calls)| calls.iter().map(tool_call_of).collect::<Vec<_>>())?;
+        .collect();
     let mut done = BTreeMap::new();
     for (id, text) in world
         .get::<crate::pipeline::ContextToolResults>(entity)

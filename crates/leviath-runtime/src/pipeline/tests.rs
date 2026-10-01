@@ -3352,6 +3352,35 @@ fn dispatch_persistence_reads_a_parent_parked_on_its_fan_out() {
     assert_eq!(job.run_id, "run-1");
 }
 
+/// A tool batch going out, and settling, is snapshotted even though the
+/// iteration, stage and status stay where they were: the run's file has to
+/// hold the batch while it runs, so a restart sends the same calls again.
+#[test]
+fn dispatch_persistence_snapshots_a_tool_batch_going_out_and_settling() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ))
+        .id();
+    run_dispatch_persistence(&mut world);
+    snapshot_job(rx.try_recv().expect("the first snapshot"));
+    run_dispatch_persistence(&mut world);
+    assert!(rx.try_recv().is_err(), "nothing moved");
+
+    world.entity_mut(e).insert(AwaitingTools);
+    run_dispatch_persistence(&mut world);
+    snapshot_job(rx.try_recv().expect("the batch going out"));
+    world.entity_mut(e).remove::<AwaitingTools>();
+    run_dispatch_persistence(&mut world);
+    snapshot_job(rx.try_recv().expect("the batch settling"));
+}
+
 #[test]
 fn dispatch_persistence_drains_io_buffer() {
     let (mut world, mut rx) = world_with_persistence();

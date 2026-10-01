@@ -66,6 +66,13 @@ pub struct PersistWatermark {
     /// heartbeat, which a finished run is unloaded before reaching, and the
     /// name is lost. Compared by reference below; only a write clones.
     last_title: Option<(Option<String>, Option<String>)>,
+    /// Whether the run had a tool batch in flight as of the last snapshot.
+    ///
+    /// A batch is dispatched without the iteration, stage or status moving,
+    /// and the run's file has to hold it while it runs: a restart then sends
+    /// the same calls again, with the results that came back carried over,
+    /// rather than asking the model a second time.
+    last_awaiting_tools: Option<bool>,
 }
 
 impl PersistWatermark {
@@ -363,6 +370,7 @@ type PersistenceQuery = (
     Option<&'static crate::fanout::FanOutWaiting>,
     (
         Option<&'static crate::interaction_points::AwaitingInteractionPoint>,
+        Option<&'static super::AwaitingTools>,
         Option<&'static crate::persistence::RunOutcomeFlags>,
         Option<&'static crate::components::OutputValidators>,
         Option<&'static crate::persistence::FinalOutput>,
@@ -445,6 +453,7 @@ fn build_snapshots(
         fan_out_waiting,
         (
             awaiting_point,
+            awaiting_tools,
             outcome_flags,
             validators,
             final_output,
@@ -529,12 +538,17 @@ fn build_snapshots(
             .as_ref()
             .map(|(t, e)| (t.as_deref(), e.as_deref()))
             != Some(title_now);
+        // A tool batch starting or settling is not progress either, but the
+        // run's file has to hold it; see `last_awaiting_tools`.
+        let awaiting_tools = awaiting_tools.is_some();
+        let tools_changed = watermark.last_awaiting_tools != Some(awaiting_tools);
         // Beat even when nothing changed, so `updated_at` distinguishes a run
         // that is slow from one that nothing is driving.
         let due_for_heartbeat = watermark
             .last_written_at
             .is_none_or(|at| now.saturating_sub(at) >= PERSIST_HEARTBEAT_SECS);
-        if !watermark_changed && !title_changed && !has_appends && !due_for_heartbeat {
+        let due = watermark_changed || title_changed || tools_changed || due_for_heartbeat;
+        if !due && !has_appends {
             continue; // nothing meaningful changed, nothing buffered, beat not due
         }
 
@@ -562,7 +576,7 @@ fn build_snapshots(
         // window per snapshot, and tool activity buffers lines several times
         // per iteration - snapshotting on each batch multiplied the lane's
         // biggest allocation by the run's tool traffic for no new state.
-        if !watermark_changed && !title_changed && !due_for_heartbeat {
+        if !due {
             let _ = stage.0.send(PersistMsg::StageLines {
                 run_id: md.run_id.clone(),
                 output_appends,
@@ -578,6 +592,7 @@ fn build_snapshots(
         if title_changed {
             watermark.last_title = Some((md.title.clone(), md.title_error.clone()));
         }
+        watermark.last_awaiting_tools = Some(awaiting_tools);
         watermark.last_written_at = Some(now);
 
         // Tree links, for a deterministic restart-time rebuild of the graph.

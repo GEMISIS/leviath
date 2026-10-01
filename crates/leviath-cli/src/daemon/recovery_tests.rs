@@ -376,3 +376,27 @@ async fn an_old_run_directory_is_converted_on_first_load() {
     // A runs directory that is not there converts nothing.
     convert_old_runs(&runs.path().join("gone"), None);
 }
+
+/// A finished run converted from the older layout still hands back its
+/// answer: the sidecar is kept aside under `legacy/`, and the run file holds
+/// the same bytes.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_converted_run_answers_from_its_run_file() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("leviath-legacy-runs")
+        .join("tests")
+        .join("fixtures")
+        .join("real-finished");
+    let runs = tempfile::tempdir().unwrap();
+    let dir = runs.path().join("done");
+    copy_dir(&fixture, &dir);
+    convert_old_run(&dir, None);
+
+    let kept = std::fs::read_to_string(dir.join("legacy").join(leviath_core::FINAL_OUTPUT_FILE))
+        .expect("the sidecar is kept aside");
+    let meta = crate::runstate::read_meta_from(&dir).expect("the run file reads");
+    let answer = crate::runstate::read_final_output_in(&dir, &meta).expect("the answer");
+    assert_eq!(answer.content, kept);
+}

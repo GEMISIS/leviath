@@ -502,10 +502,10 @@ pub(crate) fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
 
 /// Read a run's final output, content included.
 ///
-/// The descriptor in `meta.json` says whether there is one and how big it is;
-/// this fetches the bytes from the sidecar beside it. Returns `None` when the
-/// run produced no answer, or when the sidecar is missing (a run written by a
-/// build that stored the answer inline, or one whose directory was pruned).
+/// The run's metadata says whether there is one and how big it is; this
+/// fetches the bytes from the sidecar beside it, or from the run file when
+/// there is no sidecar. Returns `None` when the run produced no answer, or
+/// when neither holds it.
 pub(crate) fn read_final_output(run_id: &str) -> Option<leviath_core::FinalOutput> {
     let meta = read_meta(run_id).ok()?;
     read_final_output_in(&run_dir(run_id), &meta)
@@ -520,7 +520,9 @@ pub(crate) fn read_final_output_in(
     meta: &RunMeta,
 ) -> Option<leviath_core::FinalOutput> {
     let descriptor = meta.final_output.clone()?;
-    let content = std::fs::read_to_string(final_output_path(dir)).ok()?;
+    let content = std::fs::read_to_string(final_output_path(dir))
+        .ok()
+        .or_else(|| run_file_answer(dir))?;
     Some(leviath_core::FinalOutput {
         content,
         format: descriptor.format,
@@ -529,6 +531,16 @@ pub(crate) fn read_final_output_in(
         truncated: descriptor.truncated,
         artifacts: descriptor.artifacts,
     })
+}
+
+/// The answer as the run file holds it, for a run with no sidecar: one
+/// converted from the older layout keeps its sidecar under `legacy/`.
+fn run_file_answer(dir: &std::path::Path) -> Option<String> {
+    leviath_runtime::runfile::RunFileReader::open(&dir.join(leviath_core::files::RUN_FILE))
+        .and_then(|reader| reader.latest_state())
+        .ok()?
+        .final_output
+        .map(|out| out.content)
 }
 
 /// Where a run's answer lives, beside its `meta.json`.
