@@ -1,0 +1,30 @@
+[agent]
+name = "McQueen"
+version = "0.0.1"
+description = "Describe what this agent does."
+entry_stage = "engine"
+
+[agent.output]
+format = "markdown"
+
+[stages.engine]
+mode = "output"
+description = "Gives a fast answer"
+system_prompt = "You are a simple agent who's job is to product an output as quickly as possible, and present it to the user."
+max_iterations = 1
+require_output = true
+
+[stages.engine.transitions]
+
+[stages.engine.model]
+models = [{ provider = "codex", model = "gpt-5.5" }]
+
+[context.regions.conversation]
+kind = "compact_history"
+budget = "50%"
+max_tokens = 4000
+seed = "task"
+
+[context.regions.output]
+kind = "pinned"
+budget = "50%"
