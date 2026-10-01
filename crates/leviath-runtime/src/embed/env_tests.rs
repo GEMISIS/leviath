@@ -385,3 +385,32 @@ async fn binding_registers_the_run_with_the_basic_tool_service() {
         results[0].1
     );
 }
+
+/// An embedded host reads no blueprint from a path, and says so.
+#[tokio::test]
+async fn an_embedded_host_reads_no_blueprint_from_a_path() {
+    let path = crate::spec::names::BlueprintPath::new(
+        std::env::temp_dir().join("coder").to_string_lossy(),
+    )
+    .unwrap();
+    let issue = env().blueprint_file(&path).await.unwrap_err();
+    assert_eq!(issue.code, IssueCode::NotAllowed);
+    assert!(issue.message.contains("coder"), "{}", issue.message);
+}
+
+/// A manifest that parses and validates but does not read as a graph, or
+/// whose name cannot be a blueprint's, is refused with why.
+#[test]
+fn a_manifest_that_does_not_read_as_a_graph_is_refused() {
+    let base = || PathBuf::from("/nowhere");
+    let bad_stage = "[agent]\nname = \"a\"\n\n[stages.\" padded\"]\nmode = \"autonomous\"\n";
+    assert!(LoadedBlueprint::from_manifest(bad_stage, base()).is_err());
+    let bad_table = "[agent]\nname = \"a\"\n\n[stages.main]\nmode = \"autonomous\"\n\n[[mcp_servers]]\nname = 7\n";
+    assert!(LoadedBlueprint::from_manifest(bad_table, base()).is_err());
+    let bad_name = format!(
+        "[agent]\nname = \"{}\"\n\n[stages.main]\nmode = \"autonomous\"\n",
+        "x".repeat(200)
+    );
+    let err = LoadedBlueprint::from_manifest(&bad_name, base()).unwrap_err();
+    assert!(err.contains("blueprint name"), "{err}");
+}

@@ -221,6 +221,15 @@ async fn reload_run_pages_in_a_cancelled_run_paused_but_not_a_finished_one() {
         "paused, so resuming it carries on"
     );
     assert!(reload_run(&mut world, &starter, &live).is_some());
+
+    // A live run this machine can no longer bind is not paged in.
+    let unbound = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
+    let bare = crate::daemon::starter::testing::starter(
+        Config::default(),
+        ProviderRegistry::new(),
+        runs.path(),
+    );
+    assert!(reload_run(&mut world, &bare, &unbound).is_none());
 }
 
 /// Children come back linked to the run that started them, and a parent to
@@ -259,7 +268,8 @@ async fn the_tree_of_runs_is_linked_back_together() {
 
     let starter = starter(Config::default(), registry(), runs.path());
     let mut world = world_for(&starter);
-    let recovered = resume_all(&mut world, &starter, runs.path());
+    let recovered =
+        crate::test_support::with_tracing(|| resume_all(&mut world, &starter, runs.path()));
     assert_eq!(recovered.reloaded.len(), 3);
 
     let parent_entity = entity_of(&mut world, &parent).unwrap();
@@ -357,7 +367,7 @@ async fn an_old_run_directory_is_converted_on_first_load() {
         "the old files are kept aside"
     );
     let found = read_run(&old).expect("the converted run reads as a run file");
-    assert!(!found.run.spec.run_id.as_str().is_empty());
+    assert!(!found.spec.run_id.as_str().is_empty());
     assert!(runs.path().join("broken").join("meta.json").is_file());
 
     // Converting again finds nothing to do.

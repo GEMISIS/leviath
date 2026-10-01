@@ -211,8 +211,7 @@ fn setup() -> StageSetup {
 /// A blueprint as the spec a spawn of it runs, every stage on [`si`].
 fn spec(bp: crate::spec::Blueprint) -> crate::insert::RunSpecC {
     let infs: Vec<StageInference> = bp.stages.iter().map(|_| si()).collect();
-    let spec = crate::spec_bridge::test_support::spec_of_blueprint(&bp, "t-run", &infs)
-        .expect("a test blueprint reads as a spec");
+    let spec = crate::spec_bridge::test_support::spec_of_blueprint(&bp, "t-run", &infs);
     crate::insert::RunSpecC(Arc::new(spec))
 }
 
@@ -4775,5 +4774,22 @@ async fn wait_reason_refuses_a_foreign_agent_id() {
     assert!(
         host.wait_reason(theirs).is_none(),
         "answered for a foreign id"
+    );
+}
+
+/// A prepared run reads in a log line as its run, its bindings and the
+/// step its state is at.
+#[test]
+fn a_prepared_run_debugs_as_its_run_and_step() {
+    let spec = crate::spec::run_spec::tests::spec();
+    let prepared = PreparedRun {
+        state: crate::insert::initial_state(&spec),
+        spec: Arc::new(spec),
+        bindings: crate::spec::env::Bindings::new(),
+    };
+    let shown = format!("{prepared:?}");
+    assert!(
+        shown.contains("PreparedRun") && shown.contains("seq: 0"),
+        "{shown}"
     );
 }

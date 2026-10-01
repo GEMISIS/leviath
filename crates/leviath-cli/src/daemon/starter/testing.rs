@@ -82,9 +82,6 @@ pub(crate) struct TestLaunch {
     pub capture_model_input: bool,
     /// Starts the run as a child of this run, under a policy that allows it.
     pub parent_run_id: Option<String>,
-    /// Starts the run as a fan-out worker of `parent_run_id` entering this
-    /// stage.
-    pub worker_stage: Option<String>,
 }
 
 /// What a run is started against, as the tests hand it over.
@@ -115,11 +112,9 @@ pub(crate) fn env_for(world: &World, deps: TestDeps<'_>) -> DaemonEnv {
         .0
         .clone();
     let mime = world
-        .get_resource::<leviath_runtime::blob_store::MimeRegistryHandle>()
-        .map_or_else(
-            || Arc::new(leviath_core::mime::MimeRegistry::builtin()),
-            |r| r.0.clone(),
-        );
+        .resource::<leviath_runtime::blob_store::MimeRegistryHandle>()
+        .0
+        .clone();
     let blob_store = world
         .resource::<leviath_runtime::blob_store::BlobStoreHandle>()
         .0
@@ -184,9 +179,8 @@ pub(crate) fn start_run(
     start_as(world, deps, args, caller_for(args))
 }
 
-/// Who a [`TestLaunch`] is started for: a fan-out worker or a child of its
-/// `parent_run_id`, under a policy that allows everything, else the top of
-/// its tree.
+/// Who a [`TestLaunch`] is started for: a child of its `parent_run_id`,
+/// under a policy that allows everything, else the top of its tree.
 pub(crate) fn caller_for(args: &TestLaunch) -> Caller {
     let Some(parent) = &args.parent_run_id else {
         return Caller::TopLevel;
@@ -199,20 +193,10 @@ pub(crate) fn caller_for(args: &TestLaunch) -> Caller {
         seed_commands: true,
         capture_model_input: false,
     };
-    match &args.worker_stage {
-        Some(stage) => Caller::Worker {
-            parent,
-            policy,
-            depth: 0,
-            stage: Some(
-                leviath_runtime::spec::names::StageName::new(stage.as_str()).expect("a stage"),
-            ),
-        },
-        None => Caller::Child {
-            parent,
-            policy,
-            depth: 0,
-        },
+    Caller::Child {
+        parent,
+        policy,
+        depth: 0,
     }
 }
 

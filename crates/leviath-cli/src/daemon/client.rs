@@ -665,13 +665,12 @@ mod tests {
         run.request.model.as_ref().map(ToString::to_string)
     }
 
-    /// The name of the blueprint `run` asked for.
+    /// The directory of the blueprint `run` asked for.
     fn source_name(run: &LocalRun) -> String {
-        match &run.request.source {
-            leviath_runtime::spec::request::SpawnSource::Blueprint(r) => r.name.to_string(),
-            leviath_runtime::spec::request::SpawnSource::BlueprintFile(p) => p.to_string(),
-            leviath_runtime::spec::request::SpawnSource::Raw(_) => String::new(),
-        }
+        serde_json::to_value(&run.request.source).unwrap()["blueprint_file"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
     }
 
     fn write_manifest(dir: &std::path::Path) -> std::path::PathBuf {
@@ -766,11 +765,7 @@ mod tests {
             parts: Vec::new(),
         })
         .unwrap();
-        assert!(
-            args.manifest.is_absolute(),
-            "got: {}",
-            args.manifest.to_string_lossy()
-        );
+        assert!(args.manifest.is_absolute());
         assert!(args.manifest.ends_with("agent.leviath"));
     }
 
@@ -1884,6 +1879,38 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
     }
 
     #[tokio::test]
+    async fn send_spawn_reports_a_refusal_with_its_issues() {
+        let err = send(crate::test_support::rejected_reply("no such region"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no such region"), "{err}");
+    }
+
+    /// A flag the request cannot hold is refused before the daemon is asked.
+    #[test]
+    fn a_model_that_does_not_read_is_refused_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = write_manifest(dir.path());
+        let err = run_request(RunLine {
+            path: manifest.to_str().unwrap(),
+            task: Some("t"),
+            stdin_is_terminal: &never_interactive,
+            model: Some("not a model".to_string()),
+            workdir: "/work",
+            yolo: false,
+            yolo_profile: None,
+            allow: Vec::new(),
+            max_depth: None,
+            regions: HashMap::new(),
+            no_seed_commands: false,
+            output_request: None,
+            parts: Vec::new(),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("not a model"), "{err}");
+    }
+
+    #[tokio::test]
     async fn send_spawn_reports_unexpected_response() {
         let err = send(r#"{"result":"ok","ok":true}"#).await.unwrap_err();
         assert!(err.to_string().contains("unexpected"));
@@ -2037,10 +2064,10 @@ mod part_tests {
 
     /// `run`'s task, or nothing.
     fn task_of(run: &LocalRun) -> String {
-        match run.request.inputs.get("task") {
-            Some(leviath_runtime::spec::inputs::RawInput::Text(t)) => t.clone(),
-            _ => String::new(),
-        }
+        serde_json::to_value(&run.request.inputs).unwrap()["task"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
     }
 
     /// The region an attachment names, as text.

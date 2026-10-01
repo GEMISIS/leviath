@@ -836,6 +836,134 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         seen
     }
 
+    /// A check resolves the staged blueprint the request names without
+    /// starting it; one that names nothing staged is refused.
+    #[tokio::test]
+    async fn a_check_resolves_a_staged_blueprint_and_refuses_an_unknown_one() {
+        use crate::host::RunStarter;
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(Mock {
+                responses: Mutex::new(VecDeque::new()),
+            }),
+        );
+        let staged: StagedBlueprints = Default::default();
+        let loaded =
+            crate::spec::env::LoadedBlueprint::from_manifest(TWO_STAGE, std::env::temp_dir())
+                .unwrap();
+        leviath_core::sync::lock(&staged).insert("staged-check".to_string(), loaded);
+        let starter = EmbedStarter {
+            registry,
+            creds: Vec::new(),
+            defaults: Default::default(),
+            hints: Default::default(),
+            basic_tools: None,
+            staged,
+            preferred: Vec::new(),
+        };
+        let named = |name: &str| {
+            let mut request = SpawnRequest::new(crate::spec::request::SpawnSource::Blueprint(
+                crate::spec::names::BlueprintRef::parse(name).unwrap(),
+            ));
+            request.workdir = Some(std::env::temp_dir());
+            request
+        };
+        let summary = starter
+            .check(named("staged-check"), crate::spec::env::Caller::TopLevel)
+            .await
+            .expect("the staged blueprint checks");
+        assert_eq!(summary.title, "embedded");
+        assert!(
+            starter
+                .check(named("nowhere"), crate::spec::env::Caller::TopLevel)
+                .await
+                .is_err()
+        );
+        // A graph of the caller's own needs nothing staged.
+        let loaded =
+            crate::spec::env::LoadedBlueprint::from_manifest(TWO_STAGE, std::env::temp_dir())
+                .unwrap();
+        let mut raw = SpawnRequest::new(crate::spec::request::SpawnSource::Raw(Box::new(
+            loaded.graph,
+        )));
+        raw.workdir = Some(std::env::temp_dir());
+        assert!(
+            starter
+                .check(raw, crate::spec::env::Caller::TopLevel)
+                .await
+                .is_ok()
+        );
+    }
+
+    /// Everything a spawn spec carries reaches its request: the task, each
+    /// named region as an input, each file as an attachment, the model and
+    /// the output shape. A model or a shape that does not read is refused.
+    #[test]
+    fn a_spawn_spec_becomes_its_request() {
+        let inputs =
+            |model: Option<&str>, output: Option<leviath_core::output::OutputSpec>| SpecInputs {
+                reference: crate::spec::names::BlueprintRef::parse("b").unwrap(),
+                task: "do it".to_string(),
+                regions: HashMap::from([("notes".to_string(), "be brief".to_string())]),
+                parts: vec![
+                    leviath_core::mime::InboundPart::from_bytes(
+                        "a.png",
+                        b"\x89PNG\r\n\x1a\nx".to_vec(),
+                    )
+                    .typed("image/png".parse().unwrap())
+                    .in_region("notes"),
+                ],
+                model: model.map(str::to_string),
+                workdir: std::env::temp_dir(),
+                metadata: HashMap::new(),
+                output,
+            };
+        let request = spawn_request(inputs(
+            Some("mock/m"),
+            Some(leviath_core::output::OutputSpec::default()),
+        ))
+        .unwrap();
+        assert_eq!(
+            request.inputs["task"],
+            crate::spec::inputs::RawInput::Text("do it".to_string())
+        );
+        assert_eq!(
+            request.inputs["notes"],
+            crate::spec::inputs::RawInput::Text("be brief".to_string())
+        );
+        assert_eq!(request.attachments[0].name, "a.png");
+        assert_eq!(request.model.unwrap().to_string(), "mock/m");
+        assert!(request.output.is_some());
+
+        assert!(spawn_request(inputs(Some("a/b/c d"), None)).is_err());
+        let bad: leviath_core::output::OutputSpec = serde_json::from_value(serde_json::json!({
+            "artifacts": [{ "name": "a", "type": "not a type" }]
+        }))
+        .unwrap();
+        assert!(spawn_request(inputs(None, Some(bad))).is_err());
+    }
+
+    /// A blueprint with a task region takes the spawn's task.
+    #[tokio::test]
+    async fn a_task_reaches_a_blueprint_with_a_task_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = mock_world(vec![text("done"), text("done"), text("done")]);
+        let manifest = ASKER.replace(
+            "[context.regions]\n",
+            "[context.regions]\ntask = { kind = \"pinned\", max_tokens = 500 }\n",
+        );
+        world
+            .spawn(SpawnSpec::new(
+                BlueprintSource::Toml(manifest),
+                "say hello",
+                dir.path(),
+            ))
+            .await
+            .expect("spawns");
+        world.shutdown().await;
+    }
+
     #[tokio::test]
     async fn build_without_providers_is_refused() {
         let err = AgentWorld::builder().build().map(|_| ()).unwrap_err();

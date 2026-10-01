@@ -212,7 +212,6 @@ fn a_bundled_blueprint_lands_the_same_through_spawn_and_through_insert() {
             global_hints: crate::test_support::hints(true),
             global_nudge: Default::default(),
             region_scripts: HashMap::new(),
-            mime_registry: None,
         },
     )
     .expect("coder spawns");
@@ -644,7 +643,14 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
         max_workers: 3,
         queued: vec![WorkItemState {
             id: "q1".into(),
-            inputs: Default::default(),
+            inputs: crate::spec::inputs::InputValues(
+                [(
+                    crate::spec::names::InputName::new("topic").unwrap(),
+                    crate::spec::inputs::InputValue::Text("rust".into()),
+                )]
+                .into_iter()
+                .collect(),
+            ),
         }],
         active: vec![
             ("a1".into(), RunId::new("worker-1").unwrap()),
@@ -673,6 +679,10 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
     assert_eq!(restored.config, config);
     assert_eq!(restored.max_workers, 3);
     assert_eq!(restored.pending[0].id, "q1");
+    assert_eq!(
+        restored.pending[0].inputs["topic"],
+        crate::spec::inputs::RawInput::Text("rust".into())
+    );
     assert_eq!(
         restored.active,
         vec![("a1".to_string(), "worker-1".to_string())]

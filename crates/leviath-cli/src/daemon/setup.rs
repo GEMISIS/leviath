@@ -1207,9 +1207,8 @@ mod tests {
             .await
             .expect("the run starts while the gateway answers");
         drop(host);
-        if let Some(cache) = leviath_core::paths::capability_cache_path() {
-            let _ = std::fs::remove_file(cache);
-        }
+        let cache = leviath_core::paths::capability_cache_path().expect("an isolated home");
+        let _ = std::fs::remove_file(cache);
         run_id.to_string()
     }
 

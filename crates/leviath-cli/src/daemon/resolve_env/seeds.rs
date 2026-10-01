@@ -51,8 +51,7 @@ fn read(workdir: &Path, paths: Vec<PathBuf>) -> Result<String, String> {
             )),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    crate::daemon::spawn::read_and_concat("seed", inside.into_iter(), true)
-        .map(Option::unwrap_or_default)
+    crate::daemon::spawn::read_and_concat("seed", inside.into_iter()).map(Option::unwrap_or_default)
 }
 
 /// Run a code seed, from the run's own copy of its code however the graph

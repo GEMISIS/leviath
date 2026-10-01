@@ -107,7 +107,6 @@ fn spawn_args(path: &str) -> TestLaunch {
         allow: Vec::new(),
         max_depth: None,
         parent_run_id: None,
-        worker_stage: None,
         output: None,
         parts: Vec::new(),
         capture_model_input: false,

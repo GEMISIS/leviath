@@ -237,6 +237,18 @@ pub(crate) fn same_code_daemon(pid: u32) -> leviath_runtime::control_socket::Dae
     }
 }
 
+/// The control-socket line a daemon answers a refused spawn with: one issue
+/// carrying `message`.
+pub(crate) fn rejected_reply(message: &str) -> &'static str {
+    use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpecPath};
+    let issues = SpawnIssue::new(SpecPath::root(), IssueCode::Invalid, message).into();
+    let line = serde_json::to_string(
+        &leviath_runtime::control_socket::ControlResponse::Rejected { issues },
+    )
+    .expect("a response serializes");
+    Box::leak(line.into_boxed_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

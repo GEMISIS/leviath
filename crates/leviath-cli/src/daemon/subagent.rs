@@ -703,10 +703,10 @@ mod tests {
         fn of(request: &leviath_runtime::spec::request::SpawnRequest) -> Self {
             use leviath_runtime::spec::launch::Unattended;
             Self {
-                task: match request.inputs.get("task") {
-                    Some(leviath_runtime::spec::inputs::RawInput::Text(t)) => t.clone(),
-                    _ => String::new(),
-                },
+                task: serde_json::to_value(&request.inputs).unwrap()["task"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 max_depth: request.launch.max_depth.map(usize::from),
                 yolo: request.launch.unattended != Unattended::Off,
                 yolo_profile: match &request.launch.unattended {

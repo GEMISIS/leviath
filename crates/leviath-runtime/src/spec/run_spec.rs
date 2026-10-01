@@ -66,6 +66,19 @@ impl RunSpec {
         self.stages.iter().find(|s| s.stage.as_str() == name)
     }
 
+    /// What a fan-out worker of this run's own graph runs: the blueprint this
+    /// run ran (an installed one at the revision it ran), so the files beside
+    /// it (hooks, validators, scripts) are there for the worker too, or for a
+    /// run whose caller wrote its graph, that graph.
+    pub fn same_graph_source(&self) -> crate::spec::request::SpawnSource {
+        use crate::spec::request::SpawnSource;
+        match &self.origin {
+            SpecOrigin::Blueprint { blueprint, .. } => SpawnSource::Blueprint(blueprint.clone()),
+            SpecOrigin::BlueprintFile { path, .. } => SpawnSource::BlueprintFile(path.clone()),
+            SpecOrigin::Raw => SpawnSource::Raw(Box::new(self.graph.clone())),
+        }
+    }
+
     /// The digest the graph's reference to some code resolved to.
     pub fn code_digest(&self, code: &CodeRef) -> Option<&Digest> {
         self.code.iter().find(|(c, _)| c == code).map(|(_, d)| d)

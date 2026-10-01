@@ -105,3 +105,33 @@ async fn a_forced_cancel_is_the_run_files_last_step() {
         assert_eq!(force_cancel_in(&torn, 5), ForceCancelOutcome::WriteFailed);
     });
 }
+
+/// A run directory in the older layout, whose journal shares the run file's
+/// name, is cancelled in its `meta.json`.
+#[test]
+fn a_forced_cancel_of_an_older_run_rewrites_its_metadata() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = runs.path().join("old-run");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(leviath_core::files::ARCHIVE_FILE),
+        b"LVR1 and the rest",
+    )
+    .unwrap();
+    write_meta_to(&dir, &crate::test_fixtures::fixtures::run_meta("old-run")).unwrap();
+    assert_eq!(force_cancel_in(&dir, 9), ForceCancelOutcome::Terminated);
+    assert_eq!(read_meta_from(&dir).unwrap().status, RunStatus::Cancelled);
+}
+
+/// A run file whose state does not decode lists nothing.
+#[tokio::test]
+async fn a_run_file_whose_state_does_not_decode_is_not_listed() {
+    use leviath_runtime::runfile::codec::{FrameKind, encode};
+    let runs = tempfile::tempdir().unwrap();
+    let run_id = recorded(runs.path());
+    let dir = runs.path().join(&run_id);
+    let mut bytes = std::fs::read(dir.join(leviath_core::files::RUN_FILE)).unwrap();
+    bytes.extend(encode(FrameKind::Delta, &1u64).unwrap());
+    std::fs::write(dir.join(leviath_core::files::RUN_FILE), bytes).unwrap();
+    assert!(read_meta_from(&dir).is_err());
+}

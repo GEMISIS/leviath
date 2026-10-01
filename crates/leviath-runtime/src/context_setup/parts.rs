@@ -137,4 +137,58 @@ mod tests {
         let err = sink.admit_text("r.txt", &"z".repeat(65)).unwrap_err();
         assert!(err.contains("over the 64 byte ceiling"), "{err}");
     }
+
+    /// A store whose writes all fail.
+    struct Refusing;
+
+    impl leviath_core::mime::BlobStore for Refusing {
+        fn put(
+            &self,
+            _run_id: &str,
+            _blob: &Blob,
+            _reg: &MimeRegistry,
+        ) -> std::io::Result<leviath_core::mime::BlobRef> {
+            Err(std::io::Error::other("full"))
+        }
+        fn read(&self, _run_id: &str, _sha256: &str) -> std::io::Result<std::sync::Arc<[u8]>> {
+            Err(std::io::Error::other("empty"))
+        }
+        fn copy(&self, _from: &str, _to: &str, _sha256: &str) -> std::io::Result<()> {
+            Err(std::io::Error::other("empty"))
+        }
+        fn list(&self, _run_id: &str) -> std::io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Text a store refuses stays inline, and says why in the log; with no
+    /// sink at all it is inline from the start. A part the store refuses is
+    /// an error naming it.
+    #[test]
+    fn text_a_store_refuses_stays_inline() {
+        let registry = MimeRegistry::builtin();
+        let sink = PartSink {
+            store: &Refusing,
+            registry: &registry,
+            run_id: "run-1",
+            max_part_bytes: 64,
+            inline_text_bytes: 8,
+        };
+        crate::test_support::with_tracing(|| {
+            let part = text_part(Some(&sink), "r.txt", "well past eight bytes");
+            assert!(!part.is_stored());
+        });
+        assert!(!text_part(None, "r.txt", "well past eight bytes").is_stored());
+        use leviath_core::mime::BlobStore as _;
+        assert!(Refusing.read("run-1", "x").is_err());
+        assert!(Refusing.copy("run-1", "run-2", "x").is_err());
+        assert!(Refusing.list("run-1").unwrap().is_empty());
+        let err = sink
+            .store_part(&InboundPart::from_bytes(
+                "a.png",
+                b"\x89PNG\r\n\x1a\nx".to_vec(),
+            ))
+            .unwrap_err();
+        assert!(err.contains("could not store part 'a.png'"), "{err}");
+    }
 }

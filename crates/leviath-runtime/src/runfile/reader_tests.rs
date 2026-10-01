@@ -190,11 +190,11 @@ fn file_of(frames: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-fn spec_frame() -> Vec<u8> {
+pub(crate) fn spec_frame() -> Vec<u8> {
     codec::encode(FrameKind::Spec, &spec()).unwrap()
 }
 
-fn read(frames: &[Vec<u8>]) -> Result<RunFileReader, RunFileError> {
+pub(crate) fn read(frames: &[Vec<u8>]) -> Result<RunFileReader, RunFileError> {
     RunFileReader::from_bytes(Path::new("r.lvr2"), file_of(frames))
 }
 

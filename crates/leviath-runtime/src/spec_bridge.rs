@@ -12,13 +12,12 @@ use leviath_core::JsonDoc;
 
 use crate::pipeline::StageInference;
 use crate::spec::Blueprint;
-use crate::spec::graph::{ArtifactDef, CodeRef, OutputDef, RunGraph};
+use crate::spec::graph::{OutputDef, RunGraph};
 use crate::spec::inputs::InputValues;
 use crate::spec::issues::SpawnIssues;
 use crate::spec::launch::{Delivery, LaunchPolicy, Placement, Unattended};
 use crate::spec::names::{
-    BlueprintName, BlueprintRef, MimePattern, ModelId, ModelRef, ProviderName, RegionName, RunId,
-    ToolName,
+    BlueprintName, BlueprintRef, ModelId, ModelRef, ProviderName, RegionName, RunId, ToolName,
 };
 use crate::spec::run_spec::{EnvFingerprint, RunSpec, SpecOrigin, StagePlan, ToolDef, ToolSource};
 
@@ -46,7 +45,7 @@ pub(crate) fn run_spec_from_blueprint(
             provider: provider(&inference.provider_name),
             model: model(&inference.model),
             context_window: clamp(*window),
-            max_output_tokens: max_output_tokens(stage, bp, *window),
+            max_output_tokens: None,
             fallbacks: inference
                 .fallbacks
                 .iter()
@@ -55,21 +54,24 @@ pub(crate) fn run_spec_from_blueprint(
                     model: model(&e.model),
                 })
                 .collect(),
-            tools: inference.tools.iter().filter_map(tool_def).collect(),
-            output: inference.output.as_ref().map(output_def),
+            tools: inference.tools.iter().map(tool_def).collect(),
+            output: inference
+                .output
+                .as_ref()
+                .map(|o| OutputDef::from_output_spec(o).expect("a test's output shape reads")),
             region_budgets: region_budgets(bp, stage, &graph, def),
             notes: Vec::new(),
         })
         .collect();
-    let origin = match BlueprintName::new(bp.name.as_str()) {
-        Ok(name) => SpecOrigin::Blueprint {
-            blueprint: BlueprintRef { name, digest: None },
-            version: bp.version.clone(),
+    let origin = SpecOrigin::Blueprint {
+        blueprint: BlueprintRef {
+            name: BlueprintName::new(bp.name.as_str()).expect("a test blueprint's name"),
+            digest: None,
         },
-        Err(_) => SpecOrigin::Raw,
+        version: bp.version.clone(),
     };
     Ok(RunSpec {
-        run_id: RunId::new(agent_id).unwrap_or_else(|_| RunId::new("run").expect("a valid id")),
+        run_id: RunId::new(agent_id).expect("a test run id"),
         origin,
         graph,
         inputs: InputValues::default(),
@@ -105,15 +107,14 @@ fn clamp(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// A provider name the spawn resolved. A name the spec cannot hold (only a
-/// hand-built test world makes one) stands in as `unnamed`.
+/// A provider name a test resolved its stage to.
 fn provider(name: &str) -> ProviderName {
-    ProviderName::new(name).unwrap_or_else(|_| ProviderName::new("unnamed").expect("a valid name"))
+    ProviderName::new(name).expect("a test's provider name")
 }
 
-/// A model id the spawn resolved, with the same stand-in as [`provider`].
+/// A model id a test resolved its stage to.
 fn model(name: &str) -> ModelId {
-    ModelId::new(name).unwrap_or_else(|_| ModelId::new("unnamed").expect("a valid id"))
+    ModelId::new(name).expect("a test's model id")
 }
 
 /// The tokens each region the stage sees may take in it.
@@ -137,53 +138,14 @@ fn region_budgets(
         .collect()
 }
 
-/// The stage's reply cap in tokens, when it sets one.
-fn max_output_tokens(stage: &crate::spec::Stage, bp: &Blueprint, window: usize) -> Option<u32> {
-    use crate::spec::blueprint::OutputCap;
-    match stage.model.output_cap().ok().flatten()? {
-        OutputCap::Tokens(n) => Some(clamp(n)),
-        OutputCap::WindowPercent(f) => Some(clamp((window as f64 * f).round() as usize)),
-        OutputCap::RegionPercent { percent, region } => {
-            let layout = stage.context_layout.as_ref().unwrap_or(&bp.context_layout);
-            let budget = layout.get_region(&region)?.max_tokens;
-            Some(clamp((budget as f64 * percent).round() as usize))
-        }
-    }
-}
-
 /// A resolved tool as the spec records it. Where it came from is not known
 /// here, so it reads as built in.
-fn tool_def(tool: &leviath_providers::Tool) -> Option<ToolDef> {
-    Some(ToolDef {
-        name: ToolName::new(tool.name.as_str()).ok()?,
+fn tool_def(tool: &leviath_providers::Tool) -> ToolDef {
+    ToolDef {
+        name: ToolName::new(tool.name.as_str()).expect("a test's tool name"),
         description: tool.description.clone(),
         schema: JsonDoc::new(tool.parameters.clone()),
         source: ToolSource::Builtin,
-    })
-}
-
-/// A resolved output shape as the spec records it.
-fn output_def(o: &leviath_core::output::OutputSpec) -> OutputDef {
-    OutputDef {
-        format: o.format.clone(),
-        instructions: o.instructions.clone(),
-        example: o.example.clone(),
-        schema: o.schema.clone().map(JsonDoc::new),
-        validator: o.validator.clone().map(CodeRef::File),
-        on_validator_error: o.on_validator_error,
-        overwrite_artifacts: o.overwrite_artifacts,
-        artifacts: o
-            .artifacts
-            .iter()
-            .filter_map(|a| {
-                Some(ArtifactDef {
-                    name: a.name.clone(),
-                    mime_type: MimePattern::new(a.mime_type.as_str()).ok()?,
-                    required: a.required,
-                    description: a.description.clone(),
-                })
-            })
-            .collect(),
     }
 }
 
@@ -242,7 +204,6 @@ pub(crate) mod spawning {
                 global_hints,
                 global_nudge: crate::spec::NudgeConfig::default(),
                 region_scripts: std::collections::HashMap::new(),
-                mime_registry: None,
             },
         )
     }
@@ -270,11 +231,6 @@ pub(crate) mod spawning {
             String,
             std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
         >,
-        /// The run's mime registry, when the host built one (with the
-        /// blueprint's checks compiled and attached). Left `None`, one is built
-        /// here from the world's registry and the blueprint's own rows, with no
-        /// checks.
-        pub(crate) mime_registry: Option<crate::blob_store::RunMimeRegistry>,
     }
 
     /// The config-level defaults a blueprint spawn is resolved against, folded
@@ -340,25 +296,20 @@ pub(crate) mod spawning {
             global_hints,
             global_nudge,
             region_scripts,
-            mime_registry,
         } = spawn;
         // The registry this run types its bytes by: the host's, or the world's
         // rows with the blueprint's `[mime_types]` on top. A world without a
         // registry (one assembled by hand in a test) has no run registry either.
-        let run_registry = match mime_registry {
-            Some(registry) => Some(registry),
-            None => world
-                .get_resource::<crate::blob_store::MimeRegistryHandle>()
-                .map(|r| {
-                    crate::blob_store::RunMimeRegistry::new(
-                        &r.0,
-                        blueprint.mime_types.clone(),
-                        std::collections::BTreeMap::new(),
-                    )
-                })
-                .transpose()
-                .map_err(|e| format!("[mime_types]: {e}"))?,
-        };
+        let run_registry = world
+            .get_resource::<crate::blob_store::MimeRegistryHandle>()
+            .map(|r| {
+                crate::blob_store::RunMimeRegistry::new(
+                    &r.0,
+                    blueprint.mime_types.clone(),
+                    std::collections::BTreeMap::new(),
+                )
+                .expect("a test blueprint's [mime_types] read")
+            });
         // `parse_manifest` guarantees at least one stage, but this is `pub` and an
         // embedder can hand-build a `Blueprint`; refusing here turns index panics
         // into the `Err` the signature already promises.
@@ -585,135 +536,15 @@ pub(crate) mod test_support {
         bp: &crate::spec::Blueprint,
         agent_id: &str,
         stages: &[crate::pipeline::StageInference],
-    ) -> Result<crate::spec::run_spec::RunSpec, String> {
-        use crate::spec::names::{BlueprintName, BlueprintRef};
-        use crate::spec::run_spec::{RunSpec, SpecOrigin};
-        let graph = crate::spec::graph::RunGraph::from_blueprint(bp)
-            .map_err(|issues| issues.to_string())?;
-        let plans = graph
-            .stages
-            .iter()
-            .zip(stages)
-            .map(|(stage, si)| stage_plan(stage.name.clone(), si))
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok(RunSpec {
-            run_id: named(agent_id)?,
-            origin: match BlueprintName::new(bp.name.as_str()) {
-                Ok(name) => SpecOrigin::Blueprint {
-                    blueprint: BlueprintRef { name, digest: None },
-                    version: bp.version.clone(),
-                },
-                Err(_) => SpecOrigin::Raw,
-            },
-            graph,
-            inputs: Default::default(),
-            stages: plans,
-            seeded: Default::default(),
-            code: Vec::new(),
-            requested_output: None,
-            requested_model: None,
-            launch: crate::spec::launch::LaunchPolicy {
-                unattended: crate::spec::launch::Unattended::Off,
-                allow: Vec::new(),
-                max_depth: 0,
-                seed_commands: true,
-                capture_model_input: false,
-            },
-            auto_answers: Default::default(),
-            placement: crate::spec::launch::Placement {
-                workdir: std::path::PathBuf::new(),
-                parent: None,
-                depth: 0,
-                worker_stage: None,
-            },
-            delivery: Default::default(),
-            env: Default::default(),
-            created_at: chrono::Utc::now().timestamp(),
-        })
-    }
-
-    /// A checked name, or why the text is not one.
-    fn named<T: std::str::FromStr<Err = crate::spec::names::NameError>>(
-        text: &str,
-    ) -> Result<T, String> {
-        text.parse()
-            .map_err(|e: crate::spec::names::NameError| e.to_string())
-    }
-
-    /// A stage's plan from the inference it resolved to. A fallback with no
-    /// provider leaves the provider to the operator's order.
-    fn stage_plan(
-        stage: crate::spec::names::StageName,
-        si: &crate::pipeline::StageInference,
-    ) -> Result<crate::spec::run_spec::StagePlan, String> {
-        use crate::spec::names::ModelRef;
-        use crate::spec::run_spec::{StagePlan, ToolDef, ToolSource};
-        let fallbacks = si
-            .fallbacks
-            .iter()
-            .map(|f| {
-                let provider = (!f.provider.is_empty())
-                    .then(|| named(&f.provider))
-                    .transpose()?;
-                Ok(ModelRef {
-                    provider,
-                    model: named(&f.model)?,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let tools = si
-            .tools
-            .iter()
-            .map(|t| {
-                Ok(ToolDef {
-                    name: named(&t.name)?,
-                    description: t.description.clone(),
-                    schema: leviath_core::JsonDoc::new(t.parameters.clone()),
-                    source: ToolSource::Builtin,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok(StagePlan {
-            stage,
-            provider: named(&si.provider_name)?,
-            model: named(&si.model)?,
-            context_window: 0,
-            max_output_tokens: None,
-            fallbacks,
-            tools,
-            output: si.output.as_ref().map(output_def).transpose()?,
-            region_budgets: Default::default(),
-            notes: Vec::new(),
-        })
-    }
-
-    /// An output shape as a run graph writes it.
-    fn output_def(
-        spec: &leviath_core::output::OutputSpec,
-    ) -> Result<crate::spec::graph::OutputDef, String> {
-        use crate::spec::graph::{ArtifactDef, CodeRef, OutputDef};
-        Ok(OutputDef {
-            format: spec.format.clone(),
-            instructions: spec.instructions.clone(),
-            example: spec.example.clone(),
-            schema: spec.schema.clone().map(leviath_core::JsonDoc::new),
-            validator: spec.validator.clone().map(CodeRef::File),
-            on_validator_error: spec.on_validator_error,
-            overwrite_artifacts: spec.overwrite_artifacts,
-            artifacts: spec
-                .artifacts
-                .iter()
-                .map(|a| {
-                    Ok(ArtifactDef {
-                        name: a.name.clone(),
-                        mime_type: named(&a.mime_type)?,
-
-                        required: a.required,
-                        description: a.description.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        })
+    ) -> crate::spec::run_spec::RunSpec {
+        let windows = vec![0; stages.len()];
+        let mut spec = super::run_spec_from_blueprint(bp, agent_id, stages, &windows)
+            .expect("a test blueprint reads as a spec");
+        spec.launch.max_depth = 0;
+        for plan in &mut spec.stages {
+            plan.region_budgets.clear();
+        }
+        spec
     }
 
     /// [`spec_named`], as the component a run carries.

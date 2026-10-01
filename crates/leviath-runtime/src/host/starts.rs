@@ -27,6 +27,9 @@ pub(super) struct Started {
     parent: Option<String>,
     /// Who is waiting to hear how it went.
     reply: oneshot::Sender<Result<RunId, SpawnIssues>>,
+    /// The starter that made it, which brings the world up to date before
+    /// the run is placed in it.
+    starter: Arc<dyn RunStarter>,
 }
 
 impl WorldHost {
@@ -48,7 +51,8 @@ impl WorldHost {
         tokio::spawn(async move {
             // On a task of its own, so a starter that panics fails this one
             // start and nothing else.
-            let job = tokio::spawn(async move { starter.start(request, caller).await });
+            let starting = starter.clone();
+            let job = tokio::spawn(async move { starting.start(request, caller).await });
             let result = job
                 .await
                 .unwrap_or_else(|_| Err(host_refusal("starting the run panicked")));
@@ -56,6 +60,7 @@ impl WorldHost {
                 result,
                 parent,
                 reply,
+                starter,
             });
         });
     }
@@ -102,6 +107,7 @@ impl WorldHost {
             result,
             parent,
             reply,
+            starter,
         } = started;
         let prepared = match result {
             Ok(prepared) => prepared,
@@ -117,11 +123,8 @@ impl WorldHost {
         // Insertion runs outside the pipeline schedule, so it is not covered by
         // `run_isolated`'s panic guard: a binding that panics as it is applied
         // would otherwise unwind the serve task and take the daemon with it.
-        let starter = self.starter.clone();
         let placed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let Some(starter) = &starter {
-                starter.before_insert(&mut self.world, &prepared.spec);
-            }
+            starter.before_insert(&mut self.world, &prepared.spec);
             crate::insert::insert(
                 self.world.world_mut(),
                 prepared.spec,

@@ -2363,17 +2363,21 @@ mod tests {
         status: leviath_core::run_meta::RunStatus,
     ) -> Option<leviath_core::run_meta::RunMeta> {
         let path = runs.join(run_id).join(leviath_core::files::RUN_FILE);
-        for _ in 0..200 {
-            let meta = crate::runfile::RunFileReader::open(&path)
-                .ok()
-                .and_then(|read| crate::runfile::summary(&read).ok())
-                .filter(|meta| meta.status == status);
-            if meta.is_some() {
-                return meta;
+        let read = async {
+            loop {
+                let meta = crate::runfile::RunFileReader::open(&path)
+                    .ok()
+                    .and_then(|read| crate::runfile::summary(&read).ok())
+                    .filter(|meta| meta.status == status);
+                if let Some(meta) = meta {
+                    break meta;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        None
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), read)
+            .await
+            .ok()
     }
 
     #[tokio::test]
@@ -2829,6 +2833,8 @@ mod tests {
                 spec,
                 state,
                 code: Default::default(),
+                blobs: Default::default(),
+                asked: 0,
             },
             crate::spec::env::Bindings::new(),
         );

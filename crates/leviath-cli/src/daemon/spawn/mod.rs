@@ -634,12 +634,8 @@ pub(crate) mod tests {
     fn bp(regions_toml: &str) -> Blueprint {
         // A region named `task` picks up the caller's task implicitly, which is
         // how a real blueprint accepts one - and without it a supplied task is
-        // refused. Skipped when the caller declares its own, or the key would
-        // be duplicated.
-        let implicit_task = match regions_toml.contains("task") {
-            true => "",
-            false => "task = { kind = \"pinned\", max_tokens = 1000 }",
-        };
+        // refused.
+        let implicit_task = "task = { kind = \"pinned\", max_tokens = 1000 }";
         let toml = format!(
             r#"
     [agent]

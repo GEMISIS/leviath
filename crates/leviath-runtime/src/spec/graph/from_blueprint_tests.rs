@@ -630,3 +630,23 @@ fn a_callers_output_request_reads_as_an_output() {
     let issues = OutputDef::from_output_spec(&bad).unwrap_err();
     assert_eq!(issues.0[0].path.to_string(), "output.artifacts[0]");
 }
+
+/// A compacting region's threshold carries over; one left unset stays unset.
+#[test]
+fn a_compacting_regions_threshold_carries_over() {
+    let graph = |threshold: &str| {
+        let text = format!(
+            "[agent]\nname = \"a\"\n\n[stages.main]\nmode = \"autonomous\"\n\n\
+             [context.regions]\nnotes = {{ kind = \"compacting\", max_tokens = 500{threshold} }}\n"
+        );
+        let bp = crate::spec::manifest::parse_manifest(&text).unwrap();
+        RunGraph::from_blueprint(&bp).unwrap()
+    };
+    let set = graph(", threshold_tokens = 400");
+    assert!(matches!(
+        set.layout.regions[0].kind,
+        RegionKind::Compacting {
+            threshold_tokens: Some(400)
+        }
+    ));
+}

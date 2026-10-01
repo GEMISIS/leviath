@@ -148,6 +148,7 @@ async fn every_file_beside_the_run_file_is_private_to_this_user() {
     j.final_output = Some("the answer".to_string());
     j.taint_audit = Some((0, "[]".to_string()));
     j.log_appends = vec![(0, "a line".to_string())];
+    j.output_appends = vec![(0, "said".to_string())];
     let outcome = write_snapshot(dir.path(), &j, None).await;
     assert!(outcome.dir_made && outcome.files.is_none());
     let run_dir = dir.path().join("run-perms");
@@ -155,6 +156,7 @@ async fn every_file_beside_the_run_file_is_private_to_this_user() {
         run_dir.join(leviath_core::FINAL_OUTPUT_FILE),
         run_dir.join("stages").join("0").join("taint_audit.json"),
         run_dir.join("stages").join("0").join("logs.log"),
+        run_dir.join("stages").join("0").join("output.log"),
     ] {
         assert!(path.exists(), "{} was written", path.display());
         #[cfg(unix)]
@@ -377,6 +379,9 @@ async fn an_acked_record_that_cannot_be_written_says_so() {
     let mut lane = crate::runfile::lane::RunFileLane::new("m", "w");
     let stats = health();
     record_run_file(&mut lane, dir.path(), *step("run-1").unwrap(), &stats).await;
+    // Nothing noted, or no file open, writes nothing.
+    assert_eq!(lane.flush("run-1").await.unwrap(), None);
+    assert_eq!(lane.flush("no-file").await.unwrap(), None);
     lane.note("run-1", &batch_record("c1"));
     lane.break_writes("run-1");
     assert_eq!(

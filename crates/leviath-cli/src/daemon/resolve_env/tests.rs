@@ -529,3 +529,19 @@ fn providers_and_mcp_servers_are_fingerprinted_from_what_is_configured_now() {
     );
     assert_eq!(ResolveEnv::mcp_fingerprint(&env, &server("gone")), None);
 }
+
+/// A blueprint read from a directory whose manifest gives it a name no
+/// blueprint may have is refused, naming both.
+#[test]
+fn a_blueprint_file_with_a_name_too_long_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let long = "x".repeat(200);
+    crate::daemon::starter::testing::manifest_in(
+        dir.path(),
+        &format!("[agent]\nname = \"{long}\"\n\n[stages.main]\nmode = \"autonomous\"\n"),
+    );
+    let path =
+        leviath_runtime::spec::names::BlueprintPath::new(dir.path().to_string_lossy()).unwrap();
+    let issue = load_file(&path).unwrap_err();
+    assert!(issue.message.contains(&long), "{}", issue.message);
+}

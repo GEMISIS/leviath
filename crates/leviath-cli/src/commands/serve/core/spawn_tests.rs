@@ -256,6 +256,34 @@ async fn the_daemons_refusal_carries_its_message() {
     assert!(failure.to_string().contains("region 'plan'"), "{failure}");
 }
 
+/// A spawn the daemon refuses comes back as a bad request with every issue
+/// it named; a model the request cannot hold never reaches the daemon.
+#[tokio::test]
+async fn a_rejected_spawn_carries_its_issues() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut state = with_blueprint(dir.path(), "coder");
+    let (control, _socket, _srv) = fake_daemon(|_| {
+        serde_json::from_str(crate::test_support::rejected_reply(
+            "inputs.task is missing",
+        ))
+        .unwrap()
+    });
+    state.control = control;
+    let failure = spawn(&state, request("coder", Some("/tmp")), Vec::new())
+        .await
+        .expect_err("the daemon refused it");
+    assert_eq!(failure.code(), "BAD_USER_INPUT");
+    assert!(failure.to_string().contains("inputs.task"), "{failure}");
+
+    let mut bad_model = request("coder", Some("/tmp"));
+    bad_model.model = Some("not a model".to_string());
+    let failure = spawn(&state, bad_model, Vec::new())
+        .await
+        .expect_err("the model does not read");
+    assert_eq!(failure.code(), "BAD_USER_INPUT");
+    assert!(failure.to_string().contains("not a model"), "{failure}");
+}
+
 /// A reply to a different question, and a daemon that is not there, are this
 /// server's failures rather than the caller's.
 #[tokio::test]

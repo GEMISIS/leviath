@@ -1551,6 +1551,19 @@ async fn spawn_and_wait_reports_a_refused_spawn() {
 }
 
 #[tokio::test]
+async fn spawn_and_wait_reports_a_rejected_spawn() {
+    let DaemonOutcome::Failed(detail) = spawn_against(vec![crate::test_support::rejected_reply(
+        "the probe has no task",
+    )])
+    .await
+    else {
+        panic!("a rejected spawn fails the check");
+    };
+    assert!(detail.contains("the probe has no task"), "{detail}");
+    assert!(detail.contains("refused the spawn"), "{detail}");
+}
+
+#[tokio::test]
 async fn spawn_and_wait_rejects_an_unexpected_spawn_response() {
     let DaemonOutcome::Failed(detail) = spawn_against(vec![r#"{"result":"ok","ok":true}"#]).await
     else {

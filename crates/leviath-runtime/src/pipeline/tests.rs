@@ -3303,6 +3303,55 @@ fn a_landed_title_is_a_write_but_not_progress() {
     );
 }
 
+/// A parent parked on its fan-out is snapshotted like any run, its
+/// outstanding workers counted for its listing.
+#[test]
+fn dispatch_persistence_reads_a_parent_parked_on_its_fan_out() {
+    let (mut world, mut rx) = world_with_persistence();
+    let e = world
+        .spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ))
+        .id();
+    // Attach a (minimal) FanOutWaiting via the public restore path.
+    crate::fanout::restore_fan_out_waiting(
+        &mut world,
+        e,
+        crate::fanout::FanOutState {
+            origin: crate::fanout::FanOutOrigin::Stage,
+            parts: Vec::new(),
+            config: crate::spec::graph::FanOutDef {
+                worker: crate::spec::graph::WorkerSource::Stage(
+                    crate::spec::names::StageName::new("w").unwrap(),
+                ),
+                merge_stage: None,
+                max_workers: 1,
+                on_worker_failure: Default::default(),
+                split_prompt: String::new(),
+                results_region: None,
+                max_items: None,
+                max_attempts: None,
+            },
+            max_workers: 1,
+            pending: vec![],
+            active: vec![],
+            summaries: vec![],
+            failures: vec![],
+            paused: false,
+        },
+        &|_| None,
+    );
+
+    run_dispatch_persistence(&mut world);
+    let job = snapshot_job(rx.try_recv().expect("job sent"));
+    assert_eq!(job.run_id, "run-1");
+}
+
 #[test]
 fn dispatch_persistence_drains_io_buffer() {
     let (mut world, mut rx) = world_with_persistence();
@@ -21256,7 +21305,6 @@ fn a_blueprint_spawn_seeds_by_region_and_takes_the_operators_nudge() {
                 text: Some("go on".into()),
             },
             region_scripts: Default::default(),
-            mime_registry: None,
         },
     )
     .unwrap();

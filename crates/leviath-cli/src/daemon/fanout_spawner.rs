@@ -128,7 +128,6 @@ mod tests {
     use leviath_runtime::spec::inputs::RawInput;
     use leviath_runtime::spec::launch::LaunchRequest;
     use leviath_runtime::spec::request::SpawnSource;
-    use leviath_runtime::spec::run_spec::SpecOrigin;
     use leviath_runtime::world::PipelineWorld;
     use std::collections::HashMap;
     use tokio::runtime::Handle;
@@ -182,18 +181,14 @@ mod tests {
             .expect("the parent has a run spec")
             .0
             .clone();
-        let source = match (agent, &spec.origin) {
-            (Some(agent), _) => SpawnSource::BlueprintFile(
-                leviath_runtime::spec::names::BlueprintPath::new(agent).unwrap(),
-            ),
-            (None, SpecOrigin::Blueprint { blueprint, .. }) => {
-                SpawnSource::Blueprint(blueprint.clone())
-            }
-            (None, SpecOrigin::BlueprintFile { path, .. }) => {
-                SpawnSource::BlueprintFile(path.clone())
-            }
-            (None, SpecOrigin::Raw) => SpawnSource::Raw(Box::new(spec.graph.clone())),
-        };
+        let source = agent.map_or_else(
+            || spec.same_graph_source(),
+            |agent| {
+                SpawnSource::BlueprintFile(
+                    leviath_runtime::spec::names::BlueprintPath::new(agent).unwrap(),
+                )
+            },
+        );
         let request = SpawnRequest {
             model: spec.requested_model.clone(),
             output: spec.requested_output.clone(),

@@ -81,22 +81,23 @@ fn refusal(code: IssueCode, message: impl Into<String>) -> SpawnIssues {
     SpawnIssue::new(SpecPath::root(), code, message).into()
 }
 
-/// The MCP servers a graph declares, as the pool connects them. A server the
-/// pool cannot read is left out with a warning, and the run's tools simply
-/// do not include it.
+/// The MCP servers a graph declares, as the pool connects them. A graph's
+/// server is read from the same `[[mcp_servers]]` table the pool's config
+/// is, so it always reads as one.
 pub(crate) fn mcp_configs(graph: &RunGraph) -> Vec<MCPServerConfig> {
     graph
         .mcp_servers
         .iter()
-        .filter_map(|def| {
+        .map(|def| {
             let value = serde_json::to_value(def).expect("a server definition is plain data");
-            serde_json::from_value(value)
-                .inspect_err(|e| {
-                    tracing::warn!(server = %def.name, error = %e, "an MCP server the pool cannot read");
-                })
-                .ok()
+            serde_json::from_value(value).expect("a graph's server reads as the pool's")
         })
         .collect()
+}
+
+/// An error as the text a refusal carries.
+fn text(e: impl std::fmt::Display) -> String {
+    e.to_string()
 }
 
 /// Every model a graph's stages name, bare and without repeats.
@@ -236,30 +237,35 @@ impl DaemonStarter {
         let spec = &resolved.spec;
         let dir = self.runs_dir.join(spec.run_id.as_str());
         let path = dir.join(leviath_core::files::RUN_FILE);
-        let failed = |e: String| {
-            refusal(
-                IssueCode::Unavailable,
-                format!("the run's file could not be written: {e}"),
-            )
-        };
-        leviath_sys::perms::create_private_dir_all(&dir).map_err(|e| failed(e.to_string()))?;
-        let mut writer = leviath_runtime::runfile::RunFileWriter::create(
-            &path,
-            spec,
-            &resolved.code,
-            state,
-            Default::default(),
-        )
-        .map_err(|e| failed(e.to_string()))?;
-        for (digest, bytes) in &resolved.blobs {
-            writer
-                .add_blob(digest, bytes)
-                .map_err(|e| failed(e.to_string()))?;
-        }
+        leviath_sys::perms::create_private_dir_all(&dir)
+            .map_err(text)
+            .and_then(|()| {
+                leviath_runtime::runfile::RunFileWriter::create(
+                    &path,
+                    spec,
+                    &resolved.code,
+                    state,
+                    Default::default(),
+                )
+                .map_err(text)
+            })
+            .and_then(|mut writer| {
+                resolved
+                    .blobs
+                    .iter()
+                    .try_for_each(|(digest, bytes)| writer.add_blob(digest, bytes).map(drop))
+                    .map_err(text)
+            })
+            .map_err(|e| {
+                refusal(
+                    IssueCode::Unavailable,
+                    format!("the run's file could not be written: {e}"),
+                )
+            })?;
         store_blobs(
             self.blob_store.as_ref(),
             spec.run_id.as_str(),
-            resolved.blobs.iter(),
+            &resolved.blobs,
             &state.context,
         );
         Ok(())
@@ -374,10 +380,10 @@ impl RunStarter for DaemonStarter {
 /// Put a run's attached files in `store`, typed as the parts that name them
 /// in `context` say. A file no part names is not written: nothing would read
 /// it.
-pub(crate) fn store_blobs<'a>(
+pub(crate) fn store_blobs(
     store: &dyn leviath_core::mime::BlobStore,
     run_id: &str,
-    blobs: impl Iterator<Item = (&'a leviath_runtime::spec::names::Digest, &'a Vec<u8>)>,
+    blobs: &std::collections::BTreeMap<leviath_runtime::spec::names::Digest, Vec<u8>>,
     context: &leviath_runtime::state::ContextState,
 ) {
     use leviath_runtime::state::context::PartBody;
@@ -422,8 +428,9 @@ pub(crate) fn record_failed(
     failed.status = leviath_runtime::state::RunStatus::Error(issues.to_string());
     failed.phase = leviath_runtime::state::PipelinePhase::Done;
     let events = vec![leviath_runtime::state::RunEvent::Log(issues.to_string())];
-    writer.record(failed, chrono::Utc::now().timestamp(), events)?;
-    Ok(())
+    writer
+        .record(failed, chrono::Utc::now().timestamp(), events)
+        .map(drop)
 }
 
 #[cfg(test)]

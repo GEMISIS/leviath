@@ -138,9 +138,10 @@ impl WorldHost {
             .unwrap_or_default();
         // Recorded on the parent's serializable state too, so the tree is in
         // the parent's run file and a restart can rebuild `SubAgentChildren`.
-        if let Some(mut state) = world.get_mut::<AgentState>(parent) {
-            state.spawned_children_ids.push(child_id);
-        }
+        world
+            .get_mut::<AgentState>(parent)
+            .into_iter()
+            .for_each(|mut state| state.spawned_children_ids.push(child_id.clone()));
         crate::context_transform::apply_context_transforms(
             world,
             crate::world::AgentId::in_world(world, parent),

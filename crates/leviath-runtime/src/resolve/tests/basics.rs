@@ -259,3 +259,61 @@ async fn run_level_notes_land_on_the_entry_stage() {
     assert!(resolved.spec.stages[0].notes.is_empty());
     assert_eq!(resolved.spec.stages[1].notes.len(), 1);
 }
+
+/// A blueprint read from a directory runs as itself: its origin names the
+/// directory, the manifest's name and the revision read, and the run is
+/// named after the manifest. A directory with no blueprint is refused at the
+/// source.
+#[tokio::test]
+async fn a_blueprint_file_request_loads_the_graph_in_that_directory() {
+    let dir = std::env::temp_dir().join("agents").join("local-coder");
+    let path = crate::spec::names::BlueprintPath::new(dir.to_string_lossy()).unwrap();
+    let env = Fake {
+        blueprints: [(path.to_string(), installed(graph()))].into(),
+        ..Fake::default()
+    };
+    let request = SpawnRequest::new(SpawnSource::BlueprintFile(path.clone()))
+        .input("task", RawInput::Text("go".into()));
+    let resolved = spawn(&request, &env).await.unwrap();
+    assert_eq!(resolved.spec.run_id.as_str(), "coder-1");
+    assert_eq!(resolved.spec.origin.blueprint_name(), Some("coder"));
+    assert_eq!(
+        resolved.spec.origin.digest(),
+        Some(&Digest::of(b"v1")),
+        "pinned to the revision read"
+    );
+    assert!(matches!(
+        &resolved.spec.origin,
+        SpecOrigin::BlueprintFile { path: p, version, .. } if *p == path && version == "1.2.0"
+    ));
+
+    let gone = crate::spec::names::BlueprintPath::new(
+        std::env::temp_dir().join("nothing-here").to_string_lossy(),
+    )
+    .unwrap();
+    let issues = spawn(&SpawnRequest::new(SpawnSource::BlueprintFile(gone)), &env)
+        .await
+        .unwrap_err();
+    assert_eq!(found(&issues), ["source.blueprint_file Unresolvable"]);
+}
+
+/// Only a caller on this machine may name a blueprint by its directory: a
+/// request from the network that does is refused with where and why.
+#[test]
+fn a_remote_request_may_not_name_a_directory() {
+    let path =
+        crate::spec::names::BlueprintPath::new(std::env::temp_dir().join("x").to_string_lossy())
+            .unwrap();
+    let issues = SpawnRequest::new(SpawnSource::BlueprintFile(path))
+        .check_remote()
+        .unwrap_err();
+    assert_eq!(found(&issues), ["source.blueprint_file NotAllowed"]);
+    assert!(raw(graph()).check_remote().is_ok());
+    let named = SpawnRequest::new(SpawnSource::Blueprint(
+        BlueprintRef::parse("coder").unwrap(),
+    ));
+    assert!(named.check_remote().is_ok());
+    // A run whose caller wrote its graph comes from no blueprint.
+    assert_eq!(SpecOrigin::Raw.blueprint_name(), None);
+    assert_eq!(SpecOrigin::Raw.digest(), None);
+}

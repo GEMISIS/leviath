@@ -32,6 +32,12 @@ pub struct Resumable {
     pub state: crate::state::RunState,
     /// The code its spec names, for binding.
     pub code: crate::spec::env::CodeFiles,
+    /// The files it was given or made, by digest, for the store its tools
+    /// read from. A file whose bytes do not read is left out.
+    pub blobs: std::collections::BTreeMap<crate::spec::names::Digest, Vec<u8>>,
+    /// How many questions it has put to a person, answered or still open,
+    /// so a question it asks again gets an id of its own.
+    pub asked: u64,
 }
 
 /// Read the run in `run_dir` back from its run file.
@@ -46,9 +52,25 @@ pub fn read_for_resume(
         return Ok(None);
     }
     let reader = crate::runfile::RunFileReader::open(&path)?;
+    let state = reader.latest_state()?;
+    let blobs = reader
+        .blob_digests()
+        .map(|d| (d.clone(), reader.blob(d).ok().flatten().unwrap_or_default()))
+        .collect();
+    // Every step decoded on the way to the state, so these read too.
+    let answered = reader
+        .deltas(1, reader.last_seq())
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|d| &d.events)
+        .filter(|e| matches!(e, crate::state::RunEvent::Answered { .. }))
+        .count();
+    let open = state.interactions.len() + state.pending.as_ref().map_or(0, |b| b.calls.len());
     Ok(Some(Resumable {
-        state: reader.latest_state()?,
+        asked: u64::try_from(answered + open).unwrap_or(u64::MAX),
         code: reader.code_files()?,
+        blobs,
+        state,
         spec: std::sync::Arc::new(reader.spec().clone()),
     }))
 }

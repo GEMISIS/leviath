@@ -173,10 +173,13 @@ system_prompt = "Plan the work"
         .unwrap();
         // The blueprint is named by its directory, which the daemon reads it
         // and the files beside it from.
-        let leviath_runtime::spec::request::SpawnSource::BlueprintFile(path) = &spawn.source else {
-            panic!("a blueprint read from its directory");
-        };
-        assert!(path.as_str().ends_with("coder"));
+        let source = serde_json::to_value(&spawn.source).unwrap();
+        assert!(
+            source["blueprint_file"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("coder")),
+            "{source}"
+        );
         use leviath_runtime::spec::inputs::RawInput;
         assert_eq!(
             spawn.inputs.get("task"),

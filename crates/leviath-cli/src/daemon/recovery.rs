@@ -36,16 +36,6 @@ pub(crate) struct Recovered {
     pub reloaded: Vec<(String, AgentId)>,
 }
 
-/// A run read back from its directory, with what binding it does not need
-/// but resuming it does.
-struct Found {
-    run: Resumable,
-    /// The files the run was given or made, by digest.
-    blobs: Vec<(leviath_runtime::spec::names::Digest, Vec<u8>)>,
-    /// How many questions the run had put to a person, answered or not.
-    asked: u64,
-}
-
 /// Convert every run directory under `runs_dir` that is still in the older
 /// many-file layout into a run file, logging what each conversion had to fill
 /// in. A directory that cannot be converted is left as it is and said so.
@@ -101,45 +91,13 @@ fn convert_old_run(dir: &Path, _agents_dir: Option<&Path>) {
 
 /// Read the run in `dir` from its run file. `None` when the directory holds
 /// none, or one that cannot be read (said in the log).
-fn read_run(dir: &Path) -> Option<Found> {
-    let path = dir.join(leviath_core::files::RUN_FILE);
-    if !path.is_file() {
-        return None;
-    }
-    let read = leviath_runtime::runfile::RunFileReader::open(&path).and_then(|reader| {
-        let state = reader.latest_state()?;
-        let code = reader.code_files()?;
-        let blobs = reader
-            .blob_digests()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|d| Ok((d.clone(), reader.blob(&d)?.unwrap_or_default())))
-            .collect::<Result<Vec<_>, leviath_runtime::runfile::RunFileError>>()?;
-        let answered = reader
-            .deltas(1, reader.last_seq())?
-            .iter()
-            .flat_map(|d| &d.events)
-            .filter(|e| matches!(e, leviath_runtime::state::RunEvent::Answered { .. }))
-            .count();
-        let open = state.interactions.len() + state.pending.as_ref().map_or(0, |b| b.calls.len());
-        Ok(Found {
-            asked: u64::try_from(answered + open).unwrap_or(u64::MAX),
-            run: Resumable {
-                spec: std::sync::Arc::new(reader.spec().clone()),
-                state,
-                code,
-            },
-            blobs,
-        })
-    });
-    match read {
-        Ok(found) => Some(found),
-        Err(e) => {
+fn read_run(dir: &Path) -> Option<Resumable> {
+    leviath_runtime::restore::read_for_resume(dir)
+        .inspect_err(|e| {
             tracing::warn!(error = %e, "a run file could not be read; the run is not resumed");
-            None
-        }
-    }
+        })
+        .ok()
+        .flatten()
 }
 
 /// Bind a run read back from its file and place it in the world. A binding
@@ -147,38 +105,33 @@ fn read_run(dir: &Path) -> Option<Found> {
 fn resume_one(
     world: &mut PipelineWorld,
     starter: &DaemonStarter,
-    found: Found,
+    run: Resumable,
 ) -> Result<Entity, SpawnIssues> {
-    let Found { run, blobs, asked } = found;
     let run_id = run.spec.run_id.to_string();
     let env = starter.env_for_graph(&run.spec.graph, starter.config.current());
     let bound =
         crate::daemon::block_on::block_on(leviath_runtime::bind::bind(&run.spec, &run.code, &env));
-    let bindings = match bound {
-        Ok(bindings) => bindings,
-        Err(issues) => {
-            let path = starter
-                .runs_dir
-                .join(&run_id)
-                .join(leviath_core::files::RUN_FILE);
-            tracing::error!(run_id = %run_id, issues = %issues, "a run could not be resumed on this machine");
-            if let Err(e) = crate::daemon::starter::record_failed(&path, &run.state, &issues) {
-                tracing::warn!(run_id = %run_id, error = %e, "could not record why the run did not resume");
-            }
-            return Err(issues);
+    let bindings = bound.inspect_err(|issues| {
+        let path = starter
+            .runs_dir
+            .join(&run_id)
+            .join(leviath_core::files::RUN_FILE);
+        tracing::error!(run_id = %run_id, issues = %issues, "a run could not be resumed on this machine");
+        if let Err(e) = crate::daemon::starter::record_failed(&path, &run.state, issues) {
+            tracing::warn!(run_id = %run_id, error = %e, "could not record why the run did not resume");
         }
-    };
+    })?;
     crate::daemon::starter::store_blobs(
         starter.blob_store.as_ref(),
         &run_id,
-        blobs.iter().map(|(d, b)| (d, b)),
+        &run.blobs,
         &run.state.context,
     );
     starter.mcp_pool.lease_servers(
         &crate::daemon::starter::mcp_configs(&run.spec.graph),
         &run_id,
     );
-    starter.hub.continue_count(&run_id, asked);
+    starter.hub.continue_count(&run_id, run.asked);
     Ok(leviath_runtime::restore::resume(
         world.world_mut(),
         run,
@@ -199,23 +152,23 @@ pub(crate) fn resume_all(
     let Ok(entries) = std::fs::read_dir(runs_dir) else {
         return Recovered::default();
     };
-    let found: Vec<Found> = entries
+    let found: Vec<Resumable> = entries
         .flatten()
         .filter_map(|e| read_run(&e.path()))
         .collect();
     starter.refresh_world(world);
-    let mut placed: Vec<(String, Entity)> = Vec::new();
-    for found in leviath_runtime::restore::triage(found, |f| &f.run) {
-        let run_id = found.run.spec.run_id.to_string();
-        if let Ok(entity) = resume_one(world, starter, found) {
-            placed.push((run_id, entity));
+    let mut placed: Vec<Placed> = Vec::new();
+    for run in leviath_runtime::restore::triage(found, |r| r) {
+        let spec = run.spec.clone();
+        if let Ok(entity) = resume_one(world, starter, run) {
+            placed.push(Placed { spec, entity });
         }
     }
     relink_tree(world, &placed);
     Recovered {
         reloaded: placed
             .into_iter()
-            .map(|(run_id, entity)| (run_id, world.own_agent(entity)))
+            .map(|p| (p.spec.run_id.to_string(), world.own_agent(p.entity)))
             .collect(),
     }
 }
@@ -230,33 +183,37 @@ pub(crate) fn reload_run(
 ) -> Option<AgentId> {
     let dir = starter.runs_dir.join(run_id);
     convert_old_run(&dir, starter.agents_dir.as_deref());
-    let mut found = read_run(&dir)?;
-    match &found.run.state.status {
+    let mut run = read_run(&dir)?;
+    match &run.state.status {
         RunStatus::Complete | RunStatus::Error(_) => return None,
         RunStatus::Cancelled => {
-            found.run.state.status = RunStatus::Paused;
-            found.run.state.phase = leviath_runtime::state::PipelinePhase::Paused;
+            run.state.status = RunStatus::Paused;
+            run.state.phase = leviath_runtime::state::PipelinePhase::Paused;
         }
         _ => {}
     }
     starter.refresh_world(world);
-    let entity = resume_one(world, starter, found).ok()?;
+    let entity = resume_one(world, starter, run).ok()?;
     Some(world.own_agent(entity))
+}
+
+/// A run brought back, with the spec it was placed from.
+struct Placed {
+    spec: std::sync::Arc<leviath_runtime::spec::run_spec::RunSpec>,
+    entity: Entity,
 }
 
 /// Link the runs brought back into the tree they were in: each child to the
 /// run that started it, and each parent to the children it recorded. A link
 /// whose other end did not come back is left out.
-fn relink_tree(world: &mut PipelineWorld, placed: &[(String, Entity)]) {
+fn relink_tree(world: &mut PipelineWorld, placed: &[Placed]) {
     use leviath_runtime::components::{AgentState, ParentRef, SubAgentChildren};
-    use leviath_runtime::insert::RunSpecC;
-    let by_run_id: std::collections::HashMap<&str, Entity> =
-        placed.iter().map(|(id, e)| (id.as_str(), *e)).collect();
+    let by_run_id: std::collections::HashMap<&str, Entity> = placed
+        .iter()
+        .map(|p| (p.spec.run_id.as_str(), p.entity))
+        .collect();
     let w = world.world_mut();
-    for (run_id, entity) in placed {
-        let Some(spec) = w.get::<RunSpecC>(*entity).map(|s| s.0.clone()) else {
-            continue;
-        };
+    for Placed { spec, entity } in placed {
         if let Some(parent) = &spec.placement.parent {
             match by_run_id.get(parent.as_str()) {
                 Some(&parent_entity) => {
@@ -266,10 +223,15 @@ fn relink_tree(world: &mut PipelineWorld, placed: &[(String, Entity)]) {
                         depth: usize::from(spec.placement.depth),
                     });
                 }
-                None => tracing::warn!(
-                    run_id = %run_id, parent = %parent,
-                    "parent run did not come back; leaving the child unlinked"
-                ),
+                None => {
+                    // Formatted outside the macro, so the text is made
+                    // whether or not a subscriber reads the fields.
+                    let (child, parent) = (spec.run_id.to_string(), parent.to_string());
+                    tracing::warn!(
+                        run_id = %child, parent = %parent,
+                        "parent run did not come back; leaving the child unlinked"
+                    );
+                }
             }
         }
         let recorded = w

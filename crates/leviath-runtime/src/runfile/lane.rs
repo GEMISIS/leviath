@@ -115,9 +115,7 @@ impl RunFileLane {
     /// Make every later write to `run_id`'s open file fail.
     #[cfg(test)]
     pub(crate) fn break_writes(&mut self, run_id: &str) {
-        if let Some(writer) = self.writers.get_mut(run_id) {
-            crate::runfile::writer::break_writes(writer);
-        }
+        crate::runfile::writer::break_writes(self.writers.get_mut(run_id).expect("an open file"));
     }
 
     /// Record one step for its run, under `runs_dir`.

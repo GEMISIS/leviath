@@ -134,6 +134,19 @@ impl ResolveEnv for Fake {
             })
     }
 
+    async fn blueprint_file(
+        &self,
+        path: &crate::spec::names::BlueprintPath,
+    ) -> Result<LoadedBlueprint, SpawnIssue> {
+        self.blueprints.get(path.as_str()).cloned().ok_or_else(|| {
+            SpawnIssue::new(
+                SpecPath::root(),
+                IssueCode::Unresolvable,
+                "no blueprint is there",
+            )
+        })
+    }
+
     fn limits(&self) -> SpawnLimits {
         self.limits.clone()
     }

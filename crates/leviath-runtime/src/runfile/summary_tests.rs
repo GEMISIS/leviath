@@ -1,5 +1,5 @@
 use super::*;
-use crate::runfile::reader_tests::{code, initial, spec};
+use crate::runfile::reader_tests::{code, initial, read, spec, spec_frame};
 use crate::runfile::{CheckpointPolicy, RunFileWriter};
 use crate::state::{FinalOutputState, RunStatus};
 
@@ -56,4 +56,14 @@ fn a_run_is_listed_as_of_its_last_step() {
     assert_eq!(meta.prompt_tokens, 42);
     assert_eq!(meta.updated_at, 1234);
     assert_eq!(meta.final_output.unwrap().submitted_at, 7);
+}
+
+/// A run file whose state does not decode lists nothing, and says why.
+#[test]
+fn a_run_file_whose_state_does_not_decode_is_an_error() {
+    use crate::runfile::codec;
+    use crate::runfile::codec::FrameKind;
+    let state = codec::encode(FrameKind::State, &0u64).unwrap();
+    let reader = read(&[spec_frame(), state]).unwrap();
+    assert!(summary(&reader).is_err());
 }

@@ -71,8 +71,9 @@ fn cancel_in_run_file(run_dir: &Path, now: i64) -> Option<ForceCancelOutcome> {
             }
             next.status = State::Cancelled;
             next.phase = PipelinePhase::Done;
-            writer.record(next, now, Vec::new())?;
-            Ok(ForceCancelOutcome::Terminated)
+            writer
+                .record(next, now, Vec::new())
+                .map(|_| ForceCancelOutcome::Terminated)
         });
     Some(recorded.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "could not record a cancel in a run's file");

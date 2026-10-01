@@ -1065,12 +1065,13 @@ mod tests {
         )
     }
 
-    /// The `task` a request carries, or nothing.
+    /// The `task` a request carries: every request these tests send has one.
     fn task_of(request: &SpawnRequest) -> String {
-        match request.inputs.get("task") {
-            Some(crate::spec::inputs::RawInput::Text(t)) => t.clone(),
-            _ => String::new(),
-        }
+        serde_json::to_value(&request.inputs["task"])
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     /// The fake host's refusal.
@@ -1522,10 +1523,8 @@ mod tests {
             run_id: "t-1".to_string(),
         })
         .await;
-        let ControlResponse::State { state } = resp else {
-            panic!("expected a state, got {resp:?}");
-        };
-        assert_eq!(state.cursor.stage.as_str(), "plan");
+        let wire = serde_json::to_value(&resp).unwrap();
+        assert_eq!(wire["state"]["cursor"]["stage"], "plan", "{wire}");
         let resp = round_trip(&ControlRequest::Inspect {
             run_id: "ghost".to_string(),
         })
@@ -3045,6 +3044,35 @@ mod tests {
             response,
             ControlResponse::Error {
                 message: SHUTTING_DOWN.to_string()
+            }
+        );
+        draining.await.unwrap();
+    }
+
+    /// A check asked of a daemon that is going away says so, as a spawn
+    /// does; an inspect finds no run there.
+    #[tokio::test]
+    async fn a_check_and_an_inspect_say_the_daemon_is_shutting_down() {
+        let (mut listener, id, dir) = test_listener();
+        let token = ControlToken::create(dir.path()).unwrap();
+        let client =
+            ControlClient::for_home(id, dir.path()).with_reconnect_grace(std::time::Duration::ZERO);
+        let draining = tokio::spawn(async move {
+            for _ in 0..2 {
+                let stream = listener.accept().await.unwrap().unwrap();
+                let (op_tx, op_rx) = mpsc::unbounded_channel();
+                drop(op_rx);
+                let _ = handle_connection(stream, op_tx, no_events(), Some(token.clone())).await;
+            }
+        });
+        let shutting = ControlResponse::Error {
+            message: SHUTTING_DOWN.to_string(),
+        };
+        assert_eq!(client.validate_spawn(request("r")).await.unwrap(), shutting);
+        assert_eq!(
+            client.inspect("r").await.unwrap(),
+            ControlResponse::Error {
+                message: "no run 'r' is live or has a run file".to_string()
             }
         );
         draining.await.unwrap();

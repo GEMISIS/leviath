@@ -62,6 +62,8 @@ fn resumable(depth: u8, created_at: i64, status: RunStatus, phase: PipelinePhase
         spec: std::sync::Arc::new(spec),
         state,
         code: Default::default(),
+        blobs: Default::default(),
+        asked: 0,
     }
 }
 
@@ -117,4 +119,53 @@ fn children_come_back_first_then_active_runs_then_the_newest() {
         .map(|r| (r.spec.placement.depth, r.spec.created_at))
         .collect();
     assert_eq!(order, vec![(1, 0), (0, 5), (0, 2), (0, 1)]);
+}
+
+/// A run comes back with the files its file holds and a count of the
+/// questions it put to a person: the ones answered in its history, the ones
+/// still open, and the calls in flight that may ask one.
+#[test]
+fn a_run_comes_back_with_its_files_and_the_questions_it_asked() {
+    use crate::runfile::{CheckpointPolicy, RunFileWriter};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(leviath_core::files::RUN_FILE);
+    let first = scripted_run(1).remove(0);
+    let mut writer = RunFileWriter::create(
+        &path,
+        &spec(),
+        &crate::runfile::reader_tests::code(),
+        &first,
+        CheckpointPolicy::default(),
+    )
+    .unwrap();
+    let digest = crate::spec::names::Digest::of(b"bytes");
+    writer.add_blob(&digest, b"bytes").unwrap();
+    let mut next = first.clone();
+    next.interactions.push(crate::state::OpenInteraction {
+        id: "q-2".into(),
+        prompt: "again?".into(),
+        options: Vec::new(),
+    });
+    next.pending = Some(crate::state::PendingBatch {
+        calls: vec![crate::state::context::ToolCallState {
+            id: "c1".into(),
+            name: "ask_user_text".into(),
+            args: Default::default(),
+            thought_signature: None,
+        }],
+        done: Default::default(),
+    });
+    writer
+        .record(
+            next,
+            1,
+            vec![crate::state::RunEvent::Answered {
+                id: "q-1".into(),
+                answer: "yes".into(),
+            }],
+        )
+        .unwrap();
+    let run = read_for_resume(dir.path()).unwrap().expect("a run file");
+    assert_eq!(run.blobs[&digest], b"bytes");
+    assert_eq!(run.asked, 3);
 }

@@ -851,6 +851,22 @@ async fn a_refused_spawn_ends_the_turn_as_refusal() {
     h.close_input().await;
 }
 
+/// A blueprint gone from under a session cannot be asked for: the turn ends
+/// as a refusal without the daemon being asked.
+#[tokio::test]
+async fn a_spawn_whose_blueprint_is_gone_ends_the_turn_as_refusal() {
+    let daemon = ScriptedDaemon::new(vec![], spawn_ok);
+    let (mut h, bp) = opened_session(daemon, false).await;
+    std::fs::remove_dir_all(bp.path().join("coder")).unwrap();
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    assert_eq!(
+        h.recv_until(is_result).await.result.unwrap()["stopReason"],
+        "refusal"
+    );
+    h.close_input().await;
+}
+
 #[tokio::test]
 async fn a_second_prompt_is_delivered_as_a_message() {
     let daemon = ScriptedDaemon::new(vec![completed("complete")], spawn_ok);

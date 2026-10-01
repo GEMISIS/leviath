@@ -1709,6 +1709,15 @@ mod tests {
             refused.message
         );
 
+        let rejected =
+            spawn_outcome(Some(crate::test_support::rejected_reply("no task given"))).await;
+        assert!(!rejected.ok);
+        assert!(
+            rejected.message.contains("no task given"),
+            "{}",
+            rejected.message
+        );
+
         let odd = spawn_outcome(Some(r#"{"result":"ok","ok":true}"#)).await;
         assert!(!odd.ok);
         assert!(odd.message.contains("Unexpected"), "{}", odd.message);

@@ -980,21 +980,7 @@ fn start_worker(
         .ok_or_else(|| "no fan-out spawner installed".to_string())?;
     let source = match &config.worker {
         WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
-        // A same-graph worker runs the blueprint its parent ran (an installed
-        // one at the revision the parent ran), so the files beside it (hooks,
-        // validators, scripts) are there for the worker too. A parent that
-        // ran its own graph hands the worker that graph.
-        WorkerSource::Stage(_) => match &spec.origin {
-            crate::spec::run_spec::SpecOrigin::Blueprint { blueprint, .. } => {
-                SpawnSource::Blueprint(blueprint.clone())
-            }
-            crate::spec::run_spec::SpecOrigin::BlueprintFile { path, .. } => {
-                SpawnSource::BlueprintFile(path.clone())
-            }
-            crate::spec::run_spec::SpecOrigin::Raw => {
-                SpawnSource::Raw(Box::new(spec.graph.clone()))
-            }
-        },
+        WorkerSource::Stage(_) => spec.same_graph_source(),
         WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
     };
     let (request, caller) = items::worker_request(&spec, config, item, source, parent_depth);
@@ -1371,8 +1357,22 @@ mod tests {
         let mut raw = (*world.get::<RunSpecC>(parent).unwrap().0).clone();
         raw.origin = crate::spec::run_spec::SpecOrigin::Raw;
         let graph = raw.graph.clone();
-        world.entity_mut(parent).insert(RunSpecC(Arc::new(raw)));
+        world
+            .entity_mut(parent)
+            .insert(RunSpecC(Arc::new(raw.clone())));
         start_worker(&mut world, parent, &config, &item("b")).expect("the worker starts");
+        let path = crate::spec::names::BlueprintPath::new(
+            std::env::temp_dir().join("t").to_string_lossy(),
+        )
+        .unwrap();
+        raw.origin = crate::spec::run_spec::SpecOrigin::BlueprintFile {
+            path: path.clone(),
+            name: crate::spec::names::BlueprintName::new("t").unwrap(),
+            digest: None,
+            version: String::new(),
+        };
+        world.entity_mut(parent).insert(RunSpecC(Arc::new(raw)));
+        start_worker(&mut world, parent, &config, &item("c")).expect("the worker starts");
 
         let sources = recording.sources.lock().unwrap();
         assert_eq!(
@@ -1380,6 +1380,9 @@ mod tests {
             SpawnSource::Blueprint(BlueprintRef::parse("t").unwrap())
         );
         assert_eq!(sources[1], SpawnSource::Raw(Box::new(graph)));
+        assert_eq!(sources[2], SpawnSource::BlueprintFile(path));
+        assert!(recording.find_worker("helper").is_ok());
+        assert!(recording.find_worker("helper@not-a-digest").is_err());
     }
 
     fn status_of(world: &World, e: Entity) -> AgentStatus {

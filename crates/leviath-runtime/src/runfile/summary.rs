@@ -17,14 +17,12 @@ pub fn summary(reader: &RunFileReader) -> Result<RunMeta, RunFileError> {
     let spec = reader.spec();
     let state = reader.latest_state()?;
     // When the run last moved: its last step, or when it was resolved for one
-    // that has taken none.
-    let updated_at = match state.seq {
-        0 => spec.created_at,
-        seq => reader
-            .deltas(seq, seq)?
-            .last()
-            .map_or(spec.created_at, |delta| delta.at),
-    };
+    // that has taken none. The step decoded a moment ago, as part of the state.
+    let updated_at = reader
+        .deltas(state.seq, state.seq)
+        .ok()
+        .and_then(|deltas| deltas.last().map(|delta| delta.at))
+        .unwrap_or(spec.created_at);
     let ledger = place::stage_ledger(&state);
     let final_output = place::final_output(&state);
     Ok(build_run_meta(

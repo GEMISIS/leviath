@@ -870,43 +870,15 @@ system_prompt = "Plan the work"
     /// task, the other text inputs as `regions`, and each attachment's name,
     /// region, type and caption under `parts`. `Null` for any other request.
     fn spawn_args_of(req: &ControlRequest) -> serde_json::Value {
-        use leviath_runtime::spec::inputs::RawInput;
-        let ControlRequest::Spawn { request } = req else {
-            return serde_json::Value::Null;
-        };
-        let text = |v: &RawInput| match v {
-            RawInput::Text(t) => serde_json::Value::String(t.clone()),
-            other => serde_json::to_value(other).unwrap(),
-        };
-        let mut regions = serde_json::Map::new();
-        for (name, value) in &request.inputs {
-            if name != "task" {
-                regions.insert(name.clone(), text(value));
-            }
-        }
-        let parts: Vec<serde_json::Value> = request
-            .attachments
-            .iter()
-            .map(|a| {
-                let mut part = serde_json::Map::new();
-                part.insert("name".into(), a.name.clone().into());
-                if let Some(region) = &a.region {
-                    part.insert("region".into(), region.as_str().into());
-                }
-                if let Some(mime) = &a.mime_type {
-                    part.insert("mime_type".into(), mime.as_str().into());
-                }
-                if let Some(caption) = &a.caption {
-                    part.insert("caption".into(), caption.clone().into());
-                }
-                serde_json::Value::Object(part)
-            })
-            .collect();
+        let wire = serde_json::to_value(req).unwrap();
+        let request = &wire["request"];
+        let mut regions = request["inputs"].as_object().cloned().unwrap_or_default();
+        let task = regions.remove("task");
         serde_json::json!({
-            "task": request.inputs.get("task").map(text),
+            "task": task,
             "regions": regions,
-            "parts": parts,
-            "no_seed_commands": !request.launch.seed_commands,
+            "parts": request["attachments"],
+            "no_seed_commands": !request["launch"]["seed_commands"].as_bool().unwrap_or(true),
         })
     }
 
@@ -960,8 +932,8 @@ system_prompt = "Plan the work"
         assert_eq!(parts[0]["region"], "storyboard");
         assert_eq!(parts[0]["mime_type"], "image/png");
         assert_eq!(parts[1]["name"], "notes.txt");
-        assert!(parts[1].get("region").is_none());
-        assert!(parts[1].get("mime_type").is_none());
+        assert!(parts[1]["region"].is_null());
+        assert!(parts[1]["mime_type"].is_null());
 
         // A body with no `request` field, an unexpected field, and an empty
         // file are each refused.
@@ -1013,7 +985,7 @@ system_prompt = "Plan the work"
         assert_eq!(names, ["brief.md", "hero.png", "brief.md"]);
         assert_eq!(parts[0]["region"], "notes");
         assert_eq!(parts[0]["caption"], "c");
-        assert!(parts[1].get("region").is_none());
+        assert!(parts[1]["region"].is_null());
         assert_eq!(parts[2]["region"], "brief");
 
         let body = format!(

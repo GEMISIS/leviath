@@ -3,12 +3,11 @@
 use super::*;
 
 /// Read each file and concatenate with `--- <path> ---` headers. Returns
-/// `Ok(None)` when the list is empty; a missing/unreadable file is an error only
-/// when `required`, else it is skipped.
+/// `Ok(None)` when the list is empty; a missing or unreadable file is an
+/// error naming it.
 pub(crate) fn read_and_concat(
     region: &str,
     paths: impl Iterator<Item = std::path::PathBuf>,
-    required: bool,
 ) -> Result<Option<String>, String> {
     let mut parts: Vec<String> = Vec::new();
     for path in paths {
@@ -21,12 +20,10 @@ pub(crate) fn read_and_concat(
                 crate::daemon::script_host::cap_script_io(text)
             )),
             Err(e) => {
-                if required {
-                    return Err(format!(
-                        "region '{region}': read seed file '{}': {e}",
-                        path.display()
-                    ));
-                }
+                return Err(format!(
+                    "region '{region}': read seed file '{}': {e}",
+                    path.display()
+                ));
             }
         }
     }

@@ -385,12 +385,12 @@ async fn a_runs_files_are_stored_as_its_parts_say() {
     let stray = leviath_runtime::spec::names::Digest::of(b"nothing names this");
     let context = &prepared.state.context;
     let store = leviath_core::mime::MemoryBlobStore::new();
-    let blobs = [
+    let blobs = std::collections::BTreeMap::from([
         (digests[0].clone(), bytes.clone()),
         (stray.clone(), b"x".to_vec()),
-    ];
-    store_blobs(&store, "r", blobs.iter().map(|(d, b)| (d, b)), context);
-    store_blobs(&store, "r", blobs.iter().map(|(d, b)| (d, b)), context);
+    ]);
+    store_blobs(&store, "r", &blobs, context);
+    store_blobs(&store, "r", &blobs, context);
     assert_eq!(
         leviath_core::mime::BlobStore::list(&store, "r")
             .unwrap()
@@ -398,6 +398,66 @@ async fn a_runs_files_are_stored_as_its_parts_say() {
         1
     );
     crate::test_support::with_tracing(|| {
-        store_blobs(&Refusing, "r", blobs.iter().map(|(d, b)| (d, b)), context);
+        store_blobs(&Refusing, "r", &blobs, context);
     });
+
+    // An inline part names no file, and a part whose type does not read
+    // stores its file as plain bytes.
+    let mut context = context.clone();
+    let parts = context
+        .regions
+        .iter_mut()
+        .flat_map(|r| r.entries.iter_mut())
+        .find(|e| !e.parts.is_empty())
+        .map(|e| &mut e.parts)
+        .expect("the image is a part of an entry");
+    let mut inline = parts[0].clone();
+    inline.body = leviath_runtime::state::context::PartBody::Inline("hi".to_string());
+    parts[0].mime_type = "not a type".to_string();
+    parts.insert(0, inline);
+    let fresh = leviath_core::mime::MemoryBlobStore::new();
+    store_blobs(&fresh, "r", &blobs, &context);
+    assert!(leviath_core::mime::BlobStore::has(
+        &fresh,
+        "r",
+        digests[0].as_str()
+    ));
+}
+
+/// A run that resolves and then cannot be bound (here, a grant in the
+/// operator's own config that does not read) is refused, and the refusal
+/// is the last step of its file, so it ends there rather than sitting as a
+/// run that never moved.
+#[tokio::test]
+async fn a_run_refused_at_its_binding_ends_on_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let manifest = manifest_in(
+        dir.path(),
+        "[agent]\nname = \"reader\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+         [read_paths]\nallow = [\"/tmp\"]\n\n\
+         [context.regions]\ntask = { kind = \"pinned\", max_tokens = 4000 }\n\n\
+         [stages.main]\nmode = \"autonomous\"\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
+         available_tools = []\nsystem_prompt = \"be brief\"\n",
+    );
+    let mut config = Config::default();
+    config.security.read_paths = vec!["glob:[".to_string()];
+    let starter = starter(config, registry(), runs.path());
+    let request = task_request(&manifest, "t");
+    let env = starter.env_for(&request, starter.config.current());
+    let issues = starter
+        .start_with(env, request, Caller::TopLevel)
+        .await
+        .expect_err("the grant does not read");
+    let run_dir = std::fs::read_dir(runs.path())
+        .unwrap()
+        .flatten()
+        .next()
+        .expect("the run was recorded before it was bound")
+        .path();
+    let state = RunFileReader::open(&run_dir.join(leviath_core::files::RUN_FILE))
+        .unwrap()
+        .latest_state()
+        .unwrap();
+    assert_eq!(state.status, RunStatus::Error(issues.to_string()));
 }
