@@ -174,17 +174,17 @@ fn answered(
 /// listed. A list holding no such call gets the move alone, standing for the
 /// call it gave up on.
 fn follow(attempts: &mut Vec<Attempt>, mut failover: FailoverRecord) {
-    let given_up = attempts.last_mut().filter(|held| {
-        held.failover.is_none() && matches!(held.record.outcome, AttemptOutcome::Failed { .. })
+    let last = attempts.last_mut().filter(|held| held.failover.is_none());
+    let failed = last.as_ref().and_then(|held| match &held.record.outcome {
+        AttemptOutcome::Failed { kind, .. } => Some(kind.clone()),
+        AttemptOutcome::Succeeded => None,
     });
-    match given_up {
-        Some(held) => {
-            if let AttemptOutcome::Failed { kind, .. } = &held.record.outcome {
-                failover.kind = kind.clone();
-            }
+    match (last, failed) {
+        (Some(held), Some(kind)) => {
+            failover.kind = kind;
             held.failover = Some(failover);
         }
-        None => attempts.push(Attempt {
+        _ => attempts.push(Attempt {
             record: AttemptRecord {
                 id: String::new(),
                 stage: failover.stage.clone(),

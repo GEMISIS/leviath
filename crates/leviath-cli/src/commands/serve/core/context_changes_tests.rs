@@ -196,3 +196,52 @@ async fn a_run_with_no_file_changed_nothing_and_an_unreadable_one_is_an_error() 
     })
     .await;
 }
+
+/// Every cause a change can be kept with reads back as itself, and a run that
+/// keeps its changes whole is read from them alone.
+#[tokio::test]
+async fn every_kept_cause_reads_back() {
+    use leviath_runtime::state::journal::{CauseState, ContextNoteState};
+    crate::runstate::with_isolated_runs_dir_async("context-changes-causes", |_d| async move {
+        let run_id = recorded();
+        let causes = [
+            (CauseState::Seed, ContextCause::Seed),
+            (CauseState::Message, ContextCause::Message),
+            (CauseState::ModelReply, ContextCause::ModelReply),
+            (CauseState::ToolResult, ContextCause::ToolResult),
+            (CauseState::ProducedPart, ContextCause::ProducedPart),
+            (CauseState::Compaction, ContextCause::Compaction),
+            (CauseState::Transform, ContextCause::Transform),
+            (CauseState::ContextTool, ContextCause::ContextTool),
+            (CauseState::Hook, ContextCause::Hook),
+            (CauseState::FanOut, ContextCause::FanOut),
+            (CauseState::Interaction, ContextCause::Interaction),
+            (CauseState::Resume, ContextCause::Resume),
+            (CauseState::Framework, ContextCause::Framework),
+        ];
+        step(
+            &run_id,
+            10,
+            causes
+                .iter()
+                .map(|(cause, _)| {
+                    RunEvent::ContextNoted(ContextNoteState {
+                        region: "plan".into(),
+                        cause: *cause,
+                        entries_added: 1,
+                        entries_removed: 0,
+                        token_delta: 2,
+                    })
+                })
+                .collect(),
+            |s| s.cursor.iteration += 1,
+        );
+        let changes = read(&run_id).unwrap();
+        let read_back: Vec<ContextCause> = changes.iter().map(|c| c.record.cause).collect();
+        let wanted: Vec<ContextCause> = causes.iter().map(|(_, c)| *c).collect();
+        assert_eq!(read_back, wanted);
+        assert!(changes.iter().all(|c| c.record.revision_before.is_none()));
+        assert_eq!(changes[0].record.regions[0].token_delta, 2);
+    })
+    .await;
+}

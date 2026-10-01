@@ -335,6 +335,83 @@ mod tests {
         .await;
     }
 
+    /// An execution kept whole carries its own id, how it ended and what it
+    /// produced; an ending, a dispatch or a file for no execution the file
+    /// holds is passed over, and a file whose type does not read is left out.
+    #[tokio::test]
+    async fn an_execution_kept_whole_reads_back_whole() {
+        use leviath_runtime::state::journal::{ArtifactState, ToolOutcomeState};
+        crate::runstate::with_isolated_runs_dir_async("executions-whole", |_d| async move {
+            let run_id = recorded();
+            let dispatched = |call: &str, execution: &str| RunEvent::Dispatched {
+                call_id: call.into(),
+                execution_id: execution.into(),
+                requested_by: "a1".into(),
+            };
+            let completed = |call: &str, execution: &str, outcome| RunEvent::Completed {
+                call_id: call.into(),
+                execution_id: execution.into(),
+                outcome: Some(outcome),
+                parts: Vec::new(),
+            };
+            let file = |mime: &str| ArtifactState {
+                name: "r".into(),
+                path: "r.md".into(),
+                mime_type: mime.into(),
+                size: 1,
+                sha256: String::new(),
+            };
+            step(
+                &run_id,
+                10,
+                vec![
+                    started("c1", serde_json::json!({})),
+                    started("c2", serde_json::json!({})),
+                    started("c3", serde_json::json!({})),
+                    dispatched("c1", "x1"),
+                    dispatched("c2", "x2"),
+                    dispatched("c3", "x3"),
+                    dispatched("ghost", "x9"),
+                ],
+                |s| s.cursor.iteration += 1,
+            );
+            step(
+                &run_id,
+                20,
+                vec![
+                    completed("c1", "x1", ToolOutcomeState::Blocked),
+                    completed("c2", "x2", ToolOutcomeState::Denied),
+                    completed("c3", "x3", ToolOutcomeState::Failed),
+                    completed("ghost", "x9", ToolOutcomeState::Succeeded),
+                    RunEvent::Artifacts {
+                        execution_id: "x1".into(),
+                        artifacts: vec![file("text/markdown"), file("not a type")],
+                    },
+                    RunEvent::Artifacts {
+                        execution_id: "x9".into(),
+                        artifacts: vec![file("text/plain")],
+                    },
+                ],
+                |s| s.cursor.iteration += 1,
+            );
+            let ran = read(&run_id).unwrap();
+            let ids: Vec<&str> = ran.iter().map(|e| e.id.as_str()).collect();
+            assert_eq!(ids, vec!["x1", "x2", "x3"]);
+            assert_eq!(ran[0].requested_by, "a1");
+            let outcomes: Vec<Option<ToolOutcome>> = ran.iter().map(|e| e.outcome).collect();
+            assert_eq!(
+                outcomes,
+                vec![
+                    Some(ToolOutcome::Blocked),
+                    Some(ToolOutcome::Denied),
+                    Some(ToolOutcome::Failed)
+                ]
+            );
+            assert_eq!(ran[0].artifacts.len(), 1, "the file whose type reads");
+        })
+        .await;
+    }
+
     /// A run with no file did nothing, and a result asked of it is nothing:
     /// the caller read a page a moment ago and the run has gone since.
     #[tokio::test]

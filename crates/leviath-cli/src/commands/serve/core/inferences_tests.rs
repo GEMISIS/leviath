@@ -109,3 +109,84 @@ async fn a_run_with_no_file_made_no_calls_and_an_unreadable_one_is_an_error() {
     })
     .await;
 }
+
+/// A call kept whole reads back with every capture state its request can be
+/// in, and a move after a call that answered stands on its own.
+#[tokio::test]
+async fn a_call_kept_whole_reads_back_whole() {
+    use leviath_core::JsonDoc;
+    use leviath_core::run_archive::CaptureStatus;
+    use leviath_runtime::state::journal::{
+        AttemptOutcomeState, AttemptState, CaptureState, ModelInputState, RequestDigestState,
+    };
+    crate::runstate::with_isolated_runs_dir_async("inferences-whole", |_d| async move {
+        let run_id = recorded();
+        let kept = |id: &str, capture: CaptureState| {
+            RunEvent::Attempt(Box::new(AttemptState {
+                id: id.to_string(),
+                number: 1,
+                provider: "anthropic".into(),
+                model: "m".into(),
+                outcome: AttemptOutcomeState::Succeeded,
+                finish_reason: None,
+                stopped_for: None,
+                duration_ms: 1,
+                backoff_ms: 0,
+                digest: RequestDigestState {
+                    system_hash: 1,
+                    messages: 1,
+                    tools: 0,
+                    max_tokens: 1,
+                    temperature: 0.0,
+                },
+                model_input: Some(ModelInputState {
+                    capture,
+                    request: None,
+                    bytes: 0,
+                    source_context_digest: String::new(),
+                    parameters: [("t".to_string(), JsonDoc::new(serde_json::json!(1)))].into(),
+                    tool_catalog_version: String::new(),
+                    assembly_version: String::new(),
+                }),
+            }))
+        };
+        step(
+            &run_id,
+            10,
+            vec![
+                kept("a1", CaptureState::Retained),
+                kept("a2", CaptureState::NotCaptured),
+                kept("a3", CaptureState::Redacted),
+                kept("a4", CaptureState::Expired),
+                RunEvent::Failover {
+                    from: model("anthropic/m"),
+                    to: model("anthropic/n"),
+                    reason: "after an answer".into(),
+                },
+            ],
+            |s| s.cursor.iteration += 1,
+        );
+        let calls = read(&run_id).unwrap();
+        let captures: Vec<CaptureStatus> = calls
+            .iter()
+            .filter_map(|c| c.record.model_input.as_ref().map(|m| m.capture_status))
+            .collect();
+        assert_eq!(
+            captures,
+            vec![
+                CaptureStatus::Retained,
+                CaptureStatus::NotCaptured,
+                CaptureStatus::Redacted,
+                CaptureStatus::Expired
+            ]
+        );
+        assert_eq!(
+            calls[0].record.model_input.as_ref().unwrap().parameters["t"],
+            serde_json::json!(1)
+        );
+        assert_eq!(calls.len(), 5, "the move stands on its own");
+        assert!(calls[3].failover.is_none());
+        assert!(calls[4].failover.is_some());
+    })
+    .await;
+}

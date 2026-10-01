@@ -123,3 +123,59 @@ async fn a_run_with_no_file_asked_nothing_and_an_unreadable_one_is_an_error() {
     })
     .await;
 }
+
+/// A question kept whole reads back with its own kind, tool and stage, and a
+/// settlement that is not one reads as the text it was.
+#[tokio::test]
+async fn a_question_kept_whole_reads_back_whole() {
+    use leviath_runtime::state::journal::{QuestionKind, SettledState};
+    crate::runstate::with_isolated_runs_dir_async("interactions-whole", |_d| async move {
+        let run_id = recorded();
+        let settled = |id: &str, kind: QuestionKind, settlement: &str| {
+            RunEvent::Settled(Box::new(SettledState {
+                id: id.to_string(),
+                kind,
+                tool: Some("shell".into()),
+                prompt: "?".into(),
+                stage: "plan".into(),
+                settlement: settlement.to_string(),
+                asked_at: 3,
+            }))
+        };
+        let timed_out = serde_json::to_string(&Settlement::TimedOut).unwrap();
+        step(
+            &run_id,
+            10,
+            vec![
+                settled("q1", QuestionKind::FreeText, "typed words"),
+                settled("q2", QuestionKind::MultipleChoice, &timed_out),
+                settled("q3", QuestionKind::Confirm, &timed_out),
+                settled("q4", QuestionKind::ToolApproval, &timed_out),
+                settled("q5", QuestionKind::EditText, &timed_out),
+            ],
+            |s| s.cursor.iteration += 1,
+        );
+        let asked = read(&run_id).unwrap();
+        let kinds: Vec<InteractionKind> = asked.iter().map(|q| q.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                InteractionKind::FreeText,
+                InteractionKind::MultipleChoice,
+                InteractionKind::Confirm,
+                InteractionKind::ToolApproval,
+                InteractionKind::EditText
+            ]
+        );
+        assert_eq!(asked[0].stage, "plan");
+        assert_eq!(asked[0].tool.as_deref(), Some("shell"));
+        assert_eq!(asked[0].asked_at, 3);
+        assert_eq!(asked[0].at, 10);
+        assert!(matches!(
+            &asked[0].settlement,
+            Settlement::Answered { text: Some(t), .. } if t == "typed words"
+        ));
+        assert_eq!(asked[1].settlement, Settlement::TimedOut);
+    })
+    .await;
+}

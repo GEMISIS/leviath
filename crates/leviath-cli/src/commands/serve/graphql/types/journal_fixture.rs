@@ -63,9 +63,7 @@ fn at_of(record: &RunRecord) -> Option<i64> {
         | RunRecord::ArtifactsProduced { at, .. }
         | RunRecord::Interaction { at, .. }
         | RunRecord::ContextTransaction { at, .. }
-        | RunRecord::ContextChange { at, .. }
-        | RunRecord::Message { at, .. }
-        | RunRecord::InferenceUsage { at, .. } => Some(*at),
+        | RunRecord::ContextChange { at, .. } => Some(*at),
         _ => None,
     }
 }

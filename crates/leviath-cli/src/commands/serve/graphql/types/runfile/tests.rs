@@ -705,8 +705,155 @@ fn delta() -> CoreDelta {
             },
             RunEvent::Message(message()),
             RunEvent::Log("a line".into()),
-        ],
+        ]
+        .into_iter()
+        .chain(kept_facts())
+        .collect(),
     }
+}
+
+/// One of every fact a step keeps whole, in every word its vocabularies hold.
+fn kept_facts() -> Vec<RunEvent> {
+    use leviath_runtime::state::journal::{
+        ArtifactState, AttemptOutcomeState, AttemptState, CaptureState, CauseState,
+        ContextCommitState, ContextNoteState, ModelInputState, QuestionKind, RegionCommitState,
+        RequestDigestState, RetryState, SettledState, ToolOutcomeState,
+    };
+    let attempt = |outcome: AttemptOutcomeState, capture: Option<CaptureState>| {
+        RunEvent::Attempt(Box::new(AttemptState {
+            id: "a1".into(),
+            number: 2,
+            provider: "mock".into(),
+            model: "m".into(),
+            outcome,
+            finish_reason: Some("stop".into()),
+            stopped_for: Some("filter".into()),
+            duration_ms: 9,
+            backoff_ms: 3,
+            digest: RequestDigestState {
+                system_hash: 7,
+                messages: 4,
+                tools: 2,
+                max_tokens: 100,
+                temperature: 0.5,
+            },
+            model_input: capture.map(|capture| ModelInputState {
+                capture,
+                request: Some(JsonDoc::new(serde_json::json!({ "model": "m" }))),
+                bytes: 15,
+                source_context_digest: "ctx".into(),
+                parameters: [("t".to_string(), JsonDoc::new(serde_json::json!(0.5)))].into(),
+                tool_catalog_version: "t1".into(),
+                assembly_version: "1".into(),
+            }),
+        }))
+    };
+    let failed = |next| AttemptOutcomeState::Failed {
+        kind: "timeout".into(),
+        transient: true,
+        capacity: false,
+        next,
+    };
+    let mut events = vec![
+        attempt(AttemptOutcomeState::Succeeded, Some(CaptureState::Retained)),
+        attempt(
+            AttemptOutcomeState::Succeeded,
+            Some(CaptureState::NotCaptured),
+        ),
+        attempt(failed(RetryState::Reported), Some(CaptureState::Redacted)),
+        attempt(failed(RetryState::SameModel), Some(CaptureState::Expired)),
+        attempt(failed(RetryState::RenewedFiles), None),
+        RunEvent::Dispatched {
+            call_id: "c1".into(),
+            execution_id: "x1".into(),
+            requested_by: "a1".into(),
+        },
+        RunEvent::Artifacts {
+            execution_id: "x1".into(),
+            artifacts: vec![ArtifactState {
+                name: "report".into(),
+                path: "out/r.md".into(),
+                mime_type: "text/markdown".into(),
+                size: 9,
+                sha256: "beef".into(),
+            }],
+        },
+        RunEvent::ContextNoted(ContextNoteState {
+            region: "plan".into(),
+            cause: CauseState::Seed,
+            entries_added: 1,
+            entries_removed: 2,
+            token_delta: -3,
+        }),
+    ];
+    for outcome in [
+        Some(ToolOutcomeState::Succeeded),
+        Some(ToolOutcomeState::Failed),
+        Some(ToolOutcomeState::Blocked),
+        Some(ToolOutcomeState::Denied),
+        Some(ToolOutcomeState::Indeterminate),
+        None,
+    ] {
+        events.push(RunEvent::Completed {
+            call_id: "c1".into(),
+            execution_id: "x1".into(),
+            outcome,
+            parts: vec!["chart.png".into()],
+        });
+    }
+    for (kind, settlement) in [
+        (QuestionKind::FreeText, "\"timed_out\""),
+        (QuestionKind::MultipleChoice, "\"cancelled\""),
+        (QuestionKind::Confirm, "{}"),
+        (QuestionKind::ToolApproval, "\"timed_out\""),
+        (QuestionKind::EditText, "not json"),
+    ] {
+        events.push(RunEvent::Settled(Box::new(SettledState {
+            id: "q1".into(),
+            kind,
+            tool: Some("shell".into()),
+            prompt: "?".into(),
+            stage: "plan".into(),
+            settlement: settlement.into(),
+            asked_at: 4,
+        })));
+    }
+    for (at, cause) in [
+        CauseState::Seed,
+        CauseState::Message,
+        CauseState::ModelReply,
+        CauseState::ToolResult,
+        CauseState::ProducedPart,
+        CauseState::Compaction,
+        CauseState::Transform,
+        CauseState::ContextTool,
+        CauseState::Hook,
+        CauseState::FanOut,
+        CauseState::Interaction,
+        CauseState::Resume,
+        CauseState::Framework,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        events.push(RunEvent::ContextCommitted(Box::new(ContextCommitState {
+            cause,
+            execution_id: (at == 0).then(|| "x1".to_string()),
+            revision_before: "cw1-a".into(),
+            revision_after: "cw1-b".into(),
+            regions: vec![RegionCommitState {
+                region: "plan".into(),
+                digest_before: "d1".into(),
+                digest_after: "d2".into(),
+                tokens_before: 1,
+                tokens_after: 5,
+                entries_before: 0,
+                entries_after: 1,
+                entries_added: 1,
+            }],
+        })));
+    }
+    events
 }
 
 /// Every phase a run can be in.
@@ -941,7 +1088,19 @@ async fn every_field_of_every_converted_type_resolves() {
 
     let step = &json["deltas"][0];
     assert_eq!(step["changes"].as_array().map(Vec::len), Some(21));
-    assert_eq!(step["events"].as_array().map(Vec::len), Some(7));
+    assert_eq!(
+        step["events"].as_array().map(Vec::len),
+        Some(7 + 8 + 6 + 5 + 13)
+    );
+    let attempt = &step["events"][9];
+    assert_eq!(attempt["__typename"], "AttemptStepOutput");
+    assert_eq!(attempt["failure"]["next"], "REPORTED");
+    assert_eq!(attempt["modelInput"]["capture"], "REDACTED");
+    assert_eq!(attempt["modelInput"]["parameters"]["t"], 0.5);
+    assert_eq!(step["events"][15]["outcome"], "SUCCEEDED");
+    assert_eq!(step["events"][25]["settlement"], "not json");
+    assert_eq!(step["events"][26]["committedBy"], "x1");
+    assert_eq!(step["events"][38]["cause"], "FRAMEWORK");
     let context = &step["changes"][8]["diff"];
     assert_eq!(context["regions"][0]["mode"], serde_json::Value::Null);
     assert_eq!(context["regions"][1]["mode"], "APPEND");
