@@ -1122,8 +1122,6 @@ mod transition;
 pub use transition::*;
 mod tool_groups;
 pub use tool_groups::*;
-mod output_checks;
-pub use output_checks::retired_check_warnings;
 
 #[cfg(test)]
 mod checks_tests;

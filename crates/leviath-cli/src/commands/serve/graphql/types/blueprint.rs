@@ -1,6 +1,6 @@
-//! `Blueprint`: the manifest, typed.
+//! `Blueprint`: a blueprint's graph, typed.
 //!
-//! One type for one concept. The blueprint a run executed and the blueprint
+//! One type for one concept. The graph a run executed and the blueprint
 //! installed under that name are the same kind of thing, read from different
 //! files, so they are the same type here. What tells them apart is the id,
 //! which carries the digest: two revisions of one name are two ids, so a
@@ -27,7 +27,9 @@ use super::manifest::runtime::{
 };
 use super::manifest::stage::Stage;
 use super::manifest::transition::ContextTransform;
-use leviath_runtime::spec::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::graph::{Budget, RegionDef, RegionKind as Kind, RegionLayoutDef};
+
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 /// How much of the digest an id carries.
 ///
@@ -52,8 +54,7 @@ pub(crate) enum BlueprintSource {
     /// The run's own copy, written at spawn: what the run executed, whatever
     /// the installed file says now.
     Snapshot,
-    /// The installed file. For a run, this means it kept no snapshot, so the
-    /// file may have changed since it ran.
+    /// The installed `agent.toml`, as it is now.
     Installed,
 }
 
@@ -90,9 +91,9 @@ pub(crate) enum ToolRescan {
     RescanBeforeDispatch,
 }
 
-impl From<leviath_runtime::spec::blueprint::ToolRescan> for ToolRescan {
-    fn from(setting: leviath_runtime::spec::blueprint::ToolRescan) -> Self {
-        use leviath_runtime::spec::blueprint::ToolRescan as Core;
+impl From<leviath_runtime::spec::graph::ToolRescan> for ToolRescan {
+    fn from(setting: leviath_runtime::spec::graph::ToolRescan) -> Self {
+        use leviath_runtime::spec::graph::ToolRescan as Core;
         match setting {
             Core::AtSpawn => Self::AtSpawnOnly,
             Core::AfterWrites => Self::RescanAfterWrites,
@@ -142,9 +143,8 @@ pub(crate) struct ToolUseGuidance {
 
 /// What a region does when it fills.
 ///
-/// One value per kind the daemon recognises. The manifest accepts `hashmap`
-/// and `hash_map` for the same kind, which is a spelling the TOML takes; the
-/// API has one name for one thing.
+/// One value per kind the daemon recognises. A blueprint writes the
+/// key-value kind as `keyed`, which is `HASHMAP` here.
 #[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum RegionKind {
@@ -191,19 +191,18 @@ impl RegionKind {
     }
 }
 
-impl From<&leviath_core::region::RegionKind> for RegionKind {
-    fn from(kind: &leviath_core::region::RegionKind) -> Self {
-        use leviath_core::region::RegionKind as Core;
+impl From<&Kind> for RegionKind {
+    fn from(kind: &Kind) -> Self {
         match kind {
-            Core::Pinned => Self::Pinned,
-            Core::Temporary => Self::Temporary,
-            Core::Clearable => Self::Clearable,
-            Core::SlidingWindow { .. } => Self::SlidingWindow,
-            Core::Compacting { .. } => Self::Compacting,
-            Core::CompactHistory { .. } => Self::CompactHistory,
-            Core::HashMap { .. } => Self::Hashmap,
-            Core::Checklist => Self::Checklist,
-            Core::Custom { .. } => Self::Custom,
+            Kind::Pinned => Self::Pinned,
+            Kind::Temporary => Self::Temporary,
+            Kind::Clearable => Self::Clearable,
+            Kind::SlidingWindow { .. } => Self::SlidingWindow,
+            Kind::Compacting { .. } => Self::Compacting,
+            Kind::CompactHistory { .. } => Self::CompactHistory,
+            Kind::Keyed { .. } => Self::Hashmap,
+            Kind::Checklist => Self::Checklist,
+            Kind::Custom { .. } => Self::Custom,
         }
     }
 }
@@ -211,7 +210,7 @@ impl From<&leviath_core::region::RegionKind> for RegionKind {
 /// The resolver state behind the `Region` type.
 pub(crate) struct Region {
     /// The blueprint this region belongs to, shared rather than copied.
-    pub(crate) blueprint: Arc<CoreBlueprint>,
+    pub(crate) blueprint: Arc<ParsedBlueprint>,
     /// The stage whose own `[context.regions]` declares it, by declaration
     /// order. `None` for the blueprint's own layout.
     pub(crate) stage: Option<usize>,
@@ -231,15 +230,15 @@ pub(crate) struct Region {
 impl Region {
     /// Region name, unique within the layout that declares it.
     async fn name(&self) -> &str {
-        &self.region().name
+        self.region().name.as_str()
     }
 
-    /// The stage whose own `[context.regions]` declares this region. Null for a
+    /// The stage whose own `layout` declares this region. Null for a
     /// region the blueprint declares run-wide, which is every region in
     /// `Blueprint.regions`.
     ///
     /// A stage may declare a layout of its own, and a name resolved from
-    /// anywhere in the manifest can land in one of those. This says where the
+    /// anywhere in the blueprint can land in one of those. This says where the
     /// declaration was read from, so a client can tell a run-wide region from
     /// one only a single stage sets up.
     async fn declared_by_stage(&self) -> Option<Stage> {
@@ -260,17 +259,22 @@ impl Region {
     /// `budgetPercent`, and this number is what that resolved to against the
     /// layout's own window.
     async fn max_tokens(&self) -> i32 {
-        count(self.region().max_tokens)
+        let total = f64::from(self.layout().total_budget_tokens);
+        count(match &self.region().budget {
+            Budget::Tokens(tokens) => *tokens,
+            Budget::Percent { percent, min, max } => {
+                let share = (total * percent).round() as u32;
+                share.max(min.unwrap_or(0)).min(max.unwrap_or(u32::MAX))
+            }
+        })
     }
 
     /// The share of the model's context window this region claims, as a
     /// percentage. Null when the region names a fixed ceiling instead.
     async fn budget_percent(&self) -> Option<f64> {
         match &self.region().budget {
-            leviath_runtime::spec::layout::BudgetSpec::Percent { percent, .. } => {
-                Some(percent * 100.0)
-            }
-            leviath_runtime::spec::layout::BudgetSpec::Absolute(_) => None,
+            Budget::Percent { percent, .. } => Some(percent * 100.0),
+            Budget::Tokens(_) => None,
         }
     }
 
@@ -278,8 +282,8 @@ impl Region {
     /// model does not starve the region.
     async fn min_tokens(&self) -> Option<i32> {
         match &self.region().budget {
-            leviath_runtime::spec::layout::BudgetSpec::Percent { min, .. } => min.map(count),
-            leviath_runtime::spec::layout::BudgetSpec::Absolute(_) => None,
+            Budget::Percent { min, .. } => min.map(count),
+            Budget::Tokens(_) => None,
         }
     }
 
@@ -287,8 +291,8 @@ impl Region {
     /// very large window does not balloon.
     async fn budget_max_tokens(&self) -> Option<i32> {
         match &self.region().budget {
-            leviath_runtime::spec::layout::BudgetSpec::Percent { max, .. } => max.map(count),
-            leviath_runtime::spec::layout::BudgetSpec::Absolute(_) => None,
+            Budget::Percent { max, .. } => max.map(count),
+            Budget::Tokens(_) => None,
         }
     }
 
@@ -337,22 +341,40 @@ impl Region {
     }
 
     /// The mime patterns this region takes as parts. Empty means anything.
-    async fn accepts(&self) -> &[String] {
-        &self.region().accepts
+    async fn accepts(&self) -> Vec<String> {
+        super::manifest::texts(&self.region().accepts)
     }
 
     /// What fills this region before the first inference. Null means it starts
     /// empty, for the run to fill.
+    ///
+    /// A region an input of the graph is bound to is filled by whoever starts
+    /// the run, under that input's name.
     async fn seed(&self) -> Option<RegionSeed> {
-        self.region().seed.as_ref().map(RegionSeed::from)
+        let region = self.region();
+        if let Some(seed) = &region.seed {
+            return Some(RegionSeed::from(seed));
+        }
+        self.blueprint
+            .graph
+            .inputs
+            .iter()
+            .find(|input| {
+                input.binds.iter().any(|slot| {
+                    matches!(
+                        slot,
+                        leviath_runtime::spec::inputs::InputSlot::Region(binding)
+                            if binding.region == region.name
+                    )
+                })
+            })
+            .map(|input| RegionSeed::caller(input.name.as_str()))
     }
 
     /// The most entries a sliding region keeps.
     async fn max_items(&self) -> Option<i32> {
         match &self.region().kind {
-            leviath_core::region::RegionKind::SlidingWindow { max_items, .. } => {
-                Some(count(*max_items))
-            }
+            Kind::SlidingWindow { max_items, .. } => Some(count(*max_items)),
             _ => None,
         }
     }
@@ -375,9 +397,7 @@ impl Region {
     /// The token count at which a compacting region compacts.
     async fn threshold_tokens(&self) -> Option<i32> {
         match &self.region().kind {
-            leviath_core::region::RegionKind::Compacting { threshold_tokens } => {
-                Some(count(*threshold_tokens))
-            }
+            Kind::Compacting { threshold_tokens } => threshold_tokens.map(count),
             _ => None,
         }
     }
@@ -403,15 +423,16 @@ impl Region {
     /// The most keys a key-value region holds.
     async fn max_entries(&self) -> Option<i32> {
         match &self.region().kind {
-            leviath_core::region::RegionKind::HashMap { max_entries } => max_entries.map(count),
+            Kind::Keyed { max_entries } => max_entries.map(count),
             _ => None,
         }
     }
 
-    /// The Rhai script that owns this region, for a custom one.
-    async fn script(&self) -> Option<&str> {
+    /// The Rhai script that owns this region, for a custom one: a path beside
+    /// the blueprint, or the script itself when the blueprint writes it inline.
+    async fn script(&self) -> Option<String> {
         match &self.region().kind {
-            leviath_core::region::RegionKind::Custom { script, .. } => Some(script),
+            Kind::Custom { code, .. } => Some(super::manifest::code_text(code)),
             _ => None,
         }
     }
@@ -420,7 +441,7 @@ impl Region {
     /// first out, like a temporary one. Null for every other kind.
     async fn pinned(&self) -> Option<bool> {
         match &self.region().kind {
-            leviath_core::region::RegionKind::Custom { pinned, .. } => Some(*pinned),
+            Kind::Custom { pinned, .. } => Some(*pinned),
             _ => None,
         }
     }
@@ -428,23 +449,22 @@ impl Region {
 
 impl Region {
     /// The region this object stands for.
-    fn region(&self) -> &leviath_runtime::spec::layout::RegionDefinition {
+    fn region(&self) -> &RegionDef {
         &self.layout().regions[self.at]
     }
 
-    /// The layout that declares it: one stage's own, or the blueprint's.
-    fn layout(&self) -> &leviath_runtime::spec::layout::ContextLayout {
+    /// The layout that declares it: one stage's own, or the graph's.
+    fn layout(&self) -> &RegionLayoutDef {
+        let graph = &self.blueprint.graph;
         self.stage
-            .and_then(|at| self.blueprint.stages[at].context_layout.as_ref())
-            .unwrap_or(&self.blueprint.context_layout)
+            .and_then(|at| graph.stages[at].layout.as_ref())
+            .unwrap_or(&graph.layout)
     }
 
-    /// The `source_region` name a compacting-history region was given.
+    /// The source region a compacting-history region was given.
     fn declared_source_region(&self) -> Option<&str> {
         match &self.region().kind {
-            leviath_core::region::RegionKind::CompactHistory { source_region } => {
-                Some(source_region)
-            }
+            Kind::CompactHistory { source } => source.as_ref().map(|name| name.as_str()),
             _ => None,
         }
     }
@@ -452,9 +472,7 @@ impl Region {
     /// How this region makes room, for the kinds that slide.
     fn eviction(&self) -> Option<RegionEviction> {
         match &self.region().kind {
-            leviath_core::region::RegionKind::SlidingWindow {
-                eviction_strategy, ..
-            } => Some(RegionEviction::from(*eviction_strategy)),
+            Kind::SlidingWindow { eviction, .. } => Some(RegionEviction::from(*eviction)),
             _ => None,
         }
     }
@@ -466,23 +484,24 @@ impl super::super::connection::Paged for Blueprint {
 
 /// The resolver state behind the `Blueprint` type.
 pub(crate) struct Blueprint {
-    /// The parsed manifest, shared with the parse cache.
-    pub(crate) parsed: Arc<CoreBlueprint>,
-    /// Lowercase hex SHA-256 of the manifest text.
+    /// The parsed blueprint, shared with the parse cache.
+    pub(crate) parsed: Arc<ParsedBlueprint>,
+    /// Lowercase hex SHA-256: of an installed blueprint's file, or of the
+    /// graph a run executed.
     pub(crate) digest: String,
     /// Which file it was read from.
     pub(crate) source: BlueprintSource,
 }
 
-/// A blueprint: the manifest that says what an agent is, whole.
+/// A blueprint: the graph that says what an agent is, whole.
 ///
 /// Its stages, regions, tools and models are the declaration and nothing more.
-/// Nothing here belongs to any one execution: that is a `Run`, which carries
-/// its own frozen copy of the blueprint it started from.
+/// Nothing here belongs to any one execution: that is a `Run`, whose file
+/// carries the graph it was resolved to.
 ///
-/// So read from a run, this is the manifest that run executed; read from the
-/// blueprint listing, it is the definition installed now. The `source` field
-/// says which, and the digest in the id says whether they are the same bytes.
+/// So read from a run, this is the graph that run executed, with its inputs
+/// applied; read from the blueprint listing, it is the definition installed
+/// now. The `source` field says which.
 #[mirror]
 #[Object]
 impl Blueprint {
@@ -504,7 +523,8 @@ impl Blueprint {
         &self.parsed.name
     }
 
-    /// Content digest of this manifest, lowercase hex SHA-256.
+    /// Content digest, lowercase hex SHA-256: of the installed `agent.toml`, or
+    /// of the graph a run executed.
     async fn digest(&self) -> &str {
         &self.digest
     }
@@ -514,62 +534,60 @@ impl Blueprint {
         self.source
     }
 
-    /// From `[agent] version`.
+    /// From `[blueprint] version`. Empty for a run of a graph its caller wrote.
     #[filter(orderable)]
     async fn version(&self) -> &str {
         &self.parsed.version
     }
 
-    /// From `[agent] description`.
+    /// From `[blueprint] description`.
     async fn description(&self) -> &str {
-        &self.parsed.description
+        self.parsed.description()
     }
 
     /// The stage a run starts in. Defaults to the first stage declared.
     ///
     /// Null for a blueprint that declares no stages, and for one whose
-    /// `entry_stage` names a stage it does not declare, which `lev validate`
+    /// `entry` names a stage it does not declare, which `lev validate`
     /// refuses and the daemon will not spawn. `entryStageName` is the name it
     /// wrote.
     async fn entry_stage(&self) -> Option<Stage> {
-        match self.parsed.entry_stage.as_deref() {
-            Some(name) => super::manifest::refs::stage(&self.parsed, name),
-            None => self.parsed.stages.first().map(|_| Stage {
+        match self.parsed.graph.entry.as_ref() {
+            Some(name) => super::manifest::refs::stage(&self.parsed, name.as_str()),
+            None => self.parsed.graph.stages.first().map(|_| Stage {
                 blueprint: Arc::clone(&self.parsed),
                 at: 0,
             }),
         }
     }
 
-    /// The name the manifest gave as its entry stage, verbatim. Null where it
+    /// The name the graph gave as its entry stage, verbatim. Null where it
     /// names none, which starts the run in the first stage declared.
     async fn entry_stage_name(&self) -> Option<&str> {
-        self.parsed.entry_stage.as_deref()
+        self.parsed.graph.entry.as_ref().map(|name| name.as_str())
     }
 
     /// How deep sub-agent spawning may nest.
     async fn max_child_depth(&self) -> Option<i32> {
-        self.parsed
-            .max_child_depth
-            .map(|n| i32::try_from(n).unwrap_or(i32::MAX))
+        self.parsed.graph.max_child_depth.map(i32::from)
     }
 
     /// When this blueprint's runs look for tools again.
     async fn tool_rescan(&self) -> ToolRescan {
-        self.parsed.tool_rescan.into()
+        self.parsed.graph.tool_rescan.into()
     }
 
     /// The prompt guidance this blueprint declares, before the cascade.
     async fn tool_guidance(&self) -> ToolUseGuidance {
         ToolUseGuidance {
-            batch_independent_calls: self.parsed.batch_tool_hint.into(),
-            shell_for_multi_step_work: self.parsed.shell_hint.into(),
+            batch_independent_calls: self.parsed.graph.batch_tool_hint.into(),
+            shell_for_multi_step_work: self.parsed.graph.shell_hint.into(),
         }
     }
 
     /// One entry per stage, in declaration order.
     async fn stages(&self) -> Vec<Stage> {
-        (0..self.parsed.stages.len())
+        (0..self.parsed.graph.stages.len())
             .map(|at| Stage {
                 blueprint: Arc::clone(&self.parsed),
                 at,
@@ -582,7 +600,7 @@ impl Blueprint {
     /// A stage may declare a layout of its own on top of this, and those regions
     /// are on `Stage.context.regions` rather than here.
     async fn regions(&self) -> Vec<Region> {
-        (0..self.parsed.context_layout.regions.len())
+        (0..self.parsed.graph.layout.regions.len())
             .map(|at| Region {
                 blueprint: Arc::clone(&self.parsed),
                 stage: None,
@@ -594,16 +612,14 @@ impl Blueprint {
     /// Paths this blueprint declares it needs beyond its workdir. Declaring is not
     /// granting: an entry takes effect only where the host grants it.
     async fn read_paths(&self) -> &[String] {
-        match self.parsed.read_paths.as_ref() {
-            Some(config) => &config.allow,
-            None => &[],
-        }
+        &self.parsed.graph.read_paths
     }
 
     /// What must be on the machine before a run of this will start. A required
     /// one missing fails the spawn with its remedy; the rest are warnings.
     async fn dependencies(&self) -> Vec<BlueprintDependency> {
         self.parsed
+            .graph
             .dependencies
             .iter()
             .map(BlueprintDependency::from)
@@ -613,32 +629,33 @@ impl Blueprint {
     /// The mime rows this blueprint ships, so one that works in a file type the
     /// machine has never heard of carries the row that describes it.
     async fn mime_types(&self) -> Vec<MimeRow> {
-        MimeRow::from_table(&self.parsed.mime_types, &self.parsed.name)
+        MimeRow::from_table(&self.parsed.graph.mime_types, &self.parsed.name)
     }
 
     /// What this blueprint asks of the taint layer. Null inherits the machine's
     /// setting.
     async fn security(&self) -> Option<BlueprintSecurity> {
-        self.parsed.security.as_ref().map(BlueprintSecurity::from)
+        BlueprintSecurity::of(self.parsed.graph.taint_tracking)
     }
 
     /// Where this blueprint's tools run, unless a stage says otherwise. Null leaves
     /// the machine's own setting.
     async fn sandbox(&self) -> Option<SandboxConfig> {
-        self.parsed.sandbox.as_ref().map(SandboxConfig::from)
+        self.parsed.graph.sandbox.as_ref().map(SandboxConfig::from)
     }
 
     /// What happens when a model answers with text before calling any tool,
     /// unless a stage says otherwise. Null leaves the machine's own setting.
     async fn nudge(&self) -> Option<NudgeConfig> {
-        self.parsed.nudge.as_ref().map(NudgeConfig::from)
+        self.parsed.graph.nudge.as_ref().map(NudgeConfig::from)
     }
 
     /// The model that summarizes a region when it fills. Null leaves the
     /// machine's own summarizer.
     async fn compaction(&self) -> Option<CompactionConfig> {
         self.parsed
-            .compaction_config
+            .graph
+            .compaction
             .as_ref()
             .map(CompactionConfig::from)
     }
@@ -647,6 +664,7 @@ impl Blueprint {
     /// result can point at the region rather than repeating the file.
     async fn file_tracking(&self) -> Option<FileTrackingConfig> {
         self.parsed
+            .graph
             .file_tracking
             .as_ref()
             .map(|tracking| FileTrackingConfig::of(&self.parsed, tracking))
@@ -656,7 +674,8 @@ impl Blueprint {
     /// machine's own thresholds.
     async fn repetition_detection(&self) -> Option<RepetitionDetection> {
         self.parsed
-            .repetition_detection
+            .graph
+            .repetition
             .as_ref()
             .map(RepetitionDetection::from)
     }
@@ -665,18 +684,19 @@ impl Blueprint {
     /// than a grant: the machine's own policy decides, and this is what an
     /// operator reads when deciding whether to write it in.
     async fn safe_commands(&self) -> Option<SafeCommands> {
-        self.parsed.safe_commands.as_ref().map(SafeCommands::from)
+        SafeCommands::of(&self.parsed.graph.safe_commands)
     }
 
     /// The shape this blueprint's answer takes, unless a stage narrows it.
     async fn output(&self) -> Option<OutputSpec> {
-        self.parsed.output.as_ref().map(OutputSpec::from)
+        self.parsed.graph.output.as_ref().map(OutputSpec::from)
     }
 
     /// How this blueprint's context maps onto another's, for a handoff to a
     /// different blueprint.
     async fn transforms(&self) -> Vec<ContextTransform> {
         self.parsed
+            .graph
             .transforms
             .iter()
             .map(ContextTransform::from)

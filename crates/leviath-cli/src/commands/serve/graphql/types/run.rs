@@ -334,42 +334,35 @@ impl Run {
 
     /// The blueprint this run executed.
     ///
-    /// The run's own snapshot of the manifest, taken at spawn, so it answers
-    /// for the run even after the installed blueprint is edited or deleted.
-    /// For a run recorded before snapshots existed there is no copy, and this
-    /// falls back to the installed file: `blueprint.source` says which, and
-    /// `blueprintDigest` is set only for a run that carries its own.
+    /// The graph in the run's own file, as it was resolved at spawn with the
+    /// run's inputs applied, so it answers for the run even after the
+    /// installed blueprint is edited or deleted.
     ///
-    /// Null, with an error naming the file, when neither can be read. Nullable
-    /// on purpose: one unreadable blueprint in a page of fifty runs must not
-    /// cost a client the other forty-nine.
+    /// Null, with an error, when the run's file cannot be read. Nullable on
+    /// purpose: one unreadable run in a page of fifty must not cost a client
+    /// the other forty-nine.
     #[filter(skip)]
-    async fn blueprint(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Blueprint>> {
-        let state = ctx.data_unchecked::<AppState>();
+    async fn blueprint(&self) -> async_graphql::Result<Option<Blueprint>> {
         counted(&self.meta.run_id);
-        let meta = Arc::clone(&self.meta);
-        // One `meta.json`-sized read, off the async runtime: a selection set
-        // that asks fifty runs for their blueprints is fifty small reads, and
-        // the parse behind them is shared by digest.
-        let manifest = blocking(move || {
-            blueprints::manifest_for_run(&blueprints::run_dir(&meta.run_id), &meta)
-        })
-        .await
-        .gql()?;
-        let parsed = state.caches.blueprints.parse(&manifest).gql()?;
+        let run_id = self.meta.run_id.clone();
+        // The run file is read off the async runtime.
+        let read = blocking(move || blueprints::blueprint_for_run(&run_id))
+            .await
+            .gql()?;
         Ok(Some(Blueprint {
-            parsed,
-            digest: manifest.digest,
-            source: manifest.source.into(),
+            parsed: read.parsed,
+            digest: read.digest,
+            source: read.source.into(),
         }))
     }
 
-    /// The digest of the manifest this run executed, lowercase hex SHA-256.
+    /// The digest of the installed blueprint revision this run was spawned
+    /// from, lowercase hex SHA-256.
     ///
     /// Recorded at spawn. Compare it with the installed blueprint's digest to
     /// tell "this run executed what is installed now" from "this run executed
-    /// something else". Null for a run recorded before snapshots existed,
-    /// where the answer is unknown rather than "the same".
+    /// something else". Null for a run of a graph its caller wrote, which
+    /// came from no installed revision.
     async fn blueprint_digest(&self) -> Option<&str> {
         self.meta.blueprint_digest.as_deref()
     }
@@ -1135,26 +1128,17 @@ impl Run {
     /// unknown is not the same as no, and a console that greyed out its box on a
     /// failed read would be wrong half the time.
     #[filter(skip)]
-    async fn accepts_messages(&self, ctx: &Context<'_>) -> Option<bool> {
-        let state = ctx.data_unchecked::<AppState>();
-        let meta = Arc::clone(&self.meta);
-        let manifest = blocking(move || {
-            blueprints::manifest_for_run(&blueprints::run_dir(&meta.run_id), &meta)
-        })
-        .await
-        .ok()?;
-        let parsed = state.caches.blueprints.parse(&manifest).ok()?;
+    async fn accepts_messages(&self) -> Option<bool> {
+        let run_id = self.meta.run_id.clone();
+        let read = blocking(move || blueprints::blueprint_for_run(&run_id))
+            .await
+            .ok()?;
+        let graph = &read.parsed.graph;
         let stage = match self.meta.current_stage.is_empty() {
             // Before the first stage is entered, the answer is the entry
             // stage's: that is the stage a message would arrive in.
-            true => {
-                let entry = parsed.resolve_entry_stage_name();
-                parsed.stages.iter().find(|stage| stage.name == entry)
-            }
-            false => parsed
-                .stages
-                .iter()
-                .find(|stage| stage.name == self.meta.current_stage),
+            true => graph.entry_stage(),
+            false => graph.stage(&self.meta.current_stage),
         };
         stage.map(|stage| stage.accepts_messages)
     }

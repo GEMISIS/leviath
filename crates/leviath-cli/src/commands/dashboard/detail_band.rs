@@ -409,29 +409,52 @@ mod tests {
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use leviath_runtime::spec::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn stage_graph() -> Arc<StageGraph> {
-        Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
+        Arc::new(crate::tui::flowgraph::model::toml_graph(
+            r#"[blueprint]
 name = "grapher"
-[stages.plan]
-[stages.plan.transitions.implement]
-[stages.implement]
-[stages.implement.transitions.review]
-[stages.review]
-[stages.review.transitions.implement]
-condition = "llm_choice"
-[stages.review.transitions.done]
-[stages.done]
-[stages.done.transitions]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "plan"
+
+[[graph.stages]]
+name = "implement"
+
+[[graph.stages]]
+name = "review"
+
+[[graph.stages]]
+name = "done"
+
+[[graph.edges]]
+name = "implement"
+from = "plan"
+to = "implement"
+
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+
+[[graph.edges]]
+name = "done"
+from = "review"
+to = "done"
+
+[[graph.edges]]
+name = "implement"
+from = "review"
+to = "implement"
+when = "llm_choice"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
-            )
-            .unwrap(),
         ))
     }
 

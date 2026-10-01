@@ -41,15 +41,57 @@ fn decl(name: &str, ty: InputType, required: bool) -> InputDecl {
 fn write_agent(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
-        dir.join("agent.leviath"),
-        "[agent]\nname = \"looker\"\nversion = \"0.1.0\"\ndescription = \"looks\"\n\n\
-         [stages.main]\nmode = \"autonomous\"\n\n\
-         [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
-         [context.regions]\n\
-         task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
-         pictures = { kind = \"pinned\", max_tokens = 100000, seed = \"input\", accepts = [\"image/*\"], required = true }\n\
-         notes = { kind = \"pinned\", max_tokens = 1000, seed = \"input\" }\n\
-         conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }\n",
+        dir.join("agent.toml"),
+        r#"[blueprint]
+name = "looker"
+version = "0.1.0"
+description = "looks"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[graph.layout]
+total_budget_tokens = 112000
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "pictures"
+kind = "pinned"
+budget = 100000
+required = true
+accepts = ["image/*"]
+
+[[graph.layout.regions]]
+name = "notes"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = 10000
+
+[[graph.inputs]]
+name = "notes"
+type = { kind = "text", multiline = true }
+binds = [{ region = "notes" }]
+
+[[graph.inputs]]
+name = "pictures"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "pictures" }]
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
     )
     .unwrap();
 }
@@ -90,7 +132,7 @@ fn screen(dash: &mut Dashboard) -> String {
         .collect()
 }
 
-/// The rows follow the selected agent: one per input, in the manifest's
+/// The rows follow the selected agent: one per input, in the blueprint's
 /// order, with the task left to the task box.
 #[test]
 fn the_slots_are_the_blueprints_caller_inputs() {
@@ -383,14 +425,39 @@ fn enter_advances_between_text_slots() {
     let agent = dir.path().join("agents").join("noter");
     std::fs::create_dir_all(&agent).unwrap();
     std::fs::write(
-        agent.join("agent.leviath"),
-        "[agent]\nname = \"noter\"\nversion = \"0.1.0\"\ndescription = \"notes\"\n\n\
-         [stages.main]\nmode = \"autonomous\"\n\n\
-         [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
-         [context.regions]\n\
-         task = { kind = \"pinned\", max_tokens = 1000, seed = \"task\" }\n\
-         one = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n\
-         two = { kind = \"pinned\", max_tokens = 1000, seed = \"input\", accepts = [\"text/*\"] }\n",
+        agent.join("agent.toml"),
+        r#"[blueprint]
+name = "noter"
+version = "0.1.0"
+description = "notes"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[graph.layout]
+regions = [
+    { name = "task", kind = "pinned", budget = 1000 },
+    { name = "one", kind = "pinned", budget = 1000, accepts = ["text/*"] },
+    { name = "two", kind = "pinned", budget = 1000, accepts = ["text/*"] },
+]
+total_budget_tokens = 3000
+
+[[graph.inputs]]
+name = "one"
+type = { kind = "text", multiline = true }
+binds = [{ region = "one" }]
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+
+[[graph.inputs]]
+name = "two"
+type = { kind = "text", multiline = true }
+binds = [{ region = "two" }]
+"#,
     )
     .unwrap();
     let mut dash = make_test_dashboard();
@@ -451,8 +518,7 @@ fn the_entry_window_resolves() {
     // for it, falls past the override lookup to the catalog and then to the
     // default.
     let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
-    bp.stages[0].model.models[0].provider = "acme".to_string();
-    bp.stages[0].model.models[0].model = "mystery".to_string();
+    bp.stages[0].model.models[0] = model_ref("acme/mystery");
     assert_eq!(entry_stage_window(&bp, &config, None), 8192);
 
     // A config file that cannot be parsed is ignored, and the window comes
@@ -465,8 +531,7 @@ fn the_entry_window_resolves() {
     // The shared capability cache supplies a window for a model absent from
     // the compiled table - the offline OpenRouter case #810 is about.
     let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
-    bp.stages[0].model.models[0].provider = "openrouter".to_string();
-    bp.stages[0].model.models[0].model = "x-ai/grok-4".to_string();
+    bp.stages[0].model.models[0] = model_ref("openrouter/x-ai/grok-4");
     let cache_file = dir.path().join("model_capabilities.json");
     let cache = {
         let mut c = leviath_providers::CapabilityCache::new(1);
@@ -495,18 +560,29 @@ fn the_entry_window_resolves() {
     // The smallest window across several models wins: a second, narrower
     // model pulls the effective window down.
     let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
-    bp.stages[0].model.models[0].provider = "anthropic".to_string();
-    bp.stages[0].model.models[0].model = "claude-sonnet-5".to_string();
-    bp.stages[0]
-        .model
-        .models
-        .push(leviath_runtime::spec::blueprint::ModelEntry::new(
-            "acme".to_string(),
-            "tiny".to_string(),
-        ));
+    bp.stages[0].model.models[0] = model_ref("anthropic/claude-sonnet-5");
+    bp.stages[0].model.models.push(model_ref("acme/tiny"));
     // acme/tiny is unknown everywhere → 8192, smaller than the sonnet
     // window, so it is the effective window.
     assert_eq!(entry_stage_window(&bp, &missing, None), 8192);
+
+    // A model that leaves its provider open is looked up under its bare name:
+    // a `[model_capabilities]` override for that name answers, and with none
+    // the default does.
+    let mut bp = super::super::graph::load_blueprint(agent_path).unwrap();
+    bp.stages[0].model.models = vec![model_ref("open-model")];
+    assert_eq!(entry_stage_window(&bp, &missing, None), 8192);
+    std::fs::write(
+        &config,
+        "[model_capabilities.\"open-model\"]\nmax_context_tokens = 777\n",
+    )
+    .unwrap();
+    assert_eq!(entry_stage_window(&bp, &config, None), 777);
+}
+
+/// `provider/model`, or a bare model, as a graph names it.
+fn model_ref(text: &str) -> leviath_runtime::spec::names::ModelRef {
+    leviath_runtime::spec::names::ModelRef::parse(text).unwrap()
 }
 
 /// A choice that would not fit the region's token budget stops the start
@@ -946,4 +1022,41 @@ fn a_run_refused_for_an_input_comes_back_with_the_problem_beside_it() {
         issue_input(&SpecPath::root().field("stages").key("x")),
         None
     );
+}
+
+/// A bundled blueprint that is not installed still offers a row for every
+/// input its `agent.toml` declares beside the task, each with its declared
+/// type, so its typed inputs reach the widgets.
+#[test]
+fn a_bundled_blueprints_declared_inputs_become_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut offered = 0;
+    for agent in crate::bundled::BUNDLED_AGENTS {
+        let graph = super::super::graph::bundled_blueprint(agent.name).unwrap();
+        let mut declared: Vec<(String, InputType)> = graph
+            .inputs
+            .iter()
+            .filter(|d| d.name.as_str() != TASK_INPUT)
+            .map(|d| (d.name.to_string(), d.ty.clone()))
+            .collect();
+        let mut dash = dash_at(dir.path());
+        dash.last_launched_agent = Some(agent.name.to_string());
+        dash.open_new_run_screen();
+        assert_eq!(
+            dash.new_run_selected_agent().map(|a| a.source.as_str()),
+            Some("bundled"),
+            "{}",
+            agent.name
+        );
+        let mut rows: Vec<(String, InputType)> = dash
+            .new_run_inputs
+            .iter()
+            .map(|r| (r.key.clone(), r.ty.clone()))
+            .collect();
+        declared.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rows, declared, "{}", agent.name);
+        offered += rows.len();
+    }
+    assert!(offered > 0, "some bundled blueprint declares an input");
 }

@@ -100,6 +100,30 @@ impl From<&leviath_core::mime::TokenRule> for MimeTokenRule {
     }
 }
 
+impl From<&leviath_runtime::spec::graph::TokenRule> for MimeTokenRule {
+    fn from(rule: &leviath_runtime::spec::graph::TokenRule) -> Self {
+        use leviath_runtime::spec::graph::TokenRule as Graph;
+        match rule {
+            Graph::PerByte(rate) => Self::Bytes(PerByte {
+                tokens_per_byte: *rate,
+            }),
+            Graph::PerPixel { divisor, max } => Self::Pixels(PerPixel {
+                pixels_per_token: count(*divisor),
+                max: count(*max),
+            }),
+            Graph::PerSecond(rate) => Self::Seconds(PerSecond {
+                tokens_per_second: count(*rate),
+            }),
+            Graph::PerPage(rate) => Self::Pages(PerPage {
+                tokens_per_page: count(*rate),
+            }),
+            Graph::Fixed(tokens) => Self::Flat(Fixed {
+                tokens: count(*tokens),
+            }),
+        }
+    }
+}
+
 /// Narrow a rate to the 32 bits GraphQL's `Int` carries.
 fn count(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
@@ -207,33 +231,31 @@ impl MimeRow {
         }
     }
 
-    /// Read the `[mime_types]` table a blueprint carries.
+    /// Read the `mime_types` table a blueprint's graph carries, sorted by type.
     ///
     /// Every row is that blueprint's own, which is what `origin` says and what
-    /// `blueprint` names. A row that will not deserialize is left out rather
-    /// than reported as an empty row: the manifest loader refuses such a
-    /// blueprint, so reaching one here means the file moved underneath an
-    /// installed run, and an empty row would read as a row that sets nothing.
-    pub(crate) fn from_table(table: &toml::Table, blueprint: &str) -> Vec<Self> {
-        let mut rows: Vec<Self> = table
+    /// `blueprint` names.
+    pub(crate) fn from_table(
+        table: &leviath_runtime::spec::graph::MimeRows,
+        blueprint: &str,
+    ) -> Vec<Self> {
+        table
             .iter()
-            .filter_map(|(mime_type, value)| {
-                let row: leviath_core::mime::registry::MimeRow = value.clone().try_into().ok()?;
-                Some(Self {
-                    mime_type: mime_type.clone(),
-                    origin: MimeRowOrigin::Blueprint,
-                    blueprint_name: Some(blueprint.to_string()),
-                    family: row.family,
-                    is_text: row.text,
-                    tokens: row.tokens.as_ref().map(MimeTokenRule::from),
-                    extensions: row.extensions.unwrap_or_default(),
-                    magic: row.magic,
-                    stand_in: row.stand_in,
-                    check: row.check,
-                })
+            .map(|(mime_type, row)| Self {
+                mime_type: mime_type.to_string(),
+                origin: MimeRowOrigin::Blueprint,
+                blueprint_name: Some(blueprint.to_string()),
+                family: row.family.clone(),
+                is_text: row.text,
+                tokens: row.tokens.as_ref().map(MimeTokenRule::from),
+                extensions: row.extensions.clone().unwrap_or_default(),
+                magic: row.magic.clone(),
+                stand_in: row.stand_in.clone(),
+                check: row
+                    .check
+                    .as_ref()
+                    .map(crate::commands::serve::graphql::types::manifest::code_text),
             })
-            .collect();
-        rows.sort_by(|a, b| a.mime_type.cmp(&b.mime_type));
-        rows
+            .collect()
     }
 }

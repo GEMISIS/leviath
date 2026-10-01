@@ -1176,12 +1176,12 @@ fn a_binding_edits_what_insertion_placed() {
     let mut world = World::new();
     let bindings = Bindings::new()
         .edit(|meta: &mut crate::persistence::RunMetadata| {
-            meta.agent_path = "/agents/coder/agent.leviath".into();
+            meta.agent_path = "/agents/coder/agent.toml".into();
         })
         .edit(|m: &mut Marker| m.0 = 9);
     let e = insert(&mut world, spec.clone(), bindings, &initial_state(&spec));
     let md = world.get::<crate::persistence::RunMetadata>(e).unwrap();
-    assert_eq!(md.agent_path, "/agents/coder/agent.leviath");
+    assert_eq!(md.agent_path, "/agents/coder/agent.toml");
     assert!(world.get::<Marker>(e).is_none());
 }
 

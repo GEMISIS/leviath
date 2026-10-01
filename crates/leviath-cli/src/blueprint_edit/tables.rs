@@ -1,78 +1,51 @@
-//! Reading and writing table-shaped TOML without caring which of the two
-//! shapes it is in.
+//! Reading and writing table-shaped TOML without caring which shape it is
+//! in.
 //!
-//! A manifest writes the same thing two ways: `[stages.plan.transitions.x]`
-//! as a table with a header, or `transitions = { x = { hint = "..." } }`
-//! inline. `toml_edit` keeps them as different types (`Table` and
-//! `InlineTable`) behind one trait, `TableLike`. Everything here works on the
-//! trait, and when it has to create a child it creates one of the parent's
-//! shape, so an edit never turns an author's inline table into a headed one
-//! or the other way round.
+//! An `agent.toml` writes the same thing several ways: a stage as a
+//! `[[graph.stages]]` table or as `{ name = "plan", ... }` inside a
+//! `stages = [...]` array, a stage's tool routing as a `tool_routing = {...}`
+//! inline table or a `[graph.stages.tool_routing]` header. `toml_edit` keeps
+//! these as different types (`Table` and `InlineTable`, `ArrayOfTables` and
+//! `Array`) behind one trait, `TableLike`. Everything here works on the trait
+//! and on both list shapes, so an edit never turns what an author wrote into
+//! the other shape. A table the editor creates is always inline: it lands on
+//! the line of the key that holds it, wherever the parent is written.
 
-use toml_edit::{Array, InlineTable, Item, Key, Table, TableLike, Value};
+use toml_edit::{Array, InlineTable, Item, Table, TableLike, Value};
 
 use super::EditError;
 
-/// The table an item is, if it is one.
-pub(super) fn as_table(item: &Item) -> Option<&dyn TableLike> {
-    item.as_table_like()
+/// The table under `key`, if there is one.
+pub(super) fn sub<'a>(table: &'a dyn TableLike, key: &str) -> Option<&'a dyn TableLike> {
+    table.get(key).and_then(Item::as_table_like)
 }
 
-/// A child of `item` that is itself a table.
-pub(super) fn child<'a>(item: &'a Item, key: &str) -> Option<&'a dyn TableLike> {
-    item.as_table_like()
-        .and_then(|t| t.get(key))
-        .and_then(Item::as_table_like)
+/// The table under `key`, mutably, if there is one.
+pub(super) fn sub_mut<'a>(
+    table: &'a mut dyn TableLike,
+    key: &str,
+) -> Option<&'a mut dyn TableLike> {
+    table.get_mut(key).and_then(Item::as_table_like_mut)
 }
 
-/// A child of `item` that is a table, mutably.
-pub(super) fn child_mut<'a>(item: &'a mut Item, key: &str) -> Option<&'a mut Item> {
-    item.as_table_like_mut()
-        .and_then(|t| t.get_mut(key))
-        .filter(|c| c.as_table_like().is_some())
-}
-
-/// The child table `key` of `item` (which must be a table), created (empty,
-/// in the parent's shape) when missing. Refuses when the key holds
-/// something that is not a table.
-pub(super) fn ensure_child<'a>(item: &'a mut Item, key: &str) -> Result<&'a mut Item, EditError> {
-    let inline = item.is_inline_table();
-    let table = item.as_table_like_mut().expect("callers pass a table");
+/// The table under `key`, created empty and inline when missing. Refuses
+/// when the key holds something that is not a table.
+pub(super) fn ensure_sub<'a>(
+    table: &'a mut dyn TableLike,
+    key: &str,
+) -> Result<&'a mut dyn TableLike, EditError> {
     if !table.contains_key(key) {
-        table.insert(key, new_table(inline));
+        table.insert(key, inline_item(InlineTable::new()));
     }
-    let child = table.get_mut(key).expect("inserted or present just above");
-    if child.as_table_like().is_none() {
-        return Err(EditError::NotATable(key.to_string()));
-    }
-    Ok(child)
+    table
+        .get_mut(key)
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| EditError::NotATable(key.to_string()))
 }
 
-/// Like [`ensure_child`], for a table that only exists to hold other
-/// tables (`context` over `regions`, `tool_routing` over `overrides`): a new
-/// one is implicit, so the file does not get an empty `[stages.x.context]`
-/// header above `[stages.x.context.regions]`.
-pub(super) fn ensure_parent<'a>(item: &'a mut Item, key: &str) -> Result<&'a mut Item, EditError> {
-    let fresh = !item
-        .as_table_like()
-        .expect("callers pass a table")
-        .contains_key(key);
-    let child = ensure_child(item, key)?;
-    if fresh && let Some(table) = child.as_table_mut() {
-        table.set_implicit(true);
-    }
-    Ok(child)
-}
-
-/// An empty table of the shape a parent uses.
-pub(super) fn new_table(inline: bool) -> Item {
-    if inline {
-        Item::Value(Value::InlineTable(InlineTable::new()))
-    } else {
-        let mut table = Table::new();
-        table.set_implicit(false);
-        Item::Table(table)
-    }
+/// An inline table as an item.
+pub(super) fn inline_item(table: InlineTable) -> Item {
+    Item::Value(Value::InlineTable(table))
 }
 
 /// A string value under `key`, when it is one.
@@ -83,6 +56,11 @@ pub(super) fn get_str<'a>(table: &'a dyn TableLike, key: &str) -> Option<&'a str
 /// An integer under `key`, when it is one.
 pub(super) fn get_int(table: &dyn TableLike, key: &str) -> Option<i64> {
     table.get(key)?.as_integer()
+}
+
+/// A non-negative integer under `key`, when it is one.
+pub(super) fn get_count(table: &dyn TableLike, key: &str) -> Option<u64> {
+    get_int(table, key).and_then(|n| u64::try_from(n).ok())
 }
 
 /// A boolean under `key`, when it is one.
@@ -117,31 +95,52 @@ pub(super) fn set_or_remove_str(table: &mut dyn TableLike, key: &str, value: &st
 
 /// Write a string, keeping the key's place when it already exists.
 pub(super) fn set_str(table: &mut dyn TableLike, key: &str, value: &str) {
-    replace_value(table, key, Value::from(value));
+    set_value(table, key, Value::from(value));
 }
 
 /// Write an integer, keeping the key's place when it already exists.
 pub(super) fn set_int(table: &mut dyn TableLike, key: &str, value: i64) {
-    replace_value(table, key, Value::from(value));
+    set_value(table, key, Value::from(value));
 }
 
 /// Write a boolean, keeping the key's place when it already exists.
 pub(super) fn set_bool(table: &mut dyn TableLike, key: &str, value: bool) {
-    replace_value(table, key, Value::from(value));
+    set_value(table, key, Value::from(value));
 }
 
 /// Write an array of strings, keeping the key's place when it exists.
 pub(super) fn set_strings(table: &mut dyn TableLike, key: &str, values: &[String]) {
+    set_value(table, key, Value::Array(string_array(values)));
+}
+
+/// An array of strings.
+pub(super) fn string_array(values: &[String]) -> Array {
     let mut array = Array::new();
     for v in values {
         array.push(v.as_str());
     }
-    replace_value(table, key, Value::Array(array));
+    array
+}
+
+/// Write an integer, or remove the key for `None`.
+pub(super) fn set_or_remove_int(table: &mut dyn TableLike, key: &str, value: Option<u64>) {
+    match value {
+        Some(n) => set_int(table, key, clamp_i64(n)),
+        None => {
+            table.remove(key);
+        }
+    }
+}
+
+/// TOML integers are signed 64-bit; anything bigger is written as the top.
+pub(super) fn clamp_i64(n: u64) -> i64 {
+    n.min(i64::MAX as u64) as i64
 }
 
 /// Put `value` under `key` in place: an existing value keeps its position
-/// and its surrounding whitespace, a new one goes at the end.
-fn replace_value(table: &mut dyn TableLike, key: &str, mut value: Value) {
+/// and its surrounding whitespace, a new one goes at the end. Whatever held
+/// the key before (a headed table included) is replaced.
+pub(super) fn set_value(table: &mut dyn TableLike, key: &str, mut value: Value) {
     if let Some(existing) = table.get_mut(key).and_then(Item::as_value_mut) {
         // Keep the author's spacing around the old value.
         *value.decor_mut() = existing.decor().clone();
@@ -151,45 +150,161 @@ fn replace_value(table: &mut dyn TableLike, key: &str, mut value: Value) {
     }
 }
 
-/// Rename a key in place: the entry keeps its position among its siblings
-/// and the comments above it. `false` when `from` is not there.
-pub(super) fn rename_key(table: &mut dyn TableLike, from: &str, to: &str) -> bool {
-    if !table.contains_key(from) {
-        return false;
-    }
-    let entries: Vec<(Key, Item)> = table
-        .iter()
-        .map(|(name, item)| {
-            let key = table.key(name).expect("iterated key exists").clone();
-            (key, item.clone())
-        })
-        .collect();
-    table.clear();
-    for (key, item) in entries {
-        let key = if key.get() == from {
-            Key::new(to).with_leaf_decor(key.leaf_decor().clone())
-        } else {
-            key
-        };
-        table.entry_format(&key).or_insert(item);
-    }
-    true
-}
-
 /// Remove `key` and, when that leaves the table empty, say so.
 pub(super) fn remove_and_report_empty(table: &mut dyn TableLike, key: &str) -> bool {
     table.remove(key);
     table.is_empty()
 }
 
-/// The names of the child tables of `item`, in document order.
-pub(super) fn table_keys(item: &Item) -> Vec<String> {
-    item.as_table_like()
-        .map(|t| {
-            t.iter()
-                .filter(|(_, v)| v.as_table_like().is_some())
-                .map(|(k, _)| k.to_string())
+// ── Lists of tables ─────────────────────────────────────────────────────────
+
+/// The tables of a list, whichever shape it has: `[[...]]` tables, or an
+/// array of inline tables (anything else in the array is skipped). Nothing
+/// for a value that is not a list.
+pub(super) fn list_tables(list: &Item) -> Vec<&dyn TableLike> {
+    if let Some(tables) = list.as_array_of_tables() {
+        return tables.iter().map(|t| t as &dyn TableLike).collect();
+    }
+    list.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_inline_table)
+                .map(|t| t as &dyn TableLike)
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// [`list_tables`], mutably.
+pub(super) fn list_tables_mut(list: &mut Item) -> Vec<&mut dyn TableLike> {
+    match list {
+        Item::ArrayOfTables(tables) => tables.iter_mut().map(|t| t as &mut dyn TableLike).collect(),
+        Item::Value(Value::Array(array)) => array
+            .iter_mut()
+            .filter_map(Value::as_inline_table_mut)
+            .map(|t| t as &mut dyn TableLike)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The position, among a list's tables, of the one whose `name` is `name`.
+pub(super) fn index_named(list: &Item, name: &str) -> Option<usize> {
+    list_tables(list)
+        .iter()
+        .position(|t| get_str(*t, "name") == Some(name))
+}
+
+/// The table of a list whose `name` is `name`, mutably.
+pub(super) fn named_mut<'a>(list: &'a mut Item, name: &str) -> Option<&'a mut dyn TableLike> {
+    list_tables_mut(list)
+        .into_iter()
+        .find(|t| get_str(&**t, "name") == Some(name))
+}
+
+/// Insert `entry` as the `index`th table of a list (or last, past the end),
+/// in the list's shape. An inline entry copies the spacing of its
+/// neighbour, so a list written one entry per line stays that way.
+pub(super) fn insert_table(
+    list: &mut Item,
+    index: usize,
+    entry: InlineTable,
+) -> Result<(), EditError> {
+    match list {
+        Item::ArrayOfTables(tables) => {
+            let mut all: Vec<Table> = tables.iter().cloned().collect();
+            let at = index.min(all.len());
+            all.insert(at, entry.into_table());
+            tables.clear();
+            for t in all {
+                tables.push(t);
+            }
+            Ok(())
+        }
+        Item::Value(Value::Array(array)) => {
+            let raw = raw_index(array, index);
+            let value = Value::InlineTable(entry);
+            // The first entry is written flush against the bracket, so only
+            // a later one says how entries are spaced.
+            match array.len() > 1 {
+                true => {
+                    let spacing = entry_spacing(array.get(array.len() - 1).expect("len > 1"));
+                    array.insert_formatted(raw, value.decorated(spacing, ""));
+                }
+                false => array.insert(raw, value),
+            }
+            Ok(())
+        }
+        _ => Err(EditError::NotATable("a list".to_string())),
+    }
+}
+
+/// Append `entry` to a list, in the list's shape.
+pub(super) fn push_table(list: &mut Item, entry: InlineTable) -> Result<(), EditError> {
+    insert_table(list, usize::MAX, entry)
+}
+
+/// Drop the `index`th table of a list; `false` when there is none. An
+/// inline list is counted by its tables, the way it is read, so a stray
+/// value in it neither shifts the count nor gets removed in a table's place.
+pub(super) fn remove_table(list: &mut Item, index: usize) -> bool {
+    match list {
+        Item::ArrayOfTables(tables) if index < tables.len() => {
+            tables.remove(index);
+            true
+        }
+        Item::Value(Value::Array(array)) => {
+            let raw = table_positions(array).nth(index);
+            match raw {
+                Some(i) => {
+                    array.remove(i);
+                    true
+                }
+                None => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Keep only the tables of a list `keep` says yes to.
+pub(super) fn retain_tables(list: &mut Item, keep: &dyn Fn(&dyn TableLike) -> bool) {
+    let drop: Vec<usize> = list_tables(list)
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !keep(**t))
+        .map(|(i, _)| i)
+        .collect();
+    for i in drop.into_iter().rev() {
+        remove_table(list, i);
+    }
+}
+
+/// The whitespace before an array entry, without any comment above it: a
+/// new line and the indent when the entry starts a line, else what is there.
+fn entry_spacing(entry: &Value) -> String {
+    let prefix = entry
+        .decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or(" ");
+    match prefix.rsplit_once('\n') {
+        Some((_, indent)) => format!("\n{indent}"),
+        None => prefix.to_string(),
+    }
+}
+
+/// Where in an array its tables sit.
+fn table_positions(array: &Array) -> impl Iterator<Item = usize> + '_ {
+    array
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v.is_inline_table())
+        .map(|(i, _)| i)
+}
+
+/// The array position the `index`th table goes at: before the table now
+/// there, or at the end.
+fn raw_index(array: &Array, index: usize) -> usize {
+    table_positions(array).nth(index).unwrap_or(array.len())
 }

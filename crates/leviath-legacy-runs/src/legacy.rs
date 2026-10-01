@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use leviath_core::files::{
     ARCHIVE_FILE, BLOBS_DIR, BLUEPRINT_SNAPSHOT_FILE, CONTEXT_FILE, FANOUT_FILE, INTERACTIONS_FILE,
-    MANIFEST_FILENAME, META_FILE, STAGES_FILE,
+    META_FILE, STAGES_FILE,
 };
 use leviath_core::run_archive::{self, FoldedRun, RunIdentity, RunRecord};
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
@@ -14,6 +14,9 @@ use serde::Deserialize;
 
 use crate::report::BlueprintSource;
 use crate::{ConvertEnv, ConvertError};
+
+/// An old blueprint manifest inside its agent directory.
+const MANIFEST_FILENAME: &str = "agent.leviath";
 
 /// The first bytes of an old journal.
 const LVR1: &[u8; 4] = b"LVR1";

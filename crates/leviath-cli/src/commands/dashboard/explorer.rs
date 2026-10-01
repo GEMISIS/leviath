@@ -26,8 +26,8 @@ impl Dashboard {
     }
 
     /// `g` in the detail view: open the explorer on the selected run. Every
-    /// run has a graph (a linear blueprint is a chain); the one that has not
-    /// is a run whose manifest could not be read, and that is said out loud
+    /// run has a graph (a linear one is a chain); the one that has not is a
+    /// run whose run file could not be read, and that is said out loud
     /// rather than shown as an empty canvas.
     pub(super) fn open_stage_explorer(&mut self) {
         let Some(agent) = self.selected_agent() else {
@@ -363,32 +363,58 @@ mod tests {
     use crate::tui::flowgraph::content::NodeStatus;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use leviath_core::run_meta::StageRecord;
-    use leviath_runtime::spec::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
 
     fn stage_graph() -> Arc<StageGraph> {
-        Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
+        Arc::new(crate::tui::flowgraph::model::toml_graph(
+            r#"[blueprint]
 name = "grapher"
-[stages.plan]
-[stages.plan.transitions.implement]
-[stages.implement]
-mode = "fan_out"
-worker_agent = "researcher"
-[stages.implement.transitions.review]
-[stages.review]
-[stages.review.transitions.implement]
-condition = "llm_choice"
-[stages.review.transitions.done]
-[stages.done]
-[stages.done.transitions]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "plan"
+
+[[graph.stages]]
+name = "implement"
+tools = ["fan_out"]
+
+[graph.stages.mode.fan_out]
+worker = { blueprint = { name = "researcher" } }
+max_workers = 30
+
+[[graph.stages]]
+name = "review"
+
+[[graph.stages]]
+name = "done"
+
+[[graph.edges]]
+name = "implement"
+from = "plan"
+to = "implement"
+
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+
+[[graph.edges]]
+name = "done"
+from = "review"
+to = "done"
+
+[[graph.edges]]
+name = "implement"
+from = "review"
+to = "implement"
+when = "llm_choice"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
-            )
-            .unwrap(),
         ))
     }
 
@@ -506,7 +532,7 @@ condition = "llm_choice"
         dash.handle_key(key(KeyCode::Char('g')));
         assert!(dash.stage_explorer.is_none());
 
-        // A run whose manifest could not be read has no graph: say so.
+        // A run whose run file could not be read has no graph: say so.
         let mut dash = make_test_dashboard();
         let mut unreadable = agent("run-2", AgentDisplayStatus::Active);
         unreadable.graph = None;

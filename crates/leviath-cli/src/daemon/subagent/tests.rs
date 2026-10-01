@@ -28,7 +28,7 @@ fn bp_args(dir: &tempfile::TempDir, task: &str) -> serde_json::Value {
 }
 
 /// The escalation this closes: `write_file` is confined to the workdir, but
-/// the spawner was not, so a model could author `x/agent.leviath` in its own
+/// the spawner was not, so a model could author `x/agent.toml` in its own
 /// workspace and spawn it, and that manifest's command seeds ran on the host
 /// before the child's first inference. A bare name is an installed
 /// blueprint, never a directory in the workspace, so only paths can reach
@@ -38,12 +38,36 @@ async fn spawn_refuses_a_blueprint_the_agent_could_have_written() {
     let work = tempfile::tempdir().unwrap();
     let planted = work.path().join("x");
     std::fs::create_dir(&planted).unwrap();
-    std::fs::write(planted.join("agent.leviath"), "[agent]\nname = \"x\"\n").unwrap();
+    std::fs::write(
+        planted.join("agent.toml"),
+        r#"[blueprint]
+name = "x"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
+    )
+    .unwrap();
     let h = gone_host_in(work.path());
     for bad in [
         planted.to_string_lossy().to_string(),
         "./x".to_string(),
-        "x/agent.leviath".to_string(),
+        "x/agent.toml".to_string(),
     ] {
         let out = spawn(&h, &spawn_args(&bad, "go"), None).await;
         assert!(
@@ -76,7 +100,7 @@ fn a_spawn_names_its_blueprint_by_name_reference_or_directory() {
             .map(|r| r.source)
     };
     let dir = elsewhere.path().to_string_lossy().into_owned();
-    let manifest = elsewhere.path().join("agent.leviath");
+    let manifest = elsewhere.path().join("agent.toml");
     for named in [json!(dir), json!(manifest.to_string_lossy())] {
         match source(named).unwrap() {
             SpawnSource::BlueprintFile(path) => assert_eq!(path.path(), elsewhere.path()),
@@ -96,11 +120,10 @@ fn a_spawn_names_its_blueprint_by_name_reference_or_directory() {
         other => panic!("{other:?}"),
     }
     // A whole graph, as `spawn_schema` describes one, runs as written.
-    let manifest = std::fs::read_to_string(elsewhere.path().join("agent.leviath")).unwrap();
-    let graph = leviath_runtime::spec::graph::RunGraph::from_blueprint(
-        &leviath_runtime::spec::manifest::parse_manifest(&manifest).unwrap(),
-    )
-    .unwrap();
+    let manifest = std::fs::read_to_string(elsewhere.path().join("agent.toml")).unwrap();
+    let graph = leviath_blueprint::BlueprintFile::parse(&manifest)
+        .unwrap()
+        .run_graph();
     let request = SpawnArgs::parse(&json!({"source": {"graph": graph}}))
         .unwrap()
         .into_request(&h, Vec::new())
@@ -578,25 +601,28 @@ fn dead_handle() -> SubAgentHandle {
 }
 
 /// Write a minimal valid blueprint into a temp dir and return that dir (whose
-/// path `find_manifest` resolves to `<dir>/agent.leviath`).
+/// path `find_blueprint` resolves to `<dir>/agent.toml`).
 fn temp_blueprint() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
-        dir.path().join("agent.leviath"),
-        r#"
-[agent]
+        dir.path().join("agent.toml"),
+        r#"[blueprint]
 name = "child"
 version = "0.1.0"
 description = "child"
 
-[stages.main]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
 
-# Every caller here spawns the child with a task, and a child with nowhere to
-# put one is refused - which is the point: a sub-agent that silently discards
-# its parent's instructions is the failure this fixture would otherwise model.
-[context.regions]
-task = { kind = "pinned", max_tokens = 1000 }
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 1000 }]
+total_budget_tokens = 1000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
 "#,
     )
     .unwrap();
@@ -1456,16 +1482,36 @@ fn installed_blueprint(agents: &std::path::Path, name: &str) {
     let dir = agents.join(name);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("agent.leviath"),
+        dir.join("agent.toml"),
         format!(
-            "[agent]\nname = \"{name}\"\nversion = \"1.2.3\"\ndescription = \"writes code\"\n\
-                 entry_stage = \"plan\"\n\n\
-                 [stages.plan]\nmodel = {{ provider = \"anthropic\", model = \"m\" }}\n\
-                 description = \"plan it\"\n\n\
-                 [stages.build]\nmode = \"interactive\"\n\
-                 model = {{ provider = \"anthropic\", model = \"m\" }}\n\n\
-                 [context.regions]\n\
-                 task = {{ kind = \"pinned\", max_tokens = 1000, seed = \"task\" }}\n"
+            r#"[blueprint]
+name = "{name}"
+version = "1.2.3"
+description = "writes code"
+
+[graph]
+entry = "plan"
+edges = [{{ name = "next", from = "plan", to = "build" }}]
+
+[[graph.stages]]
+name = "plan"
+description = "plan it"
+model = {{ models = [{{ provider = "anthropic", model = "m" }}] }}
+
+[[graph.stages]]
+name = "build"
+model = {{ models = [{{ provider = "anthropic", model = "m" }}] }}
+mode = "interactive"
+
+[graph.layout]
+regions = [{{ name = "task", kind = "pinned", budget = 1000 }}]
+total_budget_tokens = 1000
+
+[[graph.inputs]]
+name = "task"
+type = {{ kind = "text", multiline = true }}
+binds = [{{ region = "task" }}]
+"#
         ),
     )
     .unwrap();
@@ -1499,7 +1545,7 @@ async fn describe_blueprint_lists_stages_inputs_and_a_call() {
     let out = handle(&h, &tc("describe_blueprint", json!({"blueprint": "nope"}))).await;
     assert!(out.starts_with("[error] "), "{out}");
     assert!(
-        out.contains("no blueprint named 'nope'") && out.contains("coder"),
+        out.contains("no blueprint named \"nope\"") && out.contains("coder"),
         "{out}"
     );
     for bad in [

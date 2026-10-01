@@ -16,12 +16,31 @@ type = { kind = "text", multiline = true }
 required = true
 binds = [{ region = "task" }]
 
+# The two inputs below are what `split_logs` hands each `scan_worker`: the
+# slice it sweeps and the format its lines are in. A run started by a person
+# leaves them out.
+[[graph.inputs]]
+name = "slice"
+type = { kind = "text", multiline = true }
+description = "For a sweeper: the log file(s) it reads, and the time window when a file is split by time."
+binds = [{ region = "slice" }]
+
+[[graph.inputs]]
+name = "log_format"
+type = { kind = "text", multiline = true }
+description = "For a sweeper: the log format and its fields, as the ingest stage found them."
+binds = [{ region = "log_format" }]
+
 # ─── Context layout ───────────────────────────────────────────────────────────
 [graph.layout]
 total_budget_tokens = 0
 regions = [
     { name = "task", kind = "pinned", budget = "2%", required = true, required_message = "Name the log file(s)/dir and what to look for via --task.", volatility = "stable" },
     { name = "severity_index", kind = "pinned", budget = "2%" },
+    # A sweeper's own slice and the format of its lines, from its work item.
+    # Empty in the run that splits the work.
+    { name = "slice", kind = "pinned", budget = "1%", volatility = "stable" },
+    { name = "log_format", kind = "pinned", budget = "2%", volatility = "stable" },
     { name = "findings", kind = { kind = "sliding_window", max_items = 30, eviction = { bulk = 10 } }, budget = "12%" },
     # The sweepers' submitted findings, on the way into the analyze stage. Its
     # budget is what each worker's share is divided from, so it matches the
@@ -145,9 +164,10 @@ lines. Use the file inventory `findings` holds.
 
 Call `fan_out` with one entry in `items` per work item:
 
-  items: [{"id": "<short-slug>", "context": {"slice": "<the file path(s), and the time window if the file is split by time>", "format": "<the log format and its fields, verbatim from findings>", "looking_for": "<what this run is trying to find, from the task>"}}]
+  items: [{"id": "<short-slug>", "inputs": {"slice": "<the file path(s), and the time window if the file is split by time>", "log_format": "<the log format and its fields, verbatim from findings>", "task": "<what this run is trying to find, from the task>"}}]
 
-Every item MUST carry the format and what the run is looking for: workers do not
+Those three are the only inputs a worker takes. Every item MUST carry the format
+and what the run is looking for: workers do not
 share this agent's context, so the work item is all they get. A worker that does
 not know the field layout can only grep for the word "error".
 
@@ -176,9 +196,9 @@ max_iterations = 20
 allow_as_worker = true
 require_output = true
 system_prompt = """
-Sweep ONE slice of the logs. Your work item names the file (and time window),
-the format its lines are in, and what this run is looking for - it is all the
-context you get, so work from it.
+Sweep ONE slice of the logs. `slice` names the file (and time window),
+`log_format` the format its lines are in, and `task` what this run is looking
+for - it is all the context you get, so work from it.
 
 Count rather than skim. Aggregate with whatever your shell runs (awk/grep/sed or
 python via bash on Unix, PowerShell or python on Windows): error counts by type,

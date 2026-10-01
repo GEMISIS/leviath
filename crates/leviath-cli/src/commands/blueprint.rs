@@ -1,8 +1,11 @@
 //! `lev blueprint`: work on blueprint files.
 //!
-//! `lev blueprint migrate` converts an `agent.leviath` manifest into an
-//! `agent.toml` blueprint describing exactly the same run, the format the
-//! run spec reads. Validate the result with `lev validate agent.toml`.
+//! `lev blueprint migrate` converts an `agent.leviath` manifest, the format
+//! blueprints were written in before `agent.toml`, into an `agent.toml`
+//! describing exactly the same run. Validate the result with
+//! `lev validate agent.toml`. The old format is read by the
+//! `leviath-legacy-runs` crate, so a build without its `legacy-runs` feature
+//! refuses the command.
 
 use std::path::{Path, PathBuf};
 
@@ -60,7 +63,7 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
     let manifest = manifest_path(&args.path);
     let text = std::fs::read_to_string(&manifest)
         .with_context(|| format!("could not read '{}'", manifest.display()))?;
-    let blueprint = leviath_blueprint::migrate(&text).map_err(|problems| {
+    let blueprint = convert(&text).map_err(|problems| {
         let mut lines = vec![format!(
             "'{}' does not convert: {} problem(s)",
             manifest.display(),
@@ -88,21 +91,67 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
+/// The name of a manifest in the old format, inside its directory.
+const MANIFEST_FILE: &str = "agent.leviath";
+
 /// The manifest `path` names: itself, or the `agent.leviath` in it.
 fn manifest_path(path: &Path) -> PathBuf {
     match path.is_dir() {
-        true => path.join(leviath_core::files::MANIFEST_FILENAME),
+        true => path.join(MANIFEST_FILE),
         false => path.to_path_buf(),
     }
+}
+
+/// The text of an `agent.leviath` as an `agent.toml`, or every problem with
+/// it.
+#[cfg(feature = "legacy-runs")]
+fn convert(manifest: &str) -> Result<String, Vec<String>> {
+    leviath_legacy_runs::migrate(manifest)
+}
+
+/// Without the old-format reader there is nothing to convert with.
+#[cfg(not(feature = "legacy-runs"))]
+fn convert(_manifest: &str) -> Result<String, Vec<String>> {
+    Err(vec![
+        "this build of lev cannot read agent.leviath files (it was built without the \
+         legacy-runs feature)"
+            .to_string(),
+    ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A coder-shaped manifest in the old format.
+    const OLD_CODER: &str = r#"[agent]
+name = "coder"
+version = "0.0.0"
+description = "A coder-shaped manifest in the old format."
+entry_stage = "analyze"
+
+[stages.analyze]
+mode = "autonomous"
+model = { provider = "anthropic", model = "m" }
+available_tools = ["read_file", "list_dir"]
+system_prompt = "Analyze the task."
+[stages.analyze.transitions.review]
+transform = "compact"
+
+[stages.review]
+mode = "autonomous"
+model = { provider = "anthropic", model = "m" }
+available_tools = ["read_file"]
+system_prompt = "Review."
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 2000, seed = "task" }
+conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
+"#;
+
     fn manifest(dir: &Path) -> PathBuf {
-        let path = dir.join(leviath_core::files::MANIFEST_FILENAME);
-        std::fs::write(&path, crate::test_support::inline_coder_manifest()).unwrap();
+        let path = dir.join(MANIFEST_FILE);
+        std::fs::write(&path, OLD_CODER).unwrap();
         path
     }
 
@@ -123,7 +172,7 @@ mod tests {
 
         let out = dir.path().join(leviath_blueprint::FILE_NAME);
         let args = MigrateArgs {
-            path: dir.path().join(leviath_core::files::MANIFEST_FILENAME),
+            path: dir.path().join(MANIFEST_FILE),
             output: Some(out.clone()),
             force: false,
         };

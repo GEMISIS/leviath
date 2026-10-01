@@ -4,7 +4,7 @@
 //! The picker row says a name and a description; the preview says what the
 //! agent will do: how many stages, in what order, where it loops. It is a
 //! viewer (drag pans, nothing selects) and it follows the picker: moving the
-//! selection swaps the graph, and a blueprint whose manifest cannot be read
+//! selection swaps the graph, and a blueprint whose `agent.toml` cannot be read
 //! says so here, before `lev run` would have refused it.
 
 use ratatui::Frame;
@@ -47,7 +47,7 @@ pub(super) fn preview_height(pane_height: u16) -> u16 {
 
 impl Dashboard {
     /// Make the preview match the picker's selection: build it when the
-    /// selected row changed, keep it otherwise. Parsing a manifest per frame
+    /// selected row changed, keep it otherwise. Parsing a blueprint per frame
     /// would be wasteful; per selection change it is nothing.
     pub(super) fn sync_new_run_preview(&mut self) {
         let Some(agent) = self.new_run_selected_agent() else {
@@ -155,13 +155,35 @@ mod tests {
         dash
     }
 
+    /// An installed blueprint called `name` whose graph is `body`: its
+    /// stages and edges, below `[graph]`.
     fn write_agent(dir: &Path, name: &str, body: &str) {
         let agent_dir = dir.join("agents").join(name);
         std::fs::create_dir_all(&agent_dir).unwrap();
         write_test_agent(
             &agent_dir,
-            format!("[agent]\nname = \"{name}\"\ndescription = \"d\"\n{body}"),
+            format!(
+                "[blueprint]\nname = \"{name}\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+                 [graph]\nlayout = {{ total_budget_tokens = 0, regions = [] }}\n{body}"
+            ),
         );
+    }
+
+    /// The `stages` and `edges` lines of a graph body.
+    fn body(stages: &[&str], edges: &[(&str, &str)]) -> String {
+        let stages: Vec<String> = stages
+            .iter()
+            .map(|s| format!("{{ name = \"{s}\" }}"))
+            .collect();
+        let edges: Vec<String> = edges
+            .iter()
+            .map(|(from, to)| format!("{{ name = \"{to}\", from = \"{from}\", to = \"{to}\" }}"))
+            .collect();
+        format!(
+            "stages = [{}]\nedges = [{}]\n",
+            stages.join(", "),
+            edges.join(", ")
+        )
     }
 
     fn draw(dash: &mut Dashboard, w: u16, h: u16) -> Terminal<TestBackend> {
@@ -196,7 +218,7 @@ mod tests {
         write_agent(
             dir.path(),
             "alpha",
-            "[stages.gather]\n[stages.gather.transitions.write]\n[stages.write]\n[stages.write.transitions]\n",
+            &body(&["gather", "write"], &[("gather", "write")]),
         );
         let mut dash = dash_at(dir.path());
         select(&mut dash, "alpha");
@@ -217,7 +239,7 @@ mod tests {
         draw(&mut dash, 160, 40);
         assert_eq!(dash.new_run_preview.as_ref().unwrap().key, key);
 
-        // A row whose manifest cannot be read (the catalog lists what parsed
+        // A row whose blueprint cannot be read (the catalog lists what parsed
         // when it was built; a file can go away after) says so instead of
         // drawing.
         dash.new_run_agents.push(NewRunAgent {
@@ -258,7 +280,7 @@ mod tests {
     #[test]
     fn a_short_screen_skips_the_preview_and_the_popup_still_anchors_to_the_task_pane() {
         let dir = tempfile::tempdir().unwrap();
-        write_agent(dir.path(), "alpha", "[stages.only]\n");
+        write_agent(dir.path(), "alpha", &body(&["only"], &[]));
         std::fs::write(dir.path().join("notes.md"), "x").unwrap();
         let mut dash = dash_at(dir.path());
         select(&mut dash, "alpha");
@@ -285,7 +307,7 @@ mod tests {
         write_agent(
             dir.path(),
             "alpha",
-            "[stages.a]\n[stages.a.transitions.b]\n[stages.b]\n[stages.b.transitions.a]\n[stages.b.transitions.c]\n[stages.c]\n[stages.c.transitions]\n",
+            &body(&["a", "b", "c"], &[("a", "b"), ("b", "a"), ("b", "c")]),
         );
         let mut dash = dash_at(dir.path());
         select(&mut dash, "alpha");

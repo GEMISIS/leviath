@@ -1290,32 +1290,35 @@ async fn inference_check_reports_the_provider_error_verbatim() {
 // ─── The canary blueprint ─────────────────────────────────────────────────────
 
 #[test]
-fn the_canary_manifest_is_a_valid_blueprint() {
-    let manifest = canary_manifest("openrouter", "anthropic/claude-sonnet-4.5");
-    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&manifest)
-        .expect("the canary manifest parses");
-    blueprint.validate().expect("the canary manifest validates");
-    assert_eq!(blueprint.stages.len(), 1, "one stage, one turn");
-    let stage = &blueprint.stages[0];
+fn the_canary_blueprint_is_a_valid_blueprint() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let file = stage_canary(dir.path(), "openrouter", "anthropic/claude-sonnet-4.5")
+        .expect("staging into a fresh temp dir succeeds");
+    let blueprint = leviath_blueprint::validate(&file).expect("the canary validates");
+    let graph = &blueprint.graph;
+    assert_eq!(graph.stages.len(), 1, "one stage, one turn");
+    let stage = &graph.stages[0];
     assert_eq!(stage.max_iterations, Some(1));
     assert!(
-        stage.available_tools.is_empty(),
+        stage.tools.is_empty(),
         "a probe with a file tool would be judged for not having used it"
     );
-    assert!(stage.transitions.is_none(), "nothing to transition to");
-    assert_eq!(stage.model.provider(), "openrouter");
-    assert_eq!(stage.model.model(), "anthropic/claude-sonnet-4.5");
+    assert!(graph.edges.is_empty(), "nothing to move on to");
+    let model = &stage.model.models[0];
+    assert_eq!(model.provider.as_ref().unwrap().as_str(), "openrouter");
+    assert_eq!(model.model.as_str(), "anthropic/claude-sonnet-4.5");
 }
 
 #[test]
-fn the_canary_manifest_escapes_hostile_names() {
+fn the_canary_blueprint_escapes_hostile_names() {
     // Provider names come from config, and a quote in one must not be able to
     // close the TOML literal and inject the rest of the file.
-    let manifest = canary_manifest("ev\"il", "m\\1");
-    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&manifest)
-        .expect("an escaped name still parses");
-    assert_eq!(blueprint.stages[0].model.provider(), "ev\"il");
-    assert_eq!(blueprint.stages[0].model.model(), "m\\1");
+    let manifest = canary_blueprint("ev\"il", "m\\1");
+    let file =
+        leviath_blueprint::BlueprintFile::parse(&manifest).expect("an escaped name still parses");
+    let model = &file.graph.stages[0].model.models[0];
+    assert_eq!(model.provider.as_ref().unwrap().as_str(), "ev\"il");
+    assert_eq!(model.model.as_str(), "m\\1");
 }
 
 #[test]
@@ -1332,7 +1335,7 @@ fn stage_canary_reports_a_manifest_it_cannot_write() {
     // The directory is fine; the manifest path itself is occupied by a
     // directory, so the write is what fails.
     let dir = tempfile::tempdir().expect("a temp dir");
-    std::fs::create_dir_all(dir.path().join("doctor").join("agent.leviath"))
+    std::fs::create_dir_all(dir.path().join("doctor").join(leviath_blueprint::FILE_NAME))
         .expect("occupy the manifest path");
     let err = stage_canary(dir.path(), "stub", "m").expect_err("cannot write over a directory");
     assert!(!err.to_string().is_empty());
@@ -1589,7 +1592,7 @@ async fn spawn_and_wait_reports_a_manifest_it_cannot_resolve() {
         let (id, _server) = scripted_daemon(&root, Vec::new());
         spawn_and_wait(
             &ControlClient::new(id),
-            &root.join("nowhere").join("agent.leviath"),
+            &root.join("nowhere").join(leviath_blueprint::FILE_NAME),
             &root,
             Duration::from_secs(5),
             Duration::from_millis(1),

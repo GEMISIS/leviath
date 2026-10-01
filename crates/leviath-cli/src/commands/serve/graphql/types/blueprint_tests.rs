@@ -8,59 +8,39 @@ use super::super::manifest::stage::StageMode;
 use super::{Blueprint, BlueprintSource, HintSetting, RegionKind, ToolRescan};
 use crate::commands::serve::core::blueprints::{BlueprintSource as CoreSource, digest_of};
 
-/// A manifest exercising the fields this module maps.
+/// A blueprint exercising the fields this module maps.
 fn manifest() -> String {
-    "[agent]\n\
-     name = \"coder\"\n\
-     version = \"1.2.0\"\n\
-     description = \"writes code\"\n\
-     entry_stage = \"plan\"\n\
-     max_child_depth = 4\n\
-     tool_rescan = \"before_dispatch\"\n\
-     batch_tool_hint = false\n\
-     \n\
-     [read_paths]\n\
-     allow = [\"~/designs\"]\n\
-     \n\
-     [context.regions.plan]\n\
-     kind = \"pinned\"\n\
-     max_tokens = 2000\n\
-     description = \"the plan so far\"\n\
-     required = true\n\
-     \n\
-     [context.regions.notes]\n\
-     kind = \"sliding_window\"\n\
-     max_tokens = 1000\n\
-     \n\
-     [stages.plan]\n\
-     mode = \"interactive_points\"\n\
-     description = \"decide what to do\"\n\
-     available_tools = [\"read_file\", \"@builtin\"]\n\
-     required_tools = [\"read_file\"]\n\
-     max_iterations = 8\n\
-     shell_hint = true\n\
-     \n\
-     [stages.plan.interaction_points.review]\n\
-     prompt = \"Does this plan look right?\"\n\
-     \n\
-     [stages.plan.transitions.build]\n\
-     hint = \"when the plan is settled\"\n\
-     \n\
-     [stages.build]\n\
-     mode = \"autonomous\"\n\
-     require_output = true\n\
-     allow_blocking_tools = true\n\
-     accepts_messages = false\n\
-     "
+    r#"[blueprint]
+name = "coder"
+version = "1.2.0"
+description = "writes code"
+
+[graph]
+entry = "plan"
+max_child_depth = 4
+read_paths = ["~/designs"]
+batch_tool_hint = false
+tool_rescan = "before_dispatch"
+stages = [
+    { name = "plan", description = "decide what to do", tools = ["read_file", "@builtin"], required_tools = ["read_file"], max_iterations = 8, shell_hint = true, mode = { interactive_points = [{ name = "review", prompt = "Does this plan look right?" }] } },
+    { name = "build", accepts_messages = false, allow_blocking_tools = true, require_output = true },
+]
+edges = [{ name = "build", from = "plan", to = "build", hint = "when the plan is settled" }]
+
+[graph.layout]
+total_budget_tokens = 3000
+regions = [
+    { name = "plan", kind = "pinned", budget = 2000, description = "the plan so far", required = true },
+    { name = "notes", kind = { kind = "sliding_window", max_items = 10 }, budget = 1000 },
+]
+"#
     .to_string()
 }
 
-/// Build the object under test from manifest text.
+/// Build the object under test from an `agent.toml`.
 fn blueprint(text: &str, source: CoreSource) -> Blueprint {
-    let parsed =
-        leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses");
     Blueprint {
-        parsed: Arc::new(parsed),
+        parsed: super::super::manifest::parsed(text),
         digest: digest_of(text),
         source: source.into(),
     }
@@ -175,7 +155,7 @@ async fn a_blueprint_carries_its_agent_block() {
 /// A blueprint naming no entry stage starts at the first one declared.
 #[tokio::test]
 async fn an_unnamed_entry_stage_is_the_first_declared() {
-    let text = manifest().replace("entry_stage = \"plan\"\n", "");
+    let text = manifest().replace("entry = \"plan\"\n", "");
     let json = ask(
         &text,
         CoreSource::Snapshot,
@@ -185,8 +165,8 @@ async fn an_unnamed_entry_stage_is_the_first_declared() {
     assert_eq!(json["blueprint"]["entryStage"]["name"], "plan");
 }
 
-/// Every value the setting can take reads back, including the flag it grew out
-/// of and a blueprint that says nothing.
+/// Every value the setting can take reads back, and a blueprint that says
+/// nothing.
 #[tokio::test]
 async fn every_rescan_setting_reads_back() {
     let cases = [
@@ -196,8 +176,6 @@ async fn every_rescan_setting_reads_back() {
             r#"tool_rescan = "before_dispatch""#,
             "RESCAN_BEFORE_DISPATCH",
         ),
-        // The flag it replaced did exactly what `after_writes` does.
-        ("dynamic_tools = true", "RESCAN_AFTER_WRITES"),
         // And a blueprint that mentions none of it is fixed at spawn.
         ("", "AT_SPAWN_ONLY"),
     ];
@@ -280,19 +258,26 @@ async fn a_stage_carries_its_own_block() {
 
 /// The stage fields a run's limits come from, and the edge ordering.
 ///
-/// A stage with two edges is what makes the sort observable: the manifest
-/// holds them in a map, so without an order two identical requests could
-/// answer differently.
+/// A stage with two edges is what makes the sort observable: they are listed
+/// by target, whatever order the blueprint declares them in.
 #[tokio::test]
 async fn a_stage_carries_its_limits_and_orders_its_edges() {
-    let text = "[agent]\nname = \"router\"\n\n\
-                [stages.pick]\nmode = \"autonomous\"\nmax_revisits = 2\n\
-                requires_children = true\nallow_complete = true\nallow_as_worker = true\n\
-                available_connectors = [\"github\"]\n\n\
-                [stages.pick.transitions.zeta]\nhint = \"last alphabetically\"\n\n\
-                [stages.pick.transitions.alpha]\ncondition = \"always\"\n\n\
-                [stages.alpha]\nmode = \"autonomous\"\nallow_complete = true\n\n\
-                [stages.zeta]\nmode = \"autonomous\"\nallow_complete = true\n";
+    let text = r#"[blueprint]
+name = "router"
+version = "1.0.0"
+
+[graph]
+stages = [
+    { name = "pick", max_revisits = 2, requires_children = true, allow_complete = true, allow_as_worker = true, connectors = ["github"] },
+    { name = "alpha", allow_complete = true },
+    { name = "zeta", allow_complete = true },
+]
+edges = [
+    { name = "zeta", from = "pick", to = "zeta", hint = "last alphabetically" },
+    { name = "alpha", from = "pick", to = "alpha" },
+]
+layout = { total_budget_tokens = 1000, regions = [] }
+"#;
     let json = ask(
         text,
         CoreSource::Installed,
@@ -307,7 +292,7 @@ async fn a_stage_carries_its_limits_and_orders_its_edges() {
     assert_eq!(pick["allowComplete"], true);
     assert_eq!(pick["allowAsWorker"], true);
     assert_eq!(pick["availableConnectors"][0], "github");
-    // Sorted by target, whatever order the manifest listed them in.
+    // Sorted by target, whatever order the blueprint listed them in.
     assert_eq!(pick["transitions"][0]["target"]["name"], "alpha");
     assert!(pick["transitions"][0]["hint"].is_null());
     assert_eq!(pick["transitions"][1]["target"]["name"], "zeta");
@@ -345,70 +330,60 @@ async fn regions_carry_their_kind_and_ceiling() {
     assert!(notes["description"].is_null());
 }
 
-/// Every region kind the daemon recognises has exactly one schema value, and
-/// the manifest's two spellings of one kind land on one of them.
+/// Every region kind a graph can declare has exactly one schema value.
 #[test]
 fn every_region_kind_maps_to_one_value() {
-    use leviath_core::region::RegionKind as Core;
+    use leviath_runtime::spec::graph::{CodeRef, Eviction, RegionKind as Kind};
     let cases = [
-        (Core::Pinned, RegionKind::Pinned),
-        (Core::Temporary, RegionKind::Temporary),
-        (Core::Clearable, RegionKind::Clearable),
+        (Kind::Pinned, RegionKind::Pinned),
+        (Kind::Temporary, RegionKind::Temporary),
+        (Kind::Clearable, RegionKind::Clearable),
         (
-            Core::SlidingWindow {
+            Kind::SlidingWindow {
                 max_items: 10,
-                eviction_strategy: Default::default(),
+                eviction: Eviction::PerItem,
             },
             RegionKind::SlidingWindow,
         ),
         (
-            Core::Compacting {
-                threshold_tokens: 100,
+            Kind::Compacting {
+                threshold_tokens: Some(100),
             },
             RegionKind::Compacting,
         ),
         (
-            Core::CompactHistory {
-                source_region: "notes".to_string(),
-            },
+            Kind::CompactHistory { source: None },
             RegionKind::CompactHistory,
         ),
-        (Core::HashMap { max_entries: None }, RegionKind::Hashmap),
-        (Core::Checklist, RegionKind::Checklist),
+        (Kind::Keyed { max_entries: None }, RegionKind::Hashmap),
+        (Kind::Checklist, RegionKind::Checklist),
         (
-            Core::Custom {
-                script: "s.rhai".to_string(),
+            Kind::Custom {
+                code: CodeRef::File("s.rhai".to_string()),
                 pinned: false,
             },
             RegionKind::Custom,
         ),
     ];
-    for (core, expected) in cases {
-        assert_eq!(RegionKind::from(&core), expected, "{core:?}");
+    for (kind, expected) in cases {
+        assert_eq!(RegionKind::from(&kind), expected, "{kind:?}");
     }
 }
 
 /// Every stage mode maps to one schema value.
 #[test]
 fn every_stage_mode_maps_to_one_value() {
-    use leviath_runtime::spec::blueprint::StageMode as Core;
-    assert_eq!(StageMode::from(&Core::Autonomous), StageMode::Autonomous);
-    assert_eq!(StageMode::from(&Core::Interactive), StageMode::Interactive);
-    assert_eq!(StageMode::from(&Core::Output), StageMode::Output);
+    use leviath_runtime::spec::graph::{FanOutDef, StageMode as Mode};
+    use leviath_runtime::spec::names::StageName;
+    assert_eq!(StageMode::from(&Mode::Autonomous), StageMode::Autonomous);
+    assert_eq!(StageMode::from(&Mode::Interactive), StageMode::Interactive);
+    assert_eq!(StageMode::from(&Mode::Output), StageMode::Output);
     assert_eq!(
-        StageMode::from(&Core::InteractivePoints { points: Vec::new() }),
+        StageMode::from(&Mode::InteractivePoints(Vec::new())),
         StageMode::InteractivePoints
     );
-    // Fan-out carries a config with no default, so this one comes from a
-    // manifest: the mapping is what is under test, not the config's shape.
-    let fanned = leviath_runtime::spec::manifest::parse_manifest(
-        "[agent]\nname = \"f\"\n\n\
-         [stages.split]\nmode = \"fan_out\"\nworker_stage = \"work\"\n\
-         split_prompt = \"one item per line\"\n\n\
-         [stages.work]\nmode = \"autonomous\"\nallow_as_worker = true\n",
-    )
-    .expect("the manifest parses");
-    assert_eq!(StageMode::from(&fanned.stages[0].mode), StageMode::FanOut);
+    let fanned = Mode::FanOut(FanOutDef::same_graph(StageName::new("work").unwrap()));
+    assert_eq!(StageMode::from(&fanned), StageMode::FanOut);
 }
 
 /// Every kind a snapshot can carry reads back, including the two spellings
@@ -454,7 +429,7 @@ async fn every_mirrored_function_runs() {
     };
 
     let one = blueprint(&manifest(), CoreSource::Installed);
-    let regions: Vec<super::Region> = (0..one.parsed.context_layout.regions.len())
+    let regions: Vec<super::Region> = (0..one.parsed.graph.layout.regions.len())
         .map(|at| super::Region {
             blueprint: Arc::clone(&one.parsed),
             stage: None,

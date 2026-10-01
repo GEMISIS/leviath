@@ -16,8 +16,7 @@
 //! This module reports both, so the wait is announced before the run starts
 //! rather than discovered twenty minutes later.
 
-use leviath_runtime::spec::Blueprint;
-use leviath_runtime::spec::blueprint::{StageMode, UnattendedPolicy};
+use leviath_runtime::spec::graph::{RunGraph, StageMode, UnattendedPoint};
 
 /// One thing in a blueprint that will still stop a `--yolo` run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,20 +28,20 @@ pub(crate) struct Held {
 }
 
 /// Every interaction point declaring `unattended = "ask"`, in stage order.
-pub(crate) fn held_points(blueprint: &Blueprint) -> Vec<Held> {
-    blueprint
+pub(crate) fn held_points(graph: &RunGraph) -> Vec<Held> {
+    graph
         .stages
         .iter()
         .flat_map(|stage| {
             let points = match &stage.mode {
-                StageMode::InteractivePoints { points } => points.as_slice(),
+                StageMode::InteractivePoints(points) => points.as_slice(),
                 _ => &[],
             };
             points
                 .iter()
-                .filter(|p| p.unattended == UnattendedPolicy::Ask)
+                .filter(|p| p.unattended == UnattendedPoint::Ask)
                 .map(|p| Held {
-                    stage: stage.name.clone(),
+                    stage: stage.name.to_string(),
                     name: p.name.clone(),
                 })
         })
@@ -52,9 +51,9 @@ pub(crate) fn held_points(blueprint: &Blueprint) -> Vec<Held> {
 /// Every blocking human tool a stage keeps through `required_tools`.
 ///
 /// Canonicalised, because the runtime matches on the name the model calls and a
-/// manifest may write either spelling.
-pub(crate) fn held_tools(blueprint: &Blueprint) -> Vec<Held> {
-    blueprint
+/// blueprint may write either spelling.
+pub(crate) fn held_tools(graph: &RunGraph) -> Vec<Held> {
+    graph
         .stages
         .iter()
         .flat_map(|stage| {
@@ -63,11 +62,11 @@ pub(crate) fn held_tools(blueprint: &Blueprint) -> Vec<Held> {
                 .iter()
                 .filter(|t| {
                     leviath_runtime::dynamic_interaction::BLOCKING_INTERACTION_TOOLS
-                        .contains(&leviath_tools::canonical_tool_name(t))
+                        .contains(&leviath_tools::canonical_tool_name(t.as_str()))
                 })
                 .map(|tool| Held {
-                    stage: stage.name.clone(),
-                    name: tool.clone(),
+                    stage: stage.name.to_string(),
+                    name: tool.to_string(),
                 })
         })
         .collect()
@@ -85,10 +84,10 @@ fn human_timeout(secs: u64) -> String {
 
 /// The stderr block for a `--yolo` spawn. Empty when nothing holds.
 ///
-/// Pure, so the wording is testable without a daemon or a manifest on disk.
-pub(crate) fn preflight_lines(blueprint: &Blueprint, timeout_secs: Option<u64>) -> Vec<String> {
-    let points = held_points(blueprint);
-    let tools = held_tools(blueprint);
+/// Pure, so the wording is testable without a daemon or a blueprint on disk.
+pub(crate) fn preflight_lines(graph: &RunGraph, timeout_secs: Option<u64>) -> Vec<String> {
+    let points = held_points(graph);
+    let tools = held_tools(graph);
     if points.is_empty() && tools.is_empty() {
         return Vec::new();
     }

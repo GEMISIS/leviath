@@ -22,7 +22,7 @@ fn meta() -> RunMeta {
     let mut meta = RunMeta::new(
         "asked-things".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "ask a few things".to_string(),
         None,
         "/tmp".to_string(),

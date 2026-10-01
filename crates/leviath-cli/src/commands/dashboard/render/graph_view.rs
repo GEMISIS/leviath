@@ -349,46 +349,95 @@ mod tests {
     use crate::tui::flowgraph::{FlowView, StageGraph};
     use crate::tui::theme::*;
     use crossterm::event::KeyCode;
-    use leviath_runtime::spec::manifest::parse_manifest;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn stage_graph() -> Arc<StageGraph> {
-        Arc::new(StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
+        Arc::new(crate::tui::flowgraph::model::toml_graph(
+            r#"[blueprint]
 name = "grapher"
-[stages.plan]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "plan"
 description = "decide what to build"
 max_iterations = 5
-[stages.plan.transitions.implement]
-hint = "ready"
-[stages.implement]
-[stages.implement.context.regions]
-notes = { kind = "pinned", accepts = ["text/*"] }
-[stages.implement.transitions.review]
-[stages.implement.transitions.recover]
-condition = "error"
-[stages.review]
+
+[[graph.stages]]
+name = "implement"
+
+[graph.stages.layout]
+regions = [
+    { name = "notes", kind = "pinned", budget = 5000, accepts = ["text/*"] },
+]
+total_budget_tokens = 5000
+
+[[graph.stages]]
+name = "review"
 max_revisits = 2
-[stages.review.transitions.implement]
-condition = "llm_choice"
-[stages.review.transitions.review]
-[stages.review.transitions.island]
-[stages.recover]
-[[stages.recover.output.artifacts]]
-name = "log"
-type = "application/json"
-[stages.recover.transitions.implement]
-[stages.island]
+
+[[graph.stages]]
+name = "recover"
+output = { artifacts = [{ name = "log", mime_type = "application/json" }] }
+
+[[graph.stages]]
+name = "island"
+tools = ["submit_output"]
 mode = "output"
-[stages.island.context.regions]
-brief = { kind = "pinned", accepts = ["application/pdf"] }
-[stages.island.transitions]
+allow_complete = true
+require_output = true
+
+[graph.stages.layout]
+total_budget_tokens = 5000
+
+[[graph.stages.layout.regions]]
+name = "brief"
+kind = "pinned"
+budget = 5000
+accepts = ["application/pdf"]
+
+[[graph.edges]]
+name = "implement"
+from = "plan"
+to = "implement"
+hint = "ready"
+
+[[graph.edges]]
+name = "recover"
+from = "implement"
+to = "recover"
+when = "error"
+
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+
+[[graph.edges]]
+name = "implement"
+from = "review"
+to = "implement"
+when = "llm_choice"
+
+[[graph.edges]]
+name = "island"
+from = "review"
+to = "island"
+
+[[graph.edges]]
+name = "review"
+from = "review"
+to = "review"
+
+[[graph.edges]]
+name = "implement"
+from = "recover"
+to = "implement"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
-            )
-            .unwrap(),
         ))
     }
 

@@ -1,8 +1,8 @@
 //! What scripts a blueprint brings, and whether they may run here.
 //!
-//! Rhai tools, region hooks, stage hooks and output validators are all declared
-//! by path in the manifest, so every one of them is a file the blueprint author
-//! chose and this daemon is about to execute. Resolution and containment
+//! Rhai tools, region hooks, stage hooks and output validators are all code a
+//! blueprint names, often as a file beside it, so every one of them is
+//! something the blueprint author chose and this daemon is about to execute. Resolution and containment
 //! therefore live together: `script_within_blueprint` is the fence, and nothing
 //! below it loads a path that has not been through it.
 //!
@@ -11,6 +11,7 @@
 //! decision about what runs rather than about how.
 
 use super::*;
+use leviath_runtime::spec::graph::{CodeRef, RegionKind, RunGraph};
 
 /// Resolve a blueprint-declared script path against the blueprint's directory,
 /// refusing anything that lands outside it.
@@ -39,141 +40,100 @@ pub(super) fn script_within_blueprint(
     }
 }
 
-/// Compile every output validator the blueprint names, keyed by path.
+/// Check every piece of code a graph names that `lev validate` promises to
+/// find a fault in before a run starts: each custom region's script, each
+/// output validator, and each stage hook.
 ///
-/// A hard spawn error for the same reason a region script is: the moment to
-/// discover an agent cannot check its own answer is not the end of a long run,
-/// which is the only other time this script would ever be read.
-///
-/// Paths resolve against the blueprint directory, the same convention script
-/// tools and region hooks use, so a validator travels with the agent that needs
-/// it.
-pub(crate) fn resolve_output_validators(
-    blueprint: &Blueprint,
-    blueprint_path: &str,
-) -> Result<HashMap<String, Arc<leviath_scripting::output_validator::OutputValidator>>, String> {
-    let base = std::path::Path::new(blueprint_path)
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-    let mut compiled = HashMap::new();
+/// Each is a hard spawn error, so the moment to find out one does not read or
+/// compile is now, not partway through a run. A file is read from `base`, the
+/// blueprint's directory, and never from outside it; one file named more than
+/// once is read and compiled once.
+pub(crate) fn check_graph_code(graph: &RunGraph, base: &std::path::Path) -> Result<(), String> {
+    check_region_scripts(graph, base)?;
+    check_output_validators(graph, base)?;
+    check_stage_hooks(graph, base)
+}
 
-    let specs = blueprint
-        .output
-        .iter()
-        .chain(blueprint.stages.iter().filter_map(|s| s.output.as_ref()));
-    for spec in specs {
-        let Some(script) = spec.validator.as_deref() else {
+/// The label and source of some code a graph names: the path as written for
+/// a file beside the blueprint, `inline` for code written in the graph. `what`
+/// names the code in a message.
+fn code_source(
+    base: &std::path::Path,
+    code: &CodeRef,
+    what: &str,
+) -> Result<(String, String), String> {
+    match code {
+        CodeRef::Inline(source) => Ok(("inline".to_string(), source.clone())),
+        CodeRef::File(declared) => {
+            let path = script_within_blueprint(base, declared, what)?;
+            let source = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {what} '{}': {e}", path.display()))?;
+            Ok((declared.clone(), source))
+        }
+    }
+}
+
+/// Every custom region's script, in the graph's layout and each stage's own.
+fn check_region_scripts(graph: &RunGraph, base: &std::path::Path) -> Result<(), String> {
+    let layouts =
+        std::iter::once(&graph.layout).chain(graph.stages.iter().filter_map(|s| s.layout.as_ref()));
+    let mut seen = HashSet::new();
+    for region in layouts.flat_map(|l| l.regions.iter()) {
+        let RegionKind::Custom { code, .. } = &region.kind else {
             continue;
         };
-        if compiled.contains_key(script) {
+        if !seen.insert(code) {
             continue;
         }
-        let path = script_within_blueprint(&base, script, "output validator")?;
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read output validator '{}': {e}", path.display()))?;
-        let validator = leviath_scripting::output_validator::compile(script, &source)
+        let (label, source) = code_source(base, code, "custom region script")
+            .map_err(|e| format!("region '{}': {e}", region.name))?;
+        leviath_scripting::region_hook::compile(&label, &source).map_err(|e| {
+            format!(
+                "region '{}': custom region script failed to compile: {e}",
+                region.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Every output validator: the graph's and each stage's.
+fn check_output_validators(graph: &RunGraph, base: &std::path::Path) -> Result<(), String> {
+    let validators = graph
+        .output
+        .iter()
+        .chain(graph.stages.iter().filter_map(|s| s.output.as_ref()))
+        .filter_map(|o| o.validator.as_ref());
+    let mut seen = HashSet::new();
+    for code in validators {
+        if !seen.insert(code) {
+            continue;
+        }
+        let (label, source) = code_source(base, code, "output validator")?;
+        leviath_scripting::output_validator::compile(&label, &source)
             .map_err(|e| format!("output validator failed to compile: {e}"))?;
-        compiled.insert(script.to_string(), Arc::new(validator));
     }
-    Ok(compiled)
+    Ok(())
 }
 
-/// Compile every stage-hook script the blueprint declares, keyed by the path as
-/// written.
-///
-/// Fail-fast at spawn, exactly as region scripts are: an unreadable file, one
-/// that does not compile, or one the blueprint names for a hook it does not
-/// define is a spawn error rather than a surprise partway through a run. One
-/// file backing several hooks is read and compiled once.
-///
-/// Returns an empty map when no stage declares a hook, so the agent gets a
-/// component that every lookup misses rather than a special case.
-pub(crate) fn resolve_stage_hook_scripts(
-    blueprint: &Blueprint,
-    blueprint_path: &str,
-) -> Result<HashMap<String, Arc<leviath_scripting::stage_hook::HookScript>>, String> {
-    let base = std::path::Path::new(blueprint_path)
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-
-    // Gather what each file is wanted for before compiling, so a file backing
-    // two hooks is checked for both in one pass.
-    let mut wanted: HashMap<&str, Vec<&str>> = HashMap::new();
-    for stage in &blueprint.stages {
-        for (hook, path) in stage.hooks.declared() {
-            wanted.entry(path).or_default().push(hook);
+/// Every stage hook. The hooks one piece of code is named for are gathered
+/// first, so it is compiled once and checked for every one of them: a file
+/// named for a hook it does not define is refused, since that hook would
+/// never run.
+fn check_stage_hooks(graph: &RunGraph, base: &std::path::Path) -> Result<(), String> {
+    let mut wanted: Vec<(&CodeRef, Vec<&str>)> = Vec::new();
+    for (hook, code) in graph.stages.iter().flat_map(|s| s.hooks.iter()) {
+        match wanted.iter_mut().find(|(c, _)| *c == code) {
+            Some((_, hooks)) => hooks.push(hook),
+            None => wanted.push((code, vec![hook])),
         }
     }
-
-    let mut scripts = HashMap::new();
-    for (path, hooks) in wanted {
-        let full = script_within_blueprint(&base, path, "stage hook script")?;
-        let source = std::fs::read_to_string(&full)
-            .map_err(|e| format!("cannot read stage hook script '{}': {e}", full.display()))?;
-        let compiled = leviath_scripting::stage_hook::compile(path, &source, &hooks)
-            .map_err(|e| format!("stage hook script '{path}' failed to compile: {e}"))?;
-        scripts.insert(path.to_string(), Arc::new(compiled));
+    for (code, hooks) in wanted {
+        let (label, source) = code_source(base, code, "stage hook script")?;
+        leviath_scripting::stage_hook::compile(&label, &source, &hooks)
+            .map_err(|e| format!("stage hook script '{label}' failed to compile: {e}"))?;
     }
-    Ok(scripts)
-}
-
-/// Read and compile every custom region's Rhai script declared by `blueprint`
-/// (global layout plus each stage's per-stage layout), keyed by the script
-/// path as written. Paths resolve relative to the blueprint's directory (the
-/// script-tool convention - the script travels with the agent), with absolute
-/// paths passing through `Path::join` unchanged. Each distinct path is read
-/// and compiled once; regions sharing a script share the compiled AST.
-///
-/// A missing or uncompilable script is a **hard spawn error** (fail fast,
-/// before any tokens are spent): a hook that silently never ran would change
-/// every inference with no signal. Runtime hook *eval* failures, by contrast,
-/// warn and fall back per hook.
-pub(crate) fn resolve_region_scripts(
-    blueprint: &Blueprint,
-    blueprint_path: &str,
-) -> Result<HashMap<String, Arc<leviath_scripting::region_hook::RegionScript>>, String> {
-    let base = std::path::Path::new(blueprint_path)
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-    let mut scripts = HashMap::new();
-
-    let layouts = std::iter::once(&blueprint.context_layout).chain(
-        blueprint
-            .stages
-            .iter()
-            .filter_map(|s| s.context_layout.as_ref()),
-    );
-    for layout in layouts {
-        for region in &layout.regions {
-            let leviath_core::RegionKind::Custom { script, .. } = &region.kind else {
-                continue;
-            };
-            if scripts.contains_key(script) {
-                continue;
-            }
-            let path = script_within_blueprint(&base, script, "custom region script")
-                .map_err(|e| format!("region '{}': {e}", region.name))?;
-            let source = std::fs::read_to_string(&path).map_err(|e| {
-                format!(
-                    "region '{}': cannot read custom region script '{}': {e}",
-                    region.name,
-                    path.display()
-                )
-            })?;
-            let compiled =
-                leviath_scripting::region_hook::compile(script, &source).map_err(|e| {
-                    format!(
-                        "region '{}': custom region script failed to compile: {e}",
-                        region.name
-                    )
-                })?;
-            scripts.insert(script.clone(), Arc::new(compiled));
-        }
-    }
-    Ok(scripts)
+    Ok(())
 }
 
 /// Names already claimed by a built-in, sub-agent, or MCP tool - a discovered

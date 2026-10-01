@@ -17,8 +17,9 @@ tool_permissions = { read_file = "allow", list_dir = "allow", bash = "ask" }
 compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
 
 # What the caller asked for, if anything (`--task`), and - when this blueprint
-# is running as one of its own fan-out workers - the work item `split_review`
-# packed for it. A worker is spawned with that item as its task.
+# is running as one of its own fan-out workers - the area `split_review` gave
+# it. A worker's item also fills `diff` with its hunks, `criteria` with its
+# focus and `conventions` with what this project calls correct.
 [[graph.inputs]]
 name = "task"
 type = { kind = "text", multiline = true }
@@ -37,6 +38,15 @@ binds = [{ region = "diff" }]
 name = "criteria"
 type = { kind = "text", multiline = true }
 binds = [{ region = "review_criteria" }]
+
+# What this project calls correct, verbatim from `discovery`: what
+# `split_review` hands each worker, which does not share the discover stage's
+# context. A run started by a person leaves it out.
+[[graph.inputs]]
+name = "conventions"
+type = { kind = "text", multiline = true }
+description = "For an area reviewer: what this project calls correct, from the discover stage."
+binds = [{ region = "conventions" }]
 
 # Optional screenshots of the change (a mockup, a before and an after):
 # `--attach before.png:screenshots --attach after.png:screenshots`, or a
@@ -58,13 +68,13 @@ binds = [{ region = "screenshots" }]
 [graph.layout]
 total_budget_tokens = 0
 regions = [
-    # The `task` input: the caller's request, or, for a fan-out worker, the area,
-    # its diff hunks, the focus, and the conventions. A blueprint with no region
-    # bound to the task input refuses the spawn, so this region is what lets the
-    # parallel review run at all. Sized for the hunks it carries.
-    { name = "task", kind = "pinned", budget = "15%", volatility = "stable" },
+    # The `task` input: the caller's request, or, for a fan-out worker, the area
+    # it reviews.
+    { name = "task", kind = "pinned", budget = "2%", volatility = "stable" },
     { name = "diff", kind = "pinned", budget = "20%", required = true, required_message = "Provide the code or diff to review via --diff <text|@file>.", volatility = "stable" },
     { name = "review_criteria", kind = "pinned", budget = "2%", volatility = "stable" },
+    # An area reviewer's copy of this project's conventions, from its work item.
+    { name = "conventions", kind = "pinned", budget = "3%", volatility = "stable" },
     # Typed `image/*`, so a model that can see them does, and one that cannot
     # gets a stand-in naming each. Six at most; older ones go.
     { name = "screenshots", kind = "pinned", budget = "6%", volatility = "stable", accepts = ["image/*"] },
@@ -257,9 +267,10 @@ lines. Start from the areas `findings` already flags.
 
 Call `fan_out` with one entry in `items` per work item:
 
-  items: [{"id": "<short-slug>", "context": {"area": "<the files or hunks to review>", "code": "<the diff hunks for this area, verbatim>", "focus": "<what to look hardest at here>", "conventions": "<what this project calls correct, verbatim from discovery>"}}]
+  items: [{"id": "<short-slug>", "inputs": {"task": "<the files or hunks to review>", "diff": "<the diff hunks for this area, verbatim>", "criteria": "<what to look hardest at here>", "conventions": "<what this project calls correct, verbatim from discovery>"}}]
 
-Every item MUST carry its code and the conventions: workers do not share this
+Those four are the only inputs a worker takes. Every item MUST carry its diff
+and the conventions: workers do not share this
 agent's context, so the work item is all they get. A worker that does not know
 what this project holds itself to can only offer generic advice.
 
@@ -288,8 +299,9 @@ max_iterations = 20
 allow_as_worker = true
 require_output = true
 system_prompt = """
-Review ONE area. Your work item holds the code, the focus, and the conventions
-every worker is holding to - it is all the context you get, so work from it.
+Review ONE area. `task` names it, `diff` holds its hunks, `review_criteria`
+says what to look hardest at, and `conventions` holds what this project calls
+correct - it is all the context you get, so work from it.
 
 Run the same framework the deep review does, on your area only:
   1. Correctness - does it do what it intends? Trace the logic.

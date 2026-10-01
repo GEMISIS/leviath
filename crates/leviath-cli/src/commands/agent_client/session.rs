@@ -11,31 +11,31 @@ use std::path::PathBuf;
 use leviath_runtime::spec::request::SpawnRequest;
 
 use super::AgentClientArgs;
-use crate::commands::run::manifest::find_manifest;
+use crate::commands::run::locate::find_blueprint;
 
-/// A blueprint resolved for a session: its manifest file and the agent name
-/// derived from the manifest's directory (matching `lev run`'s convention).
+/// A blueprint resolved for a session: its `agent.toml` and the agent name
+/// derived from the file's directory (matching `lev run`'s convention).
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ResolvedBlueprint {
-    /// Absolute path to the `agent.leviath` manifest.
+    /// Absolute path to the blueprint's `agent.toml`.
     pub(super) manifest_path: PathBuf,
-    /// The agent's name - its manifest directory's file name.
+    /// The agent's name - its blueprint directory's file name.
     pub(super) agent_name: String,
 }
 
 /// Resolve the blueprint a session should run.
 ///
-/// When `--agent <name>` was given it wins, resolved through [`find_manifest`]
+/// When `--agent <name>` was given it wins, resolved through [`find_blueprint`]
 /// (which searches an explicit path, a directory, an installed agent by name,
 /// then the process cwd). Otherwise the session's own `cwd` is searched for an
-/// `agent.leviath`. A resolution failure is returned so the caller can answer
+/// `agent.toml`. A resolution failure is returned so the caller can answer
 /// `session/new` with a JSON-RPC error rather than spawning nothing.
 pub(super) fn resolve_blueprint(
     agent: Option<&str>,
     cwd: &str,
 ) -> anyhow::Result<ResolvedBlueprint> {
     let reference = agent.unwrap_or(cwd);
-    let manifest_path = find_manifest(reference)?;
+    let manifest_path = find_blueprint(reference)?;
     let agent_name = manifest_path
         .parent()
         .and_then(|p| p.file_name())
@@ -95,16 +95,17 @@ mod tests {
     fn write_blueprint(dir: &std::path::Path, name: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
-            dir.join("agent.leviath"),
+            dir.join("agent.toml"),
             format!(
                 r#"
-[agent]
+[blueprint]
 name = "{name}"
 version = "1.0.0"
 description = "test blueprint"
 
-[stages.plan]
-system_prompt = "Plan the work"
+[graph]
+stages = [{{ name = "plan", system_prompt = "Plan the work" }}]
+layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pinned", budget = 1000 }}] }}
 "#
             ),
         )
@@ -117,8 +118,8 @@ system_prompt = "Plan the work"
         let dir = root.path().join("coder");
         write_blueprint(&dir, "coder");
         let resolved = resolve_blueprint(None, &dir.to_string_lossy()).unwrap();
-        assert_eq!(resolved.manifest_path, dir.join("agent.leviath"));
-        // The agent name is the manifest directory's file name.
+        assert_eq!(resolved.manifest_path, dir.join("agent.toml"));
+        // The agent name is the blueprint directory's file name.
         assert_eq!(resolved.agent_name, "coder");
     }
 
@@ -134,7 +135,7 @@ system_prompt = "Plan the work"
             &empty.path().to_string_lossy(),
         )
         .unwrap();
-        assert_eq!(resolved.manifest_path, agent_dir.join("agent.leviath"));
+        assert_eq!(resolved.manifest_path, agent_dir.join("agent.toml"));
         assert_eq!(resolved.agent_name, "reviewer");
     }
 

@@ -2,6 +2,7 @@
 //! tool may be handed, and the rows a blueprint adds to the registry.
 
 use super::*;
+use leviath_runtime::spec::graph::StageDef;
 
 /// A stage that limits what a tool may be handed, without granting the tool.
 ///
@@ -9,20 +10,20 @@ use super::*;
 /// handed anything, but it is a sign the author meant to grant the tool or
 /// misspelled its name. Said only when the stage names its tools one by
 /// one: under a group grant (`@builtin`, `@scripts`) whether the tool is
-/// reached depends on the install, which is not the manifest's business.
-pub(super) fn lint_tool_accepts(stage: &leviath_runtime::spec::Stage) -> Vec<LintFinding> {
-    if !stage.tool_groups().is_empty() {
+/// reached depends on the install, which is not the blueprint's business.
+pub(super) fn lint_tool_accepts(stage: &StageDef) -> Vec<LintFinding> {
+    if !tool_groups(stage).is_empty() {
         return Vec::new();
     }
     stage
         .tool_accepts
         .iter()
         .filter(|(tool, _)| {
-            !stage
-                .named_tools()
-                .any(|granted| canonical_tool_name(granted) == canonical_tool_name(tool))
+            !named_tools(stage)
+                .any(|granted| canonical_tool_name(granted) == canonical_tool_name(tool.as_str()))
         })
         .map(|(tool, list)| {
+            let list: Vec<&str> = list.iter().map(|p| p.as_str()).collect();
             LintFinding::new(
                 LintSeverity::Warning,
                 "tool-accepts-ungranted",
@@ -32,42 +33,42 @@ pub(super) fn lint_tool_accepts(stage: &leviath_runtime::spec::Stage) -> Vec<Lin
                     list.join(", ")
                 ),
             )
-            .in_stage(&stage.name)
-            .with_fix("add the tool to available_tools, or drop the limit")
+            .in_stage(stage.name.as_str())
+            .with_fix("add the tool to the stage's tools, or drop the limit")
         })
         .collect()
 }
 
-/// A blueprint `[mime_types]` row that changes the family or the text flag
-/// of a type the compiled table already knows.
+/// A `[graph.mime_types]` row that changes the family or the text flag of a
+/// type the compiled table already knows.
 ///
 /// Legal, and sometimes right (a shop that treats SVG as text), but a row
 /// that turns `image/png` into a model or makes `audio/wav` text changes
 /// what every provider is handed for that agent's runs, which is rarely what
 /// an extension or a check was meant to do.
-pub(super) fn lint_mime_types(blueprint: &Blueprint) -> Vec<LintFinding> {
+pub(super) fn lint_mime_types(graph: &RunGraph) -> Vec<LintFinding> {
     let builtin = leviath_core::mime::MimeRegistry::builtin();
-    let known: std::collections::HashSet<String> =
-        builtin.keys().into_iter().map(|(key, _)| key).collect();
+    let known: HashSet<String> = builtin.keys().into_iter().map(|(key, _)| key).collect();
     let mut findings = Vec::new();
-    // Every key the parser accepted spells as a type (a `type/*` pattern
-    // included), so nothing is skipped here.
-    let typed = blueprint
-        .mime_types
-        .iter()
-        .filter_map(|(key, row)| leviath_core::mime::MimeType::parse(key).ok().zip(Some(row)));
+    // Every key spells as a type (a `type/*` pattern included), so nothing is
+    // skipped here.
+    let typed = graph.mime_types.iter().filter_map(|(key, row)| {
+        leviath_core::mime::MimeType::parse(key.as_str())
+            .ok()
+            .zip(Some(row))
+    });
     for (mime_type, row) in typed {
         if !known.contains(mime_type.as_str()) {
             continue;
         }
         let was = builtin.info(&mime_type);
         let mut changed = Vec::new();
-        if let Some(family) = row.get("family").and_then(|v| v.as_str())
+        if let Some(family) = row.family.as_deref()
             && family != was.family
         {
             changed.push(format!("family from {} to {family}", was.family));
         }
-        if let Some(text) = row.get("text").and_then(|v| v.as_bool())
+        if let Some(text) = row.text
             && text != was.text
         {
             changed.push(format!("text from {} to {text}", was.text));
@@ -80,7 +81,8 @@ pub(super) fn lint_mime_types(blueprint: &Blueprint) -> Vec<LintFinding> {
                 LintSeverity::Warning,
                 "mime-type-overrides-builtin",
                 format!(
-                    "[mime_types] changes {mime_type}, a built-in type, for this agent's runs: {}",
+                    "[graph.mime_types] changes {mime_type}, a built-in type, for this agent's \
+                     runs: {}",
                     changed.join("; ")
                 ),
             )
@@ -99,32 +101,20 @@ pub(super) fn lint_mime_types(blueprint: &Blueprint) -> Vec<LintFinding> {
 /// time. Only providers with built-in mime tables are judged; an open
 /// route (no provider named) or a provider the tables do not cover is taken
 /// on trust.
-pub(super) fn lint_stage_mime(
-    blueprint: &Blueprint,
-    stage: &leviath_runtime::spec::Stage,
-) -> Vec<LintFinding> {
-    let needs: Vec<String> = blueprint
-        .stage_inputs(stage)
+pub(super) fn lint_stage_mime(graph: &RunGraph, stage: &StageDef) -> Vec<LintFinding> {
+    let needs: Vec<String> = stage_inputs(graph, stage)
         .into_iter()
         .filter(|p| p != "*/*")
         .collect();
-    if needs.is_empty() {
+    if needs.is_empty() || !all_pinned(&stage.model) {
         return Vec::new();
     }
-    let judged: Vec<&leviath_runtime::spec::blueprint::ModelEntry> = stage
-        .model
-        .models
-        .iter()
-        .filter(|e| !e.provider.is_empty())
-        .collect();
-    if judged.is_empty() || judged.len() != stage.model.models.len() {
-        return Vec::new();
-    }
+    let judged: Vec<(&str, &str)> = stage.model.models.iter().map(route).collect();
     let unseen: Vec<&String> = needs
         .iter()
         .filter(|need| {
-            !judged.iter().any(|e| {
-                leviath_providers::mime_tables::builtin_mime(&e.provider, &e.model)
+            !judged.iter().any(|(provider, model)| {
+                leviath_providers::mime_tables::builtin_mime(provider, model)
                     .covers(std::slice::from_ref(need))
             })
         })
@@ -143,7 +133,7 @@ pub(super) fn lint_stage_mime(
     };
     let listed: Vec<String> = judged
         .iter()
-        .map(|e| format!("{}/{}", e.provider, e.model))
+        .map(|(provider, model)| format!("{provider}/{model}"))
         .collect();
     vec![
         LintFinding::new(
@@ -160,11 +150,11 @@ pub(super) fn lint_stage_mime(
                 listed.join(", ")
             ),
         )
-        .in_stage(&stage.name)
+        .in_stage(stage.name.as_str())
         .with_fix(
-            "list a model that takes the type (lev models --accepts <type>), set \
-             [stages.<name>.input] as_text for a type the model can read as text, or \
-             leave it if the stage only needs the file names"
+            "list a model that takes the type (lev models --accepts <type>), list a type the \
+             model can read as text under the stage's input_as_text, or leave it if the stage \
+             only needs the file names"
                 .to_string(),
         ),
     ]

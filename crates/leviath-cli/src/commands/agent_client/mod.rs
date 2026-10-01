@@ -82,7 +82,7 @@ const RESUBSCRIBE_PAUSE: std::time::Duration = std::time::Duration::from_millis(
 pub struct AgentClientArgs {
     /// Blueprint to serve: an installed agent name, or a path to one. When
     /// omitted, each session's working directory is searched for an
-    /// `agent.leviath`.
+    /// `agent.toml`.
     #[arg(long)]
     pub agent: Option<String>,
 

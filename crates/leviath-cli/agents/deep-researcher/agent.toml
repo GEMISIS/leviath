@@ -29,6 +29,14 @@ name = "scope"
 type = { kind = "text", multiline = true }
 binds = [{ region = "scope" }]
 
+# How many sub-questions are researched at once, over the 12 this blueprint runs
+# by default: `lev run deep-researcher --input max_workers=4`.
+[[graph.inputs]]
+name = "max_workers"
+type = { kind = "int", min = 1, max = 30 }
+description = "How many sub-questions are researched at once (12 when left out)."
+binds = [{ fan_out_max_workers = "investigate" }]
+
 # ─── Context layout ───────────────────────────────────────────────────────────
 # Budgets are a percentage of the model's context window, so every region
 # scales with whatever model the stage runs on.
@@ -281,7 +289,10 @@ decide where the real questions are.
 
 Call `fan_out` with one entry in `items` per work item:
 
-  items: [{"id": "<short-slug>", "context": {"question": "<the sub-question>", "why": "<what this settles for the wider topic>"}}]
+  items: [{"id": "<short-slug>", "inputs": {"task": "<the sub-question>", "scope": "<what this settles for the wider topic>"}}]
+
+Each item's inputs are the worker's own: "task" is the question it
+researches, and "scope" what its answer is for. Nothing else reaches it.
 
 Every item MUST carry enough to work from alone: a worker is a separate agent
 and does not share this run's context, so the work item is all it gets. Name the

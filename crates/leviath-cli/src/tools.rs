@@ -768,7 +768,7 @@ fn target_path(target: &str, workdir: &std::path::Path) -> std::path::PathBuf {
 ///
 /// Without this list any tool the user had not configured would be loosenable,
 /// and saying nothing is the normal state: nobody writes `shell = "ask"` into
-/// their config, because that is already the default. An `agent.leviath` from
+/// their config, because that is already the default. An `agent.toml` from
 /// `lev add` could then give itself `shell = "allow"` on a stock machine,
 /// which is the opposite of what SECURITY.md promises.
 ///
@@ -799,11 +799,11 @@ pub(crate) fn blueprint_loosenable(tool_name: &str) -> bool {
 ///
 /// Scope order is narrowest-first - stage, then agent, then the user's global
 /// config, then the built-in default - but *narrower does not mean stronger*.
-/// The stage and agent layers come out of `agent.leviath`, which for any agent
+/// The stage and graph layers come out of the blueprint, which for any agent
 /// installed with `lev add` is a file the user downloaded. So a blueprint may
 /// only ever **tighten** what the user configured, never loosen it: whatever the
 /// user explicitly wrote in `[tool_permissions]` is a ceiling on how permissive
-/// a manifest can be for that tool.
+/// a blueprint can be for that tool.
 ///
 /// Only an *explicitly configured* global entry acts as a ceiling. For a tool
 /// the user has said nothing about there is no ceiling to clamp against, and
@@ -906,7 +906,7 @@ pub(crate) fn launch_allows(
 /// Look a tool up in a permission map under any name that refers to it.
 ///
 /// Policy is matched against the name the *model* calls, which is always the
-/// canonical one (`shell`), while a manifest, a config file, or a `--allow` flag
+/// canonical one (`shell`), while a blueprint, a config file, or a `--allow` flag
 /// may write an alias (`bash`). Matching only the name as called meant every
 /// `bash` entry was dead: `[tool_permissions] bash = "allow"` granted nothing
 /// and `lev run --allow bash` did nothing, because neither key was ever asked
@@ -919,7 +919,7 @@ fn by_any_spelling<'a, V>(map: &'a HashMap<String, V>, tool_name: &str) -> Optio
 
 /// A blueprint's policy string as a [`ToolPolicy`].
 ///
-/// The fallback is defensive rather than load-bearing: the manifest parser
+/// The fallback is defensive rather than load-bearing: the blueprint reader
 /// refuses a spelling that is not `allow`/`ask`/`deny`, so the only string that
 /// reaches the last arm is `ask` itself. It was load-bearing, and wrong -
 /// anything unrecognised became `ask`, so a misspelled `deny` resolved to the
@@ -1713,7 +1713,8 @@ mod policy_tests {
 
     // ─── what a blueprint may loosen ──────────────────────────────────────
 
-    /// One `agent.leviath` line, for a tool the user has said nothing about.
+    /// One blueprint `tool_permissions` entry, for a tool the user has said
+    /// nothing about.
     fn blueprint_says(tool: &str, policy: &str, may_loosen: bool) -> ToolPolicy {
         let mut agent = HashMap::new();
         agent.insert(tool.to_string(), policy.to_string());
@@ -1730,7 +1731,7 @@ mod policy_tests {
 
     /// The vulnerability. Saying nothing about `shell` is the normal state -
     /// nobody writes out a default - so "only an explicitly configured entry is
-    /// a ceiling" meant a downloaded manifest could pre-approve its own shell
+    /// a ceiling" meant a downloaded blueprint could pre-approve its own shell
     /// on a stock machine.
     #[test]
     fn a_blueprint_cannot_loosen_a_tool_the_user_never_configured() {
@@ -1817,20 +1818,36 @@ mod policy_tests {
     }
 
     /// The regression guard that matters: every shipped agent must resolve
-    /// exactly as it did before. Driven from the bundled manifests rather than
+    /// exactly as it did before. Driven from the bundled blueprints rather than
     /// a hand-copied table, so it stays true if either the agents or the
     /// allowlist move.
     #[test]
     fn the_bundled_agents_resolve_unchanged() {
         for agent in crate::bundled::BUNDLED_AGENTS {
-            let (_, manifest) = agent
+            let (_, text) = agent
                 .files
                 .iter()
-                .find(|(rel, _)| rel.ends_with("agent.leviath"))
-                .expect("every bundled agent ships a manifest");
-            let bp = leviath_runtime::spec::manifest::parse_manifest(manifest)
-                .expect("every bundled agent's manifest parses");
-            let perms = bp.agent_tool_permissions();
+                .find(|(rel, _)| rel.ends_with(leviath_blueprint::FILE_NAME))
+                .expect("every bundled agent ships a blueprint");
+            let file = leviath_blueprint::BlueprintFile::parse(text)
+                .expect("every bundled agent's blueprint parses");
+            let perms: HashMap<String, String> = file
+                .graph
+                .tool_permissions
+                .iter()
+                .map(|(tool, policy)| {
+                    let word = serde_json::to_value(policy).expect("a policy serializes");
+                    (
+                        tool.to_string(),
+                        word.as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect();
+            assert!(
+                perms.values().all(|p| !p.is_empty()),
+                "{}: every policy reads as a word",
+                agent.name
+            );
             for (tool, declared) in &perms {
                 let clamped = resolve_policy(
                     tool,
@@ -1946,8 +1963,8 @@ mod policy_tests {
         assert_eq!(policy, ToolPolicy::Deny);
     }
 
-    /// ...but it may NOT loosen it. `agent.leviath` is a file the user
-    /// downloaded; letting its `[stages.x.tool_permissions]` overrule the user's
+    /// ...but it may NOT loosen it. A blueprint is a file the user
+    /// downloaded; letting a stage's `tool_permissions` overrule the user's
     /// own `[tool_permissions]` would let an installed agent self-grant the
     /// shell the user had explicitly denied. (A test asserting the opposite -
     /// that stage "beats" global - codifies the bug, not the design.)
@@ -2513,7 +2530,7 @@ mod policy_tests {
     }
 
     /// Policy is matched against the name the model calls, which is always the
-    /// canonical `shell`, while a manifest, a config, or a `--allow` flag may
+    /// canonical `shell`, while a blueprint, a config, or a `--allow` flag may
     /// have written `bash`. Without the alias fold every one of those entries
     /// is dead: `lev run --allow bash` does nothing, and `bash = "ask"` in the
     /// shipped `coder` looks right only because the default for an unlisted

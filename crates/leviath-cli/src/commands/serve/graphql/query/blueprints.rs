@@ -56,13 +56,13 @@ async fn installed(state: &AppState) -> Vec<Blueprint> {
         .into_iter()
         .map(|info| {
             // The parse came with the listing row, so there is no second parse
-            // here and no failure path: a row exists only because its manifest
+            // here and no failure path: a row exists only because its file
             // parsed.
             let manifest = blueprints::ManifestText::installed(info.manifest);
             Blueprint {
                 parsed: Arc::clone(&info.parsed),
                 digest: manifest.digest,
-                source: manifest.source.into(),
+                source: blueprints::BlueprintSource::Installed.into(),
             }
         })
         .collect()
@@ -71,7 +71,7 @@ async fn installed(state: &AppState) -> Vec<Blueprint> {
 /// The blueprints installed on this machine.
 ///
 /// This is the live definition, not what any run executed: for that, read
-/// `blueprint` on the run, which answers from the run's own snapshot. The
+/// `blueprint` on the run, which answers from the run's own file. The
 /// digests tell you whether the two are the same bytes.
 ///
 /// Keyset-paged. A cursor names where you got to, so a blueprint installed or

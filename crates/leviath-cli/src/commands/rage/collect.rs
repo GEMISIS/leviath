@@ -9,9 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
+use leviath_blueprint::FILE_NAME;
 use leviath_core::files::{
-    ARCHIVE_FILE, BLOBS_DIR, CONTEXT_FILE, FANOUT_FILE, INTERACTIONS_FILE, MANIFEST_FILENAME,
-    META_FILE, STAGES_FILE,
+    ARCHIVE_FILE, BLOBS_DIR, CONTEXT_FILE, FANOUT_FILE, INTERACTIONS_FILE, META_FILE, STAGES_FILE,
 };
 use leviath_core::run_meta::RunMeta;
 use leviath_core::secrets::is_sensitive_env_name;
@@ -621,35 +621,32 @@ fn blueprint_under_test(path: &Path, scrubber: &Scrubber, bundle: &mut Bundle) {
     let manifest = if path.is_file() {
         path.to_path_buf()
     } else {
-        path.join(MANIFEST_FILENAME)
+        path.join(FILE_NAME)
     };
     let dir = manifest.parent().map(Path::to_path_buf).unwrap_or_default();
     copy_text_tree(&dir, "blueprint", MAX_TREE_DEPTH, scrubber, bundle);
 
-    let check = match std::fs::read_to_string(&manifest) {
-        Ok(content) => match leviath_runtime::spec::manifest::parse_manifest(&content) {
-            Ok(blueprint) => {
-                let validation = blueprint.validate();
-                serde_json::json!({
-                    "path": manifest.display().to_string(),
-                    "parses": true,
-                    "name": blueprint.name,
-                    "version": blueprint.version,
-                    "stages": blueprint.stages.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
-                    "validates": validation.is_ok(),
-                    "validation_error": validation.err().map(|e| e.to_string()),
-                })
-            }
-            Err(e) => serde_json::json!({
+    let check = match leviath_blueprint::load(&manifest) {
+        Ok(blueprint) => {
+            let at = leviath_runtime::spec::issues::SpecPath::root().field("graph");
+            let validation = blueprint.graph.validate(&at);
+            serde_json::json!({
                 "path": manifest.display().to_string(),
-                "parses": false,
-                "error": e.to_string(),
-            }),
-        },
+                "parses": true,
+                "name": blueprint.reference.name.as_str(),
+                "version": blueprint.version,
+                "stages": blueprint.graph.stages.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                "validates": validation.is_ok(),
+                "validation_error": validation.err().map(|issues| {
+                    issues.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
+                }),
+            })
+        }
+        // Unreadable and unparseable alike: the message says which.
         Err(e) => serde_json::json!({
             "path": manifest.display().to_string(),
             "parses": false,
-            "error": format!("cannot read: {e}"),
+            "error": e.to_string(),
         }),
     };
     bundle.json("blueprint-check.json", scrubber, check);
@@ -891,12 +888,12 @@ pub(crate) fn resolve_run_id(metas: &[RunMeta], given: &str) -> Result<String, S
     }
 }
 
-/// The installed blueprints: every directory under `agents_dir` holding a
-/// manifest, by name.
+/// The installed blueprints: every directory under `agents_dir` holding an
+/// `agent.toml`, by name.
 pub(crate) fn installed_blueprints(agents_dir: &Path) -> Vec<(String, PathBuf)> {
     sorted_entries(agents_dir)
         .into_iter()
-        .filter(|dir| dir.join(MANIFEST_FILENAME).is_file())
+        .filter(|dir| dir.join(FILE_NAME).is_file())
         .map(|dir| (file_name(&dir), dir))
         .collect()
 }

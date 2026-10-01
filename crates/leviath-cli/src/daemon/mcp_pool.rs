@@ -649,34 +649,17 @@ impl McpPool {
     }
 }
 
-/// Parse a blueprint manifest's `[[mcp_servers]]` array. Parsed
-/// CLI-side because `leviath-core` cannot depend on `leviath-mcp` (that crate
-/// already depends on core - a cycle). Returns an empty vec when the section is
-/// absent or malformed; a malformed entry is skipped with a warning.
-pub(crate) fn parse_blueprint_mcp_servers(manifest_toml: &str) -> Vec<MCPServerConfig> {
-    // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
-    // `FromStr for Value` parses a single *value*, not a document - so a real
-    // manifest starting with `[agent]` reads as an array literal followed by
-    // junk and fails. Both spellings compile, so swapping them is silent.
-    let Ok(value) = toml::from_str::<toml::Value>(manifest_toml) else {
-        return Vec::new();
-    };
-    let Some(array) = value.get("mcp_servers").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in array {
-        match entry.clone().try_into::<MCPServerConfig>() {
-            Ok(cfg) => out.push(cfg),
-            Err(e) => tracing::warn!(error = %e, "skipping malformed [[mcp_servers]] entry"),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The MCP servers the blueprint `text` declares; none when it does not
+    /// read.
+    fn parse_blueprint_mcp_servers(text: &str) -> Vec<MCPServerConfig> {
+        leviath_blueprint::BlueprintFile::parse(text)
+            .map(|file| crate::daemon::starter::mcp_configs(&file.graph))
+            .unwrap_or_default()
+    }
 
     /// Lease `run_id` every server the manifest at `path` declares, as a run
     /// started from it is leased them. A manifest that cannot be read leases
@@ -886,13 +869,36 @@ mod tests {
     /// its manifest path.
     fn blueprint_declaring(server: &str, stub: &std::path::Path) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join("agent.toml");
         std::fs::write(
             &manifest,
             format!(
                 // Single-quoted TOML literal so a Windows path's backslashes
                 // aren't parsed as string escapes (`\\U…` → invalid unicode).
-                "[agent]\nname = \"a\"\n\n[[mcp_servers]]\nname = \"{server}\"\ncommand = \"python3\"\nargs = ['{}']\n",
+                r#"[blueprint]
+name = "a"
+version = "0.1.0"
+
+[graph]
+mcp_servers = [{{ name = "{server}", command = "python3", args = ["{}"] }}]
+
+[[graph.stages]]
+name = "main"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-4-6" }}] }}
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = {{ kind = "sliding_window", max_items = 10 }}
+budget = 10000
+"#,
                 stub.to_string_lossy()
             ),
         )
@@ -913,9 +919,26 @@ mod tests {
         let manifest = crate::daemon::starter::testing::manifest_in(
             &agent,
             &format!(
-                "[agent]\nname = \"a\"\n\n[[mcp_servers]]\nname = \"{server}\"\ncommand = \"python3\"\nargs = ['{}']\n\n\
-                 [stages.main]\nmode = \"autonomous\"\nmodel = {{ provider = \"fake\", model = \"m\" }}\n\n\
-                 [context.regions]\ntask = {{ kind = \"pinned\", max_tokens = 200, seed = {{ caller = \"task\" }} }}\n",
+                r#"[blueprint]
+name = "a"
+version = "0.1.0"
+
+[graph]
+mcp_servers = [{{ name = "{server}", command = "python3", args = ["{}"] }}]
+
+[[graph.stages]]
+name = "main"
+model = {{ models = [{{ provider = "fake", model = "m" }}] }}
+
+[graph.layout]
+regions = [{{ name = "task", kind = "pinned", budget = 200 }}]
+total_budget_tokens = 200
+
+[[graph.inputs]]
+name = "task"
+type = {{ kind = "text", multiline = true }}
+binds = [{{ region = "task" }}]
+"#,
                 stub.to_string_lossy()
             ),
         );
@@ -1264,7 +1287,7 @@ mod tests {
             assert_eq!(pool.leased_holders(&servers[0]), 0, "global: no lease");
             pool.release_run("run-a"); // nothing held → nothing zeroed
             assert!(pool.release_run_bookkeeping("never-leased").is_empty());
-            lease(&pool, "/no/such/agent.leviath", "run-b");
+            lease(&pool, "/no/such/agent.toml", "run-b");
             assert!(pool.release_run_bookkeeping("run-b").is_empty());
         })
         .await;
@@ -1286,39 +1309,5 @@ mod tests {
         );
         // Built-in names are reserved.
         assert!(pool.reserved.contains("read_file"));
-    }
-
-    #[test]
-    fn parse_blueprint_mcp_servers_reads_array() {
-        let toml = r#"
-[agent]
-name = "x"
-[[mcp_servers]]
-name = "search"
-command = "leviath-search"
-args = ["--provider", "brave"]
-[[mcp_servers]]
-name = "http-one"
-url = "http://localhost:9/mcp"
-"#;
-        let servers = parse_blueprint_mcp_servers(toml);
-        assert_eq!(servers.len(), 2);
-        assert_eq!(servers[0].name, "search");
-        assert_eq!(servers[0].command.as_deref(), Some("leviath-search"));
-        assert_eq!(servers[1].url.as_deref(), Some("http://localhost:9/mcp"));
-    }
-
-    #[test]
-    fn parse_blueprint_mcp_servers_absent_or_malformed() {
-        // No section → empty.
-        assert!(parse_blueprint_mcp_servers("[agent]\nname='x'").is_empty());
-        // Not even valid TOML → empty.
-        assert!(parse_blueprint_mcp_servers("this is = = not toml").is_empty());
-        // Section present but not an array of tables → empty (as_array is None).
-        assert!(parse_blueprint_mcp_servers("mcp_servers = 5").is_empty());
-        // A malformed entry (name is not a string) is skipped with a warning.
-        with_tracing(|| {});
-        let servers = parse_blueprint_mcp_servers("[[mcp_servers]]\nname = 5\n");
-        assert!(servers.is_empty());
     }
 }

@@ -5,13 +5,13 @@
 //! running daemon (auto-started if needed) to start it in the one shared ECS
 //! world, or with `--check` only to say what it would be ([`check`]). `lev
 //! run show` reads a run's file back ([`show`]). The daemon exchange lives in
-//! [`crate::daemon::client`]; this module keeps the manifest/session helpers
+//! [`crate::daemon::client`]; this module keeps the blueprint-finding and session helpers
 //! shared across the CLI, and the `RunArgs` the binary wires into that path.
 
 pub mod attach;
 pub mod check;
 pub(crate) mod inputs;
-pub(crate) mod manifest;
+pub(crate) mod locate;
 pub mod request;
 pub(crate) mod session;
 pub mod show;

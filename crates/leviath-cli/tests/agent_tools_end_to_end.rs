@@ -150,21 +150,24 @@ impl Provider for Planner {
 fn manifest(name: &str, prompt: &str, tools: &[&str]) -> String {
     let tools: Vec<String> = tools.iter().map(|t| format!("\"{t}\"")).collect();
     format!(
-        r#"[agent]
+        r#"[blueprint]
 name = "{name}"
 version = "0.0.0"
 description = "{prompt}"
-entry_stage = "work"
 
-[stages.work]
-mode = "autonomous"
-model = {{ provider = "e2e", model = "m" }}
-available_tools = [{tools}]
+[graph]
+entry = "work"
+inputs = [{{ name = "task", type = "text", binds = [{{ region = "task" }}] }}]
+layout = {{ total_budget_tokens = 20500, regions = [
+    {{ name = "task", kind = "pinned", budget = 500 }},
+    {{ name = "conversation", kind = {{ kind = "sliding_window", max_items = 40 }}, budget = 20000 }},
+] }}
+
+[[graph.stages]]
+name = "work"
+model = {{ models = [{{ provider = "e2e", model = "m" }}] }}
+tools = [{tools}]
 system_prompt = "{prompt}"
-
-[context.regions]
-task = {{ kind = "pinned", max_tokens = 500, seed = "task" }}
-conversation = {{ kind = "sliding_window", max_items = 40, max_tokens = 20000 }}
 "#,
         tools = tools.join(", ")
     )
@@ -176,13 +179,13 @@ async fn an_agent_reads_validates_fixes_spawns_and_reads_its_childs_history() {
     let worker = home.path().join(".leviath").join("agents").join("worker");
     std::fs::create_dir_all(&worker).expect("agents dir");
     std::fs::write(
-        worker.join("agent.leviath"),
+        worker.join("agent.toml"),
         manifest("worker", "You work.", &[]),
     )
     .expect("worker manifest");
     let planner = tempfile::tempdir().expect("planner dir");
     std::fs::write(
-        planner.path().join("agent.leviath"),
+        planner.path().join("agent.toml"),
         manifest(
             "planner",
             "You plan.",

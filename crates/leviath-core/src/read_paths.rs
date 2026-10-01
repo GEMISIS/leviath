@@ -5,7 +5,7 @@
 //! read. Declaring is not granting: the user's config must either name the
 //! same paths (`[security] read_paths` / `[agent_read_paths.<name>]`) or set
 //! `allow_blueprint_read_paths = true`. That keeps the manifest tighten-only -
-//! an `agent.leviath` someone downloaded cannot ship one TOML line that reads
+//! an `agent.toml` someone downloaded cannot ship one TOML line that reads
 //! `~/.ssh`. [`ReadPathPolicy::decide`] is that double check, applied per path
 //! at resolve time.
 //!

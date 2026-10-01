@@ -28,7 +28,7 @@ mod load;
 mod write;
 
 pub use expand::expand;
-pub use file::{BlueprintFile, BlueprintMeta, FILE_NAME};
+pub use file::{BlueprintFile, BlueprintMeta, FILE_NAME, schema};
 pub use leviath_runtime::spec::env::LoadedBlueprint;
 pub use load::{BlueprintError, find, installed, load, validate};
 

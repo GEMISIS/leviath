@@ -227,6 +227,7 @@ pub mod renamed;
 mod sections;
 mod stage;
 mod tables;
+mod transition;
 mod unread;
 
 pub use tables::read_manifest_tables;
@@ -239,6 +240,7 @@ use read::*;
 use regions::*;
 use sections::*;
 use stage::*;
+use transition::*;
 
 /// Every key `parse_manifest` reads off the `[agent]` table, for the schema
 /// guard in `tests.rs` and the unread keys `migrate` reports. The parser

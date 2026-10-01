@@ -61,8 +61,8 @@
 //! that (see `guard-facade` in the repository's ci.yml). Behavior lives in,
 //! and is tested in, the crates re-exported here.
 
-/// Core types and traits: context regions, memory layouts, blueprint
-/// manifests, policies, and lifecycle configuration (`leviath-core`).
+/// Core types and traits: context regions, memory layouts, policies, and
+/// lifecycle configuration (`leviath-core`).
 pub use leviath_core as core;
 
 /// The ECS-based execution engine: agent state, the stage pipeline,
@@ -87,8 +87,8 @@ pub use leviath_scripting as scripting;
 /// OpenTelemetry export for the telemetry event stream (`leviath-telemetry`).
 pub use leviath_telemetry as telemetry;
 
-/// Blueprints: the `agent.toml` format, finding an installed one, and
-/// converting an `agent.leviath` (`leviath-blueprint`).
+/// Blueprints: the `agent.toml` format, reading and checking one, and finding
+/// an installed one (`leviath-blueprint`).
 pub use leviath_blueprint as blueprint;
 
 /// Agent packaging, sharing, and installation (`leviath-package`).
@@ -103,13 +103,14 @@ pub mod prelude {
     pub use leviath_core::interaction::{InteractionRequest, InteractionResponse};
     pub use leviath_core::{Error, PolicyConfig, Result};
     pub use leviath_runtime::spec::env::LoadedBlueprint;
-    pub use leviath_runtime::spec::graph::RunGraph;
+    pub use leviath_runtime::spec::graph::{
+        Budget, RegionDef, RegionLayoutDef, RunGraph, StageDef,
+    };
     pub use leviath_runtime::spec::inputs::RawInput;
     pub use leviath_runtime::spec::issues::{SpawnIssue, SpawnIssues};
     pub use leviath_runtime::spec::names::BlueprintRef;
     pub use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
     pub use leviath_runtime::spec::summary::SpawnSummary;
-    pub use leviath_runtime::spec::{Blueprint, BudgetSpec, ContextLayout, RegionDefinition};
     pub use leviath_runtime::state::RunState;
     pub use leviath_runtime::{
         AgentEvent, AgentState, AgentStatus, AgentWorld, AgentWorldBuilder, BasicToolService,

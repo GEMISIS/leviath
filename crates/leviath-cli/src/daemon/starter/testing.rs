@@ -231,10 +231,10 @@ pub(crate) fn start_as(
     ))
 }
 
-/// A manifest written to `<dir>/agent.leviath`, for a test that starts runs
-/// of it. Returns the manifest's path.
+/// A blueprint written to `<dir>/agent.toml`, for a test that starts runs
+/// of it. Returns the file's path.
 pub(crate) fn manifest_in(dir: &Path, manifest: &str) -> PathBuf {
-    let path = dir.join(leviath_core::files::MANIFEST_FILENAME);
+    let path = dir.join(leviath_blueprint::FILE_NAME);
     std::fs::write(&path, manifest).expect("write the manifest");
     path
 }
@@ -258,24 +258,28 @@ pub(crate) fn blueprint_with_mcp(dir: &Path, stub_py: &Path) -> PathBuf {
     manifest_in(
         dir,
         &format!(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "mcpagent"
-entry_stage = "work"
+version = "0.1.0"
 
-[[mcp_servers]]
-name = "search"
-command = "python3"
-args = ['{}']
+[graph]
+entry = "work"
+mcp_servers = [{{ name = "search", command = "python3", args = ["{}"] }}]
 
-[stages.work]
-mode = "autonomous"
-model = {{ provider = "fake", model = "m" }}
-available_tools = ["stub_search"]
+[[graph.stages]]
+name = "work"
 system_prompt = "use stub_search"
+model = {{ models = [{{ provider = "fake", model = "m" }}] }}
+tools = ["stub_search"]
 
-[context.regions]
-task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
+[graph.layout]
+regions = [{{ name = "task", kind = "pinned", budget = 200 }}]
+total_budget_tokens = 200
+
+[[graph.inputs]]
+name = "task"
+type = {{ kind = "text", multiline = true }}
+binds = [{{ region = "task" }}]
 "#,
             stub_py.to_string_lossy()
         ),

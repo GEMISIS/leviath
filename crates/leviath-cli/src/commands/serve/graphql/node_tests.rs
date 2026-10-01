@@ -94,11 +94,7 @@ async fn a_blueprint_answers_to_the_revision_id_it_published() {
         let agents = tempfile::tempdir().expect("a temp dir");
         let dir = agents.path().join("alpha");
         std::fs::create_dir_all(&dir).expect("agent dir");
-        std::fs::write(
-            dir.join(leviath_core::files::MANIFEST_FILENAME),
-            "[agent]\nname = \"alpha\"\nversion = \"1.0.0\"\n",
-        )
-        .expect("manifest written");
+        crate::test_support::write_test_agent(&dir, crate::test_support::tiny_blueprint("alpha"));
         let state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
 
         let listed = ask(state.clone(), "{ blueprints { results { id } } }").await;

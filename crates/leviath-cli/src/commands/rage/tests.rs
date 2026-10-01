@@ -133,7 +133,7 @@ fn manifest_text() -> String {
     crate::bundled::BUNDLED_AGENTS
         .iter()
         .flat_map(|agent| agent.files.iter())
-        .find(|(rel, _)| *rel == "agent.leviath")
+        .find(|(rel, _)| *rel == "agent.toml")
         .map(|(_, content)| (*content).to_string())
         .expect("a bundled agent ships a manifest")
 }
@@ -243,7 +243,7 @@ api_token = "{EXTRA_VALUE}"
 
     // Installed blueprints, with a tree deeper than the bundle copies.
     let demo = data.join("agents").join("demo");
-    write(&demo.join("agent.leviath"), manifest_text());
+    write(&demo.join("agent.toml"), manifest_text());
     write(
         &demo.join("tools").join("t.rhai"),
         format!("let k = \"{GITHUB_TOKEN}\";\n"),
@@ -265,7 +265,7 @@ api_token = "{EXTRA_VALUE}"
 
     // The blueprint the run used.
     let blueprint = root.join("blueprint");
-    write(&blueprint.join("agent.leviath"), manifest_text());
+    write(&blueprint.join("agent.toml"), manifest_text());
     write(&blueprint.join("tools").join("helper.rhai"), "fn x() {}\n");
 
     // A run family: root, a child by parent_run_id, a child by the parent's
@@ -288,7 +288,7 @@ api_token = "{EXTRA_VALUE}"
     let mut listed = meta(LISTED_CHILD, &blueprint);
     listed.started_at -= 20;
     // As the daemon records it: the manifest file, not its directory.
-    listed.agent_path = blueprint.join("agent.leviath").display().to_string();
+    listed.agent_path = blueprint.join("agent.toml").display().to_string();
     write_meta(&runs, &listed);
     let mut other = meta(OTHER_RUN, &blueprint);
     other.started_at -= 30;
@@ -476,7 +476,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "config/policy.toml",
             "config/rules/r.toml",
             "config/ui-state.json",
-            "agents/demo/agent.leviath",
+            "agents/demo/agent.toml",
             "agents/demo/tools/t.rhai",
             "tools/planted.rhai",
             "logs/daemon.log",
@@ -491,11 +491,11 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             &format!("runs/{ROOT_RUN}/stages/0/taint_audit.json"),
             &format!("runs/{ROOT_RUN}/run.lvr"),
             &format!("runs/{ROOT_RUN}/blobs/aa11"),
-            &format!("runs/{ROOT_RUN}/blueprint/agent.leviath"),
+            &format!("runs/{ROOT_RUN}/blueprint/agent.toml"),
             &format!("runs/{ROOT_RUN}/blueprint/tools/helper.rhai"),
             &format!("runs/{CHILD_RUN}/meta.json"),
             &format!("runs/{LISTED_CHILD}/meta.json"),
-            &format!("runs/{LISTED_CHILD}/blueprint/agent.leviath"),
+            &format!("runs/{LISTED_CHILD}/blueprint/agent.toml"),
         ] {
             assert!(
                 member_names.iter().any(|n| n.ends_with(expected)),
@@ -637,34 +637,52 @@ async fn blobs_can_be_left_out() {
 async fn the_other_categories_carry_their_own_extras() {
     with_env(|root| async move {
         let blueprint = plant(&root);
-        // A blueprint that parses and then fails to validate.
+        // A blueprint that parses and then fails to validate: its input
+        // binds a region the layout does not declare.
         write(
-            &root.join("bad").join("agent.leviath"),
-            format!(
-                "{}\n[[dependencies]]\nname = \"dup\"\nkind = \"env\"\nvar = \"X\"\n[[dependencies]]\nname = \"dup\"\nkind = \"env\"\nvar = \"Y\"\n",
-                manifest_text()
+            &root.join("bad").join("agent.toml"),
+            crate::test_support::tiny_blueprint("bad").replace(
+                "binds = [{ region = \"task\" }]",
+                "binds = [{ region = \"nowhere\" }]",
             ),
         );
-        write(&root.join("broken").join("agent.leviath"), "not = = toml");
+        write(&root.join("broken").join("agent.toml"), "not = = toml");
         let env = env_for(&root);
 
         let setup = collect::collect(&env, &selection(About::Setup), "now").await;
-        let imports = setup.members.iter().find(|m| m.path == "setup/imports.json").unwrap();
+        let imports = setup
+            .members
+            .iter()
+            .find(|m| m.path == "setup/imports.json")
+            .unwrap();
         assert!(String::from_utf8_lossy(&imports.bytes).contains("Claude Code"));
 
         let mut sel = selection(About::Agent);
-        sel.agent = Some(blueprint.join("agent.leviath"));
+        sel.agent = Some(blueprint.join("agent.toml"));
         let agent = collect::collect(&env, &sel, "now").await;
-        let check = agent.members.iter().find(|m| m.path == "blueprint-check.json").unwrap();
+        let check = agent
+            .members
+            .iter()
+            .find(|m| m.path == "blueprint-check.json")
+            .unwrap();
         let check: serde_json::Value = serde_json::from_slice(&check.bytes).unwrap();
         assert_eq!(check["parses"], true);
         assert_eq!(check["validates"], true, "{check}");
         assert!(check["name"].is_string(), "{check}");
-        assert!(agent.members.iter().any(|m| m.path == "blueprint/agent.leviath"));
+        assert!(
+            agent
+                .members
+                .iter()
+                .any(|m| m.path == "blueprint/agent.toml")
+        );
 
         sel.agent = Some(root.join("bad"));
         let bad = collect::collect(&env, &sel, "now").await;
-        let check = bad.members.iter().find(|m| m.path == "blueprint-check.json").unwrap();
+        let check = bad
+            .members
+            .iter()
+            .find(|m| m.path == "blueprint-check.json")
+            .unwrap();
         let check: serde_json::Value = serde_json::from_slice(&check.bytes).unwrap();
         assert_eq!(check["parses"], true, "{check}");
         assert_eq!(check["validates"], false, "{check}");
@@ -672,13 +690,21 @@ async fn the_other_categories_carry_their_own_extras() {
 
         sel.agent = Some(root.join("broken"));
         let broken = collect::collect(&env, &sel, "now").await;
-        let check = broken.members.iter().find(|m| m.path == "blueprint-check.json").unwrap();
+        let check = broken
+            .members
+            .iter()
+            .find(|m| m.path == "blueprint-check.json")
+            .unwrap();
         let check: serde_json::Value = serde_json::from_slice(&check.bytes).unwrap();
         assert_eq!(check["parses"], false);
 
         sel.agent = Some(root.join("nowhere"));
         let nowhere = collect::collect(&env, &sel, "now").await;
-        let check = nowhere.members.iter().find(|m| m.path == "blueprint-check.json").unwrap();
+        let check = nowhere
+            .members
+            .iter()
+            .find(|m| m.path == "blueprint-check.json")
+            .unwrap();
         assert!(String::from_utf8_lossy(&check.bytes).contains("cannot read"));
 
         // A category that needs a choice, with none: nothing extra, nothing lost.
@@ -889,10 +915,7 @@ fn run_ids_resolve_exactly_or_by_a_unique_prefix() {
 #[test]
 fn installed_blueprints_need_a_manifest() {
     let dir = tempfile::tempdir().unwrap();
-    write(
-        &dir.path().join("agents").join("a").join("agent.leviath"),
-        "x",
-    );
+    write(&dir.path().join("agents").join("a").join("agent.toml"), "x");
     std::fs::create_dir_all(dir.path().join("agents").join("empty")).unwrap();
     let found = installed_blueprints(&dir.path().join("agents"));
     assert_eq!(found.len(), 1);

@@ -1,6 +1,26 @@
 use super::*;
 
-const MANIFEST: &str = "[agent]\nname = \"a\"\n\n[stages.main]\nmode = \"autonomous\"\n";
+const MANIFEST: &str = r#"[blueprint]
+name = "a"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#;
 
 /// The blueprint name a request asks for.
 fn name_of(source: &SpawnSource) -> String {
@@ -19,7 +39,7 @@ fn a_blueprint_is_named_by_its_installed_name_or_its_directory() {
     crate::config::with_isolated_config_path("requests_blueprint_source", |home| {
         let installed = home.join(".leviath").join("agents").join("coder");
         std::fs::create_dir_all(&installed).unwrap();
-        std::fs::write(installed.join("agent.leviath"), MANIFEST).unwrap();
+        std::fs::write(installed.join("agent.toml"), MANIFEST).unwrap();
         assert_eq!(name_of(&blueprint_source("coder").unwrap()), "coder");
         assert_eq!(
             name_of(&blueprint_source(&installed.to_string_lossy()).unwrap()),
@@ -27,7 +47,7 @@ fn a_blueprint_is_named_by_its_installed_name_or_its_directory() {
         );
 
         let elsewhere = tempfile::tempdir().unwrap();
-        let manifest = elsewhere.path().join("agent.leviath");
+        let manifest = elsewhere.path().join("agent.toml");
         std::fs::write(&manifest, MANIFEST).unwrap();
         let dir = std::fs::canonicalize(elsewhere.path()).unwrap();
         for asked in [&manifest, &elsewhere.path().to_path_buf()] {
@@ -49,7 +69,7 @@ fn an_installed_directory_that_cannot_be_a_name_is_refused() {
         let long = "a".repeat(130);
         let installed = home.join(".leviath").join("agents").join(&long);
         std::fs::create_dir_all(&installed).unwrap();
-        std::fs::write(installed.join("agent.leviath"), MANIFEST).unwrap();
+        std::fs::write(installed.join("agent.toml"), MANIFEST).unwrap();
         let asked = installed.to_string_lossy().into_owned();
         let err = blueprint_source(&asked).unwrap_err();
         assert!(err.contains(&long), "{err}");

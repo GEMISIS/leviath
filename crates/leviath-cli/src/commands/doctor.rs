@@ -670,9 +670,9 @@ async fn inference_check(provider: &dyn Provider, model: &str, extra: serde_json
 // ─── Check 4: daemon ──────────────────────────────────────────────────────────
 
 /// The throwaway blueprint the daemon check spawns: one autonomous stage, one
-/// iteration, no tools, no transitions.
+/// iteration, no tools, no edges.
 ///
-/// A single stage with no transitions is a valid "pure linear" blueprint and
+/// A single stage with no edges is a valid one-stage graph and
 /// goes `Complete` after one text-only turn. Advertising no tools also keeps it
 /// out of the empty-output report - an agent with no way to modify a file is
 /// never judged for not having modified one.
@@ -680,27 +680,32 @@ async fn inference_check(provider: &dyn Provider, model: &str, extra: serde_json
 /// `provider` and `model` are serialised as JSON strings, whose escaping is a
 /// subset of TOML's basic-string escaping, so a name containing a quote or a
 /// backslash cannot break out of the literal.
-fn canary_manifest(provider: &str, model: &str) -> String {
+fn canary_blueprint(provider: &str, model: &str) -> String {
     let provider = serde_json::to_string(provider).expect("a str always serializes to JSON");
     let model = serde_json::to_string(model).expect("a str always serializes to JSON");
     format!(
-        r#"[agent]
+        r#"[blueprint]
 name = "doctor"
 version = "0.0.1"
 description = "One-turn provider probe spawned by `lev doctor`, deleted when it finishes."
-entry_stage = "ping"
 
-[stages.ping]
-mode = "autonomous"
-model = {{ models = [{{ provider = {provider}, model = {model} }}] }}
+[graph]
+entry = "ping"
+inputs = [{{ name = "task", type = "text", required = true, binds = [{{ region = "task" }}] }}]
+
+[[graph.stages]]
+name = "ping"
 description = "Answer once, in text."
-available_tools = []
+model = {{ models = [{{ provider = {provider}, model = {model} }}] }}
 max_iterations = 1
 system_prompt = "Reply with exactly: {PROBE_EXPECTED}. Call no tools."
 
-[context.regions]
-task = {{ kind = "pinned", max_tokens = 1000, seed = "task" }}
-conversation = {{ kind = "sliding_window", max_items = 4, max_tokens = 2000 }}
+[graph.layout]
+total_budget_tokens = 3000
+regions = [
+    {{ name = "task", kind = "pinned", budget = 1000 }},
+    {{ name = "conversation", kind = {{ kind = "sliding_window", max_items = 4 }}, budget = 2000 }},
+]
 "#
     )
 }
@@ -729,9 +734,9 @@ enum DaemonOutcome {
     Failed(String),
 }
 
-/// Write the canary manifest under `root`, returning its path.
+/// Write the canary blueprint under `root`, returning its path.
 ///
-/// The manifest's parent directory names the agent, and so prefixes the run id:
+/// The blueprint's parent directory names the agent, and so prefixes the run id:
 /// the canary is identifiable as `doctor-...` for as long as it exists.
 fn stage_canary(
     root: &std::path::Path,
@@ -740,8 +745,8 @@ fn stage_canary(
 ) -> std::io::Result<std::path::PathBuf> {
     let agent_dir = root.join("doctor");
     std::fs::create_dir_all(&agent_dir)?;
-    let manifest = agent_dir.join(leviath_core::files::MANIFEST_FILENAME);
-    std::fs::write(&manifest, canary_manifest(provider, model))?;
+    let manifest = agent_dir.join(leviath_blueprint::FILE_NAME);
+    std::fs::write(&manifest, canary_blueprint(provider, model))?;
     Ok(manifest)
 }
 

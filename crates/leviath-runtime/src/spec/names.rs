@@ -291,7 +291,7 @@ name_type!(
 );
 name_type!(
     /// The absolute directory a blueprint that is not installed is read
-    /// from: the one holding its `agent.leviath`.
+    /// from: the one holding its `agent.toml`.
     ///
     /// Only a caller on this machine names a blueprint this way (the CLI, the
     /// control socket, an embedding program). A request that arrives over the

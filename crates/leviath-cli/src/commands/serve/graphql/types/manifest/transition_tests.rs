@@ -3,11 +3,13 @@
 
 use std::sync::Arc;
 
-use leviath_runtime::spec::Blueprint as CoreBlueprint;
-use leviath_runtime::spec::blueprint::{
-    EdgeTransform, RegionCount, TransitionCondition as CoreCondition, TransitionEdge as CoreEdge,
-    TransitionGate as CoreGate,
+use leviath_runtime::spec::graph::{
+    EdgeCarry, EdgeCondition as CoreCondition, EdgeDef as CoreEdge, GateDef as CoreGate,
+    RegionCount,
 };
+use leviath_runtime::spec::names::{EdgeName, RegionName, StageName, ToolName};
+
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 use super::{
     ContextTransform, MappingTransform, RegionEntryRequirement, RegionMapping, StuckThresholds,
@@ -17,40 +19,47 @@ use super::{
 use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum, exercise_list};
 
 /// A blueprint with the regions and stages these types resolve names against.
-fn blueprint() -> Arc<CoreBlueprint> {
-    let text = "[agent]\n\
-                name = \"router\"\n\
-                \n\
-                [context.regions.plan]\n\
-                kind = \"pinned\"\n\
-                max_tokens = 100\n\
-                \n\
-                [context.regions.env]\n\
-                kind = \"temporary\"\n\
-                max_tokens = 100\n\
-                \n\
-                [stages.plan]\n\
-                mode = \"autonomous\"\n\
-                \n\
-                [stages.build]\n\
-                mode = \"autonomous\"\n";
-    Arc::new(leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses"))
+fn blueprint() -> Arc<ParsedBlueprint> {
+    super::super::parsed(
+        r#"[blueprint]
+name = "router"
+version = "1.0.0"
+
+[graph]
+stages = [{ name = "plan" }, { name = "build" }]
+layout = { total_budget_tokens = 200, regions = [{ name = "plan", kind = "pinned", budget = 100 }, { name = "env", kind = "temporary", budget = 100 }] }
+"#,
+    )
 }
 
-/// One edge, custom-transformed and gated, as a manifest would write it.
-fn custom_edge() -> CoreEdge {
+/// An edge from `plan` to `to`, taken when it is `when`, carrying `carry`.
+fn edge(to: &str, when: CoreCondition, carry: EdgeCarry) -> CoreEdge {
     CoreEdge {
-        target: "build".to_string(),
-        condition: CoreCondition::LlmChoice,
-        hint: Some("when the plan is settled".to_string()),
-        transform: EdgeTransform::Custom {
-            carry: vec!["plan".to_string()],
-            compact: vec![],
-            clear: vec!["env".to_string()],
-            compact_prompt: None,
-        },
+        name: EdgeName::new(to).unwrap(),
+        from: StageName::new("plan").unwrap(),
+        to: StageName::new(to).unwrap(),
+        when,
+        hint: None,
+        carry,
         gate: None,
         stuck: None,
+    }
+}
+
+/// One edge, custom-transformed, as a blueprint would write it.
+fn custom_edge() -> CoreEdge {
+    CoreEdge {
+        hint: Some("when the plan is settled".to_string()),
+        ..edge(
+            "build",
+            CoreCondition::LlmChoice,
+            EdgeCarry::Custom {
+                carry: vec![RegionName::new("plan").unwrap()],
+                compact: vec![],
+                clear: vec![RegionName::new("env").unwrap()],
+                compact_prompt: None,
+            },
+        )
     }
 }
 
@@ -101,13 +110,13 @@ async fn every_mirrored_function_runs() {
         blueprint: Arc::clone(&bp),
         gate: CoreGate {
             require_modifications: true,
-            region: Some("plan".to_string()),
-            tools: vec!["shell".to_string()],
-            require_region_updated: Some("plan".to_string()),
-            require_regions: vec!["plan".to_string()],
-            require_no_open_items: Some("plan".to_string()),
+            region: Some(RegionName::new("plan").unwrap()),
+            tools: vec![ToolName::new("shell").unwrap()],
+            require_region_updated: Some(RegionName::new("plan").unwrap()),
+            require_regions: vec![RegionName::new("plan").unwrap()],
+            require_no_open_items: Some(RegionName::new("plan").unwrap()),
             require_region_entries: Some(RegionCount {
-                region: "plan".to_string(),
+                region: RegionName::new("plan").unwrap(),
                 at_least: 2,
             }),
             message: Some("write the plan first".to_string()),
@@ -116,18 +125,10 @@ async fn every_mirrored_function_runs() {
     }])
     .await;
 
-    exercise(&[TransitionEdge::of(&bp, "build", &custom_edge())]).await;
+    exercise(&[TransitionEdge::of(&bp, &custom_edge())]).await;
     exercise_list(&[TransitionEdge::of(
         &bp,
-        "build",
-        &CoreEdge {
-            target: "build".to_string(),
-            condition: CoreCondition::Always,
-            hint: None,
-            transform: EdgeTransform::Direct,
-            gate: None,
-            stuck: None,
-        },
+        &edge("build", CoreCondition::Always, EdgeCarry::Direct),
     )])
     .await;
 
@@ -185,19 +186,16 @@ async fn a_dangling_target_resolves_to_nothing() {
     use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
     let bp = blueprint();
-    let edge = TransitionEdge::of(
+    let dangling = TransitionEdge::of(
         &bp,
-        "nowhere",
-        &CoreEdge {
-            target: "nowhere".to_string(),
-            condition: CoreCondition::Always,
-            hint: None,
-            transform: EdgeTransform::Direct,
-            gate: None,
-            stuck: None,
-        },
+        &edge("nowhere", CoreCondition::Always, EdgeCarry::Direct),
     );
-    let schema = Schema::build(EdgeProbe { edge }, EmptyMutation, EmptySubscription).finish();
+    let schema = Schema::build(
+        EdgeProbe { edge: dangling },
+        EmptyMutation,
+        EmptySubscription,
+    )
+    .finish();
     let answer = schema
         .execute(Request::new("{ edge { target { name } targetName } }"))
         .await;

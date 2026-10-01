@@ -823,7 +823,8 @@ input BlueprintInput {
 	"""
 	Filter on `BlueprintOutput.digest`.
 	
-	Content digest of this manifest, lowercase hex SHA-256.
+	Content digest, lowercase hex SHA-256: of the installed `agent.toml`, or
+	of the graph a run executed.
 	"""
 	digest: StringFilter
 	"""
@@ -835,13 +836,13 @@ input BlueprintInput {
 	"""
 	Filter on `BlueprintOutput.version`.
 	
-	From `[agent] version`.
+	From `[blueprint] version`. Empty for a run of a graph its caller wrote.
 	"""
 	version: StringFilter
 	"""
 	Filter on `BlueprintOutput.description`.
 	
-	From `[agent] description`.
+	From `[blueprint] description`.
 	"""
 	description: StringFilter
 	"""
@@ -850,7 +851,7 @@ input BlueprintInput {
 	The stage a run starts in. Defaults to the first stage declared.
 	
 	Null for a blueprint that declares no stages, and for one whose
-	`entry_stage` names a stage it does not declare, which `lev validate`
+	`entry` names a stage it does not declare, which `lev validate`
 	refuses and the daemon will not spawn. `entryStageName` is the name it
 	wrote.
 	"""
@@ -858,7 +859,7 @@ input BlueprintInput {
 	"""
 	Filter on `BlueprintOutput.entryStageName`.
 	
-	The name the manifest gave as its entry stage, verbatim. Null where it
+	The name the graph gave as its entry stage, verbatim. Null where it
 	names none, which starts the run in the first stage declared.
 	"""
 	entryStageName: StringFilter
@@ -1010,15 +1011,15 @@ enum BlueprintOrderField {
 }
 
 """
-A blueprint: the manifest that says what an agent is, whole.
+A blueprint: the graph that says what an agent is, whole.
 
 Its stages, regions, tools and models are the declaration and nothing more.
-Nothing here belongs to any one execution: that is a `Run`, which carries
-its own frozen copy of the blueprint it started from.
+Nothing here belongs to any one execution: that is a `Run`, whose file
+carries the graph it was resolved to.
 
-So read from a run, this is the manifest that run executed; read from the
-blueprint listing, it is the definition installed now. The `source` field
-says which, and the digest in the id says whether they are the same bytes.
+So read from a run, this is the graph that run executed, with its inputs
+applied; read from the blueprint listing, it is the definition installed
+now. The `source` field says which.
 """
 type BlueprintOutput implements Node {
 	"""
@@ -1034,25 +1035,28 @@ type BlueprintOutput implements Node {
 	id: ID!
 	"Unique within the installed set."
 	name: String!
-	"Content digest of this manifest, lowercase hex SHA-256."
+	"""
+	Content digest, lowercase hex SHA-256: of the installed `agent.toml`, or
+	of the graph a run executed.
+	"""
 	digest: String!
 	"Which file this was read from."
 	source: BlueprintSource!
-	"From `[agent] version`."
+	"From `[blueprint] version`. Empty for a run of a graph its caller wrote."
 	version: String!
-	"From `[agent] description`."
+	"From `[blueprint] description`."
 	description: String!
 	"""
 	The stage a run starts in. Defaults to the first stage declared.
 	
 	Null for a blueprint that declares no stages, and for one whose
-	`entry_stage` names a stage it does not declare, which `lev validate`
+	`entry` names a stage it does not declare, which `lev validate`
 	refuses and the daemon will not spawn. `entryStageName` is the name it
 	wrote.
 	"""
 	entryStage: StageOutput
 	"""
-	The name the manifest gave as its entry stage, verbatim. Null where it
+	The name the graph gave as its entry stage, verbatim. Null where it
 	names none, which starts the run in the first stage declared.
 	"""
 	entryStageName: String
@@ -1230,10 +1234,7 @@ enum BlueprintSource {
 	the installed file says now.
 	"""
 	SNAPSHOT
-	"""
-	The installed file. For a run, this means it kept no snapshot, so the
-	file may have changed since it ran.
-	"""
+	"The installed `agent.toml`, as it is now."
 	INSTALLED
 }
 
@@ -1532,7 +1533,8 @@ input CompactionConfigInput {
 	"""
 	Filter on `CompactionConfigOutput.provider`.
 	
-	The provider that serves the summarizer.
+	The provider that serves the summarizer. Empty when the blueprint
+	names the model alone and the machine's provider order picks one.
 	"""
 	provider: StringFilter
 	"""
@@ -1586,7 +1588,10 @@ Its own model on purpose: compaction is cheap, frequent and not the work, so
 a run on an expensive model usually summarizes on a small one.
 """
 type CompactionConfigOutput {
-	"The provider that serves the summarizer."
+	"""
+	The provider that serves the summarizer. Empty when the blueprint
+	names the model alone and the machine's provider order picks one.
+	"""
 	provider: String!
 	"The model it runs on."
 	model: String!
@@ -7517,7 +7522,8 @@ input OutputSpecInput {
 	"""
 	Filter on `OutputSpecOutput.validator`.
 	
-	A script that checks the answer, beyond the schema.
+	A script that checks the answer, beyond the schema: a path beside the
+	blueprint, or the script itself when the blueprint writes it inline.
 	"""
 	validator: StringFilter
 	"""
@@ -7570,7 +7576,10 @@ type OutputSpecOutput {
 	example: String
 	"A JSON Schema the answer must satisfy."
 	schema: JSON
-	"A script that checks the answer, beyond the schema."
+	"""
+	A script that checks the answer, beyond the schema: a path beside the
+	blueprint, or the script itself when the blueprint writes it inline.
+	"""
 	validator: String
 	"""
 	What happens when that script refuses an answer. Null leaves the default,
@@ -8644,12 +8653,12 @@ input RegionInput {
 	"""
 	Filter on `RegionOutput.declaredByStage`.
 	
-	The stage whose own `[context.regions]` declares this region. Null for a
+	The stage whose own `layout` declares this region. Null for a
 	region the blueprint declares run-wide, which is every region in
 	`Blueprint.regions`.
 	
 	A stage may declare a layout of its own, and a name resolved from
-	anywhere in the manifest can land in one of those. This says where the
+	anywhere in the blueprint can land in one of those. This says where the
 	declaration was read from, so a client can tell a run-wide region from
 	one only a single stage sets up.
 	"""
@@ -8754,6 +8763,9 @@ input RegionInput {
 	
 	What fills this region before the first inference. Null means it starts
 	empty, for the run to fill.
+	
+	A region an input of the graph is bound to is filled by whoever starts
+	the run, under that input's name.
 	"""
 	seed: RegionSeedInput
 	"""
@@ -8815,7 +8827,8 @@ input RegionInput {
 	"""
 	Filter on `RegionOutput.script`.
 	
-	The Rhai script that owns this region, for a custom one.
+	The Rhai script that owns this region, for a custom one: a path beside
+	the blueprint, or the script itself when the blueprint writes it inline.
 	"""
 	script: StringFilter
 	"""
@@ -8842,9 +8855,8 @@ input RegionInput {
 """
 What a region does when it fills.
 
-One value per kind the daemon recognises. The manifest accepts `hashmap`
-and `hash_map` for the same kind, which is a spelling the TOML takes; the
-API has one name for one thing.
+One value per kind the daemon recognises. A blueprint writes the
+key-value kind as `keyed`, which is `HASHMAP` here.
 """
 enum RegionKind {
 	"Stays in the prompt verbatim."
@@ -8980,12 +8992,12 @@ type RegionOutput {
 	"Region name, unique within the layout that declares it."
 	name: String!
 	"""
-	The stage whose own `[context.regions]` declares this region. Null for a
+	The stage whose own `layout` declares this region. Null for a
 	region the blueprint declares run-wide, which is every region in
 	`Blueprint.regions`.
 	
 	A stage may declare a layout of its own, and a name resolved from
-	anywhere in the manifest can land in one of those. This says where the
+	anywhere in the blueprint can land in one of those. This says where the
 	declaration was read from, so a client can tell a run-wide region from
 	one only a single stage sets up.
 	"""
@@ -9046,6 +9058,9 @@ type RegionOutput {
 	"""
 	What fills this region before the first inference. Null means it starts
 	empty, for the run to fill.
+	
+	A region an input of the graph is bound to is filled by whoever starts
+	the run, under that input's name.
 	"""
 	seed: RegionSeed
 	"The most entries a sliding region keeps."
@@ -9076,7 +9091,10 @@ type RegionOutput {
 	sourceRegionName: String
 	"The most keys a key-value region holds."
 	maxEntries: Int
-	"The Rhai script that owns this region, for a custom one."
+	"""
+	The Rhai script that owns this region, for a custom one: a path beside
+	the blueprint, or the script itself when the blueprint writes it inline.
+	"""
 	script: String
 	"""
 	Whether a custom region is never evicted, like a pinned one, rather than
@@ -10152,12 +10170,13 @@ input RunInput {
 	"""
 	Filter on `RunOutput.blueprintDigest`.
 	
-	The digest of the manifest this run executed, lowercase hex SHA-256.
+	The digest of the installed blueprint revision this run was spawned
+	from, lowercase hex SHA-256.
 	
 	Recorded at spawn. Compare it with the installed blueprint's digest to
 	tell "this run executed what is installed now" from "this run executed
-	something else". Null for a run recorded before snapshots existed,
-	where the answer is unknown rather than "the same".
+	something else". Null for a run of a graph its caller wrote, which
+	came from no installed revision.
 	"""
 	blueprintDigest: StringFilter
 	"""
@@ -10388,24 +10407,23 @@ type RunOutput implements Node {
 	"""
 	The blueprint this run executed.
 	
-	The run's own snapshot of the manifest, taken at spawn, so it answers
-	for the run even after the installed blueprint is edited or deleted.
-	For a run recorded before snapshots existed there is no copy, and this
-	falls back to the installed file: `blueprint.source` says which, and
-	`blueprintDigest` is set only for a run that carries its own.
+	The graph in the run's own file, as it was resolved at spawn with the
+	run's inputs applied, so it answers for the run even after the
+	installed blueprint is edited or deleted.
 	
-	Null, with an error naming the file, when neither can be read. Nullable
-	on purpose: one unreadable blueprint in a page of fifty runs must not
-	cost a client the other forty-nine.
+	Null, with an error, when the run's file cannot be read. Nullable on
+	purpose: one unreadable run in a page of fifty must not cost a client
+	the other forty-nine.
 	"""
 	blueprint: BlueprintOutput
 	"""
-	The digest of the manifest this run executed, lowercase hex SHA-256.
+	The digest of the installed blueprint revision this run was spawned
+	from, lowercase hex SHA-256.
 	
 	Recorded at spawn. Compare it with the installed blueprint's digest to
 	tell "this run executed what is installed now" from "this run executed
-	something else". Null for a run recorded before snapshots existed,
-	where the answer is unknown rather than "the same".
+	something else". Null for a run of a graph its caller wrote, which
+	came from no installed revision.
 	"""
 	blueprintDigest: String
 	"""
@@ -12617,7 +12635,8 @@ input StageHooksInput {
 """
 The scripts a stage runs at points in its own lifecycle.
 
-Each names a Rhai file relative to the blueprint. The function a script has to
+Each names a Rhai file relative to the blueprint, or is the script itself
+when the blueprint writes it inline. The function a script has to
 define is named for the field it is given as, so one file may back several
 hooks. A stage that declares none costs nothing: no file is read and no
 engine is built.
@@ -12991,7 +13010,9 @@ input StageModelRouteInput {
 	"""
 	Filter on `StageModelRouteOutput.provider`.
 	
-	The provider that serves it, as the config names providers.
+	The provider that serves it, as the config names providers. Empty when
+	the blueprint names the model alone and the machine's provider order
+	picks one.
 	"""
 	provider: StringFilter
 	"""
@@ -13028,7 +13049,11 @@ input StageModelRouteListInput {
 
 "One provider and model, in a stage's ordered list."
 type StageModelRouteOutput {
-	"The provider that serves it, as the config names providers."
+	"""
+	The provider that serves it, as the config names providers. Empty when
+	the blueprint names the model alone and the machine's provider order
+	picks one.
+	"""
 	provider: String!
 	"The model id, as that provider spells it."
 	model: String!
@@ -15478,7 +15503,7 @@ input TransitionEdgeInput {
 	"""
 	Filter on `TransitionEdgeOutput.targetName`.
 	
-	The stage name this edge was keyed by, verbatim.
+	The stage name this edge leads to, verbatim.
 	"""
 	targetName: StringFilter
 	"""
@@ -15561,7 +15586,7 @@ type TransitionEdgeOutput {
 	wrote.
 	"""
 	target: StageOutput
-	"The stage name this edge was keyed by, verbatim."
+	"The stage name this edge leads to, verbatim."
 	targetName: String!
 	"Told to the model when it is choosing where to go next."
 	hint: String

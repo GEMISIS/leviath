@@ -87,21 +87,21 @@ impl Provider for AnswersOnce {
 
 /// A one-stage agent that answers and stops.
 fn one_stage_manifest() -> &'static str {
-    r#"[agent]
+    r#"[blueprint]
 name = "seam"
 version = "0.0.0"
 description = "Answers once, then finishes."
-entry_stage = "work"
 
-[stages.work]
-mode = "autonomous"
-model = { provider = "seam", model = "m" }
-description = "Answer"
-system_prompt = "Answer, then stop."
+[graph]
+stages = [{ name = "work", description = "Answer", system_prompt = "Answer, then stop.", model = { models = [{ provider = "seam", model = "m" }] } }]
+inputs = [{ name = "task", type = "text", required = true, binds = [{ region = "task" }] }]
 
-[context.regions]
-task = { kind = "pinned", max_tokens = 500, seed = "task" }
-conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+[graph.layout]
+total_budget_tokens = 10500
+regions = [
+    { name = "task", kind = "pinned", budget = 500 },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 20 }, budget = 10000 },
+]
 "#
 }
 
@@ -265,8 +265,7 @@ fn last<'a>(frames: &'a [serde_json::Value], tag: &str) -> &'a serde_json::Value
 #[tokio::test]
 async fn a_real_run_reaches_a_websocket_subscriber() {
     let agent_dir = tempfile::tempdir().expect("agent dir");
-    let manifest = agent_dir.path().join("agent.leviath");
-    std::fs::write(&manifest, one_stage_manifest()).expect("write manifest");
+    let manifest = crate::test_support::write_test_agent(agent_dir.path(), one_stage_manifest());
     let workdir = tempfile::tempdir().expect("workdir");
     let runs = tempfile::tempdir().expect("runs dir");
 

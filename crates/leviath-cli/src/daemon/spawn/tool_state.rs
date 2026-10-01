@@ -75,10 +75,10 @@ pub(crate) struct ToolStateParts<'a> {
     /// The files this run may not change, shared with the seeds that ran
     /// before the tool lane existed.
     pub(crate) protected: Vec<crate::tools::ProtectedPath>,
-    /// `[safe_commands]` the blueprint declares, if the user opted in.
-    pub(crate) blueprint_safe: Option<&'a leviath_runtime::spec::blueprint::SafeCommandsConfig>,
-    /// `[read_paths]` the blueprint declares, if any.
-    pub(crate) blueprint_read_paths: Option<&'a leviath_runtime::spec::blueprint::ReadPathsConfig>,
+    /// The graph's `safe_commands`, when it declares any; they count only if the user opted in.
+    pub(crate) blueprint_safe: Option<&'a leviath_runtime::spec::graph::SafeCommandsDef>,
+    /// The graph's `read_paths`, empty when it declares none.
+    pub(crate) blueprint_read_paths: &'a [String],
     /// The run's workdir, which read-path entries compile relative to.
     pub(crate) workdir: std::path::PathBuf,
 }
@@ -151,7 +151,7 @@ pub(crate) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
         config_source: Arc::new(crate::daemon::tool_service::ConfigSource {
             agent_name: parts.agent_name.to_string(),
             blueprint_safe: parts.blueprint_safe.cloned(),
-            blueprint_read_paths: parts.blueprint_read_paths.cloned(),
+            blueprint_read_paths: parts.blueprint_read_paths.to_vec(),
             workdir: parts.workdir,
             yolo_profile: parts.yolo_profile,
         }),

@@ -14,12 +14,38 @@ use crate::commands::serve::graphql::scalars::BigInt;
 use crate::commands::serve::testutil::state_with_agent_paths;
 use crate::runstate::{RunMeta, create_run};
 
+/// Give the run `run_id` a file whose graph is two stages: `review`, which
+/// takes no messages, then `build`, which does.
+fn review_then_build(run_id: &str) {
+    use crate::commands::serve::core::run_file;
+    use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter};
+
+    let recorded = run_file::tests::recorded();
+    let reader = RunFileReader::open(&run_file::path(&recorded)).expect("a recorded run");
+    let mut spec = reader.spec().clone();
+    let text = "[blueprint]\nname = \"coder\"\nversion = \"1.0.0\"\n\n[graph]\n\
+                stages = [{ name = \"review\", accepts_messages = false }, { name = \"build\" }]\n\
+                layout = { total_budget_tokens = 1000, \
+                regions = [{ name = \"work\", kind = \"temporary\", budget = 100 }] }\n";
+    spec.graph = leviath_blueprint::BlueprintFile::parse(text)
+        .expect("the blueprint parses")
+        .run_graph();
+    RunFileWriter::create(
+        &run_file::path(run_id),
+        &spec,
+        &leviath_runtime::spec::env::CodeFiles::new(),
+        &reader.state_at(0).expect("the first state"),
+        CheckpointPolicy::default(),
+    )
+    .expect("the run file is written");
+}
+
 /// A run whose working directory is the given one.
 fn meta_in(workdir: &std::path::Path) -> RunMeta {
     let mut meta = RunMeta::new(
         "reader".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "read the files".to_string(),
         None,
         workdir.to_string_lossy().into_owned(),
@@ -698,17 +724,9 @@ async fn whether_messages_reach_the_run_comes_from_its_stage() {
         let mut meta = meta_in(workdir.path());
         meta.current_stage = "review".to_string();
         crate::runstate::create_run(&meta).expect("run written");
-        // The run's own snapshot, which is what this reads: the installed file
+        // The run's own file, which is what this reads: the installed file
         // may say something else by now.
-        std::fs::write(
-            crate::runstate::run_dir(&meta.run_id)
-                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
-            "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\
-             \n[context.regions.work]\nkind = \"temporary\"\nmax_tokens = 100\n\
-             \n[stages.review]\nmode = \"autonomous\"\naccepts_messages = false\n\
-             \n[stages.build]\nmode = \"autonomous\"\n",
-        )
-        .expect("a snapshot");
+        review_then_build(&meta.run_id);
 
         let json = data(meta.clone(), "{ run { acceptsMessages } }").await;
         assert_eq!(
@@ -1379,15 +1397,7 @@ async fn a_run_yet_to_enter_a_stage_answers_from_its_entry_stage() {
         let mut meta = meta_in(workdir.path());
         meta.current_stage = String::new();
         crate::runstate::create_run(&meta).expect("run written");
-        std::fs::write(
-            crate::runstate::run_dir(&meta.run_id)
-                .join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
-            "[agent]\nname = \"coder\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\
-             \n[context.regions.work]\nkind = \"temporary\"\nmax_tokens = 100\n\
-             \n[stages.review]\nmode = \"autonomous\"\naccepts_messages = false\n\
-             \n[stages.build]\nmode = \"autonomous\"\n",
-        )
-        .expect("a snapshot");
+        review_then_build(&meta.run_id);
 
         let json = data(meta, "{ run { acceptsMessages } }").await;
         assert_eq!(

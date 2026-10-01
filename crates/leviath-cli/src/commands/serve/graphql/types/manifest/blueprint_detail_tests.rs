@@ -1,25 +1,20 @@
 //! Tests for the blueprint-level and region-level detail.
 //!
-//! The same manifest the stage tests use, read from the top: what the agent
-//! block declares about the whole run, and what each region declares about
-//! itself.
-
-use std::sync::Arc;
+//! The same blueprint the stage tests use, read from the top: what the graph
+//! declares about the whole run, and what each region declares about itself.
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 
 use super::super::blueprint::Blueprint;
 use crate::commands::serve::core::blueprints::{BlueprintSource as CoreSource, digest_of};
 
-/// Ask the schema about the manifest the stage tests declare.
+/// Ask the schema about the blueprint the stage tests declare.
 async fn ask(query: &str) -> serde_json::Value {
     let text = super::stage_tests::manifest();
-    let parsed =
-        leviath_runtime::spec::manifest::parse_manifest(&text).expect("the manifest parses");
     let schema = Schema::build(
         Probe {
             blueprint: Blueprint {
-                parsed: Arc::new(parsed),
+                parsed: super::parsed(&text),
                 digest: digest_of(&text),
                 source: CoreSource::Snapshot.into(),
             },
@@ -240,154 +235,73 @@ async fn a_tool_seed_carries_its_calls_and_its_refresh() {
     assert_eq!(env["seed"]["calls"][0]["args"]["command"], "git");
 }
 
-/// A second manifest, for the branches the first one does not take: the other
-/// seed kinds, the other token rules, the other region formats, and a transform.
+/// A second blueprint, for the branches the first one does not take: the
+/// other seed kinds, the other token rules, the other region kinds, and a
+/// transform.
 fn variants() -> String {
-    r#"
-[agent]
+    r#"[blueprint]
 name = "variants"
 version = "1.0.0"
 description = "the other branches"
 
-[sandbox]
-kind = "namespace"
-network = true
-keep_warm = true
-on_unavailable = "warn"
+[graph]
+sandbox = { kind = "namespace", keep_warm = true, on_unavailable = "warn" }
+nudge = { enabled = false, text = "call a tool" }
+stages = [{ name = "only" }, { name = "done" }, { name = "other", mode = "interactive" }]
+edges = [
+    { name = "done", from = "only", to = "done", when = "dead_end", carry = { compact = {} } },
+    { name = "other", from = "only", to = "other", when = "max_iterations", carry = "clear" },
+]
+inputs = [{ name = "task", type = "text", binds = [{ region = "task" }] }]
 
-[agent.nudge]
-enabled = false
-text = "call a tool"
+[[graph.transforms]]
+from = "variants"
+to = "other"
+mappings = [
+    { from = "task", to = "task", transform = { extract = ["title"] } },
+    { from = "notes", to = "notes" },
+]
 
-[[transforms]]
-from_blueprint = "variants"
-to_blueprint = "other"
+[graph.layout]
+total_budget_tokens = 10000
+regions = [
+    { name = "task", kind = "pinned", budget = 1000 },
+    { name = "notes", kind = { kind = "sliding_window", max_items = 10, eviction = { compact = 4 } }, budget = 1000 },
+    { name = "sources", kind = "temporary", budget = 1000, seed = { glob = "*.md" } },
+    { name = "files", kind = "temporary", budget = 1000, seed = { files = ["a.txt", "b.txt"] } },
+    { name = "script_region", kind = { kind = "custom", code = { file = "context_hooks/own.rhai" }, pinned = true }, budget = 1000, seed = { code = { file = "seeds/now.rhai" } } },
+    { name = "env", kind = "temporary", budget = 1000, seed = { command = "git status --short" } },
+    { name = "history", kind = { kind = "compact_history", source = "work" }, budget = 1000 },
+    { name = "work", kind = { kind = "compacting", threshold_tokens = 1500 }, budget = 2000, seed = { tools = { calls = [{ tool = "which_command", args = {} }] } } },
+    { name = "plan", kind = "checklist", budget = 1000 },
+]
 
-[[transforms.mappings]]
-from_region = "task"
-to_region = "task"
-transform = "extract"
-fields = ["title"]
+[graph.mime_types]
+"application/pdf" = { family = "document", tokens = { per_page = 600 } }
+"audio/mpeg" = { family = "audio", tokens = { per_second = 32 } }
+"text/x-thing" = { family = "text", tokens = { per_byte = 0.25 } }
+"image/webp" = { family = "image", tokens = { per_pixel = { divisor = 750, max = 1600 } }, magic = "52494646", stand_in = "[a picture: {name}]", check = { file = "checks/webp.rhai" } }
 
-[[transforms.mappings]]
-from_region = "notes"
-to_region = "notes"
-
-[mime_types."image/webp"]
-family = "image"
-tokens = { per_pixel = 750, max = 1600 }
-magic = "52494646"
-stand_in = "[a picture: {name}]"
-check = "checks/webp.rhai"
-
-[mime_types."audio/mpeg"]
-family = "audio"
-tokens = { per_second = 32 }
-
-[mime_types."application/pdf"]
-family = "document"
-tokens = { per_page = 600 }
-
-[mime_types."text/x-thing"]
-family = "text"
-tokens = { per_byte = 0.25 }
-
-[[dependencies]]
+[[graph.dependencies]]
 name = "token"
-kind = "env"
-var = "THING_TOKEN"
+needs = { env = "THING_TOKEN" }
 
-[[dependencies]]
+[[graph.dependencies]]
 name = "ready"
-kind = "script"
-check = "checks/ready.rhai"
+needs = { check = { file = "checks/ready.rhai" } }
 required = false
-
-[dependencies.install]
-script = "install/ready.rhai"
-
-[dependencies.install.commands]
-macos = "brew install thing"
-linux = "apt install thing"
-
-[context.regions.task]
-kind = "pinned"
-max_tokens = 1000
-seed = { caller = "task" }
-
-[context.regions.notes]
-kind = "sliding_window"
-max_tokens = 1000
-max_items = 10
-strategy = "compact"
-compact_count = 4
-
-[context.regions.sources]
-kind = "temporary"
-max_tokens = 1000
-seed = { glob = "*.md" }
-
-[context.regions.files]
-kind = "temporary"
-max_tokens = 1000
-seed = { files = ["a.txt", "b.txt"] }
-
-[context.regions.script_region]
-kind = "custom"
-script = "context_hooks/own.rhai"
-pinned = true
-max_tokens = 1000
-seed = { rhai = "seeds/now.rhai" }
-
-[context.regions.env]
-kind = "temporary"
-max_tokens = 1000
-seed = { command = "git status --short" }
-
-[context.regions.history]
-kind = "compact_history"
-source_region = "work"
-max_tokens = 1000
-
-[context.regions.work]
-kind = "compacting"
-max_tokens = 2000
-threshold_tokens = 1500
-seed = { tool = "which_command" }
-
-[context.regions.plan]
-kind = "checklist"
-max_tokens = 1000
-
-[stages.only]
-mode = "autonomous"
-
-[stages.only.transitions.done]
-condition = "dead_end"
-transform = "compact"
-
-[stages.only.transitions.other]
-condition = "max_iterations"
-transform = "clear"
-
-[stages.done]
-mode = "autonomous"
-
-[stages.other]
-mode = "interactive"
+install = { commands = { linux = "apt install thing", macos = "brew install thing" }, script = { file = "install/ready.rhai" } }
 "#
     .to_string()
 }
 
-/// Ask the schema about the second manifest.
+/// Ask the schema about the second blueprint.
 async fn ask_variants(query: &str) -> serde_json::Value {
     let text = variants();
-    let parsed =
-        leviath_runtime::spec::manifest::parse_manifest(&text).expect("the manifest parses");
     let schema = Schema::build(
         Probe {
             blueprint: Blueprint {
-                parsed: Arc::new(parsed),
+                parsed: super::parsed(&text),
                 digest: digest_of(&text),
                 source: CoreSource::Installed.into(),
             },
@@ -405,7 +319,8 @@ async fn ask_variants(query: &str) -> serde_json::Value {
 }
 
 /// Every kind of seed comes back as its own type, so a client matches on the
-/// type rather than on which of ten fields is not null.
+/// type rather than on which of ten fields is not null. A region an input is
+/// bound to is seeded by the caller, under the input's name.
 #[tokio::test]
 async fn each_kind_of_seed_is_its_own_type() {
     let json = ask_variants(
@@ -453,8 +368,6 @@ async fn each_kind_of_seed_is_its_own_type() {
         "SeedFromCommandOutput"
     );
     assert_eq!(by_name("env")["seed"]["command"], "git status --short");
-    // The single-tool shorthand is a one-entry list here: one shape for one
-    // idea, so a client reads `calls` whichever way the manifest wrote it.
     assert_eq!(by_name("work")["seed"]["__typename"], "SeedFromToolsOutput");
     assert_eq!(by_name("work")["seed"]["calls"][0]["tool"], "which_command");
     assert_eq!(by_name("work")["seed"]["refresh"], "ONCE");
@@ -544,9 +457,8 @@ async fn a_transform_maps_one_layout_onto_another() {
     assert_eq!(transform["toBlueprint"], "other");
     assert_eq!(transform["mappings"][0]["transform"], "EXTRACT");
     assert_eq!(transform["mappings"][0]["fields"][0], "title");
-    // A mapping with no transform carries the content across as it is, and says
-    // so by leaving the field null rather than by naming a default.
-    assert!(transform["mappings"][1]["transform"].is_null());
+    // A mapping with no transform carries the content across as it is.
+    assert_eq!(transform["mappings"][1]["transform"], "DIRECT");
     assert_eq!(
         transform["mappings"][1]["fields"].as_array().map(Vec::len),
         Some(0)
@@ -595,7 +507,7 @@ async fn the_remaining_settings_arms_come_back() {
     assert!(commands.iter().any(|entry| entry["os"] == "macos"));
 }
 
-/// The edge transforms the first manifest does not use come back too.
+/// The edge transforms the first blueprint does not use come back too.
 #[tokio::test]
 async fn the_remaining_edge_transforms_come_back() {
     let json = ask_variants(
@@ -636,35 +548,21 @@ async fn the_remaining_edge_transforms_come_back() {
     );
 }
 
-/// A permission word the daemon does not recognise reads as `ASK`.
-///
-/// The manifest parser refuses such a word, so this builds the stage directly:
-/// the path exists for a record that reached the server another way. `ASK` is
-/// what the daemon's own resolution makes of it, and reporting `ALLOW` or `DENY`
-/// would describe a dispatch that will not happen.
+/// Each permission a stage can set reads back as its own policy.
 #[tokio::test]
-async fn a_permission_word_that_is_not_one_reads_as_ask() {
+async fn every_permission_reads_back() {
     use super::super::manifest::stage::Stage as StageObject;
 
-    let mut stage = leviath_runtime::spec::blueprint::Stage::new(
-        "only".to_string(),
-        leviath_runtime::spec::blueprint::ModelConfig {
-            models: Vec::new(),
-            allow_user_default: true,
-            parameters: std::collections::HashMap::new(),
-            request_timeout_secs: None,
-        },
-    );
-    stage
-        .tool_permissions
-        .insert("shell".to_string(), "sideways".to_string());
-    let blueprint = Arc::new(leviath_runtime::spec::Blueprint::new(
-        "hand-built".to_string(),
-        "one stage with a word that is not a policy".to_string(),
-        vec![stage],
-        leviath_runtime::spec::layout::ContextLayout::new(Vec::new(), 0),
-    ));
+    let blueprint = super::parsed(
+        r#"[blueprint]
+name = "permissions"
+version = "1.0.0"
 
+[graph]
+layout = { total_budget_tokens = 1000, regions = [] }
+stages = [{ name = "only", tool_permissions = { read_file = "allow", shell = "deny", write_file = "ask" } }]
+"#,
+    );
     let schema = Schema::build(
         StageProbe {
             stage: StageObject { blueprint, at: 0 },
@@ -680,11 +578,13 @@ async fn a_permission_word_that_is_not_one_reads_as_ask() {
         .await;
     assert!(answer.errors.is_empty(), "{:?}", answer.errors);
     let json = serde_json::to_value(&answer.data).expect("data serializes");
-    assert_eq!(json["stage"]["toolPermissions"][0]["tool"], "shell");
-    assert_eq!(
-        json["stage"]["toolPermissions"][0]["policy"], "ASK",
-        "a word that is not a policy is what the daemon reads it as"
-    );
+    let rules = &json["stage"]["toolPermissions"];
+    assert_eq!(rules[0]["tool"], "read_file");
+    assert_eq!(rules[0]["policy"], "ALLOW");
+    assert_eq!(rules[1]["tool"], "shell");
+    assert_eq!(rules[1]["policy"], "DENY");
+    assert_eq!(rules[2]["tool"], "write_file");
+    assert_eq!(rules[2]["policy"], "ASK");
 }
 
 /// A root handing out one hand-built stage.

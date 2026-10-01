@@ -133,10 +133,7 @@ fn models_list_subcommand_dispatches_and_exits_zero() {
 #[test]
 fn validate_subcommand_dispatches_and_exits_zero_for_valid_manifest() {
     let tmp = tempfile::tempdir().unwrap();
-    let manifest = crate_root()
-        .join("agents")
-        .join("coder")
-        .join("agent.leviath");
+    let manifest = crate_root().join("agents").join("coder").join("agent.toml");
     assert!(manifest.exists(), "fixture manifest missing: {manifest:?}");
 
     let output = lev_command(tmp.path())
@@ -174,7 +171,7 @@ fn create_subcommand_dispatches_and_exits_zero() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(tmp.path().join("my-new-agent/agent.leviath").exists());
+    assert!(tmp.path().join("my-new-agent/agent.toml").exists());
 }
 
 // ─── setup --non-interactive ────────────────────────────────────────────
@@ -238,7 +235,7 @@ fn add_subcommand_installs_from_local_directory_and_exits_zero() {
             .join(".leviath")
             .join("agents")
             .join("coder")
-            .join("agent.leviath")
+            .join("agent.toml")
             .exists()
     );
 }

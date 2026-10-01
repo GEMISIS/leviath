@@ -3,6 +3,11 @@
 use clap::Args;
 use std::path::Path;
 
+use leviath_blueprint::FILE_NAME;
+use leviath_core::policy::ToolPolicy;
+use leviath_core::sandbox::SandboxKind;
+use leviath_runtime::spec::graph::{RunGraph, ScriptPermission, Seed};
+
 /// Arguments for `lev add`.
 #[derive(Args)]
 pub struct AddArgs {
@@ -108,24 +113,19 @@ async fn execute_with(
 /// Empty means the package declares nothing unusual - a plain prompt-and-stages
 /// agent - in which case there is nothing to warn about and we stay quiet.
 ///
-/// Pure over `(manifest_toml, dir_entries, read_paths)` so the whole table is
-/// testable without a filesystem or an installed agent. `read_paths` is the
-/// grant report for this package under the active config, when one could be
-/// built; without it the `[read_paths]` line falls back to stating the rule.
+/// Pure over `(graph, script_tools, read_paths)` so the whole table is
+/// testable without a filesystem or an installed agent. `graph` is `None` for
+/// a package whose `agent.toml` does not read, which the installer reports on
+/// its own and which has nothing to inventory. `read_paths` is the grant
+/// report for this package under the active config, when one could be built;
+/// without it the read-paths line falls back to stating the rule.
 pub(crate) fn describe_capabilities(
-    manifest_toml: &str,
+    graph: Option<&RunGraph>,
     script_tools: &[String],
     read_paths: Option<&crate::read_path_report::GrantReport>,
 ) -> Vec<String> {
     let mut findings = Vec::new();
-    // `toml::from_str`, not `manifest_toml.parse::<toml::Value>()`. In toml 1.x
-    // `FromStr for Value` parses a single *value*, not a document - so a real
-    // manifest starting with `[agent]` reads as an array literal followed by
-    // junk and fails. It still compiles, so the change is silent; the tests are
-    // what caught it.
-    let Ok(value) = toml::from_str::<toml::Value>(manifest_toml) else {
-        // An unparseable manifest is reported by the installer itself; there is
-        // nothing to inventory.
+    let Some(graph) = graph else {
         return findings;
     };
 
@@ -137,25 +137,16 @@ pub(crate) fn describe_capabilities(
         ));
     }
 
-    // Tool permissions the package grants itself, at agent or stage level.
-    let mut granted: Vec<String> = Vec::new();
-    let mut collect_grants = |table: Option<&toml::Value>| {
-        if let Some(t) = table.and_then(|v| v.as_table()) {
-            for (tool, policy) in t {
-                if policy.as_str() == Some("allow") && !granted.contains(tool) {
-                    granted.push(tool.clone());
-                }
-            }
-        }
-    };
-    collect_grants(value.get("tool_permissions"));
-    if let Some(stages) = value.get("stages").and_then(|v| v.as_table()) {
-        for stage in stages.values() {
-            collect_grants(stage.get("tool_permissions"));
-        }
-    }
+    // Tool permissions the package grants itself, graph-wide or per stage.
+    let mut granted: Vec<String> = std::iter::once(&graph.tool_permissions)
+        .chain(graph.stages.iter().map(|s| &s.tool_permissions))
+        .flatten()
+        .filter(|(_, policy)| **policy == ToolPolicy::Allow)
+        .map(|(tool, _)| tool.to_string())
+        .collect();
+    granted.sort();
+    granted.dedup();
     if !granted.is_empty() {
-        granted.sort();
         findings.push(format!(
             "pre-approves these tools (no prompt at run time): {}",
             granted.join(", ")
@@ -163,51 +154,39 @@ pub(crate) fn describe_capabilities(
     }
 
     // Script host functions it grants itself.
-    if let Some(t) = value
-        .get("tool_script_permissions")
-        .and_then(|v| v.as_table())
-    {
-        let mut allowed: Vec<&String> = t
-            .iter()
-            .filter(|(_, v)| v.as_str() == Some("allow"))
-            .map(|(k, _)| k)
-            .collect();
-        if !allowed.is_empty() {
-            allowed.sort();
-            findings.push(format!(
-                "requests script host access: {}",
-                allowed
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
+    let host = &graph.script_permissions;
+    let allowed: Vec<&str> = [
+        ("env_var", host.env_var),
+        ("http_get", host.http_get),
+        ("http_post", host.http_post),
+        ("read_file", host.read_file),
+        ("shell", host.shell),
+        ("write_file", host.write_file),
+    ]
+    .into_iter()
+    .filter(|(_, permission)| *permission == Some(ScriptPermission::Allow))
+    .map(|(name, _)| name)
+    .collect();
+    if !allowed.is_empty() {
+        findings.push(format!(
+            "requests script host access: {}",
+            allowed.join(", ")
+        ));
     }
 
-    // A sandbox opt-out.
-    if let Some(kind) = value
-        .get("sandbox")
-        .and_then(|v| v.get("kind"))
-        .and_then(|v| v.as_str())
-        && kind == "none"
-    {
+    // A sandbox opt-out, graph-wide or in any stage.
+    let opts_out = std::iter::once(&graph.sandbox)
+        .chain(graph.stages.iter().map(|s| &s.sandbox))
+        .flatten()
+        .any(|sandbox| sandbox.kind == SandboxKind::None);
+    if opts_out {
         findings.push("asks to run tools directly on the host (sandbox = none)".to_string());
     }
 
     // Read paths beyond the workdir. Declaring is not granting - the entries
     // are inert until the user's config grants them - but the ask itself is
     // exactly what this inventory exists to surface.
-    if let Some(entries) = value
-        .get("read_paths")
-        .and_then(|v| v.get("allow"))
-        .and_then(|v| v.as_array())
-        && !entries.is_empty()
-    {
-        let listed: Vec<String> = entries
-            .iter()
-            .filter_map(|e| e.as_str().map(str::to_string))
-            .collect();
+    if !graph.read_paths.is_empty() {
         // With the active config in hand, say which of them are actually live
         // rather than repeating the rule and leaving the user to work it out.
         let status = match read_paths {
@@ -223,15 +202,14 @@ pub(crate) fn describe_capabilities(
         };
         findings.push(format!(
             "asks to read outside its workdir (read-only): {}{status}",
-            listed.join(", ")
+            graph.read_paths.join(", ")
         ));
     }
 
     // Command seeds run at spawn, before the first inference and therefore
-    // before any approval prompt - the one place a manifest executes something
-    // without being asked.
-    let seed_commands = collect_seed_commands(&value);
-    for command in seed_commands {
+    // before any approval prompt - the one place a blueprint executes
+    // something without being asked.
+    for command in seed_commands(graph) {
         findings.push(format!(
             "runs this command at startup, before any prompt: `{command}`"
         ));
@@ -240,40 +218,26 @@ pub(crate) fn describe_capabilities(
     findings
 }
 
-/// Every `seed = { command = "..." }` in a manifest, from agent-level and
-/// stage-level `[context.regions]` blocks alike.
-fn collect_seed_commands(value: &toml::Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut scan = |regions: Option<&toml::Value>| {
-        if let Some(t) = regions.and_then(|v| v.as_table()) {
-            for region in t.values() {
-                if let Some(cmd) = region
-                    .get("seed")
-                    .and_then(|s| s.get("command"))
-                    .and_then(|c| c.as_str())
-                {
-                    out.push(cmd.to_string());
-                }
-            }
-        }
-    };
-    scan(value.get("context").and_then(|c| c.get("regions")));
-    if let Some(stages) = value.get("stages").and_then(|v| v.as_table()) {
-        for stage in stages.values() {
-            scan(stage.get("context").and_then(|c| c.get("regions")));
-        }
-    }
-    out
+/// Every `seed = { command = "..." }` in a graph, from the graph's layout and
+/// every stage's own layout alike.
+fn seed_commands(graph: &RunGraph) -> Vec<&str> {
+    std::iter::once(&graph.layout)
+        .chain(graph.stages.iter().filter_map(|s| s.layout.as_ref()))
+        .flat_map(|layout| &layout.regions)
+        .filter_map(|region| match &region.seed {
+            Some(Seed::Command(command)) => Some(command.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Print the capability inventory for a freshly installed agent, if it has one.
 fn print_capabilities(name: &str, install_dir: &Path, config: Option<&crate::config::Config>) {
-    let manifest =
-        std::fs::read_to_string(install_dir.join(leviath_core::files::MANIFEST_FILENAME))
-            .unwrap_or_default();
+    let blueprint = crate::commands::run::locate::loaded_at(install_dir);
+    let graph = blueprint.as_ref().map(|b| &b.graph);
     let scripts = script_tool_names(install_dir);
-    let report = read_path_report(&manifest, config);
-    let findings = describe_capabilities(&manifest, &scripts, report.as_ref());
+    let report = graph.and_then(|g| read_path_report(g, name, config));
+    let findings = describe_capabilities(graph, &scripts, report.as_ref());
     if findings.is_empty() {
         return;
     }
@@ -284,21 +248,21 @@ fn print_capabilities(name: &str, install_dir: &Path, config: Option<&crate::con
     println!("  Inspect it with:  lev validate {name}");
 }
 
-/// The `[read_paths]` grant report for a just-installed manifest, when there is
-/// a config to judge it against and the manifest parses.
+/// The read-paths grant report for a just-installed graph, when there is a
+/// config to judge it against.
 ///
 /// The workdir a relative entry resolves against is the directory a `lev run`
 /// would default to, which at install time is the one `lev add` was run from.
 /// A broken grant list yields no report: the inventory falls back to stating
 /// the rule, and `lev validate` says what is wrong with the config.
 fn read_path_report(
-    manifest_toml: &str,
+    graph: &RunGraph,
+    name: &str,
     config: Option<&crate::config::Config>,
 ) -> Option<crate::read_path_report::GrantReport> {
     let config = config?;
-    let blueprint = leviath_runtime::spec::manifest::parse_manifest(manifest_toml).ok()?;
     let workdir = crate::commands::resolve_cwd().unwrap_or_default();
-    crate::read_path_report::build(&blueprint, config, &workdir)?.ok()
+    crate::read_path_report::build(graph, name, config, &workdir)?.ok()
 }
 
 /// Names of the `.rhai` tool scripts an installed agent ships.
@@ -321,17 +285,17 @@ fn script_tool_names(install_dir: &Path) -> Vec<String> {
 
 /// Copy a plain agent directory into `<agents_dir>/<name>/`.
 ///
-/// The agent name is read from `agent.leviath` in the directory (falling back
-/// to the directory's own name).
+/// The agent name is the `[blueprint] name` of the directory's `agent.toml`
+/// (falling back to the directory's own name).
 fn install_from_dir(
     src: &Path,
     agents_dir: &Path,
     config: Option<&crate::config::Config>,
 ) -> anyhow::Result<()> {
-    let manifest_path = src.join(leviath_core::files::MANIFEST_FILENAME);
+    let manifest_path = src.join(FILE_NAME);
     if !manifest_path.exists() {
         anyhow::bail!(
-            "No agent.leviath found in '{}'. Is this an agent directory?",
+            "No {FILE_NAME} found in '{}'. Is this an agent directory?",
             src.display()
         );
     }
@@ -452,46 +416,60 @@ fn copy_dir_recursive_with(
     Ok(())
 }
 
-/// The `[agent] name` an `agent.leviath` declares, if it declares one.
+/// The `[blueprint] name` an `agent.toml` declares, if it declares a readable
+/// one.
 ///
-/// A real TOML read: the line scanner this replaces took the first line that
-/// started with `name`, which a `names = [..]` key anywhere in the manifest
-/// satisfied, and it never validated what it found.
+/// A file that is not TOML at all is refused rather than installed under a
+/// guessed name. One whose `[blueprint]` table does not read (no name, no
+/// version) gives no name, and the directory's own name stands in.
 fn manifest_agent_name(content: &str) -> anyhow::Result<Option<String>> {
-    let parsed: toml::Value = toml::from_str(content)
-        .map_err(|e| anyhow::anyhow!("agent.leviath is not valid TOML: {e}"))?;
-    Ok(parsed
-        .get("agent")
-        .and_then(|a| a.get("name"))
-        .and_then(|v| v.as_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_string))
+    toml::from_str::<toml::Table>(content)
+        .map_err(|e| anyhow::anyhow!("{FILE_NAME} is not valid TOML: {e}"))?;
+    Ok(leviath_blueprint::BlueprintMeta::read(content)
+        .ok()
+        .map(|meta| meta.name.to_string()))
 }
 
 #[cfg(test)]
 mod capability_tests {
     use std::path::Path;
 
-    /// The inventory with no config to judge `[read_paths]` against - the
-    /// fallback wording, and what every test here predating grant reporting
-    /// assumed. The grant-aware tests below pass a real report.
-    fn describe_capabilities(manifest_toml: &str, script_tools: &[String]) -> Vec<String> {
-        super::describe_capabilities(manifest_toml, script_tools, None)
+    use leviath_runtime::spec::graph::RunGraph;
+
+    /// A stage and an empty layout: a graph that declares nothing unusual.
+    const PLAIN: &str = "stages = [{ name = \"main\", system_prompt = \"p\" }]\n\
+                         layout = { total_budget_tokens = 1000, regions = [] }\n";
+
+    /// The `agent.toml` of a blueprint named `name` whose `[graph]` table is
+    /// `graph`.
+    fn blueprint(name: &str, graph: &str) -> String {
+        format!("[blueprint]\nname = \"{name}\"\nversion = \"1.0.0\"\n\n[graph]\n{graph}")
+    }
+
+    /// The graph of [`blueprint`]`("x", graph)`, read.
+    fn graph(graph: &str) -> RunGraph {
+        leviath_blueprint::BlueprintFile::parse(&blueprint("x", graph))
+            .expect("a test graph reads")
+            .run_graph()
+    }
+
+    /// The inventory with no config to judge read paths against - the
+    /// fallback wording. The grant-aware tests below pass a real report.
+    fn describe_capabilities(graph_toml: &str, script_tools: &[String]) -> Vec<String> {
+        super::describe_capabilities(Some(&graph(graph_toml)), script_tools, None)
     }
 
     /// A plain agent declares nothing unusual, so the inventory stays quiet -
     /// a warning that fires on everything teaches people to skip it.
     #[test]
     fn an_ordinary_agent_has_nothing_to_report() {
-        let manifest = "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
-                        [stages.main]\nsystem_prompt = \"p\"\n";
-        assert!(describe_capabilities(manifest, &[]).is_empty());
+        assert!(describe_capabilities(PLAIN, &[]).is_empty());
     }
 
     #[test]
     fn script_tools_are_listed_by_name() {
         let findings = describe_capabilities(
-            "[agent]\nname = \"x\"\n",
+            PLAIN,
             &["web_fetch.rhai".to_string(), "post.rhai".to_string()],
         );
         assert_eq!(findings.len(), 1);
@@ -504,9 +482,10 @@ mod capability_tests {
     /// the user has said nothing this is a real grant they should see.
     #[test]
     fn self_granted_tool_permissions_are_reported() {
-        let manifest = "[agent]\nname = \"x\"\n\n\
-                        [tool_permissions]\nshell = \"allow\"\nread_file = \"ask\"\n";
-        let findings = describe_capabilities(manifest, &[]);
+        let findings = describe_capabilities(
+            &format!("{PLAIN}tool_permissions = {{ shell = \"allow\", read_file = \"ask\" }}\n"),
+            &[],
+        );
         assert_eq!(findings.len(), 1);
         assert!(findings[0].contains("pre-approves"));
         assert!(findings[0].contains("shell"));
@@ -514,77 +493,102 @@ mod capability_tests {
         assert!(!findings[0].contains("read_file"));
     }
 
-    /// A `[tool_script_permissions]` table that only *tightens* is not a grant,
-    /// so it must not appear in the inventory - the same "quiet unless there is
+    /// Script permissions that only *tighten* are not a grant, so they must
+    /// not appear in the inventory - the same "quiet unless there is
     /// something to say" rule the ordinary-agent case establishes.
     #[test]
-    fn a_script_permission_table_that_grants_nothing_is_not_reported() {
-        let manifest = "[agent]\nname = \"x\"\n\n\
-                        [tool_script_permissions]\nenv_var = \"deny\"\nhttp_get = \"ask\"\n";
+    fn script_permissions_that_grant_nothing_are_not_reported() {
+        let graph = format!(
+            "{PLAIN}script_permissions = {{ env_var = \"deny\", http_get = \"inherit\" }}\n"
+        );
         assert!(
-            describe_capabilities(manifest, &[]).is_empty(),
+            describe_capabilities(&graph, &[]).is_empty(),
             "denying host access is not a capability to warn about"
         );
     }
 
+    /// A grant in one stage, or the same tool granted twice, is listed once.
     #[test]
     fn stage_level_grants_are_reported_too() {
-        let manifest = "[agent]\nname = \"x\"\n\n\
-                        [stages.build.tool_permissions]\nwrite_file = \"allow\"\n";
-        let findings = describe_capabilities(manifest, &[]);
-        assert!(findings[0].contains("write_file"), "{findings:?}");
+        let graph = "stages = [\n\
+                     { name = \"build\", tool_permissions = { write_file = \"allow\" } },\n\
+                     { name = \"check\", tool_permissions = { write_file = \"allow\" } },\n\
+                     ]\n\
+                     layout = { total_budget_tokens = 1000, regions = [] }\n";
+        let findings = describe_capabilities(graph, &[]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].matches("write_file").count(), 1, "{findings:?}");
     }
 
     #[test]
     fn script_host_grants_and_sandbox_opt_out_are_reported() {
-        let manifest = "[agent]\nname = \"x\"\n\n\
-                        [tool_script_permissions]\nshell = \"allow\"\nhttp_post = \"allow\"\n\n\
-                        [sandbox]\nkind = \"none\"\n";
-        let findings = describe_capabilities(manifest, &[]);
+        let graph = format!(
+            "{PLAIN}script_permissions = {{ shell = \"allow\", http_post = \"allow\" }}\n\
+             sandbox = {{ kind = \"none\" }}\n"
+        );
+        let findings = describe_capabilities(&graph, &[]);
         let joined = findings.join(" | ");
-        assert!(joined.contains("script host access"), "{joined}");
-        assert!(joined.contains("http_post"), "{joined}");
+        assert!(
+            joined.contains("script host access: http_post, shell"),
+            "{joined}"
+        );
         assert!(joined.contains("sandbox = none"), "{joined}");
     }
 
+    /// A stage that opts out of the sandbox the graph asks for is an opt-out
+    /// too.
+    #[test]
+    fn a_stage_sandbox_opt_out_is_reported() {
+        let graph = "stages = [{ name = \"main\", sandbox = { kind = \"none\" } }]\n\
+                     layout = { total_budget_tokens = 1000, regions = [] }\n\
+                     sandbox = { kind = \"container\", image = \"ubuntu:24.04\" }\n";
+        let findings = describe_capabilities(graph, &[]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].contains("sandbox = none"), "{findings:?}");
+    }
+
     /// A command seed runs at spawn - before the first inference and therefore
-    /// before any approval prompt. It is the one thing a manifest executes
+    /// before any approval prompt. It is the one thing a blueprint executes
     /// without being asked, so the exact command is shown.
     #[test]
     fn command_seeds_are_reported_verbatim() {
-        let manifest = "[agent]\nname = \"x\"\n\n\
-                        [context.regions]\n\
-                        repo = { kind = \"pinned\", seed = { command = \"git ls-files\" } }\n";
-        let findings = describe_capabilities(manifest, &[]);
-        assert_eq!(findings.len(), 1);
+        let graph = "stages = [{ name = \"main\" }]\n\
+                     layout = { total_budget_tokens = 1000, regions = [\n\
+                     { name = \"repo\", kind = \"pinned\", budget = 500, seed = { command = \"git ls-files\" } },\n\
+                     { name = \"notes\", kind = \"pinned\", budget = 500, seed = { literal = \"hi\" } },\n\
+                     ] }\n";
+        let findings = describe_capabilities(graph, &[]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
         assert!(findings[0].contains("before any prompt"), "{findings:?}");
         assert!(findings[0].contains("git ls-files"), "{findings:?}");
     }
 
     #[test]
     fn stage_level_command_seeds_are_reported() {
-        let manifest = "[agent]\nname = \"x\"\n\n\
-                        [stages.discover.context.regions]\n\
-                        env = { kind = \"pinned\", seed = { command = \"curl https://evil\" } }\n";
-        let findings = describe_capabilities(manifest, &[]);
+        let graph = "stages = [{ name = \"discover\", layout = { total_budget_tokens = 500, regions = [\n\
+                     { name = \"env\", kind = \"pinned\", budget = 500, seed = { command = \"curl https://evil\" } },\n\
+                     ] } }]\n\
+                     layout = { total_budget_tokens = 1000, regions = [] }\n";
+        let findings = describe_capabilities(graph, &[]);
         assert!(findings[0].contains("curl https://evil"), "{findings:?}");
     }
 
-    /// A sandbox the manifest *opts into* is not a warning - only opting out is.
+    /// A sandbox the blueprint *opts into* is not a warning - only opting out
+    /// is.
     #[test]
     fn opting_into_a_sandbox_is_not_reported() {
-        let manifest = "[agent]\nname = \"x\"\n\n[sandbox]\nkind = \"container\"\n";
-        assert!(describe_capabilities(manifest, &[]).is_empty());
+        let graph =
+            format!("{PLAIN}sandbox = {{ kind = \"container\", image = \"ubuntu:24.04\" }}\n");
+        assert!(describe_capabilities(&graph, &[]).is_empty());
     }
 
-    /// `[read_paths]` is an ask to see beyond the workdir - listed verbatim,
+    /// `read_paths` is an ask to see beyond the workdir - listed verbatim,
     /// with the reminder that it stays inert until the user's config grants it.
     #[test]
     fn read_path_declarations_are_reported() {
-        let manifest = "[agent]\nname = \"x\"\n\n\
-                        [read_paths]\n\
-                        allow = [\"~/.leviath/runs\", \"glob:~/design-docs/**\"]\n";
-        let findings = describe_capabilities(manifest, &[]);
+        let graph =
+            format!("{PLAIN}read_paths = [\"~/.leviath/runs\", \"glob:~/design-docs/**\"]\n");
+        let findings = describe_capabilities(&graph, &[]);
         assert_eq!(findings.len(), 1);
         assert!(
             findings[0].contains("read outside its workdir"),
@@ -606,18 +610,16 @@ mod capability_tests {
     /// agent on a fresh machine needs to know.
     #[test]
     fn read_path_declarations_carry_their_grant_status() {
-        let manifest = "[agent]\nname = \"cto\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
-                        [stages.main]\nmode = \"autonomous\"\n\n\
-                        [context.regions]\nsystem = { kind = \"pinned\", max_tokens = 1000 }\n\n\
-                        [read_paths]\nallow = [\"/data/runs\", \"/data/docs\"]\n";
-        let blueprint = leviath_runtime::spec::manifest::parse_manifest(manifest).expect("parses");
+        let graph = graph(&format!(
+            "{PLAIN}read_paths = [\"/data/runs\", \"/data/docs\"]\n"
+        ));
 
         let mut config = crate::config::Config::default();
         config.security.read_paths = vec!["/data/runs".to_string()];
-        let partial = crate::read_path_report::build(&blueprint, &config, Path::new("/work"))
+        let partial = crate::read_path_report::build(&graph, "cto", &config, Path::new("/work"))
             .expect("declares read paths")
             .expect("grants compile");
-        let findings = super::describe_capabilities(manifest, &[], Some(&partial));
+        let findings = super::describe_capabilities(Some(&graph), &[], Some(&partial));
         assert!(
             findings[0].contains("2 declared, 1 granted"),
             "{findings:?}"
@@ -628,52 +630,42 @@ mod capability_tests {
         );
 
         config.security.read_paths.push("/data/docs".to_string());
-        let full = crate::read_path_report::build(&blueprint, &config, Path::new("/work"))
+        let full = crate::read_path_report::build(&graph, "cto", &config, Path::new("/work"))
             .expect("declares read paths")
             .expect("grants compile");
-        let findings = super::describe_capabilities(manifest, &[], Some(&full));
+        let findings = super::describe_capabilities(Some(&graph), &[], Some(&full));
         assert!(findings[0].contains("all granted"), "{findings:?}");
     }
 
-    /// An empty `allow` array asks for nothing - stay quiet.
+    /// An empty `read_paths` list asks for nothing - stay quiet.
     #[test]
-    fn an_empty_read_paths_block_is_not_reported() {
-        let manifest = "[agent]\nname = \"x\"\n\n[read_paths]\nallow = []\n";
-        assert!(describe_capabilities(manifest, &[]).is_empty());
+    fn an_empty_read_paths_list_is_not_reported() {
+        assert!(describe_capabilities(&format!("{PLAIN}read_paths = []\n"), &[]).is_empty());
     }
 
     /// Every way the grant report can be unavailable at install time: no
-    /// config to judge against, and a manifest the parser refuses. Both fall
-    /// back to stating the rule rather than guessing.
+    /// config to judge against, nothing declared, and a config whose grants do
+    /// not compile. Each falls back to stating the rule rather than guessing.
     #[test]
-    fn no_grant_report_is_built_without_a_config_or_a_parseable_manifest() {
-        let manifest = "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
-                        [stages.main]\nmode = \"autonomous\"\n\n\
-                        [context.regions]\nsystem = { kind = \"pinned\", max_tokens = 1000 }\n\n\
-                        [read_paths]\nallow = [\"/data/runs\"]\n";
-        assert!(super::read_path_report(manifest, None).is_none());
-        assert!(
-            super::read_path_report(
-                "not valid toml [[[",
-                Some(&crate::config::Config::default())
-            )
-            .is_none()
-        );
+    fn no_grant_report_is_built_without_a_config_or_a_declaration() {
+        let declaring = graph(&format!("{PLAIN}read_paths = [\"/data/runs\"]\n"));
+        assert!(super::read_path_report(&declaring, "x", None).is_none());
 
         // A package that declares nothing has nothing to report either.
-        let plain = "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
-                     [stages.main]\nmode = \"autonomous\"\n\n\
-                     [context.regions]\nsystem = { kind = \"pinned\", max_tokens = 1000 }\n";
-        assert!(super::read_path_report(plain, Some(&crate::config::Config::default())).is_none());
+        let plain = graph(PLAIN);
+        assert!(
+            super::read_path_report(&plain, "x", Some(&crate::config::Config::default())).is_none()
+        );
 
         // Nor does one whose grants cannot be compiled to judge it against.
         let mut broken = crate::config::Config::default();
         broken.security.read_paths = vec!["regex:relative/.*".to_string()];
-        assert!(super::read_path_report(manifest, Some(&broken)).is_none());
+        assert!(super::read_path_report(&declaring, "x", Some(&broken)).is_none());
 
         // And the ordinary case, so the fallbacks are not the only path tested.
-        let report = super::read_path_report(manifest, Some(&crate::config::Config::default()))
-            .expect("a parseable manifest and a config give a report");
+        let report =
+            super::read_path_report(&declaring, "x", Some(&crate::config::Config::default()))
+                .expect("a declaration and a config give a report");
         assert_eq!(report.declared(), 1);
     }
 
@@ -701,35 +693,40 @@ mod capability_tests {
     }
 
     /// The end-to-end printer, over a directory rather than a string: it must
-    /// stay silent for an ordinary agent and speak for a demanding one.
+    /// stay silent for an ordinary agent and speak for a demanding one, with a
+    /// config to judge read paths against or without one.
     #[test]
     fn print_capabilities_reads_the_installed_directory() {
         crate::test_support::with_tracing(|| {
             let dir = tempfile::tempdir().unwrap();
-            std::fs::write(
-                dir.path().join(leviath_core::files::MANIFEST_FILENAME),
-                "[agent]\nname = \"q\"\n\n[tool_permissions]\nshell = \"allow\"\n",
-            )
-            .unwrap();
+            crate::test_support::write_test_agent(
+                dir.path(),
+                blueprint(
+                    "q",
+                    &format!(
+                        "{PLAIN}tool_permissions = {{ shell = \"allow\" }}\n\
+                         read_paths = [\"/data/runs\"]\n"
+                    ),
+                ),
+            );
             let tools = dir.path().join("tools");
             std::fs::create_dir(&tools).unwrap();
             std::fs::write(tools.join("t.rhai"), "// @tool t\n").unwrap();
             super::print_capabilities("q", dir.path(), None);
+            super::print_capabilities("q", dir.path(), Some(&crate::config::Config::default()));
 
             // And the quiet path: a plain agent prints nothing.
             let plain = tempfile::tempdir().unwrap();
-            std::fs::write(
-                plain.path().join(leviath_core::files::MANIFEST_FILENAME),
-                "[agent]\nname = \"p\"\n\n[stages.main]\nsystem_prompt = \"p\"\n",
-            )
-            .unwrap();
+            crate::test_support::write_test_agent(plain.path(), blueprint("p", PLAIN));
             super::print_capabilities("p", plain.path(), None);
         });
     }
 
+    /// A package whose `agent.toml` does not read has nothing to inventory,
+    /// even with script tools beside it: the installer reports the file.
     #[test]
-    fn an_unparseable_manifest_reports_nothing() {
-        assert!(describe_capabilities("{ not toml", &[]).is_empty());
+    fn an_unreadable_blueprint_reports_nothing() {
+        assert!(super::describe_capabilities(None, &["t.rhai".to_string()], None).is_empty());
     }
 }
 
@@ -772,8 +769,8 @@ mod tests {
     // ─── manifest_agent_name ──────────────────────────────────────────────
 
     #[test]
-    fn manifest_agent_name_reads_the_agent_table() {
-        let content = "[agent]\nname = \"my-agent\"\nversion = \"1.0\"\n";
+    fn manifest_agent_name_reads_the_blueprint_table() {
+        let content = "[blueprint]\nname = \"my-agent\"\nversion = \"1.0\"\n";
         assert_eq!(
             manifest_agent_name(content).unwrap(),
             Some("my-agent".to_string())
@@ -783,17 +780,20 @@ mod tests {
     #[test]
     fn manifest_agent_name_is_none_when_absent_or_empty() {
         assert_eq!(manifest_agent_name("version = \"1.0\"\n").unwrap(), None);
-        assert_eq!(manifest_agent_name("[agent]\nname = \"\"\n").unwrap(), None);
+        assert_eq!(
+            manifest_agent_name("[blueprint]\nname = \"\"\nversion = \"1\"\n").unwrap(),
+            None
+        );
         // A `name` under another table is not the agent's name.
         assert_eq!(
-            manifest_agent_name("[stages.main]\nname = \"x\"\n").unwrap(),
+            manifest_agent_name("[graph]\nname = \"x\"\n").unwrap(),
             None
         );
     }
 
     #[test]
     fn manifest_agent_name_rejects_bad_toml() {
-        let err = manifest_agent_name("[agent\nname = 1")
+        let err = manifest_agent_name("[blueprint\nname = 1")
             .unwrap_err()
             .to_string();
         assert!(err.contains("not valid TOML"), "{err}");
@@ -1008,8 +1008,8 @@ mod tests {
         let src = root.path().join("evil");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(
-            src.join("agent.leviath"),
-            "[agent]\nname = \"../escaped\"\n",
+            src.join("agent.toml"),
+            "[blueprint]\nname = \"../escaped\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
 
@@ -1020,20 +1020,20 @@ mod tests {
             "precious",
             "the escape target must be left alone"
         );
-        assert!(!agents_dir.join("agent.leviath").exists());
+        assert!(!agents_dir.join("agent.toml").exists());
     }
 
-    /// The name comes from the `[agent]` table, not from the first line that
-    /// happens to start with `name`: a `names = [..]` key elsewhere in the
-    /// manifest is not the agent's name.
+    /// The name comes from the `[blueprint]` table, not from the first line
+    /// that happens to start with `name`: a `name` key elsewhere in the file
+    /// is not the agent's name.
     #[test]
-    fn install_from_dir_reads_the_agent_table_not_the_first_name_line() {
+    fn install_from_dir_reads_the_blueprint_table_not_the_first_name_line() {
         let root = tempfile::tempdir().unwrap();
         let src = root.path().join("tabled");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(
-            src.join("agent.leviath"),
-            "[agent]\nversion = \"1.0\"\n\n[stages.main]\nnames = [\"x\"]\n",
+            src.join("agent.toml"),
+            "[blueprint]\nversion = \"1.0\"\n\n[graph]\nstages = [{ name = \"x\" }]\n",
         )
         .unwrap();
         let agents_dir = tempfile::tempdir().unwrap();
@@ -1054,7 +1054,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let src = root.path().join("broken");
         std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("agent.leviath"), "[agent\nname = \"x\"\n").unwrap();
+        std::fs::write(src.join("agent.toml"), "[blueprint\nname = \"x\"\n").unwrap();
         let agents_dir = tempfile::tempdir().unwrap();
 
         let err = install_from_dir(&src, agents_dir.path())
@@ -1075,7 +1075,7 @@ mod tests {
         let agents_dir = tempfile::tempdir().unwrap();
         let result = install_from_dir(dir.path(), agents_dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+        assert!(result.unwrap_err().to_string().contains("agent.toml"));
     }
 
     #[test]
@@ -1083,8 +1083,8 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let agents_dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            src.path().join("agent.leviath"),
-            "[agent]\nname = \"my-agent\"\n",
+            src.path().join("agent.toml"),
+            "[blueprint]\nname = \"my-agent\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
         std::fs::write(src.path().join("extra.txt"), "data").unwrap();
@@ -1092,7 +1092,7 @@ mod tests {
         install_from_dir(src.path(), agents_dir.path()).unwrap();
 
         let installed_dir = agents_dir.path().join("my-agent");
-        assert!(installed_dir.join("agent.leviath").exists());
+        assert!(installed_dir.join("agent.toml").exists());
         assert!(installed_dir.join("extra.txt").exists());
     }
 
@@ -1101,7 +1101,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let agent_dir = src.path().join("my-dir-name");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("agent.leviath"), "version = \"1.0\"\n").unwrap();
+        std::fs::write(agent_dir.join("agent.toml"), "version = \"1.0\"\n").unwrap();
         let agents_dir = tempfile::tempdir().unwrap();
 
         install_from_dir(&agent_dir, agents_dir.path()).unwrap();
@@ -1113,8 +1113,8 @@ mod tests {
     fn install_from_dir_reinstalls_existing() {
         let src = tempfile::tempdir().unwrap();
         std::fs::write(
-            src.path().join("agent.leviath"),
-            "[agent]\nname = \"dup-agent\"\n",
+            src.path().join("agent.toml"),
+            "[blueprint]\nname = \"dup-agent\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
         let agents_dir = tempfile::tempdir().unwrap();
@@ -1127,13 +1127,13 @@ mod tests {
         install_from_dir(src.path(), agents_dir.path()).unwrap();
 
         assert!(!existing.join("stale.txt").exists());
-        assert!(existing.join("agent.leviath").exists());
+        assert!(existing.join("agent.toml").exists());
     }
 
     #[test]
     fn install_from_dir_invalid_utf8_manifest_errors() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("agent.leviath"), [0xFF, 0xFE, 0xFA]).unwrap();
+        std::fs::write(dir.path().join("agent.toml"), [0xFF, 0xFE, 0xFA]).unwrap();
         let agents_dir = tempfile::tempdir().unwrap();
 
         let result = install_from_dir(dir.path(), agents_dir.path());
@@ -1147,8 +1147,8 @@ mod tests {
         // fails on every platform, exercising that `?` arm.
         let src = tempfile::tempdir().unwrap();
         std::fs::write(
-            src.path().join("agent.leviath"),
-            "[agent]\nname = \"file-agent\"\n",
+            src.path().join("agent.toml"),
+            "[blueprint]\nname = \"file-agent\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
 
@@ -1167,8 +1167,8 @@ mod tests {
         // `install_from_dir`'s `copy_dir_recursive(...)?`.
         let src = tempfile::tempdir().unwrap();
         std::fs::write(
-            src.path().join("agent.leviath"),
-            "[agent]\nname = \"broken-copy-agent\"\n",
+            src.path().join("agent.toml"),
+            "[blueprint]\nname = \"broken-copy-agent\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
         std::fs::write(src.path().join("extra.txt"), "data").unwrap();
@@ -1190,8 +1190,8 @@ mod tests {
             rt.block_on(async {
                 let src = tempfile::tempdir().unwrap();
                 std::fs::write(
-                    src.path().join("agent.leviath"),
-                    "[agent]\nname = \"dir-pkg\"\n",
+                    src.path().join("agent.toml"),
+                    crate::test_support::tiny_blueprint("dir-pkg"),
                 )
                 .unwrap();
                 let agents_dir = tempfile::tempdir().unwrap();
@@ -1216,7 +1216,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         with_tracing(|| {
             rt.block_on(async {
-                let src = tempfile::tempdir().unwrap(); // no agent.leviath inside
+                let src = tempfile::tempdir().unwrap(); // no agent.toml inside
                 let agents_dir = tempfile::tempdir().unwrap();
                 let installer = leviath_package::AgentInstaller::with_install_dir(
                     agents_dir.path().to_path_buf(),
@@ -1228,7 +1228,7 @@ mod tests {
                 let err = execute_with(&args, &installer, agents_dir.path())
                     .await
                     .unwrap_err();
-                assert!(err.to_string().contains("agent.leviath"));
+                assert!(err.to_string().contains("agent.toml"));
             })
         });
     }
@@ -1261,8 +1261,8 @@ mod tests {
             rt.block_on(async {
                 let project_dir = tempfile::tempdir().unwrap();
                 std::fs::write(
-                    project_dir.path().join("agent.leviath"),
-                    "[agent]\nname = \"bundled-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
+                    project_dir.path().join("agent.toml"),
+                    crate::test_support::tiny_blueprint("bundled-pkg"),
                 )
                 .unwrap();
                 let bundle_bytes = leviath_package::AgentBundler::new()
@@ -1441,7 +1441,7 @@ mod tests {
     fn install_from_dir_with_manifest_runs() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = r#"
-[agent]
+[blueprint]
 name = "test-install-agent-xyz"
 version = "0.1.0"
 description = "test"
@@ -1453,7 +1453,7 @@ description = "test"
         install_from_dir(dir.path(), agents_dir.path()).unwrap();
 
         let install_dir = agents_dir.path().join("test-install-agent-xyz");
-        assert!(install_dir.join("agent.leviath").exists());
+        assert!(install_dir.join("agent.toml").exists());
         assert!(install_dir.join("readme.txt").exists());
     }
 }

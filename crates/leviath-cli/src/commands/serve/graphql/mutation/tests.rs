@@ -72,14 +72,7 @@ fn agents_dir_with(name: &str) -> tempfile::TempDir {
     let agents = tempfile::tempdir().expect("a temp dir");
     let agent = agents.path().join(name);
     std::fs::create_dir_all(&agent).expect("the agent dir");
-    std::fs::write(
-        agent.join(leviath_core::files::MANIFEST_FILENAME),
-        format!(
-            "[agent]\nname = \"{name}\"\n\n[context.regions.plan]\nkind = \"pinned\"\n\
-             max_tokens = 100\n\n[stages.only]\nmode = \"autonomous\"\n"
-        ),
-    )
-    .expect("manifest written");
+    crate::test_support::write_test_agent(&agent, crate::test_support::tiny_blueprint(name));
     agents
 }
 
@@ -818,14 +811,17 @@ async fn a_spawn_carries_every_field_it_was_given() {
         let (control, _dir, _srv) = fake_daemon(|request| match request {
             leviath_runtime::control_socket::ControlRequest::Spawn { request } => {
                 use leviath_runtime::spec::inputs::RawInput;
-                let leviath_runtime::spec::request::SpawnSource::Blueprint(reference) =
+                // The blueprint is listed from a configured `agent_paths`
+                // directory, so the request names that directory.
+                let leviath_runtime::spec::request::SpawnSource::BlueprintFile(path) =
                     &request.source
                 else {
-                    panic!("a blueprint request");
+                    panic!("a blueprint read from its directory: {:?}", request.source);
                 };
                 assert!(
-                    reference.name.as_str().contains("coder"),
-                    "the blueprint it named: {reference}"
+                    path.as_str().ends_with("coder"),
+                    "the blueprint it named: {}",
+                    path.as_str()
                 );
                 let text = |name: &str| match request.inputs.get(name) {
                     Some(RawInput::Text(t)) => t.clone(),
@@ -1355,12 +1351,10 @@ async fn two_answers_at_once_are_not_a_request() {
 
 // ── blueprints ──
 
-/// A manifest exercising the blueprint writes.
+/// A blueprint exercising the blueprint writes, at `version`.
 fn manifest_text(name: &str, version: &str) -> String {
-    format!(
-        "[agent]\nname = \"{name}\"\nversion = \"{version}\"\ndescription = \"d\"\n\n\
-         [stages.only]\nmode = \"autonomous\"\n"
-    )
+    crate::test_support::tiny_blueprint(name)
+        .replace("version = \"1.0.0\"", &format!("version = \"{version}\""))
 }
 
 /// The manifest as a GraphQL string literal.
@@ -1468,11 +1462,22 @@ async fn the_blueprint_writes_refuse_what_they_should() {
             no_daemon_client(),
             &format!(
                 "mutation {{ updateBlueprint(request: {{ blueprint: {{ name: \"ghost\" }}, \
-                 manifest: \"{manifest}\" }}) {{ blueprint {{ name }} }} }}"
+                 manifest: \"{}\" }}) {{ blueprint {{ name }} }} }}",
+                quoted_manifest("ghost", "1.0.0")
             ),
         )
         .await;
         assert_eq!(code_of(&missing), "\"NOT_FOUND\"");
+
+        // A blueprint installed under a name other than its own could never
+        // be run by that name.
+        let misnamed = mutate(no_daemon_client(), &create("other")).await;
+        assert_eq!(code_of(&misnamed), "\"BAD_USER_INPUT\"");
+        assert!(
+            misnamed.errors[0].message.contains("calls itself"),
+            "{:?}",
+            misnamed.errors
+        );
 
         let unparseable = mutate(
             no_daemon_client(),
@@ -1481,7 +1486,7 @@ async fn the_blueprint_writes_refuse_what_they_should() {
         )
         .await;
         assert!(
-            unparseable.errors[0].message.contains("Invalid manifest"),
+            unparseable.errors[0].message.contains("Invalid blueprint"),
             "{:?}",
             unparseable.errors
         );

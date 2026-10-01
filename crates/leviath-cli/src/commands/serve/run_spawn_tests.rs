@@ -361,13 +361,13 @@ async fn a_blueprints_inputs_are_read_from_its_graph() {
         ("coder", crate::test_support::inline_coder_manifest()),
         (
             "broken",
-            "[agent]\nname = \"broken\"\nentry_stage = \"nowhere\"\n\n[stages.only]\nmode = \"autonomous\"\n"
-                .to_string(),
+            crate::test_support::tiny_blueprint("broken")
+                .replace("[graph]\n", "[graph]\nentry = \"nowhere\"\n"),
         ),
     ] {
         let agent = dir.path().join(name);
         std::fs::create_dir_all(&agent).unwrap();
-        std::fs::write(agent.join(leviath_core::files::MANIFEST_FILENAME), manifest).unwrap();
+        crate::test_support::write_test_agent(&agent, manifest);
     }
     let state = || {
         let mut state = state_with_agent_paths(vec![dir.path().to_path_buf()]);

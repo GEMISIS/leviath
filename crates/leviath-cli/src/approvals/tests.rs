@@ -11,7 +11,7 @@ fn safe(shell: &[&str], tools: &[&str]) -> SafeCommands {
 fn resolved(
     config: &SafeCommands,
     agent: Option<&AgentSafeCommands>,
-    blueprint: Option<&leviath_runtime::spec::blueprint::SafeCommandsConfig>,
+    blueprint: Option<&leviath_runtime::spec::graph::SafeCommandsDef>,
     global_opt_in: bool,
 ) -> BTreeMap<String, SafeSource> {
     resolve_safe_keys(config, agent, blueprint, global_opt_in)
@@ -80,14 +80,14 @@ fn each_layer_contributes_and_the_narrowest_one_is_named() {
     );
 }
 
-/// Declaring is not granting: a manifest the user downloaded may say what it
+/// Declaring is not granting: a blueprint the user downloaded may say what it
 /// would like to run unprompted, and the user decides whether that counts.
 #[test]
 fn a_blueprint_list_is_inert_until_the_user_opts_in() {
     let config = SafeCommands::default();
-    let bp = leviath_runtime::spec::blueprint::SafeCommandsConfig {
+    let bp = leviath_runtime::spec::graph::SafeCommandsDef {
         shell: vec!["./gradlew".to_string()],
-        tools: vec!["web_fetch".to_string()],
+        tools: vec![leviath_runtime::spec::names::ToolName::new("web_fetch").unwrap()],
     };
 
     let inert = resolved(&config, None, Some(&bp), false);

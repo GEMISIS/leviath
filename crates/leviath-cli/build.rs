@@ -80,26 +80,31 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// Read `version = "..."` out of a blueprint manifest.
+/// Read the `version = "..."` of a blueprint's `[blueprint]` table.
 ///
-/// A deliberately dumb line scan rather than a TOML parse: the build script has
-/// no dependencies, and `version` is a top-level key on the first few lines of
-/// every manifest. A blueprint whose version can't be read is a build failure,
-/// not a silent empty string - the wizard drives install/update decisions off
-/// this value, so an unreadable one would quietly present as "no update".
-fn manifest_version(manifest: &str, path: &Path) -> String {
-    manifest
-        .lines()
+/// A deliberately small line scan rather than a TOML parse: the build script
+/// has no dependencies, and `version` is a plain key of the table every
+/// `agent.toml` starts with. A blueprint whose version can't be read is a build
+/// failure, not a silent empty string - the wizard drives install/update
+/// decisions off this value, so an unreadable one would quietly present as "no
+/// update".
+fn blueprint_version(file: &str, path: &Path) -> String {
+    let mut in_blueprint = false;
+    file.lines()
         .find_map(|line| {
             let line = line.trim();
-            let rest = line.strip_prefix("version")?.trim_start();
-            let rest = rest.strip_prefix('=')?.trim();
+            if line.starts_with('[') {
+                in_blueprint = line == "[blueprint]";
+                return None;
+            }
+            let rest = line.strip_prefix("version").filter(|_| in_blueprint)?;
+            let rest = rest.trim_start().strip_prefix('=')?.trim();
             rest.strip_prefix('"')?.split('"').next().map(str::to_owned)
         })
         .unwrap_or_else(|| {
             panic!(
-                "no top-level `version = \"...\"` in {} -- every bundled \
-                 blueprint needs one for `lev setup` to plan installs",
+                "no `version = \"...\"` in the [blueprint] table of {} -- every \
+                 bundled blueprint needs one for `lev setup` to plan installs",
                 path.display()
             )
         })
@@ -120,9 +125,9 @@ fn write_bundled_agents(out_dir: &Path, agents_dir: &Path) {
          /// One blueprint embedded in the binary.\n\
          #[derive(Debug)]\n\
          pub struct BundledAgent {\n\
-         \x20   /// Blueprint name, from the manifest's `[agent] name`.\n\
+         \x20   /// Blueprint name: its directory, which is its `[blueprint] name`.\n\
          \x20   pub name: &'static str,\n\
-         \x20   /// Manifest `version`, used to plan install vs. update.\n\
+         \x20   /// Its `[blueprint] version`, used to plan install vs. update.\n\
          \x20   pub version: &'static str,\n\
          \x20   /// `(path relative to the agent dir, file contents)`, sorted.\n\
          \x20   pub files: &'static [(&'static str, &'static str)],\n\
@@ -141,9 +146,9 @@ fn write_bundled_agents(out_dir: &Path, agents_dir: &Path) {
     dirs.sort();
 
     for dir in dirs {
-        let manifest_path = dir.join("agent.leviath");
-        let Ok(manifest) = std::fs::read_to_string(&manifest_path) else {
-            // A directory under `agents/` with no manifest isn't a blueprint.
+        let file_path = dir.join("agent.toml");
+        let Ok(file) = std::fs::read_to_string(&file_path) else {
+            // A directory under `agents/` with no `agent.toml` isn't a blueprint.
             continue;
         };
         let name = dir
@@ -151,7 +156,7 @@ fn write_bundled_agents(out_dir: &Path, agents_dir: &Path) {
             .and_then(|n| n.to_str())
             .expect("agent directory names are valid UTF-8")
             .to_string();
-        let version = manifest_version(&manifest, &manifest_path);
+        let version = blueprint_version(&file, &file_path);
 
         writeln!(
             src,

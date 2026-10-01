@@ -1,41 +1,39 @@
 use super::*;
 
-/// Wrap `stages_toml` in the smallest manifest that parses and validates.
-fn manifest(stages_toml: &str) -> String {
+/// The two regions every fixture's layout starts with. Further regions may be
+/// appended after it as `[[graph.layout.regions]]` tables.
+const LAYOUT: &str = r#"
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 50 }
+budget = 10000
+"#;
+
+/// Wrap `graph_toml` (graph-level keys first, then stage and edge tables) in
+/// the smallest blueprint that parses, with [`LAYOUT`] after it.
+fn manifest(graph_toml: &str) -> String {
     format!(
-        r#"
-[agent]
-name = "lint-fixture"
-version = "0.1.0"
-description = "a fixture"
-
-{stages_toml}
-
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
-"#
+        "[blueprint]\nname = \"lint-fixture\"\nversion = \"0.1.0\"\ndescription = \"a fixture\"\n\n\
+         [graph]\n{graph_toml}\n{LAYOUT}"
     )
 }
 
-/// [`manifest`] with a region seeded from the task, which a blueprint that runs
-/// its own fan-out workers must have: each worker is spawned with its work
-/// item as the task.
-fn manifest_taking_task(stages_toml: &str) -> String {
+/// [`manifest`] with a `task` input bound to a region of its own, which a
+/// blueprint that runs its own fan-out workers must have: each work item's
+/// inputs land there.
+fn manifest_taking_task(graph_toml: &str) -> String {
     format!(
-        r#"
-[agent]
-name = "lint-fixture"
-version = "0.1.0"
-description = "a fixture"
-
-{stages_toml}
-
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-task = {{ kind = "pinned", max_tokens = 1000, seed = "task" }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
-"#
+        "{}\n[[graph.inputs]]\nname = \"task\"\ntype = \"text\"\nbinds = [{{ region = \"task\" }}]\n\n\
+         [[graph.layout.regions]]\nname = \"task\"\nkind = \"pinned\"\nbudget = 1000\n",
+        manifest(graph_toml)
     )
 }
 
@@ -50,11 +48,19 @@ impl LintEnv {
     }
 }
 
-/// Lint a manifest whose text and blueprint come from the same source, which is
-/// the only pairing production ever passes.
+/// Read an `agent.toml` fixture.
+fn parse(content: &str) -> BlueprintFile {
+    BlueprintFile::parse(content).unwrap_or_else(|e| panic!("fixture parses: {e}\n{content}"))
+}
+
+/// Lint an `agent.toml` fixture.
 fn lint(content: &str, env: &LintEnv) -> Vec<LintFinding> {
-    let bp = leviath_runtime::spec::manifest::parse_manifest(content).expect("fixture parses");
-    lint_manifest(content, &bp, env)
+    lint_blueprint(&parse(content), env)
+}
+
+/// The graph of an `agent.toml` fixture, for the builders.
+fn graph_of(content: &str) -> RunGraph {
+    parse(content).run_graph()
 }
 
 /// The codes reported, in order, so a test can assert on the whole outcome
@@ -73,11 +79,11 @@ fn with_code<'a>(findings: &'a [LintFinding], code: &str) -> Vec<&'a LintFinding
 #[test]
 fn a_mime_row_that_changes_a_builtin_type_is_flagged() {
     let text = format!(
-        "{}\n[mime_types.\"image/png\"]\nfamily = \"model\"\ntext = true\n\
-         [mime_types.\"image/webp\"]\nextensions = [\"webp\", \"wbp\"]\n\
-         [mime_types.\"application/x-acme-scene\"]\nfamily = \"model\"\n\
-         [mime_types.\"model/*\"]\ntext = true\n\
-         [mime_types.\"model/obj\"]\ntext = true\n",
+        "{}\n[graph.mime_types.\"image/png\"]\nfamily = \"model\"\ntext = true\n\
+         [graph.mime_types.\"image/webp\"]\nextensions = [\"webp\", \"wbp\"]\n\
+         [graph.mime_types.\"application/x-acme-scene\"]\nfamily = \"model\"\n\
+         [graph.mime_types.\"model/*\"]\ntext = true\n\
+         [graph.mime_types.\"model/obj\"]\ntext = true\n",
         manifest(CLEAN_STAGE)
     );
     let findings = lint(&text, &LintEnv::default());
@@ -101,12 +107,13 @@ fn a_mime_row_that_changes_a_builtin_type_is_flagged() {
 /// A stage that declares everything the linter looks for, so a test can add a
 /// single defect and see only that.
 const CLEAN_STAGE: &str = r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Main"
 max_iterations = 10
-available_tools = ["read_file"]
+tools = ["read_file"]
 "#;
 
 fn known_tools(names: &[&str]) -> HashSet<String> {
@@ -128,11 +135,12 @@ fn a_fully_declared_stage_reports_nothing() {
 fn an_empty_env_skips_every_environment_dependent_check() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "madeup", model = "no-such-model" }] }
 max_iterations = 10
-available_tools = ["raed_file"]
+tools = ["raed_file"]
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
@@ -141,30 +149,15 @@ available_tools = ["raed_file"]
 
 // ─── Declaration checks ───────────────────────────────────────────────────────
 
+/// The defect from the report: no models listed, so the stage silently runs on
+/// the user's default provider.
 #[test]
-fn a_stage_with_no_mode_is_warned_about() {
+fn a_stage_with_no_model_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 10
-"#,
-    );
-    let findings = lint(&toml, &LintEnv::default());
-    assert_eq!(codes(&findings), ["stage-missing-mode"]);
-    assert_eq!(findings[0].stage.as_deref(), Some("main"));
-    assert_eq!(findings[0].severity, LintSeverity::Warning);
-    assert!(findings[0].message.contains("autonomous"), "{findings:?}");
-}
 
-/// The defect from the report: no model block, so the engine invents one and
-/// the stage silently runs on the user's default provider.
-#[test]
-fn a_stage_with_no_model_block_is_warned_about() {
-    let toml = manifest(
-        r#"
-[stages.main]
-mode = "autonomous"
+[[graph.stages]]
+name = "main"
 max_iterations = 10
 "#,
     );
@@ -174,32 +167,17 @@ max_iterations = 10
         findings[0].message.contains("default_provider"),
         "{findings:?}"
     );
-    let fix = findings[0].fix.as_deref().expect("the fix names the block");
-    assert!(fix.contains("[stages.main]"), "{fix}");
-}
-
-/// The old single-model spelling (`provider`/`model` at the top of the table)
-/// still counts as declaring one.
-#[test]
-fn the_legacy_inline_model_spelling_counts_as_declared() {
-    let toml = manifest(
-        r#"
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-5" }
-max_iterations = 10
-"#,
-    );
-    let findings = lint(&toml, &LintEnv::default());
-    assert!(findings.is_empty(), "{:?}", codes(&findings));
+    let fix = findings[0].fix.as_deref().expect("the fix names the stage");
+    assert!(fix.contains("'main'") && fix.contains("models"), "{fix}");
 }
 
 #[test]
 fn a_stage_with_no_max_iterations_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 "#,
     );
@@ -217,23 +195,28 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 fn a_fan_out_stage_needs_no_max_iterations() {
     let toml = manifest_taking_task(
         r#"
-[stages.split]
-mode = "fan_out"
-worker_stage = "work"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-[stages.split.transitions.recover]
-condition = "error"
 
-[stages.work]
-mode = "autonomous"
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { stage = "work" } } }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[[graph.stages]]
+name = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 allow_as_worker = true
 
-[stages.recover]
-mode = "autonomous"
+[[graph.stages]]
+name = "recover"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.edges]]
+name = "recover"
+from = "split"
+to = "recover"
+when = "error"
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
@@ -245,14 +228,14 @@ max_iterations = 5
 fn a_fail_all_fan_out_without_an_escape_is_warned_about() {
     let toml = manifest_taking_task(
         r#"
-[stages.split]
-mode = "fan_out"
-worker_stage = "work"
-on_worker_failure = "fail_all"
+
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { stage = "work" }, on_worker_failure = "fail_all" } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
-[stages.work]
-mode = "autonomous"
+[[graph.stages]]
+name = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 allow_as_worker = true
@@ -262,21 +245,22 @@ allow_as_worker = true
     assert_eq!(codes(&findings), ["fanout-no-escape"]);
 }
 
-/// A worker is spawned with its work item as the task, so a blueprint that
-/// runs its own workers and declares no region seeded from the task refuses
-/// every one of them - and the run still completes, which is why the lint is
+/// A work item's inputs land in the regions the graph binds them to, so a
+/// graph that runs its own workers and binds no input leaves every worker
+/// without its work - and the run still completes, which is why the lint is
 /// an error rather than a warning.
 #[test]
-fn a_fan_out_on_a_blueprint_with_no_task_region_is_an_error() {
+fn a_fan_out_on_a_graph_with_no_bound_input_is_an_error() {
     let toml = manifest(
         r#"
-[stages.split]
-mode = "fan_out"
-worker_stage = "work"
+
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { stage = "work" } } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
-[stages.work]
-mode = "autonomous"
+[[graph.stages]]
+name = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 allow_as_worker = true
@@ -292,20 +276,21 @@ allow_as_worker = true
         finding
             .fix
             .as_deref()
-            .is_some_and(|f| f.contains("seed = \"task\"")),
+            .is_some_and(|f| f.contains("binds = [{ region = \"task\" }]")),
         "{finding:?}"
     );
 }
 
-/// `worker_agent` names another blueprint, linted when it is validated itself;
-/// whether *this* one takes a task says nothing about it.
+/// A worker that runs another blueprint is linted when that one is validated
+/// itself; what *this* graph binds says nothing about it.
 #[test]
 fn a_fan_out_onto_another_agent_is_not_held_to_this_blueprints_regions() {
     let toml = manifest(
         r#"
-[stages.split]
-mode = "fan_out"
-worker_agent = "some-other-agent"
+
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { blueprint = { name = "some-other-agent" } } } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 "#,
     );
@@ -323,13 +308,14 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 fn a_continuing_fan_out_needs_no_escape() {
     let toml = manifest_taking_task(
         r#"
-[stages.split]
-mode = "fan_out"
-worker_stage = "work"
+
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { stage = "work" } } }
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
-[stages.work]
-mode = "autonomous"
+[[graph.stages]]
+name = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 allow_as_worker = true
@@ -345,41 +331,32 @@ allow_as_worker = true
 fn a_dead_end_edge_satisfies_the_fan_out_escape_check() {
     let toml = manifest_taking_task(
         r#"
-[stages.split]
-mode = "fan_out"
-worker_stage = "work"
-on_worker_failure = "fail_all"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-[stages.split.transitions.recover]
-condition = "dead_end"
 
-[stages.work]
-mode = "autonomous"
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { stage = "work" }, on_worker_failure = "fail_all" } }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[[graph.stages]]
+name = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 allow_as_worker = true
 
-[stages.recover]
-mode = "autonomous"
+[[graph.stages]]
+name = "recover"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.edges]]
+name = "recover"
+from = "split"
+to = "recover"
+when = "dead_end"
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
     assert!(findings.is_empty(), "{:?}", codes(&findings));
-}
-
-/// An agent-level `[model]` block reads like it sets the agent's model. Nothing
-/// looks at it.
-#[test]
-fn an_agent_level_model_block_is_warned_about() {
-    let toml = format!(
-        "{}\n[model]\nprovider = \"anthropic\"\nmodel = \"claude-opus-5\"\n",
-        manifest(CLEAN_STAGE)
-    );
-    let findings = lint(&toml, &LintEnv::default());
-    assert_eq!(codes(&findings), ["agent-model-block-ignored"]);
-    assert!(findings[0].stage.is_none(), "{findings:?}");
 }
 
 // ─── dead-end-possible ────────────────────────────────────────────────────────
@@ -388,38 +365,53 @@ fn an_agent_level_model_block_is_warned_about() {
 fn strandable(extra_edge: &str) -> String {
     format!(
         r#"
-[agent]
+[blueprint]
 name = "strandable"
 version = "0.1.0"
 description = "a fixture"
 
-[stages.work]
-mode = "autonomous"
+[graph]
+
+[[graph.stages]]
+name = "work"
 model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
 description = "Work"
 max_iterations = 10
-available_tools = ["read_file"]
-[stages.work.transitions.review]
-transform = "direct"
-{extra_edge}
+tools = ["read_file"]
 
-[stages.review]
-mode = "autonomous"
+[[graph.stages]]
+name = "review"
 model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
 description = "Review"
 max_iterations = 10
 max_revisits = 2
-available_tools = ["read_file"]
+tools = ["read_file"]
 
-[stages.answer]
+[[graph.stages]]
+name = "answer"
 mode = "output"
 model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
 description = "Answer"
 max_iterations = 10
 
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
+[[graph.edges]]
+name = "review"
+from = "work"
+to = "review"
+
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = {{ kind = "sliding_window", max_items = 50 }}
+budget = 10000
+{extra_edge}
 "#
     )
 }
@@ -440,7 +432,7 @@ fn a_strandable_stage_is_warned_about() {
 #[test]
 fn a_dead_end_edge_satisfies_the_check() {
     let toml = strandable(
-        "\n[stages.work.transitions.answer]\ncondition = \"dead_end\"\ntransform = \"direct\"\n",
+        "\n[[graph.edges]]\nname = \"answer\"\nfrom = \"work\"\nto = \"answer\"\nwhen = \"dead_end\"\n",
     );
     let findings = lint(&toml, &LintEnv::default());
     assert!(
@@ -454,7 +446,7 @@ fn a_dead_end_edge_satisfies_the_check() {
 #[test]
 fn an_error_edge_also_satisfies_the_check() {
     let toml = strandable(
-        "\n[stages.work.transitions.answer]\ncondition = \"error\"\ntransform = \"direct\"\n",
+        "\n[[graph.edges]]\nname = \"answer\"\nfrom = \"work\"\nto = \"answer\"\nwhen = \"error\"\n",
     );
     assert!(!codes(&lint(&toml, &LintEnv::default())).contains(&"dead-end-possible"));
 }
@@ -466,7 +458,7 @@ fn an_error_edge_also_satisfies_the_check() {
 #[test]
 fn a_max_iterations_edge_does_not_satisfy_the_check() {
     let toml = strandable(
-        "\n[stages.work.transitions.answer]\ncondition = \"max_iterations\"\ntransform = \"direct\"\n",
+        "\n[[graph.edges]]\nname = \"answer\"\nfrom = \"work\"\nto = \"answer\"\nwhen = \"max_iterations\"\n",
     );
     let findings = lint(&toml, &LintEnv::default());
     assert!(
@@ -490,145 +482,61 @@ fn a_max_iterations_edge_does_not_satisfy_the_check() {
 #[test]
 fn a_dead_end_edge_to_an_exhaustible_stage_does_not_count() {
     let toml = r#"
-[agent]
+[blueprint]
 name = "strandable"
 version = "0.1.0"
 description = "a fixture"
 
-[stages.work]
-mode = "autonomous"
+[graph]
+
+[[graph.stages]]
+name = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Work"
 max_iterations = 10
-available_tools = ["read_file"]
-[stages.work.transitions.review]
-transform = "direct"
-[stages.work.transitions.fallback]
-condition = "dead_end"
-transform = "direct"
+tools = ["read_file"]
 
-[stages.review]
-mode = "autonomous"
+[[graph.stages]]
+name = "review"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Review"
 max_iterations = 10
 max_revisits = 2
-available_tools = ["read_file"]
+tools = ["read_file"]
 
-# The escape's own target can run out too, so following it only defers the
-# strand rather than resolving it.
-[stages.fallback]
-mode = "autonomous"
+[[graph.stages]]
+name = "fallback"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Fallback"
 max_iterations = 10
 max_revisits = 1
-available_tools = ["read_file"]
+tools = ["read_file"]
 
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+[[graph.edges]]
+name = "review"
+from = "work"
+to = "review"
+
+[[graph.edges]]
+name = "fallback"
+from = "work"
+to = "fallback"
+when = "dead_end"
+
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 50 }
+budget = 10000
 "#;
     assert!(codes(&lint(toml, &LintEnv::default())).contains(&"dead-end-possible"));
-}
-
-// ─── Seeds the parser threw away ──────────────────────────────────────────────
-
-/// A seed table with no key the parser recognizes leaves the region empty.
-///
-/// This is what a one-character typo looks like, and it is what a "coder-shaped"
-/// fixture in this repo shipped with for months: `caller_input` instead of
-/// `caller`, silently seeding nothing.
-#[test]
-fn a_seed_table_with_no_recognized_key_is_warned_about() {
-    let toml = format!(
-        "{}\n[context.regions.notes]\nkind = \"pinned\"\nmax_tokens = 100\n\
-         seed = {{ caller_input = \"task\" }}\n",
-        manifest(CLEAN_STAGE)
-    );
-    let findings = lint(&toml, &LintEnv::default());
-    assert_eq!(codes(&findings), ["region-seed-not-understood"]);
-    assert!(findings[0].message.contains("notes"), "{findings:?}");
-}
-
-/// A seed that is neither a string nor a table goes the same way.
-#[test]
-fn a_seed_of_the_wrong_type_is_warned_about() {
-    let toml = format!(
-        "{}\n[context.regions.notes]\nkind = \"pinned\"\nmax_tokens = 100\nseed = 42\n",
-        manifest(CLEAN_STAGE)
-    );
-    assert_eq!(
-        codes(&lint(&toml, &LintEnv::default())),
-        ["region-seed-not-understood"]
-    );
-}
-
-/// Every recognized form stays silent, so the check cannot become noise.
-#[test]
-fn the_recognized_seed_forms_are_not_warned_about() {
-    for seed in [
-        r#""task""#,
-        r#""input""#,
-        r#"{ caller = "extra" }"#,
-        r#"{ literal = "x" }"#,
-        r#"{ files = ["a.txt"] }"#,
-        r#"{ glob = "*.rs" }"#,
-        r#"{ rhai = "\"x\"" }"#,
-        r#"{ command = "git ls-files" }"#,
-    ] {
-        let toml = format!(
-            "{}\n[context.regions.notes]\nkind = \"pinned\"\nmax_tokens = 100\nseed = {seed}\n",
-            manifest(CLEAN_STAGE)
-        );
-        let codes = codes(&lint(&toml, &LintEnv::default()));
-        assert!(
-            !codes.contains(&"region-seed-not-understood"),
-            "seed {seed} was reported as unreadable: {codes:?}"
-        );
-    }
-}
-
-/// A region with no `seed` key at all is not a dropped seed.
-#[test]
-fn a_region_declaring_no_seed_is_not_warned_about() {
-    let findings = lint(&manifest(CLEAN_STAGE), &LintEnv::default());
-    assert!(
-        !codes(&findings).contains(&"region-seed-not-understood"),
-        "{findings:?}"
-    );
-}
-
-// ─── Declared: the fallbacks ──────────────────────────────────────────────────
-
-/// Text the linter cannot re-read yields no declaration findings at all, rather
-/// than a full set of false ones. Production never hits this (the caller only
-/// lints a manifest that already parsed) so it is asserted directly.
-#[test]
-fn unreadable_text_reports_every_key_as_declared() {
-    let declared = Declared::from_text("not valid toml [[[");
-    assert!(!declared.agent_model_block);
-    let keys = declared.stage("anything");
-    assert!(keys.mode);
-    assert!(keys.model);
-}
-
-/// Same for a stage the text has no entry for, which is how a blueprint built
-/// in code rather than parsed would arrive.
-#[test]
-fn a_stage_absent_from_the_text_reports_as_declared() {
-    let keys = Declared::from_text("[agent]\nname = \"x\"\n").stage("ghost");
-    assert!(keys.mode);
-    assert!(keys.model);
-}
-
-/// A manifest that parses to something other than a table (a bare TOML document
-/// cannot, but the parse is fallible in principle) takes the same path.
-#[test]
-fn text_with_no_stages_table_has_no_stage_keys() {
-    let declared = Declared::from_text("[agent]\nname = \"x\"\n");
-    assert!(declared.stages.is_empty());
-    assert!(!declared.opaque);
 }
 
 // ─── Tool checks ──────────────────────────────────────────────────────────────
@@ -637,11 +545,12 @@ fn text_with_no_stages_table_has_no_stage_keys() {
 fn a_misspelled_tool_is_an_error() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["read_file", "raed_file"]
+tools = ["read_file", "raed_file"]
 "#,
     );
     let env = LintEnv {
@@ -655,16 +564,17 @@ available_tools = ["read_file", "raed_file"]
 }
 
 /// `server__tool` names an MCP tool, which resolves only once that server is
-/// installed. That is not a property of the manifest, so it is never flagged.
+/// installed. That is not a property of the blueprint, so it is never flagged.
 #[test]
 fn an_mcp_tool_name_is_never_unknown() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["github__create_issue"]
+tools = ["github__create_issue"]
 "#,
     );
     let env = LintEnv {
@@ -684,14 +594,14 @@ available_tools = ["github__create_issue"]
 fn a_stage_granting_a_connector_does_not_get_orphan_permission_errors() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["read_file"]
-available_connectors = ["github"]
-
-[stages.main.tool_permissions]
+tools = ["read_file"]
+connectors = ["github"]
+[graph.stages.tool_permissions]
 create_issue = "ask"
 "#,
     );
@@ -705,13 +615,13 @@ create_issue = "ask"
 fn a_permission_for_an_ungranted_tool_is_an_error() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["read_file"]
-
-[stages.main.tool_permissions]
+tools = ["read_file"]
+[graph.stages.tool_permissions]
 write_file = "allow"
 "#,
     );
@@ -725,13 +635,13 @@ write_file = "allow"
 fn a_permission_for_a_granted_tool_is_fine() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["read_file"]
-
-[stages.main.tool_permissions]
+tools = ["read_file"]
+[graph.stages.tool_permissions]
 read_file = "allow"
 "#,
     );
@@ -743,7 +653,6 @@ read_file = "allow"
 /// An install that knows one tool of each kind, so a group-aware check can
 /// say which group reaches what.
 fn grouped_env() -> LintEnv {
-    use leviath_runtime::spec::blueprint::ToolGroup;
     let sources = [
         ("read_file", ToolGroup::Builtin),
         ("shell", ToolGroup::Builtin),
@@ -773,11 +682,12 @@ fn grouped_env() -> LintEnv {
 fn a_group_token_is_not_an_unknown_tool() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@scripts", "@mcp", "read_file"]
+tools = ["@scripts", "@mcp", "read_file"]
 "#,
     );
     let findings = lint(&toml, &grouped_env());
@@ -791,11 +701,12 @@ available_tools = ["@scripts", "@mcp", "read_file"]
 fn a_required_tool_no_group_reaches_is_an_error() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@scripts"]
+tools = ["@scripts"]
 required_tools = ["summarize", "read_file", "github__create_issue"]
 "#,
     );
@@ -830,15 +741,15 @@ required_tools = ["summarize", "read_file", "github__create_issue"]
 fn a_required_tool_a_group_reaches_is_fine() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@builtin", "@scripts", "bash"]
+tools = ["@builtin", "@scripts", "bash"]
 required_tools = ["summarize", "read_file", "shell"]
 allow_blocking_tools = true
-
-[stages.main.tool_permissions]
+[graph.stages.tool_permissions]
 shell = "ask"
 "#,
     );
@@ -847,15 +758,15 @@ shell = "ask"
 
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@all"]
+tools = ["@all"]
 required_tools = ["spawn_agent", "github__create_issue"]
 allow_blocking_tools = true
-
-[stages.main.tool_permissions]
+[graph.stages.tool_permissions]
 shell = "ask"
 "#,
     );
@@ -870,13 +781,13 @@ shell = "ask"
 fn a_permission_a_group_reaches_is_not_orphaned() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@scripts", "@mcp", "read_file"]
-
-[stages.main.tool_permissions]
+tools = ["@scripts", "@mcp", "read_file"]
+[graph.stages.tool_permissions]
 summarize = "allow"
 github__create_issue = "ask"
 write_file = "allow"
@@ -896,14 +807,14 @@ write_file = "allow"
 fn a_builtin_group_in_an_autonomous_stage_is_warned_about_once() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@builtin"]
+tools = ["@builtin"]
 required_tools = ["ask_user_text"]
-
-[stages.main.tool_permissions]
+[graph.stages.tool_permissions]
 shell = "allow"
 "#,
     );
@@ -950,11 +861,12 @@ shell = "allow"
 fn a_builtin_group_with_no_shell_policy_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@all"]
+tools = ["@all"]
 allow_blocking_tools = true
 "#,
     );
@@ -987,14 +899,15 @@ allow_blocking_tools = true
 fn an_output_stage_granting_the_builtin_group_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
+
+[[graph.stages]]
+name = "main"
 mode = "output"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@builtin", "submit_output"]
+tools = ["@builtin", "submit_output"]
 require_output = true
-
-[stages.main.tool_permissions]
+[graph.stages.tool_permissions]
 shell = "allow"
 "#,
     );
@@ -1010,23 +923,31 @@ shell = "allow"
 fn a_builtin_group_satisfies_the_region_read_check() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@builtin"]
+tools = ["@builtin"]
 allow_blocking_tools = true
-
-[stages.main.tool_routing]
+[graph.stages.layout]
+total_budget_tokens = 0
+[graph.stages.tool_routing]
 default_region = "notes"
-
-[stages.main.tool_permissions]
+[graph.stages.tool_permissions]
 shell = "allow"
-
-[stages.main.context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
-notes = { kind = "temporary", max_tokens = 1000 }
+[[graph.stages.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 1000
+[[graph.stages.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 50 }
+budget = 10000
+[[graph.stages.layout.regions]]
+name = "notes"
+kind = "temporary"
+budget = 1000
 "#,
     );
     let findings = lint(&toml, &grouped_env());
@@ -1043,20 +964,30 @@ notes = { kind = "temporary", max_tokens = 1000 }
 fn a_builtin_group_makes_a_required_region_enforceable() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["@builtin"]
+tools = ["@builtin"]
 allow_blocking_tools = true
-
-[stages.main.tool_permissions]
+[graph.stages.layout]
+total_budget_tokens = 0
+[graph.stages.tool_permissions]
 shell = "allow"
-
-[stages.main.context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
-findings = { kind = "pinned", max_tokens = 1000, required = true }
+[[graph.stages.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 1000
+[[graph.stages.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 50 }
+budget = 10000
+[[graph.stages.layout.regions]]
+name = "findings"
+kind = "pinned"
+budget = 1000
+required = true
 "#,
     );
     let findings = lint(&toml, &grouped_env());
@@ -1073,11 +1004,12 @@ findings = { kind = "pinned", max_tokens = 1000, required = true }
 fn an_autonomous_stage_granting_an_ask_tool_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["ask_user_text"]
+tools = ["ask_user_text"]
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
@@ -1095,11 +1027,12 @@ fn every_blocking_interaction_tool_is_flagged() {
     for tool in BLOCKING_INTERACTION_TOOLS {
         let toml = manifest(&format!(
             r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
 max_iterations = 10
-available_tools = ["{tool}"]
+tools = ["{tool}"]
 "#
         ));
         assert_eq!(
@@ -1114,11 +1047,12 @@ available_tools = ["{tool}"]
 fn allow_blocking_tools_silences_the_warning() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["ask_user_text"]
+tools = ["ask_user_text"]
 allow_blocking_tools = true
 "#,
     );
@@ -1132,11 +1066,12 @@ allow_blocking_tools = true
 fn required_tools_silences_the_warning_for_that_tool() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["ask_user_text", "ask_user_confirm"]
+tools = ["ask_user_text", "ask_user_confirm"]
 required_tools = ["ask_user_text"]
 "#,
     );
@@ -1165,11 +1100,13 @@ required_tools = ["ask_user_text"]
 fn an_interactive_stage_may_grant_ask_tools_freely() {
     let toml = manifest(
         r#"
-[stages.main]
+
+[[graph.stages]]
+name = "main"
 mode = "interactive"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["ask_user_text"]
+tools = ["ask_user_text"]
 "#,
     );
     assert!(lint(&toml, &LintEnv::default()).is_empty());
@@ -1183,11 +1120,12 @@ available_tools = ["ask_user_text"]
 fn a_shell_grant_with_no_policy_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["bash"]
+tools = ["bash"]
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
@@ -1200,11 +1138,12 @@ available_tools = ["bash"]
 fn the_canonical_shell_spelling_is_checked_too() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["shell"]
+tools = ["shell"]
 "#,
     );
     assert_eq!(
@@ -1217,13 +1156,13 @@ available_tools = ["shell"]
 fn a_stage_level_shell_policy_settles_it() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["bash"]
-
-[stages.main.tool_permissions]
+tools = ["bash"]
+[graph.stages.tool_permissions]
 bash = "ask"
 "#,
     );
@@ -1238,14 +1177,15 @@ bash = "ask"
 fn either_spelling_of_a_permission_settles_the_shell() {
     for (granted, written) in [("shell", "bash"), ("bash", "shell")] {
         let toml = format!(
-            "{}\n[tool_permissions]\n{written} = \"ask\"\n",
+            "{}\n[graph.tool_permissions]\n{written} = \"ask\"\n",
             manifest(&format!(
                 r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
 max_iterations = 10
-available_tools = ["{granted}"]
+tools = ["{granted}"]
 "#
             ))
         );
@@ -1255,16 +1195,17 @@ available_tools = ["{granted}"]
 }
 
 #[test]
-fn an_agent_level_shell_policy_settles_it() {
+fn a_graph_level_shell_policy_settles_it() {
     let toml = format!(
-        "{}\n[tool_permissions]\nbash = \"deny\"\n",
+        "{}\n[graph.tool_permissions]\nbash = \"deny\"\n",
         manifest(
             r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["bash"]
+tools = ["bash"]
 "#,
         )
     );
@@ -1277,8 +1218,9 @@ available_tools = ["bash"]
 fn a_model_missing_from_a_known_catalog_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-9" }] }
 max_iterations = 10
 "#,
@@ -1301,8 +1243,9 @@ max_iterations = 10
 fn a_provider_with_no_catalog_is_not_checked() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "ollama", model = "qwen3.5:9b" }] }
 max_iterations = 10
 "#,
@@ -1326,8 +1269,9 @@ max_iterations = 10
 fn a_model_outside_a_complete_catalog_is_an_error() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "groq", model = "llama-3.1-70b" }] }
 max_iterations = 10
 "#,
@@ -1367,8 +1311,9 @@ max_iterations = 10
 fn a_refusal_the_provider_can_explain_says_the_reason() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "groq", model = "llama-3.1-70b" }] }
 max_iterations = 10
 "#,
@@ -1411,8 +1356,9 @@ max_iterations = 10
 fn a_long_catalog_is_summarised_with_a_count() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "gateway", model = "nope" }] }
 max_iterations = 10
 "#,
@@ -1445,8 +1391,9 @@ max_iterations = 10
 fn a_namespaced_catalog_id_answers_for_a_bare_model_name() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "openrouter", model = "gpt-5.5" }] }
 max_iterations = 10
 "#,
@@ -1469,8 +1416,9 @@ max_iterations = 10
 fn a_script_provider_that_names_no_models_warns_rather_than_errors() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "quiet", model = "anything-at-all" }] }
 max_iterations = 10
 "#,
@@ -1502,8 +1450,9 @@ max_iterations = 10
 fn a_live_catalogue_supersedes_the_compiled_table() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-9" }] }
 max_iterations = 10
 "#,
@@ -1531,8 +1480,9 @@ max_iterations = 10
 fn a_provider_nobody_asked_about_is_not_checked() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "groq", model = "llama-3.1-70b" }] }
 max_iterations = 10
 "#,
@@ -1567,9 +1517,10 @@ fn a_model_present_in_the_catalog_passes() {
 fn a_stage_naming_models_without_providers_is_not_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
-model = { models = ["claude-sonnet-5", "gpt-5.5"] }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.5" }] }
 max_iterations = 10
 "#,
     );
@@ -1591,9 +1542,10 @@ max_iterations = 10
 fn a_stage_pinning_only_unreachable_providers_is_still_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
-model = { models = ["claude-sonnet-5", { provider = "openai", model = "gpt-5.5" }] }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.5" }] }
 max_iterations = 10
 "#,
     );
@@ -1619,9 +1571,10 @@ max_iterations = 10
 fn an_open_entry_nothing_serves_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
-model = { models = ["gorq-turbo-9"] }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ model = "gorq-turbo-9" }] }
 max_iterations = 10
 "#,
     );
@@ -1647,9 +1600,10 @@ max_iterations = 10
 fn one_routable_open_entry_keeps_the_stage_quiet() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
-model = { models = ["gorq-turbo-9", "qwen3.5:9b", { provider = "openai", model = "gpt-5.5" }] }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ model = "gorq-turbo-9" }, { model = "qwen3.5:9b" }, { provider = "openai", model = "gpt-5.5" }] }
 max_iterations = 10
 "#,
     );
@@ -1671,8 +1625,9 @@ max_iterations = 10
 fn a_stage_with_no_reachable_provider_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "openai", model = "gpt-5.5" }] }
 max_iterations = 10
 "#,
@@ -1698,8 +1653,9 @@ max_iterations = 10
 fn an_unreachable_provider_is_fine_when_a_later_one_answers() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 max_iterations = 10
 "#,
@@ -1724,15 +1680,14 @@ fn every_provider_reachable_reports_nothing() {
 /// reachability question does not arise (the missing-model warning covers it).
 #[test]
 fn a_stage_with_an_empty_models_list_is_not_checked_for_reachability() {
-    let mut bp = leviath_runtime::spec::manifest::parse_manifest(&manifest(CLEAN_STAGE))
-        .expect("the fixture parses");
-    bp.stages[0].model.models.clear();
+    let mut bp = parse(&manifest(CLEAN_STAGE));
+    bp.graph.stages[0].model.models.clear();
     let env = LintEnv {
         available_providers: Some(HashSet::new()),
         ..LintEnv::default()
     };
-    let findings = lint_manifest(&manifest(CLEAN_STAGE), &bp, &env);
-    assert!(findings.is_empty(), "{:?}", codes(&findings));
+    let findings = lint_blueprint(&bp, &env);
+    assert_eq!(codes(&findings), ["stage-missing-model"]);
 }
 
 // ─── held checkpoints ─────────────────────────────────────────────────────────
@@ -1744,14 +1699,14 @@ fn a_stage_with_an_empty_models_list_is_not_checked_for_reachability() {
 fn a_checkpoint_that_holds_under_yolo_is_noted() {
     let toml = manifest(
         r#"
-[stages.plan]
-mode = "interactive_points"
+
+[[graph.stages]]
+name = "plan"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["read_file", "ask_user_text"]
+tools = ["read_file", "ask_user_text"]
 required_tools = ["ask_user_text"]
-
-[[stages.plan.interaction_points]]
+[[graph.stages.mode.interactive_points]]
 name = "plan_approval"
 prompt = "Review the plan"
 style = "confirm"
@@ -1787,11 +1742,12 @@ fn a_blueprint_that_holds_nothing_is_not_noted() {
 fn the_blocking_tool_check_canonicalises_required_tools() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["ask_user_text", "bash"]
+tools = ["ask_user_text", "bash"]
 required_tools = ["ask_user_text", "bash"]
 "#,
     );
@@ -1805,10 +1761,10 @@ required_tools = ["ask_user_text", "bash"]
 // ─── safe_commands ────────────────────────────────────────────────────────────
 
 fn with_safe_commands(body: &str) -> String {
-    format!("{}\n[safe_commands]\n{body}\n", manifest(CLEAN_STAGE))
+    format!("{}\n[graph.safe_commands]\n{body}\n", manifest(CLEAN_STAGE))
 }
 
-/// Declaring `[safe_commands]` is legitimate, so it is a note - but an author
+/// Declaring `safe_commands` is legitimate, so it is a note - but an author
 /// who does not know that declaring is not granting ships a block that does
 /// nothing on every install but their own.
 #[test]
@@ -1893,14 +1849,13 @@ fn no_safe_commands_means_no_finding() {
 
 // ─── read_paths ───────────────────────────────────────────────────────────────
 
-/// Declaring `[read_paths]` is legitimate, so it is a note rather than a
+/// Declaring `read_paths` is legitimate, so it is a note rather than a
 /// warning: it must survive `--deny-warnings` on an otherwise good blueprint.
 #[test]
 fn read_path_declarations_are_noted_not_warned() {
-    let toml = format!(
-        "{}\n[read_paths]\nallow = [\"~/.leviath/runs\"]\n",
-        manifest(CLEAN_STAGE)
-    );
+    let toml = manifest(&format!(
+        "read_paths = [\"~/.leviath/runs\"]\n{CLEAN_STAGE}"
+    ));
     let findings = lint(&toml, &LintEnv::default());
     assert_eq!(codes(&findings), ["read-paths-declared"]);
     assert_eq!(findings[0].severity, LintSeverity::Note);
@@ -1928,15 +1883,12 @@ fn read_paths_env(entries: &[&str], grants: &[&str]) -> (String, LintEnv) {
         .map(|e| format!("\"{e}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let toml = format!(
-        "{}\n[read_paths]\nallow = [{listed}]\n",
-        manifest(CLEAN_STAGE)
-    );
-    let blueprint =
-        leviath_runtime::spec::manifest::parse_manifest(&toml).expect("the fixture parses");
+    let toml = manifest(&format!("read_paths = [{listed}]\n{CLEAN_STAGE}"));
+    let graph = graph_of(&toml);
     let mut config = crate::config::Config::default();
     config.security.read_paths = grants.iter().map(|s| s.to_string()).collect();
-    let env = LintEnv::default().with_read_paths(&blueprint, &config, Path::new("/work"));
+    let env =
+        LintEnv::default().with_read_paths(&graph, "lint-fixture", &config, Path::new("/work"));
     (toml, env)
 }
 
@@ -2002,15 +1954,12 @@ fn granted_read_paths_are_a_note_only() {
 /// The blanket override grants everything, and says which switch did it.
 #[test]
 fn the_blanket_override_is_named_on_the_note() {
-    let toml = format!(
-        "{}\n[read_paths]\nallow = [\"/data/runs\"]\n",
-        manifest(CLEAN_STAGE)
-    );
-    let blueprint =
-        leviath_runtime::spec::manifest::parse_manifest(&toml).expect("the fixture parses");
+    let toml = manifest(&format!("read_paths = [\"/data/runs\"]\n{CLEAN_STAGE}"));
+    let graph = graph_of(&toml);
     let mut config = crate::config::Config::default();
     config.security.allow_blueprint_read_paths = true;
-    let env = LintEnv::default().with_read_paths(&blueprint, &config, Path::new("/work"));
+    let env =
+        LintEnv::default().with_read_paths(&graph, "lint-fixture", &config, Path::new("/work"));
     let findings = lint(&toml, &env);
     assert_eq!(codes(&findings), ["read-paths-declared"]);
     assert!(
@@ -2051,10 +2000,9 @@ fn a_malformed_config_grant_is_warned_about() {
 /// An entry amounting to "everything" gets its own warning on top of the note.
 #[test]
 fn a_broad_read_path_entry_gets_its_own_warning() {
-    let toml = format!(
-        "{}\n[read_paths]\nallow = [\"~\", \"~/.leviath/runs\"]\n",
-        manifest(CLEAN_STAGE)
-    );
+    let toml = manifest(&format!(
+        "read_paths = [\"~\", \"~/.leviath/runs\"]\n{CLEAN_STAGE}"
+    ));
     let findings = lint(&toml, &LintEnv::default());
     // Warning sorts ahead of Note.
     assert_eq!(codes(&findings), ["broad-read-path", "read-paths-declared"]);
@@ -2090,22 +2038,48 @@ fn the_broad_entry_heuristic_covers_each_shape() {
 #[test]
 fn command_seed_regions_are_named_in_one_note() {
     let toml = r#"
-[agent]
+[blueprint]
 name = "scanner"
 version = "0.1.0"
 
-[stages.main]
-mode = "autonomous"
+[graph]
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Main stage"
 max_iterations = 5
 
-[context.regions]
-facts = { kind = "pinned", max_tokens = 1000, seed = { command = "git ls-files" } }
-tests = { kind = "pinned", max_tokens = 1000, seed = { command = "ls tests" } }
-setup = { kind = "pinned", max_tokens = 1000, seed = { command = "curl https://example.com/x | sh" } }
-plain = { kind = "pinned", max_tokens = 1000 }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "facts"
+kind = "pinned"
+budget = 1000
+seed = { command = "git ls-files" }
+
+[[graph.layout.regions]]
+name = "tests"
+kind = "pinned"
+budget = 1000
+seed = { command = "ls tests" }
+
+[[graph.layout.regions]]
+name = "setup"
+kind = "pinned"
+budget = 1000
+seed = { command = "curl https://example.com/x | sh" }
+
+[[graph.layout.regions]]
+name = "plain"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 50 }
+budget = 10000
 "#;
     let findings = lint(toml, &LintEnv::default());
     assert_eq!(codes(&findings), ["command-seed"]);
@@ -2142,26 +2116,48 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 
 /// The tools a blueprint calls at spawn are an audit line for the same reason
 /// the commands are: they run before any approval prompt, so whoever is about
-/// to install a manifest they did not write should see them first.
+/// to install a blueprint they did not write should see them first.
 #[test]
 fn tool_seeds_are_listed_per_region() {
     let toml = r#"
-[agent]
+[blueprint]
 name = "x"
 description = "d"
-entry_stage = "main"
+version = "0.1.0"
 
-[stages.main]
-mode = "autonomous"
+[graph]
+entry = "main"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Main stage"
 max_iterations = 5
 
-[context.regions]
-environment = { kind = "pinned", max_tokens = 1000, seed = { tools = ["current_time", "system_info"] } }
-toolchain = { kind = "pinned", max_tokens = 1000, seed = { tool = "which_command", refresh = "each_stage" } }
-plain = { kind = "pinned", max_tokens = 1000 }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "environment"
+kind = "pinned"
+budget = 1000
+seed = { tools = { calls = [{ tool = "current_time", args = {} }, { tool = "system_info", args = {} }] } }
+
+[[graph.layout.regions]]
+name = "toolchain"
+kind = "pinned"
+budget = 1000
+seed = { tools = { calls = [{ tool = "which_command", args = {} }], refresh = "each_stage" } }
+
+[[graph.layout.regions]]
+name = "plain"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 50 }
+budget = 10000
 "#;
     let findings = lint(toml, &LintEnv::default());
     assert_eq!(codes(&findings), ["tool-seed"]);
@@ -2216,63 +2212,81 @@ fn no_command_seeds_means_no_note() {
 fn a_fully_reachable_graph_reports_nothing() {
     let toml = manifest(
         r#"
-[stages.entry]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 5
-[stages.entry.transitions]
-b = "true"
-c = "true"
 
-[stages.b]
-mode = "autonomous"
+[[graph.stages]]
+name = "entry"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-[stages.b.transitions]
-d = "true"
 
-[stages.c]
-mode = "autonomous"
+[[graph.stages]]
+name = "b"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-[stages.c.transitions]
-d = "true"
 
-[stages.d]
-mode = "autonomous"
+[[graph.stages]]
+name = "c"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.stages]]
+name = "d"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[[graph.edges]]
+name = "b"
+from = "entry"
+to = "b"
+
+[[graph.edges]]
+name = "c"
+from = "entry"
+to = "c"
+
+[[graph.edges]]
+name = "d"
+from = "b"
+to = "d"
+
+[[graph.edges]]
+name = "d"
+from = "c"
+to = "d"
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
     assert!(findings.is_empty(), "{:?}", codes(&findings));
 }
 
-/// A fan_out stage reaches its worker and merge stages through its own config
-/// rather than a transition edge. Following only `transitions` reported both as
+/// A fan_out stage reaches its worker and merge stages through its own
+/// settings rather than an edge. Following only edges would report both as
 /// orphans in a correctly wired blueprint.
 #[test]
 fn fan_out_worker_and_merge_stages_are_reachable() {
     let toml = manifest_taking_task(
         r#"
-[stages.split]
-mode = "fan_out"
-worker_stage = "work"
-merge_stage = "merge"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-[stages.split.transitions.merge]
-condition = "error"
 
-[stages.work]
-mode = "autonomous"
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { stage = "work" }, merge_stage = "merge" } }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[[graph.stages]]
+name = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 allow_as_worker = true
 
-[stages.merge]
-mode = "autonomous"
+[[graph.stages]]
+name = "merge"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.edges]]
+name = "merge"
+from = "split"
+to = "merge"
+when = "error"
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
@@ -2283,22 +2297,26 @@ max_iterations = 5
 fn a_stage_the_entry_cannot_reach_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.a]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 5
-[stages.a.transitions]
-b = "true"
 
-[stages.b]
-mode = "autonomous"
+[[graph.stages]]
+name = "a"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 
-[stages.orphan]
-mode = "autonomous"
+[[graph.stages]]
+name = "b"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.stages]]
+name = "orphan"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[[graph.edges]]
+name = "b"
+from = "a"
+to = "b"
 "#,
     );
     let findings = lint(&toml, &LintEnv::default());
@@ -2310,19 +2328,26 @@ max_iterations = 5
 fn a_cycle_with_no_revisit_cap_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.a]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 5
-[stages.a.transitions]
-b = "true"
 
-[stages.b]
-mode = "autonomous"
+[[graph.stages]]
+name = "a"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-[stages.b.transitions]
-a = "true"
+
+[[graph.stages]]
+name = "b"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[[graph.edges]]
+name = "b"
+from = "a"
+to = "b"
+
+[[graph.edges]]
+name = "a"
+from = "b"
+to = "a"
 "#,
     );
     // Each stage is the "target" of the other's edge, and neither caps
@@ -2338,21 +2363,28 @@ a = "true"
 fn a_capped_cycle_no_longer_trips_the_cycle_lint_but_can_dead_end() {
     let toml = manifest(
         r#"
-[stages.a]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "a"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 max_revisits = 2
-[stages.a.transitions]
-b = "true"
 
-[stages.b]
-mode = "autonomous"
+[[graph.stages]]
+name = "b"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 max_revisits = 3
-[stages.b.transitions]
-a = "true"
+
+[[graph.edges]]
+name = "b"
+from = "a"
+to = "b"
+
+[[graph.edges]]
+name = "a"
+from = "b"
+to = "a"
 "#,
     );
     // Capping both ends satisfies the cycle lint - but now EVERY exit of each
@@ -2364,44 +2396,51 @@ a = "true"
     );
 }
 
-/// A self-loop is not a two-stage cycle, and a terminal stage has an empty
-/// transitions table rather than none. Both are shapes the walk has to step
-/// over without complaining.
+/// A self-loop is not a two-stage cycle, and a terminal stage has no edges
+/// out. Both are shapes the walk has to step over without complaining.
 #[test]
 fn self_loops_and_terminal_stages_are_not_cycles() {
     let toml = manifest(
         r#"
-[stages.a]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 5
-[stages.a.transitions]
-a = "true"
-b = "true"
 
-[stages.b]
-mode = "autonomous"
+[[graph.stages]]
+name = "a"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-[stages.b.transitions]
+
+[[graph.stages]]
+name = "b"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[[graph.edges]]
+name = "a"
+from = "a"
+to = "a"
+
+[[graph.edges]]
+name = "b"
+from = "a"
+to = "b"
 "#,
     );
     assert!(lint(&toml, &LintEnv::default()).is_empty());
 }
 
-/// A blueprint with no transitions anywhere is linear: there is no graph to
-/// walk, so the graph checks return before doing anything.
+/// A graph with no edges anywhere is linear: there is nothing to walk, so the
+/// graph checks return before doing anything.
 #[test]
 fn a_linear_blueprint_has_no_graph_findings() {
     let toml = manifest(
         r#"
-[stages.a]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "a"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 
-[stages.b]
-mode = "autonomous"
+[[graph.stages]]
+name = "b"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
 "#,
@@ -2409,61 +2448,33 @@ max_iterations = 5
     assert!(lint(&toml, &LintEnv::default()).is_empty());
 }
 
-/// `Blueprint::validate` rejects an entry_stage or transition target that names
-/// no real stage, so the graph walk only meets those through the struct's own
-/// public fields. It has to step over them rather than panic.
+/// Graph validation refuses an entry or an edge target that names no stage,
+/// so the walk only meets those in a graph nothing has validated yet. It has
+/// to step over them rather than panic.
 #[test]
 fn the_graph_walk_steps_over_names_that_are_not_stages() {
-    use leviath_runtime::spec::{Blueprint, ContextLayout, Stage, TransitionEdge};
+    let stage = "[[graph.stages]]\nname = \"a\"\n\
+                 model = { models = [{ provider = \"anthropic\", model = \"claude-sonnet-5\" }] }\n\
+                 max_iterations = 5\n";
 
-    let model = leviath_runtime::spec::blueprint::ModelConfig::new(
-        "anthropic".to_string(),
-        "claude-sonnet-5".to_string(),
-    );
-
-    // entry_stage points at a name with no Stage: the BFS pops "ghost" and
-    // finds nothing to walk from.
-    let mut only = Stage::new("a".to_string(), model.clone());
-    only.transitions = Some(HashMap::new());
-    only.max_iterations = Some(5);
-    let mut bp = Blueprint::new(
-        "t".to_string(),
-        "t".to_string(),
-        vec![only],
-        ContextLayout::new(Vec::new(), 1000),
-    );
-    bp.entry_stage = Some("ghost".to_string());
-    // "a" is now unreachable, which is the only thing worth saying.
+    // The entry names no stage: the walk pops "ghost" and finds nothing to
+    // walk from, so "a" is unreachable, which is the only thing worth saying.
+    let ghost_entry = manifest(&format!(
+        "entry = \"ghost\"\n{stage}\n[[graph.edges]]\nname = \"again\"\nfrom = \"a\"\nto = \"a\"\n"
+    ));
     assert_eq!(
-        codes(&lint_manifest("", &bp, &LintEnv::default())),
+        codes(&lint(&ghost_entry, &LintEnv::default())),
         ["unreachable-stage"]
     );
 
-    // A transition target with no Stage: the cycle check finds nothing to ask
-    // about the other end of the edge.
-    let mut dangling = Stage::new("a".to_string(), model);
-    dangling.max_iterations = Some(5);
-    dangling.transitions = Some(HashMap::from([(
-        "ghost".to_string(),
-        TransitionEdge {
-            target: "ghost".to_string(),
-            condition: Default::default(),
-            hint: None,
-            transform: Default::default(),
-            gate: None,
-            stuck: None,
-        },
-    )]));
-    let bp = Blueprint::new(
-        "t".to_string(),
-        "t".to_string(),
-        vec![dangling],
-        ContextLayout::new(Vec::new(), 1000),
-    );
-    // The cycle walk has nothing to say, but an edge nothing can ever follow
-    // is a guaranteed strand, which the dead-end lint reports.
+    // An edge into no stage: the cycle check finds nothing to ask about the
+    // other end, but an edge nothing can ever follow is a guaranteed strand,
+    // which the dead-end lint reports.
+    let dangling = manifest(&format!(
+        "{stage}\n[[graph.edges]]\nname = \"ghost\"\nfrom = \"a\"\nto = \"ghost\"\n"
+    ));
     assert_eq!(
-        codes(&lint_manifest("", &bp, &LintEnv::default())),
+        codes(&lint(&dangling, &LintEnv::default())),
         ["dead-end-possible"]
     );
 }
@@ -2498,15 +2509,16 @@ fn is_error_distinguishes_the_severities() {
 
 // ─── Several defects at once ──────────────────────────────────────────────────
 
-/// The reported blueprint, reconstructed: no mode, no model block, no iteration
-/// cap, an unattended stage that can ask a human, a shell grant with no policy,
+/// The reported blueprint, reconstructed: no model, no iteration cap, an unattended stage that can ask a human, a shell grant with no policy,
 /// and a typo. Every finding lands, and only the typo is fatal.
 #[test]
 fn a_thoroughly_broken_stage_reports_each_defect_once() {
     let toml = manifest(
         r#"
-[stages.scope]
-available_tools = ["read_file", "bash", "ask_user_text", "raed_file"]
+
+[[graph.stages]]
+name = "scope"
+tools = ["read_file", "bash", "ask_user_text", "raed_file"]
 "#,
     );
     let env = LintEnv {
@@ -2515,7 +2527,6 @@ available_tools = ["read_file", "bash", "ask_user_text", "raed_file"]
     };
     let findings = lint(&toml, &env);
     for code in [
-        "stage-missing-mode",
         "stage-missing-model",
         "stage-missing-max-iterations",
         "unknown-tool",
@@ -2525,7 +2536,7 @@ available_tools = ["read_file", "bash", "ask_user_text", "raed_file"]
         assert_eq!(with_code(&findings, code).len(), 1, "{code}: {findings:?}");
     }
     assert_eq!(findings.iter().filter(|f| f.is_error()).count(), 1);
-    assert_eq!(findings.len(), 6, "{:?}", codes(&findings));
+    assert_eq!(findings.len(), 5, "{:?}", codes(&findings));
 }
 
 // ─── Final-output stages ──────────────────────────────────────────────────────
@@ -2540,23 +2551,26 @@ fn output_env() -> LintEnv {
 }
 
 const REACHABLE_OUTPUT: &str = r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Main"
 max_iterations = 10
-available_tools = ["read_file"]
+tools = ["read_file"]
 
-[stages.main.transitions.summary]
-hint = "done"
-
-[stages.summary]
+[[graph.stages]]
+name = "summary"
 mode = "output"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Report"
 max_iterations = 4
 
-[stages.summary.transitions]
+[[graph.edges]]
+name = "summary"
+from = "main"
+to = "summary"
+hint = "done"
 "#;
 
 #[test]
@@ -2569,7 +2583,10 @@ fn a_reachable_output_stage_reports_nothing() {
 /// the blueprint still validates, because the graph is otherwise well-formed.
 #[test]
 fn an_output_stage_no_edge_reaches_is_an_error() {
-    let toml = REACHABLE_OUTPUT.replace("[stages.main.transitions.summary]\nhint = \"done\"\n", "");
+    let toml = REACHABLE_OUTPUT.replace(
+        "[[graph.edges]]\nname = \"summary\"\nfrom = \"main\"\nto = \"summary\"\nhint = \"done\"\n",
+        "",
+    );
     let findings = lint(&manifest(&toml), &output_env());
     let unreachable = with_code(&findings, "output-unreachable");
     assert_eq!(unreachable.len(), 1, "{:?}", codes(&findings));
@@ -2582,8 +2599,8 @@ fn an_output_stage_no_edge_reaches_is_an_error() {
 #[test]
 fn an_upstream_allow_complete_that_could_skip_the_output_stage_is_flagged() {
     let toml = REACHABLE_OUTPUT.replace(
-        "available_tools = [\"read_file\"]\n",
-        "available_tools = [\"read_file\"]\nallow_complete = true\n",
+        "tools = [\"read_file\"]\n",
+        "tools = [\"read_file\"]\nallow_complete = true\n",
     );
     let findings = lint(&manifest(&toml), &output_env());
     let skipped = with_code(&findings, "allow-complete-skips-output");
@@ -2604,8 +2621,8 @@ fn the_output_stages_own_allow_complete_is_not_flagged() {
 #[test]
 fn a_blueprint_with_no_output_stage_is_left_alone() {
     let toml = CLEAN_STAGE.replace(
-        "available_tools = [\"read_file\"]\n",
-        "available_tools = [\"read_file\"]\nallow_complete = true\n",
+        "tools = [\"read_file\"]\n",
+        "tools = [\"read_file\"]\nallow_complete = true\n",
     );
     let findings = lint(&manifest(&toml), &LintEnv::default());
     assert!(with_code(&findings, "allow-complete-skips-output").is_empty());
@@ -2618,7 +2635,7 @@ fn a_blueprint_with_no_output_stage_is_left_alone() {
 fn an_output_stage_that_can_modify_files_is_flagged() {
     let toml = REACHABLE_OUTPUT.replace(
         "description = \"Report\"",
-        "description = \"Report\"\navailable_tools = [\"write_file\"]",
+        "description = \"Report\"\ntools = [\"write_file\"]",
     );
     let findings = lint(&manifest(&toml), &output_env());
     let modifies = with_code(&findings, "output-stage-can-modify");
@@ -2629,7 +2646,7 @@ fn an_output_stage_that_can_modify_files_is_flagged() {
 /// A declared shape nobody is obliged to produce is a wish, not a contract.
 #[test]
 fn a_declared_shape_without_require_output_is_flagged() {
-    let toml = CLEAN_STAGE.to_string() + "\n[stages.main.output]\nformat = \"a2ui\"\n";
+    let toml = CLEAN_STAGE.to_string() + "\n[graph.stages.output]\nformat = \"a2ui\"\n";
     let findings = lint(&manifest(&toml), &output_env());
     let unrequired = with_code(&findings, "output-shape-not-required");
     assert_eq!(unrequired.len(), 1, "{:?}", codes(&findings));
@@ -2639,26 +2656,21 @@ fn a_declared_shape_without_require_output_is_flagged() {
 #[test]
 fn a_declared_shape_on_a_requiring_stage_reports_nothing() {
     let toml = REACHABLE_OUTPUT.to_string()
-        + "\n[stages.summary.output]\nformat = \"a2ui\"\ninstructions = \"one card per finding\"\n";
+        + "\n[graph.stages.output]\nformat = \"a2ui\"\ninstructions = \"one card per finding\"\n";
     let findings = lint(&manifest(&toml), &output_env());
     assert!(findings.is_empty(), "{:?}", codes(&findings));
 }
 
-/// `require_output` by hand, without the tool. The manifest parser's hard error
-/// normally catches this first; the check exists so `lev validate` still says
-/// something useful if a blueprint reaches it another way.
+/// `require_output` by hand, without the tool: the stage is told to hand back
+/// an answer it has no way to submit.
 #[test]
 fn requiring_an_output_without_the_submit_tool_is_an_error() {
-    let mut stage = leviath_runtime::spec::Stage::new(
-        "summary".to_string(),
-        leviath_runtime::spec::blueprint::ModelConfig::new(
-            "anthropic".to_string(),
-            "m".to_string(),
-        ),
+    let toml = manifest(
+        "[[graph.stages]]\nname = \"summary\"\n\
+         model = { models = [{ provider = \"anthropic\", model = \"m\" }] }\n\
+         max_iterations = 4\ntools = [\"read_file\"]\nrequire_output = true\n",
     );
-    stage.available_tools = vec!["read_file".to_string()];
-    stage.require_output = true;
-    let findings = lint_output_stage(&stage);
+    let findings = lint_output_stage(&graph_of(&toml).stages[0]);
     let missing = with_code(&findings, "output-missing-submit-tool");
     assert_eq!(missing.len(), 1, "{:?}", codes(&findings));
     assert_eq!(missing[0].severity, LintSeverity::Error);
@@ -2672,24 +2684,25 @@ fn requiring_an_output_without_the_submit_tool_is_an_error() {
 fn a_bare_compact_over_a_required_region_is_warned_about() {
     let toml = manifest(
         r#"
-[stages.verify]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 5
-[stages.verify.transitions.answer]
-transform = "compact"
 
-[stages.answer]
-mode = "autonomous"
+[[graph.stages]]
+name = "verify"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.stages]]
+name = "answer"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[[graph.edges]]
+name = "answer"
+from = "verify"
+to = "answer"
+carry = { compact = {} }
 "#,
-    )
-    .replace(
-        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }",
-        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }\n\
-         results = { kind = \"sliding_window\", max_items = 20, max_tokens = 8000, required = true }",
-    );
+    ) + "\n[[graph.layout.regions]]\nname = \"results\"\n\
+           kind = { kind = \"sliding_window\", max_items = 20 }\nbudget = 8000\nrequired = true\n";
     let findings = lint(&toml, &LintEnv::default());
     let found = with_code(&findings, "compact-summarizes-deliverable");
     assert_eq!(found.len(), 1, "{:?}", codes(&findings));
@@ -2702,24 +2715,25 @@ max_iterations = 5
 fn a_region_declared_not_summarizable_is_not_warned_about() {
     let toml = manifest(
         r#"
-[stages.verify]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 5
-[stages.verify.transitions.answer]
-transform = "compact"
 
-[stages.answer]
-mode = "autonomous"
+[[graph.stages]]
+name = "verify"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.stages]]
+name = "answer"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[[graph.edges]]
+name = "answer"
+from = "verify"
+to = "answer"
+carry = { compact = {} }
 "#,
-    )
-    .replace(
-        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }",
-        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }\n\
-         results = { kind = \"sliding_window\", max_items = 20, max_tokens = 8000, required = true, summarizable = false }",
-    );
+    ) + "\n[[graph.layout.regions]]\nname = \"results\"\n\
+           kind = { kind = \"sliding_window\", max_items = 20 }\nbudget = 8000\nrequired = true\nsummarizable = false\n";
     let findings = lint(&toml, &LintEnv::default());
     assert!(
         with_code(&findings, "compact-summarizes-deliverable").is_empty(),
@@ -2734,23 +2748,25 @@ max_iterations = 5
 fn a_pinned_required_region_is_not_warned_about() {
     let toml = manifest(
         r#"
-[stages.verify]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 5
-[stages.verify.transitions.answer]
-transform = "compact"
 
-[stages.answer]
-mode = "autonomous"
+[[graph.stages]]
+name = "verify"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.stages]]
+name = "answer"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[[graph.edges]]
+name = "answer"
+from = "verify"
+to = "answer"
+carry = { compact = {} }
 "#,
     )
-    .replace(
-        "system = { kind = \"pinned\", max_tokens = 1000 }",
-        "system = { kind = \"pinned\", max_tokens = 1000, required = true }",
-    );
+    .replacen("budget = 1000\n", "budget = 1000\nrequired = true\n", 1);
     let findings = lint(&toml, &LintEnv::default());
     assert!(
         with_code(&findings, "compact-summarizes-deliverable").is_empty(),
@@ -2765,24 +2781,24 @@ max_iterations = 5
 fn a_required_region_with_no_compact_edge_is_not_warned_about() {
     let toml = manifest(
         r#"
-[stages.verify]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
-max_iterations = 5
-[stages.verify.transitions.answer]
-transform = "direct"
 
-[stages.answer]
-mode = "autonomous"
+[[graph.stages]]
+name = "verify"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
+
+[[graph.stages]]
+name = "answer"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+
+[[graph.edges]]
+name = "answer"
+from = "verify"
+to = "answer"
 "#,
-    )
-    .replace(
-        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }",
-        "conversation = { kind = \"sliding_window\", max_items = 50, max_tokens = 10000 }\n\
-         results = { kind = \"sliding_window\", max_items = 20, max_tokens = 8000, required = true }",
-    );
+    ) + "\n[[graph.layout.regions]]\nname = \"results\"\n\
+           kind = { kind = \"sliding_window\", max_items = 20 }\nbudget = 8000\nrequired = true\n";
     let findings = lint(&toml, &LintEnv::default());
     assert!(
         with_code(&findings, "compact-summarizes-deliverable").is_empty(),
@@ -2791,24 +2807,37 @@ max_iterations = 5
     );
 }
 
-/// A manifest whose region layout is spelled out, so a budget can be varied.
+/// A blueprint whose region layout is spelled out, so a budget can be varied.
 fn manifest_with_regions(regions: &str) -> String {
     format!(
         r#"
-[agent]
+[blueprint]
 name = "lint-fixture"
 version = "0.1.0"
 description = "a fixture"
 
-[stages.work]
-mode = "autonomous"
+[graph]
+
+[[graph.stages]]
+name = "work"
 model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
 max_iterations = 10
 allow_complete = true
 
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = {{ kind = "sliding_window", max_items = 50 }}
+budget = 10000
+
+[[graph.layout.regions]]
 {regions}
 "#
     )
@@ -2823,7 +2852,8 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
 /// 3.3M cache-write tokens without finishing.
 #[test]
 fn a_percentage_budget_on_an_evicting_region_is_warned_with_the_resolved_ceiling() {
-    let toml = manifest_with_regions(r#"raw_findings = { kind = "temporary", budget = "38%" }"#);
+    let toml =
+        manifest_with_regions("name = \"raw_findings\"\nkind = \"temporary\"\nbudget = \"38%\"");
     let findings = lint(&toml, &LintEnv::default_with_windows());
     let found = findings
         .iter()
@@ -2844,7 +2874,7 @@ fn a_percentage_budget_on_an_evicting_region_is_warned_with_the_resolved_ceiling
             .fix
             .as_deref()
             .unwrap_or_default()
-            .contains("max_tokens"),
+            .contains("max = ..."),
         "{found:?}"
     );
 }
@@ -2853,7 +2883,7 @@ fn a_percentage_budget_on_an_evicting_region_is_warned_with_the_resolved_ceiling
 fn a_percentage_budget_with_a_max_guard_is_left_alone() {
     // The fix the issue reports as working completely.
     let toml = manifest_with_regions(
-        r#"raw_findings = { kind = "temporary", budget = "38%", max_tokens = 24000 }"#,
+        "name = \"raw_findings\"\nkind = \"temporary\"\nbudget = { percent = \"38%\", max = 24000 }",
     );
     assert!(
         !codes(&lint(&toml, &LintEnv::default_with_windows()))
@@ -2864,7 +2894,7 @@ fn a_percentage_budget_with_a_max_guard_is_left_alone() {
 #[test]
 fn an_absolute_budget_is_never_warned_about() {
     let toml =
-        manifest_with_regions(r#"raw_findings = { kind = "temporary", max_tokens = 24000 }"#);
+        manifest_with_regions("name = \"raw_findings\"\nkind = \"temporary\"\nbudget = 24000");
     assert!(
         !codes(&lint(&toml, &LintEnv::default_with_windows()))
             .contains(&"unbounded-percentage-budget")
@@ -2875,7 +2905,7 @@ fn an_absolute_budget_is_never_warned_about() {
 /// percentage there means exactly what its author intended.
 #[test]
 fn a_pinned_region_with_a_percentage_budget_is_fine() {
-    let toml = manifest_with_regions(r#"notes = { kind = "pinned", budget = "38%" }"#);
+    let toml = manifest_with_regions("name = \"notes\"\nkind = \"pinned\"\nbudget = \"38%\"");
     assert!(
         !codes(&lint(&toml, &LintEnv::default_with_windows()))
             .contains(&"unbounded-percentage-budget")
@@ -2885,9 +2915,9 @@ fn a_pinned_region_with_a_percentage_budget_is_fine() {
 #[test]
 fn every_evicting_kind_is_covered_not_just_temporary() {
     for decl in [
-        r#"r = { kind = "clearable", budget = "38%" }"#,
-        r#"r = { kind = "sliding_window", max_items = 20, budget = "38%" }"#,
-        r#"r = { kind = "compacting", compact_at = 0.8, budget = "38%" }"#,
+        "name = \"r\"\nkind = \"clearable\"\nbudget = \"38%\"",
+        "name = \"r\"\nkind = { kind = \"sliding_window\", max_items = 20 }\nbudget = \"38%\"",
+        "name = \"r\"\nkind = \"compacting\"\nbudget = \"38%\"\ncompact_at = 0.8",
     ] {
         let toml = manifest_with_regions(decl);
         assert!(
@@ -2907,28 +2937,45 @@ fn an_output_stage_whose_models_cannot_call_tools_must_route_a_declared_file() {
     let manifest = |model: &str, mode: &str, extra: &str| {
         format!(
             r#"
-[agent]
+[blueprint]
 name = "builder"
 version = "0.1.0"
 description = "d"
 
-[stages.build]
+[graph]
+
+[[graph.stages]]
+name = "build"
 mode = "{mode}"
 model = {{ models = [{model}] }}
 description = "Builds"
 max_iterations = 3
-{extra}
 
-[context.regions]
-task = {{ kind = "pinned", max_tokens = 1000 }}
-model = {{ kind = "pinned", max_tokens = 1000, accepts = ["model/*"] }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "model"
+kind = "pinned"
+budget = 1000
+accepts = ["model/*"]
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = {{ kind = "sliding_window", max_items = 50 }}
+budget = 10000
+{extra}
 "#
         )
     };
     let meshy = r#"{ provider = "meshy", model = "image-to-3d" }"#;
-    let routing = "[stages.build.output_routing]\n\"model/*\" = \"model\"\n";
-    let artifact = "[[stages.build.output.artifacts]]\nname = \"mesh\"\ntype = \"model/*\"\n";
+    let routing = "[graph.stages.output_routing]\n\"model/*\" = \"model\"\n";
+    let artifact = "[[graph.stages.output.artifacts]]\nname = \"mesh\"\nmime_type = \"model/*\"\n";
     let code = "output-stage-cannot-answer";
 
     let bare = lint(&manifest(meshy, "output", ""), &LintEnv::default());
@@ -3002,8 +3049,8 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
 #[test]
 fn a_model_that_does_not_write_text_is_not_the_widest_window() {
     let toml = format!(
-        "{}\n[stages.build]\nmode = \"output\"\nmodel = {{ models = [{{ provider = \"meshy\", model = \"image-to-3d\" }}] }}\ndescription = \"Builds\"\nmax_iterations = 3\n",
-        manifest_with_regions(r#"raw_findings = { kind = "temporary", budget = "38%" }"#)
+        "{}\n[[graph.stages]]\nname = \"build\"\nmode = \"output\"\nmodel = {{ models = [{{ provider = \"meshy\", model = \"image-to-3d\" }}] }}\ndescription = \"Builds\"\nmax_iterations = 3\n",
+        manifest_with_regions("name = \"raw_findings\"\nkind = \"temporary\"\nbudget = \"38%\"")
     );
     let findings = lint(&toml, &LintEnv::default_with_windows());
     let found = findings
@@ -3022,7 +3069,8 @@ fn a_model_that_does_not_write_text_is_not_the_widest_window() {
 /// what "38%" comes to is one nobody acts on.
 #[test]
 fn nothing_is_said_when_no_declared_model_has_a_known_window() {
-    let toml = manifest_with_regions(r#"raw_findings = { kind = "temporary", budget = "38%" }"#);
+    let toml =
+        manifest_with_regions("name = \"raw_findings\"\nkind = \"temporary\"\nbudget = \"38%\"");
     assert!(!codes(&lint(&toml, &LintEnv::default())).contains(&"unbounded-percentage-budget"));
 }
 
@@ -3031,23 +3079,37 @@ fn nothing_is_said_when_no_declared_model_has_a_known_window() {
 #[test]
 fn a_region_declared_in_two_layouts_is_named_once() {
     let toml = r#"
-[agent]
+[blueprint]
 name = "lint-fixture"
 version = "0.1.0"
 description = "a fixture"
 
-[stages.work]
-mode = "autonomous"
+[graph]
+
+[[graph.stages]]
+name = "work"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
 allow_complete = true
+[graph.stages.layout]
+total_budget_tokens = 0
+[[graph.stages.layout.regions]]
+name = "raw_findings"
+kind = "temporary"
+budget = "38%"
 
-[stages.work.context.regions]
-raw_findings = { kind = "temporary", budget = "38%" }
+[graph.layout]
+total_budget_tokens = 0
 
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-raw_findings = { kind = "temporary", budget = "38%" }
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "raw_findings"
+kind = "temporary"
+budget = "38%"
 "#;
     let hits = codes(&lint(toml, &LintEnv::default_with_windows()))
         .into_iter()
@@ -3066,24 +3128,34 @@ raw_findings = { kind = "temporary", budget = "38%" }
 #[test]
 fn routing_into_a_region_without_context_read_is_flagged() {
     let manifest = r#"
-[agent]
+[blueprint]
 name = "router"
 version = "0.1.0"
-entry_stage = "gather"
 
-[stages.gather]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-5" }
+[graph]
+entry = "gather"
+
+[[graph.stages]]
+name = "gather"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-available_tools = ["read_file", "web_fetch"]
+tools = ["read_file", "web_fetch"]
 system_prompt = "gather"
-
-[stages.gather.tool_routing]
+[graph.stages.tool_routing]
 default_region = "raw_findings"
 
-[context.regions]
-raw_findings = { kind = "temporary", budget = "30%" }
-conversation = { kind = "sliding_window", max_items = 20, budget = "12%" }
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "raw_findings"
+kind = "temporary"
+budget = "30%"
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = "12%"
 "#;
     let findings = lint(manifest, &LintEnv::default());
     assert!(
@@ -3099,24 +3171,34 @@ conversation = { kind = "sliding_window", max_items = 20, budget = "12%" }
 #[test]
 fn routing_with_context_read_or_to_conversation_is_not_flagged() {
     let with_grant = r#"
-[agent]
+[blueprint]
 name = "router"
 version = "0.1.0"
-entry_stage = "gather"
 
-[stages.gather]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-5" }
+[graph]
+entry = "gather"
+
+[[graph.stages]]
+name = "gather"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 5
-available_tools = ["read_file", "context_read"]
+tools = ["read_file", "context_read"]
 system_prompt = "gather"
-
-[stages.gather.tool_routing]
+[graph.stages.tool_routing]
 default_region = "raw_findings"
 
-[context.regions]
-raw_findings = { kind = "temporary", budget = "30%" }
-conversation = { kind = "sliding_window", max_items = 20, budget = "12%" }
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "raw_findings"
+kind = "temporary"
+budget = "30%"
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = "12%"
 "#;
     let to_conversation = with_grant
         .replace("\"read_file\", \"context_read\"", "\"read_file\"")
@@ -3148,7 +3230,7 @@ conversation = { kind = "sliding_window", max_items = 20, budget = "12%" }
 #[test]
 fn a_required_region_no_stage_can_write_is_warned_about() {
     let toml = manifest_with_regions(
-        r#"sources_index = { kind = "pinned", max_tokens = 2000, required = true }"#,
+        "name = \"sources_index\"\nkind = \"pinned\"\nbudget = 2000\nrequired = true",
     );
     let findings = lint(&toml, &LintEnv::default());
     let found = with_code(&findings, "required-region-unenforceable");
@@ -3173,11 +3255,11 @@ fn a_required_region_no_stage_can_write_is_warned_about() {
 #[test]
 fn a_required_region_some_stage_can_write_is_not_warned_about() {
     let toml = manifest_with_regions(
-        r#"sources_index = { kind = "pinned", max_tokens = 2000, required = true }"#,
+        "name = \"sources_index\"\nkind = \"pinned\"\nbudget = 2000\nrequired = true",
     )
     .replace(
         "allow_complete = true",
-        "allow_complete = true\navailable_tools = [\"context_append\"]",
+        "allow_complete = true\ntools = [\"context_append\"]",
     );
     let findings = lint(&toml, &LintEnv::default());
     assert!(
@@ -3187,14 +3269,14 @@ fn a_required_region_some_stage_can_write_is_not_warned_about() {
     );
 }
 
-/// Caller-seeded regions are exempt, the same exemption the runtime gate makes:
-/// the caller owns them and they are validated at spawn, so no stage ever owed
-/// one. Without this every bundled agent's `query` region would warn.
+/// Regions an input fills are exempt, the same exemption the runtime gate
+/// makes: the caller owns them and they are checked at spawn, so no stage ever
+/// owed one. Without this every bundled agent's `query` region would warn.
 #[test]
-fn a_required_caller_seeded_region_is_not_warned_about() {
+fn a_required_region_an_input_fills_is_not_warned_about() {
     let toml = manifest_with_regions(
-        r#"query = { kind = "pinned", max_tokens = 2000, required = true, seed = "task" }"#,
-    );
+        "name = \"query\"\nkind = \"pinned\"\nbudget = 2000\nrequired = true",
+    ) + "\n[[graph.inputs]]\nname = \"task\"\ntype = \"text\"\nbinds = [{ region = \"query\" }]\n";
     let findings = lint(&toml, &LintEnv::default());
     assert!(
         with_code(&findings, "required-region-unenforceable").is_empty(),
@@ -3208,13 +3290,13 @@ fn a_required_caller_seeded_region_is_not_warned_about() {
 #[test]
 fn an_unenforceable_required_region_is_named_once_across_stages() {
     let toml = manifest_with_regions(
-        r#"sources_index = { kind = "pinned", max_tokens = 2000, required = true }"#,
+        "name = \"sources_index\"\nkind = \"pinned\"\nbudget = 2000\nrequired = true",
     )
     .replace(
-        "[context.regions]",
-        "[stages.second]\nmode = \"autonomous\"\n\
+        "[graph.layout]\n",
+        "[[graph.stages]]\nname = \"second\"\n\
          model = { models = [{ provider = \"anthropic\", model = \"claude-sonnet-5\" }] }\n\
-         max_iterations = 10\nallow_complete = true\n\n[context.regions]",
+         max_iterations = 10\nallow_complete = true\n\n[graph.layout]\n",
     );
     let hits = codes(&lint(&toml, &LintEnv::default()))
         .into_iter()
@@ -3227,31 +3309,29 @@ fn an_unenforceable_required_region_is_named_once_across_stages() {
 
 /// A blueprint pinning `<provider>/<model>` on its one stage, for the builder
 /// tests below.
-fn blueprint_pinning(pairs: &[(&str, &str)]) -> leviath_runtime::spec::Blueprint {
+fn blueprint_pinning(pairs: &[(&str, &str)]) -> String {
     let listed = pairs
         .iter()
         .map(|(p, m)| format!("{{ provider = \"{p}\", model = \"{m}\" }}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let toml = manifest(&format!(
-        "[stages.main]\nmode = \"autonomous\"\n\
+    manifest(&format!(
+        "[[graph.stages]]\nname = \"main\"\n\
          model = {{ models = [{listed}] }}\nmax_iterations = 10\n"
-    ));
-    leviath_runtime::spec::manifest::parse_manifest(&toml).expect("the fixture parses")
+    ))
 }
 
 /// A blueprint naming models and leaving every route open.
-fn blueprint_open(models: &[&str]) -> leviath_runtime::spec::Blueprint {
+fn blueprint_open(models: &[&str]) -> String {
     let listed = models
         .iter()
-        .map(|m| format!("\"{m}\""))
+        .map(|m| format!("{{ model = \"{m}\" }}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let toml = manifest(&format!(
-        "[stages.main]\nmode = \"autonomous\"\n\
+    manifest(&format!(
+        "[[graph.stages]]\nname = \"main\"\n\
          model = {{ models = [{listed}] }}\nmax_iterations = 10\n"
-    ));
-    leviath_runtime::spec::manifest::parse_manifest(&toml).expect("the fixture parses")
+    ))
 }
 
 /// A natively registered provider serving a fixed set of models, for the open
@@ -3398,7 +3478,8 @@ fn a_retaining_head_model_is_an_error_under_zero_retention() {
     let registry = registry_serving(&[("openai", "gpt-5.5"), ("ollama", "q")]);
     let bp = blueprint_pinning(&[("openai", "gpt-5.5"), ("ollama", "q")]);
 
-    let env = LintEnv::default().with_retention(&bp, &zero_retention_config(), &registry);
+    let env =
+        LintEnv::default().with_retention(&graph_of(&bp), &zero_retention_config(), &registry);
     let refusals = &env.retention_refusals["main"];
     assert_eq!(refusals.len(), 1, "{refusals:?}");
     let refusal = &refusals[0];
@@ -3407,7 +3488,7 @@ fn a_retaining_head_model_is_an_error_under_zero_retention() {
     let reason = refusal.reason.as_str();
     assert!(reason.contains("30 days"), "{reason}");
 
-    let findings = lint_manifest("", &bp, &env);
+    let findings = lint(&bp, &env);
     assert_eq!(codes(&findings), ["retention-not-zero"]);
     let message = findings[0].message.as_str();
     assert!(message.contains("openai/gpt-5.5"), "{message}");
@@ -3415,9 +3496,13 @@ fn a_retaining_head_model_is_an_error_under_zero_retention() {
     let fix = findings[0].fix.clone().unwrap_or_default();
     assert!(fix.contains("zero_retention_agreements"), "{fix}");
 
-    let off = LintEnv::default().with_retention(&bp, &crate::config::Config::default(), &registry);
+    let off = LintEnv::default().with_retention(
+        &graph_of(&bp),
+        &crate::config::Config::default(),
+        &registry,
+    );
     assert!(off.retention_refusals.is_empty());
-    assert!(lint_manifest("", &bp, &off).is_empty());
+    assert!(lint(&bp, &off).is_empty());
 }
 
 /// A fallback that keeps something is a warning, since failover drops it
@@ -3433,14 +3518,15 @@ fn a_retaining_fallback_is_a_warning_under_zero_retention() {
         ("anthropic", "claude-sonnet-5"),
     ]);
 
-    let env = LintEnv::default().with_retention(&bp, &zero_retention_config(), &registry);
+    let env =
+        LintEnv::default().with_retention(&graph_of(&bp), &zero_retention_config(), &registry);
     let refusals = &env.retention_refusals["main"];
     assert_eq!(refusals.len(), 1, "{refusals:?}");
     let refusal = &refusals[0];
     assert!(!refusal.head);
     assert_eq!(refusal.route, "openai/gpt-5.5");
 
-    let findings = lint_manifest("", &bp, &env);
+    let findings = lint(&bp, &env);
     assert_eq!(codes(&findings), ["retention-fallback-dropped"]);
     assert_eq!(findings[0].severity, LintSeverity::Warning);
     let message = findings[0].message.as_str();
@@ -3448,7 +3534,7 @@ fn a_retaining_fallback_is_a_warning_under_zero_retention() {
 
     let mut config = zero_retention_config();
     config.providers.zero_retention_agreements = vec!["openai".to_string()];
-    let cleared = LintEnv::default().with_retention(&bp, &config, &registry);
+    let cleared = LintEnv::default().with_retention(&graph_of(&bp), &config, &registry);
     assert!(
         cleared.retention_refusals.is_empty(),
         "{:?}",
@@ -3468,7 +3554,7 @@ async fn a_script_providers_catalogue_reaches_the_lint() {
     let bp = blueprint_pinning(&[("groq", "llama-3.1-70b")]);
 
     let env = LintEnv::default().with_provider_catalogs(
-        &bp,
+        &graph_of(&bp),
         &crate::config::Config::default(),
         &registry,
     );
@@ -3480,9 +3566,7 @@ async fn a_script_providers_catalogue_reaches_the_lint() {
         ]))
     );
     assert!(
-        lint_manifest("", &bp, &env)
-            .iter()
-            .any(|f| f.code == "unserved-model"),
+        lint(&bp, &env).iter().any(|f| f.code == "unserved-model"),
         "the catalogue is what makes the model checkable"
     );
 }
@@ -3505,7 +3589,7 @@ async fn a_providers_reason_for_refusing_reaches_the_lint() {
     let bp = blueprint_pinning(&[("codexish", "gpt-5.3-spark")]);
 
     let env = LintEnv::default().with_provider_catalogs(
-        &bp,
+        &graph_of(&bp),
         &crate::config::Config::default(),
         &registry,
     );
@@ -3517,7 +3601,7 @@ async fn a_providers_reason_for_refusing_reaches_the_lint() {
         Some("your ChatGPT plus plan does not include it")
     );
     // And the finding carries it rather than the generic wording.
-    let message = &lint_manifest("", &bp, &env)
+    let message = &lint(&bp, &env)
         .into_iter()
         .find(|f| f.code == "unserved-model")
         .expect("the catalogue makes it checkable")
@@ -3537,7 +3621,7 @@ async fn a_provider_with_no_reason_adds_none() {
     let bp = blueprint_pinning(&[("plain", "nope")]);
 
     let env = LintEnv::default().with_provider_catalogs(
-        &bp,
+        &graph_of(&bp),
         &crate::config::Config::default(),
         &registry,
     );
@@ -3556,7 +3640,7 @@ async fn a_silent_script_provider_is_recorded_as_such() {
     let bp = blueprint_pinning(&[("quiet", "anything")]);
 
     let env = LintEnv::default().with_provider_catalogs(
-        &bp,
+        &graph_of(&bp),
         &crate::config::Config::default(),
         &registry,
     );
@@ -3577,7 +3661,7 @@ async fn an_unreachable_provider_is_left_out_of_the_map() {
     let bp = blueprint_pinning(&[("nobody-has-this", "some-model")]);
 
     let env = LintEnv::default().with_provider_catalogs(
-        &bp,
+        &graph_of(&bp),
         &crate::config::Config::default(),
         &registry,
     );
@@ -3600,7 +3684,7 @@ async fn a_provider_named_twice_is_asked_once() {
     let bp = blueprint_pinning(&[("groq", "llama-4-scout"), ("groq", "llama-3.1-70b")]);
 
     let env = LintEnv::default().with_provider_catalogs(
-        &bp,
+        &graph_of(&bp),
         &crate::config::Config::default(),
         &registry,
     );
@@ -3623,7 +3707,7 @@ async fn an_open_entry_is_routed_through_the_default_script_provider() {
         ..crate::config::Config::default()
     };
 
-    let env = LintEnv::default().with_provider_catalogs(&bp, &config, &registry);
+    let env = LintEnv::default().with_provider_catalogs(&graph_of(&bp), &config, &registry);
 
     assert_eq!(
         env.unrouted_models,
@@ -3649,7 +3733,7 @@ fn a_native_provider_answers_the_open_route_question() {
     let bp = blueprint_open(&["claude-sonnet-5", "nobody-serves-this"]);
 
     let env = LintEnv::default().with_provider_catalogs(
-        &bp,
+        &graph_of(&bp),
         &crate::config::Config::default(),
         &registry,
     );
@@ -3679,7 +3763,7 @@ fn a_silent_native_provider_is_not_reported_as_unchecked() {
     let bp = blueprint_pinning(&[("anthropic", "claude-sonnet-5")]);
 
     let env = LintEnv::default().with_provider_catalogs(
-        &bp,
+        &graph_of(&bp),
         &crate::config::Config::default(),
         &registry,
     );
@@ -3695,58 +3779,70 @@ fn a_silent_native_provider_is_not_reported_as_unchecked() {
 #[test]
 fn a_stage_taking_mime_its_models_cannot_see_is_warned_once() {
     let manifest = r#"
-[agent]
+[blueprint]
 name = "artist"
 version = "0.1.0"
 description = "d"
 
-[stages.look]
-mode = "autonomous"
+[graph]
+
+[[graph.stages]]
+name = "look"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Main"
 max_iterations = 10
-available_tools = ["read_file"]
+tools = ["read_file"]
 
-[stages.listen]
-mode = "autonomous"
+[[graph.stages]]
+name = "listen"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Hears"
 max_iterations = 10
-available_tools = ["read_file"]
-[stages.listen.input]
-accepts = ["audio/*"]
+tools = ["read_file"]
+input_accepts = ["audio/*"]
 
-[stages.hears_anyway]
-mode = "autonomous"
+[[graph.stages]]
+name = "hears_anyway"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }, { provider = "gemini", model = "gemini-2.5-pro" }] }
 description = "Hears"
 max_iterations = 10
-available_tools = ["read_file"]
-[stages.hears_anyway.input]
-accepts = ["audio/*"]
+tools = ["read_file"]
+input_accepts = ["audio/*"]
 
-[stages.open_route]
-mode = "autonomous"
+[[graph.stages]]
+name = "open_route"
 model = { models = [{ model = "something" }] }
 description = "Unknown"
 max_iterations = 10
-available_tools = ["read_file"]
-[stages.open_route.input]
-accepts = ["audio/*"]
+tools = ["read_file"]
+input_accepts = ["audio/*"]
 
-[stages.mixed]
-mode = "autonomous"
+[[graph.stages]]
+name = "mixed"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Sees the pictures, not the sound"
 max_iterations = 10
-available_tools = ["read_file"]
-[stages.mixed.input]
-accepts = ["audio/*", "image/*"]
+tools = ["read_file"]
+input_accepts = ["audio/*", "image/*"]
 
-[context.regions]
-task = { kind = "pinned", max_tokens = 1000 }
-storyboard = { kind = "pinned", max_tokens = 1000, accepts = ["image/*"] }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "storyboard"
+kind = "pinned"
+budget = 1000
+accepts = ["image/*"]
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 50 }
+budget = 10000
 "#;
     let findings = lint(manifest, &LintEnv::default());
     assert!(with_code(&findings, "tool-accepts-ungranted").is_empty());
@@ -3792,23 +3888,24 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 fn a_tool_limit_on_an_ungranted_tool_is_said_once() {
     let text = manifest(
         r#"
-[stages.named]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-5" }
+
+[[graph.stages]]
+name = "named"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Named"
 max_iterations = 10
-available_tools = ["read_file", "spawn_agent"]
-[stages.named.tool_accepts]
+tools = ["read_file", "spawn_agent"]
+[graph.stages.tool_accepts]
 spawn_agent = ["image/*"]
 ghost = ["audio/*", "video/mp4"]
 
-[stages.grouped]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-5" }
+[[graph.stages]]
+name = "grouped"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 description = "Grouped"
 max_iterations = 10
-available_tools = ["@builtin"]
-[stages.grouped.tool_accepts]
+tools = ["@builtin"]
+[graph.stages.tool_accepts]
 ghost = ["audio/*"]
 "#,
     );
@@ -3827,7 +3924,7 @@ ghost = ["audio/*"]
         said[0]
             .fix
             .as_deref()
-            .is_some_and(|f| f.contains("available_tools"))
+            .is_some_and(|f| f.contains("the stage's tools"))
     );
 }
 
@@ -3838,13 +3935,13 @@ ghost = ["audio/*"]
 fn a_blueprint_that_loosens_a_tool_is_told_the_runtime_clamps_it() {
     let toml = manifest(
         r#"
-[stages.main]
-mode = "autonomous"
+
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["shell", "write_file", "read_file", "web_search"]
-
-[stages.main.tool_permissions]
+tools = ["shell", "write_file", "read_file", "web_search"]
+[graph.stages.tool_permissions]
 shell = "allow"
 write_file = "allow"
 read_file = "allow"
@@ -3884,47 +3981,59 @@ web_search = "allow"
         "{strict:?}"
     );
 
-    // The agent-level table is checked too, once per tool.
-    let agent_level = manifest(
+    // The graph-level table is checked too, once per tool.
+    let graph_level = manifest(
         r#"
-[tool_permissions]
-write_file = "allow"
 
-[stages.main]
-mode = "autonomous"
+[[graph.stages]]
+name = "main"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 max_iterations = 10
-available_tools = ["write_file"]
+tools = ["write_file"]
+
+[graph.tool_permissions]
+write_file = "allow"
 "#,
     );
-    let findings = lint(&agent_level, &LintEnv::default());
+    let findings = lint(&graph_level, &LintEnv::default());
     let clamped = with_code(&findings, "blueprint-permission-clamped");
     assert_eq!(clamped.len(), 1, "{:?}", codes(&findings));
     assert!(
-        clamped[0].message.contains("[tool_permissions]"),
+        clamped[0].message.contains("the graph's tool_permissions"),
         "{clamped:?}"
     );
 }
 
-/// A manifest whose stage runs on `provider/model` with regions totalling
+/// A blueprint whose stage runs on `provider/model` with regions totalling
 /// `conversation_tokens` beside a small pinned one.
 fn manifest_on(provider: &str, model: &str, conversation_tokens: usize) -> String {
     format!(
         r#"
-[agent]
+[blueprint]
 name = "lint-fixture"
 version = "0.1.0"
 description = "a fixture"
 
-[stages.work]
-mode = "autonomous"
+[graph]
+
+[[graph.stages]]
+name = "work"
 model = {{ models = [{{ provider = "{provider}", model = "{model}" }}] }}
 max_iterations = 10
 allow_complete = true
 
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = {conversation_tokens} }}
+[graph.layout]
+total_budget_tokens = 0
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = {{ kind = "sliding_window", max_items = 50 }}
+budget = {conversation_tokens}
 "#
     )
 }
@@ -3966,4 +4075,202 @@ fn a_stage_that_can_reach_a_long_context_tier_gets_a_note_and_nothing_more() {
     env.model_windows
         .insert(("google".into(), "gemini-unlisted".into()), 1_000_000);
     assert!(!codes(&lint(&unknown, &env)).contains(&"long-context-price"));
+}
+
+// ─── Graph helpers ────────────────────────────────────────────────────────────
+
+/// A region named in both the graph's layout and a stage's is listed once,
+/// from whichever layout names it first, and a seed only a stage's layout
+/// declares is listed too.
+#[test]
+fn seeds_in_stage_layouts_are_listed_once_per_region() {
+    let toml = manifest(
+        r#"
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+[graph.stages.layout]
+total_budget_tokens = 0
+[[graph.stages.layout.regions]]
+name = "facts"
+kind = "pinned"
+budget = 1000
+seed = { command = "ls stage" }
+[[graph.stages.layout.regions]]
+name = "env"
+kind = "pinned"
+budget = 1000
+seed = { tools = { calls = [{ tool = "current_time", args = {} }] } }
+"#,
+    ) + "\n[[graph.layout.regions]]\nname = \"facts\"\nkind = \"pinned\"\nbudget = 1000\n\
+         seed = { command = \"ls graph\" }\n";
+    let findings = lint(&toml, &LintEnv::default());
+    let commands = with_code(&findings, "command-seed");
+    assert_eq!(commands.len(), 1, "{findings:?}");
+    assert!(commands[0].message.contains("1 region(s)"), "{commands:?}");
+    assert!(commands[0].message.contains("ls graph"), "{commands:?}");
+    assert!(!commands[0].message.contains("ls stage"), "{commands:?}");
+    let tools = with_code(&findings, "tool-seed");
+    assert!(tools[0].message.contains("env: current_time"), "{tools:?}");
+}
+
+#[test]
+fn every_group_has_its_token_and_all_covers_the_rest() {
+    let tokens: Vec<&str> = [
+        ToolGroup::All,
+        ToolGroup::Builtin,
+        ToolGroup::Subagent,
+        ToolGroup::Scripts,
+        ToolGroup::Mcp,
+    ]
+    .into_iter()
+    .map(group_token)
+    .collect();
+    assert_eq!(
+        tokens,
+        ["@all", "@builtin", "@subagent", "@scripts", "@mcp"]
+    );
+    assert!(covers(ToolGroup::All, ToolGroup::Mcp));
+    assert!(covers(ToolGroup::Mcp, ToolGroup::Mcp));
+    assert!(!covers(ToolGroup::Mcp, ToolGroup::Builtin));
+}
+
+/// A share is rounded, capped by `max`, then floored by `min`, so a floor
+/// above the cap wins; a fixed budget ignores the window.
+#[test]
+fn a_budget_resolves_against_a_window() {
+    use leviath_runtime::spec::graph::Budget;
+    assert_eq!(resolve_budget(&Budget::Tokens(500), 1_000_000), 500);
+    let share = |min, max| Budget::Percent {
+        percent: 0.5,
+        min,
+        max,
+    };
+    assert_eq!(resolve_budget(&share(None, None), 1000), 500);
+    assert_eq!(resolve_budget(&share(None, Some(100)), 1000), 100);
+    assert_eq!(resolve_budget(&share(Some(800), None), 1000), 800);
+    assert_eq!(resolve_budget(&share(Some(800), Some(100)), 1000), 800);
+}
+
+/// A stage's own `input_accepts` wins; without one it takes what the regions
+/// it sees accept, a hidden region and text left out, and a region accepting
+/// anything reported as `*/*`.
+#[test]
+fn a_stage_takes_what_its_visible_regions_accept() {
+    let toml = manifest(
+        r#"
+[[graph.stages]]
+name = "sees"
+hide = ["hidden"]
+
+[[graph.stages]]
+name = "own"
+input_accepts = ["audio/*"]
+"#,
+    ) + "\n[[graph.layout.regions]]\nname = \"pics\"\nkind = \"pinned\"\nbudget = 10\n\
+         accepts = [\"image/*\", \"text/markdown\"]\n\
+         \n[[graph.layout.regions]]\nname = \"hidden\"\nkind = \"pinned\"\nbudget = 10\n\
+         accepts = [\"video/*\"]\n";
+    let graph = graph_of(&toml);
+    // The two fixture regions accept anything, so `*/*` comes first.
+    assert_eq!(
+        stage_inputs(&graph, &graph.stages[0]),
+        ["*/*", "image/*"],
+        "{toml}"
+    );
+    assert_eq!(stage_inputs(&graph, &graph.stages[1]), ["audio/*"]);
+}
+
+/// An input bound to something other than a region gives a work item nowhere
+/// to land either.
+#[test]
+fn an_input_bound_only_to_a_stage_setting_does_not_hold_work_items() {
+    let toml = manifest(
+        r#"
+[[graph.stages]]
+name = "split"
+mode = { fan_out = { worker = { stage = "work" } } }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+
+[[graph.stages]]
+name = "work"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+max_iterations = 5
+allow_as_worker = true
+
+[[graph.inputs]]
+name = "rounds"
+type = "int"
+binds = [{ stage_max_iterations = "work" }]
+"#,
+    );
+    assert_eq!(
+        codes(&lint(&toml, &LintEnv::default())),
+        ["fanout-worker-task-unheld"]
+    );
+}
+
+/// A graph with edges and no stages has no entry to walk from, and two edges
+/// joining the same pair of stages are judged once.
+#[test]
+fn the_graph_walk_needs_an_entry_and_judges_each_pair_once() {
+    let empty = manifest("stages = []\n[[graph.edges]]\nname = \"x\"\nfrom = \"a\"\nto = \"b\"\n");
+    assert!(lint_graph(&graph_of(&empty)).is_empty());
+
+    let stage = |name: &str| {
+        format!(
+            "[[graph.stages]]\nname = \"{name}\"\n\
+             model = {{ models = [{{ provider = \"anthropic\", model = \"claude-sonnet-5\" }}] }}\n\
+             max_iterations = 5\n"
+        )
+    };
+    let edge = |name: &str, from: &str, to: &str| {
+        format!("[[graph.edges]]\nname = \"{name}\"\nfrom = \"{from}\"\nto = \"{to}\"\n")
+    };
+    let toml = manifest(&format!(
+        "{}{}{}{}{}",
+        stage("a"),
+        stage("b"),
+        edge("b", "a", "b"),
+        edge("again", "a", "b"),
+        edge("a", "b", "a"),
+    ));
+    let cycles = with_code(
+        &lint(&toml, &LintEnv::default()),
+        "cycle-without-max-revisits",
+    )
+    .len();
+    assert_eq!(cycles, 2);
+}
+
+#[test]
+fn a_policy_reads_as_a_blueprint_writes_it() {
+    use leviath_core::policy::ToolPolicy;
+    assert_eq!(policy_word(ToolPolicy::Allow), "allow");
+    assert_eq!(policy_word(ToolPolicy::Ask), "ask");
+    assert_eq!(policy_word(ToolPolicy::Deny), "deny");
+}
+
+/// A stage whose head model cannot be chosen at all here is left to the
+/// spawn, which says why; the retention check has nothing to judge.
+#[test]
+fn a_stage_with_no_choosable_model_is_not_judged_for_retention() {
+    let env = LintEnv::default().with_retention(
+        &graph_of(&blueprint_pinning(&[("nobody-has-this", "m")])),
+        &zero_retention_config(),
+        &leviath_runtime::ProviderRegistry::new(),
+    );
+    assert!(env.retention_refusals.is_empty());
+}
+
+/// Which pinned providers this install can reach is asked of the registry
+/// the config builds; one it does not have is left out.
+#[test]
+fn the_reachable_providers_come_from_the_config() {
+    let env = LintEnv::default().with_providers(
+        &graph_of(&blueprint_pinning(&[("nobody-has-this", "m")])),
+        &crate::config::Config::default(),
+    );
+    assert_eq!(env.available_providers, Some(HashSet::new()));
 }

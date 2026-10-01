@@ -22,7 +22,6 @@ fn plan_with(method: InstallMethod) -> CorePlan {
         method,
         binary,
         agents: Vec::new(),
-        rewrites: Vec::new(),
         migrations: Vec::new(),
         config: ConfigState::Unreadable("no config here".to_string()),
     }

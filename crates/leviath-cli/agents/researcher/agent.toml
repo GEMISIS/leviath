@@ -32,9 +32,12 @@ required = true
 binds = [{ region = "query" }]
 
 # Optional caller bounds: --scope "peer-reviewed sources since 2020 only".
+# A fan-out that runs this blueprint as its worker puts what the worker's
+# answer is for here.
 [[graph.inputs]]
 name = "scope"
 type = { kind = "text", multiline = true }
+description = "Bounds on the research, or, for a fan-out worker, what its answer is for."
 binds = [{ region = "scope" }]
 
 # ─── Context layout ──────────────────────────────────────────────────────────
@@ -226,7 +229,8 @@ forum, or vendor claim. FIRST, before the broad search: read the task and count 
 
 Several INDEPENDENT subjects - separate companies, systems, incidents, products,
 each with its own sources and its own answer, no shared thread - call the
-`fan_out` tool RIGHT NOW, one item per subject, `agent` set to "researcher".
+`fan_out` tool RIGHT NOW, one item per subject, `agent` set to "researcher",
+each item's `inputs.task` naming its subject.
 That is how you split; you do not need to finish this stage first. It researches them in parallel and hands the findings back. Do one
 orienting search if you need it, then go; do not research them one at a time.
 Researching five subjects yourself costs five times what splitting them costs
@@ -481,7 +485,10 @@ one - different companies, systems, standards or approaches, each needing its
 own reading. Worth checking for every time.
 
 Name one sub-question per subject, as a JSON array:
-[{"id": "...", "context": {"question": "...", "why": "..."}}]
+[{"id": "...", "inputs": {"task": "<the sub-question>", "scope": "<why it matters to this thread>"}}]
+
+Each item's inputs are the worker's own: "task" is the question it
+researches, and "scope" what its answer is for. Nothing else reaches it.
 
 The unit is a SUBJECT, not a source:
 - Several distinct subjects is several items. They do not overlap.

@@ -68,7 +68,7 @@ pub(crate) fn blueprint_source(blueprint: &str) -> Result<SpawnSource, String> {
     let installed = leviath_core::paths::agents_dir().filter(|dir| {
         bare && dir
             .join(blueprint)
-            .join(leviath_core::files::MANIFEST_FILENAME)
+            .join(leviath_blueprint::FILE_NAME)
             .is_file()
     });
     if installed.is_some()
@@ -77,7 +77,7 @@ pub(crate) fn blueprint_source(blueprint: &str) -> Result<SpawnSource, String> {
         return Ok(SpawnSource::Blueprint(reference));
     }
     let manifest =
-        crate::commands::run::manifest::find_manifest(blueprint).map_err(|e| e.to_string())?;
+        crate::commands::run::locate::find_blueprint(blueprint).map_err(|e| e.to_string())?;
     let manifest = std::fs::canonicalize(&manifest).unwrap_or(manifest);
     let dir = manifest.parent().map(Path::to_path_buf).unwrap_or_default();
     // A path into the installed blueprints names the installed blueprint.

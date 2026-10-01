@@ -291,7 +291,7 @@ async fn a_bound_run_carries_what_only_the_daemon_knows() {
         .get::<leviath_runtime::persistence::RunMetadata>(entity)
         .unwrap();
     assert!(
-        meta.agent_path.ends_with("agent.leviath"),
+        meta.agent_path.ends_with("agent.toml"),
         "{}",
         meta.agent_path
     );

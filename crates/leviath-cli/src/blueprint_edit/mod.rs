@@ -1,32 +1,27 @@
-//! Editing an agent blueprint (`agent.leviath`) as a document.
+//! Editing an agent blueprint (`agent.toml`) as a document.
 //!
-//! The dashboard's agent editor needs to change one thing about a manifest at
-//! a time and hand back a file the author would still recognise: their
-//! comments, their key order, their formatting. Nothing in the tree could do
-//! that. `parse_manifest` reads a manifest into a [`Blueprint`], but there is
-//! no writer for one, and `toml` re-emits from values, so every comment a
-//! bundled agent carries would vanish on the first edit. So the editing model
-//! keeps the manifest as a `toml_edit` document, the one source of truth, and
-//! derives typed views from it on demand: [`ManifestDoc::stages`],
+//! The dashboard's agent editor needs to change one thing about a blueprint
+//! at a time and hand back a file the author would still recognise: their
+//! comments, their key order, their formatting. `BlueprintFile::to_toml`
+//! writes a tidy file from values, so every comment a bundled blueprint
+//! carries would vanish on the first edit. So the editing model keeps the
+//! file as a `toml_edit` document, the one source of truth, and derives
+//! typed views from it on demand: [`ManifestDoc::stages`],
 //! [`ManifestDoc::edges`], [`ManifestDoc::effective_regions`]. Keys the views
-//! do not surface (fan-out policies the editor leaves alone, `[compaction]`,
-//! table-shaped seeds, custom gates) round-trip untouched.
+//! do not surface (the fan-out's split prompt, `compaction`, a region's own
+//! `seed`, the richer gates) round-trip untouched.
 //!
 //! The mutators refuse rather than produce a broken document: a name that is
-//! not a name, a duplicate, a transition to a stage that does not exist, the
-//! last stage deleted, all come back as an [`EditError`] and leave the
-//! document as it was. What they cannot refuse (a stage with no model, an
-//! unreachable stage) is [`check`]'s job, which runs the same parse, validate
-//! and lint pass `lev validate` and the daemon's `POST /api/blueprints/validate`
-//! run.
+//! not a name, a duplicate, a path to a stage that does not exist, the last
+//! stage deleted, all come back as an [`EditError`] and leave the document
+//! as it was. What they cannot refuse (a fan-out with no worker yet, an
+//! unreachable stage) is [`check`]'s job, which reads the file and checks
+//! its graph the way `lev validate` does, then lints it.
 //!
-//! The rules match The Lair's editor field for field (`blueprint/editable.ts`
-//! in the leviath.dev repo), so an agent built here and one built there are
-//! the same file: an empty string deletes a key rather than writing `""`; a
-//! `direct` transform is written as absent; a new path is `hint = "Continue
-//! here when appropriate"`; a new region is `pinned`, `5%`, `4000` tokens.
-//!
-//! [`Blueprint`]: leviath_runtime::spec::Blueprint
+//! The rules match The Lair's editor where the two overlap: an empty string
+//! deletes a key rather than writing `""`; a `direct` carry is written as
+//! absent; a new path is `hint = "Continue here when appropriate"`; a new
+//! region is `pinned` at `5%`.
 
 pub(crate) mod catalog;
 pub(crate) mod check;
@@ -61,11 +56,11 @@ pub(crate) enum EditError {
     /// The text is not TOML.
     #[error("not valid TOML: {0}")]
     Toml(String),
-    /// The manifest has no `[agent]` table.
-    #[error("the manifest has no [agent] table")]
-    NoAgent,
-    /// The manifest has no `[stages.<name>]` table at all.
-    #[error("the manifest has no stages")]
+    /// The file has no `[blueprint]` table.
+    #[error("the file has no [blueprint] table")]
+    NoBlueprint,
+    /// The file's graph has no stage at all.
+    #[error("the file has no stages")]
     NoStages,
     /// A stage, region or agent name outside the runtime's charset.
     #[error("\"{0}\" will not work as a name: letters, digits, `.`, `_` and `-` only")]
@@ -79,7 +74,7 @@ pub(crate) enum EditError {
     /// No region of that name in that layout.
     #[error("there is no region named \"{0}\"")]
     NoSuchRegion(String),
-    /// No transition from the first stage to the second.
+    /// No edge from the first stage to the second.
     #[error("there is no path from \"{0}\" to \"{1}\"")]
     NoSuchEdge(String, String),
     /// Deleting this stage would leave the agent with none.

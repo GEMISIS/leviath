@@ -2016,18 +2016,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_blueprint_valid() {
         let app = test_app();
-        let manifest = r#"
-[agent]
-name = "test-agent"
-version = "0.1.0"
-description = "A test"
-
-[stages.main]
-mode = "autonomous"
-[stages.main.model]
-provider = "anthropic"
-model = "claude-sonnet-4-6"
-"#;
+        let manifest = crate::test_support::tiny_blueprint("test-agent");
         let body = serde_json::json!({ "manifest": manifest });
         let req = Request::builder()
             .method("POST")
@@ -2290,15 +2279,7 @@ model = "claude-sonnet-4-6"
     async fn test_full_router_update_blueprint_not_found() {
         let app = test_app();
         let body = serde_json::json!({
-            "manifest": r#"
-[agent]
-name = "no-such-agent"
-version = "1.0.0"
-description = "Missing"
-
-[stages.run]
-system_prompt = "Run"
-"#
+            "manifest": crate::test_support::tiny_blueprint("no-such-agent-xyz-99999")
         });
         let req = Request::builder()
             .method("PUT")

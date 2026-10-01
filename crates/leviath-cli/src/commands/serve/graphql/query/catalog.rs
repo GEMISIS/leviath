@@ -251,11 +251,20 @@ pub(crate) async fn tools(
 /// A bare list rather than a connection: this build compiles the set in, so it
 /// is bounded by the code rather than by anything on the machine.
 pub(crate) async fn tool_groups() -> Vec<ToolGroup> {
-    leviath_runtime::spec::blueprint::ToolGroup::ALL
+    super::super::super::tools::TOOL_GROUPS
         .iter()
-        .map(|group| ToolGroup {
-            name: group.token().to_string(),
-            description: group.describe().to_string(),
+        .map(|(_, token, description)| ToolGroup {
+            name: token.to_string(),
+            description: description.to_string(),
         })
         .collect()
+}
+
+/// The token a blueprint writes for a group in a stage's `tools`.
+pub(crate) fn group_token(group: leviath_runtime::spec::graph::ToolGroup) -> &'static str {
+    super::super::super::tools::TOOL_GROUPS
+        .iter()
+        .find(|(g, _, _)| *g == group)
+        .map(|(_, token, _)| *token)
+        .expect("every tool group has a row")
 }

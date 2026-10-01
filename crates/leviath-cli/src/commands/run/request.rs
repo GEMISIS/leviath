@@ -122,7 +122,7 @@ struct Source {
     /// What the run is called and what it does, for the editor's template.
     name: String,
     description: String,
-    /// The blueprint's manifest, for the warnings read from it. Empty for a
+    /// The blueprint's `agent.toml`, for the warnings read from it. Empty for a
     /// raw graph.
     manifest: PathBuf,
 }
@@ -294,7 +294,7 @@ fn source(path: Option<&str>, request_file: Option<&Path>) -> anyhow::Result<Sou
         decls: loaded.graph.inputs,
         name: loaded.reference.name.to_string(),
         description: loaded.graph.description.unwrap_or_default(),
-        manifest: loaded.base_dir.join(leviath_core::files::MANIFEST_FILENAME),
+        manifest: loaded.base_dir.join(leviath_blueprint::FILE_NAME),
         request,
     })
 }

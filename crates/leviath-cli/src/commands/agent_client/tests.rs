@@ -335,15 +335,17 @@ fn blueprint_args() -> (tempfile::TempDir, AgentClientArgs) {
     let dir = root.path().join("coder");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
-        dir.join("agent.leviath"),
+        dir.join("agent.toml"),
         r#"
-[agent]
+[blueprint]
 name = "coder"
 version = "1.0.0"
 description = "test"
 
-[stages.implement]
-system_prompt = "Do it"
+[graph]
+stages = [{ name = "implement", system_prompt = "Do it" }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "task", kind = "pinned", budget = 1000 }] }
+inputs = [{ name = "task", type = "text", required = true, binds = [{ region = "task" }] }]
 "#,
     )
     .unwrap();

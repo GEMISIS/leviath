@@ -116,9 +116,9 @@ pub(crate) async fn update_blueprint(
 
 /// Uninstall a blueprint.
 ///
-/// Runs that used it keep their own copy of the manifest, so their history is
-/// unaffected: `run.blueprint` still answers. A name nothing is installed under
-/// is `NOT_FOUND`.
+/// Runs that used it keep the graph they ran in their own files, so their
+/// history is unaffected: `run.blueprint` still answers. A name nothing is
+/// installed under is `NOT_FOUND`.
 pub(crate) async fn delete_blueprint(
     ctx: &Context<'_>,
     request: DeleteBlueprintRequest,

@@ -19,7 +19,7 @@ use axum::extract::{FromRequest, Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
-use leviath_runtime::spec::names::{BlueprintPath, MimePattern};
+use leviath_runtime::spec::names::MimePattern;
 use leviath_runtime::spec::request::{Attachment, Bytes, SpawnRequest};
 
 use super::core::error::as_api_error;
@@ -86,19 +86,19 @@ pub(super) async fn blueprint_inputs(
 ) -> Result<Json<Vec<leviath_runtime::spec::inputs::InputDecl>>, ApiError> {
     let roots = super::blueprints::blueprint_roots(&state.current_config());
     let listed = super::blocking::blocking(move || super::blueprints::discover_in(roots)).await;
-    let path = listed
+    let found = listed
         .into_iter()
         .find(|blueprint| blueprint.name == name)
-        .and_then(|found| std::path::absolute(found.path).ok())
-        .and_then(|dir| BlueprintPath::new(dir.to_string_lossy()).ok())
         .ok_or_else(|| {
             err(
                 StatusCode::NOT_FOUND,
                 format!("Blueprint '{name}' not found"),
             )
         })?;
-    let loaded = crate::daemon::resolve_env::load_file(&path)
-        .map_err(|issue| err(StatusCode::UNPROCESSABLE_ENTITY, issue.to_string()))?;
+    // Checked as a spawn would check it: inputs read off a graph that does
+    // not hold together would offer a form for a run that cannot start.
+    let loaded = leviath_blueprint::validate(std::path::Path::new(&found.path))
+        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     Ok(Json(loaded.graph.inputs))
 }
 

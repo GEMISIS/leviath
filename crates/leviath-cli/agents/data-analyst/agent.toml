@@ -26,6 +26,15 @@ name = "constraints"
 type = { kind = "text", multiline = true }
 binds = [{ region = "constraints" }]
 
+# The columns every worker gathers, verbatim from `schema`: what `split` hands
+# each `gather_worker`, whose slice arrives as its `task`. A run started by a
+# person leaves it out; the scope stage writes `schema` itself.
+[[graph.inputs]]
+name = "columns"
+type = { kind = "text", multiline = true }
+description = "For a gather worker: the table's columns, verbatim from the scope stage's schema."
+binds = [{ region = "columns" }]
+
 # ─── Context layout ───────────────────────────────────────────────────────────
 [graph.layout]
 total_budget_tokens = 0
@@ -47,6 +56,9 @@ regions = [
     # found and `build` folds in the distinct refs the workers returned; both
     # grant context tools, so the gate has somewhere to bind.
     { name = "sources_index", kind = "pinned", budget = "3%", volatility = "grows", required = true, required_message = 'You have not recorded a single source in `sources_index`. Append one line per publisher you would draw numbers from (context_append, region="sources_index"): `[n] <publisher/dataset> - <url> - <what it covers> - <how current>`. If the searches came back empty or unavailable, record THAT - a table nobody can trace is worse than a smaller one that is sourced.' },
+    # A gather worker's copy of the columns, from its work item. Empty in the
+    # run that splits the work.
+    { name = "columns", kind = "pinned", budget = "2%", volatility = "stable" },
     # What to distrust in the result. Read by the present stage.
     { name = "caveats", kind = "pinned", budget = "2%", volatility = "grows" },
 
@@ -180,9 +192,10 @@ divides this subject without two workers collecting the same rows.
 
 Call `fan_out` with one entry in `items` per work item:
 
-  items: [{"id": "<short-slug>", "context": {"slice": "<what to gather>", "schema": "<the columns, verbatim from the schema region>"}}]
+  items: [{"id": "<short-slug>", "inputs": {"task": "<the slice to gather>", "columns": "<the columns, verbatim from the schema region>"}}]
 
-Every item MUST carry the schema: workers do not share this agent's context, so
+Those two are the only inputs a worker takes. Every item MUST carry the columns:
+workers do not share this agent's context, so
 the work item is all they get. A worker with no schema cannot produce rows that
 line up with anyone else's.
 
@@ -216,8 +229,8 @@ max_iterations = 25
 allow_as_worker = true
 require_output = true
 system_prompt = """
-Gather data for ONE slice. Your work item holds the slice and the column schema
-every worker is using - it is all the context you get, so work from it.
+Gather data for ONE slice. `subject` holds your slice and `columns` the column
+schema every worker is using - it is all the context you get, so work from it.
 
 1. Search for the data, then fetch the pages that actually carry numbers.
    Statistical agencies, filings, and dataset publishers beat articles quoting

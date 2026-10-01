@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_runtime::spec::Blueprint as CoreBlueprint;
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 use super::super::blueprint::Region;
 
@@ -20,9 +20,9 @@ pub(crate) enum UnattendedPolicy {
     Ask,
 }
 
-impl From<leviath_runtime::spec::blueprint::UnattendedPolicy> for UnattendedPolicy {
-    fn from(policy: leviath_runtime::spec::blueprint::UnattendedPolicy) -> Self {
-        use leviath_runtime::spec::blueprint::UnattendedPolicy as Core;
+impl From<leviath_runtime::spec::graph::UnattendedPoint> for UnattendedPolicy {
+    fn from(policy: leviath_runtime::spec::graph::UnattendedPoint) -> Self {
+        use leviath_runtime::spec::graph::UnattendedPoint as Core;
         match policy {
             Core::AutoApprove => Self::AutoApprove,
             Core::Ask => Self::Ask,
@@ -42,9 +42,9 @@ pub(crate) enum InteractionPointStyle {
     Confirm,
 }
 
-impl From<&leviath_runtime::spec::blueprint::InteractionStyle> for InteractionPointStyle {
-    fn from(style: &leviath_runtime::spec::blueprint::InteractionStyle) -> Self {
-        use leviath_runtime::spec::blueprint::InteractionStyle as Core;
+impl From<&leviath_runtime::spec::graph::AnswerStyle> for InteractionPointStyle {
+    fn from(style: &leviath_runtime::spec::graph::AnswerStyle) -> Self {
+        use leviath_runtime::spec::graph::AnswerStyle as Core;
         match style {
             Core::FreeText => Self::FreeText,
             Core::MultipleChoice => Self::MultipleChoice,
@@ -68,9 +68,9 @@ pub(crate) struct DirectiveEntry {
 /// The resolver state behind the `InteractionPoint` type.
 pub(crate) struct InteractionPoint {
     /// The blueprint the document region resolves in.
-    blueprint: Arc<CoreBlueprint>,
+    blueprint: Arc<ParsedBlueprint>,
     /// The point as the stage wrote it.
-    point: leviath_runtime::spec::blueprint::InteractionPoint,
+    point: leviath_runtime::spec::graph::InteractionPointDef,
 }
 
 /// A checkpoint a stage raises, where the run waits for a person.
@@ -113,17 +113,14 @@ impl InteractionPoint {
     /// letting it transition, sorted by option so two reads of one blueprint
     /// cannot disagree about the order.
     async fn directives(&self) -> Vec<DirectiveEntry> {
-        let mut directives: Vec<DirectiveEntry> = self
-            .point
+        self.point
             .directives
             .iter()
             .map(|(option, instruction)| DirectiveEntry {
                 option: option.clone(),
                 instruction: instruction.clone(),
             })
-            .collect();
-        directives.sort_by(|a, b| a.option.cmp(&b.option));
-        directives
+            .collect()
     }
 
     /// Options that cancel the run outright, with no further inference.
@@ -144,20 +141,26 @@ impl InteractionPoint {
     /// Null when the point names none, and also when it names a region no layout
     /// in this blueprint declares. `documentRegionName` tells those apart.
     async fn document_region(&self) -> Option<Region> {
-        super::refs::region(&self.blueprint, self.point.document_region.as_deref()?)
+        super::refs::region(
+            &self.blueprint,
+            self.point.document_region.as_ref()?.as_str(),
+        )
     }
 
     /// The document region's name, verbatim. Null when the point names none.
     async fn document_region_name(&self) -> Option<&str> {
-        self.point.document_region.as_deref()
+        self.point
+            .document_region
+            .as_ref()
+            .map(|name| name.as_str())
     }
 }
 
 impl InteractionPoint {
     /// Describe one checkpoint against the blueprint that holds it.
     pub(crate) fn of(
-        blueprint: &Arc<CoreBlueprint>,
-        point: &leviath_runtime::spec::blueprint::InteractionPoint,
+        blueprint: &Arc<ParsedBlueprint>,
+        point: &leviath_runtime::spec::graph::InteractionPointDef,
     ) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),

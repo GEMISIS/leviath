@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const FILE_NAME: &str = "agent.toml";
 
 /// What a blueprint says about itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BlueprintMeta {
     /// The name it is installed and run by.
@@ -43,8 +43,9 @@ impl BlueprintMeta {
 /// `[graph]` is a [`RunGraph`] exactly as a raw spawn request carries one.
 /// The graph's `title` and `description` may be left out: a graph read from
 /// the file takes them from `[blueprint]` (see [`BlueprintFile::run_graph`]).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(title = "Leviath blueprint (agent.toml)")]
 pub struct BlueprintFile {
     /// What the blueprint is called.
     pub blueprint: BlueprintMeta,
@@ -79,3 +80,15 @@ impl BlueprintFile {
         crate::write::render(self)
     }
 }
+
+/// The JSON Schema of an `agent.toml`, as published at
+/// `docs/schema/blueprint.schema.json`. Generated from the types the file is
+/// read into, so it takes exactly what [`BlueprintFile::parse`] takes,
+/// including the short forms.
+pub fn schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(BlueprintFile)).expect("a schema is plain JSON")
+}
+
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod schema_tests;
