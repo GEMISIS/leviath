@@ -279,7 +279,7 @@ impl InputValue {
             Self::Path(p) => p.to_string(),
             Self::Model(m) => m.to_string(),
             Self::Blueprint(b) => b.to_string(),
-            Self::Duration(secs) => leviath_core::duration::compact(*secs),
+            Self::Duration(secs) => exact_duration(*secs),
             Self::Url(u) => u.to_string(),
         }
     }
@@ -634,6 +634,24 @@ fn bounds<T: fmt::Display>(lead: &str, unit: &str, min: &Option<T>, max: &Option
         (Some(a), None) => format!("{lead}at least {a}{unit}"),
         (None, Some(b)) => format!("{lead}at most {b}{unit}"),
         (None, None) => String::new(),
+    }
+}
+
+/// A span of seconds exactly, in the form [`parse_duration`] reads back:
+/// `1h30m`, `2d5s`, `0s`.
+fn exact_duration(secs: u64) -> String {
+    let parts = [(86_400, 'd'), (3_600, 'h'), (60, 'm'), (1, 's')];
+    let mut left = secs;
+    let mut out = String::new();
+    for (size, unit) in parts {
+        if left >= size {
+            out.push_str(&format!("{}{unit}", left / size));
+            left %= size;
+        }
+    }
+    match out.is_empty() {
+        true => "0s".to_string(),
+        false => out,
     }
 }
 

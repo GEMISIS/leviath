@@ -10,28 +10,47 @@
 //!
 //! [`AgentWorld`] is the front door for running agents inside your own
 //! application - no `lev` CLI, daemon, or config file. Build a world from
-//! plain values, spawn an agent, and drive the event stream:
+//! plain values, ask for a run, and drive the event stream. A run is asked
+//! for with the same typed request every front door takes; here it carries a
+//! whole graph rather than naming a blueprint:
 //!
 //! ```no_run
-//! use leviath_runtime::{AgentWorld, BlueprintSource, ProviderCreds, SpawnSpec, WorldEvent};
+//! use leviath_runtime::spec::graph::RunGraph;
+//! use leviath_runtime::spec::inputs::RawInput;
+//! use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
+//! use leviath_runtime::{AgentWorld, ProviderCreds, WorldEvent};
 //!
 //! # async fn embed() -> Result<(), Box<dyn std::error::Error>> {
+//! let graph: RunGraph = toml::from_str(
+//!     r#"
+//!     [[stages]]
+//!     name = "main"
+//!     system_prompt = "Do the task."
+//!     model = { models = [{ provider = "anthropic", model = "claude-sonnet-5-5" }] }
+//!
+//!     [layout]
+//!     total_budget_tokens = 100000
+//!     regions = [{ name = "task", kind = "pinned", budget = 4000 }]
+//!
+//!     [[inputs]]
+//!     name = "task"
+//!     type = "text"
+//!     required = true
+//!     binds = [{ region = "task" }]
+//!     "#,
+//! )?;
 //! let world = AgentWorld::builder()
 //!     .provider(ProviderCreds {
-//!         name: "anthropic".to_string(),
 //!         api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
 //!         ..ProviderCreds::simple("anthropic")
 //!     })
+//!     .workdir(std::env::current_dir()?)
 //!     .build()?;
 //!
+//! let request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph)))
+//!     .input("task", RawInput::Text("Build a CSV parser".into()));
 //! let mut events = world.events();
-//! let run = world
-//!     .spawn(SpawnSpec::new(
-//!         BlueprintSource::Path("coder.leviath".into()),
-//!         "Build a CSV parser",
-//!         std::env::current_dir()?,
-//!     ))
-//!     .await?;
+//! let run = world.spawn(request).await?;
 //!
 //! while let Some(event) = events.next().await {
 //!     match event {

@@ -411,10 +411,16 @@ fn values_render_as_region_text() {
     let rec = InputValue::Record([(name("k"), InputValue::Bool(true))].into());
     assert_eq!(rec.render_text(), "k: true");
     assert_eq!(InputValue::Float(1.5).render_text(), "1.5");
-    assert_eq!(
-        InputValue::Duration(90).render_text(),
-        leviath_core::duration::compact(90)
-    );
+    // Exact, and in the form a duration input reads back.
+    for (secs, text) in [
+        (0, "0s"),
+        (90, "1m30s"),
+        (5400, "1h30m"),
+        (90_061, "1d1h1m1s"),
+    ] {
+        assert_eq!(InputValue::Duration(secs).render_text(), text);
+        assert_eq!(parse_duration(text), Some(secs));
+    }
     let all = [
         InputValue::Text("t".into()),
         InputValue::Bool(false),
