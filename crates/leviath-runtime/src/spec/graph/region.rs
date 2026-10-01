@@ -64,8 +64,8 @@ pub struct RegionDef {
 }
 
 /// How a region keeps and drops entries.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self", rename_all = "snake_case")]
 pub enum RegionKind {
     /// Kept for the whole run.
     Pinned,
@@ -128,8 +128,8 @@ pub enum Eviction {
 }
 
 /// How big a region may grow.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self", rename_all = "snake_case")]
 pub enum Budget {
     /// A fixed number of tokens.
     Tokens(u32),

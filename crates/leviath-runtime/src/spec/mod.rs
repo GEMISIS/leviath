@@ -13,6 +13,7 @@ pub mod launch;
 pub mod layout;
 pub mod manifest;
 pub mod names;
+pub mod readable;
 pub mod request;
 pub mod run_spec;
 

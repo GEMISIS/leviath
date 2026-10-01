@@ -141,66 +141,29 @@
       ],
       "type": "object"
     },
-    "Budget": {
-      "description": "How big a region may grow.",
-      "oneOf": [
+    "Bound": {
+      "anyOf": [
         {
-          "additionalProperties": false,
-          "description": "A fixed number of tokens.",
-          "properties": {
-            "tokens": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "tokens"
-          ],
-          "type": "object"
+          "format": "int64",
+          "type": "integer"
         },
         {
-          "additionalProperties": false,
-          "description": "A fraction (above 0, at most 1) of the model's context window,\noptionally clamped.",
-          "properties": {
-            "percent": {
-              "properties": {
-                "max": {
-                  "default": null,
-                  "description": "The most tokens.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "min": {
-                  "default": null,
-                  "description": "The fewest tokens.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "percent": {
-                  "description": "The fraction.",
-                  "format": "double",
-                  "type": "number"
-                }
-              },
-              "required": [
-                "percent"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "percent"
-          ],
-          "type": "object"
+          "format": "double",
+          "type": "number"
+        }
+      ],
+      "description": "A number bound, whole or not."
+    },
+    "Budget": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/ClampedPercent"
         }
       ]
     },
@@ -227,6 +190,38 @@
       },
       "required": [
         "url"
+      ],
+      "type": "object"
+    },
+    "ClampedPercent": {
+      "additionalProperties": false,
+      "description": "A share of the window, clamped.",
+      "properties": {
+        "max": {
+          "description": "The most tokens.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min": {
+          "description": "The fewest tokens.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "percent": {
+          "description": "The share: `\"35%\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "percent"
       ],
       "type": "object"
     },
@@ -908,360 +903,28 @@
       "type": "object"
     },
     "InputSlot": {
-      "description": "Where an input's value goes in the run.",
-      "oneOf": [
+      "anyOf": [
         {
-          "additionalProperties": false,
-          "description": "Into a context region, as text, at spawn.",
-          "properties": {
-            "region": {
-              "$ref": "#/$defs/RegionBinding"
-            }
-          },
-          "required": [
-            "region"
-          ],
-          "type": "object"
+          "type": "integer"
         },
         {
-          "additionalProperties": false,
-          "description": "A stage's model. Takes a `model` input.",
-          "properties": {
-            "stage_model": {
-              "description": "A stage name.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "stage_model"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A stage's iteration cap. Takes an `int` input of at least 1.",
-          "properties": {
-            "stage_max_iterations": {
-              "description": "A stage name.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "stage_max_iterations"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A fan-out stage's worker cap. Takes an `int` input of at least 1.",
-          "properties": {
-            "fan_out_max_workers": {
-              "description": "A stage name.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "fan_out_max_workers"
-          ],
-          "type": "object"
-        },
-        {
-          "const": "output_format",
-          "description": "The run's output format. Takes a `text` or `choice` input.",
           "type": "string"
         },
         {
-          "const": "output_instructions",
-          "description": "The run's output instructions. Takes a `text` input.",
-          "type": "string"
+          "$ref": "#/$defs/SlotTable"
         }
       ]
     },
     "InputType": {
-      "description": "The type of an input. Closed: a value is one of these or it is refused.",
-      "oneOf": [
+      "anyOf": [
         {
-          "additionalProperties": false,
-          "description": "Text, optionally bounded in length (in characters).",
-          "properties": {
-            "text": {
-              "additionalProperties": false,
-              "properties": {
-                "max_len": {
-                  "default": null,
-                  "description": "The most characters allowed.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "min_len": {
-                  "default": null,
-                  "description": "The fewest characters allowed.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "multiline": {
-                  "default": false,
-                  "description": "Whether the text is expected to span lines (a form shows a text area).",
-                  "type": "boolean"
-                }
-              },
-              "type": "object"
-            }
-          },
-          "required": [
-            "text"
-          ],
-          "type": "object"
+          "type": "integer"
         },
         {
-          "const": "bool",
-          "description": "`true` or `false`.",
           "type": "string"
         },
         {
-          "additionalProperties": false,
-          "description": "A whole number, optionally bounded (inclusive).",
-          "properties": {
-            "int": {
-              "additionalProperties": false,
-              "properties": {
-                "max": {
-                  "default": null,
-                  "description": "The largest allowed.",
-                  "format": "int64",
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "min": {
-                  "default": null,
-                  "description": "The smallest allowed.",
-                  "format": "int64",
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                }
-              },
-              "type": "object"
-            }
-          },
-          "required": [
-            "int"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A number, optionally bounded (inclusive). A whole number is accepted.",
-          "properties": {
-            "float": {
-              "additionalProperties": false,
-              "properties": {
-                "max": {
-                  "default": null,
-                  "description": "The largest allowed.",
-                  "format": "double",
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "min": {
-                  "default": null,
-                  "description": "The smallest allowed.",
-                  "format": "double",
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                }
-              },
-              "type": "object"
-            }
-          },
-          "required": [
-            "float"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "One of a fixed set of options.",
-          "properties": {
-            "choice": {
-              "additionalProperties": false,
-              "properties": {
-                "options": {
-                  "description": "The options, in the order a form lists them.",
-                  "items": {
-                    "description": "A choice option.",
-                    "type": "string"
-                  },
-                  "type": "array"
-                }
-              },
-              "required": [
-                "options"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "choice"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A list of values of one type, optionally bounded in length.",
-          "properties": {
-            "list": {
-              "additionalProperties": false,
-              "properties": {
-                "item": {
-                  "$ref": "#/$defs/InputType",
-                  "description": "The type of every item."
-                },
-                "max": {
-                  "default": null,
-                  "description": "The most items allowed.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "min": {
-                  "default": null,
-                  "description": "The fewest items allowed.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "item"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "list"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A fixed set of named fields, each typed.",
-          "properties": {
-            "record": {
-              "additionalProperties": false,
-              "properties": {
-                "fields": {
-                  "description": "The fields. Their `binds` are ignored; a record is placed whole.",
-                  "items": {
-                    "$ref": "#/$defs/InputDecl"
-                  },
-                  "type": "array"
-                }
-              },
-              "required": [
-                "fields"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "record"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A file the caller attaches, named by the attachment's name.",
-          "properties": {
-            "file": {
-              "additionalProperties": false,
-              "properties": {
-                "accepts": {
-                  "default": [],
-                  "description": "The mime types accepted. Empty accepts any. Checked when the run\nis resolved, once the file's type is known.",
-                  "items": {
-                    "description": "A mime pattern.",
-                    "type": "string"
-                  },
-                  "type": "array"
-                }
-              },
-              "type": "object"
-            }
-          },
-          "required": [
-            "file"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "A path inside the run's workdir.",
-          "properties": {
-            "path": {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "$ref": "#/$defs/PathKind",
-                  "description": "What the path must name."
-                },
-                "must_exist": {
-                  "default": false,
-                  "description": "Whether it must exist when the run is resolved.",
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "kind"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "path"
-          ],
-          "type": "object"
-        },
-        {
-          "const": "model",
-          "description": "A model, as `provider/model` or a bare model id.",
-          "type": "string"
-        },
-        {
-          "const": "blueprint",
-          "description": "An installed blueprint, as `name` or `name@digest`.",
-          "type": "string"
-        },
-        {
-          "const": "duration",
-          "description": "A span of time, as `90s`, `5m`, `2h`, `1d` or a sum such as `1h30m`.",
-          "type": "string"
-        },
-        {
-          "const": "url",
-          "description": "An http or https URL.",
-          "type": "string"
+          "$ref": "#/$defs/TypeTable"
         }
       ]
     },
@@ -1570,6 +1233,72 @@
       "required": [
         "name",
         "prompt"
+      ],
+      "type": "object"
+    },
+    "KindTable": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eviction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Eviction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "max_entries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_items": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "source": {
+          "description": "A region name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threshold_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
       ],
       "type": "object"
     },
@@ -1915,6 +1644,10 @@
         }
       ]
     },
+    "NoTable": {
+      "description": "The table half of a [`Short`] for a type that has no table form.",
+      "not": {}
+    },
     "NudgeDef": {
       "additionalProperties": false,
       "description": "The nudge sent when the model answers with nothing.",
@@ -1979,64 +1712,15 @@
       ]
     },
     "OutputCap": {
-      "description": "The cap on one reply's length.",
-      "oneOf": [
+      "anyOf": [
         {
-          "additionalProperties": false,
-          "description": "A fixed number of tokens.",
-          "properties": {
-            "tokens": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "tokens"
-          ],
-          "type": "object"
+          "type": "integer"
         },
         {
-          "additionalProperties": false,
-          "description": "A fraction (0 to 1) of the model's context window.",
-          "properties": {
-            "window_percent": {
-              "format": "double",
-              "type": "number"
-            }
-          },
-          "required": [
-            "window_percent"
-          ],
-          "type": "object"
+          "type": "string"
         },
         {
-          "additionalProperties": false,
-          "description": "A fraction (0 to 1) of one region's budget.",
-          "properties": {
-            "region_percent": {
-              "properties": {
-                "percent": {
-                  "description": "The share.",
-                  "format": "double",
-                  "type": "number"
-                },
-                "region": {
-                  "description": "The region.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "percent",
-                "region"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "region_percent"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/NoTable"
         }
       ]
     },
@@ -2116,79 +1800,29 @@
       "type": "object"
     },
     "ParamScalar": {
-      "description": "A provider-specific model setting.",
-      "oneOf": [
+      "anyOf": [
         {
-          "additionalProperties": false,
-          "description": "`true` or `false`.",
-          "properties": {
-            "bool": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "bool"
-          ],
-          "type": "object"
+          "type": "boolean"
         },
         {
-          "additionalProperties": false,
-          "description": "A whole number.",
-          "properties": {
-            "int": {
-              "format": "int64",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "int"
-          ],
-          "type": "object"
+          "format": "int64",
+          "type": "integer"
         },
         {
-          "additionalProperties": false,
-          "description": "A number.",
-          "properties": {
-            "float": {
-              "format": "double",
-              "type": "number"
-            }
-          },
-          "required": [
-            "float"
-          ],
-          "type": "object"
+          "format": "double",
+          "type": "number"
         },
         {
-          "additionalProperties": false,
-          "description": "Text.",
-          "properties": {
-            "text": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "text"
-          ],
-          "type": "object"
+          "type": "string"
         },
         {
-          "additionalProperties": false,
-          "description": "A list of text, such as stop sequences.",
-          "properties": {
-            "text_list": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
+          "items": {
+            "type": "string"
           },
-          "required": [
-            "text_list"
-          ],
-          "type": "object"
+          "type": "array"
         }
-      ]
+      ],
+      "description": "A model setting as written: a boolean, a number, text, or a list of text."
     },
     "PathKind": {
       "description": "What kind of path a [`InputType::Path`] input names.",
@@ -2246,32 +1880,6 @@
         }
       ],
       "description": "A value as the wire carries it, before its declared type is known.\n\nJSON, TOML and GraphQL can each say these much and no more, so they are\nwhat every front door decodes into. [`check_inputs`] turns them into\n[`InputValue`]s."
-    },
-    "RegionBinding": {
-      "additionalProperties": false,
-      "description": "A region an input fills, and how its value reads there.",
-      "properties": {
-        "region": {
-          "description": "The region.",
-          "type": "string"
-        },
-        "template": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Template"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "The text to seed, with `{name}` standing for an input's value. `None`\nseeds this input's value alone."
-        }
-      },
-      "required": [
-        "region"
-      ],
-      "type": "object"
     },
     "RegionCount": {
       "additionalProperties": false,
@@ -2390,155 +1998,15 @@
       "type": "object"
     },
     "RegionKind": {
-      "description": "How a region keeps and drops entries.",
-      "oneOf": [
+      "anyOf": [
         {
-          "const": "pinned",
-          "description": "Kept for the whole run.",
+          "type": "integer"
+        },
+        {
           "type": "string"
         },
         {
-          "additionalProperties": false,
-          "description": "The latest entries, up to a count.",
-          "properties": {
-            "sliding_window": {
-              "properties": {
-                "eviction": {
-                  "$ref": "#/$defs/Eviction",
-                  "default": "per_item",
-                  "description": "How old entries leave."
-                },
-                "max_items": {
-                  "description": "The most entries kept.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "max_items"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "sliding_window"
-          ],
-          "type": "object"
-        },
-        {
-          "const": "temporary",
-          "description": "Emptied after each turn.",
-          "type": "string"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Summarized once it passes a size.",
-          "properties": {
-            "compacting": {
-              "properties": {
-                "threshold_tokens": {
-                  "default": null,
-                  "description": "The size, in tokens. `None` takes the region's `compact_at`\nfraction of its budget, or 80% of it.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                }
-              },
-              "type": "object"
-            }
-          },
-          "required": [
-            "compacting"
-          ],
-          "type": "object"
-        },
-        {
-          "const": "clearable",
-          "description": "Kept until a stage or edge clears it.",
-          "type": "string"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Summaries of another region's evicted entries.",
-          "properties": {
-            "compact_history": {
-              "properties": {
-                "source": {
-                  "description": "The region whose entries it summarizes.",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "source"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "compact_history"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Entries replaced by key.",
-          "properties": {
-            "keyed": {
-              "properties": {
-                "max_entries": {
-                  "default": null,
-                  "description": "The most keys kept.",
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                }
-              },
-              "type": "object"
-            }
-          },
-          "required": [
-            "keyed"
-          ],
-          "type": "object"
-        },
-        {
-          "const": "checklist",
-          "description": "A checklist the model ticks off.",
-          "type": "string"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Rendered and maintained by code.",
-          "properties": {
-            "custom": {
-              "properties": {
-                "code": {
-                  "$ref": "#/$defs/CodeRef",
-                  "description": "The code."
-                },
-                "pinned": {
-                  "default": false,
-                  "description": "Whether its entries survive the context being cleared.",
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "code"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "custom"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/KindTable"
         }
       ]
     },
@@ -3090,6 +2558,50 @@
         "tool",
         "args"
       ],
+      "type": "object"
+    },
+    "SlotTable": {
+      "additionalProperties": false,
+      "properties": {
+        "fan_out_max_workers": {
+          "description": "A stage name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "description": "A region name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stage_max_iterations": {
+          "description": "A stage name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stage_model": {
+          "description": "A stage name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
       "type": "object"
     },
     "SpawnSource": {
@@ -3704,36 +3216,6 @@
         }
       ]
     },
-    "ToolGroup": {
-      "description": "A named group of tools.",
-      "oneOf": [
-        {
-          "const": "all",
-          "description": "Every tool this machine offers.",
-          "type": "string"
-        },
-        {
-          "const": "builtin",
-          "description": "The built-in tools.",
-          "type": "string"
-        },
-        {
-          "const": "subagent",
-          "description": "The tools that start and manage child runs.",
-          "type": "string"
-        },
-        {
-          "const": "scripts",
-          "description": "Script tools.",
-          "type": "string"
-        },
-        {
-          "const": "mcp",
-          "description": "Every connected MCP server's tools.",
-          "type": "string"
-        }
-      ]
-    },
     "ToolPolicy": {
       "description": "Whether a tool call should execute automatically or require user approval.\n\nThe effective policy for a tool is resolved by narrowest scope first:\nlaunch-flag > stage > agent > global config > built-in default.",
       "oneOf": [
@@ -3823,36 +3305,111 @@
       "type": "object"
     },
     "ToolSelector": {
-      "description": "A tool a stage may call, or a whole group of them.",
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "description": "One tool.",
-          "properties": {
-            "tool": {
-              "description": "A tool name.",
-              "type": "string"
-            }
+      "description": "A tool by name, or a group as `@all`, `@builtin`, `@subagent`, `@scripts`, `@mcp`.",
+      "type": "string"
+    },
+    "TypeTable": {
+      "additionalProperties": false,
+      "properties": {
+        "accepts": {
+          "items": {
+            "description": "A mime pattern.",
+            "type": "string"
           },
-          "required": [
-            "tool"
-          ],
-          "type": "object"
+          "type": [
+            "array",
+            "null"
+          ]
         },
-        {
-          "additionalProperties": false,
-          "description": "A group of tools.",
-          "properties": {
-            "group": {
-              "$ref": "#/$defs/ToolGroup"
-            }
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/InputDecl"
           },
-          "required": [
-            "group"
-          ],
-          "type": "object"
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bound"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_len": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "min": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bound"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "min_len": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "multiline": {
+          "type": "boolean"
+        },
+        "must_exist": {
+          "type": "boolean"
+        },
+        "names": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PathKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "options": {
+          "items": {
+            "description": "A choice option.",
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
-      ]
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
     },
     "Unattended": {
       "description": "How much of a run goes ahead without a person.",

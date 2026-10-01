@@ -18,7 +18,7 @@ version = "1.0.0"
 [graph]
 stages = [{ name = "main", system_prompt = "work" }]
 layout = { total_budget_tokens = 1000, regions = [
-    { name = "task", kind = "pinned", budget = { tokens = 1000 } },
+    { name = "task", kind = "pinned", budget = 1000 },
 ] }
 "#;
 
@@ -86,9 +86,11 @@ available_tools = ["read_file", "list_dir", "bash", "write_file", "edit_file", "
     assert!(!text.contains("title"), "{text}");
     assert!(!text.contains("= false"), "{text}");
     assert!(!text.contains("= []"), "{text}");
-    assert!(text.contains("budget = { tokens = 500 }"), "{text}");
+    assert!(text.contains("budget = 500 }"), "{text}");
+    assert!(text.contains("tools = [\n    \"read_file\",\n"), "{text}");
+    assert!(text.contains("binds = [{ region = \"task\" }]"), "{text}");
     assert!(
-        text.contains("tools = [\n    { tool = \"read_file\" },\n"),
+        text.contains("type = { kind = \"text\", multiline = true }"),
         "{text}"
     );
     let file = BlueprintFile::parse(&text).unwrap();

@@ -165,8 +165,8 @@ pub struct ModelParams {
 }
 
 /// The cap on one reply's length.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self", rename_all = "snake_case")]
 pub enum OutputCap {
     /// A fixed number of tokens.
     Tokens(u32),
@@ -182,8 +182,8 @@ pub enum OutputCap {
 }
 
 /// A provider-specific model setting.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self", rename_all = "snake_case")]
 pub enum ParamScalar {
     /// `true` or `false`.
     Bool(bool),
@@ -198,8 +198,8 @@ pub enum ParamScalar {
 }
 
 /// A tool a stage may call, or a whole group of them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", rename_all = "snake_case")]
 pub enum ToolSelector {
     /// One tool.
     Tool(ToolName),

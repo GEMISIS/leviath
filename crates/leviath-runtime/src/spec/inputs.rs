@@ -32,8 +32,8 @@ pub enum PathKind {
 }
 
 /// The type of an input. Closed: a value is one of these or it is refused.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "Self", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InputType {
     /// Text, optionally bounded in length (in characters).
     Text {
@@ -138,8 +138,8 @@ pub struct InputDecl {
 }
 
 /// Where an input's value goes in the run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self", rename_all = "snake_case")]
 pub enum InputSlot {
     /// Into a context region, as text, at spawn.
     Region(RegionBinding),
