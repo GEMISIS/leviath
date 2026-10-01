@@ -23,11 +23,12 @@
 //! A failed call leaves the region as it was rather than blanking it: the
 //! previous value is merely stale, and stale beats absent.
 
-use crate::spec::layout::{RegionSeed, SeedRefresh, SeedToolCall};
 use bevy_ecs::prelude::*;
 
 use crate::components::ContextWindow;
-use crate::pipeline::{AgentBlueprint, ReadyToInfer, StageJustEntered, ToolServiceRes, ToolStage};
+use crate::insert::RunSpecC;
+use crate::pipeline::{ReadyToInfer, StageJustEntered, ToolServiceRes, ToolStage};
+use crate::spec::graph::{RegionLayoutDef, Seed, SeedRefresh, SeedToolCall};
 
 /// One dispatched stage-entry seed call, and where its answer belongs.
 ///
@@ -50,19 +51,16 @@ pub(crate) struct PendingStageSeeds {
     pub sites: Vec<SeedCallSite>,
 }
 
-/// The regions of `blueprint` that re-seed on every stage entry, with their
-/// calls.
+/// The regions of a run's layout that re-seed on every stage entry, with
+/// their calls.
 ///
-/// Pure over the blueprint so the selection is testable without a world.
-pub(crate) fn refreshing_regions(
-    blueprint: &crate::spec::Blueprint,
-) -> Vec<(&str, &[SeedToolCall])> {
-    blueprint
-        .context_layout
+/// Pure over the layout so the selection is testable without a world.
+pub(crate) fn refreshing_regions(layout: &RegionLayoutDef) -> Vec<(&str, &[SeedToolCall])> {
+    layout
         .regions
         .iter()
         .filter_map(|r| match &r.seed {
-            Some(RegionSeed::Tools {
+            Some(Seed::Tools {
                 calls,
                 refresh: SeedRefresh::EachStage,
             }) => Some((r.name.as_str(), calls.as_slice())),
@@ -83,7 +81,7 @@ pub(crate) fn call_sites(regions: &[(&str, &[SeedToolCall])]) -> Vec<SeedCallSit
             sites.push(SeedCallSite {
                 id: format!("stage-seed-{}", sites.len()),
                 region: (*region).to_string(),
-                tool: call.name.clone(),
+                tool: call.tool.to_string(),
             });
         }
     }
@@ -98,7 +96,7 @@ pub(crate) fn call_sites(regions: &[(&str, &[SeedToolCall])]) -> Vec<SeedCallSit
 type StageSeedQuery<'w, 's> = Query<
     'w,
     's,
-    (Entity, &'static AgentBlueprint),
+    (Entity, &'static RunSpecC),
     (With<StageJustEntered>, Without<PendingStageSeeds>),
 >;
 
@@ -114,9 +112,9 @@ pub(crate) fn start_stage_seeds(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, blueprint) in agents.iter() {
+    for (entity, spec) in agents.iter() {
         crate::tick_scope::enter(entity);
-        let regions = refreshing_regions(&blueprint.0);
+        let regions = refreshing_regions(&spec.0.graph.layout);
         let sites = call_sites(&regions);
         if sites.is_empty() {
             continue;
@@ -127,8 +125,8 @@ pub(crate) fn start_stage_seeds(
             .zip(sites.iter())
             .map(|(call, site)| leviath_providers::ToolCall {
                 id: site.id.clone(),
-                name: call.name.clone(),
-                arguments: call.args.clone(),
+                name: call.tool.to_string(),
+                arguments: call.args.value().clone(),
                 thought_signature: None,
             })
             .collect();
@@ -205,30 +203,43 @@ pub(crate) fn apply_stage_seeds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::Stage;
-    use crate::spec::layout::{ContextLayout, RegionDefinition};
-    use leviath_core::RegionKind;
+    use crate::spec::graph::{Budget, RegionDef, RegionKind};
+    use crate::spec::names::{RegionName, ToolName, WorkdirPath};
 
-    fn blueprint_with(seeds: Vec<(&str, Option<RegionSeed>)>) -> crate::spec::Blueprint {
-        let regions = seeds
-            .into_iter()
-            .map(|(name, seed)| {
-                let mut r = RegionDefinition::new(name.to_string(), RegionKind::Pinned, 1000);
-                r.seed = seed;
-                r
-            })
-            .collect();
-        let layout = ContextLayout::new(regions, 10_000);
-        let stages = vec![Stage::new(
-            "main".to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        )];
-        crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    fn layout_with(seeds: Vec<(&str, Option<Seed>)>) -> RegionLayoutDef {
+        RegionLayoutDef {
+            regions: seeds
+                .into_iter()
+                .map(|(name, seed)| RegionDef {
+                    name: RegionName::new(name).unwrap(),
+                    kind: RegionKind::Pinned,
+                    budget: Budget::Tokens(1000),
+                    compact_at: None,
+                    description: None,
+                    describe_in_prompt: false,
+                    required: false,
+                    required_message: None,
+                    summarizable: true,
+                    admission: Default::default(),
+                    volatility: Default::default(),
+                    seed,
+                    accepts: vec![],
+                })
+                .collect(),
+            total_budget_tokens: 10_000,
+            eviction_order: vec![],
+        }
     }
 
-    fn tools(names: &[&str], refresh: SeedRefresh) -> RegionSeed {
-        RegionSeed::Tools {
-            calls: names.iter().map(|n| SeedToolCall::new(*n)).collect(),
+    fn tools(names: &[&str], refresh: SeedRefresh) -> Seed {
+        Seed::Tools {
+            calls: names
+                .iter()
+                .map(|n| SeedToolCall {
+                    tool: ToolName::new(*n).unwrap(),
+                    args: leviath_core::JsonDoc::default(),
+                })
+                .collect(),
             refresh,
         }
     }
@@ -238,7 +249,7 @@ mod tests {
     /// that would be a tool call per stage for the life of the run.
     #[test]
     fn only_each_stage_tool_seeds_are_refreshed() {
-        let bp = blueprint_with(vec![
+        let bp = layout_with(vec![
             (
                 "clock",
                 Some(tools(&["current_time"], SeedRefresh::EachStage)),
@@ -246,9 +257,7 @@ mod tests {
             ("machine", Some(tools(&["system_info"], SeedRefresh::Once))),
             (
                 "readme",
-                Some(RegionSeed::Files {
-                    paths: vec!["README.md".to_string()],
-                }),
+                Some(Seed::Files(vec![WorkdirPath::new("README.md").unwrap()])),
             ),
             ("notes", None),
         ]);
@@ -256,12 +265,12 @@ mod tests {
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].0, "clock");
         assert_eq!(picked[0].1.len(), 1);
-        assert_eq!(picked[0].1[0].name, "current_time");
+        assert_eq!(picked[0].1[0].tool.as_str(), "current_time");
     }
 
     #[test]
-    fn a_blueprint_with_no_refreshing_region_dispatches_nothing() {
-        let bp = blueprint_with(vec![(
+    fn a_layout_with_no_refreshing_region_dispatches_nothing() {
+        let bp = layout_with(vec![(
             "machine",
             Some(tools(&["system_info"], SeedRefresh::Once)),
         )]);
@@ -274,7 +283,7 @@ mod tests {
     /// collide and file both answers under whichever matched first.
     #[test]
     fn call_sites_are_numbered_across_the_whole_batch() {
-        let bp = blueprint_with(vec![
+        let bp = layout_with(vec![
             (
                 "a",
                 Some(tools(

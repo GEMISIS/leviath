@@ -16,32 +16,38 @@
 //!   `PendingFanOut`, and `start_pending_fan_outs` begins it. The report
 //!   comes back as that call's tool result, routed by the stage's
 //!   `tool_routing` like any other, and the agent carries on where it was.
-//! - **A `mode = "fan_out"` stage** (see
-//!   [`crate::spec::blueprint::StageMode::FanOut`]), which is sugar for
-//!   granting the same tool: its report goes to the config's `results_region`
-//!   and the stage transitions to its `merge_stage`.
+//! - **A fan-out stage** (see [`crate::spec::graph::StageMode::FanOut`]),
+//!   which is sugar for granting the same tool: its report goes to the
+//!   stage's `results_region` and the stage transitions to its `merge_stage`.
 //!
 //! Because both park the same way, both survive a daemon restart through
 //! `fanout.json` (see [`FanOutState`]).
 //!
 //! # What lives elsewhere
 //!
-//! The runtime only **starts and tracks** workers; resolving *which* blueprint a
-//! worker runs (self-at-worker-stage, a named agent, or a capability query) is
-//! the CLI's job, encapsulated behind the [`FanOutSpawner`] it installs.
+//! The runtime only **starts and tracks** workers. It hands the installed
+//! [`FanOutSpawner`] a [`SpawnRequest`] per work item, carrying the item's
+//! typed inputs; resolving and binding that request is the host's job.
 //!
 //! A single sub-agent is `spawn_agent`, not a fan-out of one.
 //!
 //! [`FAN_OUT_TOOL`]: crate::spec::blueprint::FAN_OUT_TOOL
+mod items;
 mod report;
 mod worker_sources;
+pub(crate) use items::{FanOutRequest, config_for, is_fan_out_tool, parse_fan_out_call};
+pub use items::{WORK_ITEM_LABEL, WorkItem};
 use report::*;
 use worker_sources::merge_worker_sources;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::spec::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
+use crate::insert::RunSpecC;
+use crate::spec::env::Caller;
+use crate::spec::graph::{FanOutDef, StageMode, WorkerFailure, WorkerSource};
+use crate::spec::names::BlueprintRef;
+use crate::spec::request::{SpawnRequest, SpawnSource};
 use bevy_ecs::prelude::*;
 use leviath_core::mime::{InboundPart, Part};
 use leviath_core::output::Artifact;
@@ -52,27 +58,30 @@ use crate::context_setup::PartSink;
 use crate::components::{
     AgentState, AgentStatus, ContextWindow, InferenceResult, ParentRef, SubAgentChildren,
 };
-use crate::pipeline::{AgentBlueprint, ResolveTransition, StageCursor};
+use crate::pipeline::{ResolveTransition, StageCursor};
 
-/// Depth cap for fan-out workers when the parent's blueprint doesn't set one.
+/// Depth cap for fan-out workers when the parent's graph doesn't set one.
 const DEFAULT_FANOUT_DEPTH: usize = 3;
 
-/// Starts one worker for a fan-out work item. The implementor resolves the
-/// worker's blueprint (per `config`'s `worker_stage` / `worker_agent` /
-/// `worker_query`), spawns it into `world` seeded with the work item, and returns
-/// the child entity. Parent/child linking is done by `fan_out_collect`, not the
-/// spawner.
+/// Starts one worker for a fan-out work item. The implementor resolves and
+/// binds `request` for `caller` (a [`Caller::Worker`] naming the parent, its
+/// policy and depth, and the stage a same-graph worker enters), spawns it into
+/// `world`, and returns the child entity. Parent/child linking is done by
+/// `fan_out_collect`, not the spawner.
 pub trait FanOutSpawner: Send + Sync {
-    /// Spawn one worker under `parent` for the given work item, or `Err` with a
-    /// human-readable reason (recorded as that item's failure).
+    /// Spawn one worker under `parent`, or `Err` with a human-readable reason
+    /// (recorded as that item's failure).
     fn spawn_worker(
         &self,
         world: &mut World,
         parent: Entity,
-        config: &FanOutConfig,
-        item_id: &str,
-        item_context: &serde_json::Value,
+        request: SpawnRequest,
+        caller: Caller,
     ) -> Result<Entity, String>;
+
+    /// The installed blueprint a fan-out's worker query picks, or `Err` with
+    /// why none does.
+    fn find_worker(&self, query: &str) -> Result<BlueprintRef, String>;
 }
 
 /// The installed [`FanOutSpawner`], as a world resource. Absent in a pure-runtime
@@ -96,8 +105,8 @@ struct ActiveWorker {
 /// differs, and this is the whole of that difference.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FanOutOrigin {
-    /// A `mode = "fan_out"` stage. The report goes to the config's
-    /// `results_region` and the stage transitions to its `merge_stage`.
+    /// A fan-out stage. The report goes to the stage's `results_region` and
+    /// the stage transitions to its `merge_stage`.
     ///
     /// The default so a `fanout.json` written before the tool existed still
     /// loads, as the only thing it could have been.
@@ -105,7 +114,7 @@ pub enum FanOutOrigin {
     Stage,
     /// A `fan_out` tool call from an ordinary stage. The report comes back as
     /// that call's result - routed by the stage's `tool_routing` like any other,
-    /// so the blueprint decides where it lands or whether it lands at all - and
+    /// so the graph decides where it lands or whether it lands at all - and
     /// the agent carries on where it left off.
     Tool {
         /// The tool call this fan-out is the result of.
@@ -117,7 +126,7 @@ pub enum FanOutOrigin {
 /// `pending` items, the currently-`active` workers, and the accumulated results.
 #[derive(Component)]
 pub struct FanOutWaiting {
-    config: FanOutConfig,
+    config: FanOutDef,
     max_workers: usize,
     pending: VecDeque<WorkItem>,
     active: Vec<ActiveWorker>,
@@ -143,7 +152,7 @@ pub struct FanOutWaiting {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FanOutState {
     /// The fan-out configuration.
-    pub config: FanOutConfig,
+    pub config: FanOutDef,
     /// The concurrency cap; `usize::MAX` for a stage with `max_workers = 0`.
     pub max_workers: usize,
     /// Work items not yet started.
@@ -274,7 +283,7 @@ const FRAMED_PREVIOUS_ITEMS: usize = 12;
 /// the borrow is bound when the query is fetched.
 type FrameSplitRoundQuery = (
     Entity,
-    &'static AgentBlueprint,
+    &'static RunSpecC,
     &'static StageCursor,
     &'static crate::pipeline::VisitCounts,
     &'static mut ContextWindow,
@@ -299,15 +308,15 @@ pub(crate) fn frame_split_round(
     mut agents: Query<FrameSplitRoundQuery, With<crate::pipeline::StageJustEntered>>,
 ) {
     crate::tick_scope::clear();
-    for (entity, bp, cursor, visits, mut window, previous) in agents.iter_mut() {
+    for (entity, spec, cursor, visits, mut window, previous) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        let stage = &bp.0.stages[cursor.index];
-        if !matches!(stage.mode, StageMode::FanOut { .. }) {
+        let stage = &spec.0.graph.stages[cursor.index];
+        if !matches!(stage.mode, StageMode::FanOut(_)) {
             continue;
         }
         // `enter_stage` bumps the count before this runs, so a first entry reads
         // as 1 and there is nothing to say.
-        let round = visits.0.get(&stage.name).copied().unwrap_or(1);
+        let round = visits.0.get(stage.name.as_str()).copied().unwrap_or(1);
         if round < 2 {
             continue;
         }
@@ -355,72 +364,6 @@ fn split_round_framing(round: usize, previous: &[String]) -> String {
 /// thread; the queue drains over the following passes of the same wake.
 pub(crate) const MAX_WORKER_STARTS_PER_PASS: usize = 4;
 
-/// One unit of work produced by a fan-out call.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkItem {
-    /// Stable id (used to label the worker in the consolidated report).
-    #[serde(default)]
-    pub id: String,
-    /// Free-form context handed to the worker (seeded into its pinned context).
-    #[serde(default)]
-    pub context: serde_json::Value,
-}
-
-/// A `fan_out` call the dispatcher has read but not yet started.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FanOutRequest {
-    /// The agent to run for every item, when the caller named one. `None` inside
-    /// a fan-out stage, whose blueprint names the worker instead.
-    pub agent: Option<String>,
-    /// The work, one entry per worker.
-    pub items: Vec<WorkItem>,
-    /// A per-call concurrency cap, when the caller asked for one.
-    pub max_workers: Option<usize>,
-}
-
-/// Whether a tool call is the fan-out tool.
-pub(crate) fn is_fan_out_tool(name: &str) -> bool {
-    name == crate::spec::blueprint::FAN_OUT_TOOL
-}
-
-/// Read a `fan_out` call's arguments.
-///
-/// Strict, unlike the free-text parser it replaced: the arguments came through a
-/// schema the provider enforced, so a shape that does not fit is a real mistake
-/// and the model is told so rather than guessed at. The refusal is an `[error]`
-/// tool result, which the model corrects on its next turn like any other.
-pub(crate) fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOutRequest, String> {
-    let object = arguments
-        .as_object()
-        .ok_or_else(|| "fan_out arguments must be an object".to_string())?;
-    let items = match object.get("items") {
-        Some(serde_json::Value::Array(items)) => items,
-        Some(_) => return Err("fan_out `items` must be an array".to_string()),
-        None => return Err("fan_out requires an `items` array".to_string()),
-    };
-    let items: Vec<WorkItem> = items
-        .iter()
-        .map(|item| {
-            serde_json::from_value(item.clone())
-                .map_err(|e| format!("fan_out item is not {{id, context}}: {e}"))
-        })
-        .collect::<Result<_, _>>()?;
-    let agent = object
-        .get("agent")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .filter(|a| !a.trim().is_empty());
-    let max_workers = object
-        .get("max_workers")
-        .and_then(serde_json::Value::as_u64)
-        .map(|n| n as usize);
-    Ok(FanOutRequest {
-        agent,
-        items,
-        max_workers,
-    })
-}
-
 /// How many agents one run may create, sub-agents included, or `0` for no limit.
 ///
 /// Read at every fan-out spawn. A run at its ceiling stops widening and finishes
@@ -457,55 +400,23 @@ fn run_tree_size(world: &World, entity: Entity) -> usize {
     count(world, root)
 }
 
-/// The item ceiling this blueprint declares on any fan-out stage it has.
+/// The item ceiling this run's graph declares on any fan-out stage it has.
 ///
 /// `None` when it declares none, which leaves a tool-driven split unbounded, as
-/// it has always been. Read from the blueprint rather than the current stage on
+/// it has always been. Read from the graph rather than the current stage on
 /// purpose: the tool is called from ordinary stages, which is the whole reason
 /// the ceiling was being missed.
-fn blueprint_fan_out_max_items(world: &World, entity: Entity) -> Option<usize> {
+fn graph_fan_out_max_items(world: &World, entity: Entity) -> Option<u32> {
     world
-        .get::<AgentBlueprint>(entity)?
+        .get::<RunSpecC>(entity)?
         .0
+        .graph
         .stages
         .iter()
         .find_map(|stage| match &stage.mode {
-            StageMode::FanOut { config } => config.max_items,
+            StageMode::FanOut(def) => def.max_items,
             _ => None,
         })
-}
-
-/// Turn a request into the config the engine runs it under.
-///
-/// A stage's `[stages.x]` fan-out keys are the starting point when there are any;
-/// a call from an ordinary stage has none, so it gets the engine defaults and
-/// names its worker in the call. Either way the result is one `FanOutConfig`, so
-/// everything downstream - the cap, the failure policy, the report - is the same
-/// code for both entry points.
-pub(crate) fn config_for(request: &FanOutRequest, stage: Option<&FanOutConfig>) -> FanOutConfig {
-    let mut config = stage.cloned().unwrap_or_else(|| FanOutConfig {
-        worker_agent: None,
-        worker_stage: None,
-        worker_query: None,
-        merge_stage: None,
-        max_workers: crate::spec::blueprint::DEFAULT_MAX_WORKERS,
-        on_worker_failure: WorkerFailurePolicy::Continue,
-        split_prompt: String::new(),
-        results_region: None,
-        max_items: None,
-        max_attempts: None,
-    });
-    // A named agent wins over the blueprint's worker: an ordinary stage has no
-    // worker to inherit, and a fan-out stage that names one in the call meant it.
-    if let Some(agent) = &request.agent {
-        config.worker_agent = Some(agent.clone());
-        config.worker_stage = None;
-        config.worker_query = None;
-    }
-    if let Some(max_workers) = request.max_workers {
-        config.max_workers = max_workers;
-    }
-    config
 }
 
 /// A `fan_out` call the dispatcher accepted, waiting for a tick with world
@@ -538,27 +449,16 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         // A fan-out stage's own keys when there are any, so a stage that set
         // `max_items` or `on_worker_failure` still gets them; nothing when an
         // ordinary stage called the tool.
+        let spec = world.get::<RunSpecC>(entity).map(|s| s.0.clone());
         let stage_config = world
             .get::<StageCursor>(entity)
-            .and_then(|cursor| {
-                world.get::<AgentBlueprint>(entity).map(|bp| {
-                    match &bp.0.stages[cursor.index].mode {
-                        StageMode::FanOut { config } => Some(config.clone()),
-                        _ => None,
-                    }
-                })
-            })
-            .flatten();
-        // Which door this came through, and so how its report is delivered. A
-        // `mode = "fan_out"` stage answers with the same tool call as anybody
-        // else, so the call cannot tell us - only the stage can.
-        //
-        // Getting this wrong made `results_region` and `merge_stage` dead
-        // config: a live `deep-researcher` fan-out delivered three workers'
-        // findings into `conversation` as a tool result and resumed the split
-        // stage, instead of writing `sub_findings` and moving to `analyze`. The
-        // unit tests passed throughout, because they build the origin directly
-        // and never went through this decision.
+            .zip(spec.as_ref())
+            .and_then(
+                |(cursor, spec)| match &spec.graph.stages[cursor.index].mode {
+                    StageMode::FanOut(def) => Some(def.clone()),
+                    _ => None,
+                },
+            );
         // Which door this came through, and so how its report is delivered. A
         // `mode = "fan_out"` stage answers with the same tool call as anybody
         // else, so the call cannot tell us - only the stage can.
@@ -571,12 +471,35 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         // and never went through this decision.
         let origin = match stage_config.is_some() {
             true => FanOutOrigin::Stage,
-            false => FanOutOrigin::Tool { call_id },
+            false => FanOutOrigin::Tool {
+                call_id: call_id.clone(),
+            },
         };
-        let mut config = config_for(&request, stage_config.as_ref());
+        let mut config = match config_for(&request, stage_config.as_ref()) {
+            Ok(config) => config,
+            Err(why) => {
+                answer_call(world, entity, &call_id, format!("[error] {why}"));
+                continue;
+            }
+        };
+        // A worker entering this run's own graph takes that graph's inputs, so
+        // its items are checked here, before any worker starts. A worker
+        // running an installed blueprint has its inputs checked when that
+        // blueprint is resolved.
+        if let (WorkerSource::Stage(_), Some(spec)) = (&config.worker, &spec)
+            && let Err(issues) = items::check_items(&spec.graph.inputs, &request.items)
+        {
+            answer_call(
+                world,
+                entity,
+                &call_id,
+                format!("[error] fan_out items do not fit the worker's inputs:\n{issues}"),
+            );
+            continue;
+        }
         // A call through the tool comes from an ordinary stage, so it carries no
         // `max_items` and creates as many workers as the model named. Where the
-        // blueprint declares a fan-out stage, that stage's ceiling is the
+        // graph declares a fan-out stage, that stage's ceiling is the
         // author's answer to "how wide should a split of this work be", and a
         // split of this work is what this is. Measured: a blueprint saying
         // `max_items = 3` produced six-way splits through this door, and one run
@@ -586,7 +509,7 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         // `results_region` describe how a *stage* delivers its report, and
         // taking those would change where this call's result goes.
         if config.max_items.is_none() {
-            config.max_items = blueprint_fan_out_max_items(world, entity);
+            config.max_items = graph_fan_out_max_items(world, entity);
         }
         begin_fan_out(world, entity, config, request.items, origin);
     }
@@ -605,18 +528,18 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
 pub(crate) fn begin_fan_out(
     world: &mut World,
     parent: Entity,
-    config: FanOutConfig,
+    config: FanOutDef,
     items: Vec<WorkItem>,
     origin: FanOutOrigin,
 ) {
     // Unlimited (`max_workers = 0`) is the largest cap there is, rather than a
     // separate flag: the start loop compares against it and nothing else.
-    let max_workers = config.worker_cap().unwrap_or(usize::MAX);
+    let max_workers = items::worker_cap(&config).unwrap_or(usize::MAX);
     // A caller decides its own item count, so without a cap a model that returns
     // five hundred items spawns five hundred runs. The cap also fixes each
     // worker's share of the results region: past some number of ways to divide
     // it, every section is too small to say anything.
-    let items = match config.max_items {
+    let items = match config.max_items.map(|cap| cap as usize) {
         Some(cap) if items.len() > cap => {
             tracing::warn!(
                 produced = items.len(),
@@ -793,7 +716,7 @@ pub(crate) fn slim_merged_workers(
             InferenceResult,
             crate::pipeline::StageInferences,
             crate::pipeline::StageSetups,
-            AgentBlueprint,
+            RunSpecC,
             MergedWorker,
         )>();
     }
@@ -801,8 +724,8 @@ pub(crate) fn slim_merged_workers(
 
 /// Apply the failure policy, inject the consolidated report, and transition.
 fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
-    if !w.failures.is_empty() && w.config.on_worker_failure == WorkerFailurePolicy::FailAll {
-        // Down the stage's `error` edge, which is what `WorkerFailurePolicy::FailAll`
+    if !w.failures.is_empty() && w.config.on_worker_failure == WorkerFailure::FailAll {
+        // Down the stage's `error` edge, which is what `WorkerFailure::FailAll`
         // has always been documented as doing. Writing the status alone made it a
         // dead run instead, so a blueprint with an `error_recovery` stage got the
         // recovery it declared only for provider failures, never for this.
@@ -828,8 +751,8 @@ fn finish_fan_out(world: &mut World, parent: Entity, w: FanOutWaiting) {
     }
 }
 
-/// A `mode = "fan_out"` stage: the report goes to the region the blueprint named
-/// and the stage moves on to its `merge_stage`.
+/// A fan-out stage: the report goes to the region the graph named and the
+/// stage moves on to its `merge_stage`.
 fn finish_stage_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting) {
     // Where the results land, and how much room they have there. A blueprint
     // that names a region of its own gets that region's budget to divide; the
@@ -838,8 +761,8 @@ fn finish_stage_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting) {
     let region = w
         .config
         .results_region
-        .clone()
-        .unwrap_or_else(|| "conversation".to_string());
+        .as_ref()
+        .map_or_else(|| "conversation".to_string(), ToString::to_string);
     let budget = world
         .get::<ContextWindow>(parent)
         .and_then(|window| window.get_region(&region).map(|r| r.max_tokens));
@@ -936,28 +859,43 @@ fn hand_up_artifacts(world: &World, parent: Entity, worker: &ActiveWorker) -> Ve
 /// to read their prose) somewhere it is cheaply dropped. That flexibility is not
 /// a fan-out feature; it is the one every tool already has.
 fn finish_tool_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting, call_id: &str) {
-    let routing = world
+    // Sized against the region the result is actually routed to, so a report
+    // headed for a big `sub_findings` is not trimmed to fit a conversation it
+    // never enters.
+    let region = routed_region(world, parent);
+    let budget = world
+        .get::<ContextWindow>(parent)
+        .and_then(|window| window.get_region(&region).map(|r| r.max_tokens));
+    let report = build_report(&w.summaries, &w.failures, budget);
+    answer_call(world, parent, call_id, report);
+}
+
+/// The region a `fan_out` call's result lands in, by the stage's
+/// `tool_routing`.
+fn routed_region(world: &World, parent: Entity) -> String {
+    world
         .get::<crate::components::ToolResultRoutingComponent>(parent)
-        .map(|r| r.routing.clone());
-    let region = routing
-        .as_ref()
         .map(|r| {
-            r.tool_overrides
+            r.routing
+                .tool_overrides
                 .iter()
                 .find(|(k, _)| {
                     leviath_tools::canonical_tool_name(k) == crate::spec::blueprint::FAN_OUT_TOOL
                 })
                 .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| r.default_region.clone())
+                .unwrap_or_else(|| r.routing.default_region.clone())
         })
-        .unwrap_or_else(|| "conversation".to_string());
-    // Sized against the region the result is actually routed to, so a report
-    // headed for a big `sub_findings` is not trimmed to fit a conversation it
-    // never enters.
-    let budget = world
-        .get::<ContextWindow>(parent)
-        .and_then(|window| window.get_region(&region).map(|r| r.max_tokens));
-    let report = build_report(&w.summaries, &w.failures, budget);
+        .unwrap_or_else(|| "conversation".to_string())
+}
+
+/// Answer a `fan_out` call with `text` and hand the agent back to its model.
+///
+/// Routed through the same path every other tool result takes. The report of
+/// a finished fan-out arrives this way, and so does a refusal to start one.
+fn answer_call(world: &mut World, parent: Entity, call_id: &str, text: String) {
+    let routing = world
+        .get::<crate::components::ToolResultRoutingComponent>(parent)
+        .map(|r| r.routing.clone());
     let sensitivities = world
         .get::<crate::pipeline::ToolSensitivities>(parent)
         .map(|s| s.0.clone());
@@ -966,11 +904,11 @@ fn finish_tool_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting, cal
             &mut window,
             crate::spec::blueprint::FAN_OUT_TOOL,
             call_id,
-            report.into(),
+            text.into(),
             routing.as_ref(),
             sensitivities.as_ref(),
-            // Already cut to the region's budget above, so the report never
-            // reaches the inline text ceiling.
+            // A report is already cut to its region's budget, and a refusal
+            // is a line or two, so neither reaches the inline text ceiling.
             None,
         );
     }
@@ -986,12 +924,12 @@ fn finish_tool_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting, cal
 ///
 /// Shared by the normal completion and by the never-terminal split failure, so
 /// both leave the stage by the same door.
-fn leave_fan_out(world: &mut World, parent: Entity, config: &FanOutConfig) {
+fn leave_fan_out(world: &mut World, parent: Entity, config: &FanOutDef) {
     set_status(world, parent, AgentStatus::Active);
-    match config.merge_stage.as_deref().and_then(|name| {
+    match config.merge_stage.as_ref().and_then(|name| {
         world
-            .get::<AgentBlueprint>(parent)
-            .and_then(|bp| bp.0.stages.iter().position(|s| s.name == name))
+            .get::<RunSpecC>(parent)
+            .and_then(|spec| spec.0.graph.stages.iter().position(|s| &s.name == name))
     }) {
         Some(idx) => crate::pipeline::force_transition(
             world,
@@ -1005,21 +943,21 @@ fn leave_fan_out(world: &mut World, parent: Entity, config: &FanOutConfig) {
 }
 
 /// Start one worker and link it to `parent` (`ParentRef` + `SubAgentChildren`),
-/// enforcing the parent blueprint's child-depth cap. Returns the child entity.
+/// enforcing the parent graph's child-depth cap. Returns the child entity.
 fn start_worker(
     world: &mut World,
     parent: Entity,
-    config: &FanOutConfig,
+    config: &FanOutDef,
     item: &WorkItem,
 ) -> Result<Entity, String> {
+    let spec = world
+        .get::<RunSpecC>(parent)
+        .map(|s| s.0.clone())
+        .ok_or_else(|| "fan-out parent has no run spec".to_string())?;
     let max_depth = world
         .get::<SubAgentChildren>(parent)
         .map(|k| k.max_child_depth)
-        .or_else(|| {
-            world
-                .get::<AgentBlueprint>(parent)
-                .and_then(|bp| bp.0.max_child_depth)
-        })
+        .or_else(|| spec.graph.max_child_depth.map(usize::from))
         .unwrap_or(DEFAULT_FANOUT_DEPTH);
     let parent_depth = world.get::<ParentRef>(parent).map_or(0, |p| p.depth);
     let child_depth = parent_depth + 1;
@@ -1045,7 +983,13 @@ fn start_worker(
         .get_resource::<FanOutSpawnerRes>()
         .map(|r| r.0.clone())
         .ok_or_else(|| "no fan-out spawner installed".to_string())?;
-    let child = spawner.spawn_worker(world, parent, config, &item.id, &item.context)?;
+    let source = match &config.worker {
+        WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
+        WorkerSource::Stage(_) => SpawnSource::Raw(Box::new(spec.graph.clone())),
+        WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
+    };
+    let (request, caller) = items::worker_request(&spec, config, item, source, parent_depth);
+    let child = spawner.spawn_worker(world, parent, request, caller)?;
 
     let parent_agent_id = world
         .get::<AgentState>(parent)
@@ -1078,8 +1022,8 @@ fn start_worker(
         .expect("a fan-out parent always has AgentState")
         .spawned_children_ids
         .push(worker_id);
-    // Seed the worker's context from the parent per any declared blueprint
-    // context transform (when a fan-out worker runs a different blueprint).
+    // Seed the worker's context from the parent per any declared context
+    // transform (when a fan-out worker runs a different blueprint).
     crate::context_transform::apply_context_transforms(
         world,
         crate::world::AgentId::in_world(world, parent),
@@ -1098,8 +1042,8 @@ fn start_worker(
 /// text, so the merge stage gets an empty string, silently indistinguishable
 /// from a worker that had nothing to say.
 ///
-/// The fallback stays because it costs nothing and a blueprint that happens to
-/// end on a text turn keeps working. A blueprint that wants the guarantee sets
+/// The fallback stays because it costs nothing and a graph that happens to
+/// end on a text turn keeps working. A graph that wants the guarantee sets
 /// `require_output` on its worker stage.
 ///
 /// A worker whose stage set `require_output` and that finished without one is
@@ -1136,13 +1080,15 @@ fn worker_terminal_result(world: &World, worker: Entity) -> Option<Result<String
 
 /// Whether the stage this worker is sitting in demands a final output.
 fn worker_requires_output(world: &World, worker: Entity) -> bool {
-    let Some(bp) = world.get::<AgentBlueprint>(worker) else {
+    let Some(spec) = world.get::<RunSpecC>(worker) else {
         return false;
     };
     let Some(cursor) = world.get::<StageCursor>(worker) else {
         return false;
     };
-    bp.0.stages
+    spec.0
+        .graph
+        .stages
         .get(cursor.index)
         .is_some_and(|s| s.require_output)
 }
@@ -1156,8 +1102,12 @@ mod tests {
         StageSetups, VisitCounts,
     };
     use crate::spec::Blueprint;
-    use crate::spec::blueprint::{ModelConfig, Stage};
+    use crate::spec::blueprint::{
+        FanOutConfig, ModelConfig, Stage, StageMode as BpMode, WorkerFailurePolicy,
+    };
     use crate::spec::layout::{ContextLayout, RegionDefinition};
+    use crate::spec::names::{RegionName, StageName};
+    use crate::spec_bridge::test_support::{both, spec_c};
     use leviath_core::{Region, RegionKind};
     use std::collections::HashSet;
 
@@ -1185,10 +1135,10 @@ mod tests {
             &self,
             world: &mut World,
             _parent: Entity,
-            _config: &FanOutConfig,
-            item_id: &str,
-            _item_context: &serde_json::Value,
+            request: SpawnRequest,
+            _caller: Caller,
         ) -> Result<Entity, String> {
+            let item_id = request.delivery.metadata[WORK_ITEM_LABEL].as_str();
             if self.fail.contains(item_id) {
                 return Err(format!("spawn refused for '{item_id}'"));
             }
@@ -1231,14 +1181,19 @@ mod tests {
                 ))
                 .id())
         }
+
+        fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
+            match query {
+                "nobody" => Err(format!("no installed agent matches '{query}'")),
+                _ => Ok(BlueprintRef::parse(query).expect("a valid name")),
+            }
+        }
     }
 
-    fn cfg(merge: Option<&str>, max_workers: usize, policy: WorkerFailurePolicy) -> FanOutConfig {
-        FanOutConfig {
-            worker_agent: None,
-            worker_stage: Some("w".to_string()),
-            worker_query: None,
-            merge_stage: merge.map(String::from),
+    fn cfg(merge: Option<&str>, max_workers: u32, policy: WorkerFailure) -> FanOutDef {
+        FanOutDef {
+            worker: WorkerSource::Stage(StageName::new("w").unwrap()),
+            merge_stage: merge.map(|m| StageName::new(m).unwrap()),
             max_workers,
             on_worker_failure: policy,
             split_prompt: "split".to_string(),
@@ -1246,6 +1201,43 @@ mod tests {
             max_items: None,
             max_attempts: None,
         }
+    }
+
+    /// A fan-out as a parsed blueprint writes it.
+    fn legacy(def: &FanOutDef) -> FanOutConfig {
+        let (agent, stage, query) = match &def.worker {
+            WorkerSource::Blueprint(b) => (Some(b.to_string()), None, None),
+            WorkerSource::Stage(s) => (None, Some(s.to_string()), None),
+            WorkerSource::Query(q) => (None, None, Some(q.clone())),
+        };
+        FanOutConfig {
+            worker_agent: agent,
+            worker_stage: stage,
+            worker_query: query,
+            merge_stage: def.merge_stage.as_ref().map(ToString::to_string),
+            max_workers: def.max_workers as usize,
+            on_worker_failure: match def.on_worker_failure {
+                WorkerFailure::Continue => WorkerFailurePolicy::Continue,
+                WorkerFailure::FailAll => WorkerFailurePolicy::FailAll,
+            },
+            split_prompt: def.split_prompt.clone(),
+            results_region: def.results_region.as_ref().map(ToString::to_string),
+            max_items: def.max_items.map(|n| n as usize),
+            max_attempts: def.max_attempts.map(|n| n as usize),
+        }
+    }
+
+    /// A fan-out whose worker `legacy` reads back as each blueprint source.
+    #[test]
+    fn every_worker_source_reads_back_as_a_blueprint_writes_it() {
+        let mut def = cfg(None, 1, WorkerFailure::FailAll);
+        def.max_attempts = Some(2);
+        assert_eq!(legacy(&def).max_attempts, Some(2));
+        def.worker = WorkerSource::Blueprint(BlueprintRef::parse("fixer").unwrap());
+        assert_eq!(legacy(&def).worker_agent.as_deref(), Some("fixer"));
+        def.worker = WorkerSource::Query("tests".into());
+        assert_eq!(legacy(&def).worker_query.as_deref(), Some("tests"));
+        assert_eq!(legacy(&def).on_worker_failure, WorkerFailurePolicy::FailAll);
     }
 
     fn window() -> ContextWindow {
@@ -1289,8 +1281,14 @@ mod tests {
         }
     }
 
+    /// The graph of [`fanout_blueprint`] over the default fan-out.
+    fn fanout_graph() -> crate::spec::graph::RunGraph {
+        let bp = fanout_blueprint(cfg(None, 3, WorkerFailure::Continue));
+        both(bp).1.0.graph.clone()
+    }
+
     /// A blueprint whose stage 0 is a fan-out stage and stage 1 is `merge`.
-    fn fanout_blueprint(config: FanOutConfig) -> Blueprint {
+    fn fanout_blueprint(config: FanOutDef) -> Blueprint {
         let layout = ContextLayout::new(
             vec![RegionDefinition::new(
                 "conversation".to_string(),
@@ -1303,7 +1301,9 @@ mod tests {
             "fan".to_string(),
             ModelConfig::new("script".to_string(), "m".to_string()),
         );
-        s0.mode = StageMode::FanOut { config };
+        s0.mode = BpMode::FanOut {
+            config: legacy(&config),
+        };
         let s1 = Stage::new(
             "merge".to_string(),
             ModelConfig::new("script".to_string(), "m".to_string()),
@@ -1329,7 +1329,7 @@ mod tests {
     fn spawn_parent(world: &mut World, bp: Blueprint, response: &str) -> Entity {
         world
             .spawn((
-                AgentBlueprint(bp),
+                both(bp),
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),
@@ -1404,26 +1404,27 @@ mod tests {
     /// Walked in reverse so the fixture's ordinary `merge` stage is visited
     /// first: the non-fan-out arm is then a branch the suite actually takes,
     /// rather than one that only exists to satisfy the match.
-    fn stage_config(world: &World, e: Entity) -> FanOutConfig {
+    fn stage_config(world: &World, e: Entity) -> FanOutDef {
         world
-            .get::<AgentBlueprint>(e)
+            .get::<RunSpecC>(e)
             .unwrap()
             .0
+            .graph
             .stages
             .iter()
             .rev()
             .find_map(|stage| match &stage.mode {
-                StageMode::FanOut { config } => Some(config.clone()),
+                StageMode::FanOut(def) => Some(def.clone()),
                 _ => None,
             })
             .expect("the fixture has a fan-out stage")
     }
 
-    /// A work item with the given id and an empty context.
+    /// A work item with the given id and no inputs.
     fn item(id: &str) -> WorkItem {
         WorkItem {
             id: id.to_string(),
-            context: serde_json::json!({}),
+            inputs: Default::default(),
         }
     }
 
@@ -1468,7 +1469,7 @@ mod tests {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             "",
         );
 
@@ -1485,7 +1486,7 @@ mod tests {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             "",
         );
         world.entity_mut(e).insert(PreviousWorkItems(vec![
@@ -1513,7 +1514,7 @@ mod tests {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             "",
         );
 
@@ -1530,7 +1531,7 @@ mod tests {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             "",
         );
         let ids: Vec<String> = (0..20).map(|i| format!("item-{i}")).collect();
@@ -1547,8 +1548,8 @@ mod tests {
     #[test]
     fn a_stage_that_is_not_a_fan_out_is_not_framed() {
         let mut world = World::new();
-        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue));
-        bp.stages[0].mode = StageMode::Autonomous;
+        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
+        bp.stages[0].mode = BpMode::Autonomous;
         let e = spawn_parent(&mut world, bp, "");
 
         let convo = run_framing(&mut world, e, &[("fan", 2)]);
@@ -1563,14 +1564,14 @@ mod tests {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             "",
         );
 
         begin_fan_out(
             &mut world,
             e,
-            cfg(None, 2, WorkerFailurePolicy::Continue),
+            cfg(None, 2, WorkerFailure::Continue),
             vec![item("a"), item("b")],
             FanOutOrigin::Stage,
         );
@@ -1599,7 +1600,12 @@ mod tests {
         assert_eq!(request.agent.as_deref(), Some("researcher"));
         assert_eq!(request.max_workers, Some(4));
         assert_eq!(request.items.len(), 2);
-        assert_eq!(request.items[1].context["question"], "q2");
+        assert_eq!(
+            request.items[1].inputs["task"],
+            crate::spec::inputs::RawInput::Text(
+                "Work item id: b\nContext: {\"question\":\"q2\"}".into()
+            )
+        );
     }
 
     /// An empty list is a real answer, not a malformed call: it means there is
@@ -1632,81 +1638,13 @@ mod tests {
             (serde_json::json!({"items": "all"}), "must be an array"),
             (
                 serde_json::json!({"items": [{"id": 4}]}),
-                "not {id, context}",
+                "not {id, inputs}",
             ),
         ];
         for (args, expected) in cases {
             let err = parse_fan_out_call(&args).unwrap_err();
             assert!(err.contains(expected), "{args}: {err}");
         }
-    }
-
-    // ── config_for ────────────────────────────────────────────────────────────
-
-    /// A call from an ordinary stage brings its own worker and takes engine
-    /// defaults for everything else.
-    #[test]
-    fn config_for_a_bare_call_names_its_worker_and_defaults_the_rest() {
-        let request = parse_fan_out_call(&serde_json::json!({
-            "agent": "researcher", "items": []
-        }))
-        .unwrap();
-
-        let config = config_for(&request, None);
-
-        assert_eq!(config.worker_agent.as_deref(), Some("researcher"));
-        assert_eq!(config.worker_stage, None);
-        assert_eq!(
-            config.max_workers,
-            crate::spec::blueprint::DEFAULT_MAX_WORKERS
-        );
-        assert_eq!(config.on_worker_failure, WorkerFailurePolicy::Continue);
-        assert_eq!(config.max_items, None);
-    }
-
-    /// Inside a fan-out stage the blueprint's keys are the starting point, so a
-    /// stage that set `max_items` or a failure policy still gets them.
-    #[test]
-    fn config_for_a_stage_call_keeps_the_blueprints_keys() {
-        let mut stage = cfg(Some("merge"), 3, WorkerFailurePolicy::FailAll);
-        stage.max_items = Some(5);
-        let request = parse_fan_out_call(&serde_json::json!({"items": []})).unwrap();
-
-        let config = config_for(&request, Some(&stage));
-
-        assert_eq!(config.merge_stage.as_deref(), Some("merge"));
-        assert_eq!(config.max_items, Some(5));
-        assert_eq!(config.on_worker_failure, WorkerFailurePolicy::FailAll);
-        assert_eq!(config.max_workers, 3);
-    }
-
-    /// A worker named in the call wins, and clears the blueprint's own worker so
-    /// the two cannot both be set.
-    #[test]
-    fn a_named_agent_overrides_the_stages_worker() {
-        let stage = cfg(None, 2, WorkerFailurePolicy::Continue);
-        assert!(
-            stage.worker_stage.is_some(),
-            "the fixture uses worker_stage"
-        );
-        let request =
-            parse_fan_out_call(&serde_json::json!({"agent": "other", "items": []})).unwrap();
-
-        let config = config_for(&request, Some(&stage));
-
-        assert_eq!(config.worker_agent.as_deref(), Some("other"));
-        assert_eq!(config.worker_stage, None);
-        assert_eq!(config.worker_query, None);
-    }
-
-    /// A per-call cap overrides the stage's.
-    #[test]
-    fn a_per_call_cap_overrides_the_stages() {
-        let stage = cfg(None, 2, WorkerFailurePolicy::Continue);
-        let request =
-            parse_fan_out_call(&serde_json::json!({"max_workers": 9, "items": []})).unwrap();
-
-        assert_eq!(config_for(&request, Some(&stage)).max_workers, 9);
     }
 
     // ── begin_fan_out / start_pending_fan_outs ────────────────────────────────
@@ -1718,14 +1656,14 @@ mod tests {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             "",
         );
 
         begin_fan_out(
             &mut world,
             e,
-            cfg(None, 2, WorkerFailurePolicy::Continue),
+            cfg(None, 2, WorkerFailure::Continue),
             vec![item("a"), item("b")],
             FanOutOrigin::Stage,
         );
@@ -1746,7 +1684,7 @@ mod tests {
     #[test]
     fn begin_fan_out_keeps_only_the_first_max_items() {
         let mut world = World::new();
-        let mut config = cfg(None, 2, WorkerFailurePolicy::Continue);
+        let mut config = cfg(None, 2, WorkerFailure::Continue);
         config.max_items = Some(3);
         let e = spawn_parent(&mut world, fanout_blueprint(config.clone()), "");
 
@@ -1766,14 +1704,14 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             "",
         );
 
         begin_fan_out(
             &mut world,
             e,
-            cfg(Some("merge"), 2, WorkerFailurePolicy::Continue),
+            cfg(Some("merge"), 2, WorkerFailure::Continue),
             Vec::new(),
             FanOutOrigin::Stage,
         );
@@ -1795,8 +1733,8 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         // An ordinary stage, so this is the tool door: a fan-out stage's own
         // call is a stage fan-out and is covered separately.
-        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue));
-        bp.stages[0].mode = StageMode::Autonomous;
+        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
+        bp.stages[0].mode = BpMode::Autonomous;
         let e = spawn_parent(&mut world, bp, "");
         world.entity_mut(e).insert(PendingFanOut {
             call_id: "call-1".to_string(),
@@ -1819,8 +1757,8 @@ mod tests {
             }
         );
         assert_eq!(
-            w.config.worker_agent.as_deref(),
-            Some("researcher"),
+            w.config.worker,
+            WorkerSource::Blueprint(BlueprintRef::parse("researcher").unwrap()),
             "the call named its worker"
         );
     }
@@ -1840,8 +1778,8 @@ mod tests {
     fn a_fan_out_stages_call_is_delivered_as_a_stage_not_a_tool_result() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let mut config = cfg(Some("merge"), 2, WorkerFailurePolicy::Continue);
-        config.results_region = Some("sub_findings".to_string());
+        let mut config = cfg(Some("merge"), 2, WorkerFailure::Continue);
+        config.results_region = Some(RegionName::new("sub_findings").unwrap());
         let e = spawn_parent(&mut world, fanout_blueprint(config), "");
         world
             .get_mut::<ContextWindow>(e)
@@ -1898,7 +1836,7 @@ mod tests {
     fn a_call_inside_a_fan_out_stage_inherits_the_stages_keys() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let mut config = cfg(Some("merge"), 7, WorkerFailurePolicy::Continue);
+        let mut config = cfg(Some("merge"), 7, WorkerFailure::Continue);
         config.max_items = Some(2);
         let e = spawn_parent(&mut world, fanout_blueprint(config), "");
         world.entity_mut(e).insert(PendingFanOut {
@@ -1912,7 +1850,10 @@ mod tests {
         start_pending_fan_outs(&mut world);
 
         let w = world.get::<FanOutWaiting>(e).expect("parked");
-        assert_eq!(w.config.merge_stage.as_deref(), Some("merge"));
+        assert_eq!(
+            w.config.merge_stage.as_ref().map(StageName::as_str),
+            Some("merge")
+        );
         assert_eq!(w.config.max_items, Some(2));
         assert_eq!(w.max_workers, 7);
     }
@@ -1931,8 +1872,8 @@ mod tests {
     fn an_ordinary_stage_can_fan_out_mid_work() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue));
-        bp.stages[0].mode = StageMode::Autonomous;
+        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
+        bp.stages[0].mode = BpMode::Autonomous;
         let e = spawn_parent(&mut world, bp, "");
         world.entity_mut(e).insert(PendingFanOut {
             call_id: "call-1".to_string(),
@@ -1947,7 +1888,10 @@ mod tests {
         start_pending_fan_outs(&mut world);
 
         let w = world.get::<FanOutWaiting>(e).expect("parked");
-        assert_eq!(w.config.worker_agent.as_deref(), Some("researcher"));
+        assert_eq!(
+            w.config.worker,
+            WorkerSource::Blueprint(BlueprintRef::parse("researcher").unwrap())
+        );
         assert_eq!(w.max_workers, 3);
         assert_eq!(
             w.config.merge_stage, None,
@@ -1962,8 +1906,8 @@ mod tests {
     fn a_stage_fan_out_writes_to_its_results_region() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let mut config = cfg(Some("merge"), 2, WorkerFailurePolicy::Continue);
-        config.results_region = Some("sub_findings".to_string());
+        let mut config = cfg(Some("merge"), 2, WorkerFailure::Continue);
+        config.results_region = Some(RegionName::new("sub_findings").unwrap());
         let e = spawn_parent(&mut world, fanout_blueprint(config.clone()), "");
         world
             .get_mut::<ContextWindow>(e)
@@ -2004,7 +1948,7 @@ mod tests {
     fn a_fan_out_still_merges_when_its_stage_is_out_of_iterations() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let mut bp = fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue));
+        let mut bp = fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue));
         bp.stages[0].max_iterations = Some(4);
         let e = spawn_parent(&mut world, bp, "");
         // The stage is at its cap, exactly as it is when the fan-out starts on
@@ -2016,7 +1960,7 @@ mod tests {
         begin_fan_out(
             &mut world,
             e,
-            cfg(Some("merge"), 2, WorkerFailurePolicy::Continue),
+            cfg(Some("merge"), 2, WorkerFailure::Continue),
             vec![item("a")],
             FanOutOrigin::Stage,
         );
@@ -2048,13 +1992,13 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             "",
         );
         begin_fan_out(
             &mut world,
             e,
-            cfg(Some("merge"), 2, WorkerFailurePolicy::Continue),
+            cfg(Some("merge"), 2, WorkerFailure::Continue),
             vec![item("a")],
             FanOutOrigin::Tool {
                 call_id: "call-1".to_string(),
@@ -2089,11 +2033,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = world
             .spawn((
-                AgentBlueprint(fanout_blueprint(cfg(
-                    None,
-                    2,
-                    WorkerFailurePolicy::Continue,
-                ))),
+                both(fanout_blueprint(cfg(None, 2, WorkerFailure::Continue))),
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),
@@ -2105,7 +2045,7 @@ mod tests {
         begin_fan_out(
             &mut world,
             e,
-            cfg(None, 2, WorkerFailurePolicy::Continue),
+            cfg(None, 2, WorkerFailure::Continue),
             Vec::new(),
             FanOutOrigin::Tool {
                 call_id: "call-1".to_string(),
@@ -2126,7 +2066,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             "",
         );
         world
@@ -2162,7 +2102,7 @@ mod tests {
         begin_fan_out(
             &mut world,
             e,
-            cfg(None, 2, WorkerFailurePolicy::Continue),
+            cfg(None, 2, WorkerFailure::Continue),
             vec![item("a")],
             FanOutOrigin::Tool {
                 call_id: "call-1".to_string(),
@@ -2195,7 +2135,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             "",
         );
         // The region the routing points at has to exist for the result to land
@@ -2228,7 +2168,7 @@ mod tests {
         begin_fan_out(
             &mut world,
             e,
-            cfg(None, 2, WorkerFailurePolicy::Continue),
+            cfg(None, 2, WorkerFailure::Continue),
             vec![item("a")],
             FanOutOrigin::Tool {
                 call_id: "call-1".to_string(),
@@ -2268,13 +2208,13 @@ mod tests {
         // Cap of one against three items, so there is always something queued.
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 1, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 1, WorkerFailure::Continue)),
             "",
         );
         begin_fan_out(
             &mut world,
             e,
-            cfg(Some("merge"), 1, WorkerFailurePolicy::Continue),
+            cfg(Some("merge"), 1, WorkerFailure::Continue),
             vec![item("a"), item("b"), item("c")],
             FanOutOrigin::Stage,
         );
@@ -2329,7 +2269,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 1, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 1, WorkerFailure::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
         split(&mut world, e);
@@ -2354,7 +2294,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
         split(&mut world, e);
@@ -2405,7 +2345,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             r#"[{"id":"a"}]"#,
         );
         split(&mut world, e);
@@ -2444,7 +2384,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 1, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 1, WorkerFailure::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
         split(&mut world, e);
@@ -2479,7 +2419,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 0, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 0, WorkerFailure::Continue)),
             r#"[{"id":"a"},{"id":"b"},{"id":"c"},{"id":"d"},{"id":"e"}]"#,
         );
         split(&mut world, e);
@@ -2506,7 +2446,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
         split(&mut world, e);
@@ -2558,7 +2498,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::FailAll)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::FailAll)),
             r#"[{"id":"a"}]"#,
         );
         split(&mut world, e);
@@ -2583,7 +2523,7 @@ mod tests {
         // No merge stage ⇒ ResolveTransition (proceed) rather than force_transition.
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::Continue)),
             r#"[{"id":"a"},{"id":"b"}]"#,
         );
         split(&mut world, e);
@@ -2609,7 +2549,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             "[]",
         );
         split(&mut world, e);
@@ -2626,7 +2566,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("ghost"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("ghost"), 2, WorkerFailure::Continue)),
             "[]",
         );
         split(&mut world, e);
@@ -2642,7 +2582,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             r#"[{"id":"a"}]"#,
         );
         split(&mut world, e);
@@ -2658,7 +2598,7 @@ mod tests {
         let mut world = World::new();
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             r#"[{"id":"a"}]"#,
         );
         split(&mut world, e);
@@ -2674,7 +2614,7 @@ mod tests {
         install(&mut world, TestSpawner::refusing(&["a"]));
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::FailAll)),
+            fanout_blueprint(cfg(None, 2, WorkerFailure::FailAll)),
             r#"[{"id":"a"}]"#,
         );
         split(&mut world, e);
@@ -2689,7 +2629,7 @@ mod tests {
     fn start_worker_enforces_depth_cap() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailurePolicy::Continue));
+        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
         bp.max_child_depth = Some(3);
         let e = spawn_parent(&mut world, bp, r#"[{"id":"deep"}]"#);
         // Parent is itself a depth-3 sub-agent ⇒ child would be depth 4 > 3.
@@ -2712,7 +2652,7 @@ mod tests {
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
             &mut world,
-            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
             r#"[{"id":"a"}]"#,
         );
         // Pre-existing children container with a generous cap.
@@ -2813,7 +2753,7 @@ mod tests {
         );
         let bp = Blueprint::new("w".to_string(), "d".to_string(), vec![stage], layout);
         let worker = world
-            .spawn((parent_state(), AgentBlueprint(bp), StageCursor { index: 0 }))
+            .spawn((parent_state(), both(bp), StageCursor { index: 0 }))
             .id();
         set_status(world, worker, AgentStatus::Complete);
         worker
@@ -2872,25 +2812,21 @@ mod tests {
     #[test]
     fn a_worker_with_no_stage_to_read_owes_nothing() {
         let mut world = World::new();
-        let bp = fanout_blueprint(cfg(None, 1, WorkerFailurePolicy::Continue));
+        let bp = fanout_blueprint(cfg(None, 1, WorkerFailure::Continue));
 
         // No blueprint at all.
         let bare = world.spawn(parent_state()).id();
         assert!(!worker_requires_output(&world, bare));
 
         // A blueprint, but no cursor saying which stage it is in.
-        let no_cursor = world.spawn((parent_state(), AgentBlueprint(bp))).id();
+        let no_cursor = world.spawn((parent_state(), both(bp))).id();
         assert!(!worker_requires_output(&world, no_cursor));
 
         // A cursor pointing past the end of the stage list.
         let past_end = world
             .spawn((
                 parent_state(),
-                AgentBlueprint(fanout_blueprint(cfg(
-                    None,
-                    1,
-                    WorkerFailurePolicy::Continue,
-                ))),
+                both(fanout_blueprint(cfg(None, 1, WorkerFailure::Continue))),
                 StageCursor { index: 99 },
             ))
             .id();
@@ -3238,13 +3174,12 @@ mod tests {
     fn a_run_at_its_ceiling_does_not_spawn_another_worker() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
-        let parent = world.spawn(parent_state()).id();
+        let parent = world
+            .spawn((parent_state(), spec_c("t", fanout_graph())))
+            .id();
 
-        let item = WorkItem {
-            id: "one".to_string(),
-            context: serde_json::json!({}),
-        };
-        let config = cfg(None, 3, WorkerFailurePolicy::Continue);
+        let item = item("one");
+        let config = cfg(None, 3, WorkerFailure::Continue);
 
         // No ceiling: the spawn goes through, and the run now holds two agents.
         world.insert_resource(FanOutBudget(0));
@@ -3330,19 +3265,17 @@ mod tests {
     /// reached 34 sub-agents where an earlier one reached 7.
     #[test]
     fn a_tool_split_takes_the_blueprints_declared_ceiling() {
-        let bp = fanout_blueprint(FanOutConfig {
+        let bp = fanout_blueprint(FanOutDef {
             max_items: Some(3),
-            ..cfg(None, 3, WorkerFailurePolicy::Continue)
+            ..cfg(None, 3, WorkerFailure::Continue)
         });
         let mut world = World::new();
         // Cursor on the merge stage rather than the fan-out one, because that is
         // the situation: the tool is called from a stage that declares nothing.
-        let e = world
-            .spawn((AgentBlueprint(bp), StageCursor { index: 1 }))
-            .id();
+        let e = world.spawn((both(bp), StageCursor { index: 1 })).id();
 
         assert_eq!(
-            blueprint_fan_out_max_items(&world, e),
+            graph_fan_out_max_items(&world, e),
             Some(3),
             "the ceiling the blueprint wrote, found from a stage that does not \
              declare it"
@@ -3353,17 +3286,15 @@ mod tests {
     /// declared number to a second door; it does not invent a number.
     #[test]
     fn a_blueprint_declaring_no_ceiling_still_has_none() {
-        let bp = fanout_blueprint(cfg(None, 3, WorkerFailurePolicy::Continue));
+        let bp = fanout_blueprint(cfg(None, 3, WorkerFailure::Continue));
         let mut world = World::new();
-        let e = world
-            .spawn((AgentBlueprint(bp), StageCursor { index: 1 }))
-            .id();
-        assert_eq!(blueprint_fan_out_max_items(&world, e), None);
+        let e = world.spawn((both(bp), StageCursor { index: 1 })).id();
+        assert_eq!(graph_fan_out_max_items(&world, e), None);
 
         // An entity carrying no blueprint declares nothing either, rather than
         // the lookup being an error.
         let bare = world.spawn_empty().id();
-        assert_eq!(blueprint_fan_out_max_items(&world, bare), None);
+        assert_eq!(graph_fan_out_max_items(&world, bare), None);
     }
 
     #[test]
@@ -3593,10 +3524,10 @@ mod tests {
         setups[1].routing = Some(crate::spec::ToolResultRouting::default());
         let e = world
             .spawn((
-                AgentBlueprint(fanout_blueprint(cfg(
+                both(fanout_blueprint(cfg(
                     Some("merge"),
                     2,
-                    WorkerFailurePolicy::Continue,
+                    WorkerFailure::Continue,
                 ))),
                 StageCursor { index: 0 },
                 parent_state(),
@@ -3636,8 +3567,8 @@ mod tests {
             "fan".to_string(),
             ModelConfig::new("script".to_string(), "m".to_string()),
         );
-        s0.mode = StageMode::FanOut {
-            config: cfg(Some("merge"), 2, WorkerFailurePolicy::Continue),
+        s0.mode = BpMode::FanOut {
+            config: legacy(&cfg(Some("merge"), 2, WorkerFailure::Continue)),
         };
         let mut s1 = Stage::new(
             "merge".to_string(),
@@ -3664,7 +3595,7 @@ mod tests {
         let mut world = World::new();
         let e = world
             .spawn((
-                AgentBlueprint(bp),
+                both(bp),
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),
@@ -3675,5 +3606,115 @@ mod tests {
             ))
             .id();
         (world, e)
+    }
+
+    // ── typed work items ──────────────────────────────────────────────────────
+
+    /// A fan-out stage whose graph declares a `topic` text input.
+    fn topic_blueprint(config: FanOutDef) -> Blueprint {
+        let mut bp = fanout_blueprint(config);
+        bp.context_layout.regions.push(
+            RegionDefinition::new("topic".to_string(), RegionKind::Pinned, 1000).with_seed(
+                crate::spec::layout::RegionSeed::CallerInput {
+                    name: "topic".to_string(),
+                },
+            ),
+        );
+        bp
+    }
+
+    fn pending(world: &mut World, e: Entity, args: serde_json::Value) {
+        world.entity_mut(e).insert(PendingFanOut {
+            call_id: "call-1".to_string(),
+            request: parse_fan_out_call(&args).unwrap(),
+        });
+    }
+
+    /// A same-graph worker's items are checked against the graph's inputs
+    /// before any worker starts. A mistyped one is refused at its path, and
+    /// the model is handed the refusal to correct.
+    #[test]
+    fn a_mistyped_work_item_is_refused_before_any_worker_starts() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent(
+            &mut world,
+            topic_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue)),
+            "",
+        );
+        pending(
+            &mut world,
+            e,
+            serde_json::json!({"items": [
+                {"id": "a", "inputs": {"topic": "rust"}},
+                {"id": "b", "inputs": {"topic": 4}}
+            ]}),
+        );
+
+        start_pending_fan_outs(&mut world);
+
+        assert!(world.get::<FanOutWaiting>(e).is_none(), "nothing started");
+        assert!(world.get::<crate::pipeline::ReadyToInfer>(e).is_some());
+        let convo = conversation_text(&world, e);
+        assert!(
+            convo.contains("[error] fan_out items do not fit"),
+            "{convo}"
+        );
+        assert!(convo.contains("items[1].inputs.topic"), "{convo}");
+
+        // Typed right, the same items start.
+        pending(
+            &mut world,
+            e,
+            serde_json::json!({"items": [{"id": "a", "inputs": {"topic": "rust"}}]}),
+        );
+        start_pending_fan_outs(&mut world);
+        assert_eq!(
+            world.get::<FanOutWaiting>(e).expect("parked").pending.len(),
+            1
+        );
+    }
+
+    /// An ordinary stage has no worker to fall back on, so a call that names
+    /// none is refused rather than failing every item.
+    #[test]
+    fn a_call_naming_no_worker_outside_a_fan_out_stage_is_refused() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
+        bp.stages[0].mode = BpMode::Autonomous;
+        let e = spawn_parent(&mut world, bp, "");
+        pending(&mut world, e, serde_json::json!({"items": [{"id": "a"}]}));
+
+        start_pending_fan_outs(&mut world);
+
+        assert!(world.get::<FanOutWaiting>(e).is_none());
+        let convo = conversation_text(&world, e);
+        assert!(convo.contains("needs an `agent`"), "{convo}");
+    }
+
+    /// Each worker source reaches the spawner as the request it means: an
+    /// installed blueprint by name, one a query found, or the parent's own
+    /// graph. A query nothing answers fails that item.
+    #[test]
+    fn every_worker_source_becomes_a_spawn_request() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let parent = world
+            .spawn((parent_state(), spec_c("t", fanout_graph())))
+            .id();
+        let mut config = cfg(None, 3, WorkerFailure::Continue);
+        config.worker = WorkerSource::Blueprint(BlueprintRef::parse("fixer").unwrap());
+        assert!(start_worker(&mut world, parent, &config, &item("a")).is_ok());
+        config.worker = WorkerSource::Query("tests".into());
+        assert!(start_worker(&mut world, parent, &config, &item("b")).is_ok());
+        config.worker = WorkerSource::Query("nobody".into());
+        let err = start_worker(&mut world, parent, &config, &item("c")).unwrap_err();
+        assert!(err.contains("no installed agent"), "{err}");
+
+        // A parent with no spec has nothing to start a worker from.
+        let bare = world.spawn(parent_state()).id();
+        let err = start_worker(&mut world, bare, &config, &item("d")).unwrap_err();
+        assert!(err.contains("no run spec"), "{err}");
     }
 }

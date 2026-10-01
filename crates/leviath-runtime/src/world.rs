@@ -1235,8 +1235,8 @@ mod tests {
 
     use crate::components::{AgentState, ContextWindow, InferenceConfig};
     use crate::pipeline::{
-        AgentBlueprint, MessageIntake, StageCursor, StageInference, StageInferences, StageProgress,
-        StageSetup, StageSetups, VisitCounts,
+        MessageIntake, StageCursor, StageInference, StageInferences, StageProgress, StageSetup,
+        StageSetups, VisitCounts,
     };
     use crate::tool_bridge::BoxedToolExec;
     use leviath_core::{Region, RegionKind};
@@ -1410,7 +1410,7 @@ mod tests {
     /// Spawn a single-stage agent, initially ready to infer.
     fn spawn(world: &mut PipelineWorld) -> AgentId {
         world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::spec_bridge::test_support::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -1808,7 +1808,7 @@ mod tests {
             ..Default::default()
         });
         let e = world.spawn_agent((
-            AgentBlueprint(bp),
+            crate::spec_bridge::test_support::both(bp),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2309,10 +2309,44 @@ mod tests {
                 hints(true),
             )
             .unwrap();
+        // The run carries the spec its systems read, named for the run.
+        let spec = &world
+            .world()
+            .get::<crate::insert::RunSpecC>(e.entity())
+            .expect("a spawned run carries its spec")
+            .0;
+        assert_eq!(spec.run_id.as_str(), "agent-1");
+        assert_eq!(spec.stages[0].model.as_str(), "m");
 
         world.run_until_idle(20).await;
 
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    /// A blueprint that parsed but cannot be read as a run graph is refused
+    /// at spawn, naming the field that did not fit.
+    #[tokio::test]
+    async fn spawn_from_blueprint_refuses_a_blueprint_that_is_not_a_graph() {
+        let mut world = build_world(registry_with(vec![text("done")]));
+        let mut bp = blueprint();
+        bp.stages[0].available_tools = vec!["bad tool".to_string()];
+        let err = world
+            .spawn_from_blueprint(
+                "agent-1".to_string(),
+                bp,
+                "do the task",
+                vec![crate::pipeline::ResolvedStage {
+                    provider_name: "script".to_string(),
+                    model: "m".to_string(),
+                    tools: vec![],
+                    fallbacks: Vec::new(),
+                    output: None,
+                    notes: Vec::new(),
+                }],
+                hints(true),
+            )
+            .unwrap_err();
+        assert!(err.contains("tools[0]"), "{err}");
     }
 
     #[tokio::test]
@@ -2329,7 +2363,7 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::spec_bridge::test_support::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2424,7 +2458,7 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::spec_bridge::test_support::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2533,7 +2567,7 @@ mod tests {
         );
         world.insert_interaction_hub(crate::interaction_hub::InteractionHub::new());
         let e = world.spawn_agent((
-            AgentBlueprint(interactive_blueprint()),
+            crate::spec_bridge::test_support::both(interactive_blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2659,7 +2693,7 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::spec_bridge::test_support::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2730,7 +2764,7 @@ mod tests {
             Handle::current(),
         );
         let entity = world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::spec_bridge::test_support::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2794,7 +2828,7 @@ mod tests {
             Handle::current(),
         );
         let entity = world.spawn_agent((
-            AgentBlueprint(blueprint()),
+            crate::spec_bridge::test_support::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),

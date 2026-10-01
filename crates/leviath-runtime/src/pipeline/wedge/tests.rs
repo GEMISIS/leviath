@@ -102,7 +102,7 @@ fn inside_the_grace_period_it_is_only_recorded() {
 /// `FanOutWaiting`'s private fields.
 fn empty_fan_out_state() -> crate::fanout::FanOutState {
     serde_json::from_value(serde_json::json!({
-        "config": { "worker_agent": "w", "split_prompt": "s" },
+        "config": { "worker": { "blueprint": { "name": "w" } }, "split_prompt": "s" },
         "max_workers": 1,
         "pending": [],
         "active": [],

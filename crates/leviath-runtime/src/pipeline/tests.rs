@@ -3620,7 +3620,6 @@ fn dispatch_persistence_records_tree_links() {
 
 #[test]
 fn dispatch_persistence_serializes_fan_out_waiting() {
-    use crate::spec::blueprint::{FanOutConfig, WorkerFailurePolicy};
     let (mut world, mut rx) = world_with_persistence();
     let e = world
         .spawn((
@@ -3639,14 +3638,14 @@ fn dispatch_persistence_serializes_fan_out_waiting() {
         crate::fanout::FanOutState {
             origin: crate::fanout::FanOutOrigin::Stage,
             parts: Vec::new(),
-            config: FanOutConfig {
-                worker_agent: None,
-                worker_stage: Some("w".to_string()),
-                worker_query: None,
+            config: crate::spec::graph::FanOutDef {
+                worker: crate::spec::graph::WorkerSource::Stage(
+                    crate::spec::names::StageName::new("w").unwrap(),
+                ),
                 merge_stage: None,
                 max_workers: 1,
-                on_worker_failure: WorkerFailurePolicy::Continue,
-                split_prompt: "s".to_string(),
+                on_worker_failure: Default::default(),
+                split_prompt: String::new(),
                 results_region: None,
                 max_items: None,
                 max_attempts: None,
@@ -6718,7 +6717,7 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
     let e = world
         .spawn((
             agent_state(),
-            AgentBlueprint(bp),
+            crate::spec_bridge::test_support::both(bp),
             window,
             StageJustEntered {
                 index: 0,

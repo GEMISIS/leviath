@@ -25,7 +25,7 @@ use super::{
     StageStatus, ToolResultState, Totals, TransitionRecord, VisitRecord, WorkItemState,
 };
 use crate::components::{AgentState, AgentStatus, ContextWindow};
-use crate::spec::inputs::{InputValue, InputValues};
+use crate::spec::inputs::{InputValue, InputValues, RawInput};
 use crate::spec::names::{
     Digest, EdgeName, InputName, ModelId, ModelRef, ProviderName, RegionName, RunId, StageName,
 };
@@ -541,7 +541,7 @@ fn fan_out_of(waiting: &crate::fanout::FanOutWaiting, stage: &StageName) -> FanO
             .into_iter()
             .map(|item| WorkItemState {
                 id: item.id,
-                inputs: inputs_of(item.context),
+                inputs: inputs_of(item.inputs),
             })
             .collect(),
         active: s
@@ -557,37 +557,27 @@ fn fan_out_of(waiting: &crate::fanout::FanOutWaiting, stage: &StageName) -> FanO
 
 /// A work item's free-form context as typed inputs: each key of an object is
 /// an input, and anything else is one input named `context`.
-fn inputs_of(context: serde_json::Value) -> InputValues {
-    let fields = match context {
-        serde_json::Value::Object(map) => map.into_iter().collect::<Vec<_>>(),
-        serde_json::Value::Null => Vec::new(),
-        other => vec![("context".to_string(), other)],
-    };
+/// A queued item's inputs, read by the shape they arrived in. A queued item
+/// is checked against its worker's declarations when it starts, so here each
+/// value keeps the type the wire gave it, and a name that is not a valid
+/// input name is left out.
+fn inputs_of(raw: std::collections::BTreeMap<String, RawInput>) -> InputValues {
     InputValues(
-        fields
-            .into_iter()
-            .filter_map(|(k, v)| Some((InputName::new(k).ok()?, input_of(v)?)))
+        raw.into_iter()
+            .filter_map(|(k, v)| Some((InputName::new(k).ok()?, input_of(v))))
             .collect(),
     )
 }
 
-fn input_of(value: serde_json::Value) -> Option<InputValue> {
-    use serde_json::Value as V;
-    Some(match value {
-        V::Null => return None,
-        V::Bool(b) => InputValue::Bool(b),
-        V::Number(n) => match n.as_i64() {
-            Some(i) => InputValue::Int(i),
-            None => InputValue::Float(n.as_f64().unwrap_or_default()),
-        },
-        V::String(s) => InputValue::Text(s),
-        V::Array(items) => InputValue::List(items.into_iter().filter_map(input_of).collect()),
-        V::Object(map) => InputValue::Record(
-            map.into_iter()
-                .filter_map(|(k, v)| Some((InputName::new(k).ok()?, input_of(v)?)))
-                .collect(),
-        ),
-    })
+fn input_of(value: RawInput) -> InputValue {
+    match value {
+        RawInput::Bool(b) => InputValue::Bool(b),
+        RawInput::Int(i) => InputValue::Int(i),
+        RawInput::Float(x) => InputValue::Float(x),
+        RawInput::Text(s) => InputValue::Text(s),
+        RawInput::List(items) => InputValue::List(items.into_iter().map(input_of).collect()),
+        RawInput::Record(map) => InputValue::Record(inputs_of(map).0),
+    }
 }
 
 fn message_of(m: &crate::components::AgentMessage) -> MessageState {

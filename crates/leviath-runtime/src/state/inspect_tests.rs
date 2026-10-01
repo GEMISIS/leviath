@@ -274,20 +274,24 @@ fn a_choice_names_its_edges_as_the_graph_does() {
 
 fn fan_out(world: &mut World, e: Entity) {
     let state = crate::fanout::FanOutState {
-        config: serde_json::from_value(json!({})).unwrap(),
+        config: serde_json::from_value(json!({"worker": {"stage": "plan"}})).unwrap(),
         max_workers: 2,
         pending: vec![
             crate::fanout::WorkItem {
                 id: "i1".into(),
-                context: json!({"topic": "x", "bad key": 1}),
+                inputs: [
+                    ("topic".to_string(), RawInput::Text("x".into())),
+                    ("bad key".to_string(), RawInput::Int(1)),
+                ]
+                .into(),
             },
             crate::fanout::WorkItem {
                 id: "i2".into(),
-                context: json!(null),
+                inputs: Default::default(),
             },
             crate::fanout::WorkItem {
                 id: "i3".into(),
-                context: json!("plain"),
+                inputs: [("task".to_string(), RawInput::Text("plain".into()))].into(),
             },
         ],
         active: vec![("i0".into(), "w-1".into()), ("i9".into(), "bad id".into())],
@@ -319,7 +323,7 @@ fn a_fan_out_reads_with_its_items_as_typed_inputs() {
     );
     assert!(f.queued[1].inputs.0.is_empty());
     assert_eq!(
-        f.queued[2].inputs.get("context"),
+        f.queued[2].inputs.get("task"),
         Some(&InputValue::Text("plain".into()))
     );
     assert_eq!(f.active, vec![("i0".into(), RunId::new("w-1").unwrap())]);
@@ -329,16 +333,20 @@ fn a_fan_out_reads_with_its_items_as_typed_inputs() {
 }
 
 #[test]
-fn json_becomes_the_closest_typed_input() {
-    let v = inputs_of(json!({
-        "b": true, "i": -3, "f": 1.5, "big": u64::MAX, "s": "t", "n": null,
-        "l": [1, null, "x"], "r": {"k": 2, "bad key": 1, "z": null}
-    }));
+fn raw_inputs_keep_the_type_they_arrived_with() {
+    let raw: RawInput = serde_json::from_value(json!({
+        "b": true, "i": -3, "f": 1.5, "s": "t",
+        "l": [1, "x"], "r": {"k": 2, "bad key": 1}
+    }))
+    .unwrap();
+    let RawInput::Record(map) = raw else {
+        unreachable!()
+    };
+    let v = inputs_of(map);
     assert_eq!(v.get("b"), Some(&InputValue::Bool(true)));
     assert_eq!(v.get("i"), Some(&InputValue::Int(-3)));
     assert_eq!(v.get("f"), Some(&InputValue::Float(1.5)));
-    assert_eq!(v.get("big"), Some(&InputValue::Float(u64::MAX as f64)));
-    assert_eq!(v.get("n"), None);
+    assert_eq!(v.get("s"), Some(&InputValue::Text("t".into())));
     assert_eq!(
         v.get("l"),
         Some(&InputValue::List(vec![
@@ -349,7 +357,7 @@ fn json_becomes_the_closest_typed_input() {
     let InputValue::Record(r) = v.get("r").unwrap() else {
         unreachable!()
     };
-    assert_eq!(r.len(), 1);
+    assert_eq!(r.len(), 1, "a key that is not an input name is left out");
 }
 
 fn entry(content: EntryContent, kind: CoreKind) -> RegionEntry {
