@@ -3,9 +3,11 @@
 use std::path::Path;
 
 use super::attach::{self, Files};
-use crate::spec::env::ResolveEnv;
+use crate::spec::env::{Caller, ResolveEnv};
 use crate::spec::graph::{OutputDef, RunGraph, StageMode};
-use crate::spec::inputs::{CheckCtx, InputSlot, InputType, InputValue, InputValues, check_inputs};
+use crate::spec::inputs::{
+    CheckCtx, InputDecl, InputSlot, InputType, InputValue, InputValues, check_inputs,
+};
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::ModelRef;
 use crate::spec::request::SpawnRequest;
@@ -23,9 +25,14 @@ pub(super) struct Checked {
 /// two checks that need more than the value: a `file` input's accepted types
 /// against the attached file's real type, and a `path` input that must exist
 /// against the workdir.
+///
+/// A fan-out worker is not held to the inputs the graph requires: its work
+/// item is its input, and its parent's caller gave the ones the graph asks
+/// for.
 pub(super) fn check(
     graph: &RunGraph,
     request: &SpawnRequest,
+    caller: &Caller,
     files: &Files,
     workdir: Option<&Path>,
     env: &dyn ResolveEnv,
@@ -35,7 +42,19 @@ pub(super) fn check(
     let cx = CheckCtx {
         attachments: &names,
     };
-    let checked = match check_inputs(&graph.inputs, &request.inputs, &cx) {
+    let decls: Vec<InputDecl> = match caller {
+        Caller::Worker { .. } => graph
+            .inputs
+            .iter()
+            .cloned()
+            .map(|decl| InputDecl {
+                required: false,
+                ..decl
+            })
+            .collect(),
+        Caller::TopLevel | Caller::Child { .. } => graph.inputs.clone(),
+    };
+    let checked = match check_inputs(&decls, &request.inputs, &cx) {
         Ok(values) => Checked { values, ok: true },
         Err(found) => {
             issues.absorb(found);

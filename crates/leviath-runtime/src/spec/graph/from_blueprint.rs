@@ -74,6 +74,19 @@ impl RunGraph {
     }
 }
 
+impl OutputDef {
+    /// The output shape `spec` describes, as a graph or a request carries it.
+    /// An artifact whose mime type does not read is an issue under `output`.
+    pub fn from_output_spec(spec: &leviath_core::output::OutputSpec) -> Result<Self, SpawnIssues> {
+        let mut c = Conv {
+            issues: SpawnIssues::new(),
+            inputs: BTreeMap::new(),
+        };
+        let def = c.output(spec, &at().field("output"));
+        c.issues.into_result(def)
+    }
+}
+
 struct Conv {
     issues: SpawnIssues,
     /// Caller inputs found in region seeds, by input name.

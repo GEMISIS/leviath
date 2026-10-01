@@ -52,7 +52,7 @@ use leviath_runtime::host::WorldEvent;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use self::mapping::{PermissionChoice, interpret_permission};
-use self::session::{ResolvedBlueprint, resolve_blueprint, spawn_args};
+use self::session::{ResolvedBlueprint, resolve_blueprint, spawn_request};
 use self::translate::{StageTail, split_chunks};
 
 /// How often, absent a daemon event, the loop flushes newly-written run output.
@@ -606,15 +606,17 @@ impl Server {
             }
             None => {
                 let session = self.session.as_ref().expect("session present");
-                let spawn = spawn_args(
+                let Ok(request) = spawn_request(
                     &session.blueprint,
                     &task,
                     &session.cwd,
                     &self.args,
                     regions,
                     parts,
-                );
-                match self.control.spawn(spawn).await {
+                ) else {
+                    return RunStart::SpawnFailed;
+                };
+                match self.control.spawn(request).await {
                     Ok(ControlResponse::Spawned { run_id }) => {
                         self.session.as_mut().expect("session present").run_id =
                             Some(run_id.clone());

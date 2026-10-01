@@ -8,11 +8,9 @@
 
 use leviath_core::mime::InboundPart;
 use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
-use leviath_runtime::host::SpawnArgs;
 
 use super::super::types::AppState;
 use super::error::ServeError;
-use crate::runstate;
 
 /// Everything about a new run, after the request that carried it is decoded.
 ///
@@ -125,50 +123,32 @@ pub(crate) async fn spawn(
             .map_err(ServeError::Forbidden)?;
     }
 
-    let args = SpawnArgs {
-        run_id: runstate::new_run_id(&request.blueprint),
-        blueprint_path: manifest_path.to_string_lossy().to_string(),
-        task: request.task,
-        regions: request.regions,
-        model: request.model,
-        workdir,
-        metadata: request.metadata,
-        callback_url: request.callback_url,
-        callback_secret: request.callback_secret,
-        yolo,
-        yolo_profile: request.yolo_profile,
-        // Either side may refuse: this caller for this run, or the operator for
-        // every run that arrives over the network.
-        no_seed_commands: request.no_seed_commands || state.limits.no_remote_seed_commands,
-        allow: request.allow,
-        output: request.output,
-        max_depth: request.max_depth,
-        // A run started through this server is a top-level run.
-        parent_run_id: None,
-        worker_stage: None,
-        parts,
-        capture_model_input: request.capture_model_input,
-    };
+    let output = request.output.clone();
+    let blueprint_dir = found.path.clone();
+    let spawn = daemon_request(state, request, &blueprint_dir, workdir, yolo, parts)
+        .map_err(ServeError::BadRequest)?;
     // What this spawn tells its caller alongside the run id: the declared
     // checks that the request's own output shape retires. The daemon logs the
     // same retirement into its own log, which the caller never reads, and the
     // check they may be counting on deserves a line in the response they do.
     // Best-effort: a manifest that will not read is the daemon's to report as
     // the spawn error, and this must never be why one fails.
-    let warnings = crate::commands::run::manifest::retired_check_warnings_at(
-        &manifest_path,
-        args.output.as_ref(),
-    );
-    let blueprint = request.blueprint;
+    let warnings =
+        crate::commands::run::manifest::retired_check_warnings_at(&manifest_path, output.as_ref());
 
-    match state.control.spawn(args).await {
+    match state.control.spawn(spawn).await {
         Ok(ControlResponse::Spawned { run_id }) => {
             // No spawned frame from here. The daemon emits one for every run the
             // world gains, however it was launched, so a second one would make
             // exactly the runs that arrived over the network appear twice.
-            tracing::info!(run_id = %run_id, blueprint = %blueprint, "spawned agent via API");
+            tracing::info!(run_id = %run_id, blueprint = %blueprint_dir, "spawned agent via API");
             Ok(Spawned { run_id, warnings })
         }
+        // Every problem with the request, each with where it is and how to
+        // fix it.
+        Ok(ControlResponse::Rejected { issues }) => Err(ServeError::BadRequest(format!(
+            "Failed to spawn agent: {issues}"
+        ))),
         // The daemon's own refusal: a manifest that will not load, a region the
         // blueprint does not declare, a seed that cannot run.
         Ok(ControlResponse::Error { message }) => Err(ServeError::BadRequest(format!(
@@ -177,6 +157,39 @@ pub(crate) async fn spawn(
         Ok(other) => Err(ServeError::unexpected_reply(&other)),
         Err(e) => Err(ServeError::from_daemon_io(&e)),
     }
+}
+
+/// The request a decoded spawn makes of the daemon: the blueprint found for
+/// it, the task and each named region as inputs, its files as attachments, and
+/// the launch settings. Seed commands are refused when either this caller or
+/// the operator refuses them for runs that arrive over the network.
+fn daemon_request(
+    state: &AppState,
+    request: SpawnRequest,
+    blueprint_dir: &str,
+    workdir: String,
+    yolo: bool,
+    parts: Vec<InboundPart>,
+) -> Result<leviath_runtime::spec::request::SpawnRequest, String> {
+    crate::daemon::requests::TaskLaunch {
+        blueprint: blueprint_dir.to_string(),
+        task: request.task,
+        regions: request.regions,
+        parts,
+        model: request.model,
+        workdir: Some(workdir),
+        unattended: yolo,
+        profile: request.yolo_profile,
+        allow: request.allow,
+        max_depth: request.max_depth,
+        no_seed_commands: request.no_seed_commands || state.limits.no_remote_seed_commands,
+        output: request.output,
+        capture_model_input: request.capture_model_input,
+        metadata: request.metadata,
+        callback_url: request.callback_url,
+        callback_secret: request.callback_secret,
+    }
+    .into_request()
 }
 
 /// Deliver a message to a run that is going.

@@ -94,9 +94,9 @@ pub fn insert(
     id
 }
 
-/// The state a new run starts in: at its entry stage, visited once, with its
-/// window laid out from the graph, filled from what the spec seeded, and the
-/// entry stage's instructions in place.
+/// The state a new run starts in: at its first stage (a fan-out worker's own stage),
+/// visited once, with its window laid out from the graph, filled from what the
+/// spec seeded, and that stage's instructions in place.
 ///
 /// A prompt too large for its region is left out rather than failing: the
 /// resolver refuses such a spec before it is ever inserted.
@@ -104,12 +104,6 @@ pub fn initial_state(spec: &RunSpec) -> RunState {
     let mut window = seeded_window(spec, &HashMap::new());
     let _ = enter_first_stage(spec, &mut window);
     initial_state_from(spec, &window)
-}
-
-/// The graph's layout as an otherwise empty blueprint, for the window setup
-/// that still reads one.
-fn layout_only(layout: crate::spec::ContextLayout) -> crate::spec::Blueprint {
-    crate::spec::Blueprint::new(String::new(), String::new(), Vec::new(), layout)
 }
 
 /// A window laid out from the graph's layout and filled from the spec's seeds:
@@ -126,7 +120,7 @@ pub(crate) fn seeded_window(
     // Before seeding, so seed writes pass through each region's `on_write`
     // hook like any other entry.
     window.region_scripts = scripts.clone();
-    crate::context_setup::init_window_seeded(&mut window, &layout_only(layout), &HashMap::new());
+    crate::context_setup::lay_out(&mut window, &layout);
     if spec.graph.taint_tracking == Some(true) {
         window.enable_taint_tracking();
     }
@@ -189,14 +183,25 @@ pub(crate) fn enter_first_stage(spec: &RunSpec, window: &mut ContextWindow) -> R
         .map(|i| spec_view::stage_setup(spec, i).system_prompt)
         .collect();
     crate::context_setup::ensure_stage_instructions_region(window, &prompts);
-    let entry = spec_view::entry_index(&spec.graph);
+    let entry = start_index(spec);
     crate::pipeline::apply_stage_context(&spec_view::stage_setup(spec, entry), window)
+}
+
+/// The stage a new run starts in: for a fan-out worker, the stage of its
+/// parent's graph it was started to run; for any other run, the graph's entry
+/// stage.
+pub(crate) fn start_index(spec: &RunSpec) -> usize {
+    spec.placement
+        .worker_stage
+        .as_ref()
+        .and_then(|stage| spec.graph.stages.iter().position(|s| s.name == *stage))
+        .unwrap_or_else(|| spec_view::entry_index(&spec.graph))
 }
 
 /// The state a new run starts in, with `window` as its context: at the entry
 /// stage, visited once, its first visit open in the ledger, active.
 pub(crate) fn initial_state_from(spec: &RunSpec, window: &ContextWindow) -> RunState {
-    let entry = spec_view::entry_index(&spec.graph);
+    let entry = start_index(spec);
     let setup = spec_view::stage_setup(spec, entry);
     let mut state = RunState::initial(
         spec.graph.stages[entry].name.clone(),

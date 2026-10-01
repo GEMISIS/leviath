@@ -148,6 +148,28 @@ async fn a_worker_is_not_held_to_required_regions_or_a_task() {
     assert_eq!(found(&issues), ["inputs.task Missing"]);
 }
 
+/// The inputs a graph requires of its caller were given to a worker's
+/// parent, so a worker is not asked for them again; anyone else is.
+#[tokio::test]
+async fn a_worker_is_not_held_to_the_graphs_required_inputs() {
+    let mut g = graph();
+    g.inputs.push(crate::spec::inputs::InputDecl {
+        required: true,
+        ..text_input("diff", "task")
+    });
+    let request = raw(g);
+    resolve(
+        &request,
+        &worker(None),
+        &Fake::default(),
+        ResolveMode::Spawn,
+    )
+    .await
+    .expect("a worker is not asked for the diff");
+    let issues = spawn(&request, &Fake::default()).await.unwrap_err();
+    assert!(found(&issues).contains(&"inputs.diff Missing".to_string()));
+}
+
 #[tokio::test]
 async fn a_parent_that_turned_commands_off_turns_them_off_for_its_child() {
     let mut g = graph();

@@ -14,8 +14,6 @@ use leviath_runtime::host::{SubAgentOp, SubAgentReport};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::daemon::client::{never_interactive, resolve_spawn_args};
-
 /// Per-agent state needed to service the sub-agent tools: a sender into the
 /// host's [`SubAgentOp`] channel plus the spawning agent's identity and the
 /// context children inherit.
@@ -27,8 +25,6 @@ pub(crate) struct SubAgentHandle {
     pub parent_run_id: String,
     /// Working directory children inherit.
     pub workdir: String,
-    /// Maximum allowed sub-agent tree depth.
-    pub max_depth: usize,
     /// The parent run's `--no-seed-commands` setting, inherited by children so a
     /// per-run opt-out can't be side-stepped by spawning a sub-agent whose
     /// blueprint declares command seeds.
@@ -274,32 +270,23 @@ async fn spawn(
         }
     };
 
-    let spawn_args = match resolve_spawn_args(crate::daemon::client::LaunchRequest {
-        path: blueprint,
-        task: Some(&full_task),
-        stdin_is_terminal: &never_interactive,
-        model: h.model_override.clone(),
-        workdir: &h.workdir,
-        yolo: h.unattended,
-        yolo_profile: h.yolo_profile.clone(),
-        allow: Vec::new(),
-        max_depth: child_max_depth,
-        regions: // Sub-agents receive their whole task via `full_task`; no region flags.
-        std::collections::HashMap::new(),
-        no_seed_commands: h.no_seed_commands,
-        output_request: child_output,
+    let request = match child_request(
+        h,
+        blueprint,
+        full_task,
+        child_max_depth,
+        child_output,
         parts,
-    }) {
-        Ok(a) => a,
+    ) {
+        Ok(request) => request,
         Err(e) => return EntryContent::text(format!("[error] cannot spawn '{blueprint}': {e}")),
     };
 
     let (tx, rx) = oneshot::channel();
     if h.sender
         .send(SubAgentOp::Spawn {
-            args: Box::new(spawn_args),
+            request: Box::new(request),
             parent_run_id: h.parent_run_id.clone(),
-            max_depth: h.max_depth,
             reply: tx,
         })
         .is_err()
@@ -307,11 +294,39 @@ async fn spawn(
         return EntryContent::text("[error] the daemon is shutting down");
     }
     match rx.await {
-        Ok(Ok(child_id)) if wait_flag => wait(h, &child_id).await,
+        Ok(Ok(child_id)) if wait_flag => wait(h, child_id.as_str()).await,
         Ok(Ok(child_id)) => EntryContent::text(format!("Spawned sub-agent '{child_id}'.")),
-        Ok(Err(e)) => EntryContent::text(format!("[error] {e}")),
+        Ok(Err(issues)) => EntryContent::text(format!("[error] {issues}")),
         Err(_) => EntryContent::text("[error] the daemon dropped the spawn request"),
     }
+}
+
+/// The request a `spawn_agent` call makes: the named blueprint, the task as
+/// its `task` input, and the parent's launch settings and model as the
+/// child's own. The host narrows them against the parent's policy, so a child
+/// is never trusted with more than its parent.
+fn child_request(
+    h: &SubAgentHandle,
+    blueprint: &str,
+    task: String,
+    max_depth: Option<usize>,
+    output: Option<leviath_core::output::OutputSpec>,
+    parts: Vec<leviath_core::mime::InboundPart>,
+) -> Result<leviath_runtime::spec::request::SpawnRequest, String> {
+    crate::daemon::requests::TaskLaunch {
+        blueprint: blueprint.to_string(),
+        task,
+        parts,
+        model: h.model_override.clone(),
+        workdir: Some(h.workdir.clone()),
+        unattended: h.unattended,
+        profile: h.yolo_profile.clone(),
+        max_depth,
+        no_seed_commands: h.no_seed_commands,
+        output,
+        ..Default::default()
+    }
+    .into_request()
 }
 
 async fn check(h: &SubAgentHandle, agent_id: &str) -> EntryContent {
@@ -602,7 +617,6 @@ mod tests {
             sender: tx,
             parent_run_id: "parent".to_string(),
             workdir: work.path().to_string_lossy().to_string(),
-            max_depth: 3,
             no_seed_commands: false,
             unattended: false,
             yolo_profile: None,
@@ -650,7 +664,6 @@ mod tests {
             sender: tx,
             parent_run_id: "parent".to_string(),
             workdir: work.path().to_string_lossy().to_string(),
-            max_depth: 3,
             no_seed_commands: false,
             unattended: false,
             yolo_profile: None,
@@ -672,8 +685,40 @@ mod tests {
             "a blueprint outside the workspace must not be refused: {out}"
         );
     }
-    use leviath_runtime::host::SpawnArgs;
     use serde_json::json;
+
+    /// What a child's request asked for, as the tests read it.
+    #[derive(Debug, Clone)]
+    struct SeenSpawn {
+        task: String,
+        max_depth: Option<usize>,
+        yolo: bool,
+        yolo_profile: Option<String>,
+        parts: Vec<leviath_runtime::spec::request::Attachment>,
+        model: Option<String>,
+        output: Option<leviath_runtime::spec::graph::OutputDef>,
+    }
+
+    impl SeenSpawn {
+        fn of(request: &leviath_runtime::spec::request::SpawnRequest) -> Self {
+            use leviath_runtime::spec::launch::Unattended;
+            Self {
+                task: match request.inputs.get("task") {
+                    Some(leviath_runtime::spec::inputs::RawInput::Text(t)) => t.clone(),
+                    _ => String::new(),
+                },
+                max_depth: request.launch.max_depth.map(usize::from),
+                yolo: request.launch.unattended != Unattended::Off,
+                yolo_profile: match &request.launch.unattended {
+                    Unattended::Profile(p) => Some(p.to_string()),
+                    _ => None,
+                },
+                parts: request.attachments.clone(),
+                model: request.model.as_ref().map(ToString::to_string),
+                output: request.output.clone(),
+            }
+        }
+    }
 
     fn handle_with(sender: UnboundedSender<SubAgentOp>) -> SubAgentHandle {
         SubAgentHandle {
@@ -688,7 +733,6 @@ mod tests {
             // containment guard refused them all. macOS puts tempdirs under
             // `$TMPDIR` in `/var/folders`, so nothing local caught it.
             workdir: env!("CARGO_MANIFEST_DIR").to_string(),
-            max_depth: 3,
             no_seed_commands: false,
             unattended: false,
             yolo_profile: None,
@@ -709,7 +753,7 @@ mod tests {
         ok: bool,
     ) -> (
         SubAgentHandle,
-        std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<SeenSpawn>>>,
         tokio::task::JoinHandle<()>,
     ) {
         fake_host_with_parent(spawn_result, statuses, ok, Some(AgentStatus::Active))
@@ -722,7 +766,7 @@ mod tests {
         output: Option<leviath_core::output::FinalOutput>,
     ) -> (
         SubAgentHandle,
-        std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<SeenSpawn>>>,
         tokio::task::JoinHandle<()>,
     ) {
         fake_host_full(
@@ -742,7 +786,7 @@ mod tests {
         parent_status: Option<AgentStatus>,
     ) -> (
         SubAgentHandle,
-        std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<SeenSpawn>>>,
         tokio::task::JoinHandle<()>,
     ) {
         fake_host_full(spawn_result, statuses, ok, parent_status, None)
@@ -757,7 +801,7 @@ mod tests {
         child_output: Option<leviath_core::output::FinalOutput>,
     ) -> (
         SubAgentHandle,
-        std::sync::Arc<std::sync::Mutex<Vec<SpawnArgs>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<SeenSpawn>>>,
         tokio::task::JoinHandle<()>,
     ) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -767,9 +811,20 @@ mod tests {
             let mut checks = statuses.into_iter();
             while let Some(op) = rx.recv().await {
                 match op {
-                    SubAgentOp::Spawn { reply, args, .. } => {
-                        seen_task.lock().unwrap().push(*args);
-                        let _ = reply.send(spawn_result.clone());
+                    SubAgentOp::Spawn { reply, request, .. } => {
+                        seen_task.lock().unwrap().push(SeenSpawn::of(&request));
+                        let answer = spawn_result
+                            .clone()
+                            .map(|id| leviath_runtime::spec::names::RunId::new(id).unwrap())
+                            .map_err(|e| {
+                                leviath_runtime::spec::issues::SpawnIssue::new(
+                                    leviath_runtime::spec::issues::SpecPath::root(),
+                                    leviath_runtime::spec::issues::IssueCode::Invalid,
+                                    e,
+                                )
+                                .into()
+                            });
+                        let _ = reply.send(answer);
                     }
                     // `wait` polls the *caller* as well as the child (to bail out
                     // if the caller was itself cancelled), so the scripted queue
@@ -1001,10 +1056,10 @@ task = { kind = "pinned", max_tokens = 1000 }
             assert_eq!(parts[0].name, "hero.png");
             assert_eq!(parts[0].mime_type.as_ref().unwrap().as_str(), "image/png");
             assert_eq!(parts[0].deliver, Some(Delivery::Text));
-            assert_eq!(parts[0].data, b"\x89PNG\r\n\x1a\nhero");
+            assert_eq!(parts[0].data.0, b"\x89PNG\r\n\x1a\nhero");
             // The unnamed part is named by its hash.
             assert_eq!(parts[1].name, sha.chars().take(12).collect::<String>());
-            assert_eq!(parts[1].data, b"other");
+            assert_eq!(parts[1].data.0, b"other");
             assert!(parts[1].deliver.is_none());
         }
 

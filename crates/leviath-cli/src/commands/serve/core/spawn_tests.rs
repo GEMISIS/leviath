@@ -49,16 +49,22 @@ async fn a_spawn_reaches_the_daemon_and_answers_with_the_run() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let mut state = with_blueprint(dir.path(), "coder");
     let (control, _socket, _srv) = fake_daemon(|req| match req {
-        ControlRequest::Spawn { args } => {
-            // The blueprint the request named, resolved to the file on disk.
-            assert!(
-                args.blueprint_path.ends_with("agent.leviath"),
-                "{}",
-                args.blueprint_path
+        ControlRequest::Spawn { request } => {
+            // The blueprint the request named, by the name it is installed
+            // under, and the task as its `task` input.
+            let leviath_runtime::spec::request::SpawnSource::Blueprint(reference) = &request.source
+            else {
+                panic!("a blueprint request");
+            };
+            assert!(reference.name.as_str().ends_with("coder"), "{reference}");
+            assert_eq!(
+                request.inputs.get("task"),
+                Some(&leviath_runtime::spec::inputs::RawInput::Text(
+                    "do the thing".to_string()
+                ))
             );
-            assert_eq!(args.task, "do the thing");
             ControlResponse::Spawned {
-                run_id: args.run_id,
+                run_id: "coder-1".to_string(),
             }
         }
         other => panic!("the spawn is what reaches the daemon: {other:?}"),
@@ -84,13 +90,14 @@ async fn a_request_with_no_workdir_runs_where_the_server_does() {
         .map(|dir| dir.to_string_lossy().to_string())
         .unwrap_or_default();
     let (control, _socket, _srv) = fake_daemon(move |req| match req {
-        ControlRequest::Spawn { args } => {
+        ControlRequest::Spawn { request } => {
             assert_eq!(
-                args.workdir, here,
+                request.workdir,
+                Some(std::path::PathBuf::from(&here)),
                 "the server's own directory is passed on"
             );
             ControlResponse::Spawned {
-                run_id: args.run_id,
+                run_id: "coder-1".to_string(),
             }
         }
         other => panic!("the spawn is what reaches the daemon: {other:?}"),
@@ -137,8 +144,8 @@ async fn a_workdir_outside_the_root_is_forbidden() {
     let inside = root.path().join("work");
     std::fs::create_dir_all(&inside).expect("the workdir");
     let (control, _socket, _srv) = fake_daemon(|req| match req {
-        ControlRequest::Spawn { args } => ControlResponse::Spawned {
-            run_id: args.run_id,
+        ControlRequest::Spawn { .. } => ControlResponse::Spawned {
+            run_id: "coder-1".to_string(),
         },
         other => panic!("unexpected: {other:?}"),
     });
@@ -462,8 +469,8 @@ async fn the_retired_check_warnings_stay_quiet_on_a_bad_manifest() {
     .expect("manifest written");
     let mut state = state_with_agent_paths(vec![dir.path().to_path_buf()]);
     let (control, _socket, _srv) = fake_daemon(|req| match req {
-        ControlRequest::Spawn { args } => ControlResponse::Spawned {
-            run_id: args.run_id,
+        ControlRequest::Spawn { .. } => ControlResponse::Spawned {
+            run_id: "coder-1".to_string(),
         },
         other => panic!("unexpected: {other:?}"),
     });

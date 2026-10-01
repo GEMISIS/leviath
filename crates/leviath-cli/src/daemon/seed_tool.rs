@@ -27,10 +27,7 @@
 //! the setting that would let it run. `allow` runs, `deny` is refused, and both
 //! read the same as they would mid-run.
 
-use std::collections::HashMap;
 use std::sync::Arc;
-
-use leviath_runtime::spec::layout::SeedToolCall;
 
 use crate::config::ToolPolicy;
 
@@ -41,33 +38,6 @@ use crate::config::ToolPolicy;
 /// [`crate::daemon::seed_command::SeedCommandRunner`].
 pub(crate) type SeedToolRunner =
     Arc<dyn Fn(&str, &serde_json::Value) -> Result<String, String> + Send + Sync>;
-
-/// How tool seeds are executed for one spawn.
-#[derive(Clone)]
-pub(crate) struct SeedToolPolicy {
-    /// The executor.
-    pub runner: SeedToolRunner,
-}
-
-impl SeedToolPolicy {
-    /// A policy over an explicit runner.
-    pub(crate) fn new(runner: SeedToolRunner) -> Self {
-        Self { runner }
-    }
-
-    /// A policy that runs nothing, for tests that spawn without seed tools.
-    #[cfg(test)]
-    pub(crate) fn disabled() -> Self {
-        Self {
-            runner: Arc::new(|name, _| Err(format!("tool seeds are not resolved here ('{name}')"))),
-        }
-    }
-
-    /// Run `call`, or report why it did not.
-    pub(crate) fn run(&self, call: &SeedToolCall) -> Result<String, String> {
-        (self.runner)(&call.name, &call.args)
-    }
-}
 
 /// Whether a seed may run `policy`, and what to say when it may not.
 ///
@@ -101,38 +71,6 @@ pub(crate) fn join_blocks(blocks: Vec<String>) -> Option<String> {
     (!blocks.is_empty()).then(|| blocks.join("\n\n"))
 }
 
-/// The policy layers a seed resolves each call against.
-///
-/// Borrowed from the spawn path rather than rebuilt, so a seed and a mid-run
-/// call cannot disagree about what the user configured.
-pub(crate) struct SeedToolPermissions<'a> {
-    /// `--allow` / `--ask` / `--deny` / `--yolo` for this run.
-    pub launch: &'a HashMap<String, ToolPolicy>,
-    /// The entry stage's `[stages.<name>.tool_permissions]`.
-    pub stage: &'a HashMap<String, String>,
-    /// The agent's `[tool_permissions]`.
-    pub agent: &'a HashMap<String, String>,
-    /// The user's `config.toml` `[tool_permissions]`.
-    pub global: &'a HashMap<String, ToolPolicy>,
-    /// Whether this blueprint may loosen a tool below its built-in default.
-    pub may_loosen: bool,
-}
-
-impl SeedToolPermissions<'_> {
-    /// The resolved policy for `name`.
-    pub(crate) fn resolve(&self, name: &str, is_builtin: bool) -> ToolPolicy {
-        crate::tools::resolve_policy(
-            name,
-            is_builtin,
-            self.launch,
-            self.stage,
-            self.agent,
-            self.global,
-            self.may_loosen,
-        )
-    }
-}
-
 /// Everything the production runner needs to answer one seeded call.
 ///
 /// Cloned into the closure rather than borrowed, because the runner outlives
@@ -157,9 +95,9 @@ pub(crate) struct SeedToolContext {
 
 /// Decides one seeded call's policy: `(tool name, is_builtin) -> policy`.
 ///
-/// A closure rather than [`SeedToolPermissions`] itself, so the spawn path can
-/// hand over the layered resolution it already built without this module
-/// learning its shape or borrowing its four maps for the runner's lifetime.
+/// A closure, so the caller can hand over the layered resolution it already
+/// built without this module learning its shape or borrowing its maps for the
+/// runner's lifetime.
 pub(crate) type SeedPolicyResolver =
     Arc<dyn Fn(&str, bool, &serde_json::Value) -> ToolPolicy + Send + Sync>;
 
@@ -343,33 +281,6 @@ mod tests {
         // Every call having failed leaves the region unseeded rather than
         // holding an empty string, which reads downstream as content.
         assert_eq!(join_blocks(Vec::new()), None);
-    }
-
-    #[test]
-    fn a_disabled_policy_runs_nothing_and_names_the_tool_it_skipped() {
-        let policy = SeedToolPolicy::disabled();
-        let err = policy
-            .run(&SeedToolCall::new("current_time"))
-            .expect_err("disabled");
-        assert!(err.contains("current_time"), "{err}");
-    }
-
-    /// The runner really is the seam: what it answers is what the seed records,
-    /// and the arguments reach it unchanged.
-    #[test]
-    fn the_injected_runner_receives_the_call_as_written() {
-        let policy = SeedToolPolicy::new(Arc::new(|name, args| Ok(format!("{name}:{args}"))));
-        let call =
-            SeedToolCall::with_args("which_command", serde_json::json!({ "command": "git" }));
-        assert_eq!(
-            policy.run(&call).expect("ran"),
-            "which_command:{\"command\":\"git\"}"
-        );
-        // A call with no arguments carries an empty object, not a null.
-        assert_eq!(
-            policy.run(&SeedToolCall::new("current_time")).expect("ran"),
-            "current_time:{}"
-        );
     }
 
     /// A server that ran the tool and reported failure is not data. Reporting
@@ -656,9 +567,13 @@ for line in sys.stdin:
     elif method != "notifications/initialized" and method != "notifications/cancelled":
         respond(id_, {})
 "#;
-        let mut client = leviath_mcp::MCPClient::spawn("python3", &["-c", STUB], &HashMap::new())
-            .await
-            .expect("spawn stub");
+        let mut client = leviath_mcp::MCPClient::spawn(
+            "python3",
+            &["-c", STUB],
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("spawn stub");
         client.connect().await.expect("connect");
         client.list_tools().await.expect("list_tools");
         let mut executor = leviath_mcp::ToolExecutor::new();
@@ -673,28 +588,6 @@ for line in sys.stdin:
         let runner = production_runner(ctx, allow_all());
         let out = runner("acme__do_thing", &serde_json::json!({})).expect("answered");
         assert_eq!(out, "seeded by acme");
-    }
-
-    #[test]
-    fn permissions_resolve_through_the_same_path_the_tool_lane_uses() {
-        let launch = HashMap::new();
-        let stage = HashMap::new();
-        let agent = HashMap::new();
-        let mut global = HashMap::new();
-        global.insert("current_time".to_string(), ToolPolicy::Deny);
-        let perms = SeedToolPermissions {
-            launch: &launch,
-            stage: &stage,
-            agent: &agent,
-            global: &global,
-            may_loosen: false,
-        };
-        // The user's config is honoured at seed time, not only mid-run.
-        assert_eq!(perms.resolve("current_time", true), ToolPolicy::Deny);
-        // And an unconfigured environment tool keeps its built-in `allow`.
-        assert_eq!(perms.resolve("system_info", true), ToolPolicy::Allow);
-        // While a mutating one still defaults to `ask`, which a seed refuses.
-        assert_eq!(perms.resolve("write_file", true), ToolPolicy::Ask);
     }
 
     /// A seed is held to the same lock as a mid-run call: it runs before any

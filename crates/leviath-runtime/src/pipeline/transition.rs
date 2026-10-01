@@ -9,25 +9,12 @@ use spec_view::StageToolOverrides;
 
 // ─── Stage transition ────────────────────────────────────────────────────────
 
-/// The parsed blueprint a run was spawned from, kept on runs that came through
-/// [`spawn_agent_seeded`](super::spawn_agent_seeded) for the modules outside
-/// the pipeline that still read it. The pipeline itself reads the run's spec.
-#[derive(Component, Debug, Clone)]
-pub struct AgentBlueprint(pub crate::spec::Blueprint);
-
 /// The index of the agent's current stage within its graph.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct StageCursor {
     /// Current stage index.
     pub index: usize,
 }
-
-/// Every stage's [`StageInference`], by position, as runs spawned through
-/// [`spawn_agent_seeded`](super::spawn_agent_seeded) carry it for the modules
-/// outside the pipeline that still read it. The pipeline works each stage's
-/// inference out from the run's spec.
-#[derive(Component, Debug, Clone)]
-pub(crate) struct StageInferences(pub Vec<StageInference>);
 
 /// How many times the agent has entered each stage (for `max_revisits`).
 #[derive(Component, Debug, Clone, Default)]
@@ -55,11 +42,6 @@ pub(crate) struct StageSetup {
     /// Optional stage instructions injected as pinned context on entry.
     pub system_prompt: Option<String>,
 }
-
-/// Every stage's [`StageSetup`], by position, kept beside [`StageInferences`]
-/// for the same readers.
-#[derive(Component, Clone)]
-pub(crate) struct StageSetups(pub Vec<StageSetup>);
 
 /// The stage completed with multiple candidate edges (or a single edge the stage
 /// may decline); an LLM must choose. Holds the choosable edges for the async

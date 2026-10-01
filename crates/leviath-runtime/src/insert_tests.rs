@@ -1,8 +1,8 @@
 use super::*;
 use crate::components::{AgentState, AgentStatus, InferenceConfig};
 use crate::pipeline::{
-    AgentBlueprint, AwaitingTransitionChoice, LastTransition, ReadyToInfer, StageCursor,
-    StageInference, StageLedger, StageProgress, VisitCounts, WaitingForChildren,
+    AwaitingTransitionChoice, LastTransition, ReadyToInfer, StageCursor, StageInference,
+    StageLedger, StageProgress, VisitCounts, WaitingForChildren,
 };
 use crate::spec::graph::ToolRescan;
 use crate::spec::names::{EdgeName, RunId, StageName};
@@ -170,7 +170,7 @@ fn placement(world: &World, e: Entity) -> String {
     )
 }
 
-/// A bundled blueprint spawned the way the daemon spawns it places exactly what
+/// A bundled blueprint spawned from its parsed form places exactly what
 /// inserting its spec at its initial state places, and that is the run the
 /// blueprint describes: at its entry stage, visited once, with the stage's
 /// instructions, inference and routing in place.
@@ -208,7 +208,6 @@ fn a_bundled_blueprint_lands_the_same_through_spawn_and_through_insert() {
             agent_id: "coder-1".to_string(),
             blueprint: blueprint.clone(),
             seeds: [("task".to_string(), "fix the bug".to_string())].into(),
-            parts: vec![],
             stages,
             global_hints: crate::test_support::hints(true),
             global_nudge: Default::default(),
@@ -272,10 +271,6 @@ fn a_bundled_blueprint_lands_the_same_through_spawn_and_through_insert() {
             .unwrap()
             .0
             .no_output_tools
-    );
-    assert!(
-        spawned.get::<AgentBlueprint>(a).is_some(),
-        "kept for the readers outside the pipeline"
     );
     assert!(spawned.get::<ReadyToInfer>(a).is_some());
 }
@@ -1118,4 +1113,24 @@ fn a_binding_edits_what_insertion_placed() {
     let md = world.get::<crate::persistence::RunMetadata>(e).unwrap();
     assert_eq!(md.agent_path, "/agents/coder/agent.leviath");
     assert!(world.get::<Marker>(e).is_none());
+}
+
+/// A fan-out worker starts in the stage it was started to run, not at the
+/// graph's entry.
+#[test]
+fn a_worker_starts_in_its_worker_stage() {
+    let graph = crate::spec_bridge::test_support::graph_of(
+        "[agent]\nname = \"t\"\nentry_stage = \"a\"\n\
+         [stages.a]\nsystem_prompt = \"first\"\n\
+         [stages.b]\nsystem_prompt = \"second\"\nallow_as_worker = true\n",
+    );
+    let mut spec = crate::spec_bridge::test_support::spec_named("t", graph);
+    assert_eq!(initial_state(&spec).cursor.stage.as_str(), "a");
+    spec.placement.worker_stage = Some(crate::spec::names::StageName::new("b").unwrap());
+    let state = initial_state(&spec);
+    assert_eq!(state.cursor.stage.as_str(), "b");
+    assert_eq!(state.visits.get("b"), Some(&1));
+    // A stage the graph does not have leaves the run at its entry.
+    spec.placement.worker_stage = Some(crate::spec::names::StageName::new("z").unwrap());
+    assert_eq!(initial_state(&spec).cursor.stage.as_str(), "a");
 }

@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use leviath_core::{EvictionStrategy, Region, RegionKind, truncate_at_boundary};
 
 use crate::ContextWindow;
-use crate::spec::graph::{Budget, RegionDef, RegionKind as Kind, RegionLayoutDef};
+use crate::spec::graph::{Budget, RegionDef, RegionLayoutDef};
 use crate::spec::run_spec::RunSpec;
 use crate::spec::{Blueprint, ContextLayout};
 
 pub(crate) mod parts;
-pub(crate) use parts::{PartSink, ingest_parts_into, text_part};
+pub(crate) use parts::{PartSink, text_part};
 
 /// A region's budget as tokens, against a model window of `window` tokens.
 ///
@@ -34,27 +34,6 @@ pub fn budget_tokens(budget: &Budget, window: usize) -> usize {
             v
         }
     }
-}
-
-/// The tokens a region of the graph's own layout gets.
-///
-/// The smallest budget any stage using that layout resolved it to, which is
-/// the budget sized against the smallest window that sees the region. A
-/// region no such stage sees is sized against the entry stage's window.
-#[cfg(test)]
-pub(crate) fn layout_region_budget(spec: &RunSpec, def: &RegionDef) -> usize {
-    spec.graph
-        .stages
-        .iter()
-        .zip(&spec.stages)
-        .filter(|(stage, _)| stage.layout.is_none())
-        .filter_map(|(_, plan)| plan.region_budgets.get(&def.name))
-        .min()
-        .map(|n| *n as usize)
-        .unwrap_or_else(|| {
-            let window = spec.stages.first().map_or(0, |p| p.context_window);
-            budget_tokens(&def.budget, window as usize)
-        })
 }
 
 /// The tokens a region gets in one stage: what that stage's plan resolved it
@@ -84,56 +63,22 @@ pub fn region_from_def(def: &RegionDef, budget: usize) -> Region {
     region
 }
 
-/// The region the `task` text seeds: a pinned region named `task`, else the
-/// first pinned region.
-pub(crate) fn task_region(layout: &RegionLayoutDef) -> Option<String> {
-    layout
-        .regions
-        .iter()
-        .find(|r| r.name.as_str() == "task" && matches!(r.kind, Kind::Pinned))
-        .or_else(|| {
-            layout
-                .regions
-                .iter()
-                .find(|r| matches!(r.kind, Kind::Pinned))
-        })
-        .map(|r| r.name.to_string())
+/// Lay `window` out from a resolved layout: each of its regions, then the
+/// infra `tool_results`/`conversation`/`final_output` regions it does not
+/// declare itself. Nothing is written into any of them.
+pub(crate) fn lay_out(window: &mut ContextWindow, layout: &ContextLayout) {
+    seed_window(window, layout, &HashMap::new());
 }
 
-/// Initialize a [`ContextWindow`] from a run's spec and seed its regions from
-/// a name→content map. Adds each region of the graph's layout at the budget
-/// it was resolved to, plus the infra `tool_results`/`conversation`/
-/// `final_output` regions, then fills each seed whose key matches a declared
-/// region. The `task` key falls back to the first pinned region when no pinned
-/// region is named `task`.
-#[cfg(test)]
-pub(crate) fn init_window_from_spec(
+/// [`lay_out`], then fill each region a seed names from a name→content map.
+/// The `task` key falls back to the first pinned region when no pinned region
+/// is named `task`.
+fn seed_window(
     window: &mut ContextWindow,
-    spec: &RunSpec,
+    layout: &ContextLayout,
     seeds: &HashMap<String, String>,
 ) {
-    let layout = &spec.graph.layout;
-    let regions = layout
-        .regions
-        .iter()
-        .map(|def| region_from_def(def, layout_region_budget(spec, def)))
-        .collect();
-    fill_window(window, regions, task_region(layout), seeds);
-}
-
-/// Initialize a window from a parsed blueprint's (already resolved) layout:
-/// The window a spawn from a blueprint starts with.
-pub(crate) fn init_window_seeded(
-    window: &mut ContextWindow,
-    blueprint: &Blueprint,
-    seeds: &HashMap<String, String>,
-) {
-    let regions: Vec<Region> = blueprint
-        .context_layout
-        .regions
-        .iter()
-        .map(region_from_definition)
-        .collect();
+    let regions: Vec<Region> = layout.regions.iter().map(region_from_definition).collect();
     let task = task_region_of(&regions);
     fill_window(window, regions, task, seeds);
 }
@@ -264,12 +209,12 @@ fn fit_seed_to_budget(content: &str, max_tokens: usize) -> String {
     )
 }
 
-/// Initialize a window from a blueprint, seeding only the task text: the
-/// one-seed convenience over `init_window_seeded`, for callers that carry a
-/// single task string.
+/// Initialize a window from a blueprint's (already resolved) layout and seed
+/// its task region with `task`, for a caller that assembles one request from
+/// a blueprint without placing a run (`lev test`).
 pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str) {
     let seeds = HashMap::from([("task".to_string(), task.to_string())]);
-    init_window_seeded(window, blueprint, &seeds);
+    seed_window(window, &blueprint.context_layout, &seeds);
 }
 
 /// Swap a [`ContextWindow`] to one stage's own layout in place, keeping each
@@ -482,7 +427,7 @@ mod tests {
     }
 
     fn seed(window: &mut ContextWindow, bp: &Blueprint, seeds: &HashMap<String, String>) {
-        init_window_from_spec(window, &spec_of(bp), seeds);
+        seed_window(window, &bp.context_layout, seeds);
     }
 
     fn seeded_window(bp: &Blueprint, task: &str) -> ContextWindow {
@@ -550,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn init_window_seeded_fills_multiple_named_regions_and_ignores_unknown() {
+    fn seeding_fills_multiple_named_regions_and_ignores_unknown() {
         let bp = blueprint_with(vec![
             RegionDefinition::new("task".to_string(), RegionKind::Pinned, 5000),
             RegionDefinition::new("criteria".to_string(), RegionKind::Pinned, 5000),
@@ -591,7 +536,7 @@ mod tests {
         assert_eq!(fit_seed_to_budget(&exact, 10), exact);
     }
 
-    /// The token estimate `init_window_seeded` computes for a fitted seed - the
+    /// The token estimate seeding computes for a fitted seed - the
     /// number that has to land inside the region's budget.
     fn estimated_tokens(fitted: &str) -> usize {
         leviath_core::estimate_tokens(fitted)
@@ -638,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn init_window_seeded_truncates_a_seed_larger_than_its_region() {
+    fn seeding_truncates_a_seed_larger_than_its_region() {
         // Regression: `add_entry` rejects an over-budget entry outright, so a
         // seed must be trimmed first - an untrimmed oversized seed leaves the
         // region completely EMPTY.
@@ -660,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn init_window_seeded_task_key_falls_back_to_first_pinned() {
+    fn seeding_task_key_falls_back_to_first_pinned() {
         // No region literally named "task": the "task" seed key still lands in
         // the first pinned region (the task fallback), while a named key does not.
         let bp = blueprint_with(vec![RegionDefinition::new(
@@ -1024,7 +969,7 @@ mod tests {
         assert_eq!(budget_tokens(&pct(0.5, Some(900), Some(100)), 1000), 900);
     }
 
-    use crate::spec::graph::{CodeRef, Eviction};
+    use crate::spec::graph::{CodeRef, Eviction, RegionKind as Kind};
 
     fn def(kind: crate::spec::graph::RegionKind) -> RegionDef {
         RegionDef {
@@ -1177,29 +1122,11 @@ mod tests {
             min: None,
             max: None,
         };
-        assert_eq!(layout_region_budget(&spec, &half), 50_000);
         assert_eq!(stage_region_budget(&spec, 0, &half), 50_000);
         assert_eq!(
             stage_region_budget(&spec, 9, &half),
             0,
             "no plan, no window"
         );
-        spec.stages.clear();
-        assert_eq!(layout_region_budget(&spec, &half), 0);
-    }
-
-    #[test]
-    fn the_task_region_is_a_pinned_task_or_the_first_pinned_one() {
-        let spec = spec_of(&blueprint_with(vec![
-            RegionDefinition::new("task".to_string(), RegionKind::Temporary, 5000),
-            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 5000),
-        ]));
-        assert_eq!(task_region(&spec.graph.layout).as_deref(), Some("system"));
-        let spec = spec_of(&blueprint_with(vec![RegionDefinition::new(
-            "scratch".to_string(),
-            RegionKind::Temporary,
-            5000,
-        )]));
-        assert_eq!(task_region(&spec.graph.layout), None);
     }
 }

@@ -7,22 +7,16 @@ use std::collections::HashMap;
 
 use anyhow::bail;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
-use leviath_runtime::host::SpawnArgs;
+use leviath_runtime::spec::request::SpawnRequest;
 
 use crate::commands::run::attach::{self, RegionInput};
 use crate::commands::run::manifest::find_manifest;
 use crate::commands::run::task::resolve_task;
-use crate::runstate::new_run_id;
 
 /// Everything a spawn request needs from the agent's own files.
 pub(crate) struct AgentSource {
     /// The resolved `agent.leviath` path.
     pub manifest: std::path::PathBuf,
-    /// The manifest's parent directory name, which the run id is minted from.
-    /// Deliberately not `blueprint.name`: the run id is what `lev ps` shows and
-    /// what identifies the checkout on disk, while the blueprint's own name is
-    /// what the agent calls itself.
-    pub run_stem: String,
     /// The parsed blueprint itself.
     pub blueprint: leviath_runtime::spec::Blueprint,
 }
@@ -50,142 +44,75 @@ pub(crate) fn load_agent_source(path: &str) -> anyhow::Result<AgentSource> {
     // between the two calls. Falling back to what it found leaves a legible
     // daemon-side error rather than inventing an error arm no test can reach.
     let manifest = std::fs::canonicalize(&found).unwrap_or(found);
-    let run_stem = manifest
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("agent")
-        .to_string();
     let content = std::fs::read_to_string(&manifest)
         .map_err(|e| anyhow::anyhow!("read manifest '{}': {e}", manifest.display()))?;
     let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content)
         .map_err(|e| anyhow::anyhow!("parse manifest: {e}"))?;
     Ok(AgentSource {
         manifest,
-        run_stem,
         blueprint,
     })
 }
 
-/// Validate and resolve the dynamic `--<region>` flag values against the
-/// blueprint's declared caller-input regions.
-///
-/// An unknown region name (one the blueprint doesn't read as caller input) is a
-/// hard error - fast, local typo protection before the daemon is contacted.
-fn resolve_regions(
+/// What the `--<region>` flags hold: each one's text, and the files its
+/// `@path` tokens name, each bound for that region. A flag naming no region
+/// the blueprint lets a caller fill is refused here, before anything else is
+/// asked of the person, so a typo does not cost them a task typed into an
+/// editor.
+fn read_regions(
     blueprint: &leviath_runtime::spec::Blueprint,
     regions: HashMap<String, String>,
     cwd: &std::path::Path,
 ) -> anyhow::Result<RegionSeeds> {
     let declared = blueprint.caller_inputs();
     let registry = attach::cli_registry();
-    let mut out = HashMap::new();
+    let mut text = HashMap::new();
     let mut parts = Vec::new();
     let mut unresolved = Vec::new();
     for (name, raw) in regions {
         if !declared.contains(&name.as_str()) {
-            bail!(
-                "unknown region '--{name}'; this agent's caller-input regions are: {}",
-                if declared.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    declared.join(", ")
-                }
+            let known = match declared.is_empty() {
+                true => "(none)".to_string(),
+                false => declared.join(", "),
+            };
+            anyhow::bail!(
+                "unknown region '--{name}'; this agent's caller-input regions are: {known}"
             );
         }
         let RegionInput {
-            text,
+            text: said,
             parts: found,
             unresolved: missing,
         } = attach::read_region_input(&name, &raw, cwd, &registry)?;
-        if !text.is_empty() {
-            out.insert(name, text);
+        if !said.is_empty() {
+            text.insert(name, said);
         }
         parts.extend(found);
         unresolved.extend(missing);
     }
     Ok(RegionSeeds {
-        text: out,
+        text,
         parts,
         unresolved,
     })
 }
 
-/// What the `--<region>` flags resolved to.
+/// What the `--<region>` flags held.
 struct RegionSeeds {
-    /// Text seeds, keyed by region.
+    /// Each region's text, by region.
     text: HashMap<String, String>,
-    /// Files, each bound for its region.
+    /// The files their `@path` tokens named, each bound for its region.
     parts: Vec<leviath_core::mime::InboundPart>,
-    /// `@path` tokens that named no file.
+    /// The `@path` tokens that named no file.
     unresolved: Vec<String>,
 }
 
-/// Refuse a part bound for a region the blueprint does not declare, or one
-/// whose `accepts` excludes the type the user named for it, before anything
-/// is dialled.
+/// The stdin probe for a caller that must never open an editor for a task:
+/// the dashboard, which owns the terminal itself. An editor launched under it
+/// would fight it for the screen.
 ///
-/// The daemon checks the same things and its refusal comes back as the
-/// spawn error, but by then the user may have spent twenty minutes in an
-/// editor writing the task. A part with no region goes where the task text
-/// goes, so it is checked against that region. An untyped part is not
-/// checked against `accepts`: only the daemon's registry, with the user's
-/// `[mime_types]` in it, can say what it is.
-fn check_parts(
-    blueprint: &leviath_runtime::spec::Blueprint,
-    parts: &[leviath_core::mime::InboundPart],
-) -> anyhow::Result<()> {
-    let regions = &blueprint.context_layout.regions;
-    let task_region = regions
-        .iter()
-        .find(|r| r.name == "task" && r.kind == leviath_core::RegionKind::Pinned)
-        .or_else(|| {
-            regions
-                .iter()
-                .find(|r| r.kind == leviath_core::RegionKind::Pinned)
-        })
-        .map(|r| r.name.as_str());
-    for part in parts {
-        let name = match part.region.as_deref().or(task_region) {
-            Some(n) => n,
-            None => bail!(
-                "'{}' names no region and this agent has no task region to put it in",
-                part.name
-            ),
-        };
-        let Some(region) = regions.iter().find(|r| r.name == name) else {
-            bail!(
-                "'{}' names region '{name}', which this agent does not declare; its regions are: {}",
-                part.name,
-                regions
-                    .iter()
-                    .map(|r| r.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        };
-        if let Some(t) = &part.mime_type
-            && !region.accepts.is_empty()
-            && !t.matches_any(&region.accepts)
-        {
-            bail!(
-                "region '{name}' does not accept {t} ('{}'); it accepts: {}",
-                part.name,
-                region.accepts.join(", ")
-            );
-        }
-    }
-    Ok(())
-}
-
-/// The stdin probe for callers that build a spawn request from inside the
-/// daemon: fan-out workers and sub-agents. There is no terminal there, and an
-/// editor launched from a background process would block it forever with
-/// nobody to close the window.
-///
-/// Those callers always have a task in hand, so the probe is never actually
-/// consulted; passing this rather than a bare `|| false` states the reason at
-/// each call site.
+/// Passing this rather than a bare `|| false` states the reason at each call
+/// site.
 pub(crate) fn never_interactive() -> bool {
     false
 }
@@ -194,9 +121,9 @@ pub(crate) fn never_interactive() -> bool {
 ///
 /// One struct because these are one thing: the command line. Each field is a
 /// flag the user typed, and grouping them keeps the difference between "what was
-/// asked for" and "what that resolves to" visible - `resolve_spawn_args` turns
-/// this into a [`SpawnArgs`], and the two are deliberately different types.
-pub struct LaunchRequest<'a> {
+/// asked for" and "what that resolves to" visible - [`run_request`] turns this
+/// into a [`LocalRun`], and the two are deliberately different types.
+pub struct RunLine<'a> {
     /// The blueprint path or name, as given.
     pub path: &'a str,
     /// The task text, if it was given rather than read from stdin or an editor.
@@ -216,7 +143,7 @@ pub struct LaunchRequest<'a> {
     pub allow: Vec<String>,
     /// `--max-depth`: sub-agent tree cap.
     pub max_depth: Option<usize>,
-    /// `--<region>` seeds, keyed by caller-input region name.
+    /// `--<region>` text, keyed by the caller input it fills.
     pub regions: HashMap<String, String>,
     /// `--no-seed-commands`: refuse the blueprint's command seeds.
     pub no_seed_commands: bool,
@@ -227,9 +154,26 @@ pub struct LaunchRequest<'a> {
     pub parts: Vec<leviath_core::mime::InboundPart>,
 }
 
-/// Resolve the local inputs of a spawn request: find and parse the manifest,
-/// resolve the `--<region>` flags, resolve the task, and mint a run id from the
-/// agent's directory name.
+/// A `lev run` command line, resolved locally: the request to send, and what
+/// the warnings before it and the report after it read.
+#[derive(Debug, Clone)]
+pub struct LocalRun {
+    /// The request.
+    pub request: SpawnRequest,
+    /// The manifest the request names.
+    pub manifest: std::path::PathBuf,
+    /// The working directory, as given.
+    pub workdir: String,
+    /// Whether the run is unattended.
+    pub yolo: bool,
+    /// The yolo profile, when one was named.
+    pub yolo_profile: Option<String>,
+    /// The output shape asked for, for the warning about retired checks.
+    pub output: Option<leviath_core::output::OutputSpec>,
+}
+
+/// Resolve the local inputs of a `lev run`: find and parse the manifest, read
+/// the `--<region>` flags, resolve the task, and build the request.
 ///
 /// `task` is what `--task` was given, if anything. Left off, `resolve_task`
 /// opens the user's editor, which is why `stdin_is_terminal` is threaded
@@ -238,11 +182,12 @@ pub struct LaunchRequest<'a> {
 /// blueprint that takes no task: it is not asked for one, and giving it one is
 /// an error rather than text with nowhere to go.
 ///
-/// Regions are resolved *before* the task on purpose. A typo'd `--foo` has to
+/// Regions are read *before* the task on purpose. A `--foo @missing` has to
 /// fail before the user is dropped into an editor and types a paragraph they
-/// are about to lose.
-pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
-    let LaunchRequest {
+/// are about to lose. Whether each region is one the blueprint takes is the
+/// daemon's to say, with every other problem with the request.
+pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
+    let RunLine {
         path,
         task,
         stdin_is_terminal,
@@ -256,14 +201,14 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
         no_seed_commands,
         output_request,
         parts: attached,
-    } = req;
+    } = line;
     let source = load_agent_source(path)?;
     let cwd = std::env::current_dir().unwrap_or_default();
     let RegionSeeds {
-        text: resolved_regions,
+        text: regions,
         mut parts,
         mut unresolved,
-    } = resolve_regions(&source.blueprint, regions, &cwd)?;
+    } = read_regions(&source.blueprint, regions, &cwd)?;
     parts.extend(attached);
     // An agent driven by named regions takes no task, so neither demanding one
     // nor opening an editor to write one would make sense - `lev run reviewer
@@ -272,10 +217,8 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
     //
     // The same command line stays complete when the blueprint *can* take a
     // task but does not insist on one: a caller who named a region or attached
-    // a file has said what the run is for, and the reviewer's task region
-    // exists so its own fan-out workers can be handed their work item, not to
-    // make every `--diff` run stop for a prompt.
-    let handed_in = !resolved_regions.is_empty() || !parts.is_empty();
+    // a file has said what the run is for.
+    let handed_in = !regions.is_empty() || !parts.is_empty();
     let task = match source.blueprint.accepts_task() {
         true if task.is_none() && handed_in && !source.blueprint.requires_task() => String::new(),
         true => resolve_task(
@@ -297,8 +240,7 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
     // the part over, then the line above resolves the same token again against
     // the current directory - which, for a dashboard whose workdir is where it
     // was launched, is the same file. Drop the exact repeat (same region, name
-    // and bytes), which no caller ever means; a file attached to two regions,
-    // or two different files, still differs in one of the three.
+    // and bytes), which no caller ever means.
     let mut deduped: Vec<leviath_core::mime::InboundPart> = Vec::with_capacity(parts.len());
     for part in parts {
         let dup = deduped
@@ -308,35 +250,74 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
             deduped.push(part);
         }
     }
-    let parts = deduped;
-    check_parts(&source.blueprint, &parts)?;
     attach::warn_unresolved(&unresolved);
-
-    Ok(SpawnArgs {
-        run_id: new_run_id(&source.run_stem),
-        blueprint_path: source.manifest.to_string_lossy().to_string(),
+    let request = run_launch(LaunchFlags {
+        manifest: &source.manifest,
         task,
-        regions: resolved_regions,
-        parts,
+        regions,
+        parts: deduped,
         model,
-        workdir: workdir.to_string(),
-        metadata: Default::default(),
-        callback_url: None,
-        callback_secret: None,
+        workdir,
         yolo,
-        yolo_profile,
-        no_seed_commands,
+        yolo_profile: yolo_profile.clone(),
         allow,
         max_depth,
-        // A top-level run (sub-agents/fan-out set this on the host side).
-        parent_run_id: None,
-        worker_stage: None,
+        no_seed_commands,
+        output: output_request.clone(),
+    })?;
+    Ok(LocalRun {
+        request,
+        manifest: source.manifest,
+        workdir: workdir.to_string(),
+        yolo,
+        yolo_profile,
         output: output_request,
-        // `lev run` carries no flag for it. A capture is an operator decision
-        // about a machine, taken in `[observability] capture_model_input`, or a
-        // caller's decision about one run, taken over the API.
-        capture_model_input: false,
     })
+}
+
+/// `lev run`'s flags, resolved, for [`run_launch`].
+struct LaunchFlags<'a> {
+    manifest: &'a std::path::Path,
+    task: String,
+    regions: HashMap<String, String>,
+    parts: Vec<leviath_core::mime::InboundPart>,
+    model: Option<String>,
+    workdir: &'a str,
+    yolo: bool,
+    yolo_profile: Option<String>,
+    allow: Vec<String>,
+    max_depth: Option<usize>,
+    no_seed_commands: bool,
+    output: Option<leviath_core::output::OutputSpec>,
+}
+
+/// The request `lev run`'s flags make: the blueprint the manifest belongs to,
+/// the task and each `--<region>` as inputs, the files as attachments, and the
+/// launch flags as the run's launch settings.
+fn run_launch(flags: LaunchFlags<'_>) -> anyhow::Result<SpawnRequest> {
+    let blueprint = flags
+        .manifest
+        .parent()
+        .unwrap_or(flags.manifest)
+        .to_string_lossy()
+        .into_owned();
+    crate::daemon::requests::TaskLaunch {
+        blueprint,
+        task: flags.task,
+        regions: flags.regions,
+        parts: flags.parts,
+        model: flags.model,
+        workdir: Some(flags.workdir.to_string()),
+        unattended: flags.yolo,
+        profile: flags.yolo_profile,
+        allow: flags.allow,
+        max_depth: flags.max_depth,
+        no_seed_commands: flags.no_seed_commands,
+        output: flags.output,
+        ..Default::default()
+    }
+    .into_request()
+    .map_err(anyhow::Error::msg)
 }
 
 /// Warn, on stderr, when the agent about to run declares `[read_paths]` the
@@ -350,8 +331,8 @@ pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<SpawnArgs> {
 ///
 /// Best-effort by design. An unreadable manifest or config is the daemon's to
 /// report, and it will: this must never be the reason a run does not start.
-fn warn_ungranted_read_paths(spawn_args: &SpawnArgs) {
-    for line in read_path_warning_for_spawn(spawn_args) {
+fn warn_ungranted_read_paths(run: &LocalRun) {
+    for line in read_path_warning_for_spawn(run) {
         eprintln!("{line}");
     }
 }
@@ -359,20 +340,14 @@ fn warn_ungranted_read_paths(spawn_args: &SpawnArgs) {
 /// The warning for a spawn request, read from the real manifest and config.
 /// Empty when there is nothing to say, and empty when either file cannot be
 /// read: see [`warn_ungranted_read_paths`] for why that is not an error here.
-fn read_path_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
-    let Some(blueprint) = crate::commands::run::manifest::blueprint_at(std::path::Path::new(
-        &spawn_args.blueprint_path,
-    )) else {
+fn read_path_warning_for_spawn(run: &LocalRun) -> Vec<String> {
+    let Some(blueprint) = crate::commands::run::manifest::blueprint_at(&run.manifest) else {
         return Vec::new();
     };
     let Ok(config) = crate::config::Config::load() else {
         return Vec::new();
     };
-    spawn_warning_lines(
-        &blueprint,
-        &config,
-        std::path::Path::new(&spawn_args.workdir),
-    )
+    spawn_warning_lines(&blueprint, &config, std::path::Path::new(&run.workdir))
 }
 
 /// The warning itself: one line saying what is refused, then the stanza that
@@ -435,9 +410,11 @@ fn broken_config_warning(path: &std::path::Path) -> Vec<String> {
 /// set of rules, and the daemon would refuse the same spawn a moment later
 /// with the same words. Failing here saves the round trip and the placeholder
 /// run directory. The bare flag and an attended run say nothing.
-pub(crate) fn yolo_profile_preflight(spawn_args: &SpawnArgs) -> anyhow::Result<Vec<String>> {
-    let profile =
-        crate::yolo::resolve_for_spawn(spawn_args.yolo, spawn_args.yolo_profile.as_deref())?;
+pub(crate) fn yolo_profile_preflight(
+    yolo: bool,
+    yolo_profile: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let profile = crate::yolo::resolve_for_spawn(yolo, yolo_profile)?;
     let Some(profile) = profile.filter(|p| !p.is_builtin_default()) else {
         return Ok(Vec::new());
     };
@@ -462,8 +439,8 @@ pub(crate) fn yolo_profile_preflight(spawn_args: &SpawnArgs) -> anyhow::Result<V
 /// Best-effort for the same reason as [`warn_ungranted_read_paths`]: an
 /// unreadable manifest or config is the daemon's to report, and this must never
 /// be why a run does not start.
-fn warn_held_checkpoints(spawn_args: &SpawnArgs) {
-    for line in held_checkpoint_warning_for_spawn(spawn_args) {
+fn warn_held_checkpoints(run: &LocalRun) {
+    for line in held_checkpoint_warning_for_spawn(run) {
         eprintln!("{line}");
     }
 }
@@ -476,8 +453,8 @@ fn warn_held_checkpoints(spawn_args: &SpawnArgs) {
 /// behind is worth saying however the run was launched, and it is the reason
 /// this exists: nothing said it at the moment it mattered, so a run could keep
 /// using an old blueprint long after the fix had shipped.
-fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
-    let path = std::path::Path::new(&spawn_args.blueprint_path);
+fn held_checkpoint_warning_for_spawn(run: &LocalRun) -> Vec<String> {
+    let path = run.manifest.as_path();
     let Some(blueprint) = crate::commands::run::manifest::blueprint_at(path) else {
         return Vec::new();
     };
@@ -485,7 +462,7 @@ fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
         crate::bundled::stale_install_note(path, &blueprint, leviath_core::agents_dir().as_deref())
             .into_iter()
             .collect();
-    if spawn_args.yolo {
+    if run.yolo {
         let timeout = crate::config::Config::load()
             .ok()
             .and_then(|c| c.limits.interaction_timeout_secs);
@@ -504,19 +481,16 @@ fn held_checkpoint_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
 /// another. That is deliberate and stays; what cannot stay is the silence. The
 /// daemon logs the retirement at spawn, but into `daemon.log`, and the person
 /// who typed the override is the one counting on a check that will not run.
-fn warn_retired_output_checks(spawn_args: &SpawnArgs) {
-    for line in retired_check_warning_for_spawn(spawn_args) {
+fn warn_retired_output_checks(run: &LocalRun) {
+    for line in retired_check_warning_for_spawn(run) {
         eprintln!("warning: {line}");
     }
 }
 
 /// The retirement warning for a spawn request, read from the real manifest.
 /// Best-effort for the same reason as [`warn_ungranted_read_paths`].
-fn retired_check_warning_for_spawn(spawn_args: &SpawnArgs) -> Vec<String> {
-    crate::commands::run::manifest::retired_check_warnings_at(
-        std::path::Path::new(&spawn_args.blueprint_path),
-        spawn_args.output.as_ref(),
-    )
+fn retired_check_warning_for_spawn(run: &LocalRun) -> Vec<String> {
+    crate::commands::run::manifest::retired_check_warnings_at(&run.manifest, run.output.as_ref())
 }
 
 /// What `lev run --json` prints on a successful spawn.
@@ -563,44 +537,36 @@ pub(crate) fn batch_report(spawned: &[SpawnedRun], json: bool) -> String {
     }
 }
 
-/// A fresh run id for the same agent as `previous`.
-///
-/// Ids are minted `<stem>-<secs>-<hex12>` (see [`crate::runstate::new_run_id`]),
-/// so the stem is everything before the last two dash-separated components.
-/// The stem itself may contain dashes (`wide-researcher`), which is why this
-/// strips from the right. An id that does not have the minted shape is used as
-/// the stem wholesale - a fresh unique id still comes out.
-fn respawned_run_id(previous: &str) -> String {
-    let mut parts = previous.rsplitn(3, '-');
-    let _entropy = parts.next();
-    let _secs = parts.next();
-    let stem = parts.next().unwrap_or(previous);
-    crate::runstate::new_run_id(stem)
-}
-
 /// Send a resolved spawn request to the daemon and report the outcome, printing
 /// the new run id on success.
 ///
 /// Warnings go to stderr, so `--json` leaves stdout parseable on its own.
 pub(crate) async fn send_spawn(
     client: &ControlClient,
-    spawn_args: SpawnArgs,
+    run: LocalRun,
     json: bool,
 ) -> anyhow::Result<()> {
-    warn_broken_config();
-    warn_ungranted_read_paths(&spawn_args);
-    for line in yolo_profile_preflight(&spawn_args)? {
-        eprintln!("{line}");
-    }
-    warn_held_checkpoints(&spawn_args);
-    warn_retired_output_checks(&spawn_args);
-    let spawned = spawn_once(client, spawn_args).await?;
+    warn_before(&run)?;
+    let spawned = spawn_once(client, &run).await?;
     println!("{}", spawn_report(&spawned, json));
     Ok(())
 }
 
+/// Every warning a run's blueprint and this machine call for, before the
+/// daemon is asked. A yolo profile the file does not have is the one refusal.
+fn warn_before(run: &LocalRun) -> anyhow::Result<()> {
+    warn_broken_config();
+    warn_ungranted_read_paths(run);
+    for line in yolo_profile_preflight(run.yolo, run.yolo_profile.as_deref())? {
+        eprintln!("{line}");
+    }
+    warn_held_checkpoints(run);
+    warn_retired_output_checks(run);
+    Ok(())
+}
+
 /// Send `count` copies of a resolved spawn request - the same agent, task, and
-/// flags, each under its own fresh run id - and print one combined report.
+/// flags; the daemon gives each its own run id - and print one combined report.
 ///
 /// This exists because spawn throughput from the CLI is otherwise bounded by
 /// process startup: each `lev run` invocation pays binary launch plus a socket
@@ -613,7 +579,7 @@ pub(crate) async fn send_spawn(
 /// already started - those runs keep running; `lev ps` lists them.
 pub async fn send_spawn_batch(
     client: &ControlClient,
-    spawn_args: SpawnArgs,
+    run: LocalRun,
     count: usize,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -621,23 +587,15 @@ pub async fn send_spawn_batch(
         bail!("--count must be at least 1");
     }
     if count == 1 {
-        return send_spawn(client, spawn_args, json).await;
+        return send_spawn(client, run, json).await;
     }
     // The warnings describe the blueprint and the machine, not the individual
     // run: once.
-    warn_broken_config();
-    warn_ungranted_read_paths(&spawn_args);
-    for line in yolo_profile_preflight(&spawn_args)? {
-        eprintln!("{line}");
-    }
-    warn_held_checkpoints(&spawn_args);
-    warn_retired_output_checks(&spawn_args);
+    warn_before(&run)?;
     let mut spawned = Vec::with_capacity(count);
     for _ in 0..count {
-        let mut args = spawn_args.clone();
-        args.run_id = respawned_run_id(&spawn_args.run_id);
-        match spawn_once(client, args).await {
-            Ok(run) => spawned.push(run),
+        match spawn_once(client, &run).await {
+            Ok(started) => spawned.push(started),
             Err(e) => bail!(
                 "batch stopped after {} of {count} runs started (those keep \
                  running; see `lev ps`): {e}",
@@ -650,20 +608,35 @@ pub async fn send_spawn_batch(
 }
 
 /// One spawn exchange with the daemon, warnings and printing left to callers.
-async fn spawn_once(client: &ControlClient, spawn_args: SpawnArgs) -> anyhow::Result<SpawnedRun> {
-    let blueprint_path = spawn_args.blueprint_path.clone();
-    let workdir = spawn_args.workdir.clone();
-    let yolo = spawn_args.yolo;
-    match client.spawn(spawn_args).await {
+async fn spawn_once(client: &ControlClient, run: &LocalRun) -> anyhow::Result<SpawnedRun> {
+    match client.spawn(run.request.clone()).await {
         Ok(ControlResponse::Spawned { run_id }) => Ok(SpawnedRun {
             run_id,
-            blueprint_path,
-            workdir,
-            yolo,
+            blueprint_path: run.manifest.to_string_lossy().into_owned(),
+            workdir: run.workdir.clone(),
+            yolo: run.yolo,
         }),
+        Ok(ControlResponse::Rejected { issues }) => bail!("spawn refused: {issues}"),
         Ok(ControlResponse::Error { message }) => bail!("spawn failed: {message}"),
         Ok(other) => bail!("unexpected daemon response: {other:?}"),
         Err(e) => bail!("the leviath daemon is not reachable ({e}); start it with `lev daemon`"),
+    }
+}
+
+#[cfg(test)]
+impl Default for LocalRun {
+    /// A run of a blueprint named `x`, attended, asking for nothing.
+    fn default() -> Self {
+        Self {
+            request: SpawnRequest::new(leviath_runtime::spec::request::SpawnSource::Blueprint(
+                leviath_runtime::spec::names::BlueprintRef::parse("x").expect("a name"),
+            )),
+            manifest: std::path::PathBuf::new(),
+            workdir: String::new(),
+            yolo: false,
+            yolo_profile: None,
+            output: None,
+        }
     }
 }
 
@@ -673,6 +646,33 @@ mod tests {
     use leviath_runtime::control_socket::{ControlId, bind_control_listener, control_id};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::task::JoinHandle;
+
+    /// The text of `run`'s `name` input, when it has one.
+    fn input_of(run: &LocalRun, name: &str) -> Option<String> {
+        match run.request.inputs.get(name) {
+            Some(leviath_runtime::spec::inputs::RawInput::Text(t)) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
+    /// `run`'s task, or nothing.
+    fn task_of(run: &LocalRun) -> String {
+        input_of(run, "task").unwrap_or_default()
+    }
+
+    /// The model `run` asked for, as written.
+    fn model_of(run: &LocalRun) -> Option<String> {
+        run.request.model.as_ref().map(ToString::to_string)
+    }
+
+    /// The name of the blueprint `run` asked for.
+    fn source_name(run: &LocalRun) -> String {
+        match &run.request.source {
+            leviath_runtime::spec::request::SpawnSource::Blueprint(r) => r.name.to_string(),
+            leviath_runtime::spec::request::SpawnSource::BlueprintFile(p) => p.to_string(),
+            leviath_runtime::spec::request::SpawnSource::Raw(_) => String::new(),
+        }
+    }
 
     fn write_manifest(dir: &std::path::Path) -> std::path::PathBuf {
         std::fs::write(
@@ -684,13 +684,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_spawn_args_finds_manifest_and_builds_request() {
+    fn run_request_finds_manifest_and_builds_request() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let manifest = write_manifest(&agent_dir);
 
-        let args = resolve_spawn_args(LaunchRequest {
+        let args = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: Some("do it"),
             stdin_is_terminal: &never_interactive,
@@ -706,11 +706,11 @@ mod tests {
             parts: Vec::new(),
         })
         .unwrap();
-        assert!(args.run_id.contains("my-agent"));
-        assert_eq!(args.task, "do it");
-        assert_eq!(args.model.as_deref(), Some("m"));
+        assert!(source_name(&args).ends_with("my-agent"));
+        assert_eq!(task_of(&args), "do it");
+        assert_eq!(model_of(&args).as_deref(), Some("m"));
         assert_eq!(
-            args.blueprint_path,
+            args.manifest.to_string_lossy(),
             std::fs::canonicalize(&manifest).unwrap().to_string_lossy()
         );
         assert_eq!(args.workdir, "/work");
@@ -721,7 +721,7 @@ mod tests {
     /// `./agent.leviath` fails there, and it is the very command `lev create`
     /// prints as the next step.
     #[test]
-    fn resolve_spawn_args_sends_an_absolute_blueprint_path_for_a_relative_input() {
+    fn run_request_sends_an_absolute_blueprint_path_for_a_relative_input() {
         // Reading the CWD is enough to race the tests that *move* it: one of
         // them chdirs into a directory it then deletes, and a relative path
         // resolved against that instant cannot be found. Take the same lock
@@ -750,7 +750,7 @@ mod tests {
         // uncovered region under the 100% gate.
         assert!(relative.is_relative(), "expected a relative path");
 
-        let args = resolve_spawn_args(LaunchRequest {
+        let args = run_request(RunLine {
             path: relative.to_str().unwrap(),
             task: Some("do it"),
             stdin_is_terminal: &never_interactive,
@@ -767,17 +767,17 @@ mod tests {
         })
         .unwrap();
         assert!(
-            std::path::Path::new(&args.blueprint_path).is_absolute(),
+            args.manifest.is_absolute(),
             "got: {}",
-            args.blueprint_path
+            args.manifest.to_string_lossy()
         );
-        assert!(args.blueprint_path.ends_with("agent.leviath"));
+        assert!(args.manifest.ends_with("agent.leviath"));
     }
 
     #[test]
-    fn resolve_spawn_args_errors_on_missing_manifest() {
+    fn run_request_errors_on_missing_manifest() {
         assert!(
-            resolve_spawn_args(LaunchRequest {
+            run_request(RunLine {
                 path: "/no/such/agent",
                 task: Some("t"),
                 stdin_is_terminal: &never_interactive,
@@ -799,7 +799,7 @@ mod tests {
     /// `--task <file>` end to end through the real wiring, not just through
     /// `resolve_task` in isolation.
     #[test]
-    fn resolve_spawn_args_reads_the_task_from_a_file() {
+    fn run_request_reads_the_task_from_a_file() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -807,7 +807,7 @@ mod tests {
         let task_file = dir.path().join("task.md");
         std::fs::write(&task_file, "  summarize the README  \n").unwrap();
 
-        let args = resolve_spawn_args(LaunchRequest {
+        let args = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: Some(task_file.to_str().unwrap()),
             stdin_is_terminal: &never_interactive,
@@ -823,19 +823,19 @@ mod tests {
             parts: Vec::new(),
         })
         .unwrap();
-        assert_eq!(args.task, "summarize the README");
+        assert_eq!(task_of(&args), "summarize the README");
     }
 
     /// No `--task` and no terminal to open an editor on: the run is refused
     /// here, before the daemon is contacted.
     #[test]
-    fn resolve_spawn_args_without_a_task_errors_when_stdin_is_not_a_tty() {
+    fn run_request_without_a_task_errors_when_stdin_is_not_a_tty() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let manifest = write_manifest(&agent_dir);
 
-        let err = resolve_spawn_args(LaunchRequest {
+        let err = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: None,
             stdin_is_terminal: &never_interactive,
@@ -911,8 +911,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         manifest: &'a std::path::Path,
         task: Option<&'a str>,
         regions: HashMap<String, String>,
-    ) -> LaunchRequest<'a> {
-        LaunchRequest {
+    ) -> RunLine<'a> {
+        RunLine {
             path: manifest.to_str().unwrap(),
             task,
             stdin_is_terminal: &never_interactive,
@@ -938,18 +938,15 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let manifest = write_optional_task_manifest(&dir.path().join("diff-or-task"));
         let diff = HashMap::from([("diff".to_string(), "- a\n+ b".to_string())]);
 
-        let args = resolve_spawn_args(launch(&manifest, None, diff.clone())).unwrap();
-        assert_eq!(args.task, "");
-        assert_eq!(
-            args.regions.get("diff").map(String::as_str),
-            Some("- a\n+ b")
-        );
+        let args = run_request(launch(&manifest, None, diff.clone())).unwrap();
+        assert_eq!(task_of(&args), "");
+        assert_eq!(input_of(&args, "diff").as_deref(), Some("- a\n+ b"));
 
-        let err = resolve_spawn_args(launch(&manifest, None, HashMap::new())).unwrap_err();
+        let err = run_request(launch(&manifest, None, HashMap::new())).unwrap_err();
         assert!(err.to_string().contains("No task provided"), "got: {err}");
 
-        let args = resolve_spawn_args(launch(&manifest, Some("look at b"), diff)).unwrap();
-        assert_eq!(args.task, "look at b");
+        let args = run_request(launch(&manifest, Some("look at b"), diff)).unwrap();
+        assert_eq!(task_of(&args), "look at b");
     }
 
     /// A `required` task region is a demand, and a region on the side does not
@@ -963,7 +960,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             .replace("seed = \"task\" }", "seed = \"task\", required = true }");
         std::fs::write(&manifest, insisting).unwrap();
         let regions = HashMap::from([("diff".to_string(), "x".to_string())]);
-        let err = resolve_spawn_args(launch(&manifest, None, regions)).unwrap_err();
+        let err = run_request(launch(&manifest, None, regions)).unwrap_err();
         assert!(err.to_string().contains("No task provided"), "got: {err}");
     }
 
@@ -977,7 +974,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let mut regions = HashMap::new();
         regions.insert("diff".to_string(), "a patch".to_string());
 
-        let args = resolve_spawn_args(LaunchRequest {
+        let args = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: None,
             // Says stdin is not a TTY, so an unconditional demand would error
@@ -995,11 +992,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             parts: Vec::new(),
         })
         .expect("no task is required of an agent that takes none");
-        assert_eq!(args.task, "");
-        assert_eq!(
-            args.regions.get("diff").map(String::as_str),
-            Some("a patch")
-        );
+        assert_eq!(task_of(&args), "");
+        assert_eq!(input_of(&args, "diff").as_deref(), Some("a patch"));
     }
 
     /// The other half: handing that agent a task is the error, and the message
@@ -1009,7 +1003,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_taskless_manifest(&dir.path().join("diffonly"));
 
-        let err = resolve_spawn_args(LaunchRequest {
+        let err = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: Some("review my code"),
             stdin_is_terminal: &never_interactive,
@@ -1040,7 +1034,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_taskless_manifest(&dir.path().join("diffonly"));
 
-        let args = resolve_spawn_args(LaunchRequest {
+        let args = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: Some("   "),
             stdin_is_terminal: &never_interactive,
@@ -1056,18 +1050,18 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             parts: Vec::new(),
         })
         .expect("blank is the same as absent");
-        assert_eq!(args.task, "");
+        assert_eq!(task_of(&args), "");
     }
 
     /// Pins the ordering: a typo'd region flag must fail *before* the user is
     /// dropped into an editor, or they type a paragraph and then lose it.
     #[test]
-    fn resolve_spawn_args_rejects_a_bad_region_before_it_looks_at_the_task() {
+    fn run_request_rejects_a_bad_region_before_it_looks_at_the_task() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_region_manifest(&dir.path().join("reviewer"));
         let regions = HashMap::from([("bogus".to_string(), "x".to_string())]);
 
-        let err = resolve_spawn_args(LaunchRequest {
+        let err = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: None,
             stdin_is_terminal: &never_interactive,
@@ -1114,7 +1108,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     }
 
     #[test]
-    fn resolve_spawn_args_resolves_declared_region_and_reads_at_path() {
+    fn run_request_resolves_declared_region_and_reads_at_path() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_region_manifest(&dir.path().join("reviewer"));
         let policy = dir.path().join("policy.md");
@@ -1124,7 +1118,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             "criteria".to_string(),
             format!("@{}", policy.to_string_lossy()),
         )]);
-        let args = resolve_spawn_args(LaunchRequest {
+        let args = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: Some("review it"),
             stdin_is_terminal: &never_interactive,
@@ -1142,13 +1136,13 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         .unwrap();
         // `@path` was read and trimmed.
         assert_eq!(
-            args.regions.get("criteria").map(String::as_str),
+            input_of(&args, "criteria").as_deref(),
             Some("focus on safety")
         );
     }
 
     #[test]
-    fn resolve_spawn_args_unknown_region_reports_none_when_no_caller_inputs() {
+    fn run_request_unknown_region_reports_none_when_no_caller_inputs() {
         // A blueprint with zero caller-input regions: the error lists "(none)".
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("noinput");
@@ -1174,7 +1168,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         .unwrap();
         let manifest = agent_dir.join("agent.leviath");
         let regions = HashMap::from([("foo".to_string(), "x".to_string())]);
-        let err = resolve_spawn_args(LaunchRequest {
+        let err = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: Some("t"),
             stdin_is_terminal: &never_interactive,
@@ -1194,14 +1188,14 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     }
 
     #[test]
-    fn resolve_spawn_args_manifest_read_error_surfaces() {
+    fn run_request_manifest_read_error_surfaces() {
         // `find_manifest` accepts a dir whose `agent.leviath` merely *exists*; when
         // that entry is itself a directory, the client-side read fails (EISDIR).
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("dirmanifest");
         std::fs::create_dir_all(agent_dir.join("agent.leviath")).unwrap();
         let regions = HashMap::from([("x".to_string(), "y".to_string())]);
-        let err = resolve_spawn_args(LaunchRequest {
+        let err = run_request(RunLine {
             path: agent_dir.to_str().unwrap(),
             task: Some("t"),
             stdin_is_terminal: &never_interactive,
@@ -1221,7 +1215,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     }
 
     #[test]
-    fn resolve_spawn_args_manifest_parse_error_surfaces() {
+    fn run_request_manifest_parse_error_surfaces() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("badtoml");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -1231,7 +1225,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         )
         .unwrap();
         let regions = HashMap::from([("x".to_string(), "y".to_string())]);
-        let err = resolve_spawn_args(LaunchRequest {
+        let err = run_request(RunLine {
             path: agent_dir.join("agent.leviath").to_str().unwrap(),
             task: Some("t"),
             stdin_is_terminal: &never_interactive,
@@ -1251,13 +1245,13 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     }
 
     #[test]
-    fn resolve_spawn_args_region_value_bad_file_errors() {
+    fn run_request_region_value_bad_file_errors() {
         // A declared region whose `@file` value can't be read → the error from
-        // read_region_value propagates out of resolve_spawn_args.
+        // read_region_value propagates out of run_request.
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_region_manifest(&dir.path().join("reviewer"));
         let regions = HashMap::from([("criteria".to_string(), "@/no/such/file.md".to_string())]);
-        let err = resolve_spawn_args(LaunchRequest {
+        let err = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: Some("review it"),
             stdin_is_terminal: &never_interactive,
@@ -1280,11 +1274,11 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     }
 
     #[test]
-    fn resolve_spawn_args_rejects_unknown_region_flag() {
+    fn run_request_rejects_unknown_region_flag() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_region_manifest(&dir.path().join("reviewer"));
         let regions = HashMap::from([("bogus".to_string(), "x".to_string())]);
-        let err = resolve_spawn_args(LaunchRequest {
+        let err = run_request(RunLine {
             path: manifest.to_str().unwrap(),
             task: Some("review it"),
             stdin_is_terminal: &never_interactive,
@@ -1335,7 +1329,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     async fn send(response_line: &'static str) -> anyhow::Result<()> {
         let dir = tempfile::tempdir().unwrap();
         let (id, server) = fake_daemon(dir.path(), response_line);
-        let result = send_spawn(&ControlClient::new(id), SpawnArgs::default(), false).await;
+        let result = send_spawn(&ControlClient::new(id), LocalRun::default(), false).await;
         server.await.unwrap();
         result
     }
@@ -1380,9 +1374,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
                 r#"{"result":"spawned","run_id":"a-1-000000000003"}"#,
             ],
         );
-        let args = SpawnArgs {
-            run_id: "wide-researcher-1785900000-0123456789ab".to_string(),
-            ..SpawnArgs::default()
+        let args = LocalRun {
+            ..LocalRun::default()
         };
         send_spawn_batch(&ControlClient::new(id), args, 3, false)
             .await
@@ -1400,7 +1393,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
                 r#"{"result":"error","message":"the world is full"}"#,
             ],
         );
-        let err = send_spawn_batch(&ControlClient::new(id), SpawnArgs::default(), 3, false)
+        let err = send_spawn_batch(&ControlClient::new(id), LocalRun::default(), 3, false)
             .await
             .expect_err("the second spawn fails");
         // Asserts before the server join: a wrong error path makes fewer
@@ -1416,7 +1409,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     async fn a_batch_of_one_is_exactly_a_single_spawn() {
         let dir = tempfile::tempdir().unwrap();
         let (id, server) = fake_daemon(dir.path(), r#"{"result":"spawned","run_id":"solo-1-0"}"#);
-        send_spawn_batch(&ControlClient::new(id), SpawnArgs::default(), 1, false)
+        send_spawn_batch(&ControlClient::new(id), LocalRun::default(), 1, false)
             .await
             .expect("the single spawn succeeds");
         server.await.unwrap();
@@ -1427,31 +1420,10 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let dir = tempfile::tempdir().unwrap();
         // No listener bound: reaching the daemon at all would error differently.
         let id = control_id(dir.path());
-        let err = send_spawn_batch(&ControlClient::new(id), SpawnArgs::default(), 0, false)
+        let err = send_spawn_batch(&ControlClient::new(id), LocalRun::default(), 0, false)
             .await
             .expect_err("zero runs is a refusal");
         assert!(err.to_string().contains("at least 1"), "got: {err}");
-    }
-
-    /// The stem survives its own dashes: only the minted `-<secs>-<hex>` tail
-    /// is replaced.
-    #[test]
-    fn a_respawned_id_keeps_the_dashed_agent_stem() {
-        let id = respawned_run_id("wide-researcher-1785900000-0123456789ab");
-        assert!(id.starts_with("wide-researcher-"), "got: {id}");
-        assert_ne!(id, "wide-researcher-1785900000-0123456789ab");
-        // The minted shape holds: stem + seconds + 12 hex chars.
-        let tail: Vec<&str> = id.rsplitn(3, '-').collect();
-        assert_eq!(tail[0].len(), 12, "got: {id}");
-        assert!(tail[1].chars().all(|c| c.is_ascii_digit()), "got: {id}");
-    }
-
-    /// An id without the minted tail is used as the stem wholesale - the
-    /// result is still fresh and unique.
-    #[test]
-    fn a_respawned_id_falls_back_to_the_whole_previous_id_as_stem() {
-        let id = respawned_run_id("x");
-        assert!(id.starts_with("x-"), "got: {id}");
     }
 
     #[test]
@@ -1478,7 +1450,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 
     fn spawned() -> SpawnedRun {
         SpawnedRun {
-            run_id: "run-abc".to_string(),
+            run_id: "coder-1".to_string(),
             blueprint_path: "/agents/coder/agent.leviath".to_string(),
             workdir: "/work".to_string(),
             yolo: true,
@@ -1487,7 +1459,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 
     #[test]
     fn spawn_report_without_json_is_the_sentence() {
-        assert_eq!(spawn_report(&spawned(), false), "spawned run-abc");
+        assert_eq!(spawn_report(&spawned(), false), "spawned coder-1");
     }
 
     #[test]
@@ -1642,10 +1614,10 @@ allow = ["/data/runs"]
                 + "\n[read_paths]\nallow = [\"/data/runs\"]\n",
         )
         .unwrap();
-        let args = SpawnArgs {
-            blueprint_path: manifest.to_string_lossy().into_owned(),
+        let args = LocalRun {
+            manifest: std::path::PathBuf::from(manifest.to_string_lossy().into_owned()),
             workdir: dir.path().to_string_lossy().into_owned(),
-            ..SpawnArgs::default()
+            ..LocalRun::default()
         };
         let lines = crate::config::with_isolated_config_path_async(
             "spawn-warn-read-paths",
@@ -1669,9 +1641,9 @@ allow = ["/data/runs"]
         let manifest = dir.path().join("agent.leviath");
         std::fs::write(&manifest, "not valid toml [[[").unwrap();
         assert!(
-            read_path_warning_for_spawn(&SpawnArgs {
-                blueprint_path: manifest.to_string_lossy().into_owned(),
-                ..SpawnArgs::default()
+            read_path_warning_for_spawn(&LocalRun {
+                manifest: std::path::PathBuf::from(manifest.to_string_lossy().into_owned()),
+                ..LocalRun::default()
             })
             .is_empty()
         );
@@ -1680,9 +1652,9 @@ allow = ["/data/runs"]
         crate::config::with_isolated_config_path("spawn-warn-broken-config", |fake_dir| {
             std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
             assert!(
-                read_path_warning_for_spawn(&SpawnArgs {
-                    blueprint_path: manifest.to_string_lossy().into_owned(),
-                    ..SpawnArgs::default()
+                read_path_warning_for_spawn(&LocalRun {
+                    manifest: std::path::PathBuf::from(manifest.to_string_lossy().into_owned()),
+                    ..LocalRun::default()
                 })
                 .is_empty()
             );
@@ -1730,10 +1702,10 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         let dir = tempfile::tempdir().unwrap();
         let blueprint_path = manifest_with_a_held_checkpoint(dir.path());
         crate::config::with_isolated_config_path("spawn-warn-held", |_fake| {
-            let args = SpawnArgs {
-                blueprint_path: blueprint_path.clone(),
+            let args = LocalRun {
+                manifest: std::path::PathBuf::from(blueprint_path.clone()),
                 yolo: true,
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             };
             let joined = held_checkpoint_warning_for_spawn(&args).join("\n");
             assert!(joined.contains("plan: plan_approval"), "{joined}");
@@ -1742,10 +1714,10 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             // An attended run stops for a person everywhere, so there is nothing
             // to announce.
             assert!(
-                held_checkpoint_warning_for_spawn(&SpawnArgs {
-                    blueprint_path: blueprint_path.clone(),
+                held_checkpoint_warning_for_spawn(&LocalRun {
+                    manifest: std::path::PathBuf::from(blueprint_path.clone()),
                     yolo: false,
-                    ..SpawnArgs::default()
+                    ..LocalRun::default()
                 })
                 .is_empty()
             );
@@ -1760,10 +1732,10 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.leviath");
         assert!(
-            held_checkpoint_warning_for_spawn(&SpawnArgs {
-                blueprint_path: missing.to_string_lossy().into_owned(),
+            held_checkpoint_warning_for_spawn(&LocalRun {
+                manifest: std::path::PathBuf::from(missing.to_string_lossy().into_owned()),
                 yolo: true,
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             })
             .is_empty()
         );
@@ -1771,10 +1743,10 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         let unparseable = dir.path().join("agent.leviath");
         std::fs::write(&unparseable, "not valid toml [[[").unwrap();
         assert!(
-            held_checkpoint_warning_for_spawn(&SpawnArgs {
-                blueprint_path: unparseable.to_string_lossy().into_owned(),
+            held_checkpoint_warning_for_spawn(&LocalRun {
+                manifest: std::path::PathBuf::from(unparseable.to_string_lossy().into_owned()),
                 yolo: true,
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             })
             .is_empty()
         );
@@ -1785,10 +1757,10 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         let held = manifest_with_a_held_checkpoint(dir.path());
         crate::config::with_isolated_config_path("spawn-held-broken-config", |fake_dir| {
             std::fs::write(fake_dir.join("config.toml"), "not = valid = toml").unwrap();
-            let joined = held_checkpoint_warning_for_spawn(&SpawnArgs {
-                blueprint_path: held.clone(),
+            let joined = held_checkpoint_warning_for_spawn(&LocalRun {
+                manifest: std::path::PathBuf::from(held.clone()),
                 yolo: true,
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             })
             .join("\n");
             assert!(joined.contains("plan_approval"), "{joined}");
@@ -1837,10 +1809,10 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
     fn an_output_format_override_announces_the_retired_checks() {
         let dir = tempfile::tempdir().unwrap();
         let blueprint_path = manifest_with_a_validator(dir.path());
-        let args = SpawnArgs {
-            blueprint_path: blueprint_path.clone(),
+        let args = LocalRun {
+            manifest: std::path::PathBuf::from(blueprint_path.clone()),
             output: format_request("json"),
-            ..SpawnArgs::default()
+            ..LocalRun::default()
         };
         let joined = retired_check_warning_for_spawn(&args).join("\n");
         assert!(joined.contains("checks/report.rhai"), "{joined}");
@@ -1849,19 +1821,19 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
         warn_retired_output_checks(&args);
 
         assert!(
-            retired_check_warning_for_spawn(&SpawnArgs {
-                blueprint_path: blueprint_path.clone(),
+            retired_check_warning_for_spawn(&LocalRun {
+                manifest: std::path::PathBuf::from(blueprint_path.clone()),
                 output: format_request("markdown"),
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             })
             .is_empty(),
             "re-stating the declared format keeps the checks"
         );
         assert!(
-            retired_check_warning_for_spawn(&SpawnArgs {
-                blueprint_path,
+            retired_check_warning_for_spawn(&LocalRun {
+                manifest: std::path::PathBuf::from(blueprint_path),
                 output: None,
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             })
             .is_empty(),
             "no override, nothing retired"
@@ -1874,14 +1846,10 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
     fn the_retirement_warning_gives_up_quietly() {
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            retired_check_warning_for_spawn(&SpawnArgs {
-                blueprint_path: dir
-                    .path()
-                    .join("nope.leviath")
-                    .to_string_lossy()
-                    .into_owned(),
+            retired_check_warning_for_spawn(&LocalRun {
+                manifest: dir.path().join("nope.leviath"),
                 output: format_request("json"),
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             })
             .is_empty()
         );
@@ -1889,10 +1857,10 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
         let unparseable = dir.path().join("agent.leviath");
         std::fs::write(&unparseable, "not valid toml [[[").unwrap();
         assert!(
-            retired_check_warning_for_spawn(&SpawnArgs {
-                blueprint_path: unparseable.to_string_lossy().into_owned(),
+            retired_check_warning_for_spawn(&LocalRun {
+                manifest: std::path::PathBuf::from(unparseable.to_string_lossy().into_owned()),
                 output: format_request("json"),
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             })
             .is_empty()
         );
@@ -1926,7 +1894,7 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
         let dir = tempfile::tempdir().unwrap();
         // A control id with no daemon bound to it.
         let id = control_id(&dir.path().join("no-daemon"));
-        let err = send_spawn(&ControlClient::new(id), SpawnArgs::default(), false)
+        let err = send_spawn(&ControlClient::new(id), LocalRun::default(), false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not reachable"));
@@ -1934,12 +1902,12 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 
     /// `--yolo=<name>` reaches the daemon as the bit plus the name.
     #[test]
-    fn resolve_spawn_args_carries_a_yolo_profile() {
+    fn run_request_carries_a_yolo_profile() {
         let root = tempfile::tempdir().unwrap();
         let agent_dir = root.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let manifest = write_manifest(&agent_dir);
-        let args = resolve_spawn_args(LaunchRequest {
+        let args = run_request(RunLine {
             parts: Vec::new(),
             path: manifest.to_str().unwrap(),
             task: Some("do it"),
@@ -1970,25 +1938,27 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
                 "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n\n[loose]\ndefault = \"allow\"\n",
             )
             .unwrap();
-            let with = |yolo: bool, profile: Option<&str>| SpawnArgs {
+            let with = |yolo: bool, profile: Option<&str>| LocalRun {
                 yolo,
                 yolo_profile: profile.map(str::to_string),
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             };
-            assert!(yolo_profile_preflight(&with(false, None)).unwrap().is_empty());
-            assert!(yolo_profile_preflight(&with(true, None)).unwrap().is_empty());
-            assert!(yolo_profile_preflight(&with(false, Some("nope"))).unwrap().is_empty());
+            let preflight =
+                |run: &LocalRun| yolo_profile_preflight(run.yolo, run.yolo_profile.as_deref());
+            assert!(preflight(&with(false, None)).unwrap().is_empty());
+            assert!(preflight(&with(true, None)).unwrap().is_empty());
+            assert!(preflight(&with(false, Some("nope"))).unwrap().is_empty());
 
-            let lines = yolo_profile_preflight(&with(true, Some("careful"))).unwrap();
+            let lines = preflight(&with(true, Some("careful"))).unwrap();
             assert_eq!(lines[0], "--yolo=careful keeps these for you:");
             assert!(lines[1].contains("questions"), "{lines:?}");
             assert!(lines[2].contains("lists do not allow"), "{lines:?}");
 
-            let lines = yolo_profile_preflight(&with(true, Some("loose"))).unwrap();
+            let lines = preflight(&with(true, Some("loose"))).unwrap();
             assert_eq!(lines.len(), 1);
             assert!(lines[0].contains("keeps nothing for you"), "{lines:?}");
 
-            let err = yolo_profile_preflight(&with(true, Some("nope"))).unwrap_err();
+            let err = preflight(&with(true, Some("nope"))).unwrap_err();
             assert!(err.to_string().contains("careful, loose"), "{err}");
 
             // Through `send_spawn`: refused before any socket is dialled, so
@@ -2013,11 +1983,10 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
                 "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n",
             )
             .unwrap();
-            let args = SpawnArgs {
-                run_id: "wide-researcher-1785900000-0123456789ab".to_string(),
+            let args = LocalRun {
                 yolo: true,
                 yolo_profile: Some("careful".to_string()),
-                ..SpawnArgs::default()
+                ..LocalRun::default()
             };
             let one = tempfile::tempdir().unwrap();
             let (id, server) = fake_daemon_serving(
@@ -2046,7 +2015,7 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
             let id = control_id(&none.path().join("no-daemon"));
             let err = send_spawn_batch(
                 &ControlClient::new(id),
-                SpawnArgs {
+                LocalRun {
                     yolo_profile: Some("nope".to_string()),
                     ..args
                 },
@@ -2064,7 +2033,20 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 #[cfg(test)]
 mod part_tests {
     use super::*;
-    use leviath_core::mime::{InboundPart, MimeType};
+    use leviath_core::mime::InboundPart;
+
+    /// `run`'s task, or nothing.
+    fn task_of(run: &LocalRun) -> String {
+        match run.request.inputs.get("task") {
+            Some(leviath_runtime::spec::inputs::RawInput::Text(t)) => t.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// The region an attachment names, as text.
+    fn region_of(part: &leviath_runtime::spec::request::Attachment) -> Option<&str> {
+        part.region.as_ref().map(|r| r.as_str())
+    }
 
     fn write_typed_manifest(dir: &std::path::Path, regions: &str) -> std::path::PathBuf {
         std::fs::create_dir_all(dir).unwrap();
@@ -2089,8 +2071,8 @@ mod part_tests {
         task: Option<&'a str>,
         regions: HashMap<String, String>,
         parts: Vec<InboundPart>,
-    ) -> LaunchRequest<'a> {
-        LaunchRequest {
+    ) -> RunLine<'a> {
+        RunLine {
             yolo_profile: None,
             path: manifest,
             task,
@@ -2119,23 +2101,24 @@ mod part_tests {
         );
         let regions = HashMap::from([("art".to_string(), format!("@{}", png.display()))]);
         let attached = InboundPart::from_bytes("extra.wav", vec![1, 2, 3]);
-        let args = resolve_spawn_args(request(
+        let args = run_request(request(
             manifest.to_str().unwrap(),
             Some(&task),
             regions,
             vec![attached],
         ))
         .unwrap();
-        assert_eq!(args.task, task);
+        assert_eq!(task_of(&args), task);
         assert!(
-            args.regions.is_empty(),
+            !args.request.inputs.contains_key("art"),
             "a binary region file is a part, not text"
         );
-        let names: Vec<&str> = args.parts.iter().map(|p| p.name.as_str()).collect();
+        let parts = &args.request.attachments;
+        let names: Vec<&str> = parts.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["hero.png", "extra.wav", "hero.png"]);
-        assert_eq!(args.parts[0].region.as_deref(), Some("art"));
-        assert_eq!(args.parts[1].region, None);
-        assert_eq!(args.parts[2].region, None);
+        assert_eq!(region_of(&parts[0]), Some("art"));
+        assert_eq!(region_of(&parts[1]), None);
+        assert_eq!(region_of(&parts[2]), None);
     }
 
     /// The dashboard resolves a task's `@path` into a part and still sends the
@@ -2150,14 +2133,19 @@ mod part_tests {
         std::fs::write(&png, &bytes).unwrap();
         let task = format!("see @{}", png.display());
         let attached = InboundPart::from_bytes("hero.png", bytes.clone());
-        let args = resolve_spawn_args(request(
+        let args = run_request(request(
             manifest.to_str().unwrap(),
             Some(&task),
             HashMap::new(),
             vec![attached],
         ))
         .unwrap();
-        let names: Vec<&str> = args.parts.iter().map(|p| p.name.as_str()).collect();
+        let names: Vec<&str> = args
+            .request
+            .attachments
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
         assert_eq!(names, ["hero.png"], "the exact repeat was dropped");
 
         // The same bytes attached to a named region is a different part, and a
@@ -2166,7 +2154,7 @@ mod part_tests {
         std::fs::write(&other, b"\x89PNG\r\n\x1a\nother").unwrap();
         let task2 = format!("see @{} and @{}", png.display(), other.display());
         let art = InboundPart::from_bytes("hero.png", bytes).in_region("art");
-        let args = resolve_spawn_args(request(
+        let args = run_request(request(
             manifest.to_str().unwrap(),
             Some(&task2),
             HashMap::new(),
@@ -2174,9 +2162,10 @@ mod part_tests {
         ))
         .unwrap();
         let mut got: Vec<(Option<&str>, &str)> = args
-            .parts
+            .request
+            .attachments
             .iter()
-            .map(|p| (p.region.as_deref(), p.name.as_str()))
+            .map(|p| (region_of(p), p.name.as_str()))
             .collect();
         got.sort();
         assert_eq!(
@@ -2189,64 +2178,15 @@ mod part_tests {
         );
     }
 
+    /// A task naming an empty file is refused before anything is dialled.
     #[test]
-    fn parts_are_checked_against_the_blueprint_before_dialling() {
+    fn a_task_naming_an_empty_file_is_refused_before_dialling() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = write_typed_manifest(&dir.path().join("artist"), TASK_AND_ART);
-        let path = manifest.to_str().unwrap();
-        let wav = InboundPart::from_bytes("song.wav", vec![1])
-            .in_region("art")
-            .typed(MimeType::parse("audio/wav").unwrap());
-        let err = resolve_spawn_args(request(path, Some("t"), HashMap::new(), vec![wav]))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("does not accept audio/wav"), "{err}");
-        assert!(err.contains("it accepts: image/*"), "{err}");
-
-        let ghost = InboundPart::from_bytes("x.bin", vec![1]).in_region("ghost");
-        let err = resolve_spawn_args(request(path, Some("t"), HashMap::new(), vec![ghost]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("region 'ghost', which this agent does not declare"),
-            "{err}"
-        );
-        assert!(err.contains("task, art, conversation"), "{err}");
-
-        // An untyped part into a typed region is the daemon's to judge.
-        let untyped = InboundPart::from_bytes("maybe.png", vec![1]).in_region("art");
-        assert!(
-            resolve_spawn_args(request(path, Some("t"), HashMap::new(), vec![untyped])).is_ok()
-        );
-
-        // A `task` region that is not pinned does not count as the task
-        // region; the first pinned one does.
-        let manifest = write_typed_manifest(
-            &dir.path().join("rolling"),
-            "task = { kind = \"sliding_window\", max_items = 5, max_tokens = 1000 }\n\
-             art = { kind = \"pinned\", max_tokens = 4000, accepts = [\"image/*\"] }",
-        );
-        let wav = InboundPart::from_bytes("song.wav", vec![1])
-            .typed(MimeType::parse("audio/wav").unwrap());
-        let err = resolve_spawn_args(request(
-            manifest.to_str().unwrap(),
-            Some("t"),
-            HashMap::new(),
-            vec![wav],
-        ))
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("region 'art' does not accept audio/wav"),
-            "{err}"
-        );
-
-        // A task naming an empty file is refused before anything is dialled.
         let manifest = write_typed_manifest(&dir.path().join("artist2"), TASK_AND_ART);
         let empty = dir.path().join("empty.png");
         std::fs::write(&empty, b"").unwrap();
         let task = format!("edit @{}", empty.display());
-        let err = resolve_spawn_args(request(
+        let err = run_request(request(
             manifest.to_str().unwrap(),
             Some(&task),
             HashMap::new(),
@@ -2255,21 +2195,5 @@ mod part_tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("nothing to attach"), "{err}");
-
-        // No pinned region at all: a part with no region has nowhere to go.
-        let manifest = write_typed_manifest(
-            &dir.path().join("chatty"),
-            "conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }",
-        );
-        let loose = InboundPart::from_bytes("x.bin", vec![1]);
-        let err = resolve_spawn_args(request(
-            manifest.to_str().unwrap(),
-            None,
-            HashMap::new(),
-            vec![loose],
-        ))
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("names no region"), "{err}");
     }
 }

@@ -767,6 +767,24 @@ async fn daemon_check(
     }
 }
 
+/// The request the canary run makes: the staged blueprint, the probe prompt as
+/// its task, unattended. A probe that stops to ask a person for a tool
+/// approval has stopped being a probe; it advertises no tools, so this waives
+/// nothing that could actually run.
+fn probe_request(
+    manifest: &std::path::Path,
+    workdir: &std::path::Path,
+) -> Result<leviath_runtime::spec::request::SpawnRequest, String> {
+    crate::daemon::requests::TaskLaunch {
+        blueprint: manifest.to_string_lossy().into_owned(),
+        task: PROBE_PROMPT.to_string(),
+        workdir: Some(workdir.to_string_lossy().into_owned()),
+        unattended: true,
+        ..Default::default()
+    }
+    .into_request()
+}
+
 /// Ask the daemon to run the staged canary and wait for a terminal status.
 async fn spawn_and_wait(
     client: &ControlClient,
@@ -778,32 +796,15 @@ async fn spawn_and_wait(
     // `--yolo`: a probe that stops to ask a person for a tool approval has
     // stopped being a probe. It advertises no tools, so this waives nothing
     // that could actually run.
-    let args = crate::daemon::client::resolve_spawn_args(crate::daemon::client::LaunchRequest {
-        path: &manifest.to_string_lossy(),
-        task: Some(PROBE_PROMPT),
-        // The probe brings its own task, so the editor fallback is unreachable.
-        // Answering "not a terminal" anyway makes that structural rather than
-        // incidental: a doctor that opened an editor would be a bad joke.
-        stdin_is_terminal: &|| false,
-        model: None,
-        workdir: &workdir.to_string_lossy(),
-        yolo: true,
-        yolo_profile: None,
-        allow: Vec::new(),
-        max_depth: None,
-        regions: std::collections::HashMap::new(),
-        no_seed_commands: false,
-        output_request: None,
-        parts: Vec::new(),
-    });
-    let args = match args {
-        Ok(args) => args,
+    let request = match probe_request(manifest, workdir) {
+        Ok(request) => request,
         Err(e) => return DaemonOutcome::Failed(format!("could not build the spawn request: {e}")),
     };
-    let run_id = args.run_id.clone();
-
-    let spawned = match client.spawn(args).await {
+    let spawned = match client.spawn(request).await {
         Ok(ControlResponse::Spawned { run_id }) => Ok(run_id),
+        Ok(ControlResponse::Rejected { issues }) => {
+            Err(format!("the daemon refused the spawn: {issues}"))
+        }
         Ok(ControlResponse::Error { message }) => {
             Err(format!("the daemon refused the spawn: {message}"))
         }
@@ -814,11 +815,7 @@ async fn spawn_and_wait(
     };
     let run_id = match spawned {
         Ok(id) => id,
-        Err(detail) => {
-            // The daemon may have staked out the run directory before failing.
-            cleanup_run(&run_id);
-            return DaemonOutcome::Failed(detail);
-        }
+        Err(detail) => return DaemonOutcome::Failed(detail),
     };
 
     let outcome = wait_for_run(client, &run_id, timeout, poll).await;

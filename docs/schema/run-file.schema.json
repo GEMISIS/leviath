@@ -5497,6 +5497,45 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
+            "description": "A blueprint read from its directory.",
+            "properties": {
+              "BlueprintFile": {
+                "properties": {
+                  "digest": {
+                    "description": "The revision that ran.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "description": "The name its manifest gives it (`[agent] name`).",
+                    "type": "string"
+                  },
+                  "path": {
+                    "description": "The directory.",
+                    "type": "string"
+                  },
+                  "version": {
+                    "description": "Its declared version.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "name",
+                  "version"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "BlueprintFile"
+            ],
+            "type": "object"
+          },
+          {
             "const": "Raw",
             "description": "A graph the caller wrote.",
             "type": "string"

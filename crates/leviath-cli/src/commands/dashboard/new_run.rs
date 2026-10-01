@@ -23,7 +23,7 @@ use super::types::{
 };
 use crate::commands::list::{ListFilter, build_list_report};
 use crate::config::Config;
-use crate::daemon::client::{LaunchRequest, never_interactive, resolve_spawn_args};
+use crate::daemon::client::{RunLine, never_interactive, run_request};
 use crate::tui::widgets::confirm::Confirm;
 use crate::tui::widgets::markdown_edit::MarkdownEdit;
 
@@ -685,7 +685,7 @@ pub(super) async fn spawn_background_loop(
 
 /// One spawn: resolve the blueprint locally, then hand it to the daemon.
 async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
-    let args = match resolve_spawn_args(LaunchRequest {
+    let run = match run_request(RunLine {
         path: &cmd.agent_path,
         // Always `Some`, never `None`: `None` opens `$EDITOR`, which would
         // start a second full-screen program inside this one.
@@ -702,7 +702,7 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         output_request: None,
         parts: cmd.parts,
     }) {
-        Ok(args) => args,
+        Ok(run) => run,
         Err(e) => {
             return SpawnOutcome {
                 message: format!("Could not start '{}': {e}", cmd.agent_path),
@@ -711,11 +711,16 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
             };
         }
     };
-    match control.spawn(args).await {
+    match control.spawn(run.request).await {
         Ok(ControlResponse::Spawned { run_id }) => SpawnOutcome {
             message: format!("Started {run_id}"),
             ok: true,
             run_id: Some(run_id),
+        },
+        Ok(ControlResponse::Rejected { issues }) => SpawnOutcome {
+            message: format!("The daemon refused the run: {issues}"),
+            ok: false,
+            run_id: None,
         },
         Ok(ControlResponse::Error { message }) => SpawnOutcome {
             message: format!("The daemon refused the run: {message}"),

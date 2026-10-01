@@ -123,7 +123,7 @@ pub use embed::{
     RunId, SpawnSpec,
 };
 pub use fanout::{FanOutSpawner, FanOutSpawnerRes};
-pub use host::{ControlOp, SpawnArgs, WorldEvent, WorldHost};
+pub use host::{ControlOp, PreparedRun, RunStarter, WorldEvent, WorldHost};
 pub use inference_bridge::{
     CAPACITY_BASE_DELAY_SECS, CAPACITY_MAX_DELAY_SECS, DEFAULT_RETRY_ATTEMPTS,
     DEFAULT_RETRY_BASE_DELAY_MS, MAX_TOTAL_BACKOFF_SECS, REACHED_BASE_DELAY_SECS, RetryPolicy,

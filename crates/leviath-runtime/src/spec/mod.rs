@@ -16,6 +16,7 @@ pub mod names;
 pub mod readable;
 pub mod request;
 pub mod run_spec;
+pub mod summary;
 
 pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, NudgeConfig, ReadPathsConfig,

@@ -18,8 +18,8 @@ use super::graph::{CodeRef, OutputDef, RunGraph};
 use super::inputs::InputValues;
 use super::launch::{Delivery, LaunchPolicy, Placement};
 use super::names::{
-    BlueprintRef, Digest, McpServerName, ModelId, ModelRef, ProviderName, RegionName, RunId,
-    StageName, ToolName,
+    BlueprintName, BlueprintPath, BlueprintRef, Digest, McpServerName, ModelId, ModelRef,
+    ProviderName, RegionName, RunId, StageName, ToolName,
 };
 use crate::state::context::PartState;
 
@@ -107,8 +107,42 @@ pub enum SpecOrigin {
         /// Its declared version.
         version: String,
     },
+    /// A blueprint read from its directory.
+    BlueprintFile {
+        /// The directory.
+        path: BlueprintPath,
+        /// The name its manifest gives it (`[agent] name`).
+        name: BlueprintName,
+        /// The revision that ran.
+        digest: Option<Digest>,
+        /// Its declared version.
+        version: String,
+    },
     /// A graph the caller wrote.
     Raw,
+}
+
+impl SpecOrigin {
+    /// What the blueprint the run came from is called: an installed one's
+    /// name, or the name the manifest of one read from a directory gives it.
+    /// What its runs are listed under and what the operator's per-agent
+    /// settings are looked up by. A graph its caller wrote has none.
+    pub fn blueprint_name(&self) -> Option<&str> {
+        match self {
+            Self::Blueprint { blueprint, .. } => Some(blueprint.name.as_str()),
+            Self::BlueprintFile { name, .. } => Some(name.as_str()),
+            Self::Raw => None,
+        }
+    }
+
+    /// The revision of the blueprint that ran, when one did and it is known.
+    pub fn digest(&self) -> Option<&Digest> {
+        match self {
+            Self::Blueprint { blueprint, .. } => blueprint.digest.as_ref(),
+            Self::BlueprintFile { digest, .. } => digest.as_ref(),
+            Self::Raw => None,
+        }
+    }
 }
 
 /// One stage, decided.

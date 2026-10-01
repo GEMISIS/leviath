@@ -711,14 +711,9 @@ pub(crate) fn slim_merged_workers(
         if !terminal_persisted {
             continue; // the terminal snapshot has not been dispatched yet
         }
-        commands.entity(entity).remove::<(
-            ContextWindow,
-            InferenceResult,
-            crate::pipeline::StageInferences,
-            crate::pipeline::StageSetups,
-            RunSpecC,
-            MergedWorker,
-        )>();
+        commands
+            .entity(entity)
+            .remove::<(ContextWindow, InferenceResult, RunSpecC, MergedWorker)>();
     }
 }
 
@@ -985,7 +980,21 @@ fn start_worker(
         .ok_or_else(|| "no fan-out spawner installed".to_string())?;
     let source = match &config.worker {
         WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
-        WorkerSource::Stage(_) => SpawnSource::Raw(Box::new(spec.graph.clone())),
+        // A same-graph worker runs the blueprint its parent ran (an installed
+        // one at the revision the parent ran), so the files beside it (hooks,
+        // validators, scripts) are there for the worker too. A parent that
+        // ran its own graph hands the worker that graph.
+        WorkerSource::Stage(_) => match &spec.origin {
+            crate::spec::run_spec::SpecOrigin::Blueprint { blueprint, .. } => {
+                SpawnSource::Blueprint(blueprint.clone())
+            }
+            crate::spec::run_spec::SpecOrigin::BlueprintFile { path, .. } => {
+                SpawnSource::BlueprintFile(path.clone())
+            }
+            crate::spec::run_spec::SpecOrigin::Raw => {
+                SpawnSource::Raw(Box::new(spec.graph.clone()))
+            }
+        },
         WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
     };
     let (request, caller) = items::worker_request(&spec, config, item, source, parent_depth);
@@ -1096,11 +1105,8 @@ fn worker_requires_output(world: &World, worker: Entity) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{InferenceConfig, ToolResultRoutingComponent};
-    use crate::pipeline::{
-        ProcessResponse, ReadyToInfer, StageInference, StageInferences, StageProgress, StageSetup,
-        StageSetups, VisitCounts,
-    };
+    use crate::components::ToolResultRoutingComponent;
+    use crate::pipeline::{ProcessResponse, ReadyToInfer, StageProgress, VisitCounts};
     use crate::spec::Blueprint;
     use crate::spec::blueprint::{
         FanOutConfig, ModelConfig, Stage, StageMode as BpMode, WorkerFailurePolicy,
@@ -1250,41 +1256,10 @@ mod tests {
         w
     }
 
-    fn stage_inf() -> StageInference {
-        StageInference {
-            provider_name: "script".to_string(),
-            model: "m".to_string(),
-            tools: vec![],
-            tool_filter: None,
-            fallbacks: Vec::new(),
-            output: None,
-        }
-    }
-
-    fn setup() -> StageSetup {
-        StageSetup {
-            inference_config: InferenceConfig {
-                temperature: None,
-                max_output_tokens: None,
-                extra_params: Default::default(),
-                batch_tool_hint: false,
-                shell_hint: false,
-                request_timeout_secs: None,
-                as_text: Vec::new(),
-            },
-            routing: None,
-            accepts_messages: true,
-            context_layout: None,
-            context_hide: Vec::new(),
-            context_reset: Vec::new(),
-            system_prompt: None,
-        }
-    }
-
     /// The graph of [`fanout_blueprint`] over the default fan-out.
     fn fanout_graph() -> crate::spec::graph::RunGraph {
         let bp = fanout_blueprint(cfg(None, 3, WorkerFailure::Continue));
-        both(bp).1.0.graph.clone()
+        both(bp).0.graph.clone()
     }
 
     /// A blueprint whose stage 0 is a fan-out stage and stage 1 is `merge`.
@@ -1333,8 +1308,6 @@ mod tests {
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),
-                StageInferences(vec![stage_inf(), stage_inf()]),
-                StageSetups(vec![setup(), setup()]),
                 VisitCounts::default(),
                 window(),
                 InferenceResult {
@@ -1353,6 +1326,60 @@ mod tests {
 
     fn install(world: &mut World, spawner: Arc<dyn FanOutSpawner>) {
         world.insert_resource(FanOutSpawnerRes(spawner));
+    }
+
+    /// A spawner that records where each worker's graph comes from, then
+    /// spawns it as [`TestSpawner`] does.
+    struct Recording {
+        sources: std::sync::Mutex<Vec<SpawnSource>>,
+    }
+
+    impl FanOutSpawner for Recording {
+        fn spawn_worker(
+            &self,
+            world: &mut World,
+            parent: Entity,
+            request: SpawnRequest,
+            caller: Caller,
+        ) -> Result<Entity, String> {
+            self.sources.lock().unwrap().push(request.source.clone());
+            TestSpawner {
+                fail: HashSet::new(),
+            }
+            .spawn_worker(world, parent, request, caller)
+        }
+
+        fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
+            BlueprintRef::parse(query).map_err(|e| e.to_string())
+        }
+    }
+
+    /// A same-graph worker runs the blueprint its parent ran, so the files
+    /// beside it are there for the worker too; a parent that ran its own
+    /// graph hands the worker that graph.
+    #[test]
+    fn a_same_graph_worker_runs_what_its_parent_ran() {
+        let mut world = World::new();
+        let recording = Arc::new(Recording {
+            sources: std::sync::Mutex::new(Vec::new()),
+        });
+        install(&mut world, recording.clone());
+        let config = cfg(None, 2, WorkerFailure::Continue);
+        let parent = spawn_parent(&mut world, fanout_blueprint(config.clone()), "");
+
+        start_worker(&mut world, parent, &config, &item("a")).expect("the worker starts");
+        let mut raw = (*world.get::<RunSpecC>(parent).unwrap().0).clone();
+        raw.origin = crate::spec::run_spec::SpecOrigin::Raw;
+        let graph = raw.graph.clone();
+        world.entity_mut(parent).insert(RunSpecC(Arc::new(raw)));
+        start_worker(&mut world, parent, &config, &item("b")).expect("the worker starts");
+
+        let sources = recording.sources.lock().unwrap();
+        assert_eq!(
+            sources[0],
+            SpawnSource::Blueprint(BlueprintRef::parse("t").unwrap())
+        );
+        assert_eq!(sources[1], SpawnSource::Raw(Box::new(graph)));
     }
 
     fn status_of(world: &World, e: Entity) -> AgentStatus {
@@ -2037,8 +2064,6 @@ mod tests {
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),
-                StageInferences(vec![stage_inf(), stage_inf()]),
-                StageSetups(vec![setup(), setup()]),
                 VisitCounts::default(),
             ))
             .id();
@@ -3520,12 +3545,10 @@ mod tests {
         use crate::pipeline::force_transition;
         // Routing present on the target stage ⇒ ToolResultRoutingComponent added.
         let mut world = World::new();
-        let mut setups = vec![setup(), setup()];
         let routing = crate::spec::ToolResultRouting {
             default_region: "conversation".to_string(),
             ..crate::spec::ToolResultRouting::default()
         };
-        setups[1].routing = Some(routing.clone());
         let mut bp = fanout_blueprint(cfg(Some("merge"), 2, WorkerFailure::Continue));
         bp.stages[1].tool_result_routing = Some(routing);
         let e = world
@@ -3534,8 +3557,6 @@ mod tests {
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),
-                StageInferences(vec![stage_inf(), stage_inf()]),
-                StageSetups(setups),
                 VisitCounts::default(),
                 window(),
             ))
@@ -3582,18 +3603,16 @@ mod tests {
         );
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![s0, s1], layout);
 
-        let mut setups = vec![setup(), setup()];
-        setups[1].system_prompt = Some("x".repeat(10_000));
         let mut w = ContextWindow::new(1000);
         w.add_region(Region::new("task".to_string(), RegionKind::Pinned, 20));
-        let (mut world, e) = world_with(bp, setups, w);
+        let (mut world, e) = world_with(bp, w);
         let agent = crate::world::AgentId::in_world(&world, e);
         force_transition(&mut world, agent, 1);
         assert_errored(&world, e);
     }
 
-    /// Build a world with one agent carrying the given blueprint/setups/window.
-    fn world_with(bp: Blueprint, setups: Vec<StageSetup>, w: ContextWindow) -> (World, Entity) {
+    /// Build a world with one agent carrying the given blueprint and window.
+    fn world_with(bp: Blueprint, w: ContextWindow) -> (World, Entity) {
         let mut world = World::new();
         let e = world
             .spawn((
@@ -3601,8 +3620,6 @@ mod tests {
                 StageCursor { index: 0 },
                 parent_state(),
                 StageProgress::default(),
-                StageInferences(vec![stage_inf(), stage_inf()]),
-                StageSetups(setups),
                 VisitCounts::default(),
                 w,
             ))

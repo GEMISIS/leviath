@@ -594,8 +594,11 @@ async fn empty_cwd_defaults_to_the_launch_directory() {
     let captured = Arc::new(std::sync::Mutex::new(None));
     let cap = captured.clone();
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
-        ControlRequest::Spawn { args } => {
-            *cap.lock().unwrap() = Some(args.workdir.clone());
+        ControlRequest::Spawn { request } => {
+            *cap.lock().unwrap() = request
+                .workdir
+                .as_ref()
+                .map(|w| w.to_string_lossy().into_owned());
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
             }
@@ -1773,6 +1776,23 @@ async fn produced_files_follow_the_answer_as_links() {
     h.close_input().await;
 }
 
+/// The task a spawn request carries, and the name and bytes of each file
+/// attached to it.
+fn spawned_task_and_parts(
+    request: &leviath_runtime::spec::request::SpawnRequest,
+) -> (String, Vec<(String, Vec<u8>)>) {
+    let task = match request.inputs.get("task") {
+        Some(leviath_runtime::spec::inputs::RawInput::Text(t)) => t.clone(),
+        _ => String::new(),
+    };
+    let parts = request
+        .attachments
+        .iter()
+        .map(|a| (a.name.clone(), a.data.0.clone()))
+        .collect();
+    (task, parts)
+}
+
 /// An image in the prompt reaches the daemon as a part on the spawn, and on
 /// a later prompt as a part on the message; a prompt that is only an image
 /// still gets words naming it.
@@ -1781,15 +1801,14 @@ async fn prompt_files_reach_the_daemon_as_parts() {
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let cap = captured.clone();
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
-        ControlRequest::Spawn { args } => {
-            cap.lock()
-                .unwrap()
-                .push((args.task.clone(), args.parts.clone()));
+        ControlRequest::Spawn { request } => {
+            cap.lock().unwrap().push(spawned_task_and_parts(&request));
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
             }
         }
         ControlRequest::Message { content, parts, .. } => {
+            let parts = parts.into_iter().map(|p| (p.name, p.data)).collect();
             cap.lock().unwrap().push((content, parts));
             ControlResponse::Ok { ok: true }
         }
@@ -1807,9 +1826,9 @@ async fn prompt_files_reach_the_daemon_as_parts() {
     assert_eq!(seen.len(), 2, "{seen:?}");
     assert_eq!(seen[0].0, "Attached: image-1.png");
     assert_eq!(seen[0].1.len(), 1);
-    assert_eq!(seen[0].1[0].name, "image-1.png");
+    assert_eq!(seen[0].1[0].0, "image-1.png");
     assert_eq!(seen[1].0, "and this");
-    assert_eq!(seen[1].1[0].name, "audio-1.wav");
+    assert_eq!(seen[1].1[0].0, "audio-1.wav");
     h.close_input().await;
 }
 
@@ -1821,10 +1840,8 @@ async fn linked_files_inside_the_working_directory_reach_the_daemon_as_parts() {
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let cap = captured.clone();
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
-        ControlRequest::Spawn { args } => {
-            cap.lock()
-                .unwrap()
-                .push((args.task.clone(), args.parts.clone()));
+        ControlRequest::Spawn { request } => {
+            cap.lock().unwrap().push(spawned_task_and_parts(&request));
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
             }
@@ -1871,8 +1888,8 @@ async fn linked_files_inside_the_working_directory_reach_the_daemon_as_parts() {
         "{task}"
     );
     assert_eq!(parts.len(), 1, "{parts:?}");
-    assert_eq!(parts[0].name, "notes.md");
-    assert_eq!(parts[0].data, b"# notes");
+    assert_eq!(parts[0].0, "notes.md");
+    assert_eq!(parts[0].1, b"# notes");
     h.close_input().await;
 }
 

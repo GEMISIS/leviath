@@ -14,7 +14,8 @@ use super::{
     AUTH_REQUIRED, ClientStream, ControlId, ControlRequest, ControlResponse, ControlToken,
     DaemonIdentity, INVALID_REQUEST, SHUTTING_DOWN, connect,
 };
-use crate::host::{SpawnArgs, WorldEvent};
+use crate::host::WorldEvent;
+use crate::spec::request::SpawnRequest;
 
 /// How long a control request waits for the daemon before giving up, when
 /// `LEVIATH_CONTROL_TIMEOUT_SECS` is unset.
@@ -23,11 +24,12 @@ use crate::host::{SpawnArgs, WorldEvent};
 /// wedged one is reported rather than waited on indefinitely.
 pub const DEFAULT_CONTROL_TIMEOUT_SECS: u64 = 30;
 
-/// Floor on the deadline for a `Spawn`, which does more work than the other ops:
-/// the daemon connects the blueprint's MCP servers before spawning, and each of
-/// those has its own 30s connect timeout, so a blueprint declaring several
-/// servers can legitimately outlast the ordinary deadline. Without this floor a
-/// slow-but-succeeding spawn would be reported to the user as a timeout.
+/// Floor on the deadline for a `Spawn` or a `ValidateSpawn`, which do more work
+/// than the other ops: the daemon connects the graph's MCP servers and runs its
+/// seeds before answering, and each server has its own 30s connect timeout, so
+/// a graph declaring several servers can legitimately outlast the ordinary
+/// deadline. Without this floor a slow-but-succeeding spawn would be reported
+/// to the user as a timeout.
 pub const SPAWN_CONTROL_TIMEOUT_SECS: u64 = 300;
 
 /// The deadline for one control request. `LEVIATH_CONTROL_TIMEOUT_SECS`
@@ -45,12 +47,14 @@ pub(crate) fn request_timeout() -> std::time::Duration {
 }
 
 /// The deadline for `req`: [`request_timeout`], raised to at least
-/// [`SPAWN_CONTROL_TIMEOUT_SECS`] for a `Spawn`. An explicitly disabled deadline
-/// (`0`) stays disabled.
+/// [`SPAWN_CONTROL_TIMEOUT_SECS`] for a `Spawn` or a `ValidateSpawn`. An
+/// explicitly disabled deadline (`0`) stays disabled.
 pub(super) fn timeout_for(req: &ControlRequest) -> std::time::Duration {
     let base = request_timeout();
     match req {
-        ControlRequest::Spawn { .. } if base != std::time::Duration::MAX => {
+        ControlRequest::Spawn { .. } | ControlRequest::ValidateSpawn { .. }
+            if base != std::time::Duration::MAX =>
+        {
             base.max(std::time::Duration::from_secs(SPAWN_CONTROL_TIMEOUT_SECS))
         }
         _ => base,
@@ -637,10 +641,26 @@ impl ControlClient {
         }
     }
 
-    /// Spawn a new agent.
-    pub async fn spawn(&self, args: SpawnArgs) -> std::io::Result<ControlResponse> {
+    /// Start a run.
+    pub async fn spawn(&self, request: SpawnRequest) -> std::io::Result<ControlResponse> {
         self.request(&ControlRequest::Spawn {
-            args: Box::new(args),
+            request: Box::new(request),
+        })
+        .await
+    }
+
+    /// Resolve a run without starting it.
+    pub async fn validate_spawn(&self, request: SpawnRequest) -> std::io::Result<ControlResponse> {
+        self.request(&ControlRequest::ValidateSpawn {
+            request: Box::new(request),
+        })
+        .await
+    }
+
+    /// Read a run's state.
+    pub async fn inspect(&self, run_id: &str) -> std::io::Result<ControlResponse> {
+        self.request(&ControlRequest::Inspect {
+            run_id: run_id.to_string(),
         })
         .await
     }

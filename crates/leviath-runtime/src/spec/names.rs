@@ -82,6 +82,19 @@ fn label(what: &'static str, s: &str) -> Result<(), NameError> {
     )
 }
 
+/// An absolute path to a directory: no control characters, and at most as
+/// long as a path a filesystem takes.
+fn absolute_path(what: &'static str, s: &str) -> Result<(), NameError> {
+    check_len(what, s, 4096)?;
+    let ok = !s.chars().any(char::is_control) && std::path::Path::new(s).is_absolute();
+    shape(
+        what,
+        "is an absolute path with no control characters",
+        s,
+        ok,
+    )
+}
+
 /// An identifier a flag or a template can name: a letter or `_`, then letters,
 /// digits, `_` or `-`.
 fn ident(what: &'static str, s: &str) -> Result<(), NameError> {
@@ -277,6 +290,24 @@ name_type!(
     BlueprintName, "blueprint name", label
 );
 name_type!(
+    /// The absolute directory a blueprint that is not installed is read
+    /// from: the one holding its `agent.leviath`.
+    ///
+    /// Only a caller on this machine names a blueprint this way (the CLI, the
+    /// control socket, an embedding program). A request that arrives over the
+    /// network is refused one, so a remote caller cannot have the daemon read
+    /// whatever directory it likes; see
+    /// [`SpawnRequest::check_remote`](crate::spec::request::SpawnRequest::check_remote).
+    BlueprintPath, "blueprint path", absolute_path
+);
+
+impl BlueprintPath {
+    /// The directory, as a path.
+    pub fn path(&self) -> &std::path::Path {
+        std::path::Path::new(&self.0)
+    }
+}
+name_type!(
     /// A stage in a run graph.
     StageName, "stage name", label
 );
@@ -420,6 +451,18 @@ impl fmt::Display for BlueprintRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blueprint_path_is_an_absolute_directory() {
+        let here = std::env::temp_dir().join("agents").join("coder");
+        let path = BlueprintPath::new(here.to_string_lossy()).unwrap();
+        assert_eq!(path.path(), here.as_path());
+        let deep = std::env::temp_dir().join("deep/".repeat(100));
+        assert!(BlueprintPath::new(deep.to_string_lossy()).is_ok());
+        assert!(BlueprintPath::new("relative/coder").is_err());
+        assert!(BlueprintPath::new("x".repeat(4097)).is_err());
+        assert!(BlueprintName::new("x".repeat(129)).is_err());
+    }
 
     #[test]
     fn labels_refuse_empty_padded_long_and_control_text() {

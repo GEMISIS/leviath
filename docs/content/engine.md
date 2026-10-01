@@ -178,39 +178,39 @@ boundary around what an agent can run, add a [sandbox](/docs/security).
 
 ## An agent is an entity
 
-When the daemon spawns an agent, this is all that happens:
+When the daemon starts a run, it first resolves the request into a **run spec**: the blueprint's
+stage graph with every model, tool, input and limit decided. It writes that spec to the run's file,
+then places the run in the world. Placing it is all that happens in the world:
 
 ```rust
 world.spawn((
-    AgentBlueprint(blueprint),   // the whole stage graph, as data
+    RunSpecC(spec),              // the resolved run: graph, models, tools, launch policy
     AgentState { .. },           // agent id, current stage, iteration, status
     MessageInbox::default(),     // mid-run messages not yet delivered
     StageCursor { index: 0 },    // which stage we are in
     StageProgress::default(),    // per-stage counters (tool calls, edits, timings)
-    StageInferences(..),         // pre-resolved model + tools, one per stage
-    StageSetups(..),             // pre-resolved layout + prompt, one per stage
     visits,                      // times each stage has been entered
     window,                      // the ContextWindow: regions and their budgets
-    stage0_inf,                  // this stage's model and tool set
-    stage0_cfg,                  // this stage's temperature, token caps, timeouts
+    stage_inference,             // this stage's model and tool set
+    inference_config,            // this stage's temperature, token caps, timeouts
     ReadyToInfer,                // a marker, explained below
 ));
 ```
 
-Every line is a component, and most come straight from the [blueprint](/docs/agents):
+Every line is a component, and most come from the run spec:
 
 | Component | Filled from |
 |---|---|
-| `AgentBlueprint` | the entire `agent.leviath` file |
+| `RunSpecC` | the run spec, resolved from `agent.leviath` and the request |
 | `ContextWindow` | `[context.regions]`, with percentage budgets resolved against the model's window |
-| `StageInferences` | each `[stages.<name>.model]` and its `available_tools` |
-| `StageSetups` | each stage's `system_prompt`, context layout, and tool routing |
+| `StageInference` | the current stage's model and its `available_tools`, as the spec decided them |
 | `StageProgress` | nothing, these are the runtime's own counters |
 
-The per-stage arrays are worked out once, at spawn. A stage is not an entity of its own: it is
-`StageCursor.index`, a position in the blueprint the agent already carries. A transition moves that
-integer, resets `StageProgress`, and swaps in the next stage's pre-resolved model, tools, and
-layout. It tears nothing down, which is why a workflow graph is cheap to run.
+Every stage is worked out once, when the run is resolved. A stage is not an entity of its own: it
+is `StageCursor.index`, a position in the graph the run already carries. A transition moves that
+integer, resets `StageProgress`, and swaps in the next stage's model, tools, and layout from the
+spec. It tears nothing down, which is why a workflow graph is cheap to run. A run brought back
+after a restart is placed the same way, from the spec and the last state in its file.
 
 ## Markers are the state machine
 

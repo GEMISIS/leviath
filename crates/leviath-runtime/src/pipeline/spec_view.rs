@@ -22,7 +22,7 @@ use crate::spec::names::ModelRef;
 use crate::spec::run_spec::{RunSpec, StagePlan, ToolDef};
 
 /// The context window a stage is budgeted against when its plan is missing.
-const FALLBACK_WINDOW: u32 = super::spawn::DEFAULT_CONTEXT_WINDOW_TOKENS as u32;
+const FALLBACK_WINDOW: u32 = super::DEFAULT_CONTEXT_WINDOW_TOKENS as u32;
 
 /// The text a piece of code is filed under in a run's compiled-code tables:
 /// the path of a file, or the source of inline code.

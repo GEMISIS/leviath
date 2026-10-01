@@ -36,7 +36,8 @@ use leviath_runtime::spec::inputs::PathKind;
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use leviath_runtime::spec::launch::Unattended;
 use leviath_runtime::spec::names::{
-    BlueprintRef, Digest, McpServerName, MimePattern, ModelRef, ProviderName, RunId, WorkdirPath,
+    BlueprintName, BlueprintPath, BlueprintRef, Digest, McpServerName, MimePattern, ModelRef,
+    ProviderName, RunId, WorkdirPath,
 };
 use leviath_runtime::spec::run_spec::{AutoAnswers, SeededContent, ToolDef, ToolSource};
 use tokio::sync::mpsc::UnboundedSender;
@@ -235,9 +236,6 @@ fn installed(agents_dir: Option<&Path>) -> Vec<String> {
 /// parsed and validated as every spawn has done, with its `[[mcp_servers]]`
 /// and `[tool_script_permissions]` read into the graph too. The operator's
 /// defaults are not folded in here; resolution does that for every graph.
-///
-/// The one place the blueprint format is read, so the file format can change
-/// behind it.
 pub fn load_installed(
     agents_dir: Option<&Path>,
     reference: &BlueprintRef,
@@ -246,11 +244,7 @@ pub fn load_installed(
     let name = &reference.name;
     let issue = |code: IssueCode, message: String| SpawnIssue::new(at.clone(), code, message);
     let (manifest, content) = agents_dir
-        .map(|d| {
-            d.join(name.as_str())
-                .join(leviath_core::files::MANIFEST_FILENAME)
-        })
-        .and_then(|p| std::fs::read_to_string(&p).ok().map(|c| (p, c)))
+        .and_then(|d| read_manifest_in(&d.join(name.as_str())))
         .ok_or_else(|| {
             issue(
                 IssueCode::Unresolvable,
@@ -269,33 +263,79 @@ pub fn load_installed(
         .got(format!("revision {digest}"))
         .into());
     }
+    let mut loaded = read_blueprint(&manifest, &content, name.as_str(), &at)?;
+    loaded.reference.name = name.clone();
+    Ok(loaded)
+}
+
+/// Load the blueprint in the directory `path` names, the way
+/// [`load_installed`] loads an installed one. Named after its `[agent]
+/// name`.
+pub fn load_file(path: &BlueprintPath) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
+    let at = SpecPath::root().field("source").field("blueprint_file");
+    let (manifest, content) = read_manifest_in(path.path()).ok_or_else(|| {
+        SpawnIssue::new(
+            at.clone(),
+            IssueCode::Unresolvable,
+            format!("no blueprint is in '{path}'"),
+        )
+        .hint("name the directory that holds the blueprint's agent.leviath")
+    })?;
+    read_blueprint(&manifest, &content, path.as_str(), &at)
+}
+
+/// The manifest in `dir`, with its path, when there is one to read.
+fn read_manifest_in(dir: &Path) -> Option<(PathBuf, String)> {
+    let path = dir.join(leviath_core::files::MANIFEST_FILENAME);
+    std::fs::read_to_string(&path).ok().map(|text| (path, text))
+}
+
+/// The blueprint `content` (read from `manifest`), parsed, validated and read
+/// as a graph, named after its `[agent] name` and pinned to the text's
+/// digest. `shown` is how problems name it.
+///
+/// The one place the blueprint format is read, so the file format can change
+/// behind it.
+fn read_blueprint(
+    manifest: &Path,
+    content: &str,
+    shown: &str,
+    at: &SpecPath,
+) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
+    let issue = |code: IssueCode, message: String| SpawnIssue::new(at.clone(), code, message);
     let stale = crate::bundled::stale_install_suffix(
-        &manifest,
+        manifest,
         crate::bundled::real_agents_dir_opt().as_deref(),
         ". ",
     );
-    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content)
+    let blueprint = leviath_runtime::spec::manifest::parse_manifest(content)
         .map_err(|e| issue(IssueCode::Invalid, format!("parse manifest: {e}{stale}")))?;
     blueprint
         .validate()
         .map_err(|e| issue(IssueCode::Invalid, format!("invalid blueprint: {e}{stale}")))?;
     let graph = RunGraph::from_blueprint(&blueprint)
-        .and_then(|mut graph| graph.read_manifest_tables(&content).map(|()| graph))
+        .and_then(|mut graph| graph.read_manifest_tables(content).map(|()| graph))
         .map_err(|issues| {
             let each: Vec<String> = issues.iter().map(ToString::to_string).collect();
             issue(
                 IssueCode::Invalid,
                 format!(
-                    "blueprint '{name}' does not read as a run graph: {}",
+                    "blueprint '{shown}' does not read as a run graph: {}",
                     each.join("; ")
                 ),
             )
         })?;
+    let name = BlueprintName::new(blueprint.name.as_str()).map_err(|e| {
+        issue(
+            IssueCode::Invalid,
+            format!("blueprint '{shown}' is named '{}': {e}", blueprint.name),
+        )
+    })?;
     Ok(LoadedBlueprint {
         graph,
         reference: BlueprintRef {
-            name: name.clone(),
-            digest: Some(digest),
+            name,
+            digest: Some(Digest::of(content.as_bytes())),
         },
         version: blueprint.version,
         base_dir: manifest.parent().map(Path::to_path_buf).unwrap_or_default(),
@@ -306,6 +346,10 @@ pub fn load_installed(
 impl ResolveEnv for DaemonEnv {
     async fn blueprint(&self, reference: &BlueprintRef) -> Result<LoadedBlueprint, SpawnIssue> {
         load_installed(self.agents_dir.as_deref(), reference).map_err(|issue| *issue)
+    }
+
+    async fn blueprint_file(&self, path: &BlueprintPath) -> Result<LoadedBlueprint, SpawnIssue> {
+        load_file(path).map_err(|issue| *issue)
     }
 
     fn limits(&self) -> SpawnLimits {

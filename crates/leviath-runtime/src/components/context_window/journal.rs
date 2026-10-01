@@ -108,9 +108,6 @@ pub(crate) enum Pushed {
     Nothing,
     /// This many entries, into the transaction's single region.
     Into(usize),
-    /// Every entry each region now holds: a resume putting a window back by
-    /// assignment, where nothing was there before and everything arrived.
-    Everything,
     /// One entry per region that grew, and none where a keyed write replaced an
     /// entry where it stood.
     Upsert,
@@ -123,7 +120,6 @@ impl Pushed {
         match self {
             Pushed::Nothing => 0,
             Pushed::Into(n) => n,
-            Pushed::Everything => after,
             Pushed::Upsert => after.saturating_sub(before),
         }
     }

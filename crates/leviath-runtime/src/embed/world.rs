@@ -9,20 +9,76 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, oneshot};
 
-use super::spawner::{EmbedSpawner, StagedBlueprints, mint_run_id};
+use super::spawner::{EmbedStarter, StagedBlueprints};
 use super::{BasicToolService, EmbedError, EventStream};
 use crate::components::AgentStatus;
-use crate::host::{ControlOp, SpawnArgs, WorldEvent, WorldHost};
+use crate::host::{ControlOp, WorldEvent, WorldHost};
 use crate::inference_pool::InferencePoolConfig;
 use crate::interaction_hub::InteractionHub;
 use crate::pipeline::{ModelDefaults, ToolService};
 use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
+use crate::spec::request::SpawnRequest;
 use crate::world::PipelineWorld;
 
-/// How long a spawn waits for a gateway's model list it has not read yet.
-/// Bounded so an unreachable gateway costs a spawn this and no more.
-const PRIME_TIMEOUT_SECS: u64 = 10;
+/// What a [`SpawnSpec`] carries besides its blueprint, gathered for
+/// [`spawn_request`].
+struct SpecInputs {
+    reference: crate::spec::names::BlueprintRef,
+    task: String,
+    regions: HashMap<String, String>,
+    parts: Vec<leviath_core::mime::InboundPart>,
+    model: Option<String>,
+    workdir: PathBuf,
+    metadata: HashMap<String, String>,
+    output: Option<leviath_core::output::OutputSpec>,
+}
+
+/// The request a [`SpawnSpec`] makes: its task as the `task` input, each
+/// named region as a text input of that name, its files as attachments.
+fn spawn_request(spec: SpecInputs) -> Result<SpawnRequest, EmbedError> {
+    let mut request =
+        SpawnRequest::new(crate::spec::request::SpawnSource::Blueprint(spec.reference));
+    if !spec.task.trim().is_empty() {
+        request = request.input("task", crate::spec::inputs::RawInput::Text(spec.task));
+    }
+    for (name, text) in spec.regions {
+        request = request.input(name, crate::spec::inputs::RawInput::Text(text));
+    }
+    request.attachments = spec.parts.into_iter().map(attachment).collect();
+    request.model = spec
+        .model
+        .map(|m| crate::spec::names::ModelRef::parse(&m))
+        .transpose()
+        .map_err(|e| EmbedError::Spawn(format!("model: {e}")))?;
+    request.output = spec
+        .output
+        .as_ref()
+        .map(crate::spec::graph::OutputDef::from_output_spec)
+        .transpose()
+        .map_err(|issues| EmbedError::Spawn(issues.to_string()))?;
+    request.workdir = Some(spec.workdir);
+    request.delivery.metadata = spec.metadata.into_iter().collect();
+    Ok(request)
+}
+
+/// A file sent with a spawn, as the request carries it.
+pub(crate) fn attachment(
+    part: leviath_core::mime::InboundPart,
+) -> crate::spec::request::Attachment {
+    crate::spec::request::Attachment {
+        name: part.name,
+        mime_type: part
+            .mime_type
+            .and_then(|t| crate::spec::names::MimePattern::new(t.as_str()).ok()),
+        region: part
+            .region
+            .and_then(|r| crate::spec::names::RegionName::new(r.as_str()).ok()),
+        deliver: part.deliver,
+        caption: part.caption,
+        data: crate::spec::request::Bytes(part.data),
+    }
+}
 
 /// An opaque run identifier, minted by [`AgentWorld::spawn`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -300,7 +356,8 @@ impl AgentWorldBuilder {
             registry.register(name, provider);
         }
         // Shares every provider with the world's copy, so a list read through
-        // it is the list the spawn resolves against.
+        // it is the list the spawn resolves against, and the starter chooses
+        // models from the same set the world infers on.
         let unread_registry = registry.clone();
         // The providers a bare model name may route to: the only ones whose
         // unread list can hold a stage back, so the only ones worth asking.
@@ -333,29 +390,14 @@ impl AgentWorldBuilder {
         let mut host = WorldHost::with_interactions(world, hub.clone());
 
         let staged: StagedBlueprints = Arc::new(Mutex::new(HashMap::new()));
-        let spawner = EmbedSpawner {
-            basic_tools: basic_tools.clone(),
+        host.set_starter(Arc::new(EmbedStarter {
+            registry: unread_registry,
+            creds: self.creds,
             defaults: self.defaults,
             hints: self.hints,
+            basic_tools: basic_tools.clone(),
             staged: staged.clone(),
-        };
-        host.set_spawner(Box::new(move |world, args| spawner.spawn(world, args)));
-        // A gateway's model list is what a bare model name is judged against,
-        // and a stage naming one is refused while that list is unread. Read it
-        // before a spawn needs it (and again before the next, if the gateway
-        // did not answer); a list already in hand costs nothing.
-        host.set_spawn_preprocessor(Box::new(move |_args| {
-            let registry = unread_registry.clone();
-            let preferred = preferred.clone();
-            Box::pin(async move {
-                let preferred: Vec<&str> = preferred.iter().map(String::as_str).collect();
-                registry
-                    .prime_unread(
-                        std::time::Duration::from_secs(PRIME_TIMEOUT_SECS),
-                        &preferred,
-                    )
-                    .await;
-            })
+            preferred,
         }));
         if let Some(tools) = basic_tools {
             host.set_reaper(Box::new(move |_world, entity| tools.unregister(entity)));
@@ -411,61 +453,68 @@ impl AgentWorld {
     /// Spawn an agent. Returns its [`RunId`] once the agent is live in the
     /// world (blueprint loaded, stages resolved, seeds applied).
     pub async fn spawn(&self, spec: SpawnSpec) -> Result<RunId, EmbedError> {
-        // Resolve the blueprint source: a path passes through to the spawner;
-        // in-memory blueprints validate here and park in the staged map under
-        // the freshly minted run id.
-        enum Resolved {
-            Path(PathBuf),
-            Inline(Box<crate::spec::Blueprint>),
-        }
-        let resolved = match spec.blueprint {
-            BlueprintSource::Path(path) => Resolved::Path(path),
-            BlueprintSource::Toml(toml) => Resolved::Inline(Box::new(
-                crate::spec::manifest::parse_manifest(&toml)
-                    .map_err(|e| EmbedError::Blueprint(format!("parse manifest: {e}")))?,
-            )),
-            BlueprintSource::Inline(blueprint) => Resolved::Inline(blueprint),
-        };
-        if let Resolved::Inline(blueprint) = &resolved {
-            blueprint
-                .validate()
-                .map_err(|e| EmbedError::Blueprint(format!("invalid blueprint: {e}")))?;
-        }
-        let stem = match &resolved {
-            Resolved::Path(path) => path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            Resolved::Inline(blueprint) => blueprint.name.clone(),
-        };
-        let run_id = mint_run_id(&stem);
-        let blueprint_path = match resolved {
-            Resolved::Path(path) => path.to_string_lossy().into_owned(),
-            Resolved::Inline(blueprint) => {
-                leviath_core::sync::lock(&self.staged).insert(run_id.clone(), *blueprint);
-                format!("inline:{run_id}")
-            }
-        };
-        let args = SpawnArgs {
-            run_id,
-            blueprint_path,
-            task: spec.task,
-            regions: spec.regions,
-            model: spec.model,
-            workdir: spec.workdir.to_string_lossy().into_owned(),
-            metadata: spec.metadata,
-            output: spec.output,
-            parts: spec.parts,
-            ..Default::default()
-        };
+        let request = self.spawn_request(spec)?;
         let run_id = self
             .ask(|reply| ControlOp::Spawn {
-                args: Box::new(args),
+                request: Box::new(request),
                 reply,
             })
             .await?
-            .map_err(EmbedError::Spawn)?;
-        Ok(RunId(run_id))
+            .map_err(|issues| EmbedError::Spawn(issues.to_string()))?;
+        Ok(RunId(run_id.to_string()))
+    }
+
+    /// The request a [`SpawnSpec`] asks for, with its blueprint loaded and
+    /// staged for the starter under a name of its own.
+    fn spawn_request(&self, mut spec: SpawnSpec) -> Result<SpawnRequest, EmbedError> {
+        let blueprint =
+            std::mem::replace(&mut spec.blueprint, BlueprintSource::Toml(String::new()));
+        let loaded = match blueprint {
+            BlueprintSource::Path(path) => {
+                let content = std::fs::read_to_string(&path).map_err(|e| {
+                    EmbedError::Blueprint(format!("read manifest '{}': {e}", path.display()))
+                })?;
+                let base = path.parent().map(PathBuf::from).unwrap_or_default();
+                crate::spec::env::LoadedBlueprint::from_manifest(&content, base)
+            }
+            BlueprintSource::Toml(toml) => {
+                crate::spec::env::LoadedBlueprint::from_manifest(&toml, spec.workdir.clone())
+            }
+            BlueprintSource::Inline(blueprint) => crate::spec::env::LoadedBlueprint::from_parsed(
+                *blueprint,
+                None,
+                spec.workdir.clone(),
+            ),
+        }
+        .map_err(EmbedError::Blueprint)?;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let key = format!(
+            "staged-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let reference = crate::spec::names::BlueprintRef::parse(&key)
+            .expect("a staging key is a valid blueprint name");
+        // A blueprint with no task region takes no task, and the text given
+        // for one has nowhere to go.
+        let takes_task = loaded
+            .graph
+            .inputs
+            .iter()
+            .any(|d| d.name.as_str() == "task");
+        leviath_core::sync::lock(&self.staged).insert(key, loaded);
+        spawn_request(SpecInputs {
+            reference,
+            task: match takes_task {
+                true => spec.task,
+                false => String::new(),
+            },
+            regions: spec.regions,
+            parts: spec.parts,
+            model: spec.model,
+            workdir: spec.workdir,
+            metadata: spec.metadata,
+            output: spec.output,
+        })
     }
 
     /// What a run handed back, or `None` if it has not submitted anything (or
@@ -1065,7 +1114,8 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .unwrap_err();
         assert!(err.to_string().starts_with("blueprint error"));
 
-        // A manifest path that does not exist fails in the spawner.
+        // A manifest path that does not exist is a blueprint that cannot be
+        // read.
         let err = world
             .spawn(SpawnSpec::new(
                 BlueprintSource::Path(dir.path().join("missing.leviath")),
@@ -1074,7 +1124,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             ))
             .await
             .unwrap_err();
-        assert!(err.to_string().starts_with("spawn error"));
+        assert!(err.to_string().starts_with("blueprint error"));
 
         // A workdir that does not exist is refused before anything spawns.
         let err = world
@@ -1467,7 +1517,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .unwrap_err();
         assert!(err.to_string().contains("parse manifest"));
 
-        // A path with no file stem still spawns an attempt (and fails to read).
+        // A path with no file stem fails to read.
         let err = world
             .spawn(SpawnSpec::new(
                 BlueprintSource::Path(PathBuf::from("")),
@@ -1476,7 +1526,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             ))
             .await
             .unwrap_err();
-        assert!(err.to_string().starts_with("spawn error"));
+        assert!(err.to_string().starts_with("blueprint error"));
 
         // A required caller-input region that was not provided fails before
         // any inference.

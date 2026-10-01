@@ -35,7 +35,7 @@ pub(crate) use dashboard_log::append_dashboard_log;
 #[cfg(test)]
 use dashboard_log::*;
 pub(crate) use dashboard_log::{append_dashboard_log_to, dashboard_log_path};
-pub(crate) use force::{ForceCancelOutcome, force_cancel, force_cancel_in, force_error_in};
+pub(crate) use force::{ForceCancelOutcome, force_cancel, force_cancel_in};
 
 // The plain run-state data types (RunMeta, RunStatus, the snapshot structs, and
 // the per-stage records) live in `leviath_core::run_meta`. Re-exported here so
@@ -452,6 +452,7 @@ pub(crate) fn create_run(meta: &RunMeta) -> anyhow::Result<()> {
 /// Callers that already know the directory should prefer this over
 /// [`create_run`], which resolves it from the home directory - the daemon's
 /// spawner stakes out the run dir under its own configured `runs_dir`.
+#[cfg(test)]
 pub(crate) fn create_run_in(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
 
@@ -3467,61 +3468,6 @@ mod tests {
         });
     }
 
-    /// The spawn that never became a run: the placeholder is `Starting`, which
-    /// is not terminal, so it has to be rewritten or it claims to be alive for
-    /// ever.
-    #[test]
-    fn force_error_records_the_failure_over_a_starting_placeholder() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("stillborn-run");
-        let meta = RunMeta::new(
-            "stillborn-run".to_string(),
-            "agent".to_string(),
-            "/no/such/agent.leviath".to_string(),
-            "t".to_string(),
-            None,
-            "/tmp".to_string(),
-            0,
-        );
-        create_run_in(&dir, &meta).unwrap();
-        assert_eq!(read_meta_from(&dir).unwrap().status, RunStatus::Starting);
-
-        assert_eq!(
-            force_error_in(&dir, "blueprint not found", 99),
-            ForceCancelOutcome::Terminated
-        );
-
-        let written = read_meta_from(&dir).unwrap();
-        assert_eq!(written.status, RunStatus::Error);
-        assert_eq!(written.error.as_deref(), Some("blueprint not found"));
-        assert_eq!(written.updated_at, 99);
-        // The rest of the placeholder survives, so the run still explains itself.
-        assert_eq!(written.task, "t");
-    }
-
-    #[test]
-    fn force_error_leaves_a_run_that_already_finished_alone() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("done-run");
-        let mut meta = RunMeta::new(
-            "done-run".to_string(),
-            "agent".to_string(),
-            String::new(),
-            "t".to_string(),
-            None,
-            "/tmp".to_string(),
-            0,
-        );
-        meta.status = RunStatus::Complete;
-        create_run_in(&dir, &meta).unwrap();
-
-        assert_eq!(
-            force_error_in(&dir, "too late", 99),
-            ForceCancelOutcome::AlreadyTerminal
-        );
-        assert_eq!(read_meta_from(&dir).unwrap().status, RunStatus::Complete);
-    }
-
     #[test]
     fn force_cancel_keeps_an_error_the_run_had_already_recorded() {
         // Cancelling passes no message of its own, so whatever the run managed
@@ -3544,22 +3490,6 @@ mod tests {
         let written = read_meta_from(&dir).unwrap();
         assert_eq!(written.status, RunStatus::Cancelled);
         assert_eq!(written.error.as_deref(), Some("a provider hiccup"));
-    }
-
-    #[test]
-    fn force_error_writes_its_message_over_unreadable_metadata() {
-        let base = tempfile::tempdir().unwrap();
-        let dir = base.path().join("corrupt-stillborn");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("meta.json"), "{ not json").unwrap();
-
-        assert_eq!(
-            force_error_in(&dir, "blueprint not found", 99),
-            ForceCancelOutcome::Terminated
-        );
-        let written = read_meta_from(&dir).expect("now parses");
-        assert_eq!(written.status, RunStatus::Error);
-        assert_eq!(written.error.as_deref(), Some("blueprint not found"));
     }
 
     #[test]

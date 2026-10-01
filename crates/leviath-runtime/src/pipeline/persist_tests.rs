@@ -14,8 +14,8 @@ use tokio::runtime::Handle;
 
 use crate::components::{AgentState, AgentStatus, ContextWindow, InferenceConfig, MessageInbox};
 use crate::pipeline::{
-    AgentBlueprint, ReadyToInfer, StageCursor, StageInference, StageInferences, StageProgress,
-    StageSetup, StageSetups, ToolProgress, ToolService, VisitCounts,
+    ReadyToInfer, StageCursor, StageInference, StageProgress, StageSetup, ToolProgress,
+    ToolService, VisitCounts,
 };
 use crate::runfile::RunFileReader;
 use crate::tool_bridge::BoxedToolExec;
@@ -189,7 +189,7 @@ fn agent(stage: &str) -> AgentState {
 
 /// The spec a spawn of [`blueprint`] places.
 fn spec() -> Arc<crate::spec::run_spec::RunSpec> {
-    crate::spec_bridge::test_support::both(blueprint()).1.0
+    crate::spec_bridge::test_support::both(blueprint()).0
 }
 
 /// A mock agent runs a few turns; afterwards its run file's last state is the
@@ -218,13 +218,10 @@ async fn the_run_file_ends_where_the_run_does() {
     );
     let id = world.spawn_agent((
         (
-            AgentBlueprint(blueprint()),
             StageCursor { index: 0 },
             agent("s"),
             MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage()]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage(),

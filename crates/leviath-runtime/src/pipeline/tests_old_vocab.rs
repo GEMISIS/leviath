@@ -37,7 +37,7 @@ pub(super) fn plan_inference(i: usize) -> StageInference {
 /// A blueprint as the spec a spawn of it runs, each stage on the matching
 /// inference of `infs`.
 pub(super) fn spec_with(bp: Blueprint, infs: &[StageInference]) -> RunSpecC {
-    let mut spec = crate::pipeline::run_spec_from_blueprint(&bp, "t-run", infs)
+    let mut spec = crate::spec_bridge::test_support::spec_of_blueprint(&bp, "t-run", infs)
         .expect("a test blueprint reads as a spec");
     for plan in &mut spec.stages {
         plan.context_window = WINDOW;

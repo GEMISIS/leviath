@@ -1,10 +1,10 @@
-//! A resolved run spec for an agent spawned from a parsed blueprint.
+//! Test helpers: runs built from a parsed blueprint.
 //!
-//! Spawning still starts from a [`Blueprint`] whose region budgets the spawn
-//! has already resolved against each stage's model window. This reads that
-//! blueprint as the [`RunSpec`] the rest of the runtime works from, with each
-//! stage's plan taken from what the spawn resolved for it, so a system that
-//! reads the spec sees exactly what the spawn decided.
+//! A run is resolved from a request and placed with
+//! [`insert`](crate::insert::insert). Many tests of the systems that run it
+//! are written against a hand-built [`Blueprint`] and per-stage choices
+//! instead, so these read such a blueprint as the [`RunSpec`] a resolver
+//! would have made of it and place it the same way.
 
 use std::collections::BTreeMap;
 
@@ -29,7 +29,7 @@ use crate::spec::run_spec::{EnvFingerprint, RunSpec, SpecOrigin, StagePlan, Tool
 /// resolution and each stage's model window, aligned with `bp.stages`. Fails
 /// only when the blueprint cannot be read as a graph at all, with every field
 /// that does not fit.
-pub fn run_spec_from_blueprint(
+pub(crate) fn run_spec_from_blueprint(
     bp: &Blueprint,
     agent_id: &str,
     stages: &[StageInference],
@@ -187,9 +187,341 @@ fn output_def(o: &leviath_core::output::OutputSpec) -> OutputDef {
     }
 }
 
+/// Spawning runs from a parsed blueprint, for tests written against one.
+pub(crate) mod spawning {
+    use super::run_spec_from_blueprint;
+    use crate::pipeline::{Providers, StageInference};
+    use bevy_ecs::prelude::*;
+
+    /// Look up a model's context window (for resolving percentage region budgets)
+    /// via the registered [`Providers`]. Falls back to
+    /// the pipeline's default window with a warning when the provider isn't
+    /// registered - non-fatal, and `min_tokens` floors still protect regions.
+    fn context_window_tokens(world: &World, provider_name: &str, model: &str) -> usize {
+        match world
+            .get_resource::<Providers>()
+            .and_then(|p| p.0.get(provider_name))
+        {
+            Some(provider) => provider.max_context_tokens(model),
+            None => {
+                tracing::warn!(
+                    provider = provider_name,
+                    model,
+                    "provider not registered; using default context window for percentage budgets"
+                );
+                crate::pipeline::DEFAULT_CONTEXT_WINDOW_TOKENS
+            }
+        }
+    }
+
+    /// Spawn a fully-formed agent into `world` from its blueprint, task, and
+    /// per-stage resolution, and return its entity: the task seeds the `task`
+    /// region and everything else is as [`spawn_agent_seeded`] does it.
+    ///
+    /// `stages` must be aligned with `blueprint.stages` (one resolved stage each).
+    ///
+    /// `global_hints` is the caller's global config toggle for each system-prompt
+    /// hint; each is resolved per stage against the blueprint's agent-level and
+    /// per-stage override of the same name.
+    pub(crate) fn spawn_agent(
+        world: &mut World,
+        agent_id: String,
+        blueprint: crate::spec::Blueprint,
+        task: &str,
+        stages: Vec<crate::pipeline::ResolvedStage>,
+        global_hints: leviath_core::config::PromptHints,
+    ) -> Result<Entity, String> {
+        let seeds = std::collections::HashMap::from([("task".to_string(), task.to_string())]);
+        spawn_agent_seeded(
+            world,
+            SeededSpawn {
+                agent_id,
+                blueprint,
+                seeds,
+                stages,
+                global_hints,
+                global_nudge: crate::spec::NudgeConfig::default(),
+                region_scripts: std::collections::HashMap::new(),
+                mime_registry: None,
+            },
+        )
+    }
+
+    /// Everything a seeded spawn needs besides the world it spawns into.
+    ///
+    /// The blueprint and its resolved stages travel with the seeds and the global
+    /// defaults because all six are the same decision made at different layers:
+    /// what this agent starts with. The caller resolves them; this consumes them.
+    pub(crate) struct SeededSpawn {
+        /// The run id this agent is registered under.
+        pub(crate) agent_id: String,
+        /// The blueprint being spawned.
+        pub(crate) blueprint: crate::spec::Blueprint,
+        /// Content for named caller-input regions, keyed by region name.
+        pub(crate) seeds: std::collections::HashMap<String, String>,
+        /// The blueprint's stages, already resolved against the provider registry.
+        pub(crate) stages: Vec<crate::pipeline::ResolvedStage>,
+        /// Config-level prompt hints, applied where the blueprint says nothing.
+        pub(crate) global_hints: leviath_core::config::PromptHints,
+        /// The config-level nudge, likewise.
+        pub(crate) global_nudge: crate::spec::NudgeConfig,
+        /// Compiled render hooks, keyed by region name.
+        pub(crate) region_scripts: std::collections::HashMap<
+            String,
+            std::sync::Arc<leviath_scripting::region_hook::RegionScript>,
+        >,
+        /// The run's mime registry, when the host built one (with the
+        /// blueprint's checks compiled and attached). Left `None`, one is built
+        /// here from the world's registry and the blueprint's own rows, with no
+        /// checks.
+        pub(crate) mime_registry: Option<crate::blob_store::RunMimeRegistry>,
+    }
+
+    /// The config-level defaults a blueprint spawn is resolved against, folded
+    /// into the graph so the run's spec carries them: each hint and nudge setting
+    /// the blueprint leaves open takes the operator's.
+    fn fold_operator_defaults(
+        graph: &mut crate::spec::graph::RunGraph,
+        hints: leviath_core::config::PromptHints,
+        nudge: &crate::spec::NudgeConfig,
+    ) {
+        graph.batch_tool_hint = Some(graph.batch_tool_hint.unwrap_or(hints.batch_tool));
+        graph.shell_hint = Some(graph.shell_hint.unwrap_or(hints.shell));
+        let own = graph.nudge.clone().unwrap_or_default();
+        graph.nudge = Some(crate::spec::graph::NudgeDef {
+            enabled: own.enabled.or(nudge.enabled),
+            max: own
+                .max
+                .or_else(|| nudge.max.map(|m| u32::try_from(m).unwrap_or(u32::MAX))),
+            text: own.text.or_else(|| nudge.text.clone()),
+        });
+    }
+
+    /// The region a blueprint spawn's seed lands in: its own name, or for the
+    /// `task` seed, the pinned region named `task` or else the first pinned region.
+    fn seed_target(layout: &crate::spec::ContextLayout, key: &str) -> Option<String> {
+        let pinned = |r: &&crate::spec::layout::RegionDefinition| {
+            matches!(r.kind, leviath_core::RegionKind::Pinned)
+        };
+        let found = match key {
+            "task" => layout
+                .regions
+                .iter()
+                .filter(pinned)
+                .find(|r| r.name == "task")
+                .or_else(|| layout.regions.iter().find(pinned)),
+            _ => layout.regions.iter().find(|r| r.name == key),
+        };
+        found.map(|r| r.name.clone())
+    }
+
+    /// Spawn an agent from a blueprint, seeds and resolved stages: build the run's
+    /// spec from them, lay out and seed its window, enter its first stage, and
+    /// [`insert`](crate::insert::insert) it. Returns `Err` when the blueprint does
+    /// not read as a run graph, when a layout does not fit its stage's window, or
+    /// when the first stage's system prompt does not fit its region.
+    ///
+    /// Every percentage region budget is resolved here against the model windows
+    /// the providers report, and written into each stage's plan: a region of the
+    /// graph's layout is sized against the smallest window among the stages that
+    /// see it, and a stage's own layout against that stage's window.
+    ///
+    /// `global_hints` and `global_nudge` are the caller's config-level defaults;
+    /// each setting the blueprint leaves open takes them.
+    pub(crate) fn spawn_agent_seeded(
+        world: &mut World,
+        spawn: SeededSpawn,
+    ) -> Result<Entity, String> {
+        let SeededSpawn {
+            agent_id,
+            blueprint,
+            seeds,
+            stages,
+            global_hints,
+            global_nudge,
+            region_scripts,
+            mime_registry,
+        } = spawn;
+        // The registry this run types its bytes by: the host's, or the world's
+        // rows with the blueprint's `[mime_types]` on top. A world without a
+        // registry (one assembled by hand in a test) has no run registry either.
+        let run_registry = match mime_registry {
+            Some(registry) => Some(registry),
+            None => world
+                .get_resource::<crate::blob_store::MimeRegistryHandle>()
+                .map(|r| {
+                    crate::blob_store::RunMimeRegistry::new(
+                        &r.0,
+                        blueprint.mime_types.clone(),
+                        std::collections::BTreeMap::new(),
+                    )
+                })
+                .transpose()
+                .map_err(|e| format!("[mime_types]: {e}"))?,
+        };
+        // `parse_manifest` guarantees at least one stage, but this is `pub` and an
+        // embedder can hand-build a `Blueprint`; refusing here turns index panics
+        // into the `Err` the signature already promises.
+        if blueprint.stages.is_empty() {
+            return Err("blueprint declares no stages".to_string());
+        }
+        if stages.len() != blueprint.stages.len() {
+            return Err(format!(
+                "{} resolved stages for a blueprint with {}",
+                stages.len(),
+                blueprint.stages.len()
+            ));
+        }
+        let stage_windows: Vec<usize> = stages
+            .iter()
+            .map(|rs| context_window_tokens(world, &rs.provider_name, &rs.model))
+            .collect();
+        let resolved = resolved_layouts(&blueprint, &stage_windows)?;
+
+        let notes: Vec<Vec<String>> = stages.iter().map(|rs| rs.notes.clone()).collect();
+        let stage_infs: Vec<StageInference> = stages
+            .into_iter()
+            .map(|rs| StageInference {
+                provider_name: rs.provider_name,
+                model: rs.model,
+                tools: rs.tools,
+                tool_filter: None, // tools already resolved to the effective set
+                fallbacks: rs.fallbacks,
+                output: rs.output,
+            })
+            .collect();
+        let mut spec = run_spec_from_blueprint(&blueprint, &agent_id, &stage_infs, &stage_windows)
+            .map_err(|issues| issues.to_string())?;
+        fold_operator_defaults(&mut spec.graph, global_hints, &global_nudge);
+        for (i, plan) in spec.stages.iter_mut().enumerate() {
+            plan.max_output_tokens = None;
+            plan.notes = notes[i].clone();
+            plan.region_budgets = resolved.budgets(i);
+        }
+        for (key, content) in &seeds {
+            // Unknown names are rejected upstream; a seed that targets nothing is
+            // dropped here to keep this infallible for it.
+            let Some(target) = seed_target(&resolved.global, key)
+                .and_then(|t| crate::spec::names::RegionName::new(t).ok())
+            else {
+                continue;
+            };
+            spec.seeded.insert(
+                target,
+                crate::spec::run_spec::SeededContent {
+                    text: content.clone(),
+                    parts: Vec::new(),
+                },
+            );
+        }
+        let spec = std::sync::Arc::new(spec);
+
+        let mut window = crate::insert::seeded_window(&spec, &region_scripts);
+        crate::insert::enter_first_stage(&spec, &mut window)?;
+        let state = crate::insert::initial_state_from(&spec, &window);
+
+        let mut bindings =
+            crate::spec::env::Bindings::new().with(crate::insert::RegionScripts(region_scripts));
+        if let Some(registry) = run_registry {
+            bindings = bindings.with(registry);
+        }
+        Ok(crate::insert::insert(world, spec, bindings, &state))
+    }
+
+    /// A blueprint's layouts with every percentage budget resolved to tokens.
+    struct ResolvedLayouts {
+        /// The blueprint's own layout.
+        global: crate::spec::ContextLayout,
+        /// Each stage's own layout, when it has one.
+        per_stage: Vec<Option<crate::spec::ContextLayout>>,
+    }
+
+    impl ResolvedLayouts {
+        /// Each region's budget in stage `i`: the stage's own layout's, over the
+        /// blueprint layout's for every region the stage's layout does not name.
+        fn budgets(
+            &self,
+            i: usize,
+        ) -> std::collections::BTreeMap<crate::spec::names::RegionName, u32> {
+            let own = self.per_stage[i].iter().flat_map(|l| l.regions.iter());
+            self.global
+                .regions
+                .iter()
+                .chain(own)
+                .filter_map(|r| {
+                    let tokens = u32::try_from(r.max_tokens).unwrap_or(u32::MAX);
+                    crate::spec::names::RegionName::new(r.name.as_str())
+                        .ok()
+                        .map(|name| (name, tokens))
+                })
+                .collect()
+        }
+    }
+
+    /// Resolve a blueprint's layouts against its stages' model windows and check
+    /// each one, as [`spawn_agent_seeded`] describes.
+    fn resolved_layouts(
+        blueprint: &crate::spec::Blueprint,
+        stage_windows: &[usize],
+    ) -> Result<ResolvedLayouts, String> {
+        // A region's percentage budget is sized against the smallest context window
+        // among the stages that actually see it - not the entry stage's window, and
+        // not a stage that never reads the region. A per-stage layout's regions are
+        // private to that stage, so its own window is the only one that uses them.
+        let smallest_window_seeing = |region: &str| -> usize {
+            blueprint
+                .stages
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| {
+                    s.context_layout.is_none() && blueprint.regions_visible_to(s).contains(region)
+                })
+                .map(|(i, _)| stage_windows[i])
+                .min()
+                // No stage uses the global layout for this region (every stage
+                // has its own, or all hide it); the first window is a harmless
+                // default for a budget nothing at runtime consults.
+                .unwrap_or(stage_windows[0])
+        };
+        let global = blueprint
+            .context_layout
+            .resolved_per_region(&smallest_window_seeing);
+        let per_stage: Vec<Option<crate::spec::ContextLayout>> = blueprint
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                s.context_layout
+                    .as_ref()
+                    .map(|l| l.resolved(stage_windows[i]))
+            })
+            .collect();
+        // Structural validation (duplicate names, eviction order, custom scripts)
+        // once per distinct layout, now that percentages are concrete numbers.
+        global.validate().map_err(|e| e.to_string())?;
+        for layout in per_stage.iter().flatten() {
+            layout.validate().map_err(|e| e.to_string())?;
+        }
+        // Then the working-room floor, per stage: each stage must keep enough
+        // evictable room after its fixed regions, judged against *its* model window
+        // over just the regions *it* sees - a region budgeted generously for a
+        // wide-window stage must not be counted against a narrow one that never
+        // reads it.
+        for (i, stage) in blueprint.stages.iter().enumerate() {
+            let layout = per_stage[i].as_ref().unwrap_or(&global);
+            let visible = blueprint.regions_visible_to(stage);
+            layout
+                .retaining(|name| visible.contains(name))
+                .validate_working_room(stage_windows[i])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(ResolvedLayouts { global, per_stage })
+    }
+}
+
 /// Specs and graphs for tests of the systems that read them.
-#[cfg(test)]
 pub(crate) mod test_support {
+    pub(crate) use super::spawning::{SeededSpawn, spawn_agent, spawn_agent_seeded};
     use super::*;
     use crate::insert::RunSpecC;
     use crate::spec::graph::StageDef;
@@ -241,15 +573,157 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A run spec for a parsed blueprint and the inference each of its stages
+    /// resolved to, for tests that start from a blueprint and a stage list
+    /// rather than a spawn request.
+    ///
+    /// The graph is the blueprint read as a [`RunGraph`](crate::spec::graph::RunGraph);
+    /// each stage's plan is its [`StageInference`] with a zero context window and
+    /// no region budgets, which the caller fills in when it knows them. The spec
+    /// launches attended, from no workdir, with nothing seeded.
+    pub(crate) fn spec_of_blueprint(
+        bp: &crate::spec::Blueprint,
+        agent_id: &str,
+        stages: &[crate::pipeline::StageInference],
+    ) -> Result<crate::spec::run_spec::RunSpec, String> {
+        use crate::spec::names::{BlueprintName, BlueprintRef};
+        use crate::spec::run_spec::{RunSpec, SpecOrigin};
+        let graph = crate::spec::graph::RunGraph::from_blueprint(bp)
+            .map_err(|issues| issues.to_string())?;
+        let plans = graph
+            .stages
+            .iter()
+            .zip(stages)
+            .map(|(stage, si)| stage_plan(stage.name.clone(), si))
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(RunSpec {
+            run_id: named(agent_id)?,
+            origin: match BlueprintName::new(bp.name.as_str()) {
+                Ok(name) => SpecOrigin::Blueprint {
+                    blueprint: BlueprintRef { name, digest: None },
+                    version: bp.version.clone(),
+                },
+                Err(_) => SpecOrigin::Raw,
+            },
+            graph,
+            inputs: Default::default(),
+            stages: plans,
+            seeded: Default::default(),
+            code: Vec::new(),
+            requested_output: None,
+            requested_model: None,
+            launch: crate::spec::launch::LaunchPolicy {
+                unattended: crate::spec::launch::Unattended::Off,
+                allow: Vec::new(),
+                max_depth: 0,
+                seed_commands: true,
+                capture_model_input: false,
+            },
+            auto_answers: Default::default(),
+            placement: crate::spec::launch::Placement {
+                workdir: std::path::PathBuf::new(),
+                parent: None,
+                depth: 0,
+                worker_stage: None,
+            },
+            delivery: Default::default(),
+            env: Default::default(),
+            created_at: chrono::Utc::now().timestamp(),
+        })
+    }
+
+    /// A checked name, or why the text is not one.
+    fn named<T: std::str::FromStr<Err = crate::spec::names::NameError>>(
+        text: &str,
+    ) -> Result<T, String> {
+        text.parse()
+            .map_err(|e: crate::spec::names::NameError| e.to_string())
+    }
+
+    /// A stage's plan from the inference it resolved to. A fallback with no
+    /// provider leaves the provider to the operator's order.
+    fn stage_plan(
+        stage: crate::spec::names::StageName,
+        si: &crate::pipeline::StageInference,
+    ) -> Result<crate::spec::run_spec::StagePlan, String> {
+        use crate::spec::names::ModelRef;
+        use crate::spec::run_spec::{StagePlan, ToolDef, ToolSource};
+        let fallbacks = si
+            .fallbacks
+            .iter()
+            .map(|f| {
+                let provider = (!f.provider.is_empty())
+                    .then(|| named(&f.provider))
+                    .transpose()?;
+                Ok(ModelRef {
+                    provider,
+                    model: named(&f.model)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let tools = si
+            .tools
+            .iter()
+            .map(|t| {
+                Ok(ToolDef {
+                    name: named(&t.name)?,
+                    description: t.description.clone(),
+                    schema: leviath_core::JsonDoc::new(t.parameters.clone()),
+                    source: ToolSource::Builtin,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(StagePlan {
+            stage,
+            provider: named(&si.provider_name)?,
+            model: named(&si.model)?,
+            context_window: 0,
+            max_output_tokens: None,
+            fallbacks,
+            tools,
+            output: si.output.as_ref().map(output_def).transpose()?,
+            region_budgets: Default::default(),
+            notes: Vec::new(),
+        })
+    }
+
+    /// An output shape as a run graph writes it.
+    fn output_def(
+        spec: &leviath_core::output::OutputSpec,
+    ) -> Result<crate::spec::graph::OutputDef, String> {
+        use crate::spec::graph::{ArtifactDef, CodeRef, OutputDef};
+        Ok(OutputDef {
+            format: spec.format.clone(),
+            instructions: spec.instructions.clone(),
+            example: spec.example.clone(),
+            schema: spec.schema.clone().map(leviath_core::JsonDoc::new),
+            validator: spec.validator.clone().map(CodeRef::File),
+            on_validator_error: spec.on_validator_error,
+            overwrite_artifacts: spec.overwrite_artifacts,
+            artifacts: spec
+                .artifacts
+                .iter()
+                .map(|a| {
+                    Ok(ArtifactDef {
+                        name: a.name.clone(),
+                        mime_type: named(&a.mime_type)?,
+
+                        required: a.required,
+                        description: a.description.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        })
+    }
+
     /// [`spec_named`], as the component a run carries.
     pub(crate) fn spec_c(name: &str, graph: RunGraph) -> RunSpecC {
         RunSpecC(std::sync::Arc::new(spec_named(name, graph)))
     }
 
-    /// What a spawn of `bp` places for the systems that read a run's graph:
-    /// the parsed blueprint and the spec read from it, each stage on a
-    /// 128k-token model.
-    pub(crate) fn both(bp: Blueprint) -> (crate::pipeline::AgentBlueprint, RunSpecC) {
+    /// The spec a spawn of `bp` places for the systems that read a run's
+    /// graph, each stage on a 128k-token model.
+    pub(crate) fn both(bp: Blueprint) -> RunSpecC {
         let stages: Vec<StageInference> = bp
             .stages
             .iter()
@@ -265,170 +739,6 @@ pub(crate) mod test_support {
         let windows = vec![128_000; stages.len()];
         let spec = run_spec_from_blueprint(&bp, "run", &stages, &windows)
             .expect("the blueprint reads as a spec");
-        (
-            crate::pipeline::AgentBlueprint(bp),
-            RunSpecC(std::sync::Arc::new(spec)),
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::spec::blueprint::ModelEntry;
-
-    fn inference(provider: &str, model: &str) -> StageInference {
-        StageInference {
-            provider_name: provider.to_string(),
-            model: model.to_string(),
-            tools: vec![
-                leviath_providers::Tool {
-                    name: "read_file".into(),
-                    description: "read".into(),
-                    parameters: serde_json::json!({"type": "object"}),
-                },
-                leviath_providers::Tool {
-                    name: "bad name".into(),
-                    description: String::new(),
-                    parameters: serde_json::json!({}),
-                },
-            ],
-            tool_filter: None,
-            fallbacks: vec![ModelEntry::new("other".into(), "m2".into())],
-            output: Some(leviath_core::output::OutputSpec {
-                format: Some("json".into()),
-                validator: Some("v.rhai".into()),
-                artifacts: vec![
-                    leviath_core::output::ArtifactSpec {
-                        name: "a.png".into(),
-                        mime_type: "image/png".into(),
-                        required: true,
-                        description: None,
-                    },
-                    leviath_core::output::ArtifactSpec {
-                        name: "b".into(),
-                        mime_type: "not a type".into(),
-                        required: false,
-                        description: None,
-                    },
-                ],
-                ..Default::default()
-            }),
-        }
-    }
-
-    /// Every bundled blueprint, resolved the way the spawn resolves it, reads
-    /// as a spec whose plans and budgets are the spawn's own numbers.
-    #[test]
-    fn a_bundled_blueprint_reads_as_the_spec_the_spawn_resolved() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../leviath-cli/agents");
-        let manifests: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| std::fs::read_to_string(e.unwrap().path().join("agent.leviath")).ok())
-            .collect();
-        let found = manifests.len();
-        assert!(found >= 7, "found {found} bundled blueprints");
-        for text in manifests {
-            let mut bp = crate::spec::manifest::parse_manifest(&text).unwrap();
-            let window = 200_000;
-            bp.context_layout = bp.context_layout.resolved(window);
-            let stages: Vec<StageInference> = bp
-                .stages
-                .iter()
-                .map(|_| inference("mock", "gpt-mock"))
-                .collect();
-            let windows = vec![window; stages.len()];
-            let spec = run_spec_from_blueprint(&bp, "run-1", &stages, &windows).unwrap();
-            assert_eq!(spec.stages.len(), bp.stages.len());
-            for (stage, plan) in bp.stages.iter().zip(&spec.stages) {
-                assert_eq!(plan.stage.as_str(), stage.name);
-                assert_eq!(plan.context_window, window as u32);
-                let layout = stage.context_layout.as_ref().unwrap_or(&bp.context_layout);
-                let visible = bp.regions_visible_to(stage);
-                let want: BTreeMap<String, u32> = layout
-                    .regions
-                    .iter()
-                    .filter(|r| visible.contains(r.name.as_str()))
-                    .map(|r| (r.name.clone(), r.max_tokens as u32))
-                    .collect();
-                let got: BTreeMap<String, u32> = plan
-                    .region_budgets
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), *v))
-                    .collect();
-                assert_eq!(got, want);
-                assert_eq!(plan.tools.len(), 1, "the unnameable tool is left out");
-                assert_eq!(plan.fallbacks[0].to_string(), "other/m2");
-                let output = plan.output.as_ref().unwrap();
-                assert_eq!(output.artifacts.len(), 1);
-                assert_eq!(output.validator, Some(CodeRef::File("v.rhai".into())));
-            }
-            assert_eq!(spec.run_id.as_str(), "run-1");
-            assert_ne!(spec.origin, SpecOrigin::Raw);
-        }
-    }
-
-    fn one_stage() -> Blueprint {
-        crate::spec::manifest::parse_manifest(
-            r#"
-[agent]
-name = "t"
-version = "1"
-description = ""
-
-[context.regions]
-task = { kind = "pinned", max_tokens = 1000 }
-
-[stages.main]
-system_prompt = "p"
-"#,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn each_output_cap_resolves_to_tokens() {
-        let spec_for = |cap: Option<serde_json::Value>| {
-            let mut bp = one_stage();
-            if let Some(cap) = cap {
-                bp.stages[0]
-                    .model
-                    .parameters
-                    .insert("max_output_tokens".into(), cap);
-            }
-            run_spec_from_blueprint(&bp, "r", &[inference("", "")], &[10_000])
-                .unwrap()
-                .stages[0]
-                .clone()
-        };
-        let plan = spec_for(Some(serde_json::json!(500)));
-        assert_eq!(plan.max_output_tokens, Some(500));
-        assert_eq!(plan.provider.as_str(), "unnamed", "an empty name stands in");
-        assert_eq!(plan.model.as_str(), "unnamed");
-        let plan = spec_for(Some(serde_json::json!("10%")));
-        assert_eq!(plan.max_output_tokens, Some(1000));
-        let plan = spec_for(Some(serde_json::json!("50% of task")));
-        assert_eq!(plan.max_output_tokens, Some(500));
-        let plan = spec_for(Some(serde_json::json!("50% of ghost")));
-        assert_eq!(
-            plan.max_output_tokens, None,
-            "an unknown region caps nothing"
-        );
-        assert_eq!(spec_for(None).max_output_tokens, None);
-    }
-
-    #[test]
-    fn an_unreadable_blueprint_or_name_is_reported_or_stood_in() {
-        let mut bp = one_stage();
-        bp.name = " padded ".into();
-        bp.max_child_depth = Some(300);
-        let spec =
-            run_spec_from_blueprint(&bp, "not/a/path", &[inference("p", "m")], &[1]).unwrap();
-        assert_eq!(spec.origin, SpecOrigin::Raw);
-        assert_eq!(spec.run_id.as_str(), "run");
-        assert_eq!(spec.launch.max_depth, u8::MAX);
-        bp.stages[0].available_tools = vec!["bad tool".into()];
-        let issues = run_spec_from_blueprint(&bp, "r", &[inference("p", "m")], &[1]).unwrap_err();
-        assert_eq!(issues.len(), 1);
+        RunSpecC(std::sync::Arc::new(spec))
     }
 }

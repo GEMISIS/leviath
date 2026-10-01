@@ -601,3 +601,32 @@ fn every_bad_stage_setting_is_reported_where_it_sits() {
         ]
     );
 }
+
+/// A caller's output request reads as the output a graph declares, and a
+/// request whose artifact type does not read is refused with its path.
+#[test]
+fn a_callers_output_request_reads_as_an_output() {
+    let wanted = OutputSpec {
+        format: Some("json".to_string()),
+        artifacts: vec![ArtifactSpec {
+            name: "final".to_string(),
+            mime_type: "video/*".to_string(),
+            required: true,
+            description: None,
+        }],
+        ..OutputSpec::default()
+    };
+    let def = OutputDef::from_output_spec(&wanted).expect("the request reads");
+    assert_eq!(def.format.as_deref(), Some("json"));
+    assert_eq!(def.artifacts[0].mime_type.as_str(), "video/*");
+
+    let bad = OutputSpec {
+        artifacts: vec![ArtifactSpec {
+            mime_type: "not a type".to_string(),
+            ..wanted.artifacts[0].clone()
+        }],
+        ..OutputSpec::default()
+    };
+    let issues = OutputDef::from_output_spec(&bad).unwrap_err();
+    assert_eq!(issues.0[0].path.to_string(), "output.artifacts[0]");
+}

@@ -2,7 +2,7 @@
 //! Crate-local names for the shared helpers in `leviath-testkit`, plus the ones
 //! that only this crate needs.
 
-pub(crate) use leviath_testkit::{PANIC_HOOK_LOCK, with_silenced_panics, with_tracing};
+pub(crate) use leviath_testkit::{PANIC_HOOK_LOCK, with_tracing};
 
 /// Silence the process panic hook for as long as the guard lives.
 ///

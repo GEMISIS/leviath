@@ -4,6 +4,7 @@
 //! [`leviath_runtime::control_socket`]): the tool service that bridges tool calls
 //! to the built-in / MCP executors and the interaction hub.
 
+pub(crate) mod block_on;
 pub(crate) mod catalog_refresh;
 pub mod client;
 pub(crate) mod config_reload;
@@ -17,6 +18,7 @@ pub(crate) mod policy_reload;
 pub mod provider_reload;
 pub mod readiness;
 pub(crate) mod recovery;
+pub(crate) mod requests;
 pub mod resolve_env;
 pub(crate) mod sandbox_manager;
 pub(crate) mod script_host;
@@ -24,6 +26,7 @@ pub(crate) mod seed_command;
 pub(crate) mod seed_tool;
 pub mod setup;
 pub(crate) mod spawn;
+pub(crate) mod starter;
 pub(crate) mod subagent;
 pub(crate) mod telemetry_reload;
 pub(crate) mod tool_content;

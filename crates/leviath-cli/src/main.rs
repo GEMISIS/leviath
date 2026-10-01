@@ -445,8 +445,8 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     }
     // Read here, where the paths the user typed still mean what they meant.
     let parts = commands::run::attach::attach_all(&args.attach, &std::env::current_dir()?)?;
-    let spawn_args = leviath_cli::daemon::client::resolve_spawn_args(
-        leviath_cli::daemon::client::LaunchRequest {
+    let local_run =
+        leviath_cli::daemon::client::run_request(leviath_cli::daemon::client::RunLine {
             path,
             task: args.task.as_deref(),
             stdin_is_terminal: &|| std::io::IsTerminal::is_terminal(&io::stdin()),
@@ -464,8 +464,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
                 args.output_schema,
             )?,
             parts,
-        },
-    )?;
+        })?;
     // Deliberately after the resolve, not before. No `--task` opens an editor,
     // and a user can sit in vim for twenty minutes: checking daemon liveness
     // and build staleness first would mean spawning against a socket last
@@ -474,7 +473,7 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     ensure_daemon_running().await?;
     leviath_cli::daemon::client::send_spawn_batch(
         &control_client()?,
-        spawn_args,
+        local_run,
         args.count,
         args.json,
     )

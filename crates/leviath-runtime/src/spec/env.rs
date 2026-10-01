@@ -19,8 +19,8 @@ use super::inputs::PathKind;
 use super::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use super::launch::{LaunchPolicy, Unattended};
 use super::names::{
-    BlueprintRef, Digest, McpServerName, MimePattern, ModelId, ModelRef, ProviderName, RunId,
-    StageName, WorkdirPath,
+    BlueprintPath, BlueprintRef, Digest, McpServerName, MimePattern, ModelId, ModelRef,
+    ProviderName, RunId, StageName, WorkdirPath,
 };
 use super::run_spec::{AutoAnswers, RunSpec, SeededContent, ToolDef};
 
@@ -62,6 +62,47 @@ pub struct LoadedBlueprint {
     pub version: String,
     /// The directory its files (code, prompts) are read from.
     pub base_dir: PathBuf,
+}
+
+impl LoadedBlueprint {
+    /// A blueprint from its manifest text: parsed, validated and read as a
+    /// graph, with the manifest's own `[[mcp_servers]]` and
+    /// `[tool_script_permissions]`. Named after its `[agent] name`, pinned to
+    /// the text's digest, and reading its files from `base_dir`.
+    pub fn from_manifest(content: &str, base_dir: PathBuf) -> Result<Self, String> {
+        let blueprint =
+            super::manifest::parse_manifest(content).map_err(|e| format!("parse manifest: {e}"))?;
+        Self::from_parsed(blueprint, Some(content), base_dir)
+    }
+
+    /// A blueprint already parsed. `manifest` is the text it was parsed from,
+    /// when there was one, for the tables the parsed form does not carry.
+    pub fn from_parsed(
+        blueprint: super::Blueprint,
+        manifest: Option<&str>,
+        base_dir: PathBuf,
+    ) -> Result<Self, String> {
+        blueprint
+            .validate()
+            .map_err(|e| format!("invalid blueprint: {e}"))?;
+        let mut graph = RunGraph::from_blueprint(&blueprint).map_err(|e| e.to_string())?;
+        if let Some(text) = manifest {
+            graph
+                .read_manifest_tables(text)
+                .map_err(|e| e.to_string())?;
+        }
+        let name = super::names::BlueprintName::new(blueprint.name.as_str())
+            .map_err(|e| format!("blueprint name '{}': {e}", blueprint.name))?;
+        Ok(Self {
+            graph,
+            reference: BlueprintRef {
+                name,
+                digest: manifest.map(|text| Digest::of(text.as_bytes())),
+            },
+            version: blueprint.version,
+            base_dir,
+        })
+    }
 }
 
 /// The operator's limits and defaults for spawning.
@@ -210,6 +251,15 @@ impl From<Vec<ToolDef>> for StageTools {
 pub trait ResolveEnv: Send + Sync {
     /// Load an installed blueprint.
     async fn blueprint(&self, reference: &BlueprintRef) -> Result<LoadedBlueprint, SpawnIssue>;
+    /// Load the blueprint in a directory on this machine. A host that reads
+    /// no blueprints from paths keeps the refusal this answers with.
+    async fn blueprint_file(&self, path: &BlueprintPath) -> Result<LoadedBlueprint, SpawnIssue> {
+        Err(SpawnIssue::new(
+            SpecPath::root(),
+            IssueCode::NotAllowed,
+            format!("this host reads no blueprint from a path, so not '{path}'"),
+        ))
+    }
     /// The operator's limits and defaults.
     fn limits(&self) -> SpawnLimits;
     /// A new run id for a run with this title.

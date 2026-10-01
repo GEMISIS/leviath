@@ -67,10 +67,10 @@ impl BindEnv for DaemonEnv {
 /// The name a run's permissions and grants are looked up under: its
 /// blueprint's, or a raw graph's title.
 pub(super) fn agent_name(spec: &RunSpec) -> String {
-    match (&spec.origin, &spec.graph.title) {
-        (SpecOrigin::Blueprint { blueprint, .. }, _) => blueprint.name.to_string(),
-        (SpecOrigin::Raw, Some(title)) => title.clone(),
-        (SpecOrigin::Raw, None) => "raw".to_string(),
+    match (spec.origin.blueprint_name(), &spec.graph.title) {
+        (Some(name), _) => name.to_string(),
+        (None, Some(title)) => title.clone(),
+        (None, None) => "raw".to_string(),
     }
 }
 
@@ -86,13 +86,14 @@ struct ToolState {
 }
 
 impl DaemonEnv {
-    /// The directory a blueprint run's blueprint is installed in.
+    /// The directory a blueprint run's blueprint is read from.
     fn blueprint_dir(&self, spec: &RunSpec) -> Option<PathBuf> {
         match &spec.origin {
             SpecOrigin::Blueprint { blueprint, .. } => self
                 .agents_dir
                 .as_ref()
                 .map(|d| d.join(blueprint.name.as_str())),
+            SpecOrigin::BlueprintFile { path, .. } => Some(path.path().to_path_buf()),
             SpecOrigin::Raw => None,
         }
     }
@@ -320,7 +321,6 @@ impl DaemonEnv {
             sender: self.subagent_tx.clone(),
             parent_run_id: run_id.to_string(),
             workdir: workdir.to_string_lossy().into_owned(),
-            max_depth: usize::from(spec.launch.max_depth),
             no_seed_commands: !spec.launch.seed_commands,
             unattended: profile.is_some(),
             yolo_profile: profile_name.clone(),

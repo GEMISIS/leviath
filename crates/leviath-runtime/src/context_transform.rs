@@ -17,7 +17,7 @@
 
 use crate::insert::RunSpecC;
 use crate::spec::graph::{ContentTransform, RegionMappingDef};
-use crate::spec::run_spec::{RunSpec, SpecOrigin};
+use crate::spec::run_spec::RunSpec;
 use bevy_ecs::prelude::*;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -220,10 +220,7 @@ pub(crate) fn collect_content_summary(
 /// The blueprint a run came from, by name. A run whose graph its caller wrote
 /// has none, so no transform names it.
 fn blueprint_name(spec: &RunSpec) -> Option<&str> {
-    match &spec.origin {
-        SpecOrigin::Blueprint { blueprint, .. } => Some(blueprint.name.as_str()),
-        SpecOrigin::Raw => None,
-    }
+    spec.origin.blueprint_name()
 }
 
 /// Find the region mappings for `parent_blueprint → child_blueprint`, searching
@@ -421,7 +418,7 @@ mod tests {
         // A run whose caller wrote its graph came from no blueprint ⇒ none.
         let mut w7 = World::new();
         let mut raw = crate::spec::run_spec::tests::spec();
-        raw.origin = SpecOrigin::Raw;
+        raw.origin = crate::spec::run_spec::SpecOrigin::Raw;
         raw.graph.transforms = vec![transform("planner", "coder", m.clone())];
         let p7 = w7.spawn(RunSpecC(std::sync::Arc::new(raw))).id();
         let c7 = w7.spawn(bp_with_transforms("coder", vec![])).id();

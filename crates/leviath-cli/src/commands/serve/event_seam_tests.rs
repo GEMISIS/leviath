@@ -27,7 +27,7 @@ use leviath_runtime::control_socket::{
     ControlClient, ControlResponse, ControlToken, bind_control_listener, control_id,
     handle_connection_as,
 };
-use leviath_runtime::host::{SpawnArgs, WorldEvent};
+use leviath_runtime::host::WorldEvent;
 use tokio::sync::{Mutex, broadcast};
 
 use super::testutil::WsTestClient;
@@ -283,24 +283,22 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
     })
     .await;
 
+    let request = crate::daemon::requests::TaskLaunch {
+        blueprint: manifest.to_string_lossy().to_string(),
+        task: "say something".to_string(),
+        workdir: Some(workdir.path().to_string_lossy().to_string()),
+        ..Default::default()
+    }
+    .into_request()
+    .expect("the request reads");
     let reply = seam
         .control
-        .spawn(SpawnArgs {
-            run_id: "seam-1".to_string(),
-            blueprint_path: manifest.to_string_lossy().to_string(),
-            task: "say something".to_string(),
-            workdir: workdir.path().to_string_lossy().to_string(),
-            ..Default::default()
-        })
+        .spawn(request)
         .await
         .expect("the daemon answered the spawn");
-    assert_eq!(
-        reply,
-        ControlResponse::Spawned {
-            run_id: "seam-1".to_string()
-        },
-        "the spawn was refused"
-    );
+    let ControlResponse::Spawned { run_id } = reply else {
+        panic!("the spawn was refused: {reply:?}");
+    };
 
     let frames = collect_frames(
         &mut client,
@@ -310,7 +308,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
 
     // The spawn frame. `parent_id` is null for a root run, and present.
     let spawned = last(&frames, "agent_spawned");
-    assert_eq!(spawned["run_id"], "seam-1");
+    assert_eq!(spawned["run_id"], run_id.as_str());
     assert_eq!(spawned["blueprint"], "seam");
     assert_eq!(spawned["parent_id"], serde_json::Value::Null);
 
@@ -328,7 +326,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
         statuses.len()
     );
     let status = last(&frames, "agent_status");
-    assert_eq!(status["run_id"], "seam-1");
+    assert_eq!(status["run_id"], run_id.as_str());
     assert_eq!(status["stage"], "work");
     assert_eq!(status["status"], "complete");
     assert!(status["accepts_messages"].is_boolean());
@@ -338,7 +336,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
     // one-shot title generation is its own), so an exact total is a trap that
     // fails the day another call joins.
     let tokens = last(&frames, "tokens");
-    assert_eq!(tokens["run_id"], "seam-1");
+    assert_eq!(tokens["run_id"], run_id.as_str());
     assert!(
         tokens["prompt_tokens"].as_u64().unwrap_or(0) >= 7,
         "the token frame never carried the provider's usage: {tokens}"
@@ -346,7 +344,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
     assert!(tokens["completion_tokens"].as_u64().unwrap_or(0) >= 3);
 
     let completed = last(&frames, "agent_completed");
-    assert_eq!(completed["run_id"], "seam-1");
+    assert_eq!(completed["run_id"], run_id.as_str());
     assert_eq!(completed["status"], "complete");
 
     client.send_close().await;

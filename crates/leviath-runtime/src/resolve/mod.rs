@@ -117,6 +117,7 @@ pub async fn resolve(
     let checked = inputs::check(
         &src.graph,
         request,
+        caller,
         &files,
         workdir.as_deref(),
         env,
@@ -166,15 +167,15 @@ pub async fn resolve(
         plans
     });
 
-    let title = match &src.origin {
-        SpecOrigin::Blueprint { blueprint, .. } => blueprint.name.to_string(),
-        SpecOrigin::Raw => graph.title.clone().unwrap_or_else(|| "run".to_string()),
-    };
+    let title = src.origin.blueprint_name().map_or_else(
+        || graph.title.clone().unwrap_or_else(|| "run".to_string()),
+        str::to_string,
+    );
     let run_id = env.new_run_id(&title);
-    let agent = match &src.origin {
-        SpecOrigin::Blueprint { blueprint, .. } => blueprint.name.to_string(),
-        SpecOrigin::Raw => graph.title.clone().unwrap_or_else(|| "raw".to_string()),
-    };
+    let agent = src.origin.blueprint_name().map_or_else(
+        || graph.title.clone().unwrap_or_else(|| "raw".to_string()),
+        str::to_string,
+    );
     let placed = regions::place(&graph, &checked, &files, request, &mut issues);
     let seeded = match &workdir {
         Some(dir) => {

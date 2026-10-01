@@ -12,45 +12,6 @@
 
 use super::*;
 
-/// The directories scanned for an agent's Rhai script tools, in precedence order
-/// (earlier wins on a name collision): the agent's own `<agent_dir>/tools/`, then
-/// `extra` (the run workdir's `tools/`, only for `dynamic_tools` agents so a
-/// mid-run write is picked up), then the global `~/.leviath/tools/`. `Option`'s
-/// iterator flattens the "no parent" / "no home" cases without a dangling
-/// `if let` else region.
-pub(super) fn script_scan_dirs(
-    blueprint_path: &str,
-    extra: Option<std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
-    std::path::Path::new(blueprint_path)
-        .parent()
-        .map(|d| d.join("tools"))
-        .into_iter()
-        .chain(extra)
-        .chain(leviath_core::tools_dir())
-        .collect()
-}
-
-/// Read and compile every custom region's Rhai script declared by `blueprint`
-/// (global layout plus each stage's per-stage layout), keyed by the script
-/// path as written. Paths resolve relative to the blueprint's directory (the
-/// script-tool convention - the script travels with the agent), with absolute
-/// paths passing through `Path::join` unchanged. Each distinct path is read
-/// and compiled once; regions sharing a script share the compiled AST.
-///
-/// A missing or uncompilable script is a **hard spawn error** (fail fast,
-/// before any tokens are spent): a hook that silently never ran would change
-/// every inference with no signal. Runtime hook *eval* failures, by contrast,
-/// warn and fall back per hook.
-/// Compile every output validator the blueprint names, keyed by path.
-///
-/// A hard spawn error for the same reason a region script is: the moment to
-/// discover an agent cannot check its own answer is not the end of a long run,
-/// which is the only other time this script would ever be read.
-///
-/// Paths resolve against the blueprint directory, the same convention script
-/// tools and region hooks use, so a validator travels with the agent that needs
-/// it.
 /// Resolve a blueprint-declared script path against the blueprint's directory,
 /// refusing anything that lands outside it.
 ///
@@ -78,38 +39,15 @@ pub(super) fn script_within_blueprint(
     }
 }
 
-/// Compile every mime check the blueprint's `[mime_types]` rows name,
-/// keyed by the row's type or pattern.
+/// Compile every output validator the blueprint names, keyed by path.
 ///
-/// A hard spawn error like the validators, and for the same reason: a
-/// check that cannot run refuses every file of its type, and the first file
-/// is not the moment to learn that.
-pub(crate) fn resolve_mime_checks(
-    blueprint: &Blueprint,
-    blueprint_path: &str,
-) -> Result<BTreeMap<String, Arc<dyn leviath_core::mime::MimeCheck>>, String> {
-    let base = std::path::Path::new(blueprint_path)
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-    // The rows were checked when the manifest was parsed; layering them again
-    // here is the one way to walk them with their keys normalised.
-    let declared = leviath_core::mime::MimeRegistry::empty()
-        .layered(&blueprint.mime_types, "blueprint")
-        .map_err(|e| format!("[mime_types]: {e}"))?
-        .declared_checks();
-    let mut compiled: BTreeMap<String, Arc<dyn leviath_core::mime::MimeCheck>> = BTreeMap::new();
-    for (key, script, _) in declared {
-        let path = script_within_blueprint(&base, &script, "mime check")?;
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read mime check '{}': {e}", path.display()))?;
-        let check = leviath_scripting::mime_check::compile(&script, &source)
-            .map_err(|e| format!("mime check for {key} failed to compile: {e}"))?;
-        compiled.insert(key, Arc::new(check));
-    }
-    Ok(compiled)
-}
-
+/// A hard spawn error for the same reason a region script is: the moment to
+/// discover an agent cannot check its own answer is not the end of a long run,
+/// which is the only other time this script would ever be read.
+///
+/// Paths resolve against the blueprint directory, the same convention script
+/// tools and region hooks use, so a validator travels with the agent that needs
+/// it.
 pub(crate) fn resolve_output_validators(
     blueprint: &Blueprint,
     blueprint_path: &str,
@@ -181,6 +119,17 @@ pub(crate) fn resolve_stage_hook_scripts(
     Ok(scripts)
 }
 
+/// Read and compile every custom region's Rhai script declared by `blueprint`
+/// (global layout plus each stage's per-stage layout), keyed by the script
+/// path as written. Paths resolve relative to the blueprint's directory (the
+/// script-tool convention - the script travels with the agent), with absolute
+/// paths passing through `Path::join` unchanged. Each distinct path is read
+/// and compiled once; regions sharing a script share the compiled AST.
+///
+/// A missing or uncompilable script is a **hard spawn error** (fail fast,
+/// before any tokens are spent): a hook that silently never ran would change
+/// every inference with no signal. Runtime hook *eval* failures, by contrast,
+/// warn and fall back per hook.
 pub(crate) fn resolve_region_scripts(
     blueprint: &Blueprint,
     blueprint_path: &str,
@@ -315,18 +264,4 @@ pub(crate) fn discover_script_tools_in(
         });
     }
     (set, names, defs)
-}
-
-/// Discover the agent's Rhai script tools and build their `Tool`
-/// defs (the spawn-time entry point). `extra_dir` adds the run workdir's `tools/`
-/// for `dynamic_tools` agents.
-pub(super) fn discover_script_tools(
-    blueprint_path: &str,
-    builtin_names: &HashSet<String>,
-    mcp_tool_defs: &[Tool],
-    extra_dir: Option<std::path::PathBuf>,
-) -> (leviath_scripting::ScriptToolSet, HashSet<String>, Vec<Tool>) {
-    let dirs = script_scan_dirs(blueprint_path, extra_dir);
-    let reserved = reserved_tool_names(builtin_names, mcp_tool_defs);
-    discover_script_tools_in(&dirs, &reserved)
 }

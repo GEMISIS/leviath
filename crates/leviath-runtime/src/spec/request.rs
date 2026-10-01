@@ -2,8 +2,9 @@
 //!
 //! Every front door (the CLI, REST, GraphQL, ACP, the control socket, the
 //! embed API, and the tools an agent calls) builds a [`SpawnRequest`]. It
-//! either names an installed blueprint, whose graph the blueprint layer
-//! fills in, or carries a whole [`RunGraph`] of its own. Either way it
+//! names an installed blueprint or (from a caller on this machine) the
+//! directory of one that is not installed, whose graph the blueprint layer
+//! fills in, or it carries a whole [`RunGraph`] of its own. Either way it
 //! supplies the graph's inputs as [`RawInput`]s, which the resolver checks
 //! against the graph's declarations.
 
@@ -19,8 +20,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::graph::{OutputDef, RunGraph};
 use super::inputs::RawInput;
+use super::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use super::launch::{Delivery as RunDelivery, LaunchRequest};
-use super::names::{BlueprintRef, MimePattern, ModelRef, RegionName};
+use super::names::{BlueprintPath, BlueprintRef, MimePattern, ModelRef, RegionName};
 
 /// A request for a run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -73,6 +75,24 @@ impl SpawnRequest {
         self.inputs.insert(name.into(), value);
         self
     }
+
+    /// Refuse what a request that arrived over the network may not ask for:
+    /// a blueprint read from a directory on this machine. A front door that
+    /// takes whole requests from a remote caller checks this before handing
+    /// the request on; one on this machine (the CLI, the control socket, an
+    /// embedding program) does not need to.
+    pub fn check_remote(&self) -> Result<(), SpawnIssues> {
+        match &self.source {
+            SpawnSource::BlueprintFile(_) => Err(SpawnIssue::new(
+                SpecPath::root().field("source").field("blueprint_file"),
+                IssueCode::NotAllowed,
+                "a blueprint is read from a directory only for a caller on this machine",
+            )
+            .hint("name an installed blueprint, or send the graph itself")
+            .into()),
+            SpawnSource::Blueprint(_) | SpawnSource::Raw(_) => Ok(()),
+        }
+    }
 }
 
 /// What a request runs.
@@ -81,6 +101,9 @@ impl SpawnRequest {
 pub enum SpawnSource {
     /// An installed blueprint.
     Blueprint(BlueprintRef),
+    /// A blueprint that is not installed, read from its directory on this
+    /// machine. Local callers only: see [`SpawnRequest::check_remote`].
+    BlueprintFile(BlueprintPath),
     /// A whole graph, written by the caller.
     Raw(Box<RunGraph>),
 }

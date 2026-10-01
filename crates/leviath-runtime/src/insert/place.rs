@@ -312,13 +312,8 @@ pub(crate) fn io_buffer(spec: &RunSpec, state: &RunState) -> crate::pipeline::St
 /// The run's record: who it is, where it runs, what it was asked for, and
 /// (from `title`) what it is called.
 pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
-    let (blueprint, digest) = match &spec.origin {
-        crate::spec::run_spec::SpecOrigin::Blueprint { blueprint, .. } => (
-            Some(blueprint.name.to_string()),
-            blueprint.digest.as_ref().map(ToString::to_string),
-        ),
-        crate::spec::run_spec::SpecOrigin::Raw => (None, None),
-    };
+    let blueprint = spec.origin.blueprint_name().map(str::to_string);
+    let digest = spec.origin.digest().map(ToString::to_string);
     let task = spec
         .seeded
         .get("task")

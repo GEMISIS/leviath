@@ -25,7 +25,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::components::AgentStatus;
-use crate::host::{ControlOp, DaemonHealth, RunListEntry, SpawnArgs, WorldEvent};
+use crate::host::{ControlOp, DaemonHealth, RunListEntry, WorldEvent};
+use crate::spec::issues::SpawnIssues;
+use crate::spec::request::SpawnRequest;
+use crate::spec::summary::SpawnSummary;
+use crate::state::RunState;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 mod client;
@@ -231,11 +235,23 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         hello: bool,
     },
-    /// Spawn a new agent.
+    /// Start a run. The daemon mints its id.
     Spawn {
-        /// The spawn request. Boxed because it is much larger than the other
+        /// What to run. Boxed because it is much larger than the other
         /// variants' payloads.
-        args: Box<SpawnArgs>,
+        request: Box<SpawnRequest>,
+    },
+    /// Resolve a run without starting it: a dry run that answers with a
+    /// summary of the run, or every reason it would be refused.
+    ValidateSpawn {
+        /// What would run.
+        request: Box<SpawnRequest>,
+    },
+    /// Read a run's state: live while the daemon holds it, else the last
+    /// state its run file recorded.
+    Inspect {
+        /// The run to read.
+        run_id: String,
     },
     /// Query a run's status.
     Status {
@@ -306,6 +322,8 @@ impl ControlRequest {
             self,
             Self::Authenticate { .. }
                 | Self::Status { .. }
+                | Self::ValidateSpawn { .. }
+                | Self::Inspect { .. }
                 | Self::List
                 | Self::ListInteractions
                 | Self::Subscribe
@@ -321,6 +339,22 @@ pub enum ControlResponse {
     Spawned {
         /// The new run's id.
         run_id: String,
+    },
+    /// A spawn or a dry run was refused: every problem with the request, each
+    /// with its path and how to fix it.
+    Rejected {
+        /// The problems.
+        issues: SpawnIssues,
+    },
+    /// A dry run found nothing wrong: what the run would be.
+    Valid {
+        /// The run, in brief.
+        summary: Box<SpawnSummary>,
+    },
+    /// A run's state.
+    State {
+        /// The state. Boxed: it holds the run's whole context.
+        state: Box<RunState>,
     },
     /// A run's status (or `None` if there is no such run).
     Status {
@@ -500,14 +534,42 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
         // Handled by `handle_connection` before dispatch is ever reached: it is
         // about the connection, not about the world.
         ControlRequest::Authenticate { .. } => ControlResponse::Ok { ok: true },
-        ControlRequest::Spawn { args } => {
+        ControlRequest::Spawn { request } => {
             let (reply, rx) = oneshot::channel();
-            let _ = op_tx.send(ControlOp::Spawn { args, reply });
+            let _ = op_tx.send(ControlOp::Spawn { request, reply });
             match rx.await {
-                Ok(Ok(run_id)) => ControlResponse::Spawned { run_id },
-                Ok(Err(message)) => ControlResponse::Error { message },
+                Ok(Ok(run_id)) => ControlResponse::Spawned {
+                    run_id: run_id.to_string(),
+                },
+                Ok(Err(issues)) => ControlResponse::Rejected { issues },
                 Err(_) => ControlResponse::Error {
                     message: SHUTTING_DOWN.to_string(),
+                },
+            }
+        }
+        ControlRequest::ValidateSpawn { request } => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::ValidateSpawn { request, reply });
+            match rx.await {
+                Ok(Ok(summary)) => ControlResponse::Valid {
+                    summary: Box::new(summary),
+                },
+                Ok(Err(issues)) => ControlResponse::Rejected { issues },
+                Err(_) => ControlResponse::Error {
+                    message: SHUTTING_DOWN.to_string(),
+                },
+            }
+        }
+        ControlRequest::Inspect { run_id } => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::Inspect {
+                run_id: run_id.clone(),
+                reply,
+            });
+            match rx.await.ok().flatten() {
+                Some(state) => ControlResponse::State { state },
+                None => ControlResponse::Error {
+                    message: format!("no run '{run_id}' is live or has a run file"),
                 },
             }
         }
@@ -992,19 +1054,62 @@ mod tests {
         }
     }
 
+    /// A request whose `task` input is `task`: the fake host's run id.
+    fn request(task: &str) -> SpawnRequest {
+        SpawnRequest::new(crate::spec::request::SpawnSource::Blueprint(
+            crate::spec::names::BlueprintRef::parse("x").unwrap(),
+        ))
+        .input(
+            "task",
+            crate::spec::inputs::RawInput::Text(task.to_string()),
+        )
+    }
+
+    /// The `task` a request carries, or nothing.
+    fn task_of(request: &SpawnRequest) -> String {
+        match request.inputs.get("task") {
+            Some(crate::spec::inputs::RawInput::Text(t)) => t.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// The fake host's refusal.
+    fn refused() -> SpawnIssues {
+        crate::spec::issues::SpawnIssue::new(
+            crate::spec::issues::SpecPath::root(),
+            crate::spec::issues::IssueCode::Invalid,
+            "bad blueprint",
+        )
+        .into()
+    }
+
     /// A fake host: drains ControlOps and replies with scripted values.
     fn spawn_fake_host(mut rx: mpsc::UnboundedReceiver<ControlOp>) {
         tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
                 match op {
-                    ControlOp::Spawn { args, reply } => {
-                        // A sentinel run id makes the fake host fail the spawn.
-                        let result = if args.run_id == "FAIL" {
-                            Err("bad blueprint".to_string())
-                        } else {
-                            Ok(args.run_id)
+                    ControlOp::Spawn { request, reply } => {
+                        // A sentinel task makes the fake host refuse the spawn.
+                        let result = match task_of(&request).as_str() {
+                            "FAIL" => Err(refused()),
+                            id => Ok(crate::spec::names::RunId::new(id).unwrap()),
                         };
                         let _ = reply.send(result);
+                    }
+                    ControlOp::ValidateSpawn { request, reply } => {
+                        let result = match task_of(&request).as_str() {
+                            "FAIL" => Err(refused()),
+                            _ => Ok(SpawnSummary::of(&crate::spec::run_spec::tests::spec())),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    ControlOp::Inspect { run_id, reply } => {
+                        let state = (run_id != "ghost").then(|| {
+                            Box::new(crate::insert::initial_state(
+                                &crate::spec::run_spec::tests::spec(),
+                            ))
+                        });
+                        let _ = reply.send(state);
                     }
                     ControlOp::Status { reply, .. } => {
                         let _ = reply.send(Some(AgentStatus::Active));
@@ -1372,27 +1477,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_request_round_trips() {
         let resp = round_trip(&ControlRequest::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: "run-9".to_string(),
-                blueprint_path: "/agents/x".to_string(),
-                task: "do it".to_string(),
-                regions: Default::default(),
-                model: None,
-                workdir: "/w".to_string(),
-                metadata: Default::default(),
-                callback_url: None,
-                callback_secret: None,
-                yolo: false,
-                yolo_profile: None,
-                no_seed_commands: false,
-                allow: Vec::new(),
-                max_depth: None,
-                parent_run_id: None,
-                worker_stage: None,
-                output: None,
-                parts: Vec::new(),
-                capture_model_input: true,
-            }),
+            request: Box::new(request("run-9")),
         })
         .await;
         assert_eq!(
@@ -1404,19 +1489,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_error_from_host_becomes_error_response() {
+    async fn a_refused_spawn_comes_back_with_its_issues() {
         let resp = round_trip(&ControlRequest::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: "FAIL".to_string(),
-                ..Default::default()
-            }),
+            request: Box::new(request("FAIL")),
+        })
+        .await;
+        assert_eq!(resp, ControlResponse::Rejected { issues: refused() });
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_comes_back_with_a_summary_or_the_issues() {
+        let resp = round_trip(&ControlRequest::ValidateSpawn {
+            request: Box::new(request("ok")),
         })
         .await;
         assert_eq!(
-            std::mem::discriminant(&resp),
-            std::mem::discriminant(&ControlResponse::Error {
-                message: String::new()
-            })
+            resp,
+            ControlResponse::Valid {
+                summary: Box::new(SpawnSummary::of(&crate::spec::run_spec::tests::spec()))
+            }
+        );
+        let resp = round_trip(&ControlRequest::ValidateSpawn {
+            request: Box::new(request("FAIL")),
+        })
+        .await;
+        assert_eq!(resp, ControlResponse::Rejected { issues: refused() });
+    }
+
+    #[tokio::test]
+    async fn inspect_comes_back_with_the_state_or_says_there_is_none() {
+        let resp = round_trip(&ControlRequest::Inspect {
+            run_id: "t-1".to_string(),
+        })
+        .await;
+        let ControlResponse::State { state } = resp else {
+            panic!("expected a state, got {resp:?}");
+        };
+        assert_eq!(state.cursor.stage.as_str(), "plan");
+        let resp = round_trip(&ControlRequest::Inspect {
+            run_id: "ghost".to_string(),
+        })
+        .await;
+        assert!(
+            matches!(&resp, ControlResponse::Error { message } if message.contains("ghost")),
+            "{resp:?}"
         );
     }
 
@@ -2121,13 +2237,7 @@ mod tests {
         });
         let client = ControlClient::new(id);
 
-        let spawned = client
-            .spawn(SpawnArgs {
-                run_id: "r-c".to_string(),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        let spawned = client.spawn(request("r-c")).await.unwrap();
         assert_eq!(
             spawned,
             ControlResponse::Spawned {
@@ -2289,7 +2399,7 @@ mod tests {
     #[test]
     fn spawn_gets_a_longer_deadline_than_other_ops() {
         let spawn = ControlRequest::Spawn {
-            args: Box::new(SpawnArgs::default()),
+            request: Box::new(request("r")),
         };
         let cancel = ControlRequest::Cancel {
             run_id: "r".to_string(),
@@ -2392,7 +2502,7 @@ mod tests {
             std::mem::discriminant(
                 &dispatch(
                     ControlRequest::Spawn {
-                        args: Box::new(SpawnArgs::default())
+                        request: Box::new(request("r"))
                     },
                     &op_tx
                 )
@@ -2597,7 +2707,7 @@ mod tests {
         ];
         let mutating = [
             ControlRequest::Spawn {
-                args: Box::new(SpawnArgs::default()),
+                request: Box::new(request("r")),
             },
             ControlRequest::Pause { run_id: run() },
             ControlRequest::Resume { run_id: run() },
@@ -2859,7 +2969,7 @@ mod tests {
         });
         let started = std::time::Instant::now();
         let err = client
-            .spawn(SpawnArgs::default())
+            .spawn(request("r"))
             .await
             .expect_err("a spawn that got no reply is reported, not repeated");
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
@@ -2904,12 +3014,8 @@ mod tests {
             let (_events, server) = identified_daemon(listener, token, same_code(2), 1);
             server.await.unwrap();
         });
-        let args = SpawnArgs {
-            run_id: "run-x".to_string(),
-            ..Default::default()
-        };
         let response = client
-            .spawn(args)
+            .spawn(request("run-x"))
             .await
             .expect("spawned by the replacement");
         assert_eq!(
@@ -2934,7 +3040,7 @@ mod tests {
             drop(op_rx);
             let _ = handle_connection(stream, op_tx, no_events(), Some(token)).await;
         });
-        let response = client.spawn(SpawnArgs::default()).await.unwrap();
+        let response = client.spawn(request("r")).await.unwrap();
         assert_eq!(
             response,
             ControlResponse::Error {

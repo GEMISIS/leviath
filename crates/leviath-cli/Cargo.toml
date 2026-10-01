@@ -24,7 +24,12 @@ name = "lev"
 path = "src/main.rs"
 
 [features]
-default = ["mimalloc-allocator"]
+default = ["mimalloc-allocator", "legacy-runs"]
+# Converts a run directory in the older many-file layout into a run file the
+# first time the daemon loads it. Its crate is never published (it goes before
+# 1.0), so a published build leaves this off and reports such a directory
+# instead.
+legacy-runs = ["dep:leviath-legacy-runs"]
 debug-http = ["leviath-providers/debug-http"]
 # The lev binary's global allocator (see main.rs). A feature so the two
 # allocators can be benchmarked against each other on identical code
@@ -48,6 +53,7 @@ leviath-providers = { workspace = true }
 leviath-mcp = { workspace = true }
 leviath-package = { workspace = true }
 leviath-blueprint = { workspace = true }
+leviath-legacy-runs = { workspace = true, optional = true }
 leviath-scripting = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

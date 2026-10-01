@@ -14,13 +14,15 @@ impl WorldHost {
     pub(super) fn handle_subagent(&mut self, op: SubAgentOp) {
         match op {
             SubAgentOp::Spawn {
-                args,
+                request,
                 parent_run_id,
-                max_depth,
                 reply,
-            } => {
-                let _ = reply.send(self.spawn_child(*args, &parent_run_id, max_depth));
-            }
+            } => match self.child_caller(&parent_run_id) {
+                Ok(caller) => self.start(*request, caller, Some(parent_run_id), reply),
+                Err(issues) => {
+                    let _ = reply.send(Err(issues));
+                }
+            },
             SubAgentOp::Check { run_id, reply } => {
                 let report = self.live_entity(&run_id).and_then(|agent| {
                     self.world.agent_status(agent).map(|status| SubAgentReport {
@@ -70,73 +72,80 @@ impl WorldHost {
         }
     }
 
-    /// Spawn a child agent under `parent_run_id`, linking `ParentRef` /
-    /// `SubAgentChildren` and registering its run id. `Err` if the parent is not
-    /// live, the depth limit is reached, or the spawner rejects it.
-    pub(super) fn spawn_child(
-        &mut self,
-        mut args: SpawnArgs,
+    /// Who a child of `parent_run_id` is started for: that run, with the
+    /// policy it was trusted with and where it sits in its tree. A parent the
+    /// world does not hold, or one placed without a spec, cannot start one.
+    fn child_caller(
+        &self,
         parent_run_id: &str,
-        max_depth: usize,
-    ) -> Result<String, String> {
-        // Record the parentage so the child's run metadata nests it in the tree.
-        args.parent_run_id = Some(parent_run_id.to_string());
+    ) -> Result<crate::spec::env::Caller, crate::spec::issues::SpawnIssues> {
         let parent = self
             .live_entity(parent_run_id)
-            .ok_or_else(|| format!("parent run '{parent_run_id}' is not live"))?
-            // Same world as the child about to be spawned into it, so the raw
-            // entity is what the ECS links want.
+            .ok_or_else(|| host_refusal(format!("parent run '{parent_run_id}' is not live")))?
             .entity();
-        let parent_depth = self
-            .world
-            .world()
+        let world = self.world.world();
+        let spec = world
+            .get::<crate::insert::RunSpecC>(parent)
+            .ok_or_else(|| {
+                host_refusal(format!(
+                    "parent run '{parent_run_id}' has no run spec to start a child from"
+                ))
+            })?
+            .0
+            .clone();
+        let depth = world
             .get::<ParentRef>(parent)
-            .map_or(0, |p| p.depth);
-        let child_depth = parent_depth + 1;
-        if child_depth > max_depth {
-            return Err(format!(
-                "sub-agent depth limit ({max_depth}) reached; not spawning deeper"
-            ));
-        }
-        let run_id = args.run_id.clone();
-        let child = match self.spawner.as_mut() {
-            Some(spawner) => spawner(&mut self.world, &args)?,
-            None => return Err("this daemon cannot spawn agents".to_string()),
+            .map_or(usize::from(spec.placement.depth), |p| p.depth);
+        Ok(crate::spec::env::Caller::Child {
+            parent: spec.run_id.clone(),
+            policy: spec.launch.clone(),
+            depth: u8::try_from(depth).unwrap_or(u8::MAX),
+        })
+    }
+
+    /// Link a placed child to the run that started it: `ParentRef` on the
+    /// child, the child on the parent's `SubAgentChildren` and its persisted
+    /// list of children, and the parent's context carried into the child by
+    /// any context transform its graph declares. A parent that went away
+    /// while the child was starting leaves the child standing on its own.
+    pub(super) fn link_child(&mut self, parent_run_id: &str, child: Entity) {
+        let Some(parent) = self.live_entity(parent_run_id).map(|a| a.entity()) else {
+            tracing::warn!(parent = %parent_run_id, "a child run's parent went away while it started");
+            return;
         };
         let world = self.world.world_mut();
+        let depth = world.get::<ParentRef>(parent).map_or(0, |p| p.depth) + 1;
+        let max_child_depth = world
+            .get::<crate::insert::RunSpecC>(parent)
+            .map_or(0, |s| usize::from(s.0.launch.max_depth));
         world.entity_mut(child).insert(ParentRef {
             parent_entity: parent,
             parent_agent_id: parent_run_id.to_string(),
-            depth: child_depth,
+            depth,
         });
         match world.get_mut::<SubAgentChildren>(parent) {
             Some(mut kids) => kids.children.push(child),
             None => {
                 world.entity_mut(parent).insert(SubAgentChildren {
                     children: vec![child],
-                    max_child_depth: max_depth,
+                    max_child_depth,
                 });
             }
         }
-        // Record the child's run-id on the parent's serializable state so the
-        // tree is persisted (and restart can rebuild `SubAgentChildren`). A
-        // spawning parent always carries `AgentState`.
-        world
-            .get_mut::<crate::components::AgentState>(parent)
-            .expect("a spawning parent always has AgentState")
-            .spawned_children_ids
-            .push(run_id.clone());
-        // Seed the child's context from the parent per any declared blueprint
-        // context transform (planner→coder region mapping, etc.).
+        let child_id = world
+            .get::<AgentState>(child)
+            .map(|s| s.agent_id.clone())
+            .unwrap_or_default();
+        // Recorded on the parent's serializable state too, so the tree is in
+        // the parent's run file and a restart can rebuild `SubAgentChildren`.
+        if let Some(mut state) = world.get_mut::<AgentState>(parent) {
+            state.spawned_children_ids.push(child_id);
+        }
         crate::context_transform::apply_context_transforms(
             world,
             crate::world::AgentId::in_world(world, parent),
             crate::world::AgentId::in_world(world, child),
         );
-        // The spawner ran against this world, so the child is ours.
-        let child_agent = self.world.own_agent(child);
-        self.by_run_id.insert(run_id.clone(), child_agent);
-        Ok(run_id)
     }
 
     /// Cancel a run and every descendant, paging the root in from disk first if it

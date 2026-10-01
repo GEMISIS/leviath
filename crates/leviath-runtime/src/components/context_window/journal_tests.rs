@@ -68,7 +68,6 @@ fn parts(record: RunRecord) -> (String, String, ContextCause, Vec<RegionCommit>,
 fn what_each_kind_of_push_reports() {
     assert_eq!(Pushed::Nothing.into_region(4, 1), 0);
     assert_eq!(Pushed::Into(2).into_region(4, 6), 2);
-    assert_eq!(Pushed::Everything.into_region(0, 7), 7);
     // A keyed write that took a new key grew the region; one that replaced a key
     // where it stood did not, and nothing the caller holds tells them apart.
     assert_eq!(Pushed::Upsert.into_region(3, 4), 1);

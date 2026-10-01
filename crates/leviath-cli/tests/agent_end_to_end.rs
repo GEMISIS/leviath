@@ -35,7 +35,11 @@ use leviath_providers::{
     ContentBlock, FinishReason, InferenceRequest, InferenceResponse, MessageContent,
     ModelCapabilities, Provider, TokenUsage, ToolCall,
 };
-use leviath_runtime::host::{ControlOp, SpawnArgs};
+use leviath_runtime::host::ControlOp;
+use leviath_runtime::spec::inputs::RawInput;
+use leviath_runtime::spec::launch::LaunchRequest;
+use leviath_runtime::spec::names::{BlueprintPath, ToolName};
+use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
 use leviath_runtime::{AgentStatus, ProviderRegistry};
 
 /// A model that asks to write one file, then answers.
@@ -221,25 +225,31 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
         provider_reload: None,
     });
 
+    let blueprint =
+        BlueprintPath::new(agent_dir.path().to_string_lossy()).expect("an absolute directory");
+    let request = SpawnRequest {
+        workdir: Some(workdir.path().to_path_buf()),
+        // The narrow launch override rather than unattended: this grants
+        // exactly the one tool under test, so an approval prompt appearing for
+        // anything else still fails the run instead of being waved through.
+        launch: LaunchRequest {
+            allow: vec![ToolName::new("write_file").expect("a tool name")],
+            ..LaunchRequest::default()
+        },
+        ..SpawnRequest::new(SpawnSource::BlueprintFile(blueprint))
+    }
+    .input("task", RawInput::Text("write output.txt".to_string()));
     let (reply, spawned) = oneshot::channel();
     host.handle(ControlOp::Spawn {
-        args: Box::new(SpawnArgs {
-            run_id: "e2e-1".to_string(),
-            blueprint_path: manifest.to_string_lossy().to_string(),
-            task: "write output.txt".to_string(),
-            workdir: workdir.path().to_string_lossy().to_string(),
-            // The narrow launch override rather than `yolo`: this grants exactly
-            // the one tool under test, so an approval prompt appearing for
-            // anything else still fails the run instead of being waved through.
-            allow: vec!["write_file".to_string()],
-            ..Default::default()
-        }),
+        request: Box::new(request),
         reply,
     });
-    assert_eq!(
-        spawned.await.expect("spawn replied"),
-        Ok("e2e-1".to_string())
-    );
+    host.finish_starts().await;
+    let run_id = spawned
+        .await
+        .expect("spawn replied")
+        .expect("the run starts")
+        .to_string();
 
     // Wake-driven and bounded: no sleeps, no polling, no wall-clock margin.
     host.world_mut().run_until_idle(64).await;
@@ -265,10 +275,7 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
     );
 
     let (reply, status) = oneshot::channel();
-    host.handle(ControlOp::Status {
-        run_id: "e2e-1".to_string(),
-        reply,
-    });
+    host.handle(ControlOp::Status { run_id, reply });
     let status = status.await.expect("status replied");
     assert!(
         matches!(status, Some(AgentStatus::Complete)),

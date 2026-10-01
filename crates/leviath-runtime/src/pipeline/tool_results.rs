@@ -124,6 +124,7 @@ fn region_hint(window: &ContextWindow, path: &str) -> Option<String> {
 /// falls back to a placeholder rather than dropping. Ported from the core of
 /// `AgentEngine::loop_apply_tool_results` (repetition + message draining are
 /// separate systems).
+#[cfg(test)]
 pub(crate) fn apply_tool_results(
     window: &mut ContextWindow,
     response_content: &str,

@@ -13,12 +13,12 @@ use crate::runstate::{self, ContextSnapshot};
 
 /// `POST /api/agents`: spawn an agent into the shared-world daemon.
 ///
-/// Resolves the blueprint's manifest path, mints a run id, and asks the daemon
-/// (over the control socket) to create the agent; the daemon loads the blueprint,
-/// resolves tools/model, and persists the run so the read endpoints observe it.
+/// Finds the blueprint and asks the daemon (over the control socket) to start
+/// the run; the daemon resolves it, mints its id, and records it in its run
+/// file so the read endpoints observe it.
 ///
-/// `yolo` / `allow` / `max_depth` from the request are forwarded through
-/// [`SpawnArgs`] to the daemon's tool-policy resolution.
+/// `yolo` / `allow` / `max_depth` from the request become the run's launch
+/// settings.
 /// The output shape this request asks for, or `None` when it asks for nothing
 /// (leaving whatever the blueprint declares).
 ///
@@ -866,6 +866,50 @@ system_prompt = "Plan the work"
     }
 
     /// A spawn with files: what the daemon receives on the wire.
+    /// What a spawn asked the daemon for, as the tests below read it: the
+    /// task, the other text inputs as `regions`, and each attachment's name,
+    /// region, type and caption under `parts`. `Null` for any other request.
+    fn spawn_args_of(req: &ControlRequest) -> serde_json::Value {
+        use leviath_runtime::spec::inputs::RawInput;
+        let ControlRequest::Spawn { request } = req else {
+            return serde_json::Value::Null;
+        };
+        let text = |v: &RawInput| match v {
+            RawInput::Text(t) => serde_json::Value::String(t.clone()),
+            other => serde_json::to_value(other).unwrap(),
+        };
+        let mut regions = serde_json::Map::new();
+        for (name, value) in &request.inputs {
+            if name != "task" {
+                regions.insert(name.clone(), text(value));
+            }
+        }
+        let parts: Vec<serde_json::Value> = request
+            .attachments
+            .iter()
+            .map(|a| {
+                let mut part = serde_json::Map::new();
+                part.insert("name".into(), a.name.clone().into());
+                if let Some(region) = &a.region {
+                    part.insert("region".into(), region.as_str().into());
+                }
+                if let Some(mime) = &a.mime_type {
+                    part.insert("mime_type".into(), mime.as_str().into());
+                }
+                if let Some(caption) = &a.caption {
+                    part.insert("caption".into(), caption.clone().into());
+                }
+                serde_json::Value::Object(part)
+            })
+            .collect();
+        serde_json::json!({
+            "task": request.inputs.get("task").map(text),
+            "regions": regions,
+            "parts": parts,
+            "no_seed_commands": !request.launch.seed_commands,
+        })
+    }
+
     async fn spawn_parts_seen(
         content_type: &str,
         body: Vec<u8>,
@@ -873,8 +917,7 @@ system_prompt = "Plan the work"
         let captured = Arc::new(std::sync::Mutex::new(None));
         let sink = Arc::clone(&captured);
         let (control, _dir, _srv) = fake_daemon(move |req| {
-            let wire = serde_json::to_value(&req).unwrap();
-            *sink.lock().unwrap() = Some(wire["args"].clone());
+            *sink.lock().unwrap() = Some(spawn_args_of(&req));
             ControlResponse::Spawned {
                 run_id: "run-1".to_string(),
             }
@@ -1034,8 +1077,7 @@ system_prompt = "Plan the work"
                 // Through its wire form rather than a pattern match: the only
                 // request this handler sends is a spawn, so an arm for any
                 // other would be one nothing runs.
-                let wire = serde_json::to_value(&req).unwrap();
-                *sink.lock().unwrap() = wire["args"]["no_seed_commands"].as_bool();
+                *sink.lock().unwrap() = spawn_args_of(&req)["no_seed_commands"].as_bool();
                 ControlResponse::Spawned {
                     run_id: "run-1".to_string(),
                 }

@@ -25,7 +25,7 @@
 //! transient windows inside a tick.
 //!
 //! Those invariants hold on both sides. Every site that removes a phase marker
-//! either inserts a successor or sets a terminal status, and `spawn_agent_seeded`
+//! either inserts a successor or sets a terminal status, and `insert` of a new run
 //! always lands `Active + ReadyToInfer`, so no ordinary path arrives here.
 //!
 //! What is *not* touched, and why:

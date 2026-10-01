@@ -38,15 +38,13 @@ pub(crate) mod spec_view;
 mod transition;
 #[cfg(test)]
 pub(crate) use transition::find_conditioned_edge;
-pub use transition::{
-    AgentBlueprint, LastTransition, StageCursor, force_transition, is_terminal_status,
-};
 pub(crate) use transition::{
-    AwaitingTransitionChoice, StageEntry, StageInferences, StageSetup, StageSetups, VisitCounts,
-    WaitingForChildren, apply_stage_context, attach_stage_components, emit_stage_transition,
-    enter_stage, fail_stage, fail_stage_world, find_conditioned_edge_ref, hold_for_gate,
-    region_digest, resolve_transition, transition_record,
+    AwaitingTransitionChoice, StageEntry, StageSetup, VisitCounts, WaitingForChildren,
+    apply_stage_context, attach_stage_components, emit_stage_transition, enter_stage, fail_stage,
+    fail_stage_world, find_conditioned_edge_ref, hold_for_gate, region_digest, resolve_transition,
+    transition_record,
 };
+pub use transition::{LastTransition, StageCursor, force_transition, is_terminal_status};
 mod hooks;
 #[cfg(test)]
 pub(crate) use hooks::TerminalHookFired;
@@ -73,10 +71,9 @@ pub(crate) use requirements::{
 };
 mod spawn;
 #[cfg(test)]
+pub(crate) use crate::spec_bridge::test_support::{SeededSpawn, spawn_agent, spawn_agent_seeded};
 pub(crate) use spawn::DEFAULT_CONTEXT_WINDOW_TOKENS;
-#[cfg(test)]
-pub(crate) use spawn::spawn_agent;
-pub use spawn::{ResolvedStage, SeededSpawn, run_spec_from_blueprint, spawn_agent_seeded};
+pub use spawn::ResolvedStage;
 mod transition_choice;
 pub(crate) use transition_choice::{
     AwaitingTransitionResponse, TransitionResults, collect_transition_choice,
@@ -108,12 +105,11 @@ pub(crate) use compaction::{
 };
 pub use compaction::{CompactionSettings, is_stage_specific};
 mod tool_results;
-pub(crate) use tool_results::{
-    ToolResults, apply_one_tool_result, apply_tool_results, collect_tools,
-};
+pub(crate) use tool_results::{ToolResults, apply_one_tool_result, collect_tools};
 #[cfg(test)]
 pub(crate) use tool_results::{
-    annotate_path_errors, apply_file_tracking, stage_modifying_tools, truncate_file,
+    annotate_path_errors, apply_file_tracking, apply_tool_results, stage_modifying_tools,
+    truncate_file,
 };
 mod gate;
 pub(crate) use gate::taint_block_message;

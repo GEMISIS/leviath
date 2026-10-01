@@ -816,39 +816,53 @@ async fn a_spawn_carries_every_field_it_was_given() {
         std::fs::write(workdir.path().join("hero.png"), b"\x89PNG\r\n\x1a\nbody")
             .expect("the attachment");
         let (control, _dir, _srv) = fake_daemon(|request| match request {
-            leviath_runtime::control_socket::ControlRequest::Spawn { args } => {
+            leviath_runtime::control_socket::ControlRequest::Spawn { request } => {
+                use leviath_runtime::spec::inputs::RawInput;
+                let leviath_runtime::spec::request::SpawnSource::Blueprint(reference) =
+                    &request.source
+                else {
+                    panic!("a blueprint request");
+                };
                 assert!(
-                    args.blueprint_path.contains("coder"),
-                    "the blueprint it named: {}",
-                    args.blueprint_path
+                    reference.name.as_str().contains("coder"),
+                    "the blueprint it named: {reference}"
                 );
-                assert_eq!(args.task, "fix the parser");
-                assert_eq!(args.model.as_deref(), Some("gpt-5.6"));
-                assert_eq!(args.max_depth, Some(3));
-                assert!(args.yolo, "the waiver travels");
+                let text = |name: &str| match request.inputs.get(name) {
+                    Some(RawInput::Text(t)) => t.clone(),
+                    other => panic!("{name}: {other:?}"),
+                };
+                assert_eq!(text("task"), "fix the parser");
                 assert_eq!(
-                    args.regions.get("plan").map(String::as_str),
-                    Some("start here")
+                    request.model.as_ref().map(ToString::to_string).as_deref(),
+                    Some("gpt-5.6")
                 );
-                assert_eq!(args.metadata.get("ticket").map(String::as_str), Some("42"));
-                assert_eq!(args.parts.len(), 1, "the attachment travels");
-                assert_eq!(args.parts[0].name, "the-hero");
-                assert_eq!(args.parts[0].region.as_deref(), Some("plan"));
+                assert_eq!(request.launch.max_depth, Some(3));
                 assert_eq!(
-                    args.parts[0].deliver,
-                    Some(leviath_core::mime::Delivery::Text)
+                    request.launch.unattended,
+                    leviath_runtime::spec::launch::Unattended::All,
+                    "the waiver travels"
                 );
-                assert_eq!(args.parts[0].caption.as_deref(), Some("v1"));
+                assert_eq!(text("plan"), "start here");
                 assert_eq!(
-                    args.parts[0].mime_type.as_ref().map(|t| t.as_str()),
+                    request.delivery.metadata.get("ticket").map(String::as_str),
+                    Some("42")
+                );
+                assert_eq!(request.attachments.len(), 1, "the attachment travels");
+                let part = &request.attachments[0];
+                assert_eq!(part.name, "the-hero");
+                assert_eq!(part.region.as_ref().map(|r| r.as_str()), Some("plan"));
+                assert_eq!(part.deliver, Some(leviath_core::mime::Delivery::Text));
+                assert_eq!(part.caption.as_deref(), Some("v1"));
+                assert_eq!(
+                    part.mime_type.as_ref().map(|t| t.as_str()),
                     Some("image/png")
                 );
-                let mut meta = run_in(&args.run_id, RunStatus::Starting);
-                meta.task = args.task.clone();
-                meta.metadata = args.metadata.clone();
+                let mut meta = run_in("coder-1", RunStatus::Starting);
+                meta.task = text("task");
+                meta.metadata = request.delivery.metadata.clone().into_iter().collect();
                 create_run(&meta).expect("run written");
                 ControlResponse::Spawned {
-                    run_id: args.run_id,
+                    run_id: "coder-1".to_string(),
                 }
             }
             other => panic!("the spawn is what reaches the daemon, not {other:?}"),
@@ -917,13 +931,16 @@ async fn a_spawn_with_nothing_optional_set_still_starts() {
     crate::runstate::with_isolated_runs_dir_async("graphql-spawn-bare", |_d| async move {
         let agents = agents_dir_with("coder");
         let (control, _dir, _srv) = fake_daemon(|request| match request {
-            leviath_runtime::control_socket::ControlRequest::Spawn { args } => {
-                assert!(!args.yolo, "nothing was waived");
-                assert!(args.yolo_profile.is_none());
-                assert!(args.parts.is_empty());
-                create_run(&run_in(&args.run_id, RunStatus::Starting)).expect("run written");
+            leviath_runtime::control_socket::ControlRequest::Spawn { request } => {
+                assert_eq!(
+                    request.launch.unattended,
+                    leviath_runtime::spec::launch::Unattended::Off,
+                    "nothing was waived"
+                );
+                assert!(request.attachments.is_empty());
+                create_run(&run_in("coder-1", RunStatus::Starting)).expect("run written");
                 ControlResponse::Spawned {
-                    run_id: args.run_id,
+                    run_id: "coder-1".to_string(),
                 }
             }
             other => panic!("a spawn, not {other:?}"),
@@ -947,11 +964,14 @@ async fn a_named_yolo_profile_travels_as_the_name() {
     crate::runstate::with_isolated_runs_dir_async("graphql-spawn-profile", |_d| async move {
         let agents = agents_dir_with("coder");
         let (control, _dir, _srv) = fake_daemon(|request| match request {
-            leviath_runtime::control_socket::ControlRequest::Spawn { args } => {
-                assert_eq!(args.yolo_profile.as_deref(), Some("cautious"));
-                create_run(&run_in(&args.run_id, RunStatus::Starting)).expect("run written");
+            leviath_runtime::control_socket::ControlRequest::Spawn { request } => {
+                assert!(matches!(
+                    &request.launch.unattended,
+                    leviath_runtime::spec::launch::Unattended::Profile(p) if p.as_str() == "cautious"
+                ));
+                create_run(&run_in("coder-1", RunStatus::Starting)).expect("run written");
                 ControlResponse::Spawned {
-                    run_id: args.run_id,
+                    run_id: "coder-1".to_string(),
                 }
             }
             other => panic!("a spawn, not {other:?}"),

@@ -211,7 +211,7 @@ fn setup() -> StageSetup {
 /// A blueprint as the spec a spawn of it runs, every stage on [`si`].
 fn spec(bp: crate::spec::Blueprint) -> crate::insert::RunSpecC {
     let infs: Vec<StageInference> = bp.stages.iter().map(|_| si()).collect();
-    let spec = crate::pipeline::run_spec_from_blueprint(&bp, "t-run", &infs)
+    let spec = crate::spec_bridge::test_support::spec_of_blueprint(&bp, "t-run", &infs)
         .expect("a test blueprint reads as a spec");
     crate::insert::RunSpecC(Arc::new(spec))
 }
@@ -253,7 +253,101 @@ fn paging_reloader() -> Reloader {
 async fn ask<T>(host: &mut WorldHost, make: impl FnOnce(oneshot::Sender<T>) -> ControlOp) -> T {
     let (tx, rx) = oneshot::channel();
     host.handle(make(tx));
+    host.finish_starts().await;
     rx.await.unwrap()
+}
+
+/// What a [`TestStarter`] does with a request.
+#[derive(Clone, Copy)]
+enum Starts {
+    /// Places a one-stage run named after the request's `task` input.
+    Place,
+    /// Refuses every request.
+    Refuse,
+    /// Panics while starting.
+    Panic,
+    /// Starts fine and panics as the run is placed.
+    PanicOnPlacing,
+}
+
+/// A [`RunStarter`] for host tests, recording who each request came from.
+struct TestStarter {
+    starts: Starts,
+    callers: Mutex<Vec<crate::spec::env::Caller>>,
+}
+
+impl TestStarter {
+    fn new(starts: Starts) -> Arc<Self> {
+        Arc::new(Self {
+            starts,
+            callers: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The spec a request runs: the test blueprint, under the run id its
+    /// `task` input names.
+    fn spec_for(request: &crate::spec::request::SpawnRequest) -> crate::spec::run_spec::RunSpec {
+        let name = match request.inputs.get("task") {
+            Some(crate::spec::inputs::RawInput::Text(t)) => t.clone(),
+            _ => "r1".to_string(),
+        };
+        let mut spec = (*spec(blueprint()).0).clone();
+        spec.run_id = crate::spec::names::RunId::new(name).unwrap();
+        spec
+    }
+}
+
+#[async_trait::async_trait]
+impl RunStarter for TestStarter {
+    async fn start(
+        &self,
+        request: crate::spec::request::SpawnRequest,
+        caller: crate::spec::env::Caller,
+    ) -> Result<PreparedRun, crate::spec::issues::SpawnIssues> {
+        self.callers.lock().unwrap().push(caller);
+        match self.starts {
+            Starts::Refuse => Err(host_refusal("bad blueprint")),
+            Starts::Panic => panic!("simulated spawn panic"),
+            Starts::Place | Starts::PanicOnPlacing => {
+                let spec = Arc::new(Self::spec_for(&request));
+                Ok(PreparedRun {
+                    state: crate::insert::initial_state(&spec),
+                    spec,
+                    bindings: crate::spec::env::Bindings::new(),
+                })
+            }
+        }
+    }
+
+    async fn check(
+        &self,
+        request: crate::spec::request::SpawnRequest,
+        _caller: crate::spec::env::Caller,
+    ) -> Result<crate::spec::summary::SpawnSummary, crate::spec::issues::SpawnIssues> {
+        match self.starts {
+            Starts::Refuse => Err(host_refusal("bad blueprint")),
+            Starts::Panic => panic!("simulated check panic"),
+            Starts::Place | Starts::PanicOnPlacing => Ok(crate::spec::summary::SpawnSummary::of(
+                &Self::spec_for(&request),
+            )),
+        }
+    }
+
+    fn before_insert(&self, _world: &mut PipelineWorld, _spec: &crate::spec::run_spec::RunSpec) {
+        if let Starts::PanicOnPlacing = self.starts {
+            panic!("simulated placing panic");
+        }
+    }
+}
+
+/// A request for a run the [`TestStarter`] names `id`.
+fn named(id: &str) -> Box<crate::spec::request::SpawnRequest> {
+    Box::new(
+        crate::spec::request::SpawnRequest::new(crate::spec::request::SpawnSource::Blueprint(
+            crate::spec::names::BlueprintRef::parse("t").unwrap(),
+        ))
+        .input("task", crate::spec::inputs::RawInput::Text(id.to_string())),
+    )
 }
 
 /// A provider whose call never returns while `hang` is set - the stalled
@@ -1566,60 +1660,70 @@ async fn pause_resume_cancel_by_run_id() {
 }
 
 #[tokio::test]
-async fn spawn_op_uses_installed_spawner_and_registers() {
+async fn spawn_op_places_the_started_run_and_registers_it() {
     let mut host = host_with(vec![]);
-    host.set_spawner(Box::new(|world, args| {
-        Ok(world.spawn_agent((agent_state(&args.run_id),)).entity())
-    }));
+    let starter = TestStarter::new(Starts::Place);
+    host.set_starter(starter.clone());
 
     let result = ask(&mut host, |reply| ControlOp::Spawn {
-        args: Box::new(SpawnArgs {
-            run_id: "r1".to_string(),
-            ..Default::default()
-        }),
+        request: named("r1"),
         reply,
     })
     .await;
-    assert_eq!(result, Ok("r1".to_string()));
+    assert_eq!(result.unwrap().as_str(), "r1");
+    assert_eq!(
+        *starter.callers.lock().unwrap(),
+        vec![crate::spec::env::Caller::TopLevel]
+    );
 
-    // The run is now registered, so Status resolves it.
+    // The run is now registered, so Status resolves it, and Inspect reads it
+    // live.
     let status = ask(&mut host, |reply| ControlOp::Status {
         run_id: "r1".to_string(),
         reply,
     })
     .await;
     assert_eq!(status, Some(AgentStatus::Active));
+    let state = ask(&mut host, |reply| ControlOp::Inspect {
+        run_id: "r1".to_string(),
+        reply,
+    })
+    .await
+    .expect("a live run is inspected");
+    assert_eq!(state.cursor.stage.as_str(), "s");
 }
 
 #[tokio::test]
-async fn spawn_op_propagates_spawner_error() {
+async fn spawn_op_passes_the_refusal_back() {
     let mut host = host_with(vec![]);
-    host.set_spawner(Box::new(|_world, _args| Err("bad blueprint".to_string())));
+    host.set_starter(TestStarter::new(Starts::Refuse));
     let result = ask(&mut host, |reply| ControlOp::Spawn {
-        args: Box::new(SpawnArgs::default()),
+        request: named("r1"),
         reply,
     })
     .await;
-    assert_eq!(result, Err("bad blueprint".to_string()));
+    assert!(result.unwrap_err().to_string().contains("bad blueprint"));
 }
 
 #[tokio::test]
-async fn spawn_op_contains_a_panicking_spawner() {
-    // A panic while building an agent (bad manifest, sandbox blow-up) must
-    // not unwind the daemon's serve task - the run just fails to start.
+async fn spawn_op_contains_a_panicking_starter() {
+    // A panic while starting a run (bad manifest, sandbox blow-up) must not
+    // unwind the daemon's serve task - the run just fails to start.
     let mut host = host_with(vec![]);
-    host.set_spawner(Box::new(|_world, _args| panic!("simulated spawn panic")));
+    host.set_starter(TestStarter::new(Starts::Panic));
     let (tx, rx) = oneshot::channel();
-    crate::test_support::with_silenced_panics(|| {
-        host.handle(ControlOp::Spawn {
-            args: Box::new(SpawnArgs::default()),
-            reply: tx,
-        });
+    host.handle(ControlOp::Spawn {
+        request: named("r1"),
+        reply: tx,
     });
-    assert_eq!(rx.await.unwrap(), Err("agent spawn panicked".to_string()));
+    let quiet = crate::test_support::SilentPanics::install();
+    host.finish_starts().await;
+    drop(quiet);
+    let err = rx.await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("panicked"), "{err}");
     // The host is still usable afterwards, and the run never registered.
     let status = ask(&mut host, |reply| ControlOp::Status {
-        run_id: SpawnArgs::default().run_id,
+        run_id: "r1".to_string(),
         reply,
     })
     .await;
@@ -1627,14 +1731,120 @@ async fn spawn_op_contains_a_panicking_spawner() {
 }
 
 #[tokio::test]
-async fn spawn_op_errors_without_a_spawner() {
+async fn spawn_op_contains_a_panic_while_placing() {
+    let mut host = host_with(vec![]);
+    host.set_starter(TestStarter::new(Starts::PanicOnPlacing));
+    let (tx, rx) = oneshot::channel();
+    host.handle(ControlOp::Spawn {
+        request: named("r1"),
+        reply: tx,
+    });
+    let quiet = crate::test_support::SilentPanics::install();
+    host.finish_starts().await;
+    drop(quiet);
+    let err = rx.await.unwrap().unwrap_err();
+    assert!(
+        err.to_string().contains("placing the run panicked"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn spawn_and_validate_are_refused_without_a_starter() {
     let mut host = host_with(vec![]);
     let result = ask(&mut host, |reply| ControlOp::Spawn {
-        args: Box::new(SpawnArgs::default()),
+        request: named("r1"),
         reply,
     })
     .await;
-    assert!(result.unwrap_err().contains("cannot spawn"));
+    assert!(result.unwrap_err().to_string().contains("cannot start"));
+    let result = ask(&mut host, |reply| ControlOp::ValidateSpawn {
+        request: named("r1"),
+        reply,
+    })
+    .await;
+    assert!(result.unwrap_err().to_string().contains("cannot start"));
+}
+
+#[tokio::test]
+async fn validate_spawn_answers_with_a_summary_or_the_refusal() {
+    let mut host = host_with(vec![]);
+    host.set_starter(TestStarter::new(Starts::Place));
+    let summary = ask(&mut host, |reply| ControlOp::ValidateSpawn {
+        request: named("r1"),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(summary.entry_stage.as_str(), "s");
+    assert!(
+        host.by_run_id.is_empty(),
+        "a dry run starts nothing in the world"
+    );
+
+    host.set_starter(TestStarter::new(Starts::Refuse));
+    let refused = ask(&mut host, |reply| ControlOp::ValidateSpawn {
+        request: named("r1"),
+        reply,
+    })
+    .await;
+    assert!(refused.is_err());
+
+    host.set_starter(TestStarter::new(Starts::Panic));
+    let (tx, rx) = oneshot::channel();
+    host.handle(ControlOp::ValidateSpawn {
+        request: named("r1"),
+        reply: tx,
+    });
+    let quiet = crate::test_support::SilentPanics::install();
+    let answered = rx.await;
+    drop(quiet);
+    let err = answered.unwrap().unwrap_err();
+    assert!(err.to_string().contains("panicked"), "{err}");
+}
+
+#[tokio::test]
+async fn inspect_reads_an_unloaded_run_from_its_run_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let world = PipelineWorld::new(
+        crate::providers::ProviderRegistry::new(),
+        Arc::new(NoTools),
+        InferencePoolConfig::new(),
+        1,
+        Some(dir.path().to_path_buf()),
+        Handle::current(),
+    );
+    let mut host = WorldHost::new(world);
+    let states = crate::runfile::reader_tests::scripted_run(3);
+    let run_dir = dir.path().join("t-1");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let written = crate::runfile::reader_tests::write_run(
+        &run_dir.join(leviath_core::files::RUN_FILE),
+        &states,
+        Default::default(),
+    );
+    let state = ask(&mut host, |reply| ControlOp::Inspect {
+        run_id: "t-1".to_string(),
+        reply,
+    })
+    .await
+    .expect("read from the run file");
+    assert_eq!(*state, *written.state());
+    let none = ask(&mut host, |reply| ControlOp::Inspect {
+        run_id: "ghost".to_string(),
+        reply,
+    })
+    .await;
+    assert!(none.is_none());
+
+    // A world kept in memory has no run files to read.
+    let mut bare = host_with(vec![]);
+    let none = ask(&mut bare, |reply| ControlOp::Inspect {
+        run_id: "t-1".to_string(),
+        reply,
+    })
+    .await;
+    assert!(none.is_none());
 }
 
 // ─── sub-agent bridge ──────────────────────────────────────────────────
@@ -1645,59 +1855,72 @@ async fn ask_sub<T>(
 ) -> T {
     let (tx, rx) = oneshot::channel();
     host.handle_subagent(make(tx));
+    host.finish_starts().await;
     rx.await.unwrap()
-}
-
-/// A spawner that adds a bare child agent and returns it.
-fn child_spawner() -> Spawner {
-    Box::new(|world, args| Ok(world.spawn_agent((agent_state(&args.run_id),)).entity()))
 }
 
 #[tokio::test]
 async fn subagent_spawn_links_child_and_registers() {
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
+    let starter = TestStarter::new(Starts::Place);
+    host.set_starter(starter.clone());
     let parent = spawn(&mut host, "parent", "parent");
 
     let result = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs {
-            run_id: "child".to_string(),
-            ..Default::default()
-        }),
+        request: named("child"),
         parent_run_id: "parent".to_string(),
-        max_depth: 3,
         reply,
     })
     .await;
-    assert_eq!(result, Ok("child".to_string()));
+    assert_eq!(result.unwrap().as_str(), "child");
+
+    // The child was started as the parent's, under the parent's policy.
+    let callers = starter.callers.lock().unwrap().clone();
+    let parent_spec = host
+        .world
+        .world()
+        .get::<crate::insert::RunSpecC>(parent.entity())
+        .unwrap()
+        .0
+        .clone();
+    assert_eq!(
+        callers,
+        vec![crate::spec::env::Caller::Child {
+            parent: parent_spec.run_id.clone(),
+            policy: parent_spec.launch.clone(),
+            depth: 0,
+        }]
+    );
 
     let child = host.by_run_id["child"];
     // The child links back to the parent at depth 1.
     let pref = host.world.world().get::<ParentRef>(child.entity()).unwrap();
     assert_eq!(pref.parent_entity, parent.entity());
     assert_eq!(pref.depth, 1);
-    // The parent tracks the child.
+    // The parent tracks the child, in the world and in what it persists.
     let kids = host
         .world
         .world()
         .get::<SubAgentChildren>(parent.entity())
         .unwrap();
     assert_eq!(kids.children, vec![child.entity()]);
+    let state = host
+        .world
+        .world()
+        .get::<AgentState>(parent.entity())
+        .unwrap();
+    assert_eq!(state.spawned_children_ids, vec!["child".to_string()]);
 }
 
 #[tokio::test]
 async fn subagent_spawn_appends_to_existing_children() {
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
+    host.set_starter(TestStarter::new(Starts::Place));
     spawn(&mut host, "parent", "parent");
     for id in ["c1", "c2"] {
         let r = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: id.to_string(),
-                ..Default::default()
-            }),
+            request: named(id),
             parent_run_id: "parent".to_string(),
-            max_depth: 3,
             reply,
         })
         .await;
@@ -1712,63 +1935,120 @@ async fn subagent_spawn_appends_to_existing_children() {
     assert_eq!(kids.children.len(), 2);
 }
 
+/// A grandchild is started at its parent's depth, read off the parent's
+/// `ParentRef`.
 #[tokio::test]
-async fn subagent_spawn_rejects_beyond_max_depth() {
+async fn a_childs_child_is_started_one_level_deeper() {
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
+    let starter = TestStarter::new(Starts::Place);
+    host.set_starter(starter.clone());
     spawn(&mut host, "parent", "parent");
-    let result = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs {
-            run_id: "child".to_string(),
-            ..Default::default()
-        }),
+    ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+        request: named("child"),
         parent_run_id: "parent".to_string(),
-        max_depth: 0, // child would be depth 1 > 0
         reply,
     })
-    .await;
-    assert!(result.unwrap_err().contains("depth limit"));
-    assert!(!host.by_run_id.contains_key("child"));
+    .await
+    .unwrap();
+    ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+        request: named("grandchild"),
+        parent_run_id: "child".to_string(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let depths: Vec<u8> = starter
+        .callers
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| match c {
+            crate::spec::env::Caller::Child { depth, .. } => *depth,
+            _ => u8::MAX,
+        })
+        .collect();
+    assert_eq!(depths, vec![0, 1]);
+    let grandchild = host.by_run_id["grandchild"];
+    let pref = host
+        .world
+        .world()
+        .get::<ParentRef>(grandchild.entity())
+        .unwrap();
+    assert_eq!(pref.depth, 2);
 }
 
 #[tokio::test]
-async fn subagent_spawn_unknown_parent_and_no_spawner_and_spawner_error() {
+async fn subagent_spawn_unknown_parent_and_no_starter_and_starter_refusal() {
     // Unknown parent.
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
+    host.set_starter(TestStarter::new(Starts::Place));
     let r = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs::default()),
+        request: named("child"),
         parent_run_id: "ghost".to_string(),
-        max_depth: 3,
         reply,
     })
     .await;
-    assert!(r.unwrap_err().contains("not live"));
+    assert!(r.unwrap_err().to_string().contains("not live"));
 
-    // No spawner installed.
+    // A parent placed without a spec.
+    let bare = host.world_mut().spawn_agent((agent_state("bare"),));
+    host.register("bare", bare);
+    let r = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+        request: named("child"),
+        parent_run_id: "bare".to_string(),
+        reply,
+    })
+    .await;
+    assert!(r.unwrap_err().to_string().contains("no run spec"));
+
+    // No starter installed.
     let mut host2 = host_with(vec![]);
     spawn(&mut host2, "parent", "parent");
     let r = ask_sub(&mut host2, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs::default()),
+        request: named("child"),
         parent_run_id: "parent".to_string(),
-        max_depth: 3,
         reply,
     })
     .await;
-    assert!(r.unwrap_err().contains("cannot spawn"));
+    assert!(r.unwrap_err().to_string().contains("cannot start"));
 
-    // Spawner rejects.
+    // Starter refuses.
     let mut host3 = host_with(vec![]);
-    host3.set_spawner(Box::new(|_w, _a| Err("bad blueprint".to_string())));
+    host3.set_starter(TestStarter::new(Starts::Refuse));
     spawn(&mut host3, "parent", "parent");
     let r = ask_sub(&mut host3, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs::default()),
+        request: named("child"),
         parent_run_id: "parent".to_string(),
-        max_depth: 3,
         reply,
     })
     .await;
-    assert_eq!(r, Err("bad blueprint".to_string()));
+    assert!(r.unwrap_err().to_string().contains("bad blueprint"));
+}
+
+/// A parent that goes away while its child is starting leaves the child
+/// standing on its own rather than linked to nothing.
+#[tokio::test]
+async fn a_child_whose_parent_went_away_is_placed_unlinked() {
+    let mut host = host_with(vec![]);
+    host.set_starter(TestStarter::new(Starts::Place));
+    let parent = spawn(&mut host, "parent", "parent");
+    let (tx, rx) = oneshot::channel();
+    host.handle_subagent(SubAgentOp::Spawn {
+        request: named("child"),
+        parent_run_id: "parent".to_string(),
+        reply: tx,
+    });
+    host.world.world_mut().despawn(parent.entity());
+    crate::test_support::with_tracing(|| ());
+    host.finish_starts().await;
+    assert!(rx.await.unwrap().is_ok());
+    let child = host.by_run_id["child"];
+    assert!(
+        host.world
+            .world()
+            .get::<ParentRef>(child.entity())
+            .is_none()
+    );
 }
 
 /// A parent asking after a finished child receives its answer, not just a
@@ -1949,15 +2229,11 @@ async fn subagent_send_delivers_into_the_target_region() {
 #[tokio::test]
 async fn subagent_kill_cancels_the_whole_tree() {
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
+    host.set_starter(TestStarter::new(Starts::Place));
     spawn(&mut host, "parent", "parent");
     ask_sub(&mut host, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs {
-            run_id: "child".to_string(),
-            ..Default::default()
-        }),
+        request: named("child"),
         parent_run_id: "parent".to_string(),
-        max_depth: 3,
         reply,
     })
     .await
@@ -1995,15 +2271,11 @@ async fn subagent_kill_cancels_the_whole_tree() {
 #[tokio::test]
 async fn cancel_cascades_to_the_whole_tree() {
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
+    host.set_starter(TestStarter::new(Starts::Place));
     spawn(&mut host, "parent", "parent");
     ask_sub(&mut host, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs {
-            run_id: "child".to_string(),
-            ..Default::default()
-        }),
+        request: named("child"),
         parent_run_id: "parent".to_string(),
-        max_depth: 3,
         reply,
     })
     .await
@@ -2031,15 +2303,11 @@ async fn cancel_cascades_to_the_whole_tree() {
 #[tokio::test]
 async fn pause_cascades_to_the_whole_tree() {
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
+    host.set_starter(TestStarter::new(Starts::Place));
     spawn(&mut host, "parent", "parent");
     ask_sub(&mut host, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs {
-            run_id: "child".to_string(),
-            ..Default::default()
-        }),
+        request: named("child"),
         parent_run_id: "parent".to_string(),
-        max_depth: 3,
         reply,
     })
     .await
@@ -2067,15 +2335,11 @@ async fn pause_cascades_to_the_whole_tree() {
 #[tokio::test]
 async fn resume_cascades_to_the_whole_tree() {
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
+    host.set_starter(TestStarter::new(Starts::Place));
     spawn(&mut host, "parent", "parent");
     ask_sub(&mut host, |reply| SubAgentOp::Spawn {
-        args: Box::new(SpawnArgs {
-            run_id: "child".to_string(),
-            ..Default::default()
-        }),
+        request: named("child"),
         parent_run_id: "parent".to_string(),
-        max_depth: 3,
         reply,
     })
     .await
@@ -2610,24 +2874,12 @@ async fn serve_drives_agents_and_handles_ops_until_shutdown() {
     handle.await.unwrap();
 }
 
+/// A start is placed by the serve loop when it comes back, while the loop
+/// keeps answering other ops meanwhile.
 #[tokio::test]
-async fn serve_awaits_spawn_preprocessor_before_spawning() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+async fn serve_places_a_top_level_start() {
     let mut host = host_with(vec![]);
-    let ran = Arc::new(AtomicBool::new(false));
-    let ran_pp = ran.clone();
-    host.set_spawn_preprocessor(Box::new(move |_args| {
-        let ran = ran_pp.clone();
-        Box::pin(async move {
-            ran.store(true, Ordering::SeqCst);
-        })
-    }));
-    let ran_spawn = ran.clone();
-    host.set_spawner(Box::new(move |world, args| {
-        // The preprocessor must have completed before the spawner runs.
-        assert!(ran_spawn.load(Ordering::SeqCst));
-        Ok(world.spawn_agent((agent_state(&args.run_id),)).entity())
-    }));
+    host.set_starter(TestStarter::new(Starts::Place));
     let (op_tx, op_rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(async move {
         host.serve(op_rx).await;
@@ -2635,107 +2887,39 @@ async fn serve_awaits_spawn_preprocessor_before_spawning() {
     let (tx, rx) = oneshot::channel();
     op_tx
         .send(ControlOp::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: "rp".to_string(),
-                ..Default::default()
-            }),
+            request: named("rp"),
             reply: tx,
         })
         .unwrap();
     let result = rx.await.unwrap();
     drop(op_tx); // close the channel so serve() returns
     handle.await.unwrap();
-    assert_eq!(result, Ok("rp".to_string()));
-    assert!(ran.load(Ordering::SeqCst), "preprocessor ran");
+    assert_eq!(result.unwrap().as_str(), "rp");
 }
 
 #[tokio::test]
-async fn serve_awaits_preprocessor_for_subagent_spawn() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+async fn serve_places_a_subagent_start() {
     let mut host = host_with(vec![]);
-    host.set_spawner(child_spawner());
-    // An inert parent: no `ReadyToInfer`, so it never infers, never errors on
-    // the empty response script, and stays live for the child to attach to.
-    let parent = host.world_mut().spawn_agent((agent_state("parent"),));
-    host.register("parent", parent);
-    // Count preprocessor invocations: it must fire for the sub-agent Spawn,
-    // and NOT for the non-Spawn Check op (the `_ => None` arm).
-    let calls = Arc::new(AtomicUsize::new(0));
-    let calls_pp = calls.clone();
-    host.set_spawn_preprocessor(Box::new(move |_args| {
-        let calls = calls_pp.clone();
-        Box::pin(async move {
-            calls.fetch_add(1, Ordering::SeqCst);
-        })
-    }));
+    host.set_starter(TestStarter::new(Starts::Place));
+    spawn(&mut host, "parent", "parent");
     let sub_tx = host.subagent_sender();
     let shutdown = host.world_mut().shutdown_handle();
     let (op_tx, op_rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(async move {
         host.serve(op_rx).await;
     });
-
-    // A non-Spawn sub-agent op does not invoke the preprocessor.
-    let (ctx, crx) = oneshot::channel();
-    sub_tx
-        .send(SubAgentOp::Check {
-            run_id: "parent".to_string(),
-            reply: ctx,
-        })
-        .unwrap();
-    let _ = crx.await.unwrap();
-
-    // A sub-agent Spawn does.
     let (stx, srx) = oneshot::channel();
     sub_tx
         .send(SubAgentOp::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: "child".to_string(),
-                ..Default::default()
-            }),
+            request: named("child"),
             parent_run_id: "parent".to_string(),
-            max_depth: 3,
             reply: stx,
         })
         .unwrap();
-    assert_eq!(srx.await.unwrap(), Ok("child".to_string()));
-
+    assert_eq!(srx.await.unwrap().unwrap().as_str(), "child");
     shutdown.notify_one();
     drop(op_tx);
     handle.await.unwrap();
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        1,
-        "only the Spawn preprocessed"
-    );
-}
-
-#[tokio::test]
-async fn serve_spawns_without_a_preprocessor() {
-    // A Spawn op through serve() with no preprocessor installed exercises the
-    // `None` arm of the preprocessor branch.
-    let mut host = host_with(vec![]);
-    host.set_spawner(Box::new(|world, args| {
-        Ok(world.spawn_agent((agent_state(&args.run_id),)).entity())
-    }));
-    let (op_tx, op_rx) = mpsc::unbounded_channel();
-    let handle = tokio::spawn(async move {
-        host.serve(op_rx).await;
-    });
-    let (tx, rx) = oneshot::channel();
-    op_tx
-        .send(ControlOp::Spawn {
-            args: Box::new(SpawnArgs {
-                run_id: "np".to_string(),
-                ..Default::default()
-            }),
-            reply: tx,
-        })
-        .unwrap();
-    let result = rx.await.unwrap();
-    drop(op_tx);
-    handle.await.unwrap();
-    assert_eq!(result, Ok("np".to_string()));
 }
 
 #[tokio::test]
@@ -4592,141 +4776,4 @@ async fn wait_reason_refuses_a_foreign_agent_id() {
         host.wait_reason(theirs).is_none(),
         "answered for a foreign id"
     );
-}
-
-/// A gateway whose model list is unread while `learned` is empty.
-struct Gateway {
-    learned: leviath_providers::LearnedModels,
-}
-#[async_trait::async_trait]
-impl Provider for Gateway {
-    async fn infer(&self, _req: &InferenceRequest) -> leviath_providers::Result<InferenceResponse> {
-        Err(ProviderError::Other("not in this test".to_string()))
-    }
-    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-        1
-    }
-    fn max_context_tokens(&self, _m: &str) -> usize {
-        100_000
-    }
-    fn name(&self) -> &str {
-        "gateway"
-    }
-    fn capabilities(&self, _m: &str) -> ModelCapabilities {
-        ModelCapabilities::default()
-    }
-    fn catalog_unread(&self) -> bool {
-        self.learned.is_empty()
-    }
-}
-
-/// A listing row for a run held for a model list.
-fn held_row(run_id: &str) -> RunListEntry {
-    RunListEntry {
-        started_at: None,
-        active: None,
-        splits_degraded: 0,
-        broken_scripts: Vec::new(),
-        run_id: run_id.to_string(),
-        title: None,
-        status: AgentStatus::Paused,
-        wait_reason: Some(leviath_core::run_meta::WaitReason::NeedsSetup {
-            blocker: leviath_core::run_meta::SetupBlocker::ProviderUnreachable,
-            remedy: "waiting for the model list of gw".to_string(),
-        }),
-        stage: "work".to_string(),
-        stage_index: None,
-        num_stages: None,
-        iteration: 0,
-        tool_calls: 0,
-        last_progress_at: None,
-        unattended: false,
-        yolo_profile: None,
-        empty_output: false,
-        read_paths: None,
-        has_final_output: false,
-    }
-}
-
-/// A run a restart could not resume because the model list its stages need
-/// was unread is held, not crashed: listed as waiting on the list, left alone
-/// while the list is still unread, and paged back in once it is read. One the
-/// page-in still fails for is left parked for `lev resume`.
-#[tokio::test]
-async fn a_run_held_for_a_model_list_resumes_once_the_list_is_read() {
-    let learned = leviath_providers::LearnedModels::default();
-    let mut registry = crate::providers::ProviderRegistry::new();
-    registry.register(
-        "gw".to_string(),
-        Arc::new(Gateway {
-            learned: learned.clone(),
-        }),
-    );
-    let world = PipelineWorld::new(
-        registry,
-        Arc::new(NoTools),
-        InferencePoolConfig::new(),
-        1,
-        None,
-        Handle::current(),
-    );
-    let mut host = WorldHost::new(world);
-    host.set_reloader(Box::new(|world, run_id| {
-        (run_id == "held-a").then(|| world.spawn_agent((agent_state(run_id),)))
-    }));
-    host.hold_for_catalog(
-        "held-a".to_string(),
-        held_row("held-a"),
-        vec!["gw".to_string()],
-    );
-    host.hold_for_catalog(
-        "held-b".to_string(),
-        held_row("held-b"),
-        vec!["gw".to_string()],
-    );
-    let listed: Vec<String> = host.list().into_iter().map(|e| e.run_id).collect();
-    assert!(listed.contains(&"held-a".to_string()), "{listed:?}");
-
-    host.retry_held();
-    assert_eq!(
-        host.held_for_catalog(),
-        ["held-a", "held-b"],
-        "nothing moves while unread"
-    );
-    assert!(host.live_entity("held-a").is_none());
-
-    learned.replace(
-        [("m".to_string(), leviath_providers::LearnedModel::default())]
-            .into_iter()
-            .collect(),
-    );
-    // Whatever reads the list wakes the loop that pages the runs in.
-    host.catalog_waker().notify_one();
-    host.retry_held();
-
-    assert!(host.held_for_catalog().is_empty());
-    assert!(host.live_entity("held-a").is_some(), "the held run is back");
-    let listed: Vec<String> = host.list().into_iter().map(|e| e.run_id).collect();
-    assert!(
-        listed.contains(&"held-b".to_string()),
-        "a run that still cannot be paged in stays listed for `lev resume`: {listed:?}"
-    );
-}
-
-/// A held run a person resumes first leaves the hold with it.
-#[tokio::test]
-async fn resuming_a_held_run_by_hand_ends_the_hold() {
-    let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id| {
-        Some(world.spawn_agent((agent_state(run_id),)))
-    }));
-    host.hold_for_catalog("held".to_string(), held_row("held"), vec!["gw".to_string()]);
-    assert!(
-        ask(&mut host, |reply| ControlOp::Resume {
-            run_id: "held".to_string(),
-            reply
-        })
-        .await
-    );
-    assert!(host.held_for_catalog().is_empty());
 }

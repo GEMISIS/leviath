@@ -45,21 +45,8 @@ pub(crate) fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
     force_terminal_in(run_dir, RunStatus::Cancelled, None, now)
 }
 
-/// Force the run in `run_dir` to `Error` with `message`, stamping `updated_at`.
-///
-/// For the spawn that never became a run. The spawner stakes out the run
-/// directory and writes a `Starting` placeholder *before* building the agent, so
-/// a spawn that fails leaves something to diagnose - but `Starting` is not
-/// terminal, so that placeholder went on claiming the run was alive for ever,
-/// showing up in `lev ps` and the dashboard with nothing behind it (issue #190).
-/// Recording the failure where the placeholder is turns it into an answer.
-pub(crate) fn force_error_in(run_dir: &Path, message: &str, now: i64) -> ForceCancelOutcome {
-    force_terminal_in(run_dir, RunStatus::Error, Some(message.to_string()), now)
-}
-
 /// Rewrite the run in `run_dir` to a terminal `status`, attaching `error` when
-/// there is something to say. Shared by [`force_cancel_in`] and
-/// [`force_error_in`] so "terminated on disk" has one implementation.
+/// there is something to say.
 fn force_terminal_in(
     run_dir: &Path,
     status: RunStatus,

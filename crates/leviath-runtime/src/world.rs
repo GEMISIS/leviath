@@ -302,6 +302,8 @@ pub struct PipelineWorld {
     /// [`Self::flush_and_stop`] can close its channel and `await` it, guaranteeing
     /// every queued snapshot reaches disk before shutdown. `None` once flushed.
     persist_task: Option<JoinHandle<()>>,
+    /// Where runs persist, when anywhere.
+    runs_dir: Option<std::path::PathBuf>,
 }
 
 /// Agent status control: read a status, set one, and pause/resume/cancel.
@@ -365,7 +367,7 @@ impl PipelineWorld {
         let blob_store = crate::blob_store::store_for(runs_dir.as_deref());
         let persist_stats = Arc::new(crate::persist_stats::PersistLaneStats::new());
         let persist_task = runtime.spawn(persistence_worker(
-            runs_dir,
+            runs_dir.clone(),
             persist_rx,
             persist_stats.clone(),
         ));
@@ -637,7 +639,14 @@ impl PipelineWorld {
             tool_lane,
             _tool_task: tool_task,
             persist_task: Some(persist_task),
+            runs_dir,
         }
+    }
+
+    /// Where this world's runs persist (`<runs_dir>/<run_id>/`), or `None`
+    /// for a world kept in memory.
+    pub fn runs_dir(&self) -> Option<&std::path::Path> {
+        self.runs_dir.as_deref()
     }
 
     /// Mutable access to the underlying ECS world, for spawning agents (the CLI /
@@ -1235,8 +1244,7 @@ mod tests {
 
     use crate::components::{AgentState, ContextWindow, InferenceConfig};
     use crate::pipeline::{
-        MessageIntake, StageCursor, StageInference, StageInferences, StageProgress, StageSetup,
-        StageSetups, VisitCounts,
+        MessageIntake, StageCursor, StageInference, StageProgress, StageSetup, VisitCounts,
     };
     use crate::tool_bridge::BoxedToolExec;
     use leviath_core::{Region, RegionKind};
@@ -1415,8 +1423,6 @@ mod tests {
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -1813,8 +1819,6 @@ mod tests {
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2368,8 +2372,6 @@ mod tests {
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2463,8 +2465,6 @@ mod tests {
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2572,8 +2572,6 @@ mod tests {
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2698,8 +2696,6 @@ mod tests {
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2769,8 +2765,6 @@ mod tests {
             agent_state(),
             crate::components::MessageInbox::default(),
             StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
             VisitCounts::default(),
             window(),
             stage("m"),
@@ -2810,14 +2804,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn world_init_and_restore_needs_no_daemon_infra() {
-        // `PipelineWorld::new` + `restore::restore_agent` form a self-contained
-        // spin-up→restore path: no control socket, HTTP server, PID files, or build
-        // markers - only providers, a tool service, a runs dir, and a runtime. This
-        // locks that in so the daemon wiring stays optional.
-        use leviath_core::region::EntryKind;
-        use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
-
+    async fn world_init_and_resume_needs_no_daemon_infra() {
+        // `PipelineWorld::new` + `restore::resume` form a self-contained
+        // spin-up and resume path: no control socket, HTTP server, PID files, or
+        // build markers - only providers, a tool service, a runs dir, and a
+        // runtime. This locks that in so the daemon wiring stays optional.
         let dir = tempfile::tempdir().unwrap();
         let mut world = PipelineWorld::new(
             registry_with(vec![text("unused")]),
@@ -2827,65 +2818,26 @@ mod tests {
             Some(dir.path().to_path_buf()),
             Handle::current(),
         );
-        let entity = world.spawn_agent((
-            crate::spec_bridge::test_support::both(blueprint()),
-            StageCursor { index: 0 },
-            agent_state(),
-            crate::components::MessageInbox::default(),
-            StageProgress::default(),
-            StageInferences(vec![stage("m")]),
-            StageSetups(vec![setup()]),
-            VisitCounts::default(),
-            window(),
-            stage("m"),
-            setup().inference_config,
-            crate::persistence::TokenTotals::default(),
-        ));
-
-        let snapshot = ContextSnapshot {
-            stage_name: "s0".to_string(),
-            total_tokens: 4,
-            max_tokens: 10_000,
-            regions: vec![RegionSnapshot {
-                name: "conversation".to_string(),
-                kind: "clearable".to_string(),
-                current_tokens: 4,
-                max_tokens: 10_000,
-                entries: vec![RegionEntrySnapshot {
-                    content: "restored turn".into(),
-                    tokens: 4,
-                    kind: EntryKind::UserMessage,
-                    metadata: None,
-                    key: None,
-                    taint: Default::default(),
-                    reasoning: None,
-                }],
-                description: None,
-            }],
-        };
-        crate::restore::restore_agent(
+        let spec = crate::spec_bridge::test_support::both(blueprint()).0;
+        let mut state = crate::insert::initial_state(&spec);
+        state.cursor.iteration = 3;
+        let entity = crate::restore::resume(
             world.world_mut(),
-            entity.entity(),
-            &snapshot,
-            0,
-            3,
-            crate::persistence::TokenTotals::default(),
+            crate::restore::Resumable {
+                spec,
+                state,
+                code: Default::default(),
+            },
+            crate::spec::env::Bindings::new(),
         );
 
         let state = world
             .world()
-            .get::<crate::components::AgentState>(entity.entity())
+            .get::<crate::components::AgentState>(entity)
             .unwrap();
         assert_eq!(state.status, AgentStatus::Active);
         assert_eq!(state.iteration, 3);
-        let win = world
-            .world()
-            .get::<crate::components::ContextWindow>(entity.entity())
-            .unwrap();
-        assert_eq!(
-            win.get_region("conversation").unwrap().content[0].content,
-            "restored turn"
-        );
+        assert_eq!(world.runs_dir(), Some(dir.path()));
     }
 
     #[tokio::test]

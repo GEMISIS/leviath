@@ -3645,7 +3645,6 @@ mod tests {
             sender: tx,
             parent_run_id: "parent".to_string(),
             workdir: "/tmp".to_string(),
-            max_depth: 3,
             no_seed_commands: false,
             unattended: false,
             yolo_profile: None,

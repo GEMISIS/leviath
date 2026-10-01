@@ -93,55 +93,6 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
     .to_string()
 }
 
-/// A self-contained blueprint whose stage 0 (`plan`) is an `interactive_points`
-/// stage with a `plan_approval` interaction point - for recovery tests that
-/// resume a run parked at an interaction point. Self-contained for the same
-/// isolation reason as [`inline_coder_manifest`].
-#[cfg(test)]
-pub(crate) fn inline_interactive_manifest() -> String {
-    r#"[agent]
-name = "planning-agent"
-version = "0.0.0"
-description = "Inline test blueprint (interactive plan); self-contained."
-entry_stage = "plan"
-
-[tool_permissions]
-read_file = "allow"
-
-[stages.plan]
-mode = "interactive_points"
-model = { provider = "anthropic", model = "m" }
-description = "Plan"
-available_tools = ["read_file", "ask_user_text", "edit_document"]
-allow_complete = true
-system_prompt = "Produce a plan and ask for approval."
-[stages.plan.transitions.implement]
-hint = "approved"
-
-[[stages.plan.interaction_points]]
-name = "plan_approval"
-prompt = "Approve the plan?"
-required = true
-style = "multiple_choice"
-options = ["Approve", "Abort"]
-document_region = "plan"
-abort_options = ["Abort"]
-
-[stages.implement]
-mode = "autonomous"
-model = { provider = "anthropic", model = "m" }
-description = "Implement"
-available_tools = ["write_file"]
-system_prompt = "Implement the approved plan."
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 8000 }
-plan = { kind = "pinned", max_tokens = 6000 }
-conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
-"#
-    .to_string()
-}
-
 /// A fake daemon that speaks the real control handshake - a token, and the
 /// identity it introduces itself with - and answers every request `respond`
 /// gives it, for as long as `connections` says. Subscribers get the events

@@ -3335,54 +3335,6 @@ fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
     assert!(world.get::<StageIoBuffer>(e).unwrap().output.is_empty());
 }
 
-/// The persist tick rewrites `stages.json` whole, so what the reload leaves in
-/// the ledger is what lands on disk. A reload that leaves the spawn-seeded
-/// zeros there does not merely lose the run's stage history, it erases the copy
-/// still on disk.
-#[test]
-fn a_restored_ledger_reaches_the_persist_tick_instead_of_the_seeded_zeros() {
-    let (mut world, mut rx) = world_with_persistence();
-    let e = world
-        .spawn((
-            run_metadata(),
-            agent_state(),
-            conv_window(),
-            StageCursor { index: 1 },
-            TokenTotals::default(),
-            PersistWatermark::default(),
-            // What `spawn_agent` seeds: names and nothing else.
-            ledger2(),
-        ))
-        .id();
-
-    // The reload as it was: no ledger restore, so the tick ships zeros over the
-    // real record of the run's first stage.
-    run_dispatch_persistence(&mut world);
-    let before = snapshot_job(rx.try_recv().expect("job sent"));
-    assert_eq!(before.stages[0].prompt_tokens, 0);
-
-    // The reload as it is: the persisted records go back on first.
-    let mut plan = leviath_core::run_meta::StageRecord::new("plan".to_string(), 0);
-    plan.entered = true;
-    plan.prompt_tokens = 4_096;
-    plan.completion_tokens = 128;
-    crate::restore::restore_stage_ledger(&mut world, e, &[plan]);
-    world
-        .get_mut::<PersistWatermark>(e)
-        .expect("watermark present")
-        .backdate(0);
-
-    run_dispatch_persistence(&mut world);
-    let after = snapshot_job(rx.try_recv().expect("job sent"));
-    assert_eq!(after.stages[0].prompt_tokens, 4_096);
-    assert_eq!(after.stages[0].completion_tokens, 128);
-    assert_eq!(
-        after.stages[0].status,
-        leviath_core::run_meta::StageRunStatus::Complete,
-        "a stage the run had entered and left reconciles as complete, not skipped"
-    );
-}
-
 /// Every snapshot carries the answer's bytes whenever the agent holds them.
 ///
 /// Sending them once and relying on a sender-side watermark does not work: the
@@ -6732,7 +6684,6 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
         .spawn((
             agent_state(),
             spec_of(bp.clone()),
-            AgentBlueprint(bp),
             window,
             StageJustEntered {
                 index: 0,
@@ -9022,17 +8973,12 @@ fn setup() -> StageSetup {
     }
 }
 
-fn setups(n: usize) -> StageSetups {
-    StageSetups((0..n).map(|_| setup()).collect())
-}
-
 fn spawn_transition_agent(
     world: &mut World,
     bp: crate::spec::Blueprint,
     stage_infs: Vec<StageInference>,
     visits: VisitCounts,
 ) -> Entity {
-    let n = stage_infs.len();
     world
         .spawn((
             spec_with(bp, &stage_infs),
@@ -9044,7 +8990,6 @@ fn spawn_transition_agent(
                 iterations: 0,
                 ..Default::default()
             },
-            setups(n),
             conv_window(),
             visits,
             ResolveTransition,
@@ -14977,14 +14922,12 @@ fn spawn_responding_agent(
     stage_infs: Vec<StageInference>,
     edges: Vec<crate::spec::blueprint::TransitionEdge>,
 ) -> Entity {
-    let n = stage_infs.len();
     world
         .spawn((
             spec_with(bp, &stage_infs),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            setups(n),
             VisitCounts::default(),
             conv_window(),
             AwaitingTransitionResponse(edges_of(&edges)),
@@ -20767,152 +20710,6 @@ mod message_parts {
     }
 }
 
-// ── spawn with attached parts ──
-
-mod spawn_parts {
-    use super::*;
-    use std::collections::HashMap;
-
-    use crate::blob_store::{BlobStoreHandle, MimeRegistryHandle};
-    use crate::pipeline::spawn::{SeededSpawn, spawn_agent_seeded};
-    use leviath_core::mime::{InboundPart, MemoryBlobStore};
-
-    fn task_blueprint() -> crate::spec::Blueprint {
-        let layout = crate::spec::layout::ContextLayout::new(
-            vec![crate::spec::layout::RegionDefinition::new(
-                "task".to_string(),
-                RegionKind::Pinned,
-                4000,
-            )],
-            8000,
-        );
-        let s = crate::spec::Stage::new(
-            "start".to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
-    }
-
-    fn seeded(parts: Vec<InboundPart>) -> SeededSpawn {
-        SeededSpawn {
-            agent_id: "run-parts".to_string(),
-            blueprint: task_blueprint(),
-            seeds: HashMap::from([("task".to_string(), "edit @hero.png".to_string())]),
-            parts,
-            stages: vec![resolved("m")],
-            global_hints: hints(true),
-            global_nudge: crate::spec::NudgeConfig::default(),
-            region_scripts: HashMap::new(),
-            mime_registry: None,
-        }
-    }
-
-    fn png() -> InboundPart {
-        InboundPart::from_bytes("hero.png", b"\x89PNG\r\n\x1a\nbody".to_vec())
-    }
-
-    #[test]
-    fn attached_parts_land_after_the_seeds_in_the_task_region() {
-        let mut world = World::new();
-        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MimeRegistryHandle::default());
-        let e = spawn_agent_seeded(&mut world, seeded(vec![png()])).expect("spawn");
-        let task = world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("task")
-            .unwrap()
-            .clone();
-        assert_eq!(task.content.len(), 2);
-        assert_eq!(task.content[0].content, "edit @hero.png");
-        assert_eq!(task.content[1].content, "[image/png, 12 B] hero.png");
-        assert_eq!(task.stored_count(), 1);
-    }
-
-    #[test]
-    fn a_world_without_a_store_refuses_a_part_and_a_bad_part_refuses_the_spawn() {
-        let mut world = World::new();
-        let err = spawn_agent_seeded(&mut world, seeded(vec![png()])).unwrap_err();
-        assert!(err.contains("no blob store"), "{err}");
-        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MimeRegistryHandle::default());
-        world.insert_resource(crate::blob_store::MimeLimits {
-            max_part_bytes: 2,
-            ..Default::default()
-        });
-        let err = spawn_agent_seeded(&mut world, seeded(vec![png()])).unwrap_err();
-        assert!(err.contains("over the 2 byte ceiling"), "{err}");
-        // No parts: the store is never consulted.
-        assert!(spawn_agent_seeded(&mut world, seeded(Vec::new())).is_ok());
-    }
-
-    /// A spawn builds the run's registry from the world's rows and the
-    /// blueprint's own, and types the attached parts by it; a host-built one
-    /// is taken as is, and rows that will not layer refuse the spawn.
-    #[test]
-    fn a_spawn_carries_the_blueprints_mime_rows_onto_the_run() {
-        use crate::blob_store::RunMimeRegistry;
-        use leviath_core::mime::{MimeRegistry, MimeType};
-        let mut world = World::new();
-        world.insert_resource(BlobStoreHandle(Arc::new(MemoryBlobStore::new())));
-        world.insert_resource(MimeRegistryHandle::default());
-        let mut spawn = seeded(vec![InboundPart::from_bytes(
-            "a.scene",
-            b"ACME\x00\x00\x00\x01".to_vec(),
-        )]);
-        spawn.blueprint.mime_types = toml::from_str(
-            "[\"application/x-acme-scene\"]\nfamily = \"model\"\nextensions = [\"scene\"]\n",
-        )
-        .unwrap();
-        let e = spawn_agent_seeded(&mut world, spawn).expect("spawn");
-        let scene = MimeType::parse("application/x-acme-scene").unwrap();
-        let run = world
-            .get::<RunMimeRegistry>(e)
-            .expect("the run has a registry");
-        assert_eq!(run.registry().info(&scene).source, "blueprint");
-        let task = world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("task")
-            .unwrap()
-            .clone();
-        assert_eq!(
-            task.content[1].content.stored().next().unwrap().mime_type,
-            scene,
-            "the attached part is typed by the blueprint's extension row"
-        );
-
-        // A host-built registry is used as handed over.
-        let rows: toml::Table = toml::from_str("[\"model/obj\"]\nfamily = \"scene\"\n").unwrap();
-        let mut spawn = seeded(Vec::new());
-        spawn.mime_registry =
-            Some(RunMimeRegistry::new(&MimeRegistry::builtin(), rows, Default::default()).unwrap());
-        let e = spawn_agent_seeded(&mut world, spawn).expect("spawn");
-        let obj = MimeType::parse("model/obj").unwrap();
-        assert_eq!(
-            world
-                .get::<RunMimeRegistry>(e)
-                .unwrap()
-                .registry()
-                .info(&obj)
-                .family,
-            "scene"
-        );
-
-        // Rows the registry refuses (an embedder's hand-built blueprint) are
-        // the spawn's error.
-        let mut spawn = seeded(Vec::new());
-        spawn.blueprint.mime_types = toml::from_str("[png]\nfamily = \"image\"\n").unwrap();
-        let err = spawn_agent_seeded(&mut world, spawn).unwrap_err();
-        assert!(err.starts_with("[mime_types]:"), "{err}");
-
-        // A world with no registry at all spawns without one.
-        let mut bare = World::new();
-        let e = spawn_agent_seeded(&mut bare, seeded(Vec::new())).expect("spawn");
-        assert!(bare.get::<RunMimeRegistry>(e).is_none());
-    }
-}
-
 // ── mime tools and typed tool results ──
 
 mod typed_tool_results {
@@ -21601,100 +21398,6 @@ fn resolved_on(provider: &str, model: &str) -> ResolvedStage {
     }
 }
 
-/// Every name a blueprint spawn carries is checked as the spec is built, and
-/// one that is not a name refuses the spawn and says which.
-#[test]
-fn a_blueprint_spawn_with_a_name_no_spec_can_hold_is_refused() {
-    use crate::spec::blueprint::ModelEntry;
-    use leviath_core::output::{ArtifactSpec, OutputSpec};
-    let bp = || blueprint(vec![stage_named("a", None, false, None)]);
-    let build = |bp: crate::spec::Blueprint, id: &str, inf: StageInference| {
-        crate::pipeline::run_spec_from_blueprint(&bp, id, &[inf])
-    };
-    let ok = si("m0");
-    let bad_stage = blueprint(vec![stage_named(" a", None, false, None)]);
-    assert!(build(bad_stage, "r", ok.clone()).is_err(), "a stage name");
-    assert!(build(bp(), "a/b", ok.clone()).is_err(), "a run id");
-    let with = |f: &dyn Fn(&mut StageInference)| {
-        let mut inf = ok.clone();
-        f(&mut inf);
-        build(bp(), "r", inf)
-    };
-    assert!(with(&|i| i.provider_name = String::new()).is_err());
-    assert!(with(&|i| i.model = String::new()).is_err());
-    assert!(with(&|i| i.fallbacks = vec![ModelEntry::new("a b".into(), "m".into())]).is_err());
-    assert!(with(&|i| i.fallbacks = vec![ModelEntry::new(String::new(), String::new())]).is_err());
-    assert!(
-        with(&|i| {
-            i.tools = vec![leviath_providers::Tool {
-                name: "a b".into(),
-                description: String::new(),
-                parameters: serde_json::Value::Null,
-            }]
-        })
-        .is_err()
-    );
-    let artifact = |mime: &str| ArtifactSpec {
-        name: "a".into(),
-        mime_type: mime.into(),
-        required: true,
-        description: Some("d".into()),
-    };
-    assert!(
-        with(&|i| {
-            i.output = Some(OutputSpec {
-                artifacts: vec![artifact("png")],
-                ..Default::default()
-            })
-        })
-        .is_err()
-    );
-
-    // What does read carries over whole.
-    let spec = with(&|i| {
-        i.fallbacks = vec![ModelEntry::new(String::new(), "spare".into())];
-        i.output = Some(OutputSpec {
-            format: Some("json".into()),
-            schema: Some(serde_json::json!({"type": "object"})),
-            validator: Some("v.rhai".into()),
-            artifacts: vec![artifact("image/png")],
-            ..Default::default()
-        });
-    })
-    .unwrap();
-    let plan = &spec.stages[0];
-    assert!(plan.fallbacks[0].provider.is_none());
-    let output = plan.output.as_ref().unwrap();
-    assert_eq!(output.artifacts[0].mime_type.as_str(), "image/png");
-    assert_eq!(
-        output.validator,
-        Some(crate::spec::graph::CodeRef::File("v.rhai".into()))
-    );
-    assert!(matches!(
-        spec.origin,
-        crate::spec::run_spec::SpecOrigin::Blueprint { .. }
-    ));
-
-    // A blueprint whose name is no blueprint name is run as a raw graph.
-    let mut raw = bp();
-    raw.name = " x".into();
-    let spec = build(raw, "r", ok.clone()).unwrap();
-    assert_eq!(spec.origin, crate::spec::run_spec::SpecOrigin::Raw);
-
-    // And the spawn itself refuses what the spec refuses.
-    let mut world = World::new();
-    let err = spawn_agent(
-        &mut world,
-        "r".to_string(),
-        blueprint(vec![stage_named(" a", None, false, None)]),
-        "task",
-        vec![resolved_on("p", "m")],
-        hints(true),
-    )
-    .unwrap_err();
-    assert!(err.contains("stage name"), "{err}");
-}
-
 /// A blueprint spawn seeds each region its seeds name, drops a seed that names
 /// none, and takes the operator's nudge settings where the blueprint has none.
 #[test]
@@ -21710,7 +21413,6 @@ fn a_blueprint_spawn_seeds_by_region_and_takes_the_operators_nudge() {
                 ("nowhere".to_string(), "dropped".to_string()),
             ]
             .into(),
-            parts: vec![],
             stages: vec![resolved_on("p", "m")],
             global_hints: hints(false),
             global_nudge: crate::spec::NudgeConfig {

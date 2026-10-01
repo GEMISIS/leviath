@@ -15,6 +15,7 @@
 //! resume, a delivered message) is applied immediately.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bevy_ecs::entity::Entity;
@@ -44,8 +45,12 @@ pub struct WorldHost {
     world: PipelineWorld,
     by_run_id: HashMap<String, AgentId>,
     interactions: InteractionHub,
-    spawner: Option<Spawner>,
-    spawn_preprocessor: Option<SpawnPreprocessor>,
+    starter: Option<Arc<dyn RunStarter>>,
+    /// Runs whose start finished off the world, waiting to be placed in it.
+    started_tx: UnboundedSender<starts::Started>,
+    started_rx: UnboundedReceiver<starts::Started>,
+    /// Starts sent off the world and not yet placed.
+    starting: usize,
     reloader: Option<Reloader>,
     force_terminator: Option<ForceTerminator>,
     reaper: Option<Reaper>,
@@ -89,10 +94,6 @@ pub struct WorldHost {
     /// operator's `lev ps` view does not change just because the daemon stopped
     /// spending memory on a run nobody is driving.
     parked: HashMap<String, RunListEntry>,
-    /// Runs held back from a restart until the model lists they need are
-    /// read, each with the providers it waits on. Listed through `parked`.
-    /// See [`Self::hold_for_catalog`].
-    held_for_catalog: HashMap<String, Vec<String>>,
 }
 
 /// Consecutive healthy re-drives (no dead cycles, empty tool queue) before the
@@ -169,12 +170,15 @@ impl WorldHost {
             .world_mut()
             .insert_resource(WorldEventSink(events.clone()));
         let (subagent_tx, subagent_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             world,
             by_run_id: HashMap::new(),
             interactions,
-            spawner: None,
-            spawn_preprocessor: None,
+            starter: None,
+            started_tx,
+            started_rx,
+            starting: 0,
             reloader: None,
             force_terminator: None,
             reaper: None,
@@ -185,7 +189,6 @@ impl WorldHost {
             settings: HostSettings::default(),
             emitted_interactions: HashSet::new(),
             parked: HashMap::new(),
-            held_for_catalog: HashMap::new(),
             subagent_tx,
             subagent_rx,
             redrive: DEFAULT_REDRIVE_INTERVAL,
@@ -210,8 +213,8 @@ impl WorldHost {
 // its own `impl WorldHost` block rather than a trait or a free function.
 mod emit;
 mod health;
-mod held;
 mod listing;
+mod starts;
 mod subagents;
 
 impl WorldHost {
@@ -345,16 +348,10 @@ impl WorldHost {
         self.settings.set_spend_notify_usd(thresholds);
     }
 
-    /// Install the spawner used to service `Spawn` control ops. Without one, a
-    /// `Spawn` op replies with an error.
-    pub fn set_spawner(&mut self, spawner: Spawner) {
-        self.spawner = Some(spawner);
-    }
-
-    /// Install the async hook awaited before each top-level `Spawn` (see
-    /// `SpawnPreprocessor`).
-    pub fn set_spawn_preprocessor(&mut self, pp: SpawnPreprocessor) {
-        self.spawn_preprocessor = Some(pp);
+    /// Install what starts this host's runs. Without one, every `Spawn` and
+    /// `ValidateSpawn` is refused.
+    pub fn set_starter(&mut self, starter: Arc<dyn RunStarter>) {
+        self.starter = Some(starter);
     }
 
     /// Install the reloader used to page an unloaded run back in on demand.
@@ -417,10 +414,8 @@ impl WorldHost {
         }
         let entity = (self.reloader.as_mut()?)(&mut self.world, run_id)?;
         self.by_run_id.insert(run_id.to_string(), entity);
-        // Live again: its listing row comes off the entity, not the parked map,
-        // and a run held for a model list is no longer waiting on it.
+        // Live again: its listing row comes off the entity, not the parked map.
         self.parked.remove(run_id);
-        self.held_for_catalog.remove(run_id);
         Some(entity)
     }
 
@@ -455,44 +450,14 @@ impl WorldHost {
     /// harmless (the requester went away).
     pub fn handle(&mut self, op: ControlOp) {
         match op {
-            ControlOp::Spawn { args, reply } => {
-                let result = match self.spawner.as_mut() {
-                    // Spawning runs outside the pipeline schedule, so it isn't
-                    // covered by `run_isolated`'s panic guard: a panic while
-                    // parsing a blueprint or building a sandbox would otherwise
-                    // unwind the whole serve task and take the daemon with it.
-                    // As with `run_isolated`, the world may be left holding a
-                    // partially-built entity - the run just never registers.
-                    Some(spawner) => {
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            spawner(&mut self.world, &args)
-                        })) {
-                            Ok(Ok(entity)) => {
-                                // Spawned into this world, so it is ours.
-                                let agent = self.world.own_agent(entity);
-                                self.by_run_id.insert(args.run_id.clone(), agent);
-                                Ok(args.run_id.clone())
-                            }
-                            Ok(Err(e)) => Err(e),
-                            Err(_) => Err("agent spawn panicked".to_string()),
-                        }
-                    }
-                    None => Err("this daemon cannot spawn agents".to_string()),
-                };
-                // A failed spawn must leave a trace daemon-side: the error goes
-                // back over the socket to a client that may have already exited,
-                // and nothing is written to disk, so without this log line the
-                // failure is invisible.
-                if let Err(error) = &result {
-                    tracing::error!(
-                        run_id = %args.run_id,
-                        blueprint = %args.blueprint_path,
-                        workdir = %args.workdir,
-                        error = %error,
-                        "agent spawn failed"
-                    );
-                }
-                let _ = reply.send(result);
+            ControlOp::Spawn { request, reply } => {
+                self.start(*request, crate::spec::env::Caller::TopLevel, None, reply);
+            }
+            ControlOp::ValidateSpawn { request, reply } => {
+                self.validate(*request, reply);
+            }
+            ControlOp::Inspect { run_id, reply } => {
+                let _ = reply.send(self.inspect(&run_id).map(Box::new));
             }
             ControlOp::Result { run_id, reply } => {
                 // Live entities only. An unloaded run's answer is on disk in
@@ -649,7 +614,9 @@ impl WorldHost {
 
     /// Run the host: drive the world to quiescence, then park until an async
     /// result wakes it, a control op arrives, or shutdown is signalled. Returns
-    /// when shutdown fires or the control channel closes - and before returning,
+    /// when shutdown fires, or once the control channel has closed and every
+    /// run it asked for has been placed or refused (so each of their replies
+    /// is sent) - and before returning,
     /// **flushes all queued persistence to disk** (`Self::flush_and_stop`) so a
     /// clean daemon shutdown never loses a dirty agent's final snapshot.
     pub async fn serve(&mut self, mut control_rx: UnboundedReceiver<ControlOp>) {
@@ -661,10 +628,11 @@ impl WorldHost {
         let mut redrive =
             tokio::time::interval_at(tokio::time::Instant::now() + self.redrive, self.redrive);
         redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut closed = false;
         'serve: loop {
-            // Before the drive, so a run whose model list arrived since the
-            // last pass is in the world for it.
-            self.retry_held();
+            if closed && self.starting == 0 {
+                break 'serve;
+            }
             self.world.run_to_fixed_point();
             self.emit_events();
             tokio::select! {
@@ -679,41 +647,18 @@ impl WorldHost {
                     self.observe_redrive();
                     self.housekeep();
                 }
-                op = control_rx.recv() => {
+                op = control_rx.recv(), if !closed => {
                     match op {
-                        // Await the spawn preprocessor (e.g. lazy MCP connect) before
-                        // the sync spawner runs, so the pool is warm. The returned
-                        // future is `'static`, so no borrow of `self`/`op` outlives it.
-                        Some(op) => {
-                            let pre = match &op {
-                                ControlOp::Spawn { args, .. } => {
-                                    self.spawn_preprocessor.as_ref().map(|pp| pp(args))
-                                }
-                                _ => None,
-                            };
-                            if let Some(fut) = pre {
-                                fut.await;
-                            }
-                            self.handle(op);
-                        }
-                        None => break 'serve, // all control senders dropped
+                        Some(op) => self.handle(op),
+                        // All control senders dropped: finish the starts in
+                        // flight, then stop.
+                        None => closed = true,
                     }
                 }
+                // The host holds a `started_tx`, so this only yields `Some`.
+                Some(started) = self.started_rx.recv() => self.place(started),
                 // The host holds a `subagent_tx`, so this only yields `Some`.
-                Some(sub) = self.subagent_rx.recv() => {
-                    // Warm a spawning sub-agent's MCP servers first, same as a
-                    // top-level Spawn (both run in this async loop).
-                    let pre = match &sub {
-                        SubAgentOp::Spawn { args, .. } => {
-                            self.spawn_preprocessor.as_ref().map(|pp| pp(args))
-                        }
-                        _ => None,
-                    };
-                    if let Some(fut) = pre {
-                        fut.await;
-                    }
-                    self.handle_subagent(sub);
-                }
+                Some(sub) = self.subagent_rx.recv() => self.handle_subagent(sub),
             }
         }
         // Shutting down: drain the persistence lane before the world is dropped.
