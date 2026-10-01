@@ -94,7 +94,7 @@ fn a_spawn_names_its_blueprint_by_name_reference_or_directory() {
         ..handle_with(tx)
     };
     let source = |blueprint: serde_json::Value| {
-        SpawnArgs::parse(&json!({"source": {"blueprint": blueprint}}))
+        SpawnCall::parse(&json!({"source": {"blueprint": blueprint}}))
             .unwrap()
             .into_request(&h, Vec::new())
             .map(|r| r.source)
@@ -124,7 +124,7 @@ fn a_spawn_names_its_blueprint_by_name_reference_or_directory() {
     let graph = leviath_blueprint::BlueprintFile::parse(&manifest)
         .unwrap()
         .run_graph();
-    let request = SpawnArgs::parse(&json!({"source": {"graph": graph}}))
+    let request = SpawnCall::parse(&json!({"source": {"graph": graph}}))
         .unwrap()
         .into_request(&h, Vec::new())
         .unwrap();
@@ -140,7 +140,7 @@ fn a_source_that_does_not_name_one_thing_is_refused_at_its_path() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let h = handle_with(tx);
     let refused = |args: serde_json::Value| {
-        let issues = SpawnArgs::parse(&args)
+        let issues = SpawnCall::parse(&args)
             .unwrap()
             .into_request(&h, Vec::new())
             .unwrap_err();

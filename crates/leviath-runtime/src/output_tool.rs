@@ -28,7 +28,7 @@ use crate::components::ContextWindow;
 ///
 /// Created automatically alongside `conversation` and `tool_results` (see
 /// `context_setup`), and pinned, so the answer stays visible to later stages and
-/// lands in the run's `context.json` with no extra persistence work.
+/// lands in the run's context snapshot with no extra persistence work.
 pub const FINAL_OUTPUT_REGION: &str = "final_output";
 
 /// Token budget for [`FINAL_OUTPUT_REGION`].
@@ -292,7 +292,7 @@ pub(crate) fn handle_output_tool(
 /// Best-effort: a world whose layout somehow lacks the region still records the
 /// output on the component, which is what every consumer actually reads. The
 /// region exists so the answer stays in the agent's own context (a later stage
-/// can revise it) and so it appears in `context.json`.
+/// can revise it) and so it appears in the run's context snapshot.
 fn mirror_into_region(
     window: &mut ContextWindow,
     content: &str,

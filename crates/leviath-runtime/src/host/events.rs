@@ -55,7 +55,7 @@ pub enum WorldEvent {
         /// still be a reconstruction, so neither answers for the other.
         complete: bool,
         /// The stage the run was in when it crossed - the one doing the
-        /// spending. The full per-stage breakdown is in `stages.json`.
+        /// spending. The full per-stage breakdown is in the run's stage ledger.
         stage: String,
     },
 
@@ -169,7 +169,7 @@ pub enum WorldEvent {
         ///
         /// Carried on the event rather than left for the consumer to read off
         /// disk: this fires the moment the run goes terminal, and the persist
-        /// tick that writes `meta.json` has not necessarily run yet. A webhook
+        /// tick that writes the run file has not necessarily run yet. A webhook
         /// or websocket consumer reading the file would race it and report a
         /// finished run with no answer.
         #[serde(default, skip_serializing_if = "Option::is_none")]

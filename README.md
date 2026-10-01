@@ -178,7 +178,7 @@ the model.
 <br><br>
 <code>lev msg</code> drops a message straight into a running agent's context,
 and the model sees it on its next inference call, so you redirect without
-restarting. <code>interaction_points</code> force a checkpoint to approve,
+restarting. <code>interactive_points</code> force a checkpoint to approve,
 revise, or edit the output directly, and <code>ask_user_*</code> tools let the
 agent ask on its own judgment.
 <br><br>
@@ -368,8 +368,8 @@ graph TD
 | `leviath-providers` | Anthropic, OpenAI, Codex, Google, xAI, Grok, Meta, OpenRouter, Bedrock, Meshy, Ollama |
 | `leviath-mcp` | MCP tool servers over stdio and HTTP/SSE |
 | `leviath-agent-client` | Agent Client Protocol wire types (JSON-RPC over stdio) |
-| `leviath-blueprint` | The `agent.toml` blueprint format, migration and lint findings |
-| `leviath-legacy-runs` | Converts run directories from older versions into run files. Used by `lev` only, never published |
+| `leviath-blueprint` | The `agent.toml` blueprint format and lint findings |
+| `leviath-legacy-runs` | Converts older run directories into run files, and `agent.leviath` blueprints into `agent.toml`. Used by `lev` only, never published |
 | `leviath-package` | Blueprint bundling and install |
 | `leviath-scripting` | Rhai sandbox |
 | `leviath-telemetry` | OpenTelemetry export |

@@ -17,7 +17,7 @@
 //!
 //! Each commit appends its own small record, the same fire-and-forget shape
 //! [`crate::inference_usage`] uses for what a provider call cost:
-//! [`PersistMsg::Append`] with no ack, because nothing downstream waits on it.
+//! [`PersistMsg::Append`](crate::persistence_bridge::PersistMsg::Append) with no ack, because nothing downstream waits on it.
 //! Deliberately not a buffer on the window drained by the snapshot lane - that
 //! lane takes the window immutably and coalesces superseded snapshots, so a
 //! buffer would lose writes on exactly the busiest ticks.

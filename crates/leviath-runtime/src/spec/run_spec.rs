@@ -124,7 +124,7 @@ pub enum SpecOrigin {
     BlueprintFile {
         /// The directory.
         path: BlueprintPath,
-        /// The name its manifest gives it (`[agent] name`).
+        /// The name its manifest gives it (`[blueprint] name`).
         name: BlueprintName,
         /// The revision that ran.
         digest: Option<Digest>,

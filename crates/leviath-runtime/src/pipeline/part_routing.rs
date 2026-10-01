@@ -4,7 +4,7 @@
 //! to send the parts a model produces somewhere other than `conversation` -
 //! an image the model drew into a region a later stage reads, say, leaving the
 //! turn's text where it always went. This module answers the one question both
-//! recording paths ([`super::response::store_reply`] for a reply with no tool
+//! recording paths (`store_reply` in `pipeline::response` for a reply with no tool
 //! calls, [`super::tool_results::apply_tool_results_with_parts`] for one with
 //! them) ask: of the parts the model produced, which stay in the conversation
 //! and which are routed, and to where.

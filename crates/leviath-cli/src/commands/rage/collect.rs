@@ -808,7 +808,7 @@ fn sorted_entries(dir: &Path) -> Vec<PathBuf> {
 
 // ─── Runs and blueprints, for the pickers ───────────────────────────────────
 
-/// Every run under `runs_dir` whose `meta.json` parses, newest first.
+/// Every run under `runs_dir` whose run file reads, newest first.
 pub(crate) fn list_metas(runs_dir: &Path) -> Vec<RunMeta> {
     let mut runs: Vec<RunMeta> = sorted_entries(runs_dir)
         .iter()

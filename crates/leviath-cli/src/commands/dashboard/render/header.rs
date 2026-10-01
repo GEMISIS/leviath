@@ -614,7 +614,7 @@ mod tests {
     /// figure over 100%. Every provider is normalised so that `tokens_in` is
     /// the FRESH input only (see `TokenUsage::prompt_tokens`), so dividing
     /// the cache reads by it is not a share of anything. The numbers are a
-    /// real researcher run's `meta.json`: 555,075 fresh, 909,343 cached,
+    /// real researcher run's record: 555,075 fresh, 909,343 cached,
     /// which the strip showed as `cache 164%`.
     #[test]
     fn render_info_strip_cache_share_is_a_share_of_the_whole_prompt() {

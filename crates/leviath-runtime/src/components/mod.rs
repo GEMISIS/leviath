@@ -201,7 +201,7 @@ pub enum AgentStatus {
 
     /// Agent was paused by the user. The async-starting systems skip it exactly
     /// like `Idle`; the variant is distinct so the pause persists visibly
-    /// (`meta.json`, `lev ps`, dashboard) and so resume can be gated on it.
+    /// (the run file, `lev ps`, dashboard) and so resume can be gated on it.
     Paused,
 
     /// Agent has completed its task
@@ -280,7 +280,7 @@ impl std::fmt::Display for AgentStatus {
 
 /// Why an agent's status is [`AgentStatus::Waiting`].
 ///
-/// Lives in `leviath-core` because it is written to `meta.json` as well as
+/// Lives in `leviath-core` because it is kept on the run's record as well as
 /// reported live over the control socket, and re-exported here so every
 /// existing `components::WaitReason` path keeps working.
 pub use leviath_core::run_meta::WaitReason;

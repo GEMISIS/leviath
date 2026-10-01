@@ -284,7 +284,7 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             result: runstate::read_meta(&run_id).ok().and_then(|m| m.error),
             // Taken from the event rather than re-read from disk: the event
             // fires the moment the run goes terminal, and the persist tick that
-            // writes `meta.json` has not necessarily run yet.
+            // writes the run file has not necessarily run yet.
             final_output: final_output.map(Into::into),
         },
         WorldEvent::Log {
@@ -408,7 +408,7 @@ fn completion_payload(
         // run's *error*. The answer is `final_output`, below.
         "result": meta.error,
         // Taken from the event, not from `meta`: the webhook fires the moment
-        // the run goes terminal, and the persist tick that writes `meta.json`
+        // the run goes terminal, and the persist tick that writes the run file
         // has not necessarily run yet - reading it here would race and deliver
         // a finished run with no answer.
         "final_output": final_output,

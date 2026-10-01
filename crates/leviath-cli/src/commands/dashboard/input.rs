@@ -669,11 +669,10 @@ impl Dashboard {
                     "Logs",
                 ),
                 StageContentMode::Context => {
-                    let json = std::fs::read_to_string(
-                        runstate::stage_dir(&agent.id, self.selected_stage)
-                            .join(leviath_core::files::CONTEXT_FILE),
-                    )
-                    .unwrap_or_default();
+                    // The run's window as of its last step, as JSON.
+                    let json = runstate::read_context_snapshot(&agent.id)
+                        .and_then(|snapshot| serde_json::to_string_pretty(&snapshot).ok())
+                        .unwrap_or_default();
                     (json, "Context JSON")
                 }
                 StageContentMode::FinalOutput => {
@@ -4006,9 +4005,7 @@ mod tests {
             |_d| {
                 use crate::runstate;
                 let run_id = "test-yank-clipboard-unavailable-x7z9";
-                let stage_path = runstate::stage_dir(run_id, 0);
-                std::fs::create_dir_all(&stage_path).ok();
-                std::fs::write(stage_path.join("context.json"), r#"{"test":true}"#).ok();
+                runstate::create_run(&crate::test_fixtures::fixtures::run_meta(run_id)).unwrap();
 
                 let mut dash = make_test_dashboard();
                 let agent = make_test_agent(run_id, AgentDisplayStatus::Active);

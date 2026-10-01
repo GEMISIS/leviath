@@ -257,7 +257,7 @@ pub(crate) fn hold_for_gate(
 ///
 /// The one exception, which writes the status directly and says so where it does
 /// it: a run whose journal cannot be written (see
-/// [`fail_runs_with_unwritable_journals`](super::fail_runs_with_unwritable_journals)).
+/// [`super::fail_runs_with_unwritable_journals`]).
 /// A recovery stage is more work done on the same unwritable journal, and the
 /// recovery's own history would go unrecorded too, so that run stops rather than
 /// being routed.
@@ -760,8 +760,8 @@ fn stage_instructions_target(window: &mut ContextWindow) -> String {
 /// Apply a stage's context setup to a window: swap to the stage's layout (if any)
 /// and (re)inject its system prompt as pinned `[Stage instructions: …]` context,
 /// clearing any previous stage's first. Returns `Err` only when the prompt
-/// doesn't fit its region. Shared by [`enter_stage`] (transitions) and
-/// [`build_agent`] (the first stage, at spawn).
+/// doesn't fit its region. Shared by [`enter_stage`] (transitions) and the
+/// placing of a run's first stage at spawn.
 pub(crate) fn apply_stage_context(
     setup: &StageSetup,
     window: &mut ContextWindow,

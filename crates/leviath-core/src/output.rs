@@ -269,7 +269,7 @@ fn artifacts_from_wire<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Art
 ///
 /// This is the in-memory and one-shot form: the live ECS component, the
 /// completion event, a webhook body, a reply to a waiting parent. What a run's
-/// `meta.json` carries is the [`FinalOutputDescriptor`], because that file is
+/// record carries is the [`FinalOutputDescriptor`], because that record is
 /// read for every run on every listing and must not carry a payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinalOutput {
@@ -346,11 +346,11 @@ impl FinalOutput {
     }
 }
 
-/// What a run's `meta.json` records about its answer: everything but the bytes.
+/// What a run's record says about its answer: everything but the bytes.
 ///
-/// The content lives beside it in a sidecar file
-/// ([`FINAL_OUTPUT_FILE`]). `meta.json` is
-/// parsed for every run on every `lev ps`, every `/api/runs` page, and every
+/// The content lives beside the run file in a sidecar file
+/// ([`FINAL_OUTPUT_FILE`]). The run's record is
+/// read for every run on every `lev ps`, every `/api/runs` page, and every
 /// restart scan, so a payload in it is paid for by operations that never wanted
 /// it: a thousand answered runs would mean hundreds of megabytes of JSON per
 /// listing. A descriptor is a couple of hundred bytes and stays that way.
@@ -592,8 +592,8 @@ mod tests {
             .is_err()
         );
         assert_eq!(Artifact::from_path("dir\\x.png").name, "x.png");
-        // The bytes stay out of the descriptor: it goes in `meta.json`, which is
-        // read for every run in a listing.
+        // The bytes stay out of the descriptor: it goes in the run's record,
+        // which is read for every run in a listing.
         assert_eq!(output.descriptor().bytes, "the summary".len());
     }
 

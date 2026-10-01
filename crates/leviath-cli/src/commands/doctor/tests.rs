@@ -211,7 +211,7 @@ fn staged(root: &Path) -> PathBuf {
     stage_canary(root, "stub", "m").expect("staging into a fresh temp dir succeeds")
 }
 
-/// Write a `meta.json` for `run_id` so the on-disk fallbacks have something to
+/// Write a run file for `run_id` so the on-disk fallbacks have something to
 /// read - one iteration in, and whatever terminal state the test is after.
 fn write_meta(run_id: &str, status: leviath_core::run_meta::RunStatus, error: Option<&str>) {
     let dir = crate::runstate::run_dir(run_id);

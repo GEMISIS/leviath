@@ -35,7 +35,7 @@
 //!   supervisor that turns a dead task into an ordinary error outcome). A
 //!   fifteen-minute call is never a candidate.
 //! - A full inference pool leaves the agent `ReadyToInfer` with a
-//!   [`DispatchStall`](super::DispatchStall). That is backpressure working as
+//!   [`super::DispatchStall`]. That is backpressure working as
 //!   designed, and the stall watchdog already declines to fail it.
 //! - A tool batch holds `AwaitingTools` and is deliberately unbounded: it may
 //!   park off-lane on a tool approval, an `ask_user`, or a `wait_for_agent` that
@@ -67,7 +67,7 @@ use super::*;
 /// An agent found in a state no system can reach, and when it was first seen
 /// that way.
 ///
-/// One field, unlike [`DispatchStall`](super::DispatchStall), which also carries
+/// One field, unlike [`super::DispatchStall`], which also carries
 /// a freshness stamp. That record is written by the dispatch systems and read by
 /// a different one, so it has to cope with its writer going away. This one has a
 /// single owner: the watchdog inserts it when the condition holds, keeps the

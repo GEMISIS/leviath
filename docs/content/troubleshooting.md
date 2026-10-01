@@ -399,9 +399,9 @@ sub-agents, or on a person is holding the marker that says so and is exempt howe
 
 ## An agent seems stuck in a loop
 
-That's what [stuck detection](/docs/stages#stuck-detection) is for. Add a `condition = "stuck"` transition
-with thresholds (`stuck_after_iterations`, `stuck_after_same_file_edits`, …) so the runtime escapes
-the stage automatically instead of burning tokens.
+That's what [stuck detection](/docs/stages#stuck-detection) is for. Add an edge with `when = "stuck"`
+and thresholds, such as `stuck = { after_iterations = 20, after_same_file_edits = 5 }`, so the
+runtime escapes the stage automatically instead of burning tokens.
 
 ## The Lair can't reach my server
 

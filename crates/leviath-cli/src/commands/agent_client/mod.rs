@@ -592,7 +592,7 @@ impl Server {
     }
 
     /// Whether the run has reached a state that should end the current turn,
-    /// read from its persisted `meta.json` status. Returns the stop reason to
+    /// read from the status in its run file. Returns the stop reason to
     /// report, or `None` while the run is still starting / running / blocked on
     /// input (`WaitingInput`) - the latter must keep the turn in flight so a
     /// non-interactive client is never told "done" while the agent is actually

@@ -44,8 +44,8 @@ that is not the run's doing - paused, blocked on a person, parked until the
 machine is fixed, finished - so this, not AGE, is the run's duration.
 
 MOVED is how long since the run last actually moved - a new iteration, a new
-stage, or a change of status. It is not the `updated_at` in meta.json, which
-also advances on a 30-second heartbeat and so stays fresh on a wedged run. This
+stage, or a change of status. It is not the run's `updated_at`, which can
+advance without the run moving and so stays fresh on a wedged run. This
 column was headed AGE before; a script reading the table should read --json,
 where every row carries `age_secs` and `working_secs` computed and the raw stamps
 beside them.
@@ -83,7 +83,7 @@ A run stays listed for a few minutes after it finishes, so a script polling on
 an interval learns how a run ended rather than finding it gone. Set
 `[limits] finished_retention_secs` to change the window, or 0 to drop a run the
 moment it finishes. The record is held in memory, so a daemon restart clears it;
-`meta.json` and the REST API keep the durable copy.
+the run's file and the REST API keep the durable copy.
 
 An `out of service` block under the table lists providers the daemon has stopped
 sending work to, because each failed several times in a row for something only
@@ -162,8 +162,8 @@ pub(crate) struct OfflineRun {
     /// Unix seconds when the run last actually moved, when it is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<i64>,
-    /// The run's working stopwatch as it was last persisted. `None` on a run
-    /// written before the clock existed.
+    /// The run's working stopwatch as it was last persisted. `None` when the
+    /// record has no clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<leviath_core::run_meta::ActiveClock>,
     /// How long the run has existed, in seconds, at the moment this listing was

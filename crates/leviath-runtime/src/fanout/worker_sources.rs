@@ -148,7 +148,7 @@ fn strip_marker(line: &str) -> String {
 /// The first URL in a bibliography line, or `None` for a line that names no
 /// source - a heading, a blank, or an entry recording a local path.
 ///
-/// Trailing punctuation is trimmed because a line commonly ends "- <url> -
+/// Trailing punctuation is trimmed because a line commonly ends "- `<url>` -
 /// fetched ...", and a URL that keeps its trailing dash will not match the same
 /// URL written without one.
 fn source_url(line: &str) -> Option<String> {

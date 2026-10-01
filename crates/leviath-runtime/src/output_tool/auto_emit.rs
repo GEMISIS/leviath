@@ -40,8 +40,8 @@ pub(crate) fn try_emit(
     try_emit_for(stage.name.as_str(), &targets, spec, now, window)
 }
 
-/// [`try_emit`] for the stage named `stage`, whose output routing sends parts
-/// to the regions `targets`.
+/// The automatic answer for the stage named `stage`, whose output routing
+/// sends parts to the regions `targets`.
 pub(crate) fn try_emit_for(
     stage: &str,
     targets: &[&str],

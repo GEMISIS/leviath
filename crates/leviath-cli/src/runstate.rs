@@ -303,7 +303,7 @@ const RUN_ID_ENTROPY_BITS: u32 = 48;
 /// `lev run` invocations all mint `fetcher-1785127214-8b48` and silently share
 /// one run directory. Nothing downstream detects that - `create_dir_all` is a
 /// no-op on an existing directory and the persistence worker then
-/// last-writer-wins over `meta.json` / `context.json` / `run.lvr`, interleaving
+/// last-writer-wins over the run file and the files beside it, interleaving
 /// two runs' state irrecoverably.
 ///
 /// The `<name>-<secs>-<hex>` shape is preserved: the timestamp keeps IDs sorting
@@ -422,9 +422,8 @@ pub const STALE_AFTER_SECS: i64 = 300;
 /// alone would condemn a run that is working. `None` therefore answers `false`
 /// for everything: no answer is not evidence.
 ///
-/// Ages against `last_progress_at`, falling back to `updated_at` for runs
-/// written before that field existed. The fallback preserves the older, weaker
-/// behavior for old runs rather than declaring them all stale at once.
+/// Ages against `last_progress_at`, falling back to `updated_at` for a record
+/// without it, rather than declaring every such run stale at once.
 ///
 /// One definition, shared by the dashboard's STALE badge and by `lev ps --all`,
 /// so what an operator sees and what a harness reconciles against cannot drift.
@@ -1088,7 +1087,7 @@ mod tests {
 
     /// The progress stamp wins over the heartbeat. A wedged run keeps rewriting
     /// `updated_at` every 30 seconds, so judging on it would never age anything
-    /// out; the stamp is the only field on meta.json that separates a run that
+    /// out; the stamp is the only field on the run's record that separates a run that
     /// is working from one that is only ticking.
     #[test]
     fn a_fresh_heartbeat_does_not_rescue_a_run_that_stopped_moving() {
@@ -1099,8 +1098,8 @@ mod tests {
         assert!(looks_abandoned(&meta, Some(&held(&[])), now));
     }
 
-    /// A run written before the stamp existed falls back to `updated_at`, so old
-    /// runs keep the older, weaker behavior instead of all reading as stale.
+    /// A record without the stamp falls back to `updated_at`, instead of
+    /// reading as stale.
     #[test]
     fn a_run_without_the_stamp_falls_back_to_updated_at() {
         let mut meta = live_on_disk("r1");
@@ -1246,7 +1245,7 @@ mod tests {
 
     #[test]
     fn run_meta_optional_fields_deserialize() {
-        // Simulate a meta.json without optional fields (e.g., from older version)
+        // A record without its optional fields.
         let json = serde_json::json!({
             "run_id": "r1",
             "agent_name": "a",
@@ -1272,15 +1271,14 @@ mod tests {
         assert!(meta.metadata.is_empty());
         assert!(meta.callback_url.is_none());
         assert!(meta.parent_run_id.is_none());
-        // A run written before the progress stamp existed has no answer, which is
+        // A record without the progress stamp has no answer, which is
         // why the field is an Option: `Some(0)` would read as "last moved in 1970"
         // and invite a reconciler to declare it abandoned.
         assert!(meta.last_progress_at.is_none());
     }
 
-    /// `pid` is written by every daemon there has ever been, and is always 0 in
-    /// the shared world. A file that omits it entirely must still load, so the
-    /// field can be dropped in a future major without stranding old runs.
+    /// `pid` is always 0 in the shared world. A record that omits it entirely
+    /// must still load, so the field can be dropped without stranding a run.
     #[test]
     fn run_meta_without_a_pid_still_loads() {
         let json = serde_json::json!({
@@ -1818,7 +1816,7 @@ mod tests {
             assert_eq!(listed.len(), 2);
             assert_eq!(listed[0].run_id, "cached-run-2", "newest first");
 
-            // A run dir with a garbled meta.json is skipped, not fatal - and
+            // A run dir with a garbled run file is skipped, not fatal - and
             // skipped cheaply on every later tick (the negative result is
             // cached until the file changes).
             std::fs::create_dir_all(run_dir("garbled-run")).unwrap();
@@ -2934,7 +2932,7 @@ mod tests {
         });
     }
 
-    /// A child whose `meta.json` will not parse is skipped by `list_runs`, so
+    /// A child whose run file will not parse is skipped by `list_runs`, so
     /// the parent-scan cannot see it. The parent's own `children` list can, and
     /// that is the half that keeps a corrupt child from being left behind.
     #[test]

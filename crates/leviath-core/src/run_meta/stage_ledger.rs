@@ -8,8 +8,8 @@
 //! a number, exactness only ever decays, and a stage entered twice is two stays
 //! rather than one sum.
 //!
-//! Written to `stages.json` beside `meta.json`, rewritten whole on every persist
-//! tick, and served verbatim by `GET /api/agents/{id}/stages`.
+//! Read from the run's state in its run file, and served verbatim by
+//! `GET /api/runs/{id}/stages`.
 
 use serde::{Deserialize, Serialize};
 
@@ -89,9 +89,9 @@ pub struct StageCall {
 
 /// How many visits one [`StageRecord`] keeps in detail.
 ///
-/// `stages.json` is rewritten whole on every persist tick, so an unbounded list
-/// is a file that grows for as long as a looping run does and is re-serialized
-/// every time. A run that enters one stage more often than this has stopped
+/// The ledger is part of the run's state, which every checkpoint serializes
+/// whole, so an unbounded list grows for as long as a looping run does and is
+/// re-serialized every time. A run that enters one stage more often than this has stopped
 /// being a graph anyone reads node by node, and the accumulated per-stage
 /// figures are the ones worth having there - which [`StageRecord`] keeps either
 /// way.
@@ -755,7 +755,7 @@ mod tests {
     }
 
     /// Past the cap the stage's own figures stay exact and the list stops
-    /// growing, because `stages.json` is rewritten whole on every persist tick.
+    /// growing, because the ledger is serialized whole with the run's state.
     /// `visit_count` keeps counting, which is the only signal that the split a
     /// reader is looking at is partial.
     #[test]
@@ -821,8 +821,8 @@ mod tests {
         assert_eq!(left.visits[0].left_at, Some(140));
     }
 
-    /// The whole record survives `stages.json`, visits included, and a file
-    /// written before the cost fields existed still parses - as unknown-shaped
+    /// The whole record survives a JSON round trip, visits included, and a
+    /// record without the cost fields still parses, as unknown-shaped
     /// defaults, not as an error.
     #[test]
     fn a_stage_record_with_visits_survives_the_file_it_lives_in() {

@@ -168,7 +168,7 @@ pub(crate) struct Reply<'a> {
     pub(crate) sink: Option<&'a crate::context_setup::PartSink<'a>>,
 }
 
-/// [`apply_tool_results`] for a reply that produced mime beside its tool
+/// Land a batch's results for a reply that produced mime beside its tool
 /// calls: the parts ride the assistant turn ahead of the tool results.
 pub(crate) fn apply_tool_results_with_parts(
     window: &mut ContextWindow,
@@ -230,7 +230,7 @@ pub(crate) fn apply_tool_results_with_parts(
 /// Land one tool result: cap it, route it, and leave the pointer that says where
 /// it went.
 ///
-/// Split out of [`apply_tool_results`] because a fan-out started from a tool call
+/// Split out of the batch's own landing because a fan-out started from a tool call
 /// parks its parent and delivers its result long after the rest of the batch has
 /// landed. That result has to be stored exactly as any other - same caps, same
 /// routing, same pointer - and a second copy of this logic would not have stayed

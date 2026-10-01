@@ -2,9 +2,9 @@
 //! timeline derived from them.
 //!
 //! The `,`/`.` history keys would otherwise re-read and re-replay the entire
-//! `run.lvr` archive on every keypress; the stage explorer needs the same
-//! data plus real visit counts (stages.json holds one record per stage,
-//! rewritten in place, so revisits are invisible there). This module loads
+//! run file on every keypress; the stage explorer needs the same data plus
+//! real visit counts (the stage ledger holds one record per stage, so a
+//! revisit is not a row of its own there). This module loads
 //! the archive once per run (through an injectable loader, so tests count
 //! reads), derives the visit timeline, and refreshes only when the archive
 //! has changed, checked on a tick-based TTL while something is looking at it.
@@ -39,14 +39,13 @@ pub(super) struct RunHistoryCache {
     /// when it has grown: a finished run's archive is read once.
     pub(super) stamp: Option<crate::runstate::FileStamp>,
     /// Each edge the run took, `(from, to)`, from its run file's transition
-    /// records. `None` for a run in the older layout, whose journal never
-    /// recorded one.
+    /// records. `None` when nothing recorded them.
     pub(super) transitions: Option<Vec<(String, String)>>,
 }
 
 impl RunHistoryCache {
     /// The edges the run took, in order: as its run file recorded them, or
-    /// for a run whose journal recorded none, read off its visits, where each
+    /// when none are recorded, read off its visits, where each
     /// move from one stage to the next stands for the edge between them.
     pub(super) fn taken(&self) -> Vec<(String, String)> {
         match &self.transitions {
@@ -173,7 +172,7 @@ mod tests {
             point("plan", 2, 20),
             point("implement", 1, 30),
             point("review", 1, 40),
-            point("implement", 1, 50), // the revisit stages.json cannot show
+            point("implement", 1, 50), // the revisit the stage ledger has no row for
             point("implement", 2, 60),
         ];
         let visits = derive_visits(&points);

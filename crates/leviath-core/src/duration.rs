@@ -55,7 +55,7 @@ pub fn precise(secs: u64) -> String {
 /// a machine whose clock can be corrected, and a run whose `started_at` lands
 /// after `now` should read as brand new rather than as `u64::MAX` seconds old.
 /// The saturating subtraction *is* about arithmetic: `from` is read from a
-/// `meta.json` on disk, and a corrupted or hand-edited `i64::MIN` there would
+/// run on disk, and a corrupted or hand-edited `i64::MIN` there would
 /// otherwise overflow before the clamp could apply.
 pub fn between(from: i64, to: i64) -> u64 {
     to.saturating_sub(from).max(0) as u64

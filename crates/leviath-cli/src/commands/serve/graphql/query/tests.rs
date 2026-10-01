@@ -1736,8 +1736,8 @@ async fn a_tool_scope_refuses_an_unsafe_agent_name() {
 #[tokio::test]
 async fn a_run_carries_the_answer_it_submitted() {
     crate::runstate::with_isolated_runs_dir_async("graphql-final-output", |_d| async move {
-        // The descriptor in `meta.json` says an answer exists; the bytes live
-        // in the sidecar beside it, which is how the daemon stores it.
+        // The descriptor in the run's record says an answer exists; the bytes
+        // live in the sidecar beside the run file, which is how the daemon stores it.
         let mut meta = meta_at("coder-1788924523-out000", 100);
         meta.final_output = Some(leviath_core::FinalOutputDescriptor {
             format: Some("markdown".to_string()),

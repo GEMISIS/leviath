@@ -1357,9 +1357,10 @@ request does not stay open for it. Watch `/ws`, where each step change arrives a
 ```
 
 `step` is `binary`, `agents`, `keys` or `migrations`, always in that order, and `status` is one
-of `running`, `done`, `skipped`, `advised` or `failed`. The `keys` step respells blueprint keys
-that changed name, in the blueprints you wrote rather than the bundled ones. The last frame is `update_finished`, carrying
-the whole record so a client that connected mid-run needs no follow-up request. Both frames are
+of `running`, `done`, `skipped`, `advised` or `failed`. The `keys` step always skips: an
+`agent.toml` refuses a key it does not know, so a blueprint has no old spellings to rewrite. It
+stays in the list so a client sees the same four steps. The last frame is `update_finished`,
+carrying the whole record so a client that connected mid-run needs no follow-up request. Both frames are
 about the machine rather than a run, so `/ws` receives them and a per-run subscription does not.
 
 `GET /api/update/jobs/{id}` answers that same record, for a client that would rather poll than

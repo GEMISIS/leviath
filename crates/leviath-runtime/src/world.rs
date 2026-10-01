@@ -615,7 +615,7 @@ impl PipelineWorld {
                 // collect system, so a marker set anywhere on this tick counts;
                 // after the interaction reflection, so an agent that just parked
                 // on a prompt is already wearing its marker and is exempt; and
-                // before persistence, so the failure reaches meta.json on the
+                // before persistence, so the failure reaches the run file on the
                 // same tick rather than waiting for the next one.
                 fail_wedged_runs,
                 dispatch_persistence,
@@ -812,8 +812,8 @@ impl PipelineWorld {
     /// snapshots still queued in the channel. This method closes that gap: it
     /// signals shutdown, drives one last fixed point so any state that settled
     /// after the loop parked is dispatched to the lane, then **closes the lane and
-    /// awaits the worker** so all queued writes (`meta.json` / `context.json` /
-    /// `run.lvr`) land before it returns.
+    /// awaits the worker** so all queued writes (the run file, the
+    /// `final_output` sidecar and the stage logs) land before it returns.
     ///
     /// Call it after the serve loop has returned (the tokio runtime must still be
     /// alive for the worker to be scheduled). Idempotent: a second call is a no-op

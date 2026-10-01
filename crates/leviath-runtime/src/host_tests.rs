@@ -2988,7 +2988,7 @@ fn status_str_covers_all_variants() {
 
 /// The `Completed` event carries the answer, read off the live entity rather
 /// than off disk: the event fires the moment the run goes terminal, and the
-/// persist tick that writes `meta.json` has not necessarily run yet. A
+/// persist tick that writes the run file has not necessarily run yet. A
 /// subscriber that had to poll for the file would see the completion first
 /// and the answer some time later, or never.
 #[tokio::test]
@@ -4167,7 +4167,7 @@ async fn wait_reason_is_none_unless_the_agent_is_waiting() {
 }
 
 /// A run parked until the machine is fixed explains itself to `lev ps` too,
-/// not only to `meta.json`.
+/// not only to the run's record.
 ///
 /// It is `Paused` rather than `Waiting`, which is the point: nothing is
 /// holding a prompt open for it, so the listing has to treat paused as parked
@@ -4594,8 +4594,8 @@ async fn list_reports_a_finished_run_that_produced_nothing() {
     assert!(!ask(&mut host, |reply| ControlOp::List { reply }).await.runs[0].empty_output);
 }
 
-/// A run whose whole deliverable is its answer modified no files, and used
-/// to read `complete (no output)` in `lev ps` while `meta.json` said
+/// A run whose whole deliverable is its answer modified no files, and must not
+/// read `complete (no output)` in `lev ps` while the run's record says
 /// otherwise - the two surfaces disagreeing about the same run, which one
 /// shared `is_empty_output` exists to prevent.
 #[tokio::test]

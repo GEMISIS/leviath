@@ -458,26 +458,23 @@ impl Dashboard {
 
         // Bottom-left file path hint
         let file_path_hint = {
-            // The stage file each view reads; the Final view reads none, and
-            // the Output view's fallback to the run's answer reads a run file
-            // instead of its stage's.
-            let stage_file = match self.stage_content_mode {
-                StageContentMode::Output => Some("output.log"),
-                StageContentMode::Logs => Some("logs.log"),
-                StageContentMode::Context => Some(leviath_core::files::CONTEXT_FILE),
-                StageContentMode::FinalOutput => None,
+            // The file each view reads: a stage's log, the run's file for
+            // its window, or the run's answer for the Final view and the
+            // Output view's fallback to it.
+            let run_dir = runstate::run_dir(&agent.id);
+            let path = match (self.stage_content_mode, showing_final_output) {
+                (_, true) | (StageContentMode::FinalOutput, _) => {
+                    runstate::final_output_path(&run_dir)
+                }
+                (StageContentMode::Output, false) => {
+                    runstate::stage_dir(&agent.id, self.selected_stage).join("output.log")
+                }
+                (StageContentMode::Logs, false) => {
+                    runstate::stage_dir(&agent.id, self.selected_stage).join("logs.log")
+                }
+                (StageContentMode::Context, false) => runstate::run_file::path_in(&run_dir),
             };
-            let raw = match stage_file.filter(|_| !showing_final_output) {
-                Some(file_name) => runstate::stage_dir(&agent.id, self.selected_stage)
-                    .join(file_name)
-                    .to_string_lossy()
-                    .to_string(),
-                // The run's final answer lives in the `final_output` sidecar
-                // beside `meta.json`, not in any stage's directory.
-                None => runstate::final_output_path(&runstate::run_dir(&agent.id))
-                    .to_string_lossy()
-                    .to_string(),
-            };
+            let raw = path.to_string_lossy().to_string();
             // Display-only `~` abbreviation of the OS home directory;
             // deliberately NOT the LEVIATH_HOME-aware resolver (see the
             // header's workdir line for the same choice).
@@ -720,7 +717,7 @@ impl Dashboard {
                 ),
             ]));
 
-            // Detect old runs
+            // A window that counted tokens but kept no entry content.
             let has_tokens = snap.regions.iter().any(|r| r.current_tokens > 0);
             let has_entries = snap.regions.iter().any(|r| !r.entries.is_empty());
             if has_tokens && !has_entries {
@@ -1384,7 +1381,7 @@ mod tests {
     }
 
     /// Seed a run whose answer arrived through `submit_output`: the
-    /// `final_output` descriptor in `meta.json` plus the sidecar beside it,
+    /// `final_output` descriptor in the run's record plus the sidecar file,
     /// submitted by `stage`, with no `output.log` anywhere. Returns an agent
     /// pointed at that run.
     fn setup_run_state_agent_with_final_output(

@@ -6433,7 +6433,7 @@
                     ]
                   },
                   "name": {
-                    "description": "The name its manifest gives it (`[agent] name`).",
+                    "description": "The name its manifest gives it (`[blueprint] name`).",
                     "type": "string"
                   },
                   "path": {

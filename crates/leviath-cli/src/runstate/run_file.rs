@@ -62,8 +62,7 @@ pub(crate) struct RunHistory {
     /// webhook's secret, and nothing that shows a history has a use for it.
     pub(crate) points: Vec<RunPoint>,
     /// Each edge the run took, as `(from, to)`, in the order it took them.
-    /// `None` for a run directory in the older layout, whose journal never
-    /// said which edge a move followed.
+    /// `None` when nothing says which edge a move followed.
     pub(crate) transitions: Option<Vec<(String, String)>>,
 }
 

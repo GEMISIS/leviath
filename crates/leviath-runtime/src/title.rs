@@ -315,7 +315,7 @@ fn no_thinking_extra(provider: &str) -> serde_json::Value {
         // refuses `none`. `low` is in every set this route has shown us, and
         // a title that arrives beats a cheaper one that 400s. This shipped as
         // `minimal`, and every `codex/gpt-5.5` run came out untitled with the
-        // reason visible only in `meta.json`'s `title_error`.
+        // reason visible only in the run record's `title_error`.
         "codex" => serde_json::json!({
             "reasoning": { "effort": "low" },
             "text": { "verbosity": "low" }

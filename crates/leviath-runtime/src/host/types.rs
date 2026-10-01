@@ -33,7 +33,7 @@ use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 /// A run id and a status word are not enough: `waiting` on its own says nothing
 /// about whether a person is needed, and gives no way to tell a run that moved a
 /// second ago from one stopped for an hour. Everything here is read straight off
-/// the live world, so it is the daemon's own view, not a re-read of `meta.json`.
+/// the live world, so it is the daemon's own view, not a re-read of the run file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunListEntry {
     /// The run id (`lev ps`'s first column, and what `lev kill` takes).
@@ -65,7 +65,7 @@ pub struct RunListEntry {
     pub tool_calls: usize,
     /// Unix seconds when this run last actually moved (see
     /// [`PersistWatermark`](crate::pipeline::PersistWatermark)). Distinct from
-    /// `meta.json`'s `updated_at`, which also advances on a heartbeat and so
+    /// the run record's `updated_at`, which also advances on a heartbeat and so
     /// cannot be used to tell a working run from a wedged one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<i64>,
@@ -96,7 +96,7 @@ pub struct RunListEntry {
     /// Whether this run finished having modified nothing, when its blueprint
     /// gave it a way to. Only ever true for a run that has stopped.
     ///
-    /// Carried on the row rather than left in `meta.json`, which is read back
+    /// Carried on the row rather than left in the run file, which is read back
     /// only on restart: a run that finished with no work to show for it
     /// otherwise looks exactly like one that succeeded. Defaulted for the same
     /// reason as `unattended` - an older daemon simply omits it.
@@ -269,9 +269,10 @@ pub(crate) type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<Age
 ///
 /// This is what makes a cancel unconditional. [`Reloader`] declines whenever a
 /// run can't be rebuilt - its blueprint was moved or deleted, its metadata is
-/// unreadable, it died mid-spawn before any agent existed - and before this seam
-/// a cancel in that state replied `false` and wrote nothing, so `meta.json` kept
-/// claiming `running`/`starting` forever and the run could never be got rid of.
+/// unreadable, it died mid-spawn before any agent existed - and without this
+/// seam a cancel in that state would reply `false` and write nothing, so the
+/// run file would claim `running`/`starting` forever and the run could never be
+/// got rid of.
 /// The runtime has no notion of the on-disk layout, so the daemon supplies the
 /// writer. Installed with [`super::WorldHost::set_force_terminator`]; without one, a
 /// cancel that misses in the world simply misses (the prior behavior).

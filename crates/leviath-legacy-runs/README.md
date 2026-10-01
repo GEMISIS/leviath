@@ -24,5 +24,10 @@ environment fingerprint is always left empty: an old run never recorded what
 it relied on from the machine, so a resume treats it as unknown and does not
 compare it.
 
+It also holds the only reader left for the old `agent.leviath` blueprint
+format. `migrate` turns one into an `agent.toml` describing the same run,
+which is what `lev blueprint migrate` writes. Nothing else reads an
+`agent.leviath` any more.
+
 The CLI is the only crate that depends on this one. Nothing else should.
 It is never published.

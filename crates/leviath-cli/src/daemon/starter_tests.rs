@@ -1150,7 +1150,7 @@ budget = 10000
     );
     assert!(cli.take(entity).expect("tool state registered").unattended);
     // Recorded on the agent, so the sub-agent and fan-out spawners can pass
-    // it down and `meta.json` can carry it across a restart.
+    // it down and the run file can carry it across a restart.
     assert!(
         world
             .world()

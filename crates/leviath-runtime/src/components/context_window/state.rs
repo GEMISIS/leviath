@@ -1,6 +1,6 @@
 //! The window as a run's state records it, and back.
 //!
-//! [`ContextState`] keeps what changes as a run works: each region's entries,
+//! [`ContextState`](crate::state::ContextState) keeps what changes as a run works: each region's entries,
 //! budget, token count and taint, the hidden list and the window's budget. What
 //! a region *is* (its kind, what it accepts, how it is cached) comes from the
 //! run's graph, so rebuilding a window takes a `shape` for each region by name.

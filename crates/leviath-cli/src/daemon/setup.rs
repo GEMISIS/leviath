@@ -515,7 +515,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     // state to `Cancelled`. The reloader above declines whenever a run can't be
     // rebuilt - deleted blueprint, unreadable metadata, died mid-spawn - and
     // without this a cancel in that state writes nothing at all, leaving
-    // `meta.json` claiming the run is live with nothing able to clear it.
+    // the run file claiming the run is live with nothing able to clear it.
     let terminate_runs = parts.runs_dir.clone();
     host.set_force_terminator(Box::new(move |run_id| {
         crate::runstate::force_cancel_in(&terminate_runs.join(run_id), (parts.now_secs)())

@@ -43,7 +43,7 @@ fn run_in(id: &str, status: RunStatus) -> RunMeta {
     meta
 }
 
-/// A run directory whose `meta.json` will not parse.
+/// A run directory whose run file will not read.
 ///
 /// Such a run is invisible to every listing and cannot be shown to be
 /// finished, which is the state the delete's `force` exists for.

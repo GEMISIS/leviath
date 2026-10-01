@@ -1,5 +1,5 @@
-//! Agent-state persistence: turning a live ECS agent into the on-disk snapshot
-//! the dashboard/API read (`meta.json` + `context.json` under the run directory).
+//! Agent-state persistence: turning a live ECS agent into the run record and
+//! context snapshot the listings, the dashboard and the API show.
 //!
 //! This module holds the **pure** serialization core - components that carry an
 //! agent's run identity and running token totals, plus functions that build the
@@ -66,9 +66,9 @@ pub struct RunMetadata {
     ///
     /// Recorded on the agent so anything holding the world can ask. Two things
     /// need it: the sub-agent and fan-out spawners, which pass it down so a
-    /// child of an unattended run is unattended too, and `meta.json`, so a
-    /// daemon restart resumes the run the way it was launched. Both used to
-    /// hardcode "attended", which stranded unattended runs on prompts no one was
+    /// child of an unattended run is unattended too, and the run's record, so a
+    /// daemon restart resumes the run the way it was launched. Hardcoding
+    /// "attended" in either would strand unattended runs on prompts no one is
     /// there to answer.
     pub unattended: bool,
     /// The named yolo profile the run was launched under (`--yolo=<name>`),
@@ -83,21 +83,21 @@ pub struct RunMetadata {
     /// [`ReadPathGrantCounts`]: leviath_core::run_meta::ReadPathGrantCounts
     pub read_paths: Option<leviath_core::run_meta::ReadPathGrantCounts>,
     /// The output shape the caller asked for at launch, if they overrode the
-    /// blueprint's. Held so it reaches `meta.json` and survives a restart; the
+    /// blueprint's. Held so it reaches the run's record and survives a restart; the
     /// resolved per-stage shape lives on `StageInference`/`StageSetup`.
     pub output_request: Option<leviath_core::output::OutputSpec>,
     /// The `--model` the caller gave at launch, verbatim, if any. Held so it
-    /// reaches `meta.json` and a restart replays the same override rather
+    /// reaches the run's record and a restart replays the same override rather
     /// than pinning the run to whatever `model` resolved to.
     pub model_override: Option<String>,
 }
 
 /// The run's working stopwatch, advanced by the persistence system on every
-/// change of state and snapshotted into `meta.json`.
+/// change of state and recorded with the run's state in its run file.
 ///
 /// A component rather than a field on [`RunMetadata`] because the persistence
 /// system is the only thing that moves it, and a component is what that system
-/// can take a `&mut` to. It is restored from `meta.json` on reload, so pausing a
+/// can take a `&mut` to. It is restored from the run file on reload, so pausing a
 /// run - which unloads it entirely - does not restart its accounting at zero.
 #[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct RunClock(pub leviath_core::run_meta::ActiveClock);
@@ -129,7 +129,7 @@ pub struct TokenTotals {
     pub cost: leviath_providers::CostTotals,
 }
 
-/// Run-scoped productivity flags, mirrored into `meta.json` so an empty run can
+/// Run-scoped productivity flags, mirrored into the run's record so an empty run can
 /// be recognized (and explained) from disk. Unlike `StageProgress`, this is
 /// never reset on a stage transition - it describes the whole run.
 ///
@@ -138,7 +138,7 @@ pub struct TokenTotals {
 pub struct RunOutcomeFlags(pub leviath_core::run_meta::RunFlags);
 
 /// The final output an agent has submitted, held on the agent entity until the
-/// persistence lane copies it into `meta.json`.
+/// persistence lane records it with the run.
 ///
 /// Absent until `submit_output` is called, and replaced (not appended to) by a
 /// later call: an agent that submits twice meant the second one. The stage name
@@ -181,7 +181,7 @@ impl TokenTotals {
 /// offered a way to modify something, or the question does not apply to it (see
 /// [`no_output_tools`](leviath_core::run_meta::RunFlags::no_output_tools)).
 ///
-/// One definition, called by both `meta.json` and the run listing, so what an
+/// One definition, called by both the run's record and the live listing, so what an
 /// operator reads in `lev ps` and what a harness reads off disk cannot drift
 /// apart.
 pub(crate) fn is_empty_output(
@@ -244,9 +244,9 @@ pub(crate) fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
 ///
 /// One word per kind, and it is the word the blueprint's own TOML uses, so a
 /// console reading a context snapshot and a console reading a blueprint agree
-/// about what the same region is. Snapshots written by an older build carry a
-/// third spelling for two of them - `sliding` for a `sliding_window`, `history`
-/// for a `compact_history` - so a reader that renders kinds should accept both.
+/// about what the same region is. A reader that renders kinds should also
+/// accept `sliding` for a `sliding_window` and `history` for a
+/// `compact_history`.
 pub fn region_kind_str(kind: &RegionKind) -> &'static str {
     match kind {
         RegionKind::Pinned => "pinned",
@@ -261,7 +261,7 @@ pub fn region_kind_str(kind: &RegionKind) -> &'static str {
     }
 }
 
-/// Build the full context snapshot (`context.json`) from a window. Pure over the
+/// Build the full context snapshot from a window. Pure over the
 /// window - no engine/entity. (Ported from the CLI's `build_context_snapshot`.)
 pub(crate) fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> ContextSnapshot {
     let regions = window
@@ -304,7 +304,7 @@ pub(crate) fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -
     }
 }
 
-/// The agent components `meta.json` is built from.
+/// The agent components the run's record is built from.
 ///
 /// Held apart from [`RunPosition`] because these are read off the entity while
 /// the position is stamped onto it: one is what the agent *is*, the other is
@@ -325,7 +325,7 @@ pub(crate) struct RunMetaSources<'a> {
     ///
     /// Taken already rolled up rather than as the ledger itself, because the
     /// ledger is held mutably where this is built and the roll-up is the only
-    /// part of it `meta.json` carries.
+    /// part of it the run's record carries.
     pub stage_models: Vec<leviath_core::run_meta::StageModelUse>,
     /// The parking markers the agent is carrying, read off the entity by the
     /// caller, which is where they are queryable.
@@ -354,7 +354,7 @@ pub(crate) struct RunPosition {
     pub active: Option<leviath_core::run_meta::ActiveClock>,
 }
 
-/// Build the run metadata (`meta.json`) from an agent's live components, stamping
+/// Build the run's record ([`RunMeta`]) from an agent's live components, stamping
 /// `updated_at` with `now_secs`. `stage_index` is the agent's current stage
 /// position within its blueprint.
 ///
@@ -711,7 +711,7 @@ mod tests {
         );
     }
 
-    /// The reason reaches `meta.json`, which is the file every client reads.
+    /// The reason reaches the run's record, which is what every client reads.
     #[test]
     fn build_run_meta_records_why_a_run_is_parked() {
         let meta = build_run_meta(
@@ -802,8 +802,8 @@ mod tests {
         assert!(!meta.yolo);
     }
 
-    /// The roll-up of what the run's stages ran on reaches `meta.json`, which
-    /// is the file a listing has already parsed when it filters by model.
+    /// The roll-up of what the run's stages ran on reaches the run's record,
+    /// which is what a listing has already read when it filters by model.
     #[test]
     fn build_run_meta_carries_the_stage_model_rollup() {
         let used = vec![leviath_core::run_meta::StageModelUse {
@@ -832,7 +832,7 @@ mod tests {
         assert_eq!(meta.stage_models, used);
     }
 
-    /// The snapshot carries `unattended` through to `meta.json`, which is what a
+    /// The snapshot carries `unattended` through to the run's record, which is what a
     /// daemon restart reads back to resume the run the way it was launched.
     #[test]
     fn build_run_meta_records_an_unattended_run() {
@@ -996,11 +996,12 @@ mod tests {
         assert_eq!(meta.error.as_deref(), Some("boom"));
     }
 
-    /// A submitted output reaches `meta.json` and settles the emptiness verdict.
+    /// A submitted output reaches the run's record and settles the emptiness
+    /// verdict.
     ///
     /// The second half is the point: an agent whose whole deliverable is its
-    /// answer modifies no files, and before `produced_output` existed every one
-    /// of its successful runs was reported `complete (no output)`.
+    /// answer modifies no files, and without `produced_output` every one of its
+    /// successful runs would read `complete (no output)`.
     #[test]
     fn build_run_meta_carries_a_submitted_output_and_clears_the_empty_verdict() {
         let submitted = FinalOutput(leviath_core::output::FinalOutput::new(
@@ -1029,8 +1030,8 @@ mod tests {
             },
         );
         let carried = meta.final_output.expect("the submission reached meta.json");
-        // The descriptor, not the bytes: `meta.json` is parsed for every run on
-        // every listing, so the answer itself lives in a sidecar beside it.
+        // The descriptor, not the bytes: the run's record is read for every run
+        // on every listing, so the answer itself lives in a sidecar file.
         assert_eq!(
             carried.bytes,
             "Renamed two helpers and updated their callers.".len()
@@ -1112,7 +1113,7 @@ mod tests {
             100,
         ));
         w.add_region(Region::new("todos".to_string(), RegionKind::Checklist, 100));
-        // Carried onto the snapshot so every reader of context.json can explain
+        // Carried onto the snapshot so every reader of the window can explain
         // a region it is already displaying, rather than each one having to
         // find and re-parse the manifest.
         let mut described = Region::new("sources".to_string(), RegionKind::Pinned, 100);

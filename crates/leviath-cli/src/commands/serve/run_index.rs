@@ -2,7 +2,7 @@
 //!
 //! `GET /api/runs`, the tree routes and a run's children all
 //! start from "every run on disk". Reading that fresh per request means a
-//! `read_dir` and a parse of every `meta.json` to serve a page of fifty, and
+//! `read_dir` and a read of every run file to serve a page of fifty, and
 //! the reads hold a runtime worker thread while they happen. This index keeps
 //! one [`StatCache`] for the process, so a request pays a stat per run (one
 //! per second for a finished run) and parses only what changed, and it does

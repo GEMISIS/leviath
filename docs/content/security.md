@@ -155,7 +155,7 @@ $ lev validate cto
   3 stages, version 1.0.0
   WARN your config does not grant glob:~/design-docs/**: reads matching them will be refused [read-paths-not-granted]
        add to your config.toml: [agent_read_paths.cto] allow = ["glob:~/design-docs/**"]
-  NOTE declares [read_paths] (reads outside the run workdir): 2 declared, 1 granted [read-paths-declared]
+  NOTE declares read_paths (reads outside the run workdir): 2 declared, 1 granted [read-paths-declared]
        ~/.leviath/runs: granted; glob:~/design-docs/**: NOT granted
 ```
 
@@ -196,9 +196,10 @@ The rules that keep this safe:
 - **Taint rises.** When a grant is active, the read tools are classified `Private` for that
   agent, so taint tracking treats out-of-workdir content with more suspicion, not less.
 - **Seeds answer to the same fence.** A `seed` path that resolves outside the workdir is refused
-  at spawn unless a declared and granted `read_paths` entry covers it. That covers `files`,
-  `glob` and `code` seeds alike. The reasoning is the same as for `read_file`: the blueprint chose
-  that path, not you.
+  at spawn unless a declared and granted `read_paths` entry covers it. That covers `files` and
+  `glob` seeds. The reasoning is the same as for `read_file`: the blueprint chose that path, not
+  you. A `code` seed's script is part of the blueprint, read from its own directory like any
+  script it names.
   A `blueprint:`-prefixed seed reads only from the blueprint's own directory, and no grant can
   let it out, since a blueprint does not ship files outside itself.
 - Rhai script tools have their own `read_file` and it stays workdir-confined; among the tools,

@@ -137,7 +137,7 @@ fn status_cell_marks_a_run_whose_fan_out_handed_out_nothing() {
     assert_eq!(status_cell(&e), "complete (no output)");
 }
 
-/// The offline table says it too, from `meta.json`. Two formatters, and the
+/// The offline table says it too, from the run's record. Two formatters, and the
 /// live one is the one a person watching a run actually reads - so a fix to one
 /// that misses the other is a fix nobody sees.
 #[test]
@@ -148,7 +148,7 @@ fn offline_status_cell_marks_a_broken_script() {
     assert_eq!(offline_status_cell(run), "complete (broken script)");
 }
 
-/// The offline table says the same thing, from `meta.json` rather than the live
+/// The offline table says the same thing, from the run's record rather than the live
 /// listing - the two surfaces answering differently is the drift this pair of
 /// cells exists to prevent.
 #[test]

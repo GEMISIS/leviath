@@ -108,8 +108,8 @@ async fn a_run_file_whose_state_does_not_decode_is_not_listed() {
 }
 
 /// The context, the ledger and the history every view reads come off the run
-/// file, plain and through the pollers' caches, and a run file is never read
-/// for an older run's files beside it.
+/// file, plain and through the pollers' caches, and never off a stray file
+/// beside it.
 #[tokio::test]
 async fn the_views_of_a_run_read_its_run_file() {
     use super::run_file::tests::{say, step, take};
@@ -118,7 +118,7 @@ async fn the_views_of_a_run_read_its_run_file() {
         let run_id = dir.file_name().unwrap().to_string_lossy().into_owned();
         step(&dir, 10, |s| say(s, "first words"));
         step(&dir, 20, |s| take(s, "analyze", "implement", "next"));
-        // A stale file of the older layout beside it is never what is read.
+        // A stray context file beside it is never what is read.
         std::fs::write(dir.join(leviath_core::files::CONTEXT_FILE), "{}").unwrap();
 
         let window = read_context_snapshot(&run_id).expect("a window");

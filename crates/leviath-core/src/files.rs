@@ -5,28 +5,33 @@
 //! read it back. A name that lives in one constant cannot be misspelled in one
 //! reader and quietly never match again.
 //!
-//! A run directory in the older many-file layout holds `meta.json`,
-//! `context.json`, `stages.json`, `fanout.json`, `interactions.json` and an
-//! LVR1 journal at `run.lvr`; those names stay here for the readers and the
-//! converter that still open such a directory. Nothing writes them for a new
-//! run.
+//! The older many-file layout named its files `meta.json`, `context.json`,
+//! `stages.json`, `fanout.json`, `interactions.json` and an LVR1 journal at
+//! `run.lvr`. Those names stay here for the converter that reads such a
+//! directory and the recovery scan that finds one. Nothing writes them.
 
-/// A run's metadata in the older layout: status, timings, totals.
+/// What the older layout named a run's metadata (status, timings, totals),
+/// which the converter reads. `lev rage` also files a run's record under this
+/// name in its bundle.
 pub const META_FILE: &str = "meta.json";
 
-/// A run's latest context-window snapshot in the older layout.
+/// What the older layout named a run's latest context-window snapshot, which
+/// the converter reads.
 pub const CONTEXT_FILE: &str = "context.json";
 
-/// The per-stage ledger in the older layout.
+/// What the older layout named the per-stage ledger, which the converter
+/// reads.
 pub const STAGES_FILE: &str = "stages.json";
 
-/// The fan-out record in the older layout.
+/// What the older layout named the fan-out record, which the converter reads.
 pub const FANOUT_FILE: &str = "fanout.json";
 
-/// The interactions a paused run waited on, in the older layout.
+/// What the older layout named the interactions a paused run waited on, which
+/// the converter reads.
 pub const INTERACTIONS_FILE: &str = "interactions.json";
 
-/// Where the older layout kept its LVR1 journal. The same name as
+/// What the older layout named its LVR1 journal, which the converter reads.
+/// The same name as
 /// [`RUN_FILE`]: the two are told apart by the magic their first bytes carry.
 pub const ARCHIVE_FILE: &str = "run.lvr";
 
@@ -38,18 +43,8 @@ pub const BLUEPRINT_MANIFEST: &str = "agent.toml";
 /// is here.
 pub const RUN_FILE: &str = "run.lvr";
 
-/// The blueprint a run actually executed, copied into the run directory at
-/// spawn.
-///
-/// A run used to name the installed file it was started from and nothing
-/// more, so reading "what did this run execute" meant reading a file that may
-/// have been edited or deleted since, and a daemon restart resumed a run on
-/// whatever the file said by then. This copy is the run's own: immutable with
-/// it, and identified by the digest recorded beside it in `meta.json`.
-///
-/// The manifest only. Scripts it names (hooks, validators, region scripts) are
-/// still read from the installed agent directory, so editing one of those does
-/// reach a running run.
+/// What the older layout named the copy of the blueprint a run executed,
+/// which the converter reads. The run file holds what a run executed.
 pub const BLUEPRINT_SNAPSHOT_FILE: &str = "blueprint.leviath";
 
 /// The directory inside a run holding stored mime parts, one file per

@@ -652,8 +652,8 @@ names something undeclared, and a setting out of range.
 Beyond the graph, `lev validate` reports the fields whose absence quietly changes what a run does.
 That covers a stage with no model, a tool name that matches nothing, and an autonomous stage
 offering a tool that waits for a person. Errors exit non-zero, warnings do not, notes never can. The
-[CLI reference](/docs/cli#lev-validate-path) lists every check. The daemon logs the same findings
-when a run spawns, so a blueprint nobody validated still says what is wrong with it.
+[CLI reference](/docs/cli#lev-validate-path) lists every check. The dashboard's blueprint editor
+reports the same findings as you edit.
 
 `lev run --check` goes one step further. It takes the blueprint together with this run's inputs
 and this machine's providers, and reports which model each stage would get, or every problem it

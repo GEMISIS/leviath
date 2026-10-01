@@ -8,7 +8,7 @@
 //! readable per-stage logs.
 //!
 //! Every error is logged and counted in
-//! [`PersistLaneStats`](crate::persist_stats::PersistLaneStats), and the lane
+//! [`crate::persist_stats::PersistLaneStats`], and the lane
 //! itself never blocks or fails on one: a write that cannot be made is reported
 //! and the lane moves to the next message. A lost **run-file step** also names
 //! its run there, and the world fails that run on its next tick, because a run

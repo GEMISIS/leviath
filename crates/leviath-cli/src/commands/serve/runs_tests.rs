@@ -1179,7 +1179,7 @@ async fn a_journal_match_in_a_context_record_still_explains_itself() {
     .await;
 }
 
-/// The journal stores `RunMeta` whole, secret included, so the highlighter must
+/// The run file stores the run's record whole, secret included, so the highlighter must
 /// never cut a snippet from those bytes. Phase one scans the raw file and so
 /// *can* match there - the run may come back - but nothing it returns may echo
 /// the secret.
@@ -1424,8 +1424,8 @@ async fn deep_sources_stop_once_the_highlight_budget_is_full() {
             meta.metadata.insert(format!("k{i}"), "aaa".to_string());
         }
         create_run(&meta).unwrap();
-        // Deliberately no context.json, no stages and no journal, so each deep
-        // source also exercises its "nothing here" path.
+        // Deliberately nothing but the run's record and its stage ledger, so
+        // each deep source also exercises its "nothing here" path.
         crate::runstate::write_stages_index(
             "run-full",
             &[leviath_core::run_meta::StageRecord {

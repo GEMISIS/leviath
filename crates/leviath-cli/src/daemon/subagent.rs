@@ -26,7 +26,7 @@ use leviath_runtime::host::{SubAgentOp, SubAgentReport};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use args::{SpawnArgs, refusal};
+use args::{SpawnCall, refusal};
 
 /// Per-agent state needed to service the sub-agent tools: a sender into the
 /// host's [`SubAgentOp`] channel plus the spawning agent's identity and the
@@ -209,7 +209,7 @@ fn child_request(
     leviath_runtime::spec::issues::SpawnIssues,
 > {
     use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpecPath};
-    let args = SpawnArgs::parse(args)?;
+    let args = SpawnCall::parse(args)?;
     let attachments = parts_for_child(h, &args.parts, limit)
         .map_err(|e| SpawnIssue::new(SpecPath::root().field("parts"), IssueCode::Invalid, e))?;
     let wait = args.wait;

@@ -845,7 +845,7 @@ async fn wait_for_run(
                 status.label()
             }
             // The daemon reaps a finished run, so a run that was live a moment
-            // ago and is now unknown has ended - and its meta.json says how.
+            // ago and is now unknown has ended - and its run file says how.
             Ok(ControlResponse::Status { status: None }) => return reaped(run_id),
             Ok(other) => {
                 return DaemonOutcome::Failed(format!("unexpected daemon response: {other:?}"));

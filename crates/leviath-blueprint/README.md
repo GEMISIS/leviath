@@ -6,9 +6,12 @@ Blueprints for Leviath. A blueprint is a named run graph kept in an
 request carries. A caller changes a blueprint's run only through the inputs
 its graph declares.
 
-This crate reads and checks those files, turns a blueprint reference and its
-inputs into a spawn request, and converts the older `agent.leviath` format
-with `migrate`.
+This crate reads and checks those files, finds an installed
+blueprint by name, turns a blueprint reference and its inputs into a spawn
+request, and defines the findings a blueprint lint reports. It reads only
+`agent.toml`. `lev blueprint migrate` converts a blueprint written in the
+older `agent.leviath` format, using a reader that lives in the CLI's
+`leviath-legacy-runs` crate.
 
 Part of [Leviath](https://github.com/GEMISIS/leviath), a structured
 agent runtime for LLMs. Most applications should depend on the

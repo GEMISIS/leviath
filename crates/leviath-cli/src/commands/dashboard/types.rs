@@ -344,29 +344,28 @@ pub(crate) struct DashboardAgent {
     /// Shown because the run does not otherwise look any different: a broken
     /// output validator is skipped rather than fatal, so the run completes,
     /// reports success, and the only trace is a line in the daemon log. Empty
-    /// on a healthy run and on one written before the field existed.
+    /// on a healthy run.
     pub broken_scripts: Vec<String>,
     /// The question a waiting run is asking, in one line, for the list row.
     pub waiting_prompt: Option<String>,
-    /// Why a waiting run is parked, when `meta.json` says.
+    /// Why a waiting run is parked, when the run's record says.
     ///
     /// WAITING on its own reads as "go and answer it", which is wrong for a
     /// parent whose fan-out workers are still churning. `None` on a run that
-    /// is not parked, and on one written by a build from before the field
-    /// existed, which is why the row falls back to the bare status rather
-    /// than assuming.
+    /// is not parked, and on one whose record does not say, which is why the
+    /// row falls back to the bare status rather than assuming.
     pub wait_reason: Option<leviath_core::run_meta::WaitReason>,
     /// Full structured interaction request (populated for WaitingInput agents)
     pub pending_request: Option<interaction::InteractionRequest>,
     /// The request_id we most recently submitted a response for, used to suppress
     /// re-showing the same prompt before the worker has consumed the response.
     pub last_answered_request_id: Option<String>,
-    /// Live context window snapshot from context.json (background workers only)
+    /// Live context window snapshot from the run file (background workers only)
     /// Shared, not owned: the live snapshot comes out of the sync tick's
     /// stat-gated cache, and cloning a full context window per tick is the
     /// churn that cache exists to remove.
     pub context_snapshot: Option<std::sync::Arc<runstate::ContextSnapshot>>,
-    /// Per-stage records from stages.json, shared with the loader's cache.
+    /// Per-stage records from the run's stage ledger, shared with the loader's cache.
     pub stages: std::sync::Arc<Vec<StageRecord>>,
     /// Working directory the agent ran in
     pub workdir: String,

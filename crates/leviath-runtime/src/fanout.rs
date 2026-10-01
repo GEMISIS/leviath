@@ -20,8 +20,8 @@
 //!   which is sugar for granting the same tool: its report goes to the
 //!   stage's `results_region` and the stage transitions to its `merge_stage`.
 //!
-//! Because both park the same way, both survive a daemon restart through
-//! `fanout.json` (see [`FanOutState`]).
+//! Because both park the same way, both survive a daemon restart the same
+//! way (see [`FanOutState`]).
 //!
 //! # What lives elsewhere
 //!
@@ -108,8 +108,7 @@ pub enum FanOutOrigin {
     /// A fan-out stage. The report goes to the stage's `results_region` and
     /// the stage transitions to its `merge_stage`.
     ///
-    /// The default so a `fanout.json` written before the tool existed still
-    /// loads, as the only thing it could have been.
+    /// The default, so a state that does not say reads as a stage.
     #[default]
     Stage,
     /// A `fan_out` tool call from an ordinary stage. The report comes back as
@@ -145,8 +144,8 @@ pub struct FanOutWaiting {
     origin: FanOutOrigin,
 }
 
-/// The serializable form of [`FanOutWaiting`], written to `<run_dir>/fanout.json`
-/// so a parent interrupted mid-split resumes its merge after a restart. `active`
+/// The serializable form of [`FanOutWaiting`], so a parent interrupted
+/// mid-split resumes its merge after a restart. `active`
 /// carries worker **run-ids** (not entities); recovery maps them back to the
 /// reloaded worker entities.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -164,11 +163,11 @@ pub struct FanOutState {
     /// Failed worker results as `(item_id, message)`.
     pub failures: Vec<(String, String)>,
     /// The parts finished workers handed back, already in the parent's store.
-    /// `default` so a state written by an older build still loads, with none.
+    /// `default` so a state without the key loads, with none.
     #[serde(default)]
     pub parts: Vec<leviath_core::mime::Part>,
-    /// Whether the fan-out was paused. `default` so a state written by an older
-    /// build still loads, as an un-paused one.
+    /// Whether the fan-out was paused. `default` so a state without the key
+    /// loads, as an un-paused one.
     #[serde(default)]
     pub paused: bool,
     /// Which entry point started this. `default` (a stage) for the same reason.

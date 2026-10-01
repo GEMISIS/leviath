@@ -104,13 +104,18 @@ Save it as `release-notes/agent.toml` and check it:
 
 ```text
 $ lev validate release-notes
-✓ release-notes 0.1.0 is valid
-  stages: gather, write
-  inputs:
-    since: text, required
-    audience: one of "users", "developers"
-    max_items: an integer 1 to 50
+✓ Blueprint 'release-notes' is valid.
+  2 stages, version 0.1.0
+  Inputs: --since (text, required, seeds region 'brief'), --audience (one of "users", "developers"), --max_items (an integer 1 to 50)
+  Note: this agent takes no --task; give it input via --since, --audience, --max_items
+  Entry stage: 'gather'
+  - gather → write
+  - write (terminal)
 ```
+
+After that come the lint's findings, if any: a stage left without a `max_iterations`, a tool name
+that matches nothing, a seed command that runs at spawn. [`lev validate`](/docs/cli#lev-validate-path)
+lists every one.
 
 `lev add ./release-notes` installs it, and `lev run release-notes --input since=v0.6.0` runs it.
 [Starting a run](/docs/starting-a-run) covers everything a run's request can say.
@@ -120,7 +125,7 @@ a setting that is quietly ignored. Every reference to a stage, region or input i
 
 ```text
 $ lev validate release-notes
-Error: ✗ release-notes/agent.toml has 3 problem(s):
+Error: ✗ Validation failed: release-notes/agent.toml has 3 problem(s):
   graph.edges[0].to: dangling reference: no stage is named "wirte". Known: gather, write
   graph.inputs.since.binds[0].region: dangling reference: no region is named "brief". Known: brif, commits, conversation, notes
   graph.inputs.max_items.default: out of range: 99 is out of range (expected an integer 1 to 50; got the integer 99)

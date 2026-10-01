@@ -69,7 +69,7 @@ pub struct WorldHost {
     subagent_tx: UnboundedSender<SubAgentOp>,
     subagent_rx: UnboundedReceiver<SubAgentOp>,
     /// How often [`Self::serve`] re-drives the world even though nothing woke
-    /// it. See [`Self::set_redrive_interval`].
+    /// it: 30 seconds, which tests shorten.
     redrive: Duration,
     /// Consecutive re-drives that found the lanes full and nothing moved. See
     /// [`Self::observe_redrive`].
@@ -461,9 +461,10 @@ impl WorldHost {
             }
             ControlOp::Result { run_id, reply } => {
                 // Live entities only. An unloaded run's answer is on disk in
-                // `meta.json`, which is what `lev result` reads; keeping a copy
-                // of every finished run's answer in memory would defeat the
-                // point of bounding the finished buffer.
+                // its `final_output` sidecar, which is what `lev result`
+                // reads; keeping a copy of every finished run's answer in
+                // memory would defeat the point of bounding the finished
+                // buffer.
                 let output = self
                     .live_entity(&run_id)
                     .and_then(|agent| {

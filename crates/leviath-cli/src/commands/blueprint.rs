@@ -1,9 +1,8 @@
 //! `lev blueprint`: work on blueprint files.
 //!
-//! `lev blueprint migrate` converts an `agent.leviath` manifest, the format
-//! blueprints were written in before `agent.toml`, into an `agent.toml`
-//! describing exactly the same run. Validate the result with
-//! `lev validate agent.toml`. The old format is read by the
+//! `lev blueprint migrate` converts an `agent.leviath` manifest into an
+//! `agent.toml` describing exactly the same run. Validate the result with
+//! `lev validate agent.toml`. An `agent.leviath` is read by the
 //! `leviath-legacy-runs` crate, so a build without its `legacy-runs` feature
 //! refuses the command.
 
@@ -91,7 +90,7 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
-/// The name of a manifest in the old format, inside its directory.
+/// The name of an `agent.leviath` manifest, inside its directory.
 const MANIFEST_FILE: &str = "agent.leviath";
 
 /// The manifest `path` names: itself, or the `agent.leviath` in it.
@@ -123,7 +122,7 @@ fn convert(_manifest: &str) -> Result<String, Vec<String>> {
 mod tests {
     use super::*;
 
-    /// A coder-shaped manifest in the old format.
+    /// A coder-shaped `agent.leviath` manifest.
     const OLD_CODER: &str = r#"[agent]
 name = "coder"
 version = "0.0.0"

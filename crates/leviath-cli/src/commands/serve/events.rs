@@ -49,7 +49,7 @@ pub(crate) enum ServerEvent {
         /// and `cost_is_exact` on the run record is what answers it.
         complete: bool,
         /// The stage that was running when it crossed. The full per-stage
-        /// breakdown is in the run's `stages.json`.
+        /// breakdown is in the run's stage ledger.
         stage: String,
     },
 

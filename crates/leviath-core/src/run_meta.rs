@@ -2,9 +2,9 @@
 //!
 //! These are pure data (`serde`-derived structs/enums plus trivial constructors)
 //! with no filesystem or async dependencies, so they can be named by both
-//! `leviath-cli` and the `leviath-runtime` engine. All on-disk IO for
-//! these types (reading/writing `meta.json`, run directories, snapshots, etc.)
-//! lives in `leviath_cli::runstate`.
+//! `leviath-cli` and the `leviath-runtime` engine. The runtime builds them
+//! from a run's file (`leviath_runtime::runfile::summary`), and the CLI's
+//! `runstate` module reads run directories.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -49,8 +49,7 @@ pub enum RunStatus {
 
 impl RunStatus {
     /// The word this status goes on the wire as: `snake_case`, the same
-    /// spelling serde writes into `meta.json` and into every JSON body that
-    /// carries a whole run.
+    /// spelling serde writes into every JSON body that carries a whole run.
     ///
     /// Here rather than left to each caller because a status reaches a client
     /// three ways - serialized inside a run, rendered into a `status` string by
@@ -95,13 +94,13 @@ impl std::fmt::Display for RunStatus {
 /// tool-approval prompt is stopped dead until a person answers it. With the
 /// two indistinguishable, an operator reading `waiting` across a factory
 /// concludes it has stalled and starts killing healthy runs, and every client
-/// that reads `meta.json` is left guessing the same way.
+/// that reads the run's record is left guessing the same way.
 ///
 /// Derived on demand from markers the engine already sets, by
 /// [`wait_reason_from`]; nothing tracks it separately, so it cannot fall out of
 /// sync with the status it explains. It lives here rather than in the runtime
-/// because it is both reported live over the control socket and written to
-/// `meta.json`, and one vocabulary across those two is the whole point.
+/// because it is both reported live over the control socket and kept on the
+/// run's record, and one vocabulary across those two is the whole point.
 ///
 /// Deliberately not new [`RunStatus`] variants: the status is matched
 /// exhaustively across the codebase and serialized two ways on the wire, so
@@ -394,7 +393,7 @@ pub struct RunMeta {
     /// Identifies the run everywhere, and names its directory under
     /// `~/.leviath/runs/`. Assigned at spawn and never reused.
     pub run_id: String,
-    /// The blueprint's `[agent] name`, not the file it was loaded from. Two runs
+    /// The blueprint's `[blueprint] name`, not the file it was loaded from. Two runs
     /// of the same agent from different paths share this.
     pub agent_name: String,
     /// Absolute path to the agent manifest directory
@@ -410,10 +409,10 @@ pub struct RunMeta {
     ///
     /// The set, not the assignment: an entry says the run ran on that pair and
     /// never which stage did, and one pair two stages shared appears once.
-    /// [`StageRecord::models`] is the per-stage answer, and `stages.json` is
-    /// where to read it.
+    /// [`StageRecord::models`] is the per-stage answer, and the run's stage
+    /// ledger is where to read it.
     ///
-    /// Here as well as there because a listing reads this file per run and
+    /// Here as well as there because a listing reads this record per run and
     /// nothing else, so "which runs ran on this model" is a question the
     /// listing can answer without opening a ledger for every run on the
     /// machine.
@@ -427,8 +426,8 @@ pub struct RunMeta {
     /// Always 0. There is no worker process per run: the daemon hosts every run
     /// as an entity in one shared world, so no run has a pid of its own.
     ///
-    /// Kept because it is written into every `meta.json` there has ever been,
-    /// and served from `GET /api/agents`. Do not key liveness on it. `pid == 0`
+    /// Kept because it is part of every run record, and served from
+    /// `GET /api/agents`. Do not key liveness on it. `pid == 0`
     /// is true of a run that is working, a run that has finished, and a run
     /// nothing is driving, so a sweeper that reverts on it reverts everything.
     /// Ask the daemon (`lev ps`) whether it is still hosting the run, and read
@@ -588,20 +587,20 @@ pub struct RunMeta {
     ///
     /// This is the run's answer, as distinct from `error` (why it failed) and
     /// from the stage logs (what it did along the way). The content itself is
-    /// in a sidecar file beside this one, because this file is parsed for every
-    /// run on every listing and must stay small no matter how long an answer is.
+    /// in a sidecar file beside the run file, because this record is built for
+    /// every run on every listing and must stay small no matter how long an
+    /// answer is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_output: Option<crate::output::FinalOutputDescriptor>,
 
     /// Why this run is parked, when it is. `None` on every other status, and
     /// on a run written before this field existed. Same vocabulary the live
-    /// listing reports, so `lev ps` and a client reading this file describe a
+    /// listing reports, so `lev ps` and a client reading this record describe a
     /// run the same way.
     ///
-    /// Additive on purpose: `default` means a `meta.json` from an older build
-    /// still loads, and `skip_serializing_if` means a run that is not parked
-    /// writes exactly the file it wrote before, so an older build reading a
-    /// newer run sees nothing new either.
+    /// Additive on purpose: `default` means a record without the key still
+    /// loads, and `skip_serializing_if` means a run that is not parked carries
+    /// no such key at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_on: Option<WaitReason>,
     /// The output shape this run was launched asking for, when the caller
@@ -618,7 +617,7 @@ pub struct RunMeta {
     ///
     /// Distinct from `model`, which is what the entry stage *resolved to* and
     /// is recorded whether or not anything was overridden. A daemon restart
-    /// rebuilds the run's spawn arguments from this file, and must hand back
+    /// rebuilds the run's spawn arguments from this record, and must hand back
     /// this field rather than `model`: handing back `model` pins every stage
     /// of a run launched with no `--model` to its first stage's provider and
     /// model, and loses its failover list. This field is what was actually
@@ -634,11 +633,10 @@ pub struct RunMeta {
 
     /// The SHA-256 of the manifest this run executed, in lowercase hex.
     ///
-    /// The identity of the run's blueprint snapshot
-    /// (`files::BLUEPRINT_SNAPSHOT_FILE`), so a reader can tell whether the
-    /// installed blueprint is still the one that ran. Absent for a run written
-    /// before snapshots existed, where the answer is genuinely unknown rather
-    /// than "the same".
+    /// The revision of the blueprint the run's spec names, so a reader can tell
+    /// whether the installed blueprint is still the one that ran. Absent when
+    /// the revision is unknown (a graph its caller wrote, say), which is
+    /// genuinely unknown rather than "the same".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blueprint_digest: Option<String>,
 }
@@ -658,7 +656,7 @@ pub struct ReadPathGrantCounts {
     pub granted: usize,
 }
 
-/// Post-hoc diagnosis of a run's productivity, persisted in `meta.json` so a
+/// Post-hoc diagnosis of a run's productivity, kept on the run's record so a
 /// harness (or the dashboard) can tell an empty run from a successful one
 /// without inspecting the workspace or parsing logs.
 ///
@@ -693,8 +691,8 @@ pub struct RunFlags {
     /// modifying tool is skipped, because it could never pass.
     ///
     /// Phrased negatively so the `false` that [`Default`] and `serde(default)`
-    /// produce means "was capable" - the behavior every `meta.json` written
-    /// before this field had.
+    /// produce means "was capable", which is what a record without the key
+    /// says.
     #[serde(default)]
     pub no_output_tools: bool,
     /// `web_search` calls this run made, across every stage.
@@ -794,7 +792,7 @@ pub struct RunFlags {
 }
 
 /// How many distinct modified paths [`RunFlags`] records before it stops
-/// growing (the count keeps rising). Bounds `meta.json` for a long run.
+/// growing (the count keeps rising). Bounds the run's record for a long run.
 pub const MAX_TRACKED_MODIFIED_FILES: usize = 200;
 
 impl RunFlags {
@@ -1013,9 +1011,8 @@ pub struct RegionSnapshot {
     /// `temporary`, `clearable`, `sliding_window`, `compacting`,
     /// `compact_history`, `keyed`, `checklist`, `custom`.
     ///
-    /// A snapshot written by an older build says `sliding` and `history` for
-    /// those two, and those files stay on disk, so a reader that renders this
-    /// accepts both spellings.
+    /// A reader that renders this also accepts `sliding` and `history` for
+    /// those two.
     pub kind: String,
     /// Tokens the region held when the snapshot was taken.
     pub current_tokens: usize,
@@ -1027,7 +1024,7 @@ pub struct RegionSnapshot {
     pub entries: Vec<RegionEntrySnapshot>,
     /// What the blueprint says this region is for, when it says.
     ///
-    /// Carried on the snapshot so every reader of `context.json` can show it -
+    /// Carried on the snapshot so every reader of the run's window can show it -
     /// the dashboard, the history API, a console - rather than each having to
     /// find and re-parse the manifest to explain a region it is already
     /// displaying.
@@ -1035,7 +1032,8 @@ pub struct RegionSnapshot {
     pub description: Option<String>,
 }
 
-/// Snapshot of the full context window, written to `context.json` alongside `meta.json`.
+/// Snapshot of the full context window, read from the run file by
+/// `leviath_runtime::runfile::context_snapshot`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextSnapshot {
     /// The stage the run was in when this was written.
@@ -1312,20 +1310,17 @@ mod tests {
         assert!(m.updated_at > 0);
     }
 
-    /// A `meta.json` written before `waiting_on` existed still loads.
+    /// A record without `waiting_on` still loads.
     ///
-    /// This is the whole compatibility question for the field, and it is worth
-    /// a test rather than a reading of the serde attributes: every run already
-    /// on disk was written by a build that had never heard of it, and a
-    /// deserialize that insisted on the key would make every one of them
-    /// unreadable.
+    /// Worth a test rather than a reading of the serde attributes: a
+    /// deserialize that insisted on the key would refuse every record that
+    /// carries none.
     #[test]
     fn a_run_written_before_waiting_on_existed_still_loads() {
         let mut original = sample_meta();
         original.status = RunStatus::WaitingInput;
         let mut value = serde_json::to_value(&original).unwrap();
-        // Whatever the current build writes, an older file simply has no such
-        // key. Removing it reproduces that exactly.
+        // A record without the key. Removing it reproduces that exactly.
         value
             .as_object_mut()
             .expect("meta is an object")
@@ -1749,7 +1744,7 @@ mod tests {
         assert_eq!(flags.modified_files, vec!["src/a.rs", "src/b.rs"]);
 
         // Past the cap the count keeps rising but the list stops growing, so a
-        // long run can't bloat meta.json.
+        // long run can't bloat the run's record.
         for i in 0..MAX_TRACKED_MODIFIED_FILES {
             flags.record_modification(&format!("f{i}.rs"));
         }
@@ -1782,7 +1777,7 @@ mod tests {
 
     #[test]
     fn run_meta_flags_default_for_older_files() {
-        // A meta.json written before `flags` existed has no such key at all.
+        // A record with no `flags` key at all.
         let mut meta = RunMeta::new(
             "r".to_string(),
             "a".to_string(),
@@ -1803,8 +1798,8 @@ mod tests {
         assert_eq!(back.flags, RunFlags::default());
     }
 
-    /// A `meta.json` from a build that never recorded the models still loads,
-    /// and reports none rather than being filled in from `model`.
+    /// A record with no models still loads, and reports none rather than
+    /// being filled in from `model`.
     #[test]
     fn run_meta_from_an_older_file_reports_no_stage_models() {
         let meta = sample_meta();
@@ -1828,8 +1823,8 @@ mod tests {
         );
     }
 
-    /// The roll-up reaches the file, so a listing that has parsed `meta.json`
-    /// can answer which models a run ran on without opening its ledger.
+    /// The roll-up reaches the record, so a listing that has read it can
+    /// answer which models a run ran on without opening its ledger.
     #[test]
     fn run_meta_carries_the_stage_model_rollup() {
         let mut meta = sample_meta();

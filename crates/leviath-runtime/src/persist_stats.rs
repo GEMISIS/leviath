@@ -1,10 +1,10 @@
 //! Health counters for the persistence lane.
 //!
-//! Everything the lane writes is something a person reads back later: `lev ps`
-//! reads `meta.json`, the dashboard reads `context.json`, and a post-mortem
-//! reads the journal in `run.lvr`. A write the lane loses leaves a log line and
-//! nothing else, so a daemon whose journal has been failing for an hour answers
-//! every request and looks perfectly well. These counters are what makes that
+//! Everything the lane writes is something a person reads back later: `lev ps`,
+//! the dashboard and a post-mortem all read the run file, and the stage logs
+//! and the answer's sidecar sit beside it. A write the lane loses leaves a log
+//! line and nothing else, so a daemon whose run files have been failing for an
+//! hour answers every request and looks perfectly well. These counters are what makes that
 //! legible: `lev ps`, `lev doctor` and the GraphQL schema all read the same
 //! numbers.
 //!
@@ -12,7 +12,7 @@
 //! same reason: the lane reads an **unbounded** queue, so nothing upstream ever
 //! feels it fall behind, and counting is the only way to see it.
 //!
-//! The lane also names here the runs whose journal it could not write, because a
+//! The lane also names here the runs whose run file it could not write, because a
 //! run that cannot record what it did must not keep doing things. The
 //! `fail_runs_with_unwritable_journals` system drains those names each tick and
 //! fails the runs.
@@ -49,8 +49,8 @@ pub struct JournalHealth {
     /// Those the lane could not get onto disk, retry included. Each one is a
     /// thing a run did that its journal does not mention.
     pub appends_failed: u64,
-    /// Snapshot writes (`meta.json`, `context.json` and the files beside them)
-    /// that lost at least one file.
+    /// Snapshot writes (the `final_output` sidecar, the stage logs and the
+    /// taint audit) that lost at least one file.
     pub snapshots_failed: u64,
     /// How many messages the lane took in one go the last time it looked. One
     /// means it is keeping up; a large number means runs are queueing behind a

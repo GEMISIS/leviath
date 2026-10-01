@@ -65,8 +65,8 @@ pub(crate) struct RunLoader {
     /// Every distinct graph read so far and its drawing, so runs of one graph
     /// share one.
     drawn: Vec<(RunGraph, Arc<StageGraph>)>,
-    /// Last round's runs, by the address of their `meta.json` record. The
-    /// meta cache hands back the same record until the file changes, so a
+    /// Last round's runs, by the address of their run record. The meta cache
+    /// hands back the same record until the run file changes, so a
     /// finished run found here is unchanged since last round, and so are its
     /// stage ledger and graph: they are reused without asking the disk.
     last: HashMap<usize, RunEntry>,
@@ -221,7 +221,7 @@ fn run_feed_loop(
 ) {
     let mut on_screen: Option<String> = None;
     // The list first, then the rest: every column of the run list comes from
-    // `meta.json`, so the list can be drawn before the stage ledgers are read.
+    // the run's record, so the list can be drawn before the stage ledgers are read.
     let mut with_stages = false;
     loop {
         let snapshot = loader.collect(on_screen.as_deref(), with_stages);

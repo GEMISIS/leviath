@@ -5,7 +5,7 @@
 //! at, and the shared tail that recounts the window. Split out of
 //! `context_window` because "what an agent remembers" and "how something comes
 //! to be remembered" are different questions, and because the second one now
-//! also answers *why* - see [`ContextCause`] and [`ContextWindow::attach_journal`].
+//! also answers *why* - see [`ContextCause`](leviath_core::ContextCause) and [`ContextWindow::attach_journal`].
 
 use leviath_core::{ContextCause, Region};
 
@@ -363,8 +363,7 @@ impl ContextWindow {
         self.add_assistant_turn(None, region_name, kind, content, tokens, None)
     }
 
-    /// [`add_typed_entry`](Self::add_typed_entry) for a caller that can say why
-    /// the region changed.
+    /// Add a typed entry, for a caller that can say why the region changed.
     pub(crate) fn add_typed_entry_caused(
         &mut self,
         cause: ContextCause,
@@ -376,8 +375,8 @@ impl ContextWindow {
         self.add_assistant_turn(Some(cause), region_name, kind, content, tokens, None)
     }
 
-    /// [`add_typed_entry`](Self::add_typed_entry) for a turn that carries an
-    /// opaque provider token to replay.
+    /// Add a typed entry for a turn that carries an opaque provider token to
+    /// replay.
     ///
     /// A separate method rather than a parameter on the shared one: only the
     /// two writers that record an assistant turn have such a token, and the

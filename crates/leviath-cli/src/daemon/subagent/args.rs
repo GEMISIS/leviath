@@ -30,7 +30,7 @@ const SHAPE: &str = "{\"source\": {\"blueprint\": \"<name>\"} or {\"graph\": {..
 /// A spawn call's arguments as the model wrote them.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SpawnArgs {
+pub(super) struct SpawnCall {
     /// What to run: read by [`source`], which says precisely what is wrong.
     source: Value,
     /// The child's inputs, by name.
@@ -83,7 +83,7 @@ impl OutputArgs {
     }
 }
 
-impl SpawnArgs {
+impl SpawnCall {
     /// Read a call's arguments, or the one issue that says why they do not
     /// read and what shape they should have.
     pub(super) fn parse(arguments: &Value) -> Result<Self, SpawnIssues> {

@@ -117,7 +117,7 @@ const MIN_OUTPUT_TOKENS: usize = 1;
 /// two is a measurement: the prompt is [`leviath_core::estimate_tokens`], bytes
 /// over four, while the provider counts with its own tokenizer and counts the
 /// tool schemas and its own message framing besides.
-/// [`PromptCalibration`](crate::pipeline::PromptCalibration) corrects that from
+/// [`crate::pipeline::PromptCalibration`] corrects that from
 /// what earlier calls were charged, but it can only correct by what it has
 /// already seen, and a stage's first call carries schemas nothing has measured
 /// yet. Asking for every token the estimate says is left means any remaining
@@ -491,7 +491,7 @@ pub(crate) fn fold_system_into_user(
     }
 }
 
-/// Build the [`RetryPolicy`] for a job from the operator's `[limits]` retry
+/// Build the [`RetryPolicy`](crate::inference_bridge::RetryPolicy) for a job from the operator's `[limits]` retry
 /// schedule, applying a stage's per-stage inference wall-clock cap when
 /// configured.
 ///

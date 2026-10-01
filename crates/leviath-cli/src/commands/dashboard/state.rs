@@ -2546,12 +2546,10 @@ mod tests {
 
     /// The context window is read only for the run the cursor is on.
     ///
-    /// It is the largest file in a run directory by a wide margin, and the only
-    /// thing that draws it is the detail view's context card - which draws one
-    /// run. Reading every run's made launching the dashboard cost the whole
-    /// history: measured on 750 runs holding 194 MB of `context.json` between
-    /// them, the list took 1.4s to appear and the process sat at 267 MB, all to
-    /// show one run's window.
+    /// It is the largest thing in a run by a wide margin, and the only thing
+    /// that draws it is the detail view's context card - which draws one run.
+    /// Reading every run's would make launching the dashboard cost the whole
+    /// history, all to show one run's window.
     #[test]
     fn only_the_run_on_screen_has_its_context_read() {
         crate::runstate::with_isolated_runs_dir("sync-context-one-run", |_d| {
@@ -2610,7 +2608,7 @@ mod tests {
         1_000 + crate::runstate::STALE_AFTER_SECS - 1
     }
 
-    /// The reported bug's shape: a run whose `meta.json` claims `starting` /
+    /// The reported bug's shape: a run whose record claims `starting` /
     /// `running`, which the daemon does not hold and which has not been touched
     /// in a long time, is not ACTIVE - nothing is driving it.
     #[test]

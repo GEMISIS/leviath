@@ -77,9 +77,9 @@ pub(crate) struct PlanBodyOverride(pub String);
 // ─── Restart persistence ─────────────────────────────────────────────────────
 
 /// Serializable snapshot of an agent parked at a stage-boundary interaction point,
-/// persisted to `<run_dir>/interactions.json` so a daemon restart can re-present the
-/// exact same prompt instead of dropping it and re-issuing inference.
-/// Mirrors the fan-out sidecar (`fanout.json`). Everything needed to resume is small:
+/// so a daemon restart can re-present the exact same prompt instead of dropping it
+/// and re-issuing inference. Mirrors the fan-out state
+/// ([`FanOutState`](crate::fanout::FanOutState)). Everything needed to resume is small:
 /// the reviewed document lives here (and in a persisted context region), and the
 /// request id is derived from the agent id + point name + round.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -713,7 +713,7 @@ pub(crate) fn collect_interaction_point(
             }
             // Terminal, and `Error` rather than `Cancelled`: a poller waiting on
             // an unattended run needs it to end, the reason has to reach
-            // `meta.json` and `lev ps`, and it must read differently from an
+            // the run's record and `lev ps`, and it must read differently from an
             // operator's `lev cancel`. No `ResolveTransition` is inserted, so
             // the run stops here rather than diverting to an `error_recovery`
             // edge - there is nothing to recover from, only a person to wait for
@@ -1565,7 +1565,7 @@ mod tests {
         run_collect(&mut world);
 
         // Asserted whole rather than by substring, because the message is what
-        // the operator reads out of `lev ps` and `meta.json`.
+        // the operator reads out of `lev ps` and the run's record.
         assert_eq!(
             world.get::<AgentState>(e).unwrap().status,
             AgentStatus::Error {

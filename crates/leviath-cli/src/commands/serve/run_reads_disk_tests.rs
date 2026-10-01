@@ -57,7 +57,7 @@ fn make_run(id: &str) -> RunMeta {
     )
 }
 
-/// A `stages.json` entry, so a log test can say which stages exist.
+/// A stage ledger entry, so a log test can say which stages exist.
 fn stage_rec(index: usize, name: &str) -> leviath_core::run_meta::StageRecord {
     leviath_core::run_meta::StageRecord {
         status: leviath_core::run_meta::StageRunStatus::Complete,
@@ -193,7 +193,7 @@ async fn run_logs_is_empty_when_no_stages_exist() {
         let run_id = unique_run_id("logs-no-stages");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
-        // No stages.json at all. A stray run-level file is not a log
+        // No stage ledger at all. A stray run-level file is not a log
         // source either: only stage files are.
         std::fs::write(
             runstate::run_dir(&run_id).join("output.log"),
@@ -964,7 +964,7 @@ async fn run_result_serves_the_submitted_answer_beside_the_log_tail() {
             );
             let mut meta = make_run(&run_id);
             meta.status = RunStatus::Complete;
-            // The descriptor goes in `meta.json`; the bytes go beside it.
+            // The descriptor goes in the run's record; the bytes go beside the run file.
             meta.final_output = Some(answer.descriptor());
             create_run(&meta).unwrap();
             runstate::write_final_output(&runstate::run_dir(&run_id), &answer.content).unwrap();

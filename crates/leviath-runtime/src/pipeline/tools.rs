@@ -151,7 +151,7 @@ pub(crate) struct ContextToolResults(pub Vec<(String, String)>);
 /// the model a stand-in (see `restore::restore_pending_batch`). The calls that
 /// finished before the crash are here, with the result the journal recorded,
 /// so [`dispatch_tools`] runs only the rest and none of these twice. Held until
-/// [`collect_tools`](super::collect_tools) merges them, or until an all-inline
+/// [`super::collect_tools`] merges them, or until an all-inline
 /// batch applies them.
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct RecoveredResults(pub Vec<crate::tool_bridge::ToolResult>);

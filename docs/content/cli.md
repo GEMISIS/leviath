@@ -377,84 +377,96 @@ is written in `agent.toml`.
 ### `lev validate [PATH]`
 
 Check a blueprint before running it. `PATH` is a blueprint directory or its `agent.toml`, and
-defaults to `.`. It reads the blueprint the way a spawn would, then prints its stages and the
-inputs it takes:
+defaults to `.`. It reads the blueprint the way a spawn would, then prints what it is, the inputs
+it takes and the shape of its graph:
 
 ```
 $ lev validate ./release-notes
-✓ release-notes 0.1.0 is valid
-  stages: gather, write
-  inputs:
-    since: text, required
-    audience: one of "users", "developers"
-    max_items: an integer 1 to 50
+✓ Blueprint 'release-notes' is valid.
+  2 stages, version 0.1.0
+  Inputs: --since (text, required, seeds region 'brief'), --audience (one of "users", "developers"), --max_items (an integer 1 to 50)
+  Note: this agent takes no --task; give it input via --since, --audience, --max_items
+  Entry stage: 'gather'
+  - gather → write
+  - write (terminal)
+  WARN stage 'write': no max_iterations, so the stage is unbounded unless your config sets [limits] default_max_iterations [stage-missing-max-iterations]
+       give the stage a max_iterations it should never reach
+  NOTE 1 region(s) run a shell command at spawn, before the first inference and before any tool-approval prompt: commits: git log --oneline -200 (pre-approved) [command-seed]
+       a refused seed needs its programs in the graph's safe_commands shell list; disable seeds entirely with `--no-seed-commands`, or machine-wide via `[security] allow_seed_commands = false`
 ```
 
 A blueprint that does not hold together fails with every problem at once, one per line with its
 path in the file:
 
 ```
-✗ ./release-notes/agent.toml has 2 problem(s):
+Error: ✗ Validation failed: ./release-notes/agent.toml has 2 problem(s):
   graph.edges[0].to: dangling reference: no stage is named "wrtie". Known: gather, write
   graph.inputs.since.binds[0].region: dangling reference: no region is named "brif". Known: brief, commits, conversation, notes
 ```
 
-`--json` prints a valid blueprint's `name`, `version`, `stages` and `inputs` as one object. See
-[the blueprint format](/docs/blueprint-format) for every key it checks.
+Every table refuses keys it does not know, so a misspelled key is a parse error that names it
+rather than a setting quietly ignored. See [the blueprint format](/docs/blueprint-format) for every
+key it checks.
 
-`lev blueprint migrate` converts an `agent.leviath` manifest into an `agent.toml`. Given an
-`agent.leviath`, `lev validate` also lints it: beyond parsing and structural validation, it reports
-what the blueprint leaves unsaid. The findings below use the manifest's key names, and are not
-reported for an `agent.toml`. Findings come in three levels: an **error** exits non-zero, a
-**warning** does not, and a **note** never does.
+Every piece of code the blueprint names is compiled too, exactly as a spawn would compile it. A
+custom region script, an output validator, or a stage hook script that is missing or will not load
+fails the command, since it would fail the run. The agent's own `tools/*.rhai`, your global script
+tools and your script providers are compiled as well, and one that will not load is named as a
+warning.
 
-Parsing itself refuses a few things outright, before any finding is reported: a negative count
-anywhere in the file (`max_items = -1`), an unknown key under `[sandbox]`, and an unknown key in a
-stage table. Each of those errors names the key.
+And because a clean verdict against a config the daemon would grumble about is worth less than it
+looks, the command reads your `config.toml` on the way past. Keys nothing reads are named as
+warnings, usually a typo'd setting. A `[model_providers.*]` script entry whose `.rhai` file is not
+on disk is named along with the path that was looked for. With a config that loads, the report
+also says which model each stage would run on here, and whether this machine meets the blueprint's
+declared dependencies.
 
-The blueprint's scripts are compiled too, exactly as a spawn would compile them. A custom region
-script, an output validator, or a stage hook script that is missing or will not load fails the
-command, since it would fail the run. And because a clean verdict against a config the daemon
-would grumble about is worth less than it looks, the command reads your `config.toml` on the way
-past. Keys nothing reads are named as warnings, usually a typo'd setting. A `[model_providers.*]`
-script entry whose `.rhai` file is not on disk is named along with the path that was looked for.
+Beyond parsing and structural validation, `lev validate` lints the blueprint: it reports what the
+blueprint leaves unsaid. Findings come in three levels: an **error** exits non-zero, a **warning**
+does not, and a **note** never does. Each finding prints with its code in brackets.
 
 | Level | Code | What it means |
 |---|---|---|
-| error | `unknown-tool` | A name in `available_tools` matches nothing. See below |
-| error | `unparseable-safe-command` | A `[safe_commands] shell` entry no call can ever match. See below |
+| error | `unknown-tool` | A name in a stage's `tools` matches nothing. See below |
+| error | `unparseable-safe-command` | A `graph.safe_commands` shell entry no call can ever match. See below |
 | error | `output-missing-submit-tool` | A stage must produce an output and has no way to submit one. See below |
-| error | `orphan-stage-permission` | A `[stages.X.tool_permissions]` key names a tool the stage never granted. See below |
-| error | `required-tool-not-granted` | A `required_tools` entry no `available_tools` name or group reaches, so the model never sees it. See below |
+| error | `output-stage-cannot-answer` | An output stage whose models cannot call tools, with no file to hand back. See below |
+| error | `output-unreachable` | An output stage that no edge routes to, so the run can never produce one |
+| error | `orphan-stage-permission` | A stage's `tool_permissions` key names a tool the stage never granted. See below |
+| error | `required-tool-not-granted` | A `required_tools` entry no name or group in `tools` reaches. See below |
 | error | `unserved-model` | A stage names a model the provider that would run it does not carry. See below |
-| error | `fanout-worker-task-unheld` | A `fan_out` stage runs its workers on a stage that seeds no region from the task. See below |
+| error | `fanout-worker-task-unheld` | A `fan_out` stage runs workers on this graph, which binds no input to a region. See below |
 | error | `retention-not-zero` | `[providers] zero_retention` is on and the model this stage would start on keeps something. See below |
-| warning | `retention-fallback-dropped` | `[providers] zero_retention` is on and a fallback the stage lists keeps something, so failover skips it |
-| warning | `stage-missing-model` | No `[stages.X.model]` block, so the stage runs on whatever your `default_provider` is. |
-| warning | `stage-missing-mode` | No `mode`, so the stage runs as `autonomous`. |
-| warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt. |
-| warning | `agent-model-block-ignored` | A top-level `[model]` block. Nothing reads it; model selection is per stage. |
-| warning | `region-seed-not-understood` | A region's `seed` is not a recognized form, so the region starts empty. See below |
+| warning | `retention-fallback-dropped` | `[providers] zero_retention` is on and a listed fallback keeps something, so failover skips it |
+| warning | `stage-missing-model` | No `model`, so the stage runs on whatever your `default_provider` is |
+| warning | `stage-missing-max-iterations` | Unbounded unless `[limits] default_max_iterations` is set. Fan-out stages are exempt |
 | warning | `blocking-tool-in-autonomous-stage` | An autonomous stage grants a tool that waits for a person. See below |
 | warning | `implicit-shell-policy` | A shell grant with no policy behind it. See below |
-| warning | `blueprint-permission-clamped` | A `tool_permissions` entry that sets a granted tool more permissively than its built-in default. See below |
+| warning | `blueprint-permission-clamped` | A `tool_permissions` entry looser than the tool's built-in default. See below |
+| warning | `routing-without-region-read` | Tool output routed to a region, with `read_file` granted but not `context_read`. See below |
+| warning | `output-shape-not-required` | A stage declares an `output` shape but is not required to produce one |
+| warning | `output-stage-can-modify` | An output stage grants `write_file`, `edit_file`, or a group that holds them |
+| warning | `allow-complete-skips-output` | A stage with `allow_complete` may end the run before the output stage. See below |
 | warning | `unknown-model` | A model this build has not heard of. See below |
 | warning | `catalog-unchecked` | A script provider that will not say which models it serves. See below |
-| warning | `no-reachable-provider` | Nothing in the stage's models list can run here, so it falls through to your default model. See below |
+| warning | `no-reachable-provider` | Nothing in the stage's models list can run here. See below |
 | warning | `compact-summarizes-deliverable` | A `compact` edge would hand a `required` region to the summarizer. See below |
-| warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `[read_paths]` shape. |
+| warning | `required-region-unenforceable` | A `required` region no stage using it can write to. See below |
+| warning | `unbounded-percentage-budget` | An evicting region whose percentage budget is huge on the widest model named. See below |
+| warning | `unreachable-stage`, `cycle-without-max-revisits`, `broad-read-path` | Graph and `graph.read_paths` shape |
 | warning | `dead-end-possible` | Every route out of a stage can run out of budget. See below |
-| warning | `fanout-no-escape` | A `fan_out` stage with no `error` or `dead_end` edge: an unusable split degrades to an empty fan-out. See [sub-agents](/docs/sub-agents) |
-| warning | `read-paths-not-granted` | The blueprint declares `[read_paths]` your `config.toml` does not grant. See below |
-| warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error, named here first. |
-| warning | `renamed-key-superseded` | A table sets both an old key and its current name, so the old line does nothing. See below |
+| warning | `fanout-no-escape` | A `fail_all` fan-out stage with no `error` or `dead_end` edge. See [sub-agents](/docs/sub-agents) |
+| warning | `read-paths-not-granted` | The blueprint declares `read_paths` your `config.toml` does not grant. See below |
+| warning | `read-paths-grant-invalid` | A `read_paths` grant in your own config will not compile. It is a hard spawn error |
+| warning | `tool-accepts-ungranted` | A `tool_accepts` limit on a tool the stage does not grant, so it never applies |
+| warning | `mime-type-overrides-builtin` | A `graph.mime_types` row changes the family or text flag of a built-in type |
+| warning, note | `mime-unseen` | A stage takes mime types its models cannot read natively. See below |
 | note | `holds-under-yolo` | A checkpoint that still stops an unattended run for a person. See below |
 | note | `long-context-price` | A stage's context can grow past the size at which its model bills at a higher rate. See below |
-| note | `safe-commands-declared` | The blueprint declares `[safe_commands]`. Declaring is not granting. See below |
-| note | `renamed-key` | The blueprint uses an old spelling of a setting. Both are read; `lev update` offers to rewrite it. See below |
-| note | `command-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
+| note | `safe-commands-declared` | The blueprint declares `graph.safe_commands`. Declaring is not granting. See below |
+| note | `command-seed`, `tool-seed`, `read-paths-declared` | Things worth knowing before you run the blueprint. See below |
 
-Twenty-five of those findings need more than a phrase.
+Many of those findings need more than a phrase.
 
 **`unknown-tool`** means the name matches no built-in, no sub-agent tool, and no `tools/*.rhai`
 file. The stage then advertises one tool fewer, so the model is told a tool it was meant to have
@@ -467,59 +479,73 @@ ever match it. Write a program, optionally with the subcommand that narrows it: 
 **`output-missing-submit-tool`** means a stage sets `require_output` but never grants
 `submit_output`. Use `mode = "output"`, which grants the tool.
 
+**`output-stage-cannot-answer`** is about a stage whose every model cannot call tools, such as an
+image or 3D model, so `submit_output` is out of reach. Such a stage answers only through a file.
+Declare it under the stage's `output.artifacts` and route the model's part into a region with
+`output_routing`, or list a model that calls tools.
+
 **`orphan-stage-permission`** names a tool the stage never granted, by name or through a group. The
-key reads as a grant and is not one.
+key reads as a grant and is not one. A stage that grants a whole MCP server through `connectors` is
+not checked, since its tools are unknown until the server answers.
 
-**`required-tool-not-granted`** is only checked when a group is in play. Without one, the load
-itself refuses the manifest.
-
-**`fanout-worker-task-unheld`** fires when the worker stage is one of this blueprint's own and
-declares no region seeded from the task. Each worker is spawned with its work item as its task, so
-every one is refused and the merge stage works alone. Add a region with `seed = "task"`.
-
-**`retention-not-zero`** means the spawn would be refused. The message carries the provider's
-reason: a Bedrock model the listing never offers under mode `none`, an OpenRouter model with no
-zero-retention endpoint, a provider whose agreement is not declared. See
-[data retention](/docs/providers#data-retention).
-
-**`region-seed-not-understood`** is usually a typo in a table key. It is `{ caller = "task" }`, not
-`{ caller_input = "task" }`. An unrecognized seed is ignored, and the region starts empty.
-
-**`blocking-tool-in-autonomous-stage`** fires when an autonomous stage grants `ask_user_*`,
-`present_for_review` or `edit_document`. With nobody attached, the run parks there until it is
-killed. Set `allow_blocking_tools = true` on the stage to say you meant it. A stage granting
-`@builtin` or `@all` reaches all of them at once and gets one warning naming the group.
-
-**`implicit-shell-policy`** matters because the default is `ask`. An unattended run waits on that
-prompt rather than being denied. The shell arrives with `@builtin` as surely as by name, so a group
-grant with no `shell` policy is reported too.
-
-**`blueprint-permission-clamped`** is the other side of that. Setting `shell = "allow"` (or
-`write_file`, `edit_file`, `install_global_tool`) silences `implicit-shell-policy`. A downloaded blueprint
-is not allowed to grant itself write or shell access. The runtime clamps the policy back to the
-stricter of it and the built-in default, so the tool still asks. The line looks like a
-decision and is not one. Run the agent with `--yolo`, set `[security] allow_blueprint_permissions
-= true` in your own `config.toml`, or set the tool there yourself; otherwise drop the line. Tools a
-blueprint may pre-approve (`web_search`, `web_fetch`) are exempt, and a policy no looser than the
-default (`ask`, `deny`) is fine.
+**`required-tool-not-granted`** is only checked when a group is in play. Without one, a spawn
+refuses a required tool the stage does not grant.
 
 **`unserved-model`** is the one model finding that fails the command, because it is the one that can
 be proved. The provider is configured here, it published the full list of what it carries, and the
-model the stage names is not on it. That is a typo or a renamed model rather than anything about your
-machine, so a stage naming one is refused at spawn too. The message carries a few of the ids the
-provider does list; `lev models list --provider <name>` prints the rest.
+model the stage names is not on it. That is a typo or a renamed model rather than anything about
+your machine, so a stage naming one is refused at spawn too. The message carries a few of the ids
+the provider does list; `lev models list --provider <name>` prints the rest.
 
 A provider publishes its list either by answering `list_models` (a Rhai provider, or a gateway whose
 catalogue Leviath has read) or by having one written down under `[model_providers.<name>] serves`.
 The `serves` route needs no network and no key, which makes it the way to get a script provider
 checked in CI.
 
-**`catalog-unchecked`** is the same question with no answer. The script provider loaded, but it has
-neither a `list_models(state)` function nor a `serves` list. It has never said what it takes, so
-nothing here can tell a good model id from a bad one. It is a warning rather than an error because
-saying nothing is not a refusal. It exists so that "checked and fine" and "never checked" stop
-looking identical. Only script providers are named this way; a built-in that keeps quiet is either
-covered by `unknown-model` below or has a genuinely open catalog.
+**`fanout-worker-task-unheld`** fires when the workers run a stage of this same graph and the graph
+binds no input to a region. A work item's inputs then have nowhere to land, so every worker starts
+without its work and the merge stage works alone. Declare an input the split fills, such as
+`task`, and bind it with `binds = [{ region = "task" }]`.
+
+**`retention-not-zero`** means the spawn would be refused. The message carries the provider's
+reason: a Bedrock model the listing never offers under mode `none`, an OpenRouter model with no
+zero-retention endpoint, a provider whose agreement is not declared. See
+[data retention](/docs/providers#data-retention).
+
+**`blocking-tool-in-autonomous-stage`** fires when an autonomous stage grants `ask_user_*`,
+`present_for_review` or `edit_document`. With nobody attached, the run parks there until it is
+killed. List the tool in `required_tools`, or set `allow_blocking_tools = true` on the stage, to say
+you meant it. A stage granting `@builtin` or `@all` reaches all of them at once and gets one
+warning naming the group.
+
+**`implicit-shell-policy`** matters because the default is `ask`. An unattended run waits on that
+prompt rather than being denied. The shell arrives with `@builtin` as surely as by name, so a group
+grant with no `shell` policy is reported too. A policy in the graph's or the stage's
+`tool_permissions` silences it.
+
+**`blueprint-permission-clamped`** is the other side of that. Setting `shell = "allow"` (or
+`write_file`, `edit_file`, `install_global_tool`) silences `implicit-shell-policy`. A downloaded
+blueprint is not allowed to grant itself write or shell access. The runtime clamps the policy back
+to the stricter of it and the built-in default, so the tool still asks. The line looks like a
+decision and is not one. Run the agent with `--yolo`, set `[security] allow_blueprint_permissions
+= true` in your own `config.toml`, or set the tool there yourself; otherwise drop the line. Tools a
+blueprint may pre-approve (`web_search`, `web_fetch`) are exempt, and a policy no looser than the
+default (`ask`, `deny`) is fine.
+
+**`routing-without-region-read`** fires when a stage routes tool output into a region other than
+the conversation and grants a file-reading tool but not `context_read`. The model is told the
+output lives in that region, and its only read verb points at the filesystem. Grant `context_read`.
+
+**`allow-complete-skips-output`** means the model is offered a way to end the run from that stage,
+even when its own prompt never mentions it. A run that takes it ends with no answer and looks like
+success. Drop `allow_complete` and route to the output stage instead.
+
+**`catalog-unchecked`** is the `unserved-model` question with no answer. The script provider
+loaded, but it has neither a `list_models(state)` function nor a `serves` list. It has never said
+what it takes, so nothing here can tell a good model id from a bad one. It is a warning rather than
+an error because saying nothing is not a refusal. It exists so that "checked and fine" and "never
+checked" stop looking identical. Only script providers are named this way; a built-in that keeps
+quiet is either covered by `unknown-model` below or has a genuinely open catalog.
 
 **`unknown-model`** is the older, weaker check: the table of models compiled into this build, which
 covers Anthropic, OpenAI and Google. It is skipped for any provider that answered for itself, since
@@ -527,28 +553,37 @@ a live catalog knows about models released after this build was cut. A provider 
 publishes a catalog nor appears in that table is not checked at all, which is what keeps an open
 catalog (Ollama serves whatever you have pulled) from raising false alarms.
 
-**`no-reachable-provider`** means every entry in the stage's list names something this install cannot
-run: a pinned entry whose provider is not configured, or a bare model name nothing here serves. One
-entry that works is enough to keep the stage quiet, since the list is an ordered set of fallbacks and
-a machine declining some of the options is the normal case. This is also the check that catches a
-misspelled model in a stage that names only one: nothing serves `claude-sonet-5`, so the stage would
-have fallen through to your default model without saying so.
+**`no-reachable-provider`** means every entry in the stage's list names something this install
+cannot run: a pinned entry whose provider is not configured, or a bare model name nothing here
+serves. One entry that works is enough to keep the stage quiet, since the list is an ordered set of
+fallbacks and a machine declining some of the options is the normal case. This is also the check
+that catches a misspelled model in a stage that names only one: nothing serves `claude-sonet-5`,
+so the stage would have fallen back without saying so. It falls back to your `fallback_model`, if
+one is set.
 
 **`compact-summarizes-deliverable`** means a later stage reads a paraphrase of a region you marked
 `required`. Set `summarizable = false` on the region.
 
+**`required-region-unenforceable`** means `required = true` has no effect. A stage may not finish
+while a required region is empty, but only a stage that can write to it is held. When no stage
+using the region grants `context_write` or `context_append`, nothing is. Grant one of them to the
+stage that owes the region, or drop `required`. A region an input fills is exempt.
+
+**`unbounded-percentage-budget`** names a region that evicts at its bound, budgeted as a share of
+the window with no `max`. On the widest model the blueprint names, that share can be so large the
+region never evicts and only grows. Give the budget a cap: `budget = { percent = "38%", max = 24000 }`.
+
 **`dead-end-possible`** fires when every normal edge's target has a `max_revisits` budget, so the
-run errors once they are spent. Add a `condition = "dead_end"` edge to a stage without one. A
+run errors once they are spent. Add an edge with `when = "dead_end"` to a stage without one. A
 `max_iterations` edge does not count, because it fires on the iteration cap rather than on this
 path.
 
 **`read-paths-not-granted`** is the declaring-is-not-granting case. Those reads are refused at
 runtime, and the fix line carries the stanza that would grant them.
 
-**`renamed-key-superseded`** fires when a table sets a setting under both its old name and its
-current one, such as `[sandbox] persist = true` next to `keep_warm = true`. The parser reads the
-current name, so the old line is dead weight rather than a second, conflicting setting; the fix
-is to delete it.
+**`mime-unseen`** is a warning when a stage's models can read none of the mime types it takes, and
+a note when they read some of them. Either way, such parts reach the model as one-line stand-ins.
+List a model that takes the type, or name the type under the stage's `input_as_text`.
 
 **`holds-under-yolo`** names an interaction point declaring `unattended = "ask"`, or a blocking tool
 a stage keeps in `required_tools`. Both are deliberate wherever they appear. It is a note because
@@ -562,38 +597,39 @@ the cost matters. See [costs](/docs/costs#a-long-prompt-can-cost-more-per-token)
 `[agent_safe_commands.<name>] allow_blueprint`, or globally via
 `[security] allow_blueprint_safe_commands`.
 
-**`renamed-key`** names a key this build still reads under an older spelling, such as `persist`
-under `[sandbox]` or a custom region's `persistent`. Nothing about the run changes: both names are
-read the same way. `lev update` can rewrite the file for you, or you can rename the key by hand.
-
-**`command-seed`** and **`read-paths-declared`** say what the blueprint will do before you run it.
-`read-paths-declared` carries the granted and declared counts, plus each entry's status.
+**`command-seed`**, **`tool-seed`** and **`read-paths-declared`** say what the blueprint will do
+before you run it. The seeds run at spawn, before any approval prompt. `command-seed` says whether
+the default safe list covers each command, and `read-paths-declared` carries the granted and
+declared counts, plus each entry's status.
 
 | Flag | Purpose |
 |---|---|
 | `--deny-warnings` | Exit non-zero on warnings too. Notes still never fail. |
-| `--json` | Print the report as one JSON object with `valid`, `blueprint`, `error`, and `findings` |
+| `--json` | Print the report as one JSON object. See below |
 | `--graph` | Draw the stage graph after the report, as plain text. Ignored with `--json`. See below |
 | `--width <COLS>` | How many columns `--graph` may use (default 120). Only with `--graph`. See below |
 
+`--json` prints one object for every outcome: `valid`, `blueprint`, `error`, `findings`, and the
+`errors`, `warnings` and `notes` counts. `blueprint` holds the name, version, description, entry
+stage, stages, whether a `task` input is accepted, and every input. A blueprint that does not read
+or hold together fills `error` and leaves `blueprint` null.
+
 `--graph` draws the same picture the dashboard's stage explorer shows, escape edges included.
 `--width` sets how wide it may be, and a wider graph is shrunk to fit. `--width` on its own,
-without `--graph`, is refused. `--deny-warnings`, `--graph` and `--width` act on the lint report,
-so an `agent.toml` ignores them.
+without `--graph`, is refused.
 
-The same findings are written to `daemon.log` when a run spawns, so a blueprint that was never
-validated still says what is wrong with it. Nothing there refuses a spawn.
+The dashboard's blueprint editor and `POST /api/blueprints/validate` report the same findings, so
+a blueprint edited there is checked the same way.
 
-`[read_paths]` entries are checked against your own `config.toml`, entry by entry, because
+`graph.read_paths` entries are checked against your own `config.toml`, entry by entry, because
 declaring one is not the same as being allowed to read it. Anything your config does not grant is
-named as such, with the stanza that would grant it. The daemon's own lint has no user config to
-consult, so there it stays the plain "these need granting" note. See
-[reading outside the workdir](/docs/security#reading-outside-the-workdir).
+named as such, with the stanza that would grant it. Without a config to consult, it stays the plain
+"these need granting" note. See [reading outside the workdir](/docs/security#reading-outside-the-workdir).
 
 ### `lev deps <list|check|install> <agent>`
 
 Inspect and set up what an agent [declares it needs](/docs/agents#dependencies). The agent is an
-installed name or a path to a blueprint directory or manifest.
+installed name or a path to a blueprint directory or its `agent.toml`.
 
 `lev deps list <agent>` prints the declared dependencies: an MCP server, an environment variable, a
 program on PATH, or a condition a Rhai script decides.
@@ -1377,8 +1413,7 @@ sessions.
 ### `lev update`
 
 Update Leviath, then offer to bring everything else up to date with it: the binary, the bundled
-blueprints, the renamed keys in the blueprints you wrote yourself, and the config file, in that
-order.
+blueprints, and the config file, in that order.
 
 The binary is updated with the installer that put it there, and which one that was is read off the
 filesystem rather than guessed from the version string. The version cannot answer: every
@@ -1387,8 +1422,8 @@ the tap manifests and not in the binary. Where the file sits does answer.
 
 | Found at | What it runs |
 |---|---|
-| A Homebrew Cellar path, or a Homebrew-only prefix | `brew upgrade <formula>` |
-| `scoop/apps/<package>` or a scoop shim | `scoop update <package>` |
+| A Homebrew Cellar path, or a Homebrew-only prefix | `brew update && brew upgrade <formula>` |
+| `scoop/apps/<package>` or a scoop shim | `scoop update && scoop update <package>` |
 | `~/.cargo/bin` | Nothing. It says to run `cargo install leviath-cli` |
 | `/usr/local/bin`, `/usr/bin`, `~/.local/bin`, `%LOCALAPPDATA%\Leviath\bin` | `curl -fsSL https://leviath.dev/install.sh \| sh -s -- --channel <CHANNEL>` |
 | Anywhere else | Nothing. It names the path and leaves the choice to you |
@@ -1407,7 +1442,7 @@ not something to start because somebody typed `lev update`.
 | `--json` | Print the plan as JSON and change nothing |
 | `--channel <stable\|beta\|alpha>` | The channel to re-install. Only the install-script method reads it |
 | `--dry-run` | Walk the whole flow, prompts and all, printing each action instead of doing it |
-| `--yes` | Answer yes to the binary upgrade, respelling renamed keys, and the config write. It does **not** install blueprints |
+| `--yes` | Answer yes to the binary upgrade and the config write. It does **not** install blueprints |
 | `--install-agents` | Install the bundled blueprints without asking |
 
 ```bash
@@ -1416,14 +1451,16 @@ $ lev update --check
 lev 0.3.5, installed with Homebrew (formula leviath-beta, beta channel)
 
   binary   brew update && brew upgrade leviath-beta
-  agents   1 of 7 would change
+  agents   1 of 11 would change
              data-analyst - update 0.0.1 → 0.0.2
-  keys     2 renamed key(s) in 1 of your own blueprint(s)
-             researcher - 2
   config   nothing to migrate
 ```
 
-All four steps run every time, whatever the binary step did. That is the point of the command.
+The package managers are told to refresh their index first, because neither sees a release
+published minutes ago until it has. When the update check says this copy is already the newest on
+its channel, the binary step is skipped and says so.
+
+All three steps run every time, whatever the binary step did. That is the point of the command.
 `brew upgrade` and `scoop update` hand you a new binary and say nothing about the blueprints in
 `~/.leviath/agents` or the config beside them. Anyone who has ever updated that way is running
 blueprints from whenever they last ran `lev setup`. A binary that needs no update is not evidence
@@ -1438,20 +1475,16 @@ A copy at the bundled version whose files differ from the bundled ones reads as 
 is named as edited, asked about on its own, and no flag covers it: installing removes the
 destination directory first and would take your edits, and any file you added, with it.
 
-The keys step is for a blueprint of your own, not one of the bundled ones: those are replaced
-wholesale by the step before it, so they need nothing. A setting like `[sandbox] persist` still
-loads exactly as it did, under a name this version would rather you wrote instead
-([`lev validate`](#lev-validate-path) flags the old spelling as `renamed-key`), and this step
-offers to respell every such line in the blueprints you installed yourself. It lists every old key
-it found, with what the setting actually does, and asks once for the whole set; `--yes` answers
-that question along with the binary and the config write. A table that already sets both names is
-left alone, since the old line there does nothing and that is `lev validate`'s to report, not this
-step's to guess at.
+Blueprints you wrote yourself are left alone. A blueprint is an `agent.toml`, which has no old
+spellings to rewrite: a key it does not know is an error that [`lev validate`](#lev-validate-path)
+names. A blueprint still written as an `agent.leviath` is converted with
+[`lev blueprint migrate`](#lev-blueprint-migrate-path).
 
-The config step applies any migration this build knows how to make, printing every change before it
-asks to write anything. A renamed top-level or `[sandbox]` key, such as the same `persist` becoming
-`keep_warm`, is one such migration; others fix a value whose default or meaning moved. Nothing to
-migrate means your file already says what this version reads.
+The config step applies any migration this build knows how to make to your `config.toml`, printing
+every change before it asks to write anything. A renamed key is one such migration, such as
+`default_model` becoming `fallback_model` or `[sandbox] persist` becoming `keep_warm`. Others fix a
+value whose default or meaning moved. Nothing to migrate means your file already says what this
+version reads.
 
 ### `lev tools`
 

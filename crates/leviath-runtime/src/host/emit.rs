@@ -209,7 +209,7 @@ impl WorldHost {
                     status: status.to_string(),
                     // Read off the live entity, not off disk: this fires the
                     // moment the run goes terminal, and the persist tick that
-                    // writes `meta.json` has not necessarily run yet.
+                    // writes the run file has not necessarily run yet.
                     final_output: self
                         .world
                         .world()
