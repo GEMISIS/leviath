@@ -94,6 +94,7 @@ pub mod provider_creds;
 pub mod provider_files;
 pub(crate) mod providers;
 pub(crate) mod repetition;
+pub mod resolve;
 pub mod restore;
 pub mod runfile;
 pub(crate) mod runtime_info_tool;
