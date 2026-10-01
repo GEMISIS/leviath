@@ -7,11 +7,20 @@
 use super::*;
 
 /// Parse `[stages.<name>.model]`, or the shipped default when the stage does
-/// not name one.
+/// not name one. A stage's `model = "<id>"` names one model and no provider,
+/// like an entry of `models`.
 pub(super) fn parse_stage_model(
     stage_name: &str,
     stage_value: &toml::Value,
 ) -> Result<ModelConfig> {
+    if let Some(model) = str_of(stage_value, "model") {
+        return Ok(ModelConfig {
+            models: vec![ModelEntry::new(String::new(), model.to_string())],
+            allow_user_default: true,
+            parameters: std::collections::HashMap::new(),
+            request_timeout_secs: None,
+        });
+    }
     let model_table = table_of(stage_value, "model");
     if let Some(mt) = model_table {
         let mut models = Vec::new();
@@ -37,15 +46,19 @@ pub(super) fn parse_stage_model(
             }
         }
 
-        // Backward compat: old single-model format (provider + model at
-        // top level) or old fallbacks list - treat both as models entries.
+        // The single-model format (a provider and a model at the top of the
+        // table) and the fallbacks list are both read as models entries. A
+        // model with no provider stays without one, as in `models`.
         if models.is_empty() {
-            if let Some(provider) = str_of(mt, "provider") {
-                let model_name = str_of(mt, "model").unwrap_or("claude-sonnet-4-6");
-                models.push(ModelEntry::new(
+            match (str_of(mt, "provider"), str_of(mt, "model")) {
+                (Some(provider), model) => models.push(ModelEntry::new(
                     provider.to_string(),
-                    model_name.to_string(),
-                ));
+                    model.unwrap_or("claude-sonnet-4-6").to_string(),
+                )),
+                (None, Some(model)) => {
+                    models.push(ModelEntry::new(String::new(), model.to_string()))
+                }
+                (None, None) => {}
             }
 
             // Old fallbacks become additional models entries
@@ -111,9 +124,8 @@ pub(super) fn parse_stage_model(
 }
 
 /// Every key [`parse_stage_model`] reads off a `[stages.<name>.model]`
-/// table, for the schema guard in `tests.rs`. Like `REGION_KEYS`, a list and
-/// not a check: the parser ignores what it does not know.
-#[cfg(test)]
+/// table, for the schema guard in `tests.rs` and the unread keys `migrate`
+/// reports. The parser itself ignores what it does not know.
 pub(super) const MODEL_KEYS: &[&str] = &[
     "allow_user_default",
     "fallbacks",

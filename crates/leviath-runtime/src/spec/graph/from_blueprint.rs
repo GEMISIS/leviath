@@ -677,7 +677,8 @@ impl Conv {
     }
 
     /// A caller-input seed becomes a `text` input bound to the region. Two
-    /// regions fed from one caller key share one input.
+    /// regions fed from one caller key share one input, and a region a stage
+    /// declares again under the same name is bound once.
     fn caller_input(
         &mut self,
         input: &str,
@@ -708,7 +709,9 @@ impl Conv {
                 binds: Vec::new(),
             });
         decl.required |= r.required;
-        decl.binds.push(binding);
+        if !decl.binds.contains(&binding) {
+            decl.binds.push(binding);
+        }
     }
 
     /// What fills a region at spawn. A caller-input seed fills nothing here:
@@ -728,7 +731,14 @@ impl Conv {
             RegionSeed::Glob { pattern } => Seed::Glob(pattern.clone()),
             RegionSeed::Files { paths } => Seed::Files(self.names::<WorkdirPath>(p.clone(), paths)),
             RegionSeed::Literal { text } => Seed::Literal(text.clone()),
-            RegionSeed::Rhai { script } => Seed::Code(CodeRef::File(script.clone())),
+            // A code file always sits beside the blueprint, so the prefix that
+            // says so for files and globs says nothing here.
+            RegionSeed::Rhai { script } => Seed::Code(CodeRef::File(
+                script
+                    .strip_prefix("blueprint:")
+                    .unwrap_or(script)
+                    .to_string(),
+            )),
             RegionSeed::Command { command } => Seed::Command(command.clone()),
             RegionSeed::Tools { calls, refresh } => Seed::Tools {
                 calls: calls

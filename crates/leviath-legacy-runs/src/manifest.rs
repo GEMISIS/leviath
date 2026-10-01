@@ -227,8 +227,10 @@ pub mod renamed;
 mod sections;
 mod stage;
 mod tables;
+mod unread;
 
 pub use tables::read_manifest_tables;
+pub(crate) use unread::unread_keys;
 
 // Glob re-exports, so this split is invisible to every caller and to the
 // test module, exactly as `pipeline/mod.rs` does it.
@@ -239,10 +241,9 @@ use sections::*;
 use stage::*;
 
 /// Every key `parse_manifest` reads off the `[agent]` table, for the schema
-/// guard in `tests.rs`. A list and not a check: the table ignores what it
-/// does not know.
-#[cfg(test)]
-const AGENT_KEYS: &[&str] = &[
+/// guard in `tests.rs` and the unread keys `migrate` reports. The parser
+/// itself ignores what it does not know.
+pub(super) const AGENT_KEYS: &[&str] = &[
     "batch_tool_hint",
     "description",
     "dynamic_tools",

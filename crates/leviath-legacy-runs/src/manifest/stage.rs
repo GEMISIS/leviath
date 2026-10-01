@@ -1190,10 +1190,9 @@ pub(super) fn parse_nudge_config(
 }
 
 /// Every key `parse_stage` reads off one `[[stages.<name>.interaction_points]]`
-/// entry, for the schema guard in `tests.rs`. A list and not a check, like
-/// `REGION_KEYS`: `options` and `choices` are the same setting under two
-/// names, as are `directives` and `followups`.
-#[cfg(test)]
+/// entry, for the schema guard in `tests.rs` and the unread keys `migrate`
+/// reports. `options` and `choices` are the same setting under two names, as
+/// are `directives` and `followups`.
 pub(super) const INTERACTION_POINT_KEYS: &[&str] = &[
     "abort_options",
     "choices",

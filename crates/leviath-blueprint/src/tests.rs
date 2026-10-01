@@ -83,6 +83,17 @@ fn the_graph_takes_its_title_and_description_from_the_blueprint() {
     assert_eq!(graph.description.as_deref(), Some("Its own."));
 }
 
+/// A table whose every key holds its default is written with its first key
+/// rather than as `{}`: a stage that turns its sandbox off says so.
+#[test]
+fn a_table_of_defaults_keeps_its_first_key() {
+    let mut file = BlueprintFile::parse(TINY).unwrap();
+    file.graph.stages[0].sandbox = Some(toml::from_str("kind = \"none\"").unwrap());
+    let text = file.to_toml().unwrap();
+    assert!(text.contains("sandbox = { kind = \"none\" }"), "{text}");
+    assert_eq!(BlueprintFile::parse(&text).unwrap(), file);
+}
+
 #[test]
 fn a_graph_holding_a_json_null_cannot_be_written() {
     let mut file = BlueprintFile::parse(TINY).unwrap();

@@ -253,9 +253,8 @@ fn parse_artifact_spec(
 }
 
 /// Every key [`parse_output_spec`] reads off an output table, for the schema
-/// guard in `tests.rs`. Like `REGION_KEYS`, a list and not a check: the parser
-/// ignores a key it does not know.
-#[cfg(test)]
+/// guard in `tests.rs` and the unread keys `migrate` reports. The parser
+/// itself ignores a key it does not know.
 pub(super) const OUTPUT_KEYS: &[&str] = &[
     "artifacts",
     "example",
@@ -447,9 +446,9 @@ fn parse_dependency_install(
 }
 
 /// Every key a `[[dependencies]]` entry may carry, across all kinds, for the
-/// schema guard in `tests.rs`. A flat union: the parser reads the keys its kind
+/// schema guard in `tests.rs` and the unread keys `migrate` reports. A flat
+/// union: the parser reads the keys its kind
 /// needs and kind mismatches are caught in `Blueprint::validate`.
-#[cfg(test)]
 pub(super) const DEPENDENCIES_KEYS: &[&str] = &[
     "check",
     "command",

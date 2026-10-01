@@ -807,3 +807,41 @@ fn a_blueprint_with_bad_names_reports_each_with_its_path() {
         ]
     );
 }
+
+/// A code seed drops the `blueprint:` prefix a code file never needs, since
+/// code always sits beside its blueprint.
+#[test]
+fn a_code_seed_drops_the_blueprint_prefix() {
+    for script in ["blueprint:seeds/plan.rhai", "seeds/plan.rhai"] {
+        let plan = seeded(
+            "plan",
+            RegionSeed::Rhai {
+                script: script.into(),
+            },
+        );
+        let g = RunGraph::from_blueprint(&blueprint(vec![stage("main")], vec![plan])).unwrap();
+        assert_eq!(
+            g.layout.regions[0].seed,
+            Some(Seed::Code(CodeRef::File("seeds/plan.rhai".into()))),
+            "{script}"
+        );
+    }
+}
+
+/// A region a stage declares again under its own layout binds the input
+/// that fills it once, not once per layout.
+#[test]
+fn a_region_declared_again_by_a_stage_binds_its_input_once() {
+    let task = || {
+        seeded(
+            "task",
+            RegionSeed::CallerInput {
+                name: "task".into(),
+            },
+        )
+    };
+    let mut main = stage("main");
+    main.context_layout = Some(ContextLayout::new(vec![task()], 1000));
+    let g = RunGraph::from_blueprint(&blueprint(vec![main], vec![task()])).unwrap();
+    assert_eq!(g.inputs[0].binds.len(), 1, "{:?}", g.inputs[0].binds);
+}

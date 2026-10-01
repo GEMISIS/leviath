@@ -400,12 +400,6 @@ fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
     }
 }
 
-/// Every key [`parse_region_layout`] reads off a region table. The parser
-/// does not refuse a key it does not know (a misspelled one has always
-/// loaded silently), so this list has one job: the schema guard in
-/// `tests.rs` holds the published schema to it, and a key read above that is
-/// missing here, or here that is not read above, is the drift it exists to
-/// catch.
 /// `accepts = ["text/*", "image/png"]`: each entry a mime type or a
 /// `type/*` pattern. Absent or empty means anything.
 pub(super) fn parse_accepts(region_name: &str, value: Option<&toml::Value>) -> Result<Vec<String>> {
@@ -453,7 +447,10 @@ pub(super) fn parse_pattern_list(
     Ok(out)
 }
 
-#[cfg(test)]
+/// Every key [`parse_region_layout`] reads off a region table. The parser
+/// does not refuse a key it does not know, so this list is what the schema
+/// guard in `tests.rs` holds the published schema to, and what `migrate`
+/// reports an unread key against.
 pub(super) const REGION_KEYS: &[&str] = &[
     "accepts",
     "admission",

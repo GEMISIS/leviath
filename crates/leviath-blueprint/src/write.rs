@@ -51,8 +51,10 @@ struct Candidate {
 }
 
 pub(crate) fn render(file: &BlueprintFile) -> Result<String, String> {
-    let mut value = Value::try_from(file).map_err(|e| format!("cannot be written as TOML: {e}"))?;
+    let full = Value::try_from(file).map_err(|e| format!("cannot be written as TOML: {e}"))?;
+    let mut value = full.clone();
     minimize(&mut value, file);
+    refill(&mut value, &full);
     let text = toml::to_string_pretty(&value).expect("a TOML value always writes");
     let mut doc: DocumentMut = text.parse().expect("TOML written by `toml` parses");
     tidy(
@@ -102,6 +104,29 @@ fn settle(
             settle(value, target, a, kept);
             settle(value, target, b, kept);
         }
+    }
+}
+
+/// Give a table that leaving out defaults emptied, but that the file still
+/// holds, back its first key. `sandbox = {}` reads as the same file as
+/// `sandbox = { kind = "none" }`, and only the second says what it means.
+fn refill(value: &mut Value, full: &Value) {
+    match (value, full) {
+        (Value::Table(table), Value::Table(original)) => {
+            if table.is_empty() {
+                table.extend(original.iter().take(1).map(|(k, v)| (k.clone(), v.clone())));
+                return;
+            }
+            for (key, child) in table.iter_mut() {
+                refill(child, &original[key.as_str()]);
+            }
+        }
+        (Value::Array(items), Value::Array(original)) => {
+            for (child, was) in items.iter_mut().zip(original) {
+                refill(child, was);
+            }
+        }
+        _ => {}
     }
 }
 
