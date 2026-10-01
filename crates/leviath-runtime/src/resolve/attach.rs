@@ -1,5 +1,8 @@
 //! Step 3: the files sent with a request.
 //!
+//! The mime registry's checks are not attached here: they are code, read in
+//! step 7, and the bound run's registry runs them on every part it stores.
+//!
 //! Each attachment is checked on its own: its name is unique, it is within
 //! the operator's size limit, and its type is known. One that fails is left
 //! out, and the rest carry on. Where each one lands is decided later, once the
@@ -9,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use leviath_core::mime::{Blob, MimeRegistry, MimeType};
 
+use super::Source;
 use crate::spec::env::{ResolveEnv, SpawnLimits};
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::{Digest, MimePattern};
@@ -49,18 +53,35 @@ impl Files {
     }
 }
 
-/// Check every attachment on the request.
-///
-/// Stand-ins and token estimates come from the compiled mime registry: the
-/// operator's own rows are not something resolution can see, and the part is
-/// charged its stand-in in a region either way.
+/// The registry the run types its bytes by: the machine's rows with the
+/// graph's `mime_types` on top. Rows that will not layer are an issue at the
+/// graph's `mime_types`, and the compiled registry stands in meanwhile so the
+/// attachments are still checked.
+pub(super) fn registry(
+    src: &Source,
+    env: &dyn ResolveEnv,
+    issues: &mut SpawnIssues,
+) -> MimeRegistry {
+    env.mime_registry(&src.graph.mime_types)
+        .unwrap_or_else(|message| {
+            issues.push(
+                SpawnIssue::new(src.at.field("mime_types"), IssueCode::Invalid, message).hint(
+                    "fix the rows so each names a type or pattern and fields the registry knows",
+                ),
+            );
+            MimeRegistry::builtin()
+        })
+}
+
+/// Check every attachment on the request, typing it, standing it in and
+/// estimating its tokens by `registry`, the run's own.
 pub(super) fn read(
     request: &SpawnRequest,
     env: &dyn ResolveEnv,
+    registry: &MimeRegistry,
     limits: &SpawnLimits,
     issues: &mut SpawnIssues,
 ) -> Files {
-    let registry = MimeRegistry::builtin();
     let mut seen = BTreeSet::new();
     let mut files = Vec::new();
     for (index, attachment) in request.attachments.iter().enumerate() {
@@ -91,7 +112,12 @@ pub(super) fn read(
             continue;
         }
         let typed = env
-            .sniff(&attachment.name, bytes, attachment.mime_type.as_ref())
+            .sniff(
+                registry,
+                &attachment.name,
+                bytes,
+                attachment.mime_type.as_ref(),
+            )
             .and_then(|t| MimeType::parse(&t).map_err(|e| e.to_string()));
         let mime = match typed {
             Ok(mime) => mime,
@@ -107,7 +133,7 @@ pub(super) fn read(
         };
         let blob = Blob::new(mime.clone(), bytes.clone())
             .named(attachment.name.clone())
-            .describe(&registry);
+            .describe(registry);
         let part = PartState {
             mime_type: mime.to_string(),
             body: PartBody::Stored(BlobState {

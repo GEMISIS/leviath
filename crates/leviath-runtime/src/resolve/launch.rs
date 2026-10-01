@@ -1,12 +1,14 @@
-//! Step 6: what the run is trusted with, and where it sits in its tree.
+//! Step 5: what the run is trusted with, where it sits in its tree, and what
+//! it answers for itself.
 
 use std::path::PathBuf;
 
-use crate::spec::env::{Caller, SpawnLimits};
+use crate::spec::env::{Caller, ResolveEnv, SpawnLimits};
 use crate::spec::graph::RunGraph;
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::launch::{LaunchPolicy, LaunchRequest, Placement};
 use crate::spec::request::SpawnRequest;
+use crate::spec::run_spec::AutoAnswers;
 
 /// The run's launch policy and placement. The placement's workdir is left
 /// empty; the resolver fills it once the machine has checked it.
@@ -17,6 +19,8 @@ use crate::spec::request::SpawnRequest;
 ///   it is never trusted with more than the parent. A parent with no depth
 ///   left may not start one at all.
 /// - Seed commands run only when the operator allows them, whoever asks.
+/// - A run records its model input when it asks to, or when the operator
+///   records every run's.
 pub(super) fn decide(
     request: &SpawnRequest,
     caller: &Caller,
@@ -27,8 +31,9 @@ pub(super) fn decide(
     let (parent, policy, depth, worker_stage) = match caller {
         Caller::TopLevel => {
             let depth = graph.max_child_depth.unwrap_or(limits.default_max_depth);
-            let policy =
+            let mut policy =
                 LaunchPolicy::top_level(&request.launch, depth, limits.seed_commands_allowed);
+            policy.capture_model_input |= limits.defaults.capture_model_input;
             return (policy, placement(None, 0, None));
         }
         Caller::Child {
@@ -79,12 +84,31 @@ pub(super) fn decide(
     };
     let mut narrowed = LaunchPolicy::narrow(&asked, policy);
     narrowed.seed_commands &= limits.seed_commands_allowed;
+    narrowed.capture_model_input |= limits.defaults.capture_model_input;
     let placed = placement(
         Some(parent.clone()),
         depth.saturating_add(1),
         worker_stage.cloned(),
     );
     (narrowed, placed)
+}
+
+/// What the run's unattended setting answers without a person, as the host
+/// reads it. A profile the host does not have is an issue at
+/// `launch.unattended`, and the run is judged as attended meanwhile.
+pub(super) fn auto_answers(
+    launch: &LaunchPolicy,
+    env: &dyn ResolveEnv,
+    issues: &mut SpawnIssues,
+) -> AutoAnswers {
+    match env.auto_answers(&launch.unattended) {
+        Ok(answers) => answers,
+        Err(issue) => {
+            let at = SpecPath::root().field("launch").field("unattended");
+            issues.push(super::rebase(&at, *issue));
+            AutoAnswers::default()
+        }
+    }
 }
 
 fn placement(

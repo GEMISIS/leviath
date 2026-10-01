@@ -103,6 +103,8 @@ pub(crate) fn minimal() -> RunGraph {
         transforms: vec![],
         mime_types: MimeRows::new(),
         dependencies: vec![],
+        mcp_servers: vec![],
+        script_permissions: Default::default(),
     }
 }
 
@@ -481,5 +483,55 @@ fn a_blueprint_with_bad_names_reports_each_with_its_path() {
             "stages.main.model.params.weird Invalid",
             "stages.main.tool_permissions.bash Invalid",
         ]
+    );
+}
+
+#[test]
+fn a_manifests_own_mcp_servers_and_script_permissions_are_read_into_the_graph() {
+    let manifest = "[agent]\nname = \"t\"\nversion = \"1\"\n\
+        [stages.main]\nsystem_prompt = \"p\"\n\
+        [[mcp_servers]]\nname = \"srv\"\ncommand = \"python3\"\nargs = [\"-m\", \"srv\"]\n\
+        env = { TOKEN = \"x\" }\n\
+        [[mcp_servers]]\nname = \"web\"\ntransport = \"http\"\nurl = \"https://mcp.example\"\n\
+        [tool_script_permissions]\nshell = \"deny\"\nhttp_get = \"inherit\"\n";
+    let bp = crate::spec::manifest::parse_manifest(manifest).unwrap();
+    let mut g = RunGraph::from_blueprint(&bp).unwrap();
+    assert!(g.mcp_servers.is_empty());
+    g.read_manifest_tables(manifest).unwrap();
+    assert_eq!(g.mcp_servers.len(), 2);
+    assert_eq!(g.mcp_servers[0].name.as_str(), "srv");
+    assert_eq!(g.mcp_servers[0].args, ["-m", "srv"]);
+    assert_eq!(g.mcp_servers[0].env["TOKEN"], "x");
+    assert_eq!(g.mcp_servers[1].transport, Some(McpTransport::Http));
+    assert_eq!(
+        g.script_permissions,
+        ScriptPermissionsDef {
+            shell: Some(ScriptPermission::Deny),
+            http_get: Some(ScriptPermission::Inherit),
+            ..ScriptPermissionsDef::default()
+        }
+    );
+    let back: RunGraph = toml::from_str(&toml::to_string(&g).unwrap()).unwrap();
+    assert_eq!(back, g, "both read back from a blueprint file as written");
+
+    let mut plain = g.clone();
+    plain.mcp_servers.clear();
+    plain
+        .read_manifest_tables("[agent]\nname = \"t\"\n")
+        .unwrap();
+    assert!(
+        plain.mcp_servers.is_empty(),
+        "nothing declared, nothing read"
+    );
+
+    let bad = "[[mcp_servers]]\nname = \"bad name\"\n\
+        [tool_script_permissions]\nshell = \"sometimes\"\n";
+    let issues = g.clone().read_manifest_tables(bad).unwrap_err();
+    let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+    assert_eq!(paths, ["mcp_servers", "script_permissions"]);
+    let unreadable = g.read_manifest_tables("not [ toml").unwrap_err();
+    assert_eq!(
+        unreadable.0[0].code,
+        crate::spec::issues::IssueCode::Invalid
     );
 }

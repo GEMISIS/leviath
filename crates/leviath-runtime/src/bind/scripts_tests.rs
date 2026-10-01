@@ -43,6 +43,70 @@ fn place(bindings: Bindings) -> (bevy_ecs::world::World, bevy_ecs::entity::Entit
 }
 
 #[test]
+fn a_runs_mime_registry_layers_its_rows_and_compiles_their_checks() {
+    use crate::spec::graph::MimeRowDef;
+    use crate::spec::names::MimePattern;
+    let check = "fn check(bytes, mime_type) { if bytes.len() > 2 { () } else { \"too short\" } }";
+    let (mut s, mut code) = bare();
+    add(&mut s, &mut code, file("checks/acme.rhai"), check);
+    s.graph.mime_types.insert(
+        MimePattern::new("application/x-acme").unwrap(),
+        MimeRowDef {
+            check: Some(file("checks/acme.rhai")),
+            ..MimeRowDef::default()
+        },
+    );
+    s.graph.mime_types.insert(
+        MimePattern::new("application/x-plain").unwrap(),
+        MimeRowDef::default(),
+    );
+    let base = leviath_core::mime::MimeRegistry::builtin();
+    let run = mime_registry(&s, &code, &base).unwrap();
+    let acme = leviath_core::mime::MimeType::parse("application/x-acme").unwrap();
+    assert!(run.registry().verify(&acme, b"abcd").is_ok());
+    let short = run.registry().verify(&acme, b"a").unwrap_err();
+    assert!(short.contains("too short"), "{short}");
+
+    let (mut broken, mut code) = bare();
+    add(
+        &mut broken,
+        &mut code,
+        file("checks/bad.rhai"),
+        "fn nothing() {}",
+    );
+    broken.graph.mime_types.insert(
+        MimePattern::new("application/x-acme").unwrap(),
+        MimeRowDef {
+            check: Some(file("checks/bad.rhai")),
+            ..MimeRowDef::default()
+        },
+    );
+    broken.graph.mime_types.insert(
+        MimePattern::new("application/x-gone").unwrap(),
+        MimeRowDef {
+            check: Some(file("checks/gone.rhai")),
+            ..MimeRowDef::default()
+        },
+    );
+    broken.graph.mime_types.insert(
+        MimePattern::new("application/x-odd").unwrap(),
+        MimeRowDef {
+            magic: Some("not hex".into()),
+            ..MimeRowDef::default()
+        },
+    );
+    let issues = mime_registry(&broken, &code, &base).unwrap_err();
+    assert_eq!(
+        paths(&issues),
+        [
+            "mime_types[\"application/x-acme\"].check",
+            "mime_types[\"application/x-gone\"].check",
+            "mime_types",
+        ]
+    );
+}
+
+#[test]
 fn a_run_with_no_code_gets_no_script_components() {
     let (s, code) = bare();
     assert!(compile(&s, &code).unwrap().is_empty());
@@ -85,9 +149,12 @@ fn hooks_validators_and_regions_compile_once_each_from_the_run_file() {
         validators.compiled.keys().collect::<Vec<_>>(),
         ["check.rhai"]
     );
-    let regions = world.get::<RegionScripts>(e).unwrap();
+    // Insertion moves the bound region scripts into the run's window, which
+    // is where rendering looks for them.
+    assert!(world.get::<RegionScripts>(e).is_none());
+    let window = world.get::<crate::components::ContextWindow>(e).unwrap();
     let key = format!("inline:{}", Digest::of(REGION.as_bytes()));
-    assert_eq!(regions.0.keys().collect::<Vec<_>>(), [&key]);
+    assert_eq!(window.region_scripts.keys().collect::<Vec<_>>(), [&key]);
 }
 
 #[test]

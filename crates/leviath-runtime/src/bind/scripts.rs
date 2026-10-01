@@ -176,6 +176,51 @@ fn validators(
     issues.into_result(compiled)
 }
 
+/// The run's mime registry: `base` (the machine's) with the graph's own rows
+/// on top and each row's check compiled from the run file's copy of its code,
+/// for the run's entity to carry and its tools to share. A check that will not
+/// compile is reported at its row, as every row that will not layer is.
+pub fn mime_registry(
+    spec: &RunSpec,
+    code: &CodeFiles,
+    base: &leviath_core::mime::MimeRegistry,
+) -> Result<crate::blob_store::RunMimeRegistry, SpawnIssues> {
+    let mut issues = SpawnIssues::new();
+    let mut checks: BTreeMap<String, Arc<dyn leviath_core::mime::MimeCheck>> = BTreeMap::new();
+    for (pattern, row) in &spec.graph.mime_types {
+        let Some(reference) = &row.check else {
+            continue;
+        };
+        let path = SpecPath::root()
+            .field("mime_types")
+            .key(pattern.as_str())
+            .field("check");
+        let compiled = source(spec, code, reference, &path).and_then(|(key, text)| {
+            leviath_scripting::mime_check::compile(&key, text).map_err(|e| compile_failed(&path, e))
+        });
+        match compiled {
+            Ok(check) => {
+                checks.insert(pattern.to_string(), Arc::new(check));
+            }
+            Err(issue) => issues.absorb(issue),
+        }
+    }
+    let rows = crate::bind::host::mime_table(&spec.graph.mime_types);
+    let built = issues.take(
+        crate::blob_store::RunMimeRegistry::new(base, rows, checks).map_err(|e| {
+            SpawnIssues::from(SpawnIssue::new(
+                SpecPath::root().field("mime_types"),
+                IssueCode::Invalid,
+                e.to_string(),
+            ))
+        }),
+    );
+    match built {
+        Some(registry) if issues.is_empty() => Ok(registry),
+        _ => Err(issues),
+    }
+}
+
 fn regions(spec: &RunSpec, code: &CodeFiles) -> Compiled<RegionScript> {
     let layouts: Vec<(SpecPath, &RegionLayoutDef)> =
         std::iter::once((SpecPath::root().field("layout"), &spec.graph.layout))

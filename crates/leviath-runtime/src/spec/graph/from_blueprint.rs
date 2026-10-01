@@ -24,6 +24,42 @@ use crate::spec::names::{
 };
 
 impl RunGraph {
+    /// Read the two tables of a blueprint manifest that its parsed form does
+    /// not carry, `[[mcp_servers]]` and `[tool_script_permissions]`, into
+    /// this graph. `manifest` is the text [`RunGraph::from_blueprint`]'s
+    /// blueprint was parsed from. Every entry that does not fit is reported,
+    /// each at its own path.
+    pub fn read_manifest_tables(&mut self, manifest: &str) -> Result<(), SpawnIssues> {
+        let mut issues = SpawnIssues::new();
+        let table: toml::Table = match toml::from_str(manifest) {
+            Ok(table) => table,
+            Err(e) => return Err(SpawnIssue::new(at(), IssueCode::Invalid, e.to_string()).into()),
+        };
+        if let Some(value) = table.get("mcp_servers") {
+            let servers: Result<Vec<McpServerDef>, _> = value.clone().try_into();
+            match servers {
+                Ok(servers) => self.mcp_servers = servers,
+                Err(e) => issues.push(SpawnIssue::new(
+                    at().field("mcp_servers"),
+                    IssueCode::Invalid,
+                    e.to_string(),
+                )),
+            }
+        }
+        if let Some(value) = table.get("tool_script_permissions") {
+            let perms: Result<ScriptPermissionsDef, _> = value.clone().try_into();
+            match perms {
+                Ok(perms) => self.script_permissions = perms,
+                Err(e) => issues.push(SpawnIssue::new(
+                    at().field("script_permissions"),
+                    IssueCode::Invalid,
+                    e.to_string(),
+                )),
+            }
+        }
+        issues.into_result(())
+    }
+
     /// Read a parsed blueprint as a run graph, reporting every field that
     /// does not fit.
     pub fn from_blueprint(blueprint: &Blueprint) -> Result<RunGraph, SpawnIssues> {
@@ -205,6 +241,8 @@ impl Conv {
                 .enumerate()
                 .filter_map(|(i, d)| self.dependency(d, at().field("dependencies").index(i)))
                 .collect(),
+            mcp_servers: Vec::new(),
+            script_permissions: ScriptPermissionsDef::default(),
         }
     }
 

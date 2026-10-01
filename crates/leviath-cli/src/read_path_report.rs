@@ -81,18 +81,28 @@ pub(crate) fn build(
     config: &Config,
     workdir: &Path,
 ) -> Option<Result<GrantReport, String>> {
-    let rp = blueprint
-        .read_paths
-        .as_ref()
-        .filter(|rp| !rp.allow.is_empty())?;
-    Some(report_entries(
-        &blueprint.name,
-        &rp.allow,
-        config,
-        workdir,
-        leviath_core::home_dir().as_deref(),
-        cfg!(windows),
-    ))
+    let rp = blueprint.read_paths.as_ref()?;
+    build_declared(&blueprint.name, &rp.allow, config, workdir)
+}
+
+/// [`build`] over an agent's name and its declared entries, for a run whose
+/// blueprint is a graph rather than a parsed manifest.
+pub(crate) fn build_declared(
+    agent: &str,
+    declared: &[String],
+    config: &Config,
+    workdir: &Path,
+) -> Option<Result<GrantReport, String>> {
+    (!declared.is_empty()).then(|| {
+        report_entries(
+            agent,
+            declared,
+            config,
+            workdir,
+            leviath_core::home_dir().as_deref(),
+            cfg!(windows),
+        )
+    })
 }
 
 /// The report proper, with the platform inputs injected so every branch is

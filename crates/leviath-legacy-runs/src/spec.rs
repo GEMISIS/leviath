@@ -68,7 +68,10 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
     for layout in std::iter::once(&mut blueprint.context_layout).chain(stage_layouts) {
         pin_sourceless_histories(layout, report);
     }
-    let graph = RunGraph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
+    let mut graph = RunGraph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
+    graph
+        .read_manifest_tables(&old.blueprint.text)
+        .map_err(ConvertError::Graph)?;
     let digest = match meta.blueprint_digest.as_deref().map(Digest::new) {
         Some(Ok(d)) => d,
         _ => {
@@ -115,6 +118,12 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
         requested_output: meta.output_request.as_ref().map(|o| output(o, report)),
         requested_model: requested_model(meta, report),
         launch: launch(&graph, meta, report),
+        // Bare `--yolo` answered everything; what a named profile answered
+        // was never recorded, so such a run asks.
+        auto_answers: match meta.yolo && meta.yolo_profile.is_none() {
+            true => leviath_runtime::spec::run_spec::AutoAnswers::all(),
+            false => Default::default(),
+        },
         placement: placement(meta, report)?,
         delivery: delivery(meta, report),
         env: EnvFingerprint::default(),

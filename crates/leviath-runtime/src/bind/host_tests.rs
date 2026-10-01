@@ -385,3 +385,144 @@ fn a_tool_list_fingerprint_ignores_order_and_follows_every_field() {
     a3.schema = JsonDoc::default();
     assert_ne!(tools_fingerprint(&[a3, b]), ab);
 }
+
+#[test]
+fn a_plan_carries_the_models_longest_reply() {
+    let plan = choose_model(
+        &stage(&["mock/gpt-mock"]),
+        None,
+        &ModelDefaults::default(),
+        &registry(&["mock"]),
+    )
+    .unwrap();
+    let most = leviath_providers::ModelCapabilities::default().max_output_tokens;
+    assert_eq!(plan.max_output_tokens as usize, most);
+}
+
+#[test]
+fn an_install_script_must_define_install() {
+    assert_eq!(check_code(b"fn install() { }", CodeUse::Install), Ok(()));
+    let none = check_code(b"fn check() { }", CodeUse::Install).unwrap_err();
+    assert!(none.contains("fn install()"), "{none}");
+}
+
+#[test]
+fn a_compaction_model_is_refused_only_where_it_would_keep_the_context() {
+    let zero = ModelDefaults {
+        retention: leviath_providers::retention::RetentionSettings {
+            zero_requested: true,
+            ..Default::default()
+        },
+        ..ModelDefaults::default()
+    };
+    let r = registry(&["openai"]);
+    let model = |m: &str| ModelRef::parse(m).unwrap();
+    let refused = compaction_model(&model("openai/gpt-5.5"), &zero, &r).unwrap_err();
+    assert!(refused.starts_with("openai/gpt-5.5"), "{refused}");
+    assert!(compaction_model(&model("openai/gpt-5.5"), &ModelDefaults::default(), &r).is_ok());
+    assert!(
+        compaction_model(&model("gone/m"), &zero, &r).is_ok(),
+        "never called"
+    );
+    assert!(
+        compaction_model(&model("m"), &zero, &r).is_ok(),
+        "no provider"
+    );
+}
+
+#[test]
+fn a_graphs_mime_rows_layer_over_the_machines() {
+    use crate::spec::graph::{MimeRowDef, MimeRows, TokenRule};
+    let row = |tokens: TokenRule, check: Option<CodeRef>| MimeRowDef {
+        family: Some("doc".into()),
+        text: Some(false),
+        tokens: Some(tokens),
+        extensions: Some(vec!["acme".into()]),
+        magic: Some("41434d45".into()),
+        stand_in: Some("[{name}]".into()),
+        check,
+    };
+    let rows: MimeRows = [
+        (
+            MimePattern::new("application/x-a").unwrap(),
+            row(
+                TokenRule::PerByte(0.5),
+                Some(CodeRef::File("c.rhai".into())),
+            ),
+        ),
+        (
+            MimePattern::new("application/x-b").unwrap(),
+            row(
+                TokenRule::PerPixel {
+                    divisor: 10,
+                    max: 99,
+                },
+                Some(CodeRef::Inline("fn check(b, m) {}".into())),
+            ),
+        ),
+        (
+            MimePattern::new("application/x-c").unwrap(),
+            row(TokenRule::PerSecond(3), None),
+        ),
+        (
+            MimePattern::new("application/x-d").unwrap(),
+            row(TokenRule::PerPage(4), None),
+        ),
+        (
+            MimePattern::new("application/x-e").unwrap(),
+            row(TokenRule::Fixed(5), None),
+        ),
+    ]
+    .into();
+    let table = mime_table(&rows);
+    assert_eq!(table.len(), 5);
+    assert_eq!(table["application/x-a"]["check"].as_str(), Some("c.rhai"));
+    let inline = format!("inline:{}", Digest::of(b"fn check(b, m) {}"));
+    assert_eq!(
+        table["application/x-b"]["check"].as_str(),
+        Some(inline.as_str())
+    );
+    let base = leviath_core::mime::MimeRegistry::builtin();
+    let built = run_registry(&base, &rows).unwrap();
+    let e = leviath_core::mime::MimeType::parse("application/x-e").unwrap();
+    assert_eq!(built.info(&e).family, "doc");
+    assert_eq!(
+        built.info(&e).tokens,
+        leviath_core::mime::TokenRule::Fixed(5)
+    );
+
+    let odd: MimeRows = [(
+        MimePattern::new("application/x-f").unwrap(),
+        MimeRowDef {
+            magic: Some("not hex".into()),
+            ..MimeRowDef::default()
+        },
+    )]
+    .into();
+    assert!(run_registry(&base, &odd).is_err());
+}
+
+#[test]
+fn a_dependency_check_runs_from_the_runs_copy() {
+    assert_eq!(run_check(Some(b"fn check() { () }")), Ok(()));
+    assert_eq!(
+        run_check(Some(b"fn check() { \"get it\" }")),
+        Err("get it".to_string())
+    );
+    assert!(run_check(None).unwrap_err().contains("holds no code"));
+    assert!(run_check(Some(&[0xff])).unwrap_err().contains("not UTF-8"));
+}
+
+#[test]
+fn a_stage_grants_its_tools_groups_and_connectors() {
+    let mut s = stage(&[]);
+    s.tools = vec![
+        ToolSelector::Tool(ToolName::new("read_file").unwrap()),
+        ToolSelector::Group(ToolGroup::Mcp),
+    ];
+    s.connectors = vec![McpServerName::new("gh").unwrap()];
+    let owners: ToolOwners = [("gh__search".to_string(), "gh".to_string())].into();
+    let grants = stage_grants(&s, &owners);
+    assert!(grants.contains(&"read_file".to_string()), "{grants:?}");
+    assert!(grants.contains(&"gh__search".to_string()), "{grants:?}");
+}

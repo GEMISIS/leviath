@@ -1,4 +1,4 @@
-//! Steps 4 and 5: the request's inputs, checked, and the slots they fill.
+//! Steps 4 and 6: the request's inputs, checked, and the slots they fill.
 
 use std::path::Path;
 

@@ -244,8 +244,9 @@ pub(super) fn combine(seeded: Seeded, mut placed: Placed) -> Contents {
     }
 }
 
-/// Refuse a spawn that leaves a required region empty, or that hands a run
-/// which takes a task nothing to do.
+/// Refuse a spawn that leaves a required region empty when the spawn was its
+/// one chance to be filled (an input binds to it, or a seed fills it), or
+/// that hands a run which takes a task nothing to do.
 ///
 /// A fan-out worker is exempt from both: its work item arrives in its task,
 /// and the regions a caller must fill were filled by the caller of its
@@ -271,7 +272,11 @@ pub(super) fn require_filled(
         for (i, region) in layout.regions.iter().enumerate() {
             let filled = contents.regions.contains_key(&region.name)
                 || contents.excused.contains(&region.name);
-            if !region.required || filled || !seen.insert(region.name.clone()) {
+            // A required region nothing fills at spawn (no input, no seed) is
+            // the run's to fill, and is judged when its stage is left.
+            let at_spawn =
+                region.seed.is_some() || !inputs_bound_to(graph, &region.name).is_empty();
+            if !region.required || !at_spawn || filled || !seen.insert(region.name.clone()) {
                 continue;
             }
             let message = region

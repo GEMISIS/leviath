@@ -170,6 +170,7 @@ pub fn run_spec_from_blueprint(
             seed_commands: true,
             capture_model_input: false,
         },
+        auto_answers: Default::default(),
         placement: crate::spec::launch::Placement {
             workdir: std::path::PathBuf::new(),
             parent: None,

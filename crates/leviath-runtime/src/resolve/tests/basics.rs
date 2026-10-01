@@ -178,8 +178,8 @@ async fn many_independent_problems_come_back_together() {
             "attachments[0].data OutOfRange",
             "attachments[1].name Duplicate",
             "inputs.colour Unknown",
-            "source.raw.dependencies[0] Unresolvable",
             "source.raw.stages.build.hooks.on_stage_exit Invalid",
+            "source.raw.dependencies[0] Unresolvable",
             "source.raw.stages.plan.model Unresolvable",
         ]
     );

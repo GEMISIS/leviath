@@ -54,6 +54,8 @@ pub(crate) fn env_with(config: Config) -> (DaemonEnv, tempfile::TempDir) {
         hub: InteractionHub::new(),
         subagent_tx: tokio::sync::mpsc::unbounded_channel().0,
         mime: Arc::new(leviath_core::mime::MimeRegistry::builtin()),
+        blob_store: Arc::new(leviath_core::mime::MemoryBlobStore::new()),
+        mcp_overrides: HashMap::new(),
     };
     (env, agents)
 }
@@ -92,8 +94,8 @@ async fn an_installed_blueprint_loads_as_a_graph_pinned_to_what_was_read() {
         .collect();
     assert_eq!(
         ceilings,
-        [Some(5), Some(7)],
-        "0 takes the operator's ceiling"
+        [Some(5), Some(0)],
+        "the operator's ceiling is folded in by resolution, for every graph"
     );
     assert!(
         env.blueprint(&reference(&format!("helper@{digest}")))
@@ -108,14 +110,91 @@ async fn an_installed_blueprint_loads_as_a_graph_pinned_to_what_was_read() {
     assert_eq!(moved.code, IssueCode::Unresolvable);
     assert_eq!(moved.got, Some(format!("revision {digest}")));
 
-    let (unbounded, agents) = env_with({
-        let mut c = Config::default();
-        c.limits.default_max_iterations = None;
-        c
+    let with_servers = format!(
+        "{MANIFEST}\n[[mcp_servers]]\nname = \"own\"\ncommand = \"own-server\"\n\n\
+         [tool_script_permissions]\nshell = \"deny\"\n"
+    );
+    install(&agents, "served", &with_servers);
+    let served = env.blueprint(&reference("served")).await.unwrap();
+    assert_eq!(served.graph.mcp_servers[0].name.as_str(), "own");
+    assert!(served.graph.script_permissions.shell.is_some());
+    let bad = format!("{MANIFEST}\n[[mcp_servers]]\nname = 3\n");
+    install(&agents, "bad-servers", &bad);
+    let refused = env.blueprint(&reference("bad-servers")).await.unwrap_err();
+    assert!(refused.message.contains("mcp_servers"), "{refused}");
+}
+
+#[test]
+fn the_operators_defaults_are_handed_to_resolution() {
+    let mut config = Config::default();
+    config.limits.default_max_iterations = Some(7);
+    config.batch_tool_hint = false;
+    config.taint_tracking = true;
+    config.observability.capture_model_input = true;
+    config.nudge.max = Some(2);
+    config.nudge.text = Some("keep going".into());
+    let (env, _agents) = env_with(config);
+    let limits = env.limits();
+    assert_eq!(limits.default_max_iterations, Some(7));
+    let d = &limits.defaults;
+    assert!(!d.batch_tool_hint && d.shell_hint);
+    assert!(d.taint_tracking && d.capture_model_input);
+    assert_eq!(d.nudge.max, Some(2));
+    assert_eq!(d.nudge.text.as_deref(), Some("keep going"));
+}
+
+#[test]
+fn unattended_settings_answer_by_the_yolo_profile() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".leviath")).unwrap();
+    std::fs::write(
+        home.path().join(".leviath").join("yolo.toml"),
+        "[careful]\ndefault = \"allow\"\nquestions = \"ask\"\ncheckpoints = \"ask\"\ngate = \"auto\"\n",
+    )
+    .unwrap();
+    let (env, _agents) = env();
+    let profile = |name: &str| {
+        Unattended::Profile(leviath_runtime::spec::names::ProfileName::new(name).unwrap())
+    };
+    let at = |dir: &Path| {
+        [
+            ("LEVIATH_HOME", Some(dir.to_path_buf().into_os_string())),
+            ("LEVIATH_CONFIG_PATH", None),
+        ]
+    };
+    temp_env::with_vars(at(home.path()), || {
+        assert_eq!(
+            env.auto_answers(&Unattended::Off),
+            Ok(AutoAnswers::default())
+        );
+        assert_eq!(env.auto_answers(&Unattended::All), Ok(AutoAnswers::all()));
+        assert_eq!(
+            env.auto_answers(&profile("careful")),
+            Ok(AutoAnswers {
+                questions: false,
+                checkpoints: false,
+                gate: true,
+            })
+        );
+        let missing = env.auto_answers(&profile("nope")).unwrap_err();
+        assert_eq!(missing.code, IssueCode::Unresolvable);
+        assert_eq!(missing.known, ["careful"]);
     });
-    install(&agents, "helper", MANIFEST);
-    let loaded = unbounded.blueprint(&reference("helper")).await.unwrap();
-    assert_eq!(loaded.graph.stages[1].max_iterations, Some(0));
+    let empty = tempfile::tempdir().unwrap();
+    temp_env::with_vars(at(empty.path()), || {
+        let no_file = env.auto_answers(&profile("careful")).unwrap_err();
+        assert!(no_file.known.is_empty());
+        assert!(no_file.message.contains("does not exist"), "{no_file}");
+    });
+}
+
+#[test]
+fn a_compaction_model_answers_to_the_operators_retention_rules() {
+    let (env, _agents) = env();
+    assert!(
+        env.compaction_model(&ModelRef::parse("mock/m").unwrap())
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -231,20 +310,20 @@ async fn paths_models_code_and_bytes_answer_through_the_shared_host() {
         env.check_code(b"fn check() { () }", CodeUse::DependencyCheck)
             .is_ok()
     );
-    assert_eq!(env.sniff("a.txt", b"hi", None).unwrap(), "text/plain");
+    let registry = env.mime_registry(&MimeRows::new()).unwrap();
+    assert_eq!(
+        env.sniff(&registry, "a.txt", b"hi", None).unwrap(),
+        "text/plain"
+    );
 }
 
 /// The test manifest's graph, read the way a spawn reads it.
-fn load_installed_graph() -> RunGraph {
+pub(crate) fn load_installed_graph() -> RunGraph {
     let (_, agents) = env();
     install(&agents, "helper", MANIFEST);
-    load_installed(
-        Some(agents.path()),
-        &reference("helper"),
-        &Config::default(),
-    )
-    .unwrap()
-    .graph
+    load_installed(Some(agents.path()), &reference("helper"))
+        .unwrap()
+        .graph
 }
 
 fn names(tools: &[ToolDef]) -> Vec<String> {
@@ -276,7 +355,7 @@ async fn the_catalog_holds_every_kind_of_tool_and_a_stage_gets_what_it_names() {
             ("LEVIATH_HOME", Some(home.path().to_str().unwrap())),
             ("HOME", Some(home.path().to_str().unwrap())),
         ],
-        || env.catalog(&code),
+        || env.catalog(&code, None).defs,
     );
     let all = names(&catalog);
     for expected in [
@@ -313,8 +392,52 @@ async fn the_catalog_holds_every_kind_of_tool_and_a_stage_gets_what_it_names() {
         ToolSelector::Group(ToolGroup::Mcp),
     ];
     let graph = load_installed_graph();
-    let picked = env.tools(&graph, &stage, &code).await.unwrap();
-    assert_eq!(names(&picked), ["gh__search", "own_tool"]);
+    let picked = env.tools(&graph, &stage, &code, None).await.unwrap();
+    assert_eq!(names(&picked.tools), ["gh__search", "own_tool"]);
+    assert!(picked.code.is_empty(), "the run already holds its own tool");
+}
+
+#[tokio::test]
+async fn script_tools_found_on_disk_come_back_with_their_code() {
+    let home = tempfile::tempdir().unwrap();
+    let global_dir = home.path().join(".leviath").join("tools");
+    std::fs::create_dir_all(&global_dir).unwrap();
+    std::fs::write(global_dir.join("global.rhai"), "// @tool global_tool\n1").unwrap();
+    std::fs::write(global_dir.join("both.rhai"), "// @tool both\n\"global\"").unwrap();
+    let blueprint = tempfile::tempdir().unwrap();
+    let own_dir = blueprint.path().join("tools");
+    std::fs::create_dir_all(&own_dir).unwrap();
+    std::fs::write(own_dir.join("mine.rhai"), "// @tool mine\n2").unwrap();
+    std::fs::write(own_dir.join("both.rhai"), "// @tool both\n\"own\"").unwrap();
+    let (env, _agents) = env();
+    let mut stage = load_installed_graph().stages[0].clone();
+    stage.tools = vec![ToolSelector::Group(ToolGroup::Scripts)];
+    let graph = load_installed_graph();
+    let picked = temp_env::async_with_vars(
+        [("LEVIATH_HOME", Some(home.path().to_str().unwrap()))],
+        env.tools(&graph, &stage, &CodeFiles::new(), Some(blueprint.path())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(names(&picked.tools), ["both", "mine", "global_tool"]);
+    let found: BTreeMap<String, Vec<u8>> = picked
+        .code
+        .into_iter()
+        .map(|(reference, bytes)| match reference {
+            CodeRef::File(path) => (path, bytes),
+            CodeRef::Inline(_) => panic!("found code is named by where it was read"),
+        })
+        .collect();
+    assert_eq!(found["tools/mine.rhai"], b"// @tool mine\n2");
+    assert_eq!(
+        found["tools/both.rhai"], b"// @tool both\n\"own\"",
+        "the blueprint's own wins a name"
+    );
+    let global = found
+        .iter()
+        .find(|(path, _)| path.ends_with("global.rhai"))
+        .unwrap();
+    assert!(Path::new(global.0).is_absolute(), "{}", global.0);
 }
 
 fn dep(needs: Needs) -> DependencyDef {
@@ -342,38 +465,33 @@ async fn dependencies_are_judged_by_the_daemons_evaluator() {
         server: McpServerName::new(name).unwrap(),
         env: vec![],
     };
-    assert!(env.dependency(&dep(server("gh"))).await.is_ok());
-    let unmet = env.dependency(&dep(server("jira"))).await.unwrap_err();
-    assert!(unmet.contains("configure the MCP server 'jira'"), "{unmet}");
-    temp_env::async_with_vars([("LEVIATH_RESOLVE_ENV_VAR", Some("1"))], async {
-        assert!(
-            env.dependency(&dep(Needs::Env("LEVIATH_RESOLVE_ENV_VAR".into())))
-                .await
-                .is_ok()
-        );
-    })
-    .await;
-    let binary = env
-        .dependency(&dep(Needs::Binary("surely-not-installed-anywhere".into())))
+    assert!(env.dependency(&dep(server("gh")), None).await.is_ok());
+    let unmet = env
+        .dependency(&dep(server("jira")), None)
         .await
         .unwrap_err();
+    assert!(unmet.contains("configure the MCP server 'jira'"), "{unmet}");
+    temp_env::async_with_vars([("LEVIATH_RESOLVE_ENV_VAR", Some("1"))], async {
+        let set = dep(Needs::Env("LEVIATH_RESOLVE_ENV_VAR".into()));
+        assert!(env.dependency(&set, None).await.is_ok());
+    })
+    .await;
+    let missing = dep(Needs::Binary("surely-not-installed-anywhere".into()));
+    let binary = env.dependency(&missing, None).await.unwrap_err();
     assert!(
         binary.contains("install 'surely-not-installed-anywhere'"),
         "{binary}"
     );
-    let inline = |src: &str| dep(Needs::Check(CodeRef::Inline(src.into())));
-    assert!(env.dependency(&inline("fn check() { () }")).await.is_ok());
+    let by_file = dep(Needs::Check(CodeRef::File("c.rhai".into())));
+    let ok: &[u8] = b"fn check() { () }";
+    assert!(env.dependency(&by_file, Some(ok)).await.is_ok());
+    let unmet: &[u8] = b"fn check() { \"get it\" }";
     assert_eq!(
-        env.dependency(&inline("fn check() { \"get it\" }"))
-            .await
-            .unwrap_err(),
+        env.dependency(&by_file, Some(unmet)).await.unwrap_err(),
         "get it"
     );
-    let file = env
-        .dependency(&dep(Needs::Check(CodeRef::File("c.rhai".into()))))
-        .await
-        .unwrap_err();
-    assert!(file.contains("write the check inline"), "{file}");
+    let none = env.dependency(&by_file, None).await.unwrap_err();
+    assert!(none.contains("holds no code"), "{none}");
 }
 
 #[test]

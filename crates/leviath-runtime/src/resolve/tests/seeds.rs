@@ -145,7 +145,7 @@ async fn code_and_tool_seeds_run_on_a_spawn_and_see_the_inputs() {
     let env = Fake::default();
     let resolved = spawn(&raw(g), &env).await.unwrap();
     let seeded = &resolved.spec.seeded;
-    assert_eq!(seeded["system"].text, "code saw 1 inputs");
+    assert_eq!(seeded["system"].text, "code fn seed() {} saw 1 inputs");
     assert_eq!(seeded["task"].text, "2 files\n\ndo the thing");
     assert_eq!(
         env.seeds_run().len(),

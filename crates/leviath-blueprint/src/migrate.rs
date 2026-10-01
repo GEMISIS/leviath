@@ -25,6 +25,7 @@ pub fn migrate(manifest: &str) -> Result<String, Vec<String>> {
 pub fn migrate_file(manifest: &str) -> Result<BlueprintFile, Vec<String>> {
     let blueprint = parse_manifest(manifest).map_err(|e| vec![e.to_string()])?;
     let graph = RunGraph::from_blueprint(&blueprint)
+        .and_then(|mut graph| graph.read_manifest_tables(manifest).map(|()| graph))
         .map_err(|issues| issues.iter().map(ToString::to_string).collect::<Vec<_>>());
     let name =
         BlueprintName::new(blueprint.name.as_str()).map_err(|e| format!("[agent] name: {e}"));

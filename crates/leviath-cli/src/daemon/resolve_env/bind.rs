@@ -1,25 +1,33 @@
-//! Binding a resolved run on the daemon: its compiled code, its sandbox and
-//! its tool state.
+//! Binding a resolved run on the daemon: everything about the run that is
+//! this machine's to build.
 //!
 //! Hooks, validators and custom regions are compiled from the run file's own
-//! code by the runtime. What is the daemon's own is the tool lane's view of
-//! the run: built-in tools over the run's workdir behind the sandbox its
-//! stages declare, the shared MCP connections, the script tools the run's
-//! code holds, the permission layers (the run's `--allow`, each stage's and
-//! the graph's `tool_permissions`, the operator's ceiling, the yolo profile),
-//! and the sub-agent handle. That state is registered with the tool service
-//! once the run's entity exists.
+//! code by the runtime, and so is the run's mime registry (this machine's
+//! rows with the graph's on top, and the graph's checks). What is the daemon's
+//! own:
+//!
+//! - the tool lane's view of the run: built-in tools over the run's workdir
+//!   behind the sandbox its stages declare and with the run's blob store, the
+//!   shared MCP connections, the script tools the run's code holds, the
+//!   permission layers and the yolo profile, the sub-agent handle, and the
+//!   re-scan context for a run whose tools are looked at again. It is
+//!   registered with the tool service once the run's entity exists.
+//! - the taint gate, with the operator's MCP reclassifications, and every
+//!   tool's sensitivity, for a run under taint tracking;
+//! - the chain of models a title call may walk, when the operator wants runs
+//!   titled (insertion decides whether this run asks for one);
+//! - what the operator grants of the run's `read_paths`, and where its
+//!   blueprint lives, on the run's record.
 
 use std::collections::HashMap;
 
-use leviath_core::policy::ToolPolicy;
+use leviath_runtime::blob_store::RunMimeRegistry;
 use leviath_runtime::spec::env::{BindEnv, Bindings};
-use leviath_runtime::spec::graph::SandboxDef;
-use leviath_runtime::spec::launch::Unattended;
+use leviath_runtime::spec::graph::ToolRescan;
 use leviath_runtime::spec::run_spec::{RunSpec, SpecOrigin};
 
+use super::layers::{self, Layers};
 use super::*;
-use crate::daemon::sandbox_manager::SandboxManager;
 use crate::daemon::tool_service::AgentToolState;
 
 #[async_trait]
@@ -37,10 +45,22 @@ impl BindEnv for DaemonEnv {
     }
 
     async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues> {
-        let bindings = leviath_runtime::bind::scripts::compile(spec, code)?;
-        let state = self.tool_state(spec, code)?;
+        let mut issues = SpawnIssues::new();
+        let compiled = issues.take(leviath_runtime::bind::scripts::compile(spec, code));
+        let registry = issues.take(leviath_runtime::bind::scripts::mime_registry(
+            spec, code, &self.mime,
+        ));
+        let state = issues.take(self.tool_state(spec, code, registry.as_ref()));
+        let (Some(compiled), Some(registry), Some(state)) = (compiled, registry, state) else {
+            return Err(issues);
+        };
+        let mut bindings = compiled.with(registry);
+        bindings.extend(self.taint(spec, state.reads_granted));
+        bindings.extend(self.title(spec));
+        bindings.extend(self.record(spec));
         let service = self.tool_service.clone();
-        Ok(bindings.after_insert(move |entity| service.register(entity, state)))
+        let tools = state.tools;
+        Ok(bindings.after_insert(move |entity| service.register(entity, tools)))
     }
 }
 
@@ -54,44 +74,29 @@ pub(super) fn agent_name(spec: &RunSpec) -> String {
     }
 }
 
-/// A graph's sandbox as the sandbox layer reads it.
-fn sandbox_config(def: &SandboxDef) -> leviath_core::ToolSandboxConfig {
-    leviath_core::ToolSandboxConfig {
-        kind: def.kind,
-        image: def.image.clone(),
-        engine: def.engine.clone(),
-        network: def.network,
-        mounts: def.mounts.clone(),
-        keep_warm: def.keep_warm,
-        on_unavailable: def.on_unavailable,
-    }
-}
-
-/// A tool policy as the permission layers write it.
-fn policy_word(policy: ToolPolicy) -> String {
-    match policy {
-        ToolPolicy::Allow => "allow",
-        ToolPolicy::Ask => "ask",
-        ToolPolicy::Deny => "deny",
-    }
-    .to_string()
-}
-
-fn permissions(
-    table: &BTreeMap<leviath_runtime::spec::names::ToolName, ToolPolicy>,
-) -> HashMap<String, String> {
-    table
-        .iter()
-        .map(|(tool, policy)| (tool.to_string(), policy_word(*policy)))
-        .collect()
-}
-
 /// An issue at a top-level field of the spec.
 fn at(field: &str, code: IssueCode, message: impl Into<String>) -> SpawnIssues {
     SpawnIssue::new(SpecPath::root().field(field), code, message).into()
 }
 
+/// A bound run's tool state, and whether it may read outside its workdir.
+struct ToolState {
+    tools: Arc<AgentToolState>,
+    reads_granted: bool,
+}
+
 impl DaemonEnv {
+    /// The directory a blueprint run's blueprint is installed in.
+    fn blueprint_dir(&self, spec: &RunSpec) -> Option<PathBuf> {
+        match &spec.origin {
+            SpecOrigin::Blueprint { blueprint, .. } => self
+                .agents_dir
+                .as_ref()
+                .map(|d| d.join(blueprint.name.as_str())),
+            SpecOrigin::Raw => None,
+        }
+    }
+
     /// The script tools the run's stages were given, compiled from the run
     /// file's own copy of their code.
     fn script_tools(
@@ -131,12 +136,59 @@ impl DaemonEnv {
         issues.into_result((set, names))
     }
 
-    /// The tool lane's state for a run.
+    /// What a run whose tools are looked at again needs to look: where, at
+    /// what besides scripts, and what each stage may be given.
+    fn rescan(
+        &self,
+        spec: &RunSpec,
+        builtin_names: &HashSet<String>,
+        builtins: &leviath_tools::BuiltinTools,
+    ) -> Arc<crate::daemon::tool_service::DynamicToolCtx> {
+        let graph = &spec.graph;
+        let scan_dirs: Vec<PathBuf> = self
+            .blueprint_dir(spec)
+            .map(|d| d.join("tools"))
+            .into_iter()
+            .chain(std::iter::once(spec.placement.workdir.join("tools")))
+            .chain(leviath_core::tools_dir())
+            .collect();
+        let mut static_defs = builtins.tool_defs();
+        static_defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
+        static_defs.extend(self.mcp_defs.iter().cloned());
+        let stamp = std::sync::Mutex::new(crate::daemon::tool_service::stamp_scan_dirs(&scan_dirs));
+        Arc::new(crate::daemon::tool_service::DynamicToolCtx {
+            scan_dirs,
+            reserved_names: crate::daemon::spawn::reserved_tool_names(
+                builtin_names,
+                &self.mcp_defs,
+            ),
+            static_defs,
+            mcp_owners: self.mcp_owners.clone(),
+            stage_available: graph
+                .stages
+                .iter()
+                .map(|s| host::stage_grants(s, &self.mcp_owners))
+                .collect(),
+            stage_required: graph
+                .stages
+                .iter()
+                .map(|s| s.required_tools.iter().map(ToString::to_string).collect())
+                .collect(),
+            unattended: spec.auto_answers.questions,
+            dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stamp,
+        })
+    }
+
+    /// The tool lane's state for a run, over `registry` (or, when the run's
+    /// registry could not be built, over this machine's alone, so the
+    /// tool state's own problems are reported beside it).
     fn tool_state(
         &self,
         spec: &RunSpec,
         code: &CodeFiles,
-    ) -> Result<Arc<AgentToolState>, SpawnIssues> {
+        registry: Option<&RunMimeRegistry>,
+    ) -> Result<ToolState, SpawnIssues> {
         let config = &*self.config;
         let graph = &spec.graph;
         let workdir = spec.placement.workdir.clone();
@@ -144,39 +196,13 @@ impl DaemonEnv {
         let run_id = spec.run_id.as_str();
         let mut issues = SpawnIssues::new();
 
-        let (yolo, profile_name) = match &spec.launch.unattended {
-            Unattended::Off => (false, None),
-            Unattended::All => (true, None),
-            Unattended::Profile(name) => (true, Some(name.to_string())),
-        };
         let profile = issues.take(
-            crate::yolo::resolve_for_spawn(yolo, profile_name.as_deref())
+            layers::profile(&spec.launch.unattended)
                 .map_err(|e| at("launch", IssueCode::Unresolvable, e.to_string())),
         );
-        let entry_index = graph
-            .entry
-            .as_ref()
-            .and_then(|e| graph.stages.iter().position(|s| &s.name == e))
-            .unwrap_or(0);
-        let entry_stage = graph
-            .stages
-            .get(entry_index)
-            .map(|s| s.name.to_string())
-            .unwrap_or_default();
-        let graph_sandbox = graph.sandbox.as_ref().map(sandbox_config);
-        let by_index = graph
-            .stages
-            .iter()
-            .map(|s| {
-                leviath_core::resolve_sandbox(
-                    config.sandbox.as_ref(),
-                    graph_sandbox.as_ref(),
-                    s.sandbox.as_ref().map(sandbox_config).as_ref(),
-                )
-            })
-            .collect();
+        let layers = Layers::new(config, graph, &spec.launch, &agent);
         let sandbox = issues.take(
-            SandboxManager::build(run_id, by_index, &workdir.to_string_lossy(), entry_index)
+            layers::sandbox(config, graph, run_id, &workdir, layers.entry_index)
                 .map_err(|e| at("sandbox", IssueCode::Unavailable, e)),
         );
         let declared_reads = (!graph.read_paths.is_empty()).then(|| {
@@ -195,7 +221,7 @@ impl DaemonEnv {
         );
         let scripts = issues.take(self.script_tools(spec, code));
         let (
-            Some(profile),
+            Some((profile, profile_name)),
             Some(sandbox),
             Some((reads, warning)),
             Some((script_tools, script_names)),
@@ -206,12 +232,31 @@ impl DaemonEnv {
         if let Some(line) = warning {
             tracing::warn!(agent_name = %agent, "{line}");
         }
+        let reads_granted =
+            reads.is_active() && (reads.allow_blueprint || !reads.grants.is_empty());
         let sandbox = sandbox.map(Arc::new);
+        let fallback;
+        let registry = match registry {
+            Some(registry) => registry,
+            None => {
+                fallback = RunMimeRegistry::new(&self.mime, toml::Table::new(), BTreeMap::new())
+                    .expect("no rows of a run's own always layer");
+                &fallback
+            }
+        };
+        let mime = Arc::new(leviath_tools::ToolMime {
+            store: self.blob_store.clone(),
+            registry: registry.cell(),
+            run_id: run_id.to_string(),
+            max_part_bytes: config.max_part_bytes(),
+        });
 
         let shell_env = crate::daemon::spawn::shell_env_policy(config);
         let tool_ctx = leviath_tools::ToolContext::new(workdir.clone())
             .with_read_paths(reads)
-            .with_shell_env(shell_env.clone());
+            .with_shell_env(shell_env.clone())
+            .with_agent_tools_dir(self.blueprint_dir(spec).map(|d| d.join("tools")))
+            .with_mime(mime.clone());
         let builtins =
             sandbox
                 .iter()
@@ -219,19 +264,15 @@ impl DaemonEnv {
                     tools.with_shell_executor(mgr.clone() as Arc<dyn leviath_tools::ShellExecutor>)
                 });
         let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
-        let builtins = Arc::new(
-            builtins.with_reserved_names(
-                crate::daemon::spawn::reserved_tool_names(&builtin_names, &self.mcp_defs)
-                    .into_iter()
-                    .collect(),
-            ),
+        let builtins = builtins.with_reserved_names(
+            crate::daemon::spawn::reserved_tool_names(&builtin_names, &self.mcp_defs)
+                .into_iter()
+                .collect(),
         );
+        let dynamic = (graph.tool_rescan != ToolRescan::AtSpawn)
+            .then(|| self.rescan(spec, &builtin_names, &builtins));
+        let builtins = Arc::new(builtins);
 
-        let stage_perms_by_index: Vec<HashMap<String, String>> = graph
-            .stages
-            .iter()
-            .map(|s| permissions(&s.tool_permissions))
-            .collect();
         let stage_required_by_index = graph
             .stages
             .iter()
@@ -257,42 +298,8 @@ impl DaemonEnv {
                     .collect()
             })
             .collect();
-        let agent_perms = permissions(&graph.tool_permissions);
-        let launch_overrides: HashMap<String, ToolPolicy> = spec
-            .launch
-            .allow
-            .iter()
-            .map(|t| (t.to_string(), ToolPolicy::Allow))
-            .collect();
-
-        let entry_perms = stage_perms_by_index
-            .get(entry_index)
-            .cloned()
-            .unwrap_or_default();
-        let agent_scoped = config.permissions_for_agent(&agent);
-        let script_allow = crate::daemon::script_host::resolve_script_permissions(
-            &config.tool_script_permissions,
-            &|builtin| {
-                let configured = crate::tools::resolve_policy(
-                    builtin,
-                    true,
-                    &launch_overrides,
-                    &entry_perms,
-                    &agent_perms,
-                    &agent_scoped,
-                    config.security.allow_blueprint_permissions,
-                );
-                crate::yolo::apply_profile(
-                    profile.as_deref(),
-                    builtin,
-                    &serde_json::Value::Null,
-                    configured,
-                    crate::tools::launch_allows(&launch_overrides, builtin),
-                    crate::yolo::ToolKind::Builtin,
-                    &workdir,
-                )
-            },
-        );
+        let script_allow =
+            layers::script_allow(config, graph, &layers, profile.as_deref(), &workdir);
         let writes = Arc::new(crate::daemon::tool_service::WriteBudget::new(
             config.limits.write_limits(),
         ));
@@ -300,6 +307,7 @@ impl DaemonEnv {
         let script_host: Arc<dyn leviath_scripting::ScriptHost> = Arc::new(
             crate::daemon::script_host::DaemonScriptHost::new(script_allow, workdir.clone())
                 .with_write_budget(writes.clone())
+                .with_mime(mime.clone(), offered_parts.clone())
                 .with_shell(
                     sandbox.clone(),
                     std::time::Duration::from_secs(config.limits.script_shell_timeout_secs),
@@ -314,56 +322,153 @@ impl DaemonEnv {
             workdir: workdir.to_string_lossy().into_owned(),
             max_depth: usize::from(spec.launch.max_depth),
             no_seed_commands: !spec.launch.seed_commands,
-            unattended: yolo,
+            unattended: profile.is_some(),
             yolo_profile: profile_name.clone(),
             model_override: spec.requested_model.as_ref().map(ToString::to_string),
             offered_parts: offered_parts.clone(),
-            mime: None,
+            mime: Some(mime),
         };
-        let unattended = profile.as_ref().is_some_and(|p| p.spec.questions.is_auto());
-        let safe = leviath_runtime::spec::blueprint::SafeCommandsConfig {
-            tools: graph
-                .safe_commands
-                .tools
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            shell: graph.safe_commands.shell.clone(),
-        };
-        let blueprint_safe = (safe != Default::default()).then_some(&safe);
-        Ok(crate::daemon::spawn::build_tool_state(
-            crate::daemon::spawn::ToolStateParts {
-                writes,
-                builtins,
-                builtin_names,
-                mcp: self.shared_mcp.clone(),
-                config,
-                hub: &self.hub,
-                run_id,
-                entry_stage: &entry_stage,
-                entry_index,
-                stage_perms_by_index,
-                stage_required_by_index,
-                stage_tool_accepts_by_index,
-                agent_perms,
-                agent_name: &agent,
-                launch_overrides,
-                subagent: Some(subagent),
-                sandbox,
-                script_tools,
-                script_tool_names: script_names,
-                script_host,
-                offered_parts,
-                dynamic: None,
-                unattended,
-                yolo: profile,
-                yolo_profile: profile_name,
-                protected: crate::tools::permission_files(config),
-                blueprint_safe,
-                blueprint_read_paths: declared_reads.as_ref(),
-                workdir,
-            },
+        let safe = layers::blueprint_safe(graph);
+        let Layers {
+            entry_index,
+            entry_stage,
+            stage_perms_by_index,
+            agent_perms,
+            launch_overrides,
+            ..
+        } = layers;
+        let tools = crate::daemon::spawn::build_tool_state(crate::daemon::spawn::ToolStateParts {
+            writes,
+            builtins,
+            builtin_names,
+            mcp: self.shared_mcp.clone(),
+            config,
+            hub: &self.hub,
+            run_id,
+            entry_stage: &entry_stage,
+            entry_index,
+            stage_perms_by_index,
+            stage_required_by_index,
+            stage_tool_accepts_by_index,
+            agent_perms,
+            agent_name: &agent,
+            launch_overrides,
+            subagent: Some(subagent),
+            sandbox,
+            script_tools,
+            script_tool_names: script_names,
+            script_host,
+            offered_parts,
+            dynamic,
+            unattended: spec.auto_answers.questions,
+            yolo: profile,
+            yolo_profile: profile_name,
+            protected: crate::tools::permission_files(config),
+            blueprint_safe: safe.as_ref(),
+            blueprint_read_paths: declared_reads.as_ref(),
+            workdir,
+        });
+        Ok(ToolState {
+            tools,
+            reads_granted,
+        })
+    }
+
+    /// The taint gate and every tool's sensitivity, for a run under taint
+    /// tracking (the resolver folded the operator's switch into the graph).
+    /// The read tools count as private when the run may read outside its
+    /// workdir.
+    fn taint(&self, spec: &RunSpec, reads_granted: bool) -> Bindings {
+        if spec.graph.taint_tracking != Some(true) {
+            return Bindings::new();
+        }
+        let mut gate = leviath_runtime::TaintGate::new(leviath_core::taint::SecurityConfig {
+            taint_tracking: true,
+        });
+        gate.apply_mcp_overrides(&self.mcp_overrides);
+        let names = self
+            .static_defs()
+            .into_iter()
+            .chain(spec.stages.iter().flat_map(|p| p.tools.iter().cloned()))
+            .map(|t| t.name.to_string());
+        let mut sensitivities: HashMap<String, leviath_core::TaintLevel> = names
+            .map(|n| {
+                let level = gate.tool_classification(&n).sensitivity;
+                (n, level)
+            })
+            .collect();
+        crate::daemon::spawn::bump_read_sensitivities(&mut sensitivities, reads_granted);
+        Bindings::new().with((
+            gate,
+            leviath_runtime::pipeline::ToolSensitivities(sensitivities),
         ))
+    }
+
+    /// The models a title call may walk, best first: `[title]`'s choice,
+    /// then the entry stage's model and its fallbacks. Nothing when the
+    /// operator has titles off or no candidate writes text.
+    fn title(&self, spec: &RunSpec) -> Bindings {
+        let settings = &self.config.title;
+        let entry = spec
+            .graph
+            .entry_stage()
+            .and_then(|s| spec.stage(s.name.as_str()));
+        let candidates = entry.map_or_else(Vec::new, |plan| {
+            let fallbacks: Vec<leviath_runtime::spec::blueprint::ModelEntry> = plan
+                .fallbacks
+                .iter()
+                .map(|f| {
+                    leviath_runtime::spec::blueprint::ModelEntry::new(
+                        f.provider
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                        f.model.to_string(),
+                    )
+                })
+                .collect();
+            leviath_runtime::title::stage_pairs(
+                plan.provider.as_str(),
+                plan.model.as_str(),
+                &fallbacks,
+            )
+        });
+        let label = spec
+            .stages
+            .first()
+            .map(|p| format!("{}/{}", p.provider, p.model));
+        let chain = leviath_runtime::title::title_chain(settings, label.as_deref(), &candidates);
+        match settings.enabled && !chain.is_empty() {
+            true => Bindings::new().with(leviath_runtime::title::TitleCandidates(chain)),
+            false => Bindings::new(),
+        }
+    }
+
+    /// What only this machine knows about the run's record: how many of its
+    /// `read_paths` the operator grants, and where its blueprint is installed.
+    fn record(&self, spec: &RunSpec) -> Bindings {
+        let counts = crate::read_path_report::build_declared(
+            &agent_name(spec),
+            &spec.graph.read_paths,
+            &self.config,
+            &spec.placement.workdir,
+        )
+        .and_then(Result::ok)
+        .map(|report| leviath_core::run_meta::ReadPathGrantCounts {
+            declared: report.declared(),
+            granted: report.granted(),
+        });
+        let path = self
+            .blueprint_dir(spec)
+            .map(|d| d.join(leviath_core::files::MANIFEST_FILENAME))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Bindings::new().edit(
+            move |meta: &mut leviath_runtime::persistence::RunMetadata| {
+                meta.read_paths = counts;
+                meta.agent_path = path;
+            },
+        )
     }
 }
 

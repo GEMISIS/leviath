@@ -8,21 +8,26 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use super::{ResolveMode, Resolved, resolve};
+use leviath_core::mime::MimeRegistry;
+
 use crate::spec::env::{
-    Caller, CodeFiles, CodeUse, LoadedBlueprint, ModelPlan, ResolveEnv, SeedCx, SpawnLimits,
+    Caller, CodeFiles, CodeUse, LoadedBlueprint, ModelPlan, OperatorDefaults, ResolveEnv, SeedCx,
+    SpawnLimits, StageTools,
 };
-use crate::spec::graph::{CodeRef, DependencyDef, RunGraph, Seed, StageDef};
+use crate::spec::graph::{CodeRef, DependencyDef, MimeRows, RunGraph, Seed, StageDef};
 use crate::spec::inputs::{InputDecl, InputSlot, InputType, PathKind, RawInput, RegionBinding};
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use crate::spec::launch::Unattended;
 use crate::spec::names::{
     BlueprintRef, Digest, McpServerName, MimePattern, ModelRef, ProviderName, RunId, WorkdirPath,
 };
 use crate::spec::request::{SpawnRequest, SpawnSource};
-use crate::spec::run_spec::{SeededContent, ToolDef, ToolSource};
+use crate::spec::run_spec::{AutoAnswers, SeededContent, ToolDef, ToolSource};
 
 mod attachments;
 mod basics;
 mod code;
+mod defaults;
 mod launch;
 mod outputs;
 mod regions;
@@ -40,7 +45,21 @@ pub(super) struct Fake {
     pub(super) files: BTreeMap<String, Vec<u8>>,
     pub(super) failing_deps: BTreeMap<String, String>,
     pub(super) printed: BTreeSet<String>,
+    /// Script tool code a stage's tools come with, by stage.
+    pub(super) tool_code: BTreeMap<String, Vec<(CodeRef, Vec<u8>)>>,
+    /// Why the compaction model is refused, when it is.
+    pub(super) compaction_refusal: Option<String>,
+    /// The yolo profiles this machine has, by name.
+    pub(super) profiles: BTreeMap<String, AutoAnswers>,
+    /// Why the graph's mime rows will not layer, when they will not.
+    pub(super) mime_refusal: Option<String>,
     pub(super) seeds_run: Mutex<Vec<Seed>>,
+    /// What each seed saw: the run, the agent, its unattended setting.
+    pub(super) seed_sights: Mutex<Vec<String>>,
+    /// The code each dependency was judged with.
+    pub(super) dep_code: Mutex<Vec<Option<Vec<u8>>>>,
+    /// The blueprint directory each stage's tools were asked with.
+    pub(super) tool_bases: Mutex<Vec<Option<PathBuf>>>,
     pub(super) asked: Mutex<Vec<(String, Option<ModelRef>)>>,
     pub(super) titles: Mutex<Vec<String>>,
 }
@@ -53,6 +72,8 @@ impl Default for Fake {
                 default_max_depth: 3,
                 seed_commands_allowed: true,
                 max_attachment_bytes: 1024,
+                default_max_iterations: None,
+                defaults: OperatorDefaults::default(),
             },
             workdir: Ok(PathBuf::from("/work")),
             existing: BTreeSet::new(),
@@ -61,7 +82,14 @@ impl Default for Fake {
             files: BTreeMap::new(),
             failing_deps: BTreeMap::new(),
             printed: BTreeSet::new(),
+            tool_code: BTreeMap::new(),
+            compaction_refusal: None,
+            profiles: [("safe".to_string(), AutoAnswers::default())].into(),
+            mime_refusal: None,
             seeds_run: Mutex::new(Vec::new()),
+            seed_sights: Mutex::new(Vec::new()),
+            dep_code: Mutex::new(Vec::new()),
+            tool_bases: Mutex::new(Vec::new()),
             asked: Mutex::new(Vec::new()),
             titles: Mutex::new(Vec::new()),
         }
@@ -84,6 +112,7 @@ pub(super) fn plan(provider: &str, model: &str, window: u32) -> ModelPlan {
         provider: n(provider),
         model: n(model),
         context_window: window,
+        max_output_tokens: 4096,
         fallbacks: Vec::new(),
         notes: Vec::new(),
     }
@@ -145,9 +174,30 @@ impl ResolveEnv for Fake {
                 .unwrap_or_else(|| n("mock")),
             model: chosen.map_or_else(|| n("gpt-mock"), |m| m.model.clone()),
             context_window: 100_000,
+            max_output_tokens: 4096,
             fallbacks: Vec::new(),
             notes: Vec::new(),
         })
+    }
+
+    fn compaction_model(&self, _model: &ModelRef) -> Result<(), String> {
+        self.compaction_refusal.clone().map_or(Ok(()), Err)
+    }
+
+    fn auto_answers(&self, unattended: &Unattended) -> Result<AutoAnswers, Box<SpawnIssue>> {
+        match unattended {
+            Unattended::Profile(name) => {
+                self.profiles.get(name.as_str()).copied().ok_or_else(|| {
+                    SpawnIssue::new(SpecPath::root(), IssueCode::Unresolvable, "no such profile")
+                        .known(self.profiles.keys())
+                        .into()
+                })
+            }
+            _ => Ok(match unattended == &Unattended::All {
+                true => AutoAnswers::all(),
+                false => AutoAnswers::default(),
+            }),
+        }
     }
 
     async fn tools(
@@ -155,11 +205,25 @@ impl ResolveEnv for Fake {
         _graph: &RunGraph,
         stage: &StageDef,
         _code: &CodeFiles,
-    ) -> Result<Vec<ToolDef>, SpawnIssues> {
-        self.tools
+        base: Option<&Path>,
+    ) -> Result<StageTools, SpawnIssues> {
+        self.tool_bases
+            .lock()
+            .unwrap()
+            .push(base.map(Path::to_path_buf));
+        let tools = self
+            .tools
             .get(stage.name.as_str())
             .cloned()
-            .unwrap_or(Ok(Vec::new()))
+            .unwrap_or(Ok(Vec::new()))?;
+        Ok(StageTools {
+            tools,
+            code: self
+                .tool_code
+                .get(stage.name.as_str())
+                .cloned()
+                .unwrap_or_default(),
+        })
     }
 
     async fn code(&self, code: &CodeRef, base: Option<&Path>) -> Result<Vec<u8>, String> {
@@ -180,19 +244,33 @@ impl ResolveEnv for Fake {
         match (text.contains("broken"), text.contains("nohook"), used_as) {
             (true, _, _) => Err("does not compile".to_string()),
             (_, true, CodeUse::Hook) => Err("defines no hook".to_string()),
+            (_, _, CodeUse::Install) if !text.contains("fn install") => {
+                Err("defines no install".to_string())
+            }
             _ => Ok(()),
         }
     }
 
     async fn seed(&self, seed: &Seed, cx: SeedCx<'_>) -> Result<SeededContent, String> {
         self.seeds_run.lock().unwrap().push(seed.clone());
+        self.seed_sights.lock().unwrap().push(format!(
+            "{} {} {:?} {}",
+            cx.run_id,
+            cx.agent,
+            cx.launch.unattended,
+            cx.graph.stages.len()
+        ));
         let text = match seed {
             Seed::Literal(text) => text.clone(),
             Seed::Command(command) if command == "fail" => return Err("exit 1".to_string()),
             Seed::Command(command) => format!("ran {command} in {}", cx.workdir.display()),
             Seed::Glob(pattern) => format!("glob {pattern}"),
             Seed::Files(files) => format!("{} files", files.len()),
-            Seed::Code(_) => format!("code saw {} inputs", cx.inputs.0.len()),
+            Seed::Code(code) => format!(
+                "code {} saw {} inputs",
+                String::from_utf8_lossy(cx.code_of(code).unwrap_or_default()),
+                cx.inputs.0.len()
+            ),
             Seed::Tools { calls, .. } => format!("{} tool calls", calls.len()),
         };
         Ok(SeededContent {
@@ -201,8 +279,16 @@ impl ResolveEnv for Fake {
         })
     }
 
+    fn mime_registry(&self, rows: &MimeRows) -> Result<MimeRegistry, String> {
+        match &self.mime_refusal {
+            Some(why) => Err(why.clone()),
+            None => crate::bind::host::run_registry(&MimeRegistry::builtin(), rows),
+        }
+    }
+
     fn sniff(
         &self,
+        _registry: &MimeRegistry,
         name: &str,
         _bytes: &[u8],
         declared: Option<&MimePattern>,
@@ -220,7 +306,12 @@ impl ResolveEnv for Fake {
         })
     }
 
-    async fn dependency(&self, dependency: &DependencyDef) -> Result<(), String> {
+    async fn dependency(
+        &self,
+        dependency: &DependencyDef,
+        code: Option<&[u8]>,
+    ) -> Result<(), String> {
+        self.dep_code.lock().unwrap().push(code.map(<[u8]>::to_vec));
         match self.failing_deps.get(&dependency.name) {
             Some(message) => Err(message.clone()),
             None => Ok(()),

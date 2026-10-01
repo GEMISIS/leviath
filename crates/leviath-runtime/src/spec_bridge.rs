@@ -87,6 +87,7 @@ pub fn run_spec_from_blueprint(
             seed_commands: true,
             capture_model_input: false,
         },
+        auto_answers: Default::default(),
         placement: Placement {
             workdir: std::path::PathBuf::new(),
             parent: None,

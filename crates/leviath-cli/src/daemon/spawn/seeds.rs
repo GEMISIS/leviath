@@ -557,7 +557,7 @@ pub(super) fn read_path_grant_counts(
 /// actually granted: they can pull in content from outside the workdir -
 /// design docs, run archives, whatever else was granted - which the default
 /// `Internal` classification (written for workdir files) understates.
-pub(super) fn bump_read_sensitivities(
+pub(crate) fn bump_read_sensitivities(
     map: &mut HashMap<String, leviath_core::TaintLevel>,
     read_paths_granted: bool,
 ) {

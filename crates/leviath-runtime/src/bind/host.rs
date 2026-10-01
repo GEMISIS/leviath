@@ -78,6 +78,7 @@ pub fn check_code(code: &[u8], used_as: CodeUse) -> Result<(), String> {
         CodeUse::DependencyCheck => {
             leviath_scripting::dependency_check::compile(label, source).map(drop)
         }
+        CodeUse::Install => leviath_scripting::dependency_check::compile_install(label, source),
         CodeUse::Tool => leviath_scripting::tool::check_source(label, source).map(drop),
         CodeUse::Seed => Ok(()),
     };
@@ -165,6 +166,11 @@ pub fn choose_model(
         .get(provider.as_str())
         .map(|p| u32::try_from(p.max_context_tokens(model.as_str())).unwrap_or(u32::MAX))
         .unwrap_or(FALLBACK_WINDOW);
+    let max_output_tokens = registry
+        .get(provider.as_str())
+        .map(|p| p.capabilities(model.as_str()).max_output_tokens)
+        .unwrap_or(leviath_providers::ModelCapabilities::default().max_output_tokens);
+    let max_output_tokens = u32::try_from(max_output_tokens).unwrap_or(u32::MAX);
     let fallbacks = resolved
         .fallbacks
         .iter()
@@ -174,9 +180,81 @@ pub fn choose_model(
         provider,
         model,
         context_window,
+        max_output_tokens,
         fallbacks,
         notes: resolved.notes,
     })
+}
+
+/// Whether a compaction model may be sent a run's context over `registry`:
+/// refused when its provider would keep what it is sent and the operator asked
+/// for zero retention, as a stage's model is. A model whose provider is not
+/// registered (or that names none) is never called, so it is not judged.
+pub fn compaction_model(
+    model: &ModelRef,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+) -> Result<(), String> {
+    let Some(provider) = model.provider.as_ref().filter(|p| registry.has(p.as_str())) else {
+        return Ok(());
+    };
+    match registry.retention_refusal_with(
+        &defaults.retention,
+        provider.as_str(),
+        model.model.as_str(),
+    ) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// A graph's mime rows as the registry layers them: the TOML table a
+/// `[mime_types]` block is written as. A check named inline is keyed by the
+/// digest of its code, the way compiled code is filed.
+pub fn mime_table(rows: &crate::spec::graph::MimeRows) -> toml::Table {
+    use crate::spec::graph::TokenRule;
+    use leviath_core::mime::TokenRule as Core;
+    rows.iter()
+        .map(|(pattern, row)| {
+            let row = leviath_core::mime::registry::MimeRow {
+                family: row.family.clone(),
+                text: row.text,
+                tokens: row.tokens.map(|t| match t {
+                    TokenRule::PerByte(r) => Core::PerByte(r),
+                    TokenRule::PerPixel { divisor, max } => Core::PerPixel {
+                        divisor,
+                        max: max as usize,
+                    },
+                    TokenRule::PerSecond(n) => Core::PerSecond(n),
+                    TokenRule::PerPage(n) => Core::PerPage(n as usize),
+                    TokenRule::Fixed(n) => Core::Fixed(n as usize),
+                }),
+                extensions: row.extensions.clone(),
+                magic: row.magic.clone(),
+                stand_in: row.stand_in.clone(),
+                check: row.check.as_ref().map(check_key),
+            };
+            let value = toml::Value::try_from(row).expect("a row of plain values writes as TOML");
+            (pattern.to_string(), value)
+        })
+        .collect()
+}
+
+/// The key a mime check's code is filed under in a registry row.
+fn check_key(code: &CodeRef) -> String {
+    match code {
+        CodeRef::File(path) => path.clone(),
+        CodeRef::Inline(source) => format!("inline:{}", Digest::of(source.as_bytes())),
+    }
+}
+
+/// `base` with a graph's mime rows layered on top, as the run's registry.
+pub fn run_registry(
+    base: &leviath_core::mime::MimeRegistry,
+    rows: &crate::spec::graph::MimeRows,
+) -> Result<leviath_core::mime::MimeRegistry, String> {
+    base.layered(&mime_table(rows), "blueprint")
+        .map_err(|e| e.to_string())
 }
 
 /// A tool as the model is offered it, with where it comes from.
@@ -250,21 +328,12 @@ pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef
             _ => None,
         })
         .collect();
-    let available: Vec<String> = stage
-        .tools
-        .iter()
-        .map(|s| match s {
-            ToolSelector::Tool(name) => name.to_string(),
-            ToolSelector::Group(group) => group_token(*group).to_string(),
-        })
-        .collect();
-    let connectors: Vec<String> = stage.connectors.iter().map(ToString::to_string).collect();
     let required: Vec<String> = stage
         .required_tools
         .iter()
         .map(ToString::to_string)
         .collect();
-    let granted = expand_connector_grants(&available, &connectors, &owners);
+    let granted = stage_grants(stage, &owners);
     let picked = filter_tools_for_stage(
         ToolCatalog {
             defs: &defs,
@@ -299,6 +368,22 @@ pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef
         }
     }
     issues.into_result(chosen)
+}
+
+/// What a stage's tool list grants, as the tool filter reads it: each named
+/// tool, each group by its token, and every tool of each MCP server the
+/// stage connects to (by `owners`).
+pub fn stage_grants(stage: &StageDef, owners: &ToolOwners) -> Vec<String> {
+    let available: Vec<String> = stage
+        .tools
+        .iter()
+        .map(|s| match s {
+            ToolSelector::Tool(name) => name.to_string(),
+            ToolSelector::Group(group) => group_token(*group).to_string(),
+        })
+        .collect();
+    let connectors: Vec<String> = stage.connectors.iter().map(ToString::to_string).collect();
+    expand_connector_grants(&available, &connectors, owners)
 }
 
 /// The token a group is written as in a stage's tool list.
@@ -380,6 +465,16 @@ pub fn run_inline_check(source: &str) -> Result<(), String> {
         Verdict::Satisfied => Ok(()),
         Verdict::Unmet(why) | Verdict::Unusable(why) => Err(why),
     }
+}
+
+/// Run a dependency check from the run's own copy of its code, however the
+/// graph named it: `Ok` when it is satisfied, the check's own remedy or
+/// failure otherwise.
+pub fn run_check(code: Option<&[u8]>) -> Result<(), String> {
+    let code = code.ok_or("the run holds no code for this check")?;
+    let source =
+        std::str::from_utf8(code).map_err(|e| format!("the check is not UTF-8 text: {e}"))?;
+    run_inline_check(source)
 }
 
 /// A digest of a provider's configuration, credentials left out.

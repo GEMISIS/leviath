@@ -1,4 +1,5 @@
 use leviath_core::JsonDoc;
+use leviath_core::policy::ToolPolicy;
 use leviath_runtime::spec::graph::{CodeRef, StageHooks};
 use leviath_runtime::spec::launch::{Delivery, LaunchPolicy, Placement};
 use leviath_runtime::spec::names::{ModelId, ProfileName, RunId, StageName, ToolName};
@@ -11,13 +12,9 @@ use crate::daemon::resolve_env::tests::{MANIFEST, env, install};
 fn graph() -> RunGraph {
     let (_, agents) = env();
     install(&agents, "helper", MANIFEST);
-    load_installed(
-        Some(agents.path()),
-        &BlueprintRef::parse("helper").unwrap(),
-        &Config::default(),
-    )
-    .unwrap()
-    .graph
+    load_installed(Some(agents.path()), &BlueprintRef::parse("helper").unwrap())
+        .unwrap()
+        .graph
 }
 
 /// A resolved run of the test manifest working in `workdir`.
@@ -59,6 +56,7 @@ fn spec(workdir: &Path) -> RunSpec {
             seed_commands: true,
             capture_model_input: false,
         },
+        auto_answers: Default::default(),
         placement: Placement {
             workdir: workdir.to_path_buf(),
             parent: None,
@@ -118,7 +116,11 @@ async fn a_bound_run_is_registered_with_the_tool_service_once_placed() {
     };
 
     let bindings = env.bind(&s, &code).await.unwrap();
-    assert_eq!(bindings.len(), 2, "the compiled hooks and the registration");
+    assert_eq!(
+        bindings.len(),
+        5,
+        "the compiled hooks, the mime registry, the title chain, the record and the registration"
+    );
     let (world, entity) = place(s, bindings);
     assert!(
         world
@@ -244,6 +246,96 @@ fn a_run_is_named_by_its_blueprint_or_its_title() {
     assert_eq!(bind::agent_name(&s), "my run");
     s.graph.title = None;
     assert_eq!(bind::agent_name(&s), "raw");
+}
+
+#[tokio::test]
+async fn a_bound_run_carries_what_only_the_daemon_knows() {
+    let mut config = Config::default();
+    config.title.enabled = false;
+    config.security.read_paths = vec!["~/notes".into()];
+    let (env, _agents) = crate::daemon::resolve_env::tests::env_with(config);
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec(dir.path());
+    s.graph.taint_tracking = Some(true);
+    s.graph.tool_rescan = leviath_runtime::spec::graph::ToolRescan::AfterWrites;
+    s.graph.read_paths = vec!["~/notes".into()];
+    s.stages[0].fallbacks = vec![
+        ModelRef::parse("mock/backup").unwrap(),
+        ModelRef::parse("bare-model").unwrap(),
+    ];
+    s.stages[0].tools.push(ToolDef {
+        name: ToolName::new("read_file").unwrap(),
+        description: "read".into(),
+        schema: JsonDoc::default(),
+        source: ToolSource::Builtin,
+    });
+    let bindings = env.bind(&s, &CodeFiles::new()).await.unwrap();
+    let (world, entity) = place(s.clone(), bindings);
+    assert!(world.get::<leviath_runtime::TaintGate>(entity).is_some());
+    let levels = &world
+        .get::<leviath_runtime::pipeline::ToolSensitivities>(entity)
+        .unwrap()
+        .0;
+    assert_eq!(
+        levels.get("read_file"),
+        Some(&leviath_core::TaintLevel::Private),
+        "a run that may read outside its workdir reads private things"
+    );
+    assert!(
+        world
+            .get::<leviath_runtime::title::TitleCandidates>(entity)
+            .is_none(),
+        "titles are off"
+    );
+    let meta = world
+        .get::<leviath_runtime::persistence::RunMetadata>(entity)
+        .unwrap();
+    assert!(
+        meta.agent_path.ends_with("agent.leviath"),
+        "{}",
+        meta.agent_path
+    );
+    let counts = meta.read_paths.expect("the run declares read paths");
+    assert_eq!((counts.declared, counts.granted), (1, 1));
+    let state = env.tool_service.state_for(entity).unwrap();
+    let rescan = state.dynamic.as_ref().expect("the run rescans its tools");
+    assert!(rescan.scan_dirs.iter().any(|d| d.ends_with("helper/tools")));
+    assert_eq!(rescan.stage_available.len(), 2);
+
+    let mut raw = s;
+    raw.origin = SpecOrigin::Raw;
+    raw.graph.taint_tracking = Some(false);
+    raw.graph.read_paths.clear();
+    let bindings = env.bind(&raw, &CodeFiles::new()).await.unwrap();
+    let (world, entity) = place(raw, bindings);
+    assert!(world.get::<leviath_runtime::TaintGate>(entity).is_none());
+    let meta = world
+        .get::<leviath_runtime::persistence::RunMetadata>(entity)
+        .unwrap();
+    assert_eq!(meta.agent_path, "", "a raw graph has no blueprint on disk");
+    assert!(meta.read_paths.is_none());
+}
+
+#[tokio::test]
+async fn mime_rows_that_will_not_build_are_reported_beside_the_tool_states_problems() {
+    let (env, _agents) = env();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = spec(dir.path());
+    s.graph.mime_types.insert(
+        leviath_runtime::spec::names::MimePattern::new("application/x-odd").unwrap(),
+        leviath_runtime::spec::graph::MimeRowDef {
+            magic: Some("not hex".into()),
+            ..Default::default()
+        },
+    );
+    let paths = |issues: SpawnIssues| -> Vec<String> {
+        issues.iter().map(|i| i.path.to_string()).collect()
+    };
+    let alone = env.bind(&s, &CodeFiles::new()).await.unwrap_err();
+    assert_eq!(paths(alone), ["mime_types"]);
+    s.graph.read_paths = vec!["regex:".into()];
+    let both = env.bind(&s, &CodeFiles::new()).await.unwrap_err();
+    assert_eq!(paths(both), ["mime_types", "read_paths"]);
 }
 
 #[test]
