@@ -1110,12 +1110,12 @@ fn an_input_field_the_schema_does_not_have_is_refused() {
 #[test]
 fn a_value_where_an_input_object_belongs_is_refused() {
     let example =
-        "mutation { spawnRun(request: { blueprint: \"coder\", task: \"t\" })\n  { run { id } } }";
+        "mutation { spawnRun(request: { source: { blueprint: \"coder\" } })\n  { __typename } }";
     let message = refusal(&served(), example);
     assert_eq!(
         message,
         "1:30: `BlueprintRef` is an input object, and `\"coder\"` is not one \
-         (at Mutation.spawnRun(request:).blueprint)",
+         (at Mutation.spawnRun(request:).source.blueprint)",
         "{message}"
     );
 }
@@ -1163,12 +1163,12 @@ fn one_value_where_a_list_belongs_is_accepted() {
 /// A fault inside a list says which item it was in.
 #[test]
 fn a_fault_inside_a_list_names_the_item_it_was_in() {
-    let example = "mutation { spawnRun(request: { task: \"t\", regions: [\n  { region: { name: \"plan\" }, text: \"x\" },\n  { regin: { name: \"plan\" }, text: \"x\" }\n] }) { run { id } } }";
+    let example = "mutation { spawnRun(request: { inputs: [\n  { name: \"plan\", value: { text: \"x\" } },\n  { nme: \"plan\", value: { text: \"x\" } }\n] }) { __typename } }";
     let message = refusal(&served(), example);
     assert_eq!(
         message,
-        "1:30: `RegionSeedWrite` has no input field `regin` \
-         (at Mutation.spawnRun(request:).regions[1])",
+        "1:30: `InputEntryWrite` has no input field `nme` \
+         (at Mutation.spawnRun(request:).inputs[1])",
         "{message}"
     );
 }
@@ -1218,10 +1218,10 @@ fn an_enum_value_the_schema_has_is_accepted() {
 /// A null where the schema will not take one.
 #[test]
 fn a_null_where_the_schema_requires_a_value_is_refused() {
-    let example = "mutation { spawnRun(request: { blueprint: { name: \"coder\" }, task: null })\n  { run { id } } }";
+    let example = "mutation { spawnRun(request: { source: null })\n  { __typename } }";
     let message = refusal(&served(), example);
     assert_eq!(
-        message, "1:30: a null is not allowed here (at Mutation.spawnRun(request:).task)",
+        message, "1:30: a null is not allowed here (at Mutation.spawnRun(request:).source)",
         "{message}"
     );
 }
@@ -1260,7 +1260,8 @@ fn a_value_for_a_scalar_the_schema_defines_is_left_alone() {
 #[test]
 fn a_variable_fits_wherever_it_is_written() {
     let example = "mutation Spawn($task: String!) {\n  \
-        spawnRun(request: { blueprint: { name: \"coder\" }, task: $task }) { run { id } }\n}";
+        spawnRun(request: { source: { blueprint: { name: \"coder\" } },\n    \
+        inputs: [{ name: \"task\", value: { text: $task } }] }) { __typename }\n}";
     assert!(
         served().check(example).is_ok(),
         "{:?}",

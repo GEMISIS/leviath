@@ -13,6 +13,8 @@ use async_graphql::{Enum, ID, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
 use super::super::super::core::blueprints::BlueprintSource as CoreSource;
+use super::super::super::core::error::ServeError;
+use super::super::error::IntoGraphql;
 use super::super::paging::page::weight;
 use super::machine::mime::MimeRow;
 use super::manifest::count;
@@ -27,6 +29,7 @@ use super::manifest::runtime::{
 };
 use super::manifest::stage::Stage;
 use super::manifest::transition::ContextTransform;
+use super::runfile::values::InputDecl;
 use leviath_runtime::spec::Blueprint as CoreBlueprint;
 
 /// How much of the digest an id carries.
@@ -589,6 +592,24 @@ impl Blueprint {
                 at,
             })
             .collect()
+    }
+
+    /// The inputs a spawn of this blueprint takes, typed: what `spawnRun`'s
+    /// `inputs` may name, which of them it must, and where each value goes.
+    ///
+    /// A blueprint whose graph does not hold together has no inputs to offer,
+    /// and answers with every problem in it rather than an empty list.
+    #[filter(skip)]
+    async fn inputs(&self) -> async_graphql::Result<Vec<InputDecl>> {
+        let graph = leviath_runtime::spec::graph::RunGraph::from_blueprint(&self.parsed)
+            .map_err(|issues| {
+                ServeError::Unprocessable(format!(
+                    "blueprint '{}' does not read as a run graph: {issues}",
+                    self.parsed.name
+                ))
+            })
+            .gql()?;
+        Ok(graph.inputs.iter().map(InputDecl::from).collect())
     }
 
     /// Paths this blueprint declares it needs beyond its workdir. Declaring is not

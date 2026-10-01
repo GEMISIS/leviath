@@ -476,3 +476,77 @@ async fn every_mirrored_function_runs() {
     exercise_enum(&[HintSetting::Inherit, HintSetting::Omit]).await;
     exercise_enum(&[RegionKind::Pinned, RegionKind::SlidingWindow]).await;
 }
+
+/// A blueprint's inputs are typed, each with where its value goes: the
+/// `task` region takes the task, and a region seeded from the caller takes an
+/// input of that name.
+#[tokio::test]
+async fn a_blueprint_lists_the_inputs_a_spawn_takes() {
+    let text = format!(
+        "{}\n[context.regions.task]\nkind = \"pinned\"\nmax_tokens = 100\n\n\
+         [context.regions.brief]\nkind = \"pinned\"\nmax_tokens = 100\n\
+         seed = \"brief_text\"\nrequired = true\ndescription = \"what to write\"\n",
+        manifest()
+    );
+    let answer = ask(
+        &text,
+        CoreSource::Installed,
+        "{ blueprint { inputs { name required description
+            type { __typename ... on TextInputTypeOutput { multiline summary } }
+            binds { kind region template stage } default { __typename } } } }",
+    )
+    .await;
+    let inputs = answer["blueprint"]["inputs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let named = |name: &str| {
+        inputs
+            .iter()
+            .find(|input| input["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no input {name}: {inputs:?}"))
+    };
+    let brief = named("brief_text");
+    assert_eq!(brief["required"], true);
+    assert_eq!(brief["description"], "what to write");
+    assert_eq!(brief["type"]["__typename"], "TextInputTypeOutput");
+    assert_eq!(brief["type"]["multiline"], true);
+    assert_eq!(brief["binds"][0]["kind"], "REGION");
+    assert_eq!(brief["binds"][0]["region"], "brief");
+    assert_eq!(brief["default"], serde_json::Value::Null);
+    assert_eq!(named("task")["binds"][0]["region"], "task");
+}
+
+/// A blueprint whose graph does not hold together says so rather than
+/// answering with no inputs.
+#[tokio::test]
+async fn a_blueprint_that_is_no_graph_has_no_inputs_to_offer() {
+    let text = format!(
+        "{}\n[context.regions.brief]\nkind = \"pinned\"\nmax_tokens = 100\n\
+         seed = \"not a name\"\n",
+        manifest()
+    );
+    let schema = Schema::build(
+        BlueprintProbe {
+            blueprint: blueprint(&text, CoreSource::Installed),
+        },
+        EmptyMutation,
+        EmptySubscription,
+    )
+    .finish();
+    let answer = schema
+        .execute(Request::new("{ blueprint { inputs { name } } }"))
+        .await;
+    let error = answer.errors.first().expect("a refusal");
+    assert!(
+        error.message.contains("does not read as a run graph"),
+        "{error:?}"
+    );
+    let code = error
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get("code"))
+        .map(ToString::to_string);
+    assert_eq!(code.as_deref(), Some("\"UNPROCESSABLE\""));
+}

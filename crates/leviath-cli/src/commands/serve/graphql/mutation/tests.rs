@@ -19,13 +19,10 @@ use super::exports::StartRunExportRequest;
 use super::interactions::{
     AnswerInteractionRequest, ApproveWrite, DenyWrite, InteractionAnswerWrite,
 };
-use super::runs::{
-    CallbackWrite, DeleteRunsRequest, OutputRequestWrite, PauseRunRequest, PauseRunsRequest,
-    RegionSeedWrite, SendMessageRequest, SpawnRunRequest, YoloWrite,
-};
+use super::runs::{DeleteRunsRequest, PauseRunRequest, PauseRunsRequest, SendMessageRequest};
 use super::{Mutation, has_landed, settle};
-use crate::commands::serve::graphql::inputs::{BlueprintRef, KeyValueWrite, RegionRef};
-use crate::commands::serve::graphql::mutation::attachments::{AttachmentWrite, Delivery};
+use crate::commands::serve::graphql::inputs::KeyValueWrite;
+use crate::commands::serve::graphql::mutation::attachments::AttachmentWrite;
 use crate::commands::serve::graphql::query::Query;
 use crate::commands::serve::graphql::types::interaction::ApprovalScope;
 use crate::commands::serve::testutil::{fake_daemon, no_daemon_client, state_with_agent_paths};
@@ -60,27 +57,6 @@ fn unreadable_run(id: &str) {
 /// An empty agents directory, so no test reads the developer's own.
 fn empty_agents() -> tempfile::TempDir {
     tempfile::tempdir().expect("a temp agents dir")
-}
-
-/// A temporary agents directory holding one blueprint by that name.
-///
-/// A spawn checks the blueprint exists before it reaches the daemon, and with
-/// no path configured that check reads the developer's own agents directory. A
-/// test that passed only on a machine with `coder` installed is a test that
-/// says nothing, so every spawn test brings its own.
-fn agents_dir_with(name: &str) -> tempfile::TempDir {
-    let agents = tempfile::tempdir().expect("a temp dir");
-    let agent = agents.path().join(name);
-    std::fs::create_dir_all(&agent).expect("the agent dir");
-    std::fs::write(
-        agent.join(leviath_core::files::MANIFEST_FILENAME),
-        format!(
-            "[agent]\nname = \"{name}\"\n\n[context.regions.plan]\nkind = \"pinned\"\n\
-             max_tokens = 100\n\n[stages.only]\nmode = \"autonomous\"\n"
-        ),
-    )
-    .expect("manifest written");
-    agents
 }
 
 /// Run one mutation against a schema wired to `control` and an agents
@@ -800,314 +776,6 @@ async fn a_sweep_refuses_what_the_listing_refuses() {
     .await;
 }
 
-// ── spawning ──
-
-/// A spawn answers with the run it started, and carries every field it was
-/// given down to the daemon.
-///
-/// The fake daemon records what it was sent, so this asserts the translation as
-/// well as the answer: a field a client sets and the daemon never sees is a
-/// field that silently does nothing.
-#[tokio::test]
-async fn a_spawn_carries_every_field_it_was_given() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-spawn", |_d| async move {
-        let agents = agents_dir_with("coder");
-        let workdir = tempfile::tempdir().expect("a temp workdir");
-        std::fs::write(workdir.path().join("hero.png"), b"\x89PNG\r\n\x1a\nbody")
-            .expect("the attachment");
-        let (control, _dir, _srv) = fake_daemon(|request| match request {
-            leviath_runtime::control_socket::ControlRequest::Spawn { request } => {
-                use leviath_runtime::spec::inputs::RawInput;
-                let leviath_runtime::spec::request::SpawnSource::Blueprint(reference) =
-                    &request.source
-                else {
-                    panic!("a blueprint request");
-                };
-                assert!(
-                    reference.name.as_str().contains("coder"),
-                    "the blueprint it named: {reference}"
-                );
-                let text = |name: &str| match request.inputs.get(name) {
-                    Some(RawInput::Text(t)) => t.clone(),
-                    other => panic!("{name}: {other:?}"),
-                };
-                assert_eq!(text("task"), "fix the parser");
-                assert_eq!(
-                    request.model.as_ref().map(ToString::to_string).as_deref(),
-                    Some("gpt-5.6")
-                );
-                assert_eq!(request.launch.max_depth, Some(3));
-                assert_eq!(
-                    request.launch.unattended,
-                    leviath_runtime::spec::launch::Unattended::All,
-                    "the waiver travels"
-                );
-                assert_eq!(text("plan"), "start here");
-                assert_eq!(
-                    request.delivery.metadata.get("ticket").map(String::as_str),
-                    Some("42")
-                );
-                assert_eq!(request.attachments.len(), 1, "the attachment travels");
-                let part = &request.attachments[0];
-                assert_eq!(part.name, "the-hero");
-                assert_eq!(part.region.as_ref().map(|r| r.as_str()), Some("plan"));
-                assert_eq!(part.deliver, Some(leviath_core::mime::Delivery::Text));
-                assert_eq!(part.caption.as_deref(), Some("v1"));
-                assert_eq!(
-                    part.mime_type.as_ref().map(|t| t.as_str()),
-                    Some("image/png")
-                );
-                let mut meta = run_in("coder-1", RunStatus::Starting);
-                meta.task = text("task");
-                meta.metadata = request.delivery.metadata.clone().into_iter().collect();
-                create_run(&meta).expect("run written");
-                ControlResponse::Spawned {
-                    run_id: "coder-1".to_string(),
-                }
-            }
-            other => panic!("the spawn is what reaches the daemon, not {other:?}"),
-        });
-        let mut state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
-        state.control = control;
-        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
-            .data(state)
-            .finish();
-        // The workdir is a variable rather than query text: a Windows path
-        // holds backslashes, which a GraphQL string literal would eat.
-        let answer = schema
-            .execute(
-                Request::new(
-                    "mutation Start($request: SpawnRunRequest!) { \
-                       spawnRun(request: $request) { run { id task status metadata { key value } } \
-                       warnings } }",
-                )
-                .variables(async_graphql::Variables::from_json(
-                    serde_json::json!({
-                        "request": {
-                            "blueprint": { "name": "coder" },
-                            "task": "fix the parser",
-                            "model": "gpt-5.6",
-                            "maxDepth": 3,
-                            "workdir": workdir.path().to_string_lossy(),
-                            "yolo": { "everything": true },
-                            "allowTools": ["shell"],
-                            "skipSeedCommands": true,
-                            "captureModelInput": true,
-                            "regions": [{ "region": { "name": "plan" }, "text": "start here" }],
-                            "metadata": [{ "key": "ticket", "value": "42" }],
-                            "output": { "format": "json", "instructions": "one object" },
-                            "callback": { "url": "https://example.com/hook", "secret": "shh" },
-                            "attachments": [{
-                                "path": "hero.png",
-                                "region": { "name": "plan" },
-                                "name": "the-hero",
-                                "mimeType": "image/png",
-                                "deliver": "TEXT",
-                                "caption": "v1",
-                            }],
-                        }
-                    }),
-                )),
-            )
-            .await;
-        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
-        let json = data_of(&answer);
-        let run = &json["spawnRun"]["run"];
-        assert_eq!(run["task"], "fix the parser");
-        assert_eq!(run["status"], "STARTING");
-        assert_eq!(run["metadata"][0]["key"], "ticket");
-        assert_eq!(
-            json["spawnRun"]["warnings"].as_array().map(Vec::len),
-            Some(0)
-        );
-    })
-    .await;
-}
-
-/// A spawn that says almost nothing: no yolo, no callback, no output shape, no
-/// attachments. Every one of those is a branch of its own.
-#[tokio::test]
-async fn a_spawn_with_nothing_optional_set_still_starts() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-bare", |_d| async move {
-        let agents = agents_dir_with("coder");
-        let (control, _dir, _srv) = fake_daemon(|request| match request {
-            leviath_runtime::control_socket::ControlRequest::Spawn { request } => {
-                assert_eq!(
-                    request.launch.unattended,
-                    leviath_runtime::spec::launch::Unattended::Off,
-                    "nothing was waived"
-                );
-                assert!(request.attachments.is_empty());
-                create_run(&run_in("coder-1", RunStatus::Starting)).expect("run written");
-                ControlResponse::Spawned {
-                    run_id: "coder-1".to_string(),
-                }
-            }
-            other => panic!("a spawn, not {other:?}"),
-        });
-        let answer = mutate_with_agents(
-            control,
-            agents.path(),
-            r#"mutation { spawnRun(request: { blueprint: { name: "coder" }, task: "t" })
-                 { run { id } } }"#,
-        )
-        .await;
-        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
-    })
-    .await;
-}
-
-/// A named yolo profile is the other half of the waiver, and it travels as
-/// itself rather than as a blanket one.
-#[tokio::test]
-async fn a_named_yolo_profile_travels_as_the_name() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-profile", |_d| async move {
-        let agents = agents_dir_with("coder");
-        let (control, _dir, _srv) = fake_daemon(|request| match request {
-            leviath_runtime::control_socket::ControlRequest::Spawn { request } => {
-                assert!(matches!(
-                    &request.launch.unattended,
-                    leviath_runtime::spec::launch::Unattended::Profile(p) if p.as_str() == "cautious"
-                ));
-                create_run(&run_in("coder-1", RunStatus::Starting)).expect("run written");
-                ControlResponse::Spawned {
-                    run_id: "coder-1".to_string(),
-                }
-            }
-            other => panic!("a spawn, not {other:?}"),
-        });
-        let answer = mutate_with_agents(
-            control,
-            agents.path(),
-            r#"mutation { spawnRun(request: { blueprint: { name: "coder" }, task: "t",
-                 yolo: { profileName: "cautious" } }) { run { id } } }"#,
-        )
-        .await;
-        assert!(answer.errors.is_empty(), "{:?}", answer.errors);
-    })
-    .await;
-}
-
-/// A spawn pinned to a revision that is not the installed one is a conflict,
-/// and nothing is started.
-#[tokio::test]
-async fn a_spawn_pinned_to_another_revision_is_a_conflict() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-pinned", |_d| async move {
-        let agents = agents_dir_with("coder");
-        let answer = mutate_with_agents(
-            no_daemon_client(),
-            agents.path(),
-            r#"mutation { spawnRun(request: {
-                 blueprint: { name: "coder",
-                   digest: "0000000000000000000000000000000000000000000000000000000000000000" },
-                 task: "t" }) { run { id } } }"#,
-        )
-        .await;
-        assert_eq!(code_of(&answer), "\"CONFLICT\"");
-        assert!(
-            answer.errors[0].message.contains("coder"),
-            "{}",
-            answer.errors[0].message
-        );
-    })
-    .await;
-}
-
-/// The spawn's own refusals: a waiver this server does not allow, a negative
-/// depth, and an attachment outside the working directory.
-#[tokio::test]
-async fn a_spawn_refuses_what_the_server_will_not_do() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-refused", |_d| async move {
-        let agents = agents_dir_with("coder");
-        let workdir = tempfile::tempdir().expect("a temp workdir");
-        let mut state = state_with_agent_paths(vec![agents.path().to_path_buf()]);
-        state.limits = std::sync::Arc::new(crate::commands::serve::types::ServeLimits {
-            no_remote_yolo: true,
-            ..Default::default()
-        });
-        let schema = Schema::build(Query, Mutation::default(), EmptySubscription)
-            .data(state)
-            .finish();
-
-        let waived = schema
-            .execute(
-                Request::new(
-                    "mutation Start($workdir: String!) { spawnRun(request: { \
-                       blueprint: { name: \"coder\" }, task: \"t\", workdir: $workdir, \
-                       yolo: { everything: true } }) { run { id } } }",
-                )
-                .variables(async_graphql::Variables::from_json(
-                    serde_json::json!({
-                        "workdir": workdir.path().to_string_lossy(),
-                    }),
-                )),
-            )
-            .await;
-        assert_eq!(code_of(&waived), "\"FORBIDDEN\"");
-
-        let negative = schema
-            .execute(Request::new(
-                r#"mutation { spawnRun(request: { blueprint: { name: "coder" }, task: "t",
-                     maxDepth: -1 }) { run { id } } }"#,
-            ))
-            .await;
-        assert!(
-            negative.errors[0].message.contains("negative"),
-            "{:?}",
-            negative.errors
-        );
-
-        // An attachment that climbs out of the working directory is the one
-        // refusal the path reader owns, and it reaches GraphQL as its own code.
-        let escaping = schema
-            .execute(
-                Request::new(
-                    "mutation Start($workdir: String!) { spawnRun(request: { \
-                       blueprint: { name: \"coder\" }, task: \"t\", workdir: $workdir, \
-                       attachments: [{ path: \"../escape.png\" }] }) { run { id } } }",
-                )
-                .variables(async_graphql::Variables::from_json(
-                    serde_json::json!({
-                        "workdir": workdir.path().to_string_lossy(),
-                    }),
-                )),
-            )
-            .await;
-        assert_eq!(code_of(&escaping), "\"FORBIDDEN\"");
-        assert!(
-            escaping.errors[0].message.contains("working directory"),
-            "{}",
-            escaping.errors[0].message
-        );
-    })
-    .await;
-}
-
-/// A spawn the daemon accepted whose record will not read is this server's
-/// problem, and the message says so rather than blaming the caller.
-#[tokio::test]
-async fn a_record_that_will_not_read_after_a_spawn_is_internal() {
-    crate::runstate::with_isolated_runs_dir_async("graphql-spawn-unread", |_d| async move {
-        let agents = agents_dir_with("coder");
-        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
-            run_id: "ghost".to_string(),
-        });
-        let answer = mutate_with_agents(
-            control,
-            agents.path(),
-            r#"mutation { spawnRun(request: { blueprint: { name: "coder" }, task: "t" })
-                 { run { id } } }"#,
-        )
-        .await;
-        assert_eq!(
-            code_of(&answer),
-            "\"INTERNAL\"",
-            "the daemon said yes, so the missing record is ours"
-        );
-    })
-    .await;
-}
-
 // ── messaging ──
 
 /// A message answers with the run, and carries the files it named beside the
@@ -1724,61 +1392,6 @@ async fn refreshing_the_models_answers_with_the_catalogue() {
 fn every_input_object_round_trips() {
     use async_graphql::InputType;
 
-    let spawn = SpawnRunRequest {
-        blueprint: BlueprintRef {
-            name: "coder".to_string(),
-            digest: None,
-        },
-        task: "fix the parser".to_string(),
-        model: Some("gpt-5.6".to_string()),
-        max_depth: Some(3),
-        workdir: Some("/work".to_string()),
-        yolo: Some(YoloWrite::ProfileName("cautious".to_string())),
-        allow_tools: Some(vec!["shell".to_string()]),
-        skip_seed_commands: true,
-        capture_model_input: true,
-        regions: Some(vec![RegionSeedWrite {
-            region: RegionRef {
-                name: "plan".to_string(),
-            },
-            text: "start here".to_string(),
-        }]),
-        metadata: Some(vec![KeyValueWrite {
-            key: "ticket".to_string(),
-            value: "42".to_string(),
-        }]),
-        output: Some(OutputRequestWrite {
-            format: Some("json".to_string()),
-            instructions: Some("one object".to_string()),
-        }),
-        callback: Some(CallbackWrite {
-            url: "https://example.test/hook".to_string(),
-            secret: Some("shh".to_string()),
-        }),
-        attachments: Some(vec![AttachmentWrite {
-            path: "hero.png".to_string(),
-            region: Some(RegionRef {
-                name: "art".to_string(),
-            }),
-            name: Some("the-hero".to_string()),
-            mime_type: Some("image/png".to_string()),
-            deliver: Some(Delivery::StandIn),
-            caption: Some("v1".to_string()),
-        }]),
-    };
-    let Ok(read_back) = SpawnRunRequest::parse(Some(spawn.to_value())) else {
-        panic!("a spawn request reads back from its own value");
-    };
-    assert_eq!(read_back.blueprint.name, "coder");
-    assert_eq!(read_back.max_depth, Some(3));
-    assert_eq!(
-        read_back.regions.as_ref().map(Vec::len),
-        Some(1),
-        "the nested inputs come with it"
-    );
-    assert_eq!(read_back.metadata.as_ref().map(Vec::len), Some(1));
-    assert_eq!(read_back.attachments.as_ref().map(Vec::len), Some(1));
-
     let answers = [
         InteractionAnswerWrite::Choice(1),
         InteractionAnswerWrite::Text("the words".to_string()),
@@ -1800,16 +1413,6 @@ fn every_input_object_round_trips() {
         };
         assert_eq!(read_back.interaction_id.as_str(), "r1");
     }
-
-    // The waiver's other half, which the spawn above does not carry.
-    let waived = YoloWrite::Everything(true);
-    let Ok(read_back) = YoloWrite::parse(Some(waived.to_value())) else {
-        panic!("a waiver reads back from its own value");
-    };
-    let YoloWrite::Everything(everything) = read_back else {
-        panic!("the blanket waiver came back as the named one");
-    };
-    assert!(everything);
 }
 
 /// Every input object refuses what it cannot read.
@@ -1847,14 +1450,6 @@ fn every_input_object_refuses_what_it_cannot_read() {
         "no value"
     );
 
-    assert!(RegionSeedWrite::parse(scalar()).is_err());
-    assert!(RegionSeedWrite::parse(None).is_err());
-    assert!(RegionSeedWrite::parse(one("region", number())).is_err());
-    assert!(
-        RegionSeedWrite::parse(one("region", named("plan"))).is_err(),
-        "no text"
-    );
-
     assert!(AttachmentWrite::parse(scalar()).is_err());
     assert!(AttachmentWrite::parse(None).is_err());
     assert!(AttachmentWrite::parse(one("path", number())).is_err());
@@ -1862,44 +1457,6 @@ fn every_input_object_refuses_what_it_cannot_read() {
     attachment.insert(Name::new("path"), text("hero.png"));
     attachment.insert(Name::new("caption"), number());
     assert!(AttachmentWrite::parse(Some(Value::Object(attachment))).is_err());
-
-    assert!(OutputRequestWrite::parse(scalar()).is_err());
-    assert!(OutputRequestWrite::parse(None).is_err());
-    assert!(OutputRequestWrite::parse(one("format", number())).is_err());
-
-    assert!(CallbackWrite::parse(scalar()).is_err());
-    assert!(CallbackWrite::parse(None).is_err());
-    assert!(CallbackWrite::parse(one("url", number())).is_err());
-    assert!(
-        CallbackWrite::parse(one("secret", text("shh"))).is_err(),
-        "a secret with nothing to sign for is not a callback"
-    );
-    let mut callback = IndexMap::new();
-    callback.insert(Name::new("url"), text("https://example.test"));
-    callback.insert(Name::new("secret"), number());
-    assert!(CallbackWrite::parse(Some(Value::Object(callback))).is_err());
-
-    assert!(YoloWrite::parse(scalar()).is_err());
-    assert!(YoloWrite::parse(None).is_err());
-    assert!(YoloWrite::parse(one("everything", text("yes"))).is_err());
-
-    assert!(SpawnRunRequest::parse(scalar()).is_err());
-    assert!(SpawnRunRequest::parse(None).is_err());
-    assert!(SpawnRunRequest::parse(one("blueprint", number())).is_err());
-    assert!(
-        SpawnRunRequest::parse(one("blueprint", named("coder"))).is_err(),
-        "no task"
-    );
-    assert!(
-        SpawnRunRequest::parse(one("task", text("t"))).is_err(),
-        "no blueprint"
-    );
-    // The last field of the largest input, which is read after every other one.
-    let mut spawn = IndexMap::new();
-    spawn.insert(Name::new("blueprint"), named("coder"));
-    spawn.insert(Name::new("task"), text("fix it"));
-    spawn.insert(Name::new("attachments"), number());
-    assert!(SpawnRunRequest::parse(Some(Value::Object(spawn))).is_err());
 
     assert!(SendMessageRequest::parse(scalar()).is_err());
     assert!(SendMessageRequest::parse(None).is_err());
@@ -1973,45 +1530,6 @@ fn every_input_object_refuses_what_it_cannot_read() {
     assert!(RefreshModelsRequest::parse(scalar()).is_err());
     assert!(RefreshModelsRequest::parse(None).is_err());
     assert!(RefreshModelsRequest::parse(one("provider", number())).is_err());
-
-    // A request carried as a field of another input, which is the path a
-    // client takes when it builds one in code rather than inline.
-    #[derive(async_graphql::InputObject)]
-    struct SpawnProbe {
-        /// The spawn being carried.
-        request: SpawnRunRequest,
-    }
-    let mut carried = IndexMap::new();
-    carried.insert(
-        Name::new("request"),
-        SpawnRunRequest {
-            blueprint: BlueprintRef {
-                name: "coder".to_string(),
-                digest: None,
-            },
-            task: "fix the parser".to_string(),
-            model: None,
-            max_depth: None,
-            workdir: None,
-            yolo: None,
-            allow_tools: None,
-            skip_seed_commands: false,
-            capture_model_input: false,
-            regions: None,
-            metadata: None,
-            output: None,
-            callback: None,
-            attachments: None,
-        }
-        .to_value(),
-    );
-    let Ok(probe) = SpawnProbe::parse(Some(Value::Object(carried))) else {
-        panic!("a spawn request reads back as a carried field");
-    };
-    assert_eq!(probe.request.task, "fix the parser");
-    let mut broken = IndexMap::new();
-    broken.insert(Name::new("request"), text("coder"));
-    assert!(SpawnProbe::parse(Some(Value::Object(broken))).is_err());
 }
 
 // ── waiting for an act to show in the record ──
@@ -2122,14 +1640,8 @@ fn every_write_shape_round_trips() {
     use super::super::types::interaction::ApprovalScope;
     use super::super::types::run::RunFilter;
     use super::interactions::{ApproveWrite, DenyWrite, InteractionAnswerWrite};
-    use super::runs::{DeleteRunsRequest, OutputRequestWrite, SendMessageRequest, YoloWrite};
+    use super::runs::{DeleteRunsRequest, SendMessageRequest};
 
-    round_trip(&YoloWrite::Everything(true));
-    round_trip(&YoloWrite::ProfileName("bare".to_string()));
-    round_trip(&OutputRequestWrite {
-        format: Some("markdown".to_string()),
-        instructions: Some("short".to_string()),
-    });
     round_trip(&SendMessageRequest {
         run_id: async_graphql::ID::from("x0000000000000000-00000000"),
         text: "carry on".to_string(),

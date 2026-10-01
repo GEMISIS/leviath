@@ -1,5 +1,6 @@
 //! The acts a run itself goes through: `pauseRun`, `resumeRun`, `cancelRun`
-//! and their bulk twins, `spawnRun`, `sendMessage` and `deleteRuns`.
+//! and their bulk twins, `sendMessage` and `deleteRuns`. Starting one is
+//! [`spawn`](super::spawn)'s.
 //!
 //! Each one answers with the run it moved, so a client renders the new state
 //! without a second request. That means waiting for the act to show in the
@@ -12,7 +13,7 @@
 //! rest, so those come back under `skipped` with the reason rather than as an
 //! error.
 
-use async_graphql::{Context, Enum, ID, InputObject, OneofObject, SimpleObject};
+use async_graphql::{Context, Enum, ID, InputObject, SimpleObject};
 use futures_util::StreamExt;
 use leviath_graphql_derive::mirror;
 
@@ -23,118 +24,11 @@ use super::super::super::core::spawn as spawn_core;
 use super::super::super::types::AppState;
 use super::super::error::{IntoGraphql, graphql_error};
 use super::super::filter::run_predicate;
-use super::super::inputs::{BlueprintRef, KeyValueWrite, RegionRef};
+use super::super::inputs::RegionRef;
 use super::super::types::run::Run;
 use super::super::types::run::RunFilter;
 use super::attachments::{AttachmentWrite, parts_of};
 use crate::runstate;
-
-/// Seed text for one context region at spawn.
-#[derive(Debug, InputObject)]
-pub(crate) struct RegionSeedWrite {
-    /// The region to seed.
-    pub(crate) region: RegionRef,
-    /// The text it starts with.
-    pub(crate) text: String,
-}
-
-/// How a run answers prompts it would otherwise put to a person.
-///
-/// Exactly one of the two: a blanket waiver, or the named profile that says
-/// which prompts are waived. Both at once is two answers to one question, and
-/// the schema says so rather than the server refusing it after the fact.
-#[derive(Debug, OneofObject)]
-pub(crate) enum YoloWrite {
-    /// Waive every prompt. Refused outright on a server started with
-    /// `--no-remote-yolo`.
-    Everything(bool),
-    /// Waive the prompts the named profile in `yolo.toml` waives.
-    ProfileName(String),
-}
-
-/// The output shape a spawn asks the run for.
-#[derive(Debug, InputObject)]
-pub(crate) struct OutputRequestWrite {
-    /// The format label to ask for. Carried through opaquely, so a house
-    /// format needs no server support.
-    pub(crate) format: Option<String>,
-    /// Extra instructions for the run's output stage.
-    pub(crate) instructions: Option<String>,
-}
-
-/// Where a run posts its events, and what signs them.
-///
-/// The secret sits inside the URL's own object, so a secret with nothing to
-/// sign for cannot be written down at all.
-#[derive(Debug, InputObject)]
-pub(crate) struct CallbackWrite {
-    /// The URL the daemon POSTs this run's events to. Checked against the same
-    /// outbound policy a model-supplied URL is.
-    pub(crate) url: String,
-    /// Shared secret for signing that webhook body. Write-only: never read
-    /// back on the run.
-    pub(crate) secret: Option<String>,
-}
-
-/// Everything about a new run.
-#[derive(Debug, InputObject)]
-pub(crate) struct SpawnRunRequest {
-    /// The blueprint to start. A `digest` on it refuses the spawn where what is
-    /// installed under that name is a different revision, which is how a client
-    /// starts the blueprint it read rather than whatever is there now.
-    pub(crate) blueprint: BlueprintRef,
-    /// The initial ask.
-    pub(crate) task: String,
-    /// Override the blueprint's model for this run, as `provider/model` or a
-    /// bare model name. Wins over every other model setting.
-    pub(crate) model: Option<String>,
-    /// How deep sub-agent spawning may nest for this run.
-    pub(crate) max_depth: Option<i32>,
-    /// Where the run's tools execute. Defaults to this server's own directory,
-    /// and is refused outside `--workdir-root` when the operator set one.
-    pub(crate) workdir: Option<String>,
-    /// Run unattended, in one of the two ways there are to do it. Absent means
-    /// the run asks a person.
-    pub(crate) yolo: Option<YoloWrite>,
-    /// Tools to allow without asking, for this run.
-    pub(crate) allow_tools: Option<Vec<String>>,
-    /// Refuse this blueprint's command seeds, which run before any approval
-    /// prompt exists.
-    #[graphql(default = false)]
-    pub(crate) skip_seed_commands: bool,
-    /// Write this run's exact requests into its journal, once per provider
-    /// attempt, whatever this machine is configured to do for other runs.
-    ///
-    /// A captured request is the whole prompt, holding whatever the run's
-    /// context held: file contents, command output, the words somebody typed.
-    /// There is no size cap, and every call re-sends the window, so a captured
-    /// run's journal grows by roughly the context size per attempt. Read it
-    /// back on `InferenceAttempt.modelInput`.
-    #[graphql(default = false)]
-    pub(crate) capture_model_input: bool,
-    /// Seed text for named context regions.
-    pub(crate) regions: Option<Vec<RegionSeedWrite>>,
-    /// Caller-supplied metadata: labels for whoever started the run, such as a
-    /// ticket or a tenant. The run reads none of them, and the run search looks
-    /// through them. Not a typed extension point.
-    pub(crate) metadata: Option<Vec<KeyValueWrite>>,
-    /// The output shape to ask the run for, instead of the blueprint's own.
-    pub(crate) output: Option<OutputRequestWrite>,
-    /// Where to post this run's events, and what signs them.
-    pub(crate) callback: Option<CallbackWrite>,
-    /// Files inside the working directory to start the run with.
-    pub(crate) attachments: Option<Vec<AttachmentWrite>>,
-}
-
-/// What a spawn answers with.
-#[derive(SimpleObject)]
-pub(crate) struct SpawnRunResult {
-    /// The run that was started.
-    pub(crate) run: Run,
-    /// Retired checks the blueprint declared that this request's own output
-    /// shape supersedes. Empty unless something was.
-    pub(crate) warnings: Vec<String>,
-}
 
 /// A message for a run that is going.
 #[derive(Debug, InputObject)]
@@ -562,92 +456,6 @@ pub(crate) async fn cancel_runs(
 ) -> async_graphql::Result<CancelRunsResult> {
     let (runs, skipped) = act_over(ctx, request.filter, Action::Cancel, "cancel").await?;
     Ok(CancelRunsResult { runs, skipped })
-}
-
-/// Start a run.
-///
-/// Answers with the run itself, so a client renders the new row without a
-/// second request. `warnings` names checks the blueprint declared that this
-/// request's own output shape retires.
-///
-/// The refusals are the server's, not the daemon's: a workdir outside
-/// `--workdir-root`, an unattended run on a `--no-remote-yolo` server, an
-/// attachment outside the working directory, or a callback URL the outbound
-/// policy will not allow.
-pub(crate) async fn spawn_run(
-    ctx: &Context<'_>,
-    request: SpawnRunRequest,
-) -> async_graphql::Result<SpawnRunResult> {
-    let state = ctx.data_unchecked::<AppState>();
-    let max_depth = match request.max_depth {
-        None => None,
-        Some(depth) => Some(
-            usize::try_from(depth)
-                .map_err(|_| ServeError::BadRequest("`maxDepth` cannot be negative".to_string()))
-                .gql()?,
-        ),
-    };
-    // The same default the REST route uses, resolved here because the
-    // attachments are read against it before the daemon sees the request.
-    let workdir = request.workdir.clone().unwrap_or_else(|| {
-        std::env::current_dir()
-            .map(|dir| dir.to_string_lossy().to_string())
-            .unwrap_or_default()
-    });
-    let parts = parts_of(
-        request.attachments.unwrap_or_default(),
-        std::path::Path::new(&workdir),
-        state.limits.request_limits.max_upload_bytes,
-    )
-    .gql()?;
-    let (yolo, yolo_profile) = match request.yolo {
-        None => (false, None),
-        Some(YoloWrite::Everything(everything)) => (everything, None),
-        Some(YoloWrite::ProfileName(name)) => (false, Some(name)),
-    };
-    let (callback_url, callback_secret) = match request.callback {
-        None => (None, None),
-        Some(callback) => (Some(callback.url), callback.secret),
-    };
-    let blueprint = request.blueprint.installed(state).await.gql()?;
-    let spawn = spawn_core::SpawnRequest {
-        blueprint,
-        task: request.task,
-        model: request.model,
-        max_depth,
-        workdir: Some(workdir),
-        yolo,
-        yolo_profile,
-        allow: request.allow_tools.unwrap_or_default(),
-        no_seed_commands: request.skip_seed_commands,
-        capture_model_input: request.capture_model_input,
-        regions: request
-            .regions
-            .into_iter()
-            .flatten()
-            .map(|seed| (seed.region.name, seed.text))
-            .collect(),
-        metadata: request
-            .metadata
-            .into_iter()
-            .flatten()
-            .map(|entry| (entry.key, entry.value))
-            .collect(),
-        callback_url,
-        callback_secret,
-        output: request
-            .output
-            .map(|output| leviath_core::output::OutputSpec {
-                format: output.format,
-                instructions: output.instructions,
-                ..leviath_core::output::OutputSpec::default()
-            }),
-    };
-    let spawned = spawn_core::spawn(state, spawn, parts).await.gql()?;
-    Ok(SpawnRunResult {
-        run: run_of(read_meta(&spawned.run_id).gql()?),
-        warnings: spawned.warnings,
-    })
 }
 
 /// Send a message to a run that is going.

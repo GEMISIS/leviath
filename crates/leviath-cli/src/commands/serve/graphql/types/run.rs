@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use async_graphql::{Context, Enum, ID, Object};
+use async_graphql::{Context, ID, Object};
 use leviath_graphql_derive::mirror;
 
 use super::super::super::blocking::blocking;
@@ -33,16 +33,23 @@ use super::run_detail::{
     StageRecordOrder, WaitReason,
 };
 use super::run_files::{FileEntry, FileEntryFilter, FileListingExtras, FileSource, FileWindow};
+use super::runfile::delta::StateDelta;
+use super::runfile::graph::RunGraph;
+use super::runfile::read as run_file;
+use super::runfile::spec::RunSpec;
+use super::runfile::state::RunState;
 use crate::commands::serve::cursor;
 use crate::runstate::RunMeta;
+pub(crate) use status::RunStatus;
 use support::{
     BoundedPageArgs, ContextSnapshotPoint, ContextSnapshotPointFilter, CurrentStage,
-    LogStageOptions, LogStream, MetadataEntry, RunTreeStatus, as_i32, bounded_page, signed,
-    snapshot_point, tail_logs, unfiltered_history,
+    LogStageOptions, LogStream, RunTreeStatus, as_i32, bounded_page, signed, snapshot_point,
+    tail_logs, unfiltered_history,
 };
-pub(crate) use support::{CostBreakdown, TokenUsage, WorkingClock};
+pub(crate) use support::{CostBreakdown, MetadataEntry, TokenUsage, WorkingClock};
 
 mod reads;
+mod status;
 mod support;
 
 /// Where a run's own file reads are reported, for the test that counts them.
@@ -52,80 +59,6 @@ pub(crate) use reads::record_file_reads;
 
 impl Paged for Run {
     const NAME: &'static str = "Run";
-}
-
-/// The lifecycle states a run moves through.
-///
-/// One state per variant of the daemon's own `RunStatus`, so the two cannot
-/// drift: the conversion below is exhaustive and a new daemon state will not
-/// compile until it is named here.
-#[mirror]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
-pub(crate) enum RunStatus {
-    /// Spawned but not yet running.
-    Starting,
-    /// Moving: inferring, calling tools, transitioning.
-    Running,
-    /// Parked: on a prompt somebody has to answer, or holding for children.
-    WaitingInput,
-    /// Paused by `lev pause`; resumes with `lev resume`.
-    Paused,
-    /// Finished with an answer or a terminal state.
-    Complete,
-    /// Every required stage finished but the run still accepts messages.
-    CompleteInteractive,
-    /// Unrecoverable failure; `Run.error` carries what went wrong.
-    Error,
-    /// Stopped from outside. Nothing went wrong; somebody decided.
-    Cancelled,
-    /// A state this build has no name for, which is what a newer daemon's new
-    /// state looks like from here.
-    ///
-    /// Only ever reached through a live frame, where the status arrives as the
-    /// daemon's own word rather than as a value this build chose. A run read
-    /// from disk is parsed into one of the states above or not read at all.
-    Unknown,
-}
-
-impl From<&leviath_core::run_meta::RunStatus> for RunStatus {
-    fn from(status: &leviath_core::run_meta::RunStatus) -> Self {
-        use leviath_core::run_meta::RunStatus as Daemon;
-        match status {
-            Daemon::Starting => Self::Starting,
-            Daemon::Running => Self::Running,
-            Daemon::WaitingInput => Self::WaitingInput,
-            Daemon::Paused => Self::Paused,
-            Daemon::Complete => Self::Complete,
-            Daemon::CompleteInteractive => Self::CompleteInteractive,
-            Daemon::Error => Self::Error,
-            Daemon::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
-impl RunStatus {
-    /// The state one of the daemon's own words names.
-    ///
-    /// The live frames carry the word rather than a parsed state, and the
-    /// daemon on the other end of the socket may be a newer build than this
-    /// one. [`Unknown`](Self::Unknown) is what a word this build does not know
-    /// becomes, so one new state does not cost a subscriber the whole frame.
-    pub(crate) fn from_wire(word: &str) -> Self {
-        use leviath_core::run_meta::RunStatus as Daemon;
-        [
-            Daemon::Starting,
-            Daemon::Running,
-            Daemon::WaitingInput,
-            Daemon::Paused,
-            Daemon::Complete,
-            Daemon::CompleteInteractive,
-            Daemon::Error,
-            Daemon::Cancelled,
-        ]
-        .iter()
-        .find(|status| status.wire() == word)
-        .map_or(Self::Unknown, Self::from)
-    }
 }
 
 /// The resolver state behind the `Run` type.
@@ -1180,6 +1113,51 @@ impl Run {
             .collect();
         entries.sort_by(|a, b| a.key.cmp(&b.key));
         entries
+    }
+
+    /// The run as it was resolved: the request decided against the machine it
+    /// started on. Null for a run with no run file.
+    #[filter(skip)]
+    async fn spec(&self) -> async_graphql::Result<Option<RunSpec>> {
+        run_file::spec(&self.meta.run_id).await.gql()
+    }
+
+    /// The run's whole state at step `at`, or now. Now is the daemon's own
+    /// view while it holds the run, and the run file's last step otherwise.
+    /// Null for a run with no run file.
+    #[filter(skip)]
+    async fn state(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(
+            desc = "The step to read the state after. Step 0 is the state the run \
+                          started in. Omitted means now."
+        )]
+        at: Option<i32>,
+    ) -> async_graphql::Result<Option<RunState>> {
+        let state = ctx.data_unchecked::<AppState>();
+        run_file::state(state, &self.meta.run_id, at).await.gql()
+    }
+
+    /// The run's steps from `from` to `to`, both included, as its run file
+    /// records them: what each changed and what happened during it. At most
+    /// 200 steps per call. Empty for a run with no run file.
+    #[filter(skip)]
+    async fn deltas(
+        &self,
+        #[graphql(desc = "The first step. Omitted means step 1.")] from: Option<i32>,
+        #[graphql(desc = "The last step. Omitted means 199 steps after `from`, or the \
+                          run's last step if that comes first.")]
+        to: Option<i32>,
+    ) -> async_graphql::Result<Vec<StateDelta>> {
+        run_file::deltas(&self.meta.run_id, from, to).await.gql()
+    }
+
+    /// The run's stages and edges, with how often it entered each stage and
+    /// took each edge. Null for a run with no run file.
+    #[filter(skip)]
+    async fn graph(&self) -> async_graphql::Result<Option<RunGraph>> {
+        run_file::graph(&self.meta.run_id).await.gql()
     }
 }
 

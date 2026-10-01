@@ -722,7 +722,7 @@ are then reordered by cache tier. A mapping would have to be inferred after the 
 inferred one is not evidence.
 
 Turn capture on for a machine with `[observability] capture_model_input`, or for one run with
-`captureModelInput` on `spawnRun`. Read the warning in
+`launch.captureModelInput` on `spawnRun`. Read the warning in
 [Observability](/docs/observability#capturing-what-went-to-the-model) first. A captured request
 holds whatever the run's context held, including file contents a tool read and anything somebody
 pasted, and there is no size cap.
@@ -972,44 +972,45 @@ mutation {
 `checkMachine` is the one field with no `request`, because it has nothing to say: the checks are
 the checks.
 
-`spawnRun` is the widest request, and every part of it is optional but the blueprint and the task.
+`spawnRun` is the widest request. Only `source` is required: an installed blueprint, or a whole
+graph written as JSON. `validateSpawn` takes the same request and starts nothing.
 
 ```graphql
 mutation Spawn($task: String!) {
   spawnRun(request: {
-    blueprint: { name: "coder", digest: "3f9a1c0d8e77" }
-    task: $task
+    source: { blueprint: { name: "coder", digest: "3f9a1c0d8e77" } }
+    inputs: [
+      { name: "task", value: { text: $task } }
+      { name: "depth", value: { int: 3 } }
+    ]
     workdir: "/work"
     model: "claude-sonnet-5"
-    maxDepth: 3
-    yolo: { profileName: "careful" }
-    captureModelInput: true
-    regions: [{ region: { name: "brief" }, text: "ship the parser fix" }]
-    metadata: [{ key: "ticket", value: "LEV-412" }]
-    attachments: [{ path: "spec.pdf", deliver: NATIVE, caption: "the spec" }]
-    callback: { url: "https://example.invalid/hooks/leviath", secret: "shared-secret" }
+    launch: { maxDepth: 3, unattended: { profile: "careful" }, captureModelInput: true }
+    attachments: [{ content: { path: "spec.pdf" }, deliver: NATIVE, caption: "the spec" }]
+    delivery: {
+      callback: { url: "https://example.invalid/hooks/leviath", secret: "shared-secret" }
+      metadata: [{ key: "ticket", value: "LEV-412" }]
+    }
     output: { format: "markdown", instructions: "one page, no preamble" }
   }) {
-    run { id status task }
-    warnings
+    ... on SpawnedOutput { runId run { status } }
+    ... on SpawnRejectedOutput { issues { path code message expected got hint known } }
   }
 }
 ```
 
-The blueprint argument is a `BlueprintRef` rather than a name, so it can carry the revision you
-mean. Add the `digest` you read off `BlueprintOutput.digest` and the spawn is refused with
-`CONFLICT` if something else is installed under that name. Send the name alone and the spawn takes
-whatever is there.
+The answer is a union. `SpawnedOutput` carries the new run's id. `SpawnRejectedOutput` carries
+every problem with the request at once, each at its own path, so one retry can fix them all. A
+refused request is an answer, not a GraphQL error.
 
-`yolo` is `@oneOf`: exactly one of `everything` and `profileName`. `callback` puts the secret
-inside the object that carries the URL, so a secret with nowhere to go cannot be written.
-`attachments` name files inside the working directory, and `deliver` says whether each goes to the
-model natively, as text, or as a stand-in.
+`BlueprintOutput.inputs` lists what a blueprint takes, with each input's type. A value is
+`@oneOf`, and the input's declared type decides how it is read: `text` for a `model` input is a
+model name. Pin `digest` from `BlueprintOutput.digest` and a spawn of any other revision is
+refused.
 
-`warnings` names checks the blueprint declared that this request's own output shape retires. Three
-refusals here are the server's rather than the daemon's, and each answers `FORBIDDEN`: a workdir
-outside `--workdir-root`, an unattended run on a `--no-remote-yolo` server, and a callback URL the
-outbound policy will not allow.
+This server's own refusals are issues too: a workdir outside `--workdir-root`, an unattended run
+or an `allow` list on a `--no-remote-yolo` server, and a callback URL the outbound policy will not
+allow. `attachments` name files inside the working directory or carry `base64` bytes.
 
 ### Acting on many runs at once
 
