@@ -1,0 +1,31 @@
+[package]
+name = "leviath-legacy-runs"
+description = "Converts a run directory in the old many-file layout into a single run file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# Temporary: it carries old runs over and is deleted before 1.0, so it is
+# never published.
+publish = false
+
+[dependencies]
+leviath-core = { workspace = true }
+leviath-runtime = { workspace = true }
+# The run file is written owner-only, like every run file.
+leviath-sys = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

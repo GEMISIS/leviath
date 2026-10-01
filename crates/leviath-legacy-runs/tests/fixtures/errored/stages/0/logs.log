@@ -1,0 +1,1 @@
+[error] the API key was rejected: check it with `lev auth status` and re-enter it with `lev setup` ([bad-request] HTTP 401 Unauthorized: {"error": {"message": "the mock was told to refuse this one", "type": "server_error"}} - the provider rejected the request itself - a parameter it does not accept, or a model name it does not carry)

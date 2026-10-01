@@ -2811,6 +2811,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviath-legacy-runs"
+version = "0.6.4"
+dependencies = [
+ "leviath-core",
+ "leviath-runtime",
+ "leviath-sys",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "leviath-mcp"
 version = "0.6.4"
 dependencies = [
