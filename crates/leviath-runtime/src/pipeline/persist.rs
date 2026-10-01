@@ -389,13 +389,50 @@ type PersistenceQuery = (
 /// Coalescing lives here rather than in the lane: an agent whose digest has not
 /// changed since its last send is skipped, so a world full of idle runs costs
 /// nothing per tick.
-pub(crate) fn dispatch_persistence(
+///
+/// A run placed from a spec also gets its state read by
+/// [`inspect`](crate::state::inspect::inspect) at the same moments, carried to
+/// the lane inside its snapshot, and recorded in its run file there. That read
+/// needs the whole world, which is why this is an exclusive system wrapped
+/// around the query that builds the snapshots.
+pub(crate) fn dispatch_persistence(world: &mut World) {
+    let jobs = world.run_system_cached(build_snapshots).unwrap_or_default();
+    for (entity, mut job) in jobs {
+        job.run_file = run_file_step(world, entity, &job.run_id, job.meta.updated_at);
+        let _ = world
+            .resource::<PersistenceStage>()
+            .0
+            .send(PersistMsg::Snapshot(job));
+    }
+}
+
+/// The run-file step for the run on `entity`, when it was placed from a spec.
+fn run_file_step(
+    world: &World,
+    entity: Entity,
+    run_id: &str,
+    at: i64,
+) -> Option<Box<crate::runfile::lane::RunFileStep>> {
+    let spec = world.get::<crate::insert::RunSpecC>(entity)?.0.clone();
+    let state = crate::state::inspect::inspect(world, entity)?;
+    Some(Box::new(crate::runfile::lane::RunFileStep {
+        run_id: run_id.to_string(),
+        spec,
+        state,
+        at,
+    }))
+}
+
+/// Build each agent's snapshot, returning the ones to send. Lines with no
+/// snapshot behind them go to the lane from here.
+fn build_snapshots(
     mut agents: Query<PersistenceQuery>,
     stage: Res<PersistenceStage>,
     hub: Option<Res<InteractionHub>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
-) {
+) -> Vec<(Entity, Box<PersistJob>)> {
     crate::tick_scope::clear();
+    let mut jobs = Vec::new();
     for (
         entity,
         md,
@@ -675,19 +712,24 @@ pub(crate) fn dispatch_persistence(
         // The cost here is one clone of the answer per snapshot, on a path
         // that already deep-clones the whole context window.
         let final_output_body = final_output.map(|o| o.0.content.clone());
-        let _ = stage.0.send(PersistMsg::Snapshot(Box::new(PersistJob {
-            run_id: md.run_id.clone(),
-            meta,
-            context,
-            stages,
-            output_appends,
-            log_appends,
-            taint_audit,
-            final_output: final_output_body,
-            fanout,
-            interactions,
-        })));
+        jobs.push((
+            entity,
+            Box::new(PersistJob {
+                run_id: md.run_id.clone(),
+                meta,
+                context,
+                stages,
+                output_appends,
+                log_appends,
+                taint_audit,
+                final_output: final_output_body,
+                fanout,
+                interactions,
+                run_file: None,
+            }),
+        ));
     }
+    jobs
 }
 
 #[cfg(test)]
@@ -747,3 +789,7 @@ mod broken_script_tests {
         assert!(flags.0.broken_scripts.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "persist_tests.rs"]
+mod run_file_tests;

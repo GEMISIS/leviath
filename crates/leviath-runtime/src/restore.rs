@@ -21,6 +21,12 @@
 //! that batch is dispatched again with its finished results carried over: the
 //! question goes back in front of the person rather than an error in front of
 //! the model.
+//!
+//! A run with a run file comes back another way, and [`read_for_resume`] is
+//! where the two part: it reads the run's spec, code and last state from the
+//! file, the caller binds the spec against this machine, and [`resume`]
+//! inserts it. Nothing is re-resolved. A run without a run file gets `None`
+//! there and is restored by [`restore_agent`] from its older files.
 
 use bevy_ecs::prelude::*;
 use leviath_core::region::RegionEntry;
@@ -514,6 +520,48 @@ fn replay_pending_batch(
         None,
     );
 }
+
+/// A run read back from its run file, ready to bind and insert.
+#[derive(Debug)]
+pub struct Resumable {
+    /// The run's spec.
+    pub spec: std::sync::Arc<crate::spec::run_spec::RunSpec>,
+    /// Its state as of its last step.
+    pub state: crate::state::RunState,
+    /// The code its spec names, for binding.
+    pub code: crate::spec::env::CodeFiles,
+}
+
+/// Read the run in `run_dir` back from its run file.
+///
+/// `Ok(None)` when the run has no run file: it is restored from its older
+/// files by [`restore_agent`] instead. A run file that is there and cannot be
+/// read is an error naming the file and what is wrong with it, never a quiet
+/// fall back to the older files.
+pub fn read_for_resume(
+    run_dir: &std::path::Path,
+) -> Result<Option<Resumable>, crate::runfile::RunFileError> {
+    let path = run_dir.join(leviath_core::files::RUN_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let reader = crate::runfile::RunFileReader::open(&path)?;
+    Ok(Some(Resumable {
+        state: reader.latest_state()?,
+        code: reader.code_files()?,
+        spec: std::sync::Arc::new(reader.spec().clone()),
+    }))
+}
+
+/// Place a run read back by [`read_for_resume`] into the world, with the live
+/// handles binding its spec produced.
+pub fn resume(world: &mut World, run: Resumable, bindings: crate::spec::env::Bindings) -> Entity {
+    crate::insert::insert(world, run.spec, bindings, &run.state)
+}
+
+#[cfg(test)]
+#[path = "restore_tests.rs"]
+mod resume_tests;
 
 #[cfg(test)]
 mod tests {

@@ -68,6 +68,10 @@ pub(crate) struct PersistJob {
     /// than dropping it and re-inferring. `None` ⇒ the agent isn't parked
     /// at an interaction point (any stale file is removed).
     pub interactions: Option<String>,
+    /// The run's state for its run file, when it has a spec to write one
+    /// from. Coalescing drops a superseded one with its snapshot, which loses
+    /// nothing: the next step is a diff against whatever was last written.
+    pub run_file: Option<Box<crate::runfile::lane::RunFileStep>>,
 }
 
 /// What became of one append.
@@ -209,6 +213,8 @@ pub(crate) async fn persistence_worker(
     // directory it is about to establish from one somebody has deleted. See
     // [`may_write`].
     let mut staked: HashSet<String> = HashSet::new();
+    // The run files, written beside the files above from the same snapshots.
+    let mut run_files = crate::runfile::lane::RunFileLane::new(&machine_id, &world_id);
     while let Some(first) = jobs.recv().await {
         // Drain whatever else is already queued and process it as one batch,
         // keeping only the NEWEST snapshot per run: each snapshot carries the
@@ -233,7 +239,7 @@ pub(crate) async fn persistence_worker(
         }
         for (i, msg) in batch.into_iter().enumerate() {
             match msg {
-                PersistMsg::Snapshot(job) => {
+                PersistMsg::Snapshot(mut job) => {
                     if newest_snapshot.get(job.run_id.as_str()) != Some(&i) {
                         continue; // superseded by a newer snapshot in this batch
                     }
@@ -243,6 +249,7 @@ pub(crate) async fn persistence_worker(
                         last_context.remove(&job.run_id);
                         last_output.remove(&job.run_id);
                         last_status.remove(&job.run_id);
+                        run_files.forget(&job.run_id);
                         continue;
                     }
                     let prev = last_context.get(&job.run_id);
@@ -300,12 +307,16 @@ pub(crate) async fn persistence_worker(
                             run_archive::digest_context(&job.context),
                         );
                     }
+                    if let Some(step) = job.run_file.take() {
+                        record_run_file(&mut run_files, &runs_dir, *step, &stats).await;
+                    }
                 }
                 PersistMsg::Append {
                     run_id,
                     record,
                     ack,
                 } => {
+                    run_files.note(&run_id, &record);
                     let landed = if may_write(&runs_dir, &run_id, &mut staked, false) {
                         stats.append_attempted();
                         append_record(&runs_dir, &run_id, &record, &stats).await
@@ -339,6 +350,23 @@ pub(crate) async fn persistence_worker(
                 }
             }
         }
+    }
+}
+
+/// Record one run-file step, counting a failure against the run without
+/// failing it: the run file is written beside the journal, and the journal is
+/// still what a run is failed for.
+async fn record_run_file(
+    run_files: &mut crate::runfile::lane::RunFileLane,
+    runs_dir: &Path,
+    step: crate::runfile::lane::RunFileStep,
+    stats: &PersistLaneStats,
+) {
+    let run_id = step.run_id.clone();
+    if let Err(e) = run_files.record(runs_dir, step).await {
+        let message = e.kind.to_string();
+        tracing::warn!(run_id = %run_id, error = %e, "persistence: run file step not written");
+        stats.snapshot_failed(&run_id, &e.path, &message);
     }
 }
 
@@ -1050,6 +1078,7 @@ mod tests {
                 fanout: None,
                 interactions: None,
                 final_output: Some(body.to_string()),
+                run_file: None,
             })
         };
 
@@ -1094,6 +1123,7 @@ mod tests {
             fanout: None,
             interactions: None,
             final_output: None,
+            run_file: None,
         })))
         .unwrap();
         drop(tx); // close so the worker loop ends
@@ -1121,6 +1151,7 @@ mod tests {
             fanout: None,
             interactions: None,
             final_output: None,
+            run_file: None,
         }
     }
 
@@ -2052,6 +2083,7 @@ mod tests {
                 fanout: None,
                 interactions: None,
                 final_output: None,
+                run_file: None,
             },
             "machine-test",
             "world-test",
@@ -2088,6 +2120,7 @@ mod tests {
                 fanout: None,
                 interactions: None,
                 final_output: None,
+                run_file: None,
             },
             "machine-test",
             "world-test",
@@ -2153,6 +2186,7 @@ mod tests {
                 fanout: None,
                 interactions: None,
                 final_output: None,
+                run_file: None,
             },
             "machine-test",
             "world-test",
@@ -2194,6 +2228,7 @@ mod tests {
                 fanout: None,
                 interactions: None,
                 final_output: None,
+                run_file: None,
             },
             "machine-test",
             "world-test",
@@ -2226,6 +2261,7 @@ mod tests {
                 fanout: None,
                 interactions: None,
                 final_output: None,
+                run_file: None,
             },
             "machine-test",
             "world-test",
@@ -2262,6 +2298,7 @@ mod tests {
                 fanout: None,
                 interactions: None,
                 final_output: None,
+                run_file: None,
             },
             "machine-test",
             "world-test",
@@ -2648,5 +2685,61 @@ mod tests {
             stats.take_unwritable().is_empty(),
             "and no run is failed for it"
         );
+    }
+
+    /// A snapshot carries its run's run-file step: a good one lands in the
+    /// run file, with the journal's records since as its events, and one that
+    /// cannot be written is counted without failing the run.
+    #[tokio::test]
+    async fn a_snapshot_carries_its_run_file_step() {
+        use crate::runfile::reader_tests::{initial, spec};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("junk")).unwrap();
+        std::fs::write(
+            dir.path().join("junk").join(leviath_core::files::RUN_FILE),
+            b"junk",
+        )
+        .unwrap();
+        let step = |run_id: &str| {
+            Some(Box::new(crate::runfile::lane::RunFileStep {
+                run_id: run_id.to_string(),
+                spec: std::sync::Arc::new(spec()),
+                state: initial(),
+                at: 1,
+            }))
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        for run_id in ["run-1", "junk"] {
+            tx.send(PersistMsg::Snapshot(Box::new(PersistJob {
+                run_file: step(run_id),
+                ..job(run_id)
+            })))
+            .unwrap();
+        }
+        tx.send(PersistMsg::Append {
+            run_id: "run-1".to_string(),
+            record: Box::new(run_archive::RunRecord::StatusChanged {
+                status: leviath_core::run_meta::RunStatus::Running,
+                at: 1,
+            }),
+            ack: None,
+        })
+        .unwrap();
+        drop(tx);
+        let stats = health();
+        persistence_worker(Some(dir.path().to_path_buf()), rx, stats.clone()).await;
+        let file = dir.path().join("run-1").join(leviath_core::files::RUN_FILE);
+        let read = crate::runfile::RunFileReader::open(&file).unwrap();
+        assert_eq!(read.latest_state().unwrap(), initial());
+        let report = stats.report();
+        assert_eq!(report.snapshots_failed, 1);
+        assert!(
+            report
+                .last_error
+                .unwrap()
+                .message
+                .contains("not a run file")
+        );
+        assert!(stats.take_unwritable().is_empty());
     }
 }

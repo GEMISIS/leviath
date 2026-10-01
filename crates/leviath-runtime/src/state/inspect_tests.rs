@@ -1,0 +1,818 @@
+use super::*;
+use crate::components::{AwaitingInteraction, MessageInbox, SubAgentChildren};
+use crate::dynamic_interaction::InteractionBackend as _;
+use crate::pipeline as p;
+use leviath_core::interaction::InteractionRequest;
+use leviath_core::mime::{BlobRef, Delivery, MimeType};
+use leviath_core::region::SerializedToolCall;
+use leviath_core::taint::TaintLevel;
+use leviath_core::{RegionKind, region::EntryKind as CoreKind};
+use serde_json::json;
+
+fn agent(stage: &str, status: AgentStatus) -> AgentState {
+    AgentState {
+        agent_id: "a".to_string(),
+        current_visit: "v1".to_string(),
+        current_stage: stage.to_string(),
+        iteration: 3,
+        status,
+        spawned_children_ids: vec!["child-1".into(), "bad id".into()],
+        pending_wait: None,
+        accepts_messages: true,
+    }
+}
+
+fn metadata() -> crate::persistence::RunMetadata {
+    crate::persistence::RunMetadata {
+        run_id: "r1".to_string(),
+        agent_name: "a".to_string(),
+        agent_path: "/p".to_string(),
+        task: "t".to_string(),
+        model: None,
+        workdir: "/w".to_string(),
+        num_stages: 1,
+        started_at: 0,
+        parent_run_id: None,
+        metadata: Default::default(),
+        callback_url: None,
+        callback_secret: None,
+        title: None,
+        title_error: None,
+        blueprint_digest: None,
+        unattended: false,
+        yolo_profile: None,
+        read_paths: None,
+        output_request: None,
+        model_override: None,
+    }
+}
+
+fn spawn(world: &mut World, status: AgentStatus) -> Entity {
+    world.spawn(agent("plan", status)).id()
+}
+
+fn phase_with(bundle: impl bevy_ecs::bundle::Bundle) -> PipelinePhase {
+    let mut world = World::new();
+    let e = spawn(&mut world, AgentStatus::Active);
+    world.entity_mut(e).insert(bundle);
+    inspect(&world, e).unwrap().phase
+}
+
+#[test]
+fn only_a_run_with_a_named_stage_is_inspected() {
+    let mut world = World::new();
+    let nothing = world.spawn_empty().id();
+    assert!(inspect(&world, nothing).is_none());
+    let nameless = world.spawn(agent("", AgentStatus::Idle)).id();
+    assert!(inspect(&world, nameless).is_none());
+}
+
+#[test]
+fn a_bare_run_reads_as_ready_with_every_default() {
+    let mut world = World::new();
+    let e = spawn(&mut world, AgentStatus::Idle);
+    let s = inspect(&world, e).unwrap();
+    assert_eq!(s.seq, 0);
+    assert_eq!(s.status, RunStatus::Idle);
+    assert_eq!(s.cursor.stage.as_str(), "plan");
+    assert_eq!(s.cursor.visit, "v1");
+    assert_eq!(s.cursor.iteration, 3);
+    assert_eq!(s.phase, PipelinePhase::ReadyToInfer);
+    assert!(s.accepts_messages);
+    assert!(s.visits.is_empty() && s.ledger.is_empty() && s.inbox.is_empty());
+    assert_eq!(s.context, ContextState::default());
+    assert_eq!(s.pending, None);
+    assert_eq!(s.fan_out, None);
+    assert!(s.interactions.is_empty());
+    assert_eq!(s.totals, Totals::default());
+    assert_eq!(s.clock, Clock::default());
+    assert_eq!(s.children, vec![RunId::new("child-1").unwrap()]);
+    assert_eq!(s.title, None);
+    assert_eq!(s.final_output, None);
+    assert_eq!(s.wait_reason, None);
+    assert_eq!(s.last_transition, None);
+}
+
+#[test]
+fn every_status_has_its_word_and_the_finished_ones_are_done() {
+    let cases = [
+        (
+            AgentStatus::Idle,
+            RunStatus::Idle,
+            PipelinePhase::ReadyToInfer,
+        ),
+        (
+            AgentStatus::Active,
+            RunStatus::Active,
+            PipelinePhase::ReadyToInfer,
+        ),
+        (
+            AgentStatus::Waiting,
+            RunStatus::Waiting,
+            PipelinePhase::ReadyToInfer,
+        ),
+        (
+            AgentStatus::Paused,
+            RunStatus::Paused,
+            PipelinePhase::Paused,
+        ),
+        (
+            AgentStatus::Complete,
+            RunStatus::Complete,
+            PipelinePhase::Done,
+        ),
+        (
+            AgentStatus::Error {
+                message: "boom".into(),
+            },
+            RunStatus::Error("boom".into()),
+            PipelinePhase::Done,
+        ),
+        (
+            AgentStatus::Cancelled,
+            RunStatus::Cancelled,
+            PipelinePhase::Done,
+        ),
+    ];
+    for (status, word, phase) in cases {
+        let mut world = World::new();
+        let e = spawn(&mut world, status);
+        let s = inspect(&world, e).unwrap();
+        assert_eq!((s.status, s.phase), (word, phase));
+    }
+}
+
+#[test]
+fn each_pipeline_marker_reads_as_its_phase() {
+    use leviath_core::run_meta::SetupBlocker;
+    assert_eq!(
+        phase_with(p::PausedForSetup {
+            blocker: SetupBlocker::ProviderMissing,
+            remedy: "add it".into(),
+        }),
+        PipelinePhase::Paused
+    );
+    assert_eq!(
+        phase_with(p::Wedged { since: 5 }),
+        PipelinePhase::Wedged("nothing has driven it since 5".into())
+    );
+    let stall = |reason| p::DispatchStall {
+        since: 1,
+        last_seen: 2,
+        reason,
+    };
+    assert_eq!(
+        phase_with(stall(p::StallReason::ProviderMissing)),
+        PipelinePhase::Wedged("provider-missing".into())
+    );
+    assert_eq!(
+        phase_with(stall(p::StallReason::PoolFull)),
+        PipelinePhase::ReadyToInfer
+    );
+    assert_eq!(
+        phase_with(AwaitingInteraction),
+        PipelinePhase::AwaitingPerson
+    );
+    assert_eq!(
+        phase_with(crate::gate_prompt::AwaitingGatePrompt(1)),
+        PipelinePhase::AwaitingPerson
+    );
+    assert_eq!(
+        phase_with(crate::gate_prompt::AwaitingGatePrompt(0)),
+        PipelinePhase::ReadyToInfer
+    );
+    assert_eq!(
+        phase_with(crate::interaction_points::AwaitingInteractionPoint),
+        PipelinePhase::AwaitingPerson
+    );
+    assert_eq!(
+        phase_with(p::WaitingForChildren),
+        PipelinePhase::WaitingForChildren
+    );
+    assert_eq!(
+        phase_with(p::AwaitingCompaction),
+        PipelinePhase::AwaitingCompaction
+    );
+    assert_eq!(phase_with(p::AwaitingTools), PipelinePhase::AwaitingTools);
+    assert_eq!(
+        phase_with(p::AwaitingInference),
+        PipelinePhase::AwaitingInference
+    );
+    assert_eq!(phase_with(p::ReadyToInfer), PipelinePhase::ReadyToInfer);
+}
+
+fn edge(target: &str) -> crate::spec::blueprint::TransitionEdge {
+    crate::spec::blueprint::TransitionEdge {
+        target: target.into(),
+        condition: crate::spec::blueprint::TransitionCondition::LlmChoice,
+        hint: None,
+        transform: crate::spec::blueprint::EdgeTransform::Direct,
+        gate: None,
+        stuck: None,
+    }
+}
+
+fn blueprint(transitions: Option<Vec<(&str, &str)>>) -> p::AgentBlueprint {
+    let mut stage = crate::spec::Stage::new(
+        "plan".into(),
+        crate::spec::blueprint::ModelConfig::new("p".into(), "m".into()),
+    );
+    stage.transitions = transitions.map(|t| {
+        t.into_iter()
+            .map(|(name, target)| (name.to_string(), edge(target)))
+            .collect()
+    });
+    p::AgentBlueprint(crate::spec::Blueprint::new(
+        "bp".into(),
+        "d".into(),
+        vec![stage],
+        crate::spec::ContextLayout::new(vec![], 1000),
+    ))
+}
+
+#[test]
+fn a_choice_names_its_edges_as_the_graph_does() {
+    let choice = p::AwaitingTransitionChoice(vec![edge("build"), edge("review"), edge(" ")]);
+    let named = blueprint(Some(vec![("go_build", "build"), ("ask", "review")]));
+    assert_eq!(
+        phase_with((choice.clone(), named)),
+        PipelinePhase::AwaitingChoice(vec![
+            EdgeName::new("go_build").unwrap(),
+            EdgeName::new("ask").unwrap()
+        ])
+    );
+    // With no names to find, an edge is called by where it goes.
+    for unnamed in [blueprint(None), blueprint(Some(vec![]))] {
+        assert_eq!(
+            phase_with((choice.clone(), unnamed)),
+            PipelinePhase::AwaitingChoice(vec![
+                EdgeName::new("build").unwrap(),
+                EdgeName::new("review").unwrap()
+            ])
+        );
+    }
+    let other_stage = {
+        let mut bp = blueprint(Some(vec![("x", "build")]));
+        bp.0.stages[0].name = "elsewhere".into();
+        bp
+    };
+    assert_eq!(
+        phase_with((choice.clone(), other_stage)),
+        PipelinePhase::AwaitingChoice(vec![
+            EdgeName::new("build").unwrap(),
+            EdgeName::new("review").unwrap()
+        ])
+    );
+    assert_eq!(
+        phase_with(choice),
+        PipelinePhase::AwaitingChoice(vec![
+            EdgeName::new("build").unwrap(),
+            EdgeName::new("review").unwrap()
+        ])
+    );
+}
+
+fn fan_out(world: &mut World, e: Entity) {
+    let state = crate::fanout::FanOutState {
+        config: serde_json::from_value(json!({})).unwrap(),
+        max_workers: 2,
+        pending: vec![
+            crate::fanout::WorkItem {
+                id: "i1".into(),
+                context: json!({"topic": "x", "bad key": 1}),
+            },
+            crate::fanout::WorkItem {
+                id: "i2".into(),
+                context: json!(null),
+            },
+            crate::fanout::WorkItem {
+                id: "i3".into(),
+                context: json!("plain"),
+            },
+        ],
+        active: vec![("i0".into(), "w-1".into()), ("i9".into(), "bad id".into())],
+        summaries: vec![("i4".into(), "fine".into())],
+        failures: vec![("i5".into(), "bad".into())],
+        parts: vec![],
+        paused: true,
+        origin: Default::default(),
+    };
+    let resolve = |_: &str| Some(Entity::PLACEHOLDER);
+    crate::fanout::restore_fan_out_waiting(world, e, state, &resolve);
+}
+
+#[test]
+fn a_fan_out_reads_with_its_items_as_typed_inputs() {
+    let mut world = World::new();
+    let e = spawn(&mut world, AgentStatus::Waiting);
+    fan_out(&mut world, e);
+    let s = inspect(&world, e).unwrap();
+    assert_eq!(s.phase, PipelinePhase::FanOut);
+    let f = s.fan_out.unwrap();
+    assert_eq!(f.stage.as_str(), "plan");
+    assert_eq!(f.max_workers, 2);
+    assert!(f.paused);
+    assert_eq!(f.queued.len(), 3);
+    assert_eq!(
+        f.queued[0].inputs.get("topic"),
+        Some(&InputValue::Text("x".into()))
+    );
+    assert!(f.queued[1].inputs.0.is_empty());
+    assert_eq!(
+        f.queued[2].inputs.get("context"),
+        Some(&InputValue::Text("plain".into()))
+    );
+    assert_eq!(f.active, vec![("i0".into(), RunId::new("w-1").unwrap())]);
+    assert_eq!(f.done, vec![("i4".into(), "fine".into())]);
+    assert_eq!(f.failed, vec![("i5".into(), "bad".into())]);
+    assert_eq!(s.wait_reason.as_deref(), Some("workers(5)"));
+}
+
+#[test]
+fn json_becomes_the_closest_typed_input() {
+    let v = inputs_of(json!({
+        "b": true, "i": -3, "f": 1.5, "big": u64::MAX, "s": "t", "n": null,
+        "l": [1, null, "x"], "r": {"k": 2, "bad key": 1, "z": null}
+    }));
+    assert_eq!(v.get("b"), Some(&InputValue::Bool(true)));
+    assert_eq!(v.get("i"), Some(&InputValue::Int(-3)));
+    assert_eq!(v.get("f"), Some(&InputValue::Float(1.5)));
+    assert_eq!(v.get("big"), Some(&InputValue::Float(u64::MAX as f64)));
+    assert_eq!(v.get("n"), None);
+    assert_eq!(
+        v.get("l"),
+        Some(&InputValue::List(vec![
+            InputValue::Int(1),
+            InputValue::Text("x".into())
+        ]))
+    );
+    let InputValue::Record(r) = v.get("r").unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(r.len(), 1);
+}
+
+fn entry(content: EntryContent, kind: CoreKind) -> RegionEntry {
+    RegionEntry {
+        content,
+        tokens: 4,
+        timestamp: 7,
+        metadata: None,
+        kind,
+        key: None,
+        reasoning: None,
+    }
+}
+
+fn blob(sha: &str) -> BlobRef {
+    BlobRef {
+        sha256: sha.into(),
+        mime_type: MimeType::parse("image/png").unwrap(),
+        size: 3,
+        width: Some(2),
+        height: Some(2),
+        duration_ms: None,
+        tokens: 85,
+        stand_in: "[image]".into(),
+    }
+}
+
+fn busy_window() -> ContextWindow {
+    let mut w = ContextWindow::new(5000);
+    let mut conv = Region::new("conversation".into(), RegionKind::Clearable, 3000);
+    let call = SerializedToolCall {
+        id: "c1".into(),
+        name: "read_file".into(),
+        arguments: json!({"path": "a"}),
+        thought_signature: Some("sig".into()),
+    };
+    let sha = Digest::of(b"png");
+    conv.content = vec![
+        entry(EntryContent::text("hi"), CoreKind::UserMessage),
+        entry(
+            EntryContent::text("thinking"),
+            CoreKind::AssistantTurn { tool_calls: vec![] },
+        ),
+        entry(
+            EntryContent::text("reading"),
+            CoreKind::AssistantTurn {
+                tool_calls: vec![call],
+            },
+        ),
+        entry(
+            EntryContent::from_parts(vec![
+                Part::text("see"),
+                Part::stored(blob(sha.as_str()))
+                    .named("a.png")
+                    .delivered(Delivery::Native),
+                Part::stored(blob("not a sha")),
+            ]),
+            CoreKind::ToolResult {
+                tool_call_id: "c1".into(),
+                tool_name: "read_file".into(),
+                is_error: false,
+            },
+        ),
+    ];
+    let mut taint = leviath_core::taint::RegionTaint::new();
+    taint.add_entry(TaintLevel::Private);
+    conv.taint = Some(taint);
+    conv.needs_message_compaction = true;
+    w.add_region(conv);
+    let mut todo = Region::new("todo".into(), RegionKind::Checklist, 500);
+    let mut item = entry(EntryContent::text("ship"), CoreKind::Text);
+    item.metadata =
+        Some(json!({"checklist_id": 2, "checklist_done": true, "checklist_note": "ok"}));
+    item.key = Some("k".into());
+    item.reasoning = Some("why".into());
+    todo.content = vec![item];
+    w.add_region(todo);
+    w.add_region(Region::new(" bad".into(), RegionKind::Pinned, 10));
+    w.hidden.insert("todo".into());
+    w.hidden.insert(" bad".into());
+    w
+}
+
+#[test]
+fn the_context_reads_region_by_region_and_entry_by_entry() {
+    let c = context_of(&busy_window());
+    assert_eq!(c.max_tokens, 5000);
+    assert_eq!(c.hidden, vec![RegionName::new("todo").unwrap()]);
+    assert_eq!(c.regions.len(), 2);
+    let conv = &c.regions[0];
+    assert!(conv.needs_message_compaction);
+    assert_eq!(
+        conv.taint,
+        Some(TaintState {
+            level: TaintLevel::Private,
+            entries: vec![TaintLevel::Private]
+        })
+    );
+    assert_eq!(conv.entries[0].kind, EntryKind::UserMessage);
+    assert!(conv.entries[0].parts.is_empty());
+    let EntryKind::AssistantTurn(calls) = &conv.entries[2].kind else {
+        unreachable!()
+    };
+    assert_eq!(calls[0].args.value(), &json!({"path": "a"}));
+    assert_eq!(calls[0].thought_signature.as_deref(), Some("sig"));
+    let result = &conv.entries[3];
+    assert!(matches!(result.kind, EntryKind::ToolResult { .. }));
+    // The part with no valid digest has nothing to name it by and is left out.
+    assert_eq!(result.parts.len(), 2);
+    assert_eq!(result.parts[1].name.as_deref(), Some("a.png"));
+    assert_eq!(result.parts[1].deliver, Some(Delivery::Native));
+    let todo = &c.regions[1].entries[0];
+    assert_eq!(
+        todo.meta,
+        EntryMeta::ChecklistItem {
+            id: 2,
+            done: true,
+            note: Some("ok".into())
+        }
+    );
+    assert_eq!(todo.key.as_deref(), Some("k"));
+    assert_eq!(todo.reasoning.as_deref(), Some("why"));
+}
+
+#[test]
+fn an_entry_s_content_comes_back_from_its_state() {
+    let plain = entry(EntryContent::text("hi"), CoreKind::Text);
+    assert_eq!(content_of(&entry_of(&plain)), plain.content);
+    let parts = EntryContent::from_parts(vec![
+        Part::text("see"),
+        Part::stored(blob(Digest::of(b"x").as_str())).named("x.png"),
+    ]);
+    let mixed = entry(parts.clone(), CoreKind::Text);
+    assert_eq!(content_of(&entry_of(&mixed)), parts);
+    // Plain text with a name is more than plain text.
+    let named = entry(
+        EntryContent::from_parts(vec![Part::text("n").named("n.txt")]),
+        CoreKind::Text,
+    );
+    assert_eq!(entry_of(&named).parts.len(), 1);
+    let delivered = EntryContent::from_parts(vec![Part::text("d").delivered(Delivery::Native)]);
+    assert_eq!(entry_of(&entry(delivered, CoreKind::Text)).parts.len(), 1);
+    let stored_alone =
+        EntryContent::from_parts(vec![Part::stored(blob(Digest::of(b"y").as_str()))]);
+    assert_eq!(
+        entry_of(&entry(stored_alone, CoreKind::Text)).parts.len(),
+        1
+    );
+    let markdown = EntryContent::from_parts(vec![Part::inline(
+        MimeType::parse("text/markdown").unwrap(),
+        "# h",
+    )]);
+    assert_eq!(entry_of(&entry(markdown, CoreKind::Text)).parts.len(), 1);
+    // A part whose type no longer parses is left out on the way back.
+    let mut state = entry_of(&mixed);
+    state.parts[0].mime_type = "nonsense".into();
+    assert_eq!(content_of(&state).parts().len(), 1);
+}
+
+fn ledger() -> p::StageLedger {
+    use leviath_core::run_meta::{StageModelUse, StageRecord as Core, StageRunStatus as S};
+    let mut records = Vec::new();
+    for (i, status) in [
+        S::Pending,
+        S::Active,
+        S::WaitingInput,
+        S::Complete,
+        S::Error,
+        S::Skipped,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut r = Core::new(format!("s{i}"), i);
+        r.status = status;
+        records.push(r);
+    }
+    let r = &mut records[1];
+    r.entered = true;
+    r.prompt_tokens = 10;
+    r.cost_priced_usd = 0.5;
+    r.cost_is_exact = false;
+    r.unpriced_calls = 1;
+    r.models = vec![
+        StageModelUse {
+            provider: "mock".into(),
+            model: "m".into(),
+        },
+        StageModelUse {
+            provider: "".into(),
+            model: "bare".into(),
+        },
+        StageModelUse {
+            provider: "mock".into(),
+            model: "".into(),
+        },
+    ];
+    let mut visit = leviath_core::run_meta::StageVisitRecord::opened_at(5, "v1".into());
+    visit.active = Some(leviath_core::run_meta::ActiveClock {
+        banked_secs: 4,
+        since: Some(9),
+    });
+    r.visits = vec![
+        visit,
+        leviath_core::run_meta::StageVisitRecord::opened_at(6, "v2".into()),
+    ];
+    r.region_tokens = [("conversation".to_string(), 12)].into();
+    r.first_call_prompt_tokens = Some(10);
+    r.active = Some(leviath_core::run_meta::ActiveClock {
+        banked_secs: 1,
+        since: None,
+    });
+    records.push(Core::new(" bad".into(), 6));
+    p::StageLedger(records)
+}
+
+#[tokio::test]
+async fn a_busy_run_reads_every_field_from_its_components() {
+    let hub = crate::interaction_hub::InteractionHub::new();
+    let mut world = World::new();
+    world.insert_resource(hub.clone());
+    let e = spawn(&mut world, AgentStatus::Waiting);
+    let progress = p::StageProgress {
+        total_tool_calls: 4,
+        entry_region_digests: [("notes".to_string(), 99u64)].into(),
+        edits_by_path: [("a.rs".to_string(), 2usize)].into(),
+        stage_started_at: Some(1),
+        ..Default::default()
+    };
+    let validators = crate::components::OutputValidators::new(Default::default());
+    validators.note_broken("shape.rhai");
+    let mut flags = crate::persistence::RunOutcomeFlags::default();
+    flags.0.record_modification("a.rs");
+    let totals = crate::persistence::TokenTotals {
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        cached_tokens: 1,
+        cache_write_tokens: 0,
+        tool_calls: 3,
+        cost: Default::default(),
+    };
+    let mut inbox = MessageInbox::default();
+    inbox.messages.push(crate::components::AgentMessage {
+        agent_id: "a".into(),
+        content: "hurry".into(),
+        target_region: Some("conversation".into()),
+        parts: vec![],
+    });
+    world.entity_mut(e).insert((
+        (
+            p::VisitCounts([("plan".to_string(), 2usize), (" bad".to_string(), 1)].into()),
+            progress,
+            ledger(),
+            busy_window(),
+            inbox,
+            totals,
+            crate::persistence::RunClock(leviath_core::run_meta::ActiveClock {
+                banked_secs: 30,
+                since: Some(100),
+            }),
+            flags,
+            validators,
+        ),
+        (
+            crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
+                "the answer",
+                Some("markdown".into()),
+                "plan".into(),
+                9,
+            )),
+            crate::persistence::RunMetadata {
+                title: Some("Fix it".into()),
+                ..metadata()
+            },
+            SubAgentChildren {
+                children: vec![Entity::PLACEHOLDER],
+                max_child_depth: 2,
+            },
+            p::WaitingForChildren,
+        ),
+    ));
+    let other = hub.backend_for("someone-else");
+    let mine = hub.backend_for("a");
+    let mine2 = hub.backend_for("a");
+    let asks = [
+        tokio::spawn(async move {
+            other
+                .ask(InteractionRequest::free_text("z", "?", "s", true))
+                .await
+        }),
+        tokio::spawn(async move {
+            mine.ask(InteractionRequest::free_text("q2", "second?", "s", true))
+                .await
+        }),
+        tokio::spawn(async move {
+            mine2
+                .ask(InteractionRequest::free_text("q1", "first?", "s", true))
+                .await
+        }),
+    ];
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    let s = inspect(&world, e).unwrap();
+    for ask in asks {
+        ask.abort();
+    }
+    assert_eq!(s.visits, [(StageName::new("plan").unwrap(), 2)].into());
+    assert_eq!(s.progress.total_tool_calls, 4);
+    assert_eq!(s.progress.entry_region_digests["notes"], 99);
+    assert_eq!(s.progress.edits_by_path["a.rs"], 2);
+    assert_eq!(s.ledger.len(), 6);
+    let statuses: Vec<StageStatus> = s.ledger.iter().map(|r| r.status).collect();
+    assert_eq!(
+        statuses,
+        vec![
+            StageStatus::Pending,
+            StageStatus::Active,
+            StageStatus::WaitingInput,
+            StageStatus::Complete,
+            StageStatus::Error,
+            StageStatus::Skipped
+        ]
+    );
+    let active = &s.ledger[1];
+    assert_eq!(active.spend.computed_calls, 1);
+    assert_eq!(active.spend.unpriced_calls, 1);
+    assert_eq!(active.models.len(), 2);
+    assert_eq!(active.models[1].provider, None);
+    assert_eq!(active.visits[0].clock.banked_secs, 4);
+    assert_eq!(active.visits[1].clock, Clock::default());
+    assert_eq!(active.region_tokens["conversation"], 12);
+    assert_eq!(active.clock.banked_secs, 1);
+    assert_eq!(s.ledger[0].spend.computed_calls, 0);
+    assert_eq!(s.context.regions.len(), 2);
+    assert_eq!(
+        s.inbox,
+        vec![MessageState {
+            from: String::new(),
+            text: "hurry".into(),
+            region: Some("conversation".into())
+        }]
+    );
+    let asked: Vec<&str> = s.interactions.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(asked, vec!["q1", "q2"]);
+    assert_eq!(s.totals.spend.prompt_tokens, 10);
+    assert_eq!(s.totals.tool_calls, 3);
+    assert_eq!(s.clock.banked_secs, 30);
+    assert_eq!(s.flags.modified_files, vec!["a.rs".to_string()]);
+    assert_eq!(s.flags.broken_scripts, vec!["shape.rhai".to_string()]);
+    assert!(s.flags.produced_output);
+    assert!(!s.flags.empty_output);
+    assert_eq!(s.title.as_deref(), Some("Fix it"));
+    let out = s.final_output.unwrap();
+    assert_eq!(
+        (out.content.as_str(), out.stage.as_str()),
+        ("the answer", "plan")
+    );
+    assert_eq!(s.phase, PipelinePhase::WaitingForChildren);
+    assert_eq!(s.wait_reason.as_deref(), Some("children(1)"));
+}
+
+#[test]
+fn an_answer_from_a_stage_with_no_valid_name_is_left_out() {
+    let mut world = World::new();
+    let e = spawn(&mut world, AgentStatus::Complete);
+    world.entity_mut(e).insert(crate::persistence::FinalOutput(
+        leviath_core::output::FinalOutput::new("x", None, String::new(), 1),
+    ));
+    let s = inspect(&world, e).unwrap();
+    assert_eq!(s.final_output, None);
+    assert!(s.flags.produced_output);
+}
+
+#[test]
+fn a_parked_run_says_why() {
+    use leviath_core::run_meta::SetupBlocker;
+    let mut world = World::new();
+    let e = spawn(&mut world, AgentStatus::Waiting);
+    world.entity_mut(e).insert(p::WaitingForChildren);
+    assert_eq!(
+        inspect(&world, e).unwrap().wait_reason.as_deref(),
+        Some("children(0)")
+    );
+    let paused = spawn(&mut world, AgentStatus::Paused);
+    world.entity_mut(paused).insert(p::PausedForSetup {
+        blocker: SetupBlocker::CreditsExhausted,
+        remedy: "top up".into(),
+    });
+    assert!(inspect(&world, paused).unwrap().wait_reason.is_some());
+}
+
+fn tool_window() -> ContextWindow {
+    let mut w = ContextWindow::new(1000);
+    let mut conv = Region::new("conversation".into(), RegionKind::Clearable, 1000);
+    let call = |id: &str| SerializedToolCall {
+        id: id.into(),
+        name: "do".into(),
+        arguments: json!({}),
+        thought_signature: None,
+    };
+    let mut older = entry(
+        EntryContent::text("first"),
+        CoreKind::AssistantTurn {
+            tool_calls: vec![call("old")],
+        },
+    );
+    older.timestamp = 1;
+    let mut newer = entry(
+        EntryContent::text("second"),
+        CoreKind::AssistantTurn {
+            tool_calls: vec![call("c1"), call("c2"), call("c3")],
+        },
+    );
+    newer.timestamp = 2;
+    conv.content = vec![older, newer];
+    w.add_region(conv);
+    w
+}
+
+#[test]
+fn a_tool_batch_in_flight_reads_with_the_results_already_in() {
+    let mut world = World::new();
+    let e = spawn(&mut world, AgentStatus::Active);
+    world.entity_mut(e).insert((
+        p::AwaitingTools,
+        tool_window(),
+        p::ContextToolResults(vec![("c1".into(), "[error] nope".into())]),
+        p::RecoveredResults(vec![("c2".into(), "fine".into())]),
+    ));
+    let pending = inspect(&world, e).unwrap().pending.unwrap();
+    let ids: Vec<&str> = pending.calls.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, vec!["c1", "c2", "c3"]);
+    assert!(pending.done["c1"].is_error);
+    assert!(!pending.done["c2"].is_error);
+    assert_eq!(pending.done.len(), 2);
+    // Without a window, or with no turn that made calls, there is no batch.
+    let bare = spawn(&mut world, AgentStatus::Active);
+    world.entity_mut(bare).insert(p::AwaitingTools);
+    assert_eq!(inspect(&world, bare).unwrap().pending, None);
+    let quiet = spawn(&mut world, AgentStatus::Active);
+    world
+        .entity_mut(quiet)
+        .insert((p::AwaitingTools, busy_window_without_calls()));
+    assert_eq!(inspect(&world, quiet).unwrap().pending, None);
+    let no_results = spawn(&mut world, AgentStatus::Active);
+    world
+        .entity_mut(no_results)
+        .insert((p::AwaitingTools, tool_window()));
+    let batch = inspect(&world, no_results).unwrap().pending.unwrap();
+    assert!(batch.done.is_empty());
+}
+
+fn busy_window_without_calls() -> ContextWindow {
+    let mut w = ContextWindow::new(1000);
+    let mut conv = Region::new("conversation".into(), RegionKind::Clearable, 1000);
+    conv.content = vec![
+        entry(EntryContent::text("hi"), CoreKind::UserMessage),
+        entry(
+            EntryContent::text("no calls"),
+            CoreKind::AssistantTurn { tool_calls: vec![] },
+        ),
+    ];
+    w.add_region(conv);
+    w
+}

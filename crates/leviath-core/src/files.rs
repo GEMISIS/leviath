@@ -24,6 +24,11 @@ pub const INTERACTIONS_FILE: &str = "interactions.json";
 /// The run archive: the append-only journal every other file is a view of.
 pub const ARCHIVE_FILE: &str = "run.lvr";
 
+/// The run file: the run's spec, the steps it took and checkpoints of its
+/// state, in the LVR2 frame format. Written beside [`ARCHIVE_FILE`] while the
+/// readers of the older files are moved onto it.
+pub const RUN_FILE: &str = "run.lvr2";
+
 /// The blueprint manifest inside an agent directory.
 pub const MANIFEST_FILENAME: &str = "agent.leviath";
 
