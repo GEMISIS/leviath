@@ -1,7 +1,7 @@
 //! The service layer both front ends call.
 //!
-//! `lev serve` answers on two surfaces: the REST routes and, from this
-//! release, GraphQL. Neither is built on the other. A REST handler and a
+//! `lev serve` answers on two surfaces: the REST routes and GraphQL.
+//! Neither is built on the other. A REST handler and a
 //! GraphQL resolver that answer the same question call the same function
 //! here, and the function knows nothing about HTTP status codes, axum
 //! extractors or GraphQL selection sets.
@@ -22,7 +22,9 @@ pub(super) mod export;
 pub(super) mod files;
 pub(super) mod history;
 pub(super) mod inferences;
+pub(super) mod inspect;
 pub(super) mod interactions;
 pub(super) mod lifecycle;
+pub(super) mod run_file;
 pub(super) mod runs;
 pub(super) mod spawn;

@@ -1,6 +1,6 @@
 //! One run listing for every read route.
 //!
-//! `GET /api/runs`, `GET /api/agents`, the tree routes and a run's children all
+//! `GET /api/runs`, the tree routes and a run's children all
 //! start from "every run on disk". Reading that fresh per request means a
 //! `read_dir` and a parse of every `meta.json` to serve a page of fifty, and
 //! the reads hold a runtime worker thread while they happen. This index keeps

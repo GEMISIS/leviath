@@ -669,10 +669,7 @@ async fn the_byte_links_carry_their_own_permission() {
     )
     .await;
     let blob = json["run"]["blob"].as_str().expect("a link");
-    assert!(
-        blob.starts_with("/api/agents/reader/blobs/abc123?"),
-        "{blob}"
-    );
+    assert!(blob.starts_with("/api/runs/reader/blobs/abc123?"), "{blob}");
     assert!(blob.contains("exp=") && blob.contains("sig="), "{blob}");
     assert!(!blob.contains("download"), "inline by default: {blob}");
 
@@ -688,7 +685,7 @@ async fn the_byte_links_carry_their_own_permission() {
 
     let artifact = json["run"]["artifact"].as_str().expect("a link");
     assert!(
-        artifact.starts_with("/api/agents/reader/artifacts/report.md?"),
+        artifact.starts_with("/api/runs/reader/artifacts/report.md?"),
         "{artifact}"
     );
 }

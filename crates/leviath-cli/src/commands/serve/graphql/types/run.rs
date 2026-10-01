@@ -698,7 +698,7 @@ impl Run {
         download: bool,
     ) -> String {
         let state = ctx.data_unchecked::<AppState>();
-        let route = format!("/api/agents/{}/files/raw", self.meta.run_id);
+        let route = format!("/api/runs/{}/files/raw", self.meta.run_id);
         let mut query = vec![("path", path.as_str())];
         if download {
             query.push(("download", "1"));
@@ -1103,7 +1103,7 @@ impl Run {
         let state = ctx.data_unchecked::<AppState>();
         signed(
             state,
-            &format!("/api/agents/{}/blobs/{sha256}", self.meta.run_id),
+            &format!("/api/runs/{}/blobs/{sha256}", self.meta.run_id),
             download,
         )
     }
@@ -1123,7 +1123,7 @@ impl Run {
         let state = ctx.data_unchecked::<AppState>();
         signed(
             state,
-            &format!("/api/agents/{}/artifacts/{name}", self.meta.run_id),
+            &format!("/api/runs/{}/artifacts/{name}", self.meta.run_id),
             download,
         )
     }

@@ -1,6 +1,6 @@
 //! A run's stored parts, its raw files, and the mime registry, over HTTP.
 //!
-//! `GET /api/agents/{id}/blobs` lists every stored part the run's context
+//! `GET /api/runs/{id}/blobs` lists every stored part the run's context
 //! holds, by hash, with what the context says about it: name, type, size,
 //! dimensions, and the regions carrying it. `GET .../blobs/{sha256}` serves
 //! the bytes under their own `Content-Type`, and `?download=1` asks the
@@ -17,17 +17,12 @@ use leviath_core::mime::{MimeRegistry, MimeType, TokenRule, is_sha256_hex};
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
-use crate::blobs::{BlobEntry, blob_path};
+use crate::blobs::BlobEntry;
 use crate::runstate;
 
-/// The stored parts a run's context holds, or 404 when it has no context.
+/// The stored parts a run's context holds, or 404 when it has no run file.
 fn stored_parts(run_id: &str) -> Result<Vec<BlobEntry>, ApiError> {
-    crate::blobs::list(run_id).ok_or_else(|| {
-        err(
-            StatusCode::NOT_FOUND,
-            format!("No context snapshot for run '{run_id}'"),
-        )
-    })
+    super::core::inspect::blobs(run_id).map_err(|e| super::core::error::as_api_error(&e))
 }
 
 /// Every stored part a run holds.
@@ -94,12 +89,12 @@ pub(super) async fn export_file(
     )
 }
 
-/// `GET /api/agents/{id}/blobs`: every stored part the run holds.
+/// `GET /api/runs/{id}/blobs`: every stored part the run holds.
 pub(super) async fn list_blobs(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<BlobListing>, ApiError> {
     runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
+        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
     Ok(Json(BlobListing {
         items: stored_parts(&id)?,
     }))
@@ -242,7 +237,7 @@ fn bytes_response(
     Ok(response)
 }
 
-/// `GET /api/agents/{id}/blobs/{sha256}`: the bytes of one stored part.
+/// `GET /api/runs/{id}/blobs/{sha256}`: the bytes of one stored part.
 pub(super) async fn get_blob(
     State(state): State<AppState>,
     AxumPath((id, sha256)): AxumPath<(String, String)>,
@@ -256,10 +251,10 @@ pub(super) async fn get_blob(
         ));
     }
     runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
-    let bytes = tokio::fs::read(blob_path(&id, &sha256))
-        .await
-        .map_err(|_| {
+        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
+    let bytes = super::core::inspect::blob(&id, &sha256)
+        .map_err(|e| super::core::error::as_api_error(&e))?
+        .ok_or_else(|| {
             err(
                 StatusCode::NOT_FOUND,
                 format!("run '{id}' holds no blob {sha256}"),
@@ -302,7 +297,7 @@ pub(super) struct RawFileQuery {
     pub(super) download: bool,
 }
 
-/// `GET /api/agents/{id}/files/raw?path=`: a workdir file's bytes, typed.
+/// `GET /api/runs/{id}/files/raw?path=`: a workdir file's bytes, typed.
 pub(super) async fn raw_file(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -310,7 +305,7 @@ pub(super) async fn raw_file(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let meta = runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
+        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
     let workdir = PathBuf::from(&meta.workdir);
     let requested = PathBuf::from(&query.path);
     let resolved = match requested.is_absolute() {
@@ -373,20 +368,19 @@ fn artifact_by_path(run_id: &str, workdir: &str, path: &str) -> Option<Vec<u8>> 
     crate::commands::result::export::artifact_bytes(run_id, workdir, artifact).ok()
 }
 
-/// `GET /api/agents/{id}/artifacts/{name}`: the bytes of one file the run
+/// `GET /api/runs/{id}/artifacts/{name}`: the bytes of one file the run
 /// handed back, by the name the result route lists it under.
 ///
 /// The one route that follows an artifact the way the runtime does: the
 /// store by hash first, so a file a model made and nothing wrote to disk is
-/// served, then the workdir. Before it a client had the name, type and hash
-/// from the result and no route that took any of them.
+/// served, then the workdir.
 pub(super) async fn artifact(
     AxumPath((id, name)): AxumPath<(String, String)>,
     Query(query): Query<BytesQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let meta = runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Agent run '{id}' not found")))?;
+        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
     let output = runstate::read_final_output(&id).ok_or_else(|| {
         err(
             StatusCode::NOT_FOUND,
@@ -562,10 +556,10 @@ mod tests {
 
     fn app() -> Router {
         Router::new()
-            .route("/api/agents/{id}/blobs", get(list_blobs))
-            .route("/api/agents/{id}/blobs/{sha256}", get(get_blob))
-            .route("/api/agents/{id}/files/raw", get(raw_file))
-            .route("/api/agents/{id}/artifacts/{name}", get(artifact))
+            .route("/api/runs/{id}/blobs", get(list_blobs))
+            .route("/api/runs/{id}/blobs/{sha256}", get(get_blob))
+            .route("/api/runs/{id}/files/raw", get(raw_file))
+            .route("/api/runs/{id}/artifacts/{name}", get(artifact))
             .route("/api/mime", get(list_mime))
             .with_state(state())
     }
@@ -659,25 +653,96 @@ mod tests {
         (sha, "e".repeat(64))
     }
 
+    /// An entry carrying `part`, for a run's state.
+    fn holding(
+        part: leviath_runtime::state::context::PartState,
+    ) -> leviath_runtime::state::EntryState {
+        leviath_runtime::state::EntryState {
+            text: String::new(),
+            parts: vec![part],
+            tokens: 1,
+            timestamp: 0,
+            kind: leviath_runtime::state::EntryKind::Text,
+            meta: leviath_runtime::state::EntryMeta::None,
+            key: None,
+            reasoning: None,
+        }
+    }
+
+    /// A stored part of `mime_type`, hashed `sha256`, `size` bytes, maybe named.
+    fn stored_part(
+        sha256: &str,
+        mime_type: &str,
+        size: u64,
+        name: Option<&str>,
+    ) -> leviath_runtime::state::context::PartState {
+        use leviath_runtime::state::context::{BlobState, PartBody, PartState};
+        PartState {
+            mime_type: mime_type.to_string(),
+            body: PartBody::Stored(BlobState {
+                digest: leviath_runtime::spec::names::Digest::new(sha256).unwrap(),
+                size,
+                width: None,
+                height: None,
+                duration_ms: None,
+                tokens: 1,
+                stand_in: format!("[{mime_type}]"),
+            }),
+            name: name.map(str::to_string),
+            deliver: None,
+        }
+    }
+
     #[tokio::test]
     async fn blobs_are_listed_and_served_with_their_type() {
         crate::runstate::with_isolated_runs_dir_async("blobs_listed_and_served", |_d| async move {
-            let workdir = tempfile::tempdir().unwrap();
-            let run_id = "blobs-run";
-            let (sha, lost) = seed_run(run_id, workdir.path());
+            use crate::commands::serve::core::run_file::tests::{recorded, step};
+            let run_id = recorded();
+            let run_id = run_id.as_str();
+            let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
+            let png = Blob::new(
+                MimeType::parse("image/png").unwrap(),
+                b"\x89PNG\r\n\x1a\nhero".to_vec(),
+            )
+            .named("hero.png");
+            let sha = store
+                .put(run_id, &png, &MimeRegistry::builtin())
+                .unwrap()
+                .sha256;
+            let lost = "e".repeat(64);
+            step(run_id, 10, Vec::new(), |s| {
+                let regions = &mut s.context.regions;
+                let at = |name: &str| regions.iter().position(|r| r.name.as_str() == name);
+                let (task, conversation) = (at("task").unwrap(), at("conversation").unwrap());
+                // Unnamed here; the copy in the conversation names it, and
+                // the listing takes the first name it meets.
+                regions[task]
+                    .entries
+                    .push(holding(stored_part(&sha, "image/png", 12, None)));
+                let named = stored_part(&sha, "image/png", 12, Some("hero.png"));
+                // The same part twice: one listing row, one region.
+                regions[conversation].entries.push(holding(named.clone()));
+                regions[conversation].entries.push(holding(named));
+                regions[conversation].entries.push(holding(stored_part(
+                    &lost,
+                    "audio/wav",
+                    3,
+                    Some("lost.wav"),
+                )));
+            });
 
-            let (status, _, body) = call(&format!("/api/agents/{run_id}/blobs")).await;
+            let (status, _, body) = call(&format!("/api/runs/{run_id}/blobs")).await;
             assert_eq!(status, StatusCode::OK);
             let listing: BlobListing = serde_json::from_slice(&body).unwrap();
             assert_eq!(listing.items.len(), 2);
             assert_eq!(listing.items[0].sha256, sha);
             assert_eq!(listing.items[0].name.as_deref(), Some("hero.png"));
-            assert_eq!(listing.items[0].regions, ["task", "art"]);
+            assert_eq!(listing.items[0].regions, ["task", "conversation"]);
             assert!(listing.items[0].stored);
             assert_eq!(listing.items[1].name.as_deref(), Some("lost.wav"));
             assert!(!listing.items[1].stored);
 
-            let (status, headers, body) = call(&format!("/api/agents/{run_id}/blobs/{sha}")).await;
+            let (status, headers, body) = call(&format!("/api/runs/{run_id}/blobs/{sha}")).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(headers[header::CONTENT_TYPE], "image/png");
             assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
@@ -686,7 +751,7 @@ mod tests {
             // A Range header seeks into the blob: 206 with the slice and a
             // Content-Range naming the whole.
             let req = Request::builder()
-                .uri(format!("/api/agents/{run_id}/blobs/{sha}"))
+                .uri(format!("/api/runs/{run_id}/blobs/{sha}"))
                 .header(header::RANGE, "bytes=1-3")
                 .body(Body::empty())
                 .unwrap();
@@ -697,20 +762,19 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(&sliced[..], b"PNG");
-            let (_, headers, _) =
-                call(&format!("/api/agents/{run_id}/blobs/{sha}?download=1")).await;
+            let (_, headers, _) = call(&format!("/api/runs/{run_id}/blobs/{sha}?download=1")).await;
             assert_eq!(
                 headers[header::CONTENT_DISPOSITION],
                 "attachment; filename=\"hero.png\""
             );
 
-            let (status, _, _) = call(&format!("/api/agents/{run_id}/blobs/{lost}")).await;
+            let (status, _, _) = call(&format!("/api/runs/{run_id}/blobs/{lost}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
-            let (status, _, _) = call(&format!("/api/agents/{run_id}/blobs/zz")).await;
+            let (status, _, _) = call(&format!("/api/runs/{run_id}/blobs/zz")).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            let (status, _, _) = call(&format!("/api/agents/ghost/blobs/{sha}")).await;
+            let (status, _, _) = call(&format!("/api/runs/ghost/blobs/{sha}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
-            let (status, _, _) = call("/api/agents/ghost/blobs").await;
+            let (status, _, _) = call("/api/runs/ghost/blobs").await;
             assert_eq!(status, StatusCode::NOT_FOUND);
 
             // A blob on disk that the context no longer names is typed by
@@ -719,13 +783,12 @@ mod tests {
                 MimeType::parse("image/png").unwrap(),
                 b"\x89PNG\r\n\x1a\norphan".to_vec(),
             );
-            let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
             let orphan_sha = store
                 .put(run_id, &orphan, &MimeRegistry::builtin())
                 .unwrap()
                 .sha256;
             let (status, headers, _) = call(&format!(
-                "/api/agents/{run_id}/blobs/{orphan_sha}?download=true"
+                "/api/runs/{run_id}/blobs/{orphan_sha}?download=true"
             ))
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -735,13 +798,43 @@ mod tests {
             let disposition = headers[header::CONTENT_DISPOSITION].to_str().unwrap();
             let expected = format!("{}.png", orphan_sha.chars().take(12).collect::<String>());
             assert!(disposition.contains(&expected), "{disposition}");
-            // A run with no snapshot has no listing but still serves a blob.
-            std::fs::remove_file(runstate::run_dir(run_id).join(leviath_core::files::CONTEXT_FILE))
-                .unwrap();
-            let (status, _, _) = call(&format!("/api/agents/{run_id}/blobs")).await;
+            // A part the run file holds but cannot decode is an error, not a
+            // miss.
+            let half = leviath_runtime::spec::names::Digest::of(b"half a part");
+            let file = runstate::run_dir(run_id).join(leviath_core::files::RUN_FILE);
+            let mut bytes = std::fs::read(&file).unwrap();
+            bytes.extend(
+                leviath_runtime::runfile::codec::encode(
+                    leviath_runtime::runfile::codec::FrameKind::Blob,
+                    &half,
+                )
+                .unwrap(),
+            );
+            std::fs::write(&file, bytes).unwrap();
+            let (status, _, _) = call(&format!("/api/runs/{run_id}/blobs/{half}")).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            // A run with no record answers nothing about its parts.
+            std::fs::remove_file(&file).unwrap();
+            let (status, _, _) = call(&format!("/api/runs/{run_id}/blobs")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
-            let (status, _, _) = call(&format!("/api/agents/{run_id}/blobs/{sha}")).await;
-            assert_eq!(status, StatusCode::OK);
+        })
+        .await;
+    }
+
+    /// A run whose record reads and whose run file does not has its listing
+    /// refused as the server's fault, not as a run with no parts.
+    #[tokio::test]
+    async fn a_run_file_that_will_not_read_fails_the_listing() {
+        crate::runstate::with_isolated_runs_dir_async("blobs_unreadable", |_d| async move {
+            let workdir = tempfile::tempdir().unwrap();
+            seed_run("blobs-broken", workdir.path());
+            std::fs::write(
+                runstate::run_dir("blobs-broken").join(leviath_core::files::RUN_FILE),
+                b"not a run file",
+            )
+            .unwrap();
+            let (status, _, _) = call("/api/runs/blobs-broken/blobs").await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         })
         .await;
     }
@@ -761,12 +854,12 @@ mod tests {
             seed_run(run_id, workdir.path());
 
             let (status, headers, body) =
-                call(&format!("/api/agents/{run_id}/files/raw?path=out/cut.mp4")).await;
+                call(&format!("/api/runs/{run_id}/files/raw?path=out/cut.mp4")).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(headers[header::CONTENT_TYPE], "video/mp4");
             assert_eq!(body.len(), 12);
             let (_, headers, _) = call(&format!(
-                "/api/agents/{run_id}/files/raw?path=notes.md&download=1"
+                "/api/runs/{run_id}/files/raw?path=notes.md&download=1"
             ))
             .await;
             assert_eq!(headers[header::CONTENT_TYPE], "text/markdown");
@@ -776,23 +869,21 @@ mod tests {
             );
             let abs = workdir.path().join("notes.md");
             let (status, _, _) = call(&format!(
-                "/api/agents/{run_id}/files/raw?path={}",
+                "/api/runs/{run_id}/files/raw?path={}",
                 abs.to_string_lossy()
             ))
             .await;
             assert_eq!(status, StatusCode::OK);
 
-            let (status, _, _) = call(&format!(
-                "/api/agents/{run_id}/files/raw?path=../etc/passwd"
-            ))
-            .await;
+            let (status, _, _) =
+                call(&format!("/api/runs/{run_id}/files/raw?path=../etc/passwd")).await;
             assert_eq!(status, StatusCode::FORBIDDEN);
-            let (status, _, _) = call(&format!("/api/agents/{run_id}/files/raw?path=out")).await;
+            let (status, _, _) = call(&format!("/api/runs/{run_id}/files/raw?path=out")).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             let (status, _, _) =
-                call(&format!("/api/agents/{run_id}/files/raw?path=missing.bin")).await;
+                call(&format!("/api/runs/{run_id}/files/raw?path=missing.bin")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
-            let (status, _, _) = call("/api/agents/ghost/files/raw?path=x").await;
+            let (status, _, _) = call("/api/runs/ghost/files/raw?path=x").await;
             assert_eq!(status, StatusCode::NOT_FOUND);
         })
         .await;
@@ -846,47 +937,44 @@ mod tests {
             runstate::create_run(&meta).unwrap();
             runstate::write_final_output(&runstate::run_dir(run_id), &output.content).unwrap();
 
-            let (status, headers, body) =
-                call(&format!("/api/agents/{run_id}/artifacts/mesh")).await;
+            let (status, headers, body) = call(&format!("/api/runs/{run_id}/artifacts/mesh")).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(headers[header::CONTENT_TYPE], "model/gltf-binary");
             assert_eq!(body, b"glTF-bytes");
             let (_, headers, _) =
-                call(&format!("/api/agents/{run_id}/artifacts/mesh?download=1")).await;
+                call(&format!("/api/runs/{run_id}/artifacts/mesh?download=1")).await;
             assert_eq!(
                 headers[header::CONTENT_DISPOSITION],
                 "attachment; filename=\"scene.glb\""
             );
-            let (status, _, body) = call(&format!("/api/agents/{run_id}/artifacts/notes.md")).await;
+            let (status, _, body) = call(&format!("/api/runs/{run_id}/artifacts/notes.md")).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body, b"# written");
-            let (status, _, _) = call(&format!("/api/agents/{run_id}/artifacts/gone.bin")).await;
+            let (status, _, _) = call(&format!("/api/runs/{run_id}/artifacts/gone.bin")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
-            let (status, _, _) = call(&format!("/api/agents/{run_id}/artifacts/nope")).await;
+            let (status, _, _) = call(&format!("/api/runs/{run_id}/artifacts/nope")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
-            let (status, _, _) = call("/api/agents/ghost/artifacts/mesh").await;
+            let (status, _, _) = call("/api/runs/ghost/artifacts/mesh").await;
             assert_eq!(status, StatusCode::NOT_FOUND);
 
             // The raw route reaches the stored mesh by the path the answer
             // lists, and still 404s a path that is neither on disk nor listed.
-            let (status, headers, body) = call(&format!(
-                "/api/agents/{run_id}/files/raw?path=out/scene.glb"
-            ))
-            .await;
+            let (status, headers, body) =
+                call(&format!("/api/runs/{run_id}/files/raw?path=out/scene.glb")).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(headers[header::CONTENT_TYPE], "model/gltf-binary");
             assert_eq!(body, b"glTF-bytes");
             let (status, _, _) =
-                call(&format!("/api/agents/{run_id}/files/raw?path=out/gone.bin")).await;
+                call(&format!("/api/runs/{run_id}/files/raw?path=out/gone.bin")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
             let (status, _, _) =
-                call(&format!("/api/agents/{run_id}/files/raw?path=nowhere.bin")).await;
+                call(&format!("/api/runs/{run_id}/files/raw?path=nowhere.bin")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
 
             // A run that has not answered has no artifacts to serve.
             let silent = "silent-run";
             seed_run(silent, workdir.path());
-            let (status, _, _) = call(&format!("/api/agents/{silent}/artifacts/mesh")).await;
+            let (status, _, _) = call(&format!("/api/runs/{silent}/artifacts/mesh")).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
         })
         .await;

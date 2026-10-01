@@ -26,7 +26,7 @@ pub mod writer;
 
 pub use error::{RunFileError, RunFileErrorKind};
 pub use reader::RunFileReader;
-pub use summary::summary;
+pub use summary::{context_snapshot, stage_records, summary, summary_of};
 pub use writer::{CheckpointPolicy, RunFileWriter};
 
 /// The JSON Schemas of every type a run file stores, as one document.

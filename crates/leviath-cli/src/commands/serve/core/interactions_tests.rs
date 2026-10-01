@@ -1,165 +1,125 @@
-//! Tests for reading a run's interactions back out of its journal.
+//! Reading a run's questions back out of its run file.
 
 use leviath_core::interaction::{ApprovalScope, InteractionKind, Settlement};
-use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+use leviath_runtime::state::{OpenInteraction, RunEvent};
 
+use super::super::run_file::tests::{garbage, recorded, step};
 use super::read;
-use crate::runstate::{RunMeta, create_run};
 
-/// A run to hang a journal off.
-fn meta(run_id: &str) -> RunMeta {
-    RunMeta::new(
-        run_id.to_string(),
-        "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
-        "ask a few things".to_string(),
-        None,
-        "/tmp".to_string(),
-        1,
-    )
-}
-
-/// One settled interaction record.
-fn asked(request_id: &str, prompt: &str, settlement: Settlement) -> RunRecord {
-    RunRecord::Interaction {
-        request_id: request_id.to_string(),
-        kind: InteractionKind::Confirm,
-        tool: None,
+/// A question put to a person.
+fn question(id: &str, prompt: &str, options: &[&str]) -> OpenInteraction {
+    OpenInteraction {
+        id: id.to_string(),
         prompt: prompt.to_string(),
-        stage: "plan".to_string(),
-        settlement,
-        asked_at: 100,
-        at: 101,
+        options: options.iter().map(|o| o.to_string()).collect(),
     }
 }
 
-/// Write a journal of `records` for the run.
-fn write_journal(run_id: &str, records: Vec<RunRecord>) {
-    let meta = meta(run_id);
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-        .expect("a preamble");
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: meta.run_id.clone(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta.clone()),
-        },
-    )
-    .expect("a header");
-    for record in &records {
-        run_archive::write_record(&mut buf, record).expect("a record");
+/// The answer event a settlement is recorded as.
+fn answered(id: &str, settlement: &Settlement) -> RunEvent {
+    RunEvent::Answered {
+        id: id.to_string(),
+        answer: serde_json::to_string(settlement).unwrap(),
     }
-    std::fs::write(
-        crate::runstate::run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE),
-        &buf,
-    )
-    .expect("the journal");
 }
 
-/// Every question a run asked comes back in the order it asked them, each
-/// carrying the settlement the journal recorded.
-#[test]
-fn the_interactions_read_back_in_asked_order() {
-    crate::runstate::with_isolated_runs_dir("interactions-order", |_dir| {
-        create_run(&meta("did-ask")).expect("run written");
-        write_journal(
-            "did-ask",
+#[tokio::test]
+async fn each_question_is_paired_with_how_it_settled() {
+    crate::runstate::with_isolated_runs_dir_async("interactions-read", |_d| async move {
+        let run_id = recorded();
+        let approval = Settlement::Answered {
+            approved: Some(true),
+            scope: Some(ApprovalScope::Once),
+            choice: None,
+            text: None,
+            feedback: None,
+        };
+        let picked = Settlement::Answered {
+            approved: None,
+            scope: None,
+            choice: Some(1),
+            text: None,
+            feedback: None,
+        };
+        // Asked at 10, in the stage the run is in.
+        step(&run_id, 10, Vec::new(), |s| {
+            s.interactions = vec![
+                question("q-approve", "Run the tests?", &[]),
+                question("q-pick", "Which one?", &["a", "b"]),
+            ];
+        });
+        // Asked again in the next step: still the same question.
+        step(&run_id, 15, vec![RunEvent::Log("asked".into())], |s| {
+            s.cursor.iteration += 1;
+        });
+        step(
+            &run_id,
+            20,
             vec![
-                asked(
-                    "r1",
-                    "proceed?",
-                    Settlement::Answered {
-                        approved: None,
-                        scope: None,
-                        choice: None,
-                        text: Some("yes".to_string()),
-                        feedback: None,
-                    },
-                ),
-                asked("r2", "allow it?", Settlement::TimedOut),
-                asked(
-                    "r3",
-                    "allow the run for good?",
-                    Settlement::Answered {
-                        approved: Some(true),
-                        scope: Some(ApprovalScope::Run),
-                        choice: None,
-                        text: None,
-                        feedback: None,
-                    },
-                ),
+                answered("q-approve", &approval),
+                answered("q-pick", &picked),
             ],
+            |s| s.interactions.clear(),
+        );
+        // A question settled with words that are not a recorded settlement,
+        // and one the file never saw asked.
+        step(
+            &run_id,
+            30,
+            vec![
+                RunEvent::Answered {
+                    id: "q-typed".into(),
+                    answer: "just do it".into(),
+                },
+                answered("q-timeout", &Settlement::TimedOut),
+            ],
+            |s| s.cursor.iteration += 1,
         );
 
-        let interactions = read("did-ask").expect("the journal reads");
-        assert_eq!(interactions.len(), 3);
-        assert_eq!(interactions[0].request_id, "r1");
-        assert_eq!(interactions[1].request_id, "r2");
-        assert_eq!(interactions[1].settlement, Settlement::TimedOut);
+        let records = read(&run_id).unwrap();
+        let ids: Vec<&str> = records.iter().map(|r| r.request_id.as_str()).collect();
+        assert_eq!(ids, vec!["q-approve", "q-pick", "q-typed", "q-timeout"]);
+
+        let approve = &records[0];
+        assert_eq!(approve.kind, InteractionKind::ToolApproval);
+        assert_eq!(approve.prompt, "Run the tests?");
+        assert_eq!(approve.asked_at, 10);
+        assert_eq!(approve.at, 20);
+        assert_eq!(approve.settlement, approval);
+        assert!(!approve.stage.is_empty());
+
+        assert_eq!(records[1].kind, InteractionKind::MultipleChoice);
+        assert_eq!(records[1].settlement, picked);
+
+        let typed = &records[2];
+        assert_eq!(typed.kind, InteractionKind::FreeText);
+        assert_eq!(typed.prompt, "");
+        assert_eq!(typed.asked_at, 30);
         assert_eq!(
-            interactions[2].settlement,
+            typed.settlement,
             Settlement::Answered {
-                approved: Some(true),
-                scope: Some(ApprovalScope::Run),
+                approved: None,
+                scope: None,
                 choice: None,
-                text: None,
+                text: Some("just do it".into()),
                 feedback: None,
             }
         );
-    });
+        assert_eq!(records[3].settlement, Settlement::TimedOut);
+        assert_eq!(records[3].kind, InteractionKind::FreeText);
+    })
+    .await;
 }
 
-/// A run that never asked anybody anything has no interactions, and says so
-/// with an empty list rather than an error.
-#[test]
-fn a_run_that_never_asked_has_no_interactions() {
-    crate::runstate::with_isolated_runs_dir("interactions-empty", |_dir| {
-        create_run(&meta("quiet-run")).expect("run written");
-        assert!(
-            read("quiet-run")
-                .expect("no journal is not a failure")
-                .is_empty()
-        );
-    });
-}
-
-/// A run id that names nothing at all reads the same as one with no journal:
-/// there is nothing here for this reader to distinguish, the caller reads the
-/// run first for that.
-#[test]
-fn an_unknown_run_has_no_interactions() {
-    crate::runstate::with_isolated_runs_dir("interactions-unknown", |_dir| {
-        assert!(
-            read("no-such-run")
-                .expect("no journal is not a failure")
-                .is_empty()
-        );
-    });
-}
-
-/// A journal that cannot be read is reported rather than read as a run that
-/// never asked anything.
-#[test]
-fn an_unreadable_journal_is_an_error() {
-    crate::runstate::with_isolated_runs_dir("interactions-corrupt", |_dir| {
-        let dir = crate::runstate::run_dir("broken");
-        std::fs::create_dir_all(&dir).expect("a run dir");
-        std::fs::write(
-            dir.join(leviath_core::files::ARCHIVE_FILE),
-            b"not an archive",
-        )
-        .expect("a corrupt journal");
-        let failed = read("broken").expect_err("an unreadable journal");
-        assert_eq!(failed.code(), "INTERNAL");
-        assert!(
-            failed.to_string().contains("unreadable journal"),
-            "{failed}"
-        );
-    });
+#[tokio::test]
+async fn a_run_with_no_file_asked_nothing_and_an_unreadable_one_is_an_error() {
+    crate::runstate::with_isolated_runs_dir_async("interactions-none", |_d| async move {
+        assert!(read("ghost").unwrap().is_empty());
+        garbage("broken", b"not a run file");
+        let stepped = recorded();
+        super::super::run_file::tests::bad_step(&stepped, 1);
+        assert_eq!(read(&stepped).unwrap_err().code(), "INTERNAL");
+        assert_eq!(read("broken").unwrap_err().code(), "INTERNAL");
+    })
+    .await;
 }

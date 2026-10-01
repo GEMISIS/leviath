@@ -725,7 +725,7 @@ mod tests {
         );
         assert_eq!(
             config.limits.max_file_bytes,
-            crate::commands::serve::agents::MAX_FILE_READ_BYTES
+            crate::commands::serve::run_reads::MAX_FILE_READ_BYTES
         );
         assert_eq!(
             config.limits.max_tracked_modified_files,

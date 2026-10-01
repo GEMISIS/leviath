@@ -27,9 +27,6 @@
       "name": "blueprints"
     },
     {
-      "name": "agents"
-    },
-    {
       "name": "interactions"
     },
     {
@@ -351,7 +348,7 @@
           "runs"
         ],
         "summary": "List runs, paginated and searchable",
-        "description": "Supersedes the GET half of /api/agents, which returns every run ever recorded as one unbounded array.\n\nPagination is keyset, not offset: runs are created and deleted while a client walks the list, and an offset into a shifting list silently skips and repeats items. Pass `next_cursor` back verbatim and loop until it is null.\n\n`sort=started_at` is the only immutable sort key, and it is the default. `updated_at` also advances on the daemon's 30-second persistence heartbeat, so every live run moves under a walk, and a run whose sort value changes mid-walk may be skipped or repeated. Use started_at for a stable walk, and `since=` with no cursor to poll for what changed.",
+        "description": "Pagination is keyset, not offset: runs are created and deleted while a client walks the list, and an offset into a shifting list silently skips and repeats items. Pass `next_cursor` back verbatim and loop until it is null.\n\n`sort=started_at` is the only immutable sort key, and it is the default. `updated_at` also advances on the daemon's 30-second persistence heartbeat, so every live run moves under a walk, and a run whose sort value changes mid-walk may be skipped or repeated. Use started_at for a stable walk, and `since=` with no cursor to poll for what changed.",
         "parameters": [
           {
             "name": "limit",
@@ -540,15 +537,122 @@
             "$ref": "#/components/responses/Overloaded"
           }
         }
+      },
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Start a run",
+        "description": "Takes a spawn request: a blueprint by name with its inputs, or a whole graph. Answers as soon as the daemon has started the run; poll GET /api/runs/{id} or subscribe to /ws for what happens next. A request this server or the daemon refuses answers 422 with every problem at once.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpawnRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The spawn request as JSON, as the application/json body carries it."
+                  }
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "format": "binary",
+                  "description": "A file. It joins the request's `attachments` under the field's name, which is how a `file` input names it. Its `Content-Type` is its mime type, unless it is application/octet-stream."
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The run started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnedResp"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "description": "The request cannot run: every problem with it, each with its path, what was expected, what arrived and how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuesResp"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
       }
     },
     "/api/runs/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "One run's metadata, with secrets redacted",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      },
       "delete": {
         "tags": [
           "runs"
         ],
         "summary": "Delete one run's record",
-        "description": "Removes a finished run's directory from disk. Distinct from DELETE /api/agents/{id}, which cancels the run and leaves the record: one stops the work, the other forgets it happened.\n\nDeletion is real and irreversible - the directory and everything in it, including the transcript. A console offering a \"Delete\" that only hid the run locally would tell somebody clearing a sensitive transcript that it was gone when it was not.\n\nThe run's sub-agent runs go with it. A fan-out worker or a sub_agent spawn is drawn nested under the run that started it and nothing else on disk accounts for it, so a delete that left them behind did not merely strand them: a client that nests runs under their parent has nowhere to draw a parentless run but the top level, and the delete read as a promotion. The walk is downwards only - deleting a sub-agent run leaves its parent and its siblings exactly where they were.\n\n409 on a live run: removing a directory out from under a running agent is a different and much larger feature, so cancel it first. A live sub-agent is a 409 too, and the reason names it. 404 on a run that is already gone, so a client that lost the response to its own delete can repeat it rather than treat a missing run as a failure. 409 as well on a run whose record will not parse, which force=true overrides.",
+        "description": "Removes a finished run's directory from disk. Distinct from DELETE /api/runs/{id}, which cancels the run and leaves the record: one stops the work, the other forgets it happened.\n\nDeletion is real and irreversible - the directory and everything in it, including the transcript. A console offering a \"Delete\" that only hid the run locally would tell somebody clearing a sensitive transcript that it was gone when it was not.\n\nThe run's sub-agent runs go with it. A fan-out worker or a sub_agent spawn is drawn nested under the run that started it and nothing else on disk accounts for it, so a delete that left them behind did not merely strand them: a client that nests runs under their parent has nowhere to draw a parentless run but the top level, and the delete read as a promotion. The walk is downwards only - deleting a sub-agent run leaves its parent and its siblings exactly where they were.\n\n409 on a live run: removing a directory out from under a running agent is a different and much larger feature, so cancel it first. A live sub-agent is a 409 too, and the reason names it. 404 on a run that is already gone, so a client that lost the response to its own delete can repeat it rather than treat a missing run as a failure. 409 as well on a run whose record will not parse, which force=true overrides.",
         "parameters": [
           {
             "name": "id",
@@ -674,113 +778,10 @@
         }
       }
     },
-    "/api/agents": {
+    "/api/runs/tree": {
       "get": {
         "tags": [
-          "agents"
-        ],
-        "summary": "List runs",
-        "description": "Deprecated: use GET /api/runs, which paginates and supports search. This route returns every run ever recorded as one array, and is kept unchanged for existing clients.",
-        "deprecated": true,
-        "parameters": [
-          {
-            "name": "status",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            },
-            "description": "Filter to one status."
-          }
-        ],
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "408": {
-            "$ref": "#/components/responses/Timeout"
-          },
-          "503": {
-            "$ref": "#/components/responses/Overloaded"
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Spawn a run",
-        "description": "Returns as soon as the daemon accepts the run. Poll GET /api/agents/{id} or subscribe to /ws for what happens next.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SpawnAgentReq"
-              }
-            },
-            "multipart/form-data": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "request"
-                ],
-                "properties": {
-                  "request": {
-                    "type": "string",
-                    "description": "The JSON request, as the application/json body would carry it."
-                  },
-                  "part": {
-                    "type": "string",
-                    "format": "binary",
-                    "description": "A file for the task region. Repeatable. Name the field `part:<region>` for another region; the file's `filename` names the part and its `Content-Type` declares the type."
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The new run's identifiers.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SpawnAgentResp"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/Error"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "$ref": "#/components/responses/Error"
-          },
-          "404": {
-            "$ref": "#/components/responses/Error"
-          },
-          "408": {
-            "$ref": "#/components/responses/Timeout"
-          },
-          "413": {
-            "$ref": "#/components/responses/Error"
-          },
-          "503": {
-            "$ref": "#/components/responses/Overloaded"
-          }
-        }
-      }
-    },
-    "/api/agents/tree": {
-      "get": {
-        "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "The full sub-agent tree",
         "responses": {
@@ -799,40 +800,17 @@
         }
       }
     },
-    "/api/agents/{id}": {
+    "/api/runs/{id}/cancel": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
         }
       ],
-      "get": {
+      "post": {
         "tags": [
-          "agents"
+          "runs"
         ],
-        "summary": "One run's metadata, with secrets redacted",
-        "responses": {
-          "200": {
-            "$ref": "#/components/responses/Ok"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "404": {
-            "$ref": "#/components/responses/Error"
-          },
-          "408": {
-            "$ref": "#/components/responses/Timeout"
-          },
-          "503": {
-            "$ref": "#/components/responses/Overloaded"
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "Cancel a run",
+        "summary": "Cancel a run, and the runs it started",
         "responses": {
           "204": {
             "description": "Done. No body."
@@ -852,10 +830,11 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        }
+        },
+        "description": "A run that has already finished answers 409: there is nothing left to stop. DELETE /api/runs/{id} is different: it forgets a finished run."
       }
     },
-    "/api/agents/{id}/children": {
+    "/api/runs/{id}/children": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -863,7 +842,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "This run's direct children",
         "responses": {
@@ -882,7 +861,7 @@
         }
       }
     },
-    "/api/agents/{id}/context": {
+    "/api/runs/{id}/context": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -890,7 +869,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "The run's current context window",
         "responses": {
@@ -906,13 +885,16 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
         }
       }
     },
-    "/api/agents/{id}/context/history": {
+    "/api/runs/{id}/context/history": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -920,10 +902,10 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "How the context window changed over the run",
-        "description": "**Breaking change in 0.3.0**: paginated, returning the shared envelope rather than every recorded point as one array. Each point carries a full context window with untruncated region text, on a journal that grows for as long as the run does, so the unpaged form was comfortably the largest response in the API.\n\nThe cursor is the point index. The journal is append-only, so an index is stable once written and new points only ever arrive at the end.",
+        "description": "Paginated, in the shared envelope. A point is the state the run started in, then each step of its run file that changed the window, and each point carries a full context window with untruncated region text.\n\nThe cursor is the point index. A run file only grows, so an index is stable once written and new points only ever arrive at the end.",
         "parameters": [
           {
             "name": "limit",
@@ -974,13 +956,16 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
         }
       }
     },
-    "/api/agents/{id}/files": {
+    "/api/runs/{id}/files": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -998,7 +983,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "Read a file inside the run's workdir, or list files",
         "description": "With `path`, reads that file: confined to the run's working directory, 1 MiB per request. A larger file is read a window at a time - pass `offset` and continue from the `next_offset` each response carries, which is how an agent's dataset artifact is fetched in full. Without `path`, lists instead, and the response carries `kind: \"listing\"` so the two shapes can be told apart. Reading a file returns exactly the shape it always has.\n\n`source=modified` lists what the run recorded changing - free, but capped when it was recorded, so check `modified_files_truncated`. `source=workdir` reads the filesystem, **one directory level per request**; pass a directory as `path` to descend. Note `modifying_tool_calls` counts modifying tool calls and not distinct files, so subtracting it from the entry count does not give \"how many more files\".",
@@ -1066,7 +1051,7 @@
         }
       }
     },
-    "/api/agents/{id}/files/raw": {
+    "/api/runs/{id}/files/raw": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1074,10 +1059,10 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "A workdir file's bytes, under its own content type",
-        "description": "Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the mime registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. A path the directory does not hold but the run's result lists as an artifact is served from the run's blob store, so a file a model made and nothing wrote to disk answers here too. `download=1` adds a `Content-Disposition: attachment` naming the file. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
+        "description": "Where `GET /api/runs/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the mime registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. A path the directory does not hold but the run's result lists as an artifact is served from the run's blob store, so a file a model made and nothing wrote to disk answers here too. `download=1` adds a `Content-Disposition: attachment` naming the file. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
         "parameters": [
           {
             "name": "path",
@@ -1155,7 +1140,7 @@
         }
       }
     },
-    "/api/agents/{id}/blobs": {
+    "/api/runs/{id}/blobs": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1163,7 +1148,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "The stored parts a run holds",
         "description": "Every stored part the run's context carries, by sha256: its type, name, size, dimensions, the regions carrying it, and whether the bytes are on disk under the run's `blobs/`. A part a user attached, a file `read_file` stored, an image an MCP tool returned, and an artifact the run submitted all appear here.",
@@ -1187,13 +1172,16 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
         }
       }
     },
-    "/api/agents/{id}/blobs/{sha256}": {
+    "/api/runs/{id}/blobs/{sha256}": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1210,7 +1198,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "The bytes of one stored part",
         "description": "Served under the type the part was stored as, so an image renders in a browser. `download=1` adds a `Content-Disposition: attachment` carrying the part's name. A hash that is not 64 hex characters is refused; one the run does not hold is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
@@ -1258,9 +1246,6 @@
               }
             }
           },
-          "416": {
-            "description": "The `Range` header named bytes the body does not have. Carries `Content-Range: bytes */total`."
-          },
           "400": {
             "$ref": "#/components/responses/Error"
           },
@@ -1273,13 +1258,19 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "416": {
+            "description": "The `Range` header named bytes the body does not have. Carries `Content-Range: bytes */total`."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
         }
       }
     },
-    "/api/agents/{id}/artifacts/{name}": {
+    "/api/runs/{id}/artifacts/{name}": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1296,7 +1287,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "The bytes of one file the run handed back",
         "description": "Follows the artifact the way the runtime does: the run's blob store by hash first, so a file a model made and nothing wrote to the working directory is served, then the working directory. Served under the artifact's own mime type; `download=1` adds a `Content-Disposition: attachment` carrying its file name. A run that has not handed back a result, or one with no artifact of that name, is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
@@ -1362,7 +1353,7 @@
         }
       }
     },
-    "/api/agents/{id}/logs": {
+    "/api/runs/{id}/logs": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1370,7 +1361,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "The run's logs",
         "description": "A run's logs, by stage. Output is recorded per stage under stages/<idx>/, and the two streams are kept separate rather than interleaved because they share no ordering.",
@@ -1429,7 +1420,7 @@
         }
       }
     },
-    "/api/agents/{id}/result": {
+    "/api/runs/{id}/result": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1437,7 +1428,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "The run's output and token usage",
         "responses": {
@@ -1446,7 +1437,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentResultResp"
+                  "$ref": "#/components/schemas/RunResultResp"
                 }
               }
             }
@@ -1466,7 +1457,7 @@
         }
       }
     },
-    "/api/agents/{id}/tree-status": {
+    "/api/runs/{id}/tree-status": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1474,7 +1465,7 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "Token roll-ups across this run and its descendants",
         "responses": {
@@ -1496,7 +1487,7 @@
         }
       }
     },
-    "/api/agents/{id}/pause": {
+    "/api/runs/{id}/pause": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1504,7 +1495,7 @@
       ],
       "post": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "Pause a run after its in-flight step",
         "responses": {
@@ -1529,7 +1520,7 @@
         }
       }
     },
-    "/api/agents/{id}/resume": {
+    "/api/runs/{id}/resume": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1537,7 +1528,7 @@
       ],
       "post": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "Un-pause a run",
         "responses": {
@@ -1562,7 +1553,7 @@
         }
       }
     },
-    "/api/agents/{id}/message": {
+    "/api/runs/{id}/message": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -1570,7 +1561,7 @@
       ],
       "post": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "Inject a message into a running agent's context",
         "requestBody": {
@@ -1650,7 +1641,7 @@
         }
       }
     },
-    "/api/agents/{id}/interaction": {
+    "/api/runs/{id}/interaction": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -2835,9 +2826,9 @@
                     "type": "boolean"
                   },
                   "keys": {
-              "type": "boolean"
-            },
-            "migrations": {
+                    "type": "boolean"
+                  },
+                  "migrations": {
                     "type": "boolean"
                   }
                 },
@@ -3076,27 +3067,45 @@
                     "description": "The model a stage falls back to when none of the models it names is configured on this machine. Same three states and the same empty-string refusal as `override_model`."
                   },
                   "anthropic_key": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "description": "Three states like `override_model`: absent leaves the key alone, null clears it and takes the provider out of this install, a string sets it. An empty string is a 400."
                   },
                   "openai_key": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "description": "Same three states as `anthropic_key`."
                   },
                   "google_key": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "description": "Same three states as `anthropic_key`."
                   },
                   "xai_key": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "description": "An xAI API key, which starts `xai-`. Same three states as `anthropic_key`."
                   },
                   "meta_key": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "description": "A Meta Model API key. Same three states as `anthropic_key`."
                   },
                   "openrouter_key": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "description": "Same three states as `anthropic_key`."
                   },
                   "grok_enabled": {
@@ -3108,7 +3117,10 @@
                     "description": "Upload large parts to a provider's file storage once and name them by id. Zero data retention turns uploads off whatever this says."
                   },
                   "bedrock_key": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "description": "An AWS Bedrock API key, sent as a bearer token. Not an AWS access key. Same three states as `anthropic_key`."
                   },
                   "bedrock_region": {
@@ -3363,11 +3375,17 @@
                     "description": "The GraphQL document to run."
                   },
                   "operationName": {
-                    "type": ["string", "null"],
+                    "type": [
+                      "string",
+                      "null"
+                    ],
                     "description": "Which operation to run, for a document carrying several."
                   },
                   "variables": {
-                    "type": ["object", "null"],
+                    "type": [
+                      "object",
+                      "null"
+                    ],
                     "additionalProperties": true,
                     "description": "Values for the document's variables."
                   }
@@ -3481,7 +3499,7 @@
         }
       }
     },
-    "/api/agents/{id}/stages": {
+    "/api/runs/{id}/stages": {
       "parameters": [
         {
           "$ref": "#/components/parameters/Id"
@@ -3489,10 +3507,10 @@
       ],
       "get": {
         "tags": [
-          "agents"
+          "runs"
         ],
         "summary": "The run's per-stage ledger",
-        "description": "What each stage spent, in tokens and in dollars, per visit as well as in total, and which regions it carried. Not derivable from the other routes: a stage that ran and wrote nothing to any region leaves no trace in context/history, so `entered` is the only way to tell it from a stage that was never reached, and pricing is the daemon's job - a console multiplying tokens by a rate card of its own produces a fourth answer that disagrees with the run's, the stage's and the provider's.",
+        "description": "What each stage spent, in tokens and in dollars, per visit as well as in total, and which regions it carried, as of the run file's last step. A stage that ran and wrote nothing to any region leaves no trace in context/history, so `entered` is the only way to tell it from a stage that was never reached.",
         "responses": {
           "200": {
             "description": "Stage records in blueprint order. Empty for a run that has not reached its first stage boundary.",
@@ -3508,7 +3526,7 @@
             "$ref": "#/components/responses/Unauthorized"
           },
           "404": {
-            "description": "No run with that id.",
+            "description": "No run file for that id.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3519,6 +3537,9 @@
           },
           "408": {
             "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
           },
           "503": {
             "$ref": "#/components/responses/Overloaded"
@@ -3809,6 +3830,367 @@
           }
         }
       }
+    },
+    "/api/runs/validate": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Check a spawn request without running it",
+        "description": "Resolves the request the whole way, the same as POST /api/runs, and starts nothing.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpawnRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The spawn request as JSON, as the application/json body carries it."
+                  }
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "format": "binary",
+                  "description": "A file. It joins the request's `attachments` under the field's name, which is how a `file` input names it. Its `Content-Type` is its mime type, unless it is application/octet-stream."
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The run the request would start, in brief.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "description": "The request cannot run: every problem with it, each with its path, what was expected, what arrived and how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuesResp"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/schema/spawn-request": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "The spawn request's JSON Schema",
+        "description": "The schema POST /api/runs and POST /api/runs/validate take, as docs/schema/spawn-request.schema.json publishes it.",
+        "responses": {
+          "200": {
+            "description": "A JSON Schema document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/blueprints/{name}/inputs": {
+      "parameters": [
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "blueprints"
+        ],
+        "summary": "The inputs a blueprint declares",
+        "description": "Each input's name, type, whether a spawn must supply it, its default and where its value goes: what a form for starting the blueprint is built from.",
+        "responses": {
+          "200": {
+            "description": "The declared inputs, in order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/InputDecl"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/runs/{id}/spec": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "The spec a run was resolved to",
+        "description": "The graph it runs, its checked inputs, the provider, model and tools of each stage, and its launch policy. A webhook's signing secret reads as `[redacted]`.",
+        "responses": {
+          "200": {
+            "description": "The run's spec.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunSpec"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/runs/{id}/state": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "A run's state, now or at any step",
+        "description": "Without `at`, the daemon reads a run it holds from its live components; any other run, or any run while the daemon cannot be reached, reads as its run file's last step. With `at`, the state after that step, from the run file.",
+        "parameters": [
+          {
+            "name": "at",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "The step to read the state at. 0 is the state the run started in."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run's state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunState"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "416": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/runs/{id}/deltas": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "A run's steps",
+        "description": "Each step's changes to the run's state and the events that happened during it, in order.",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "The first step. Defaults to the first."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "The last step. Defaults to the last."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The steps, oldest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StateDeltas"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
+    },
+    "/api/runs/{id}/graph": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "A run's graph as it ran",
+        "description": "Every stage with how many times the run entered it and whether it is in it, and every edge with how many times the run took it, counted from the transitions its run file records.",
+        "responses": {
+          "200": {
+            "description": "The graph.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunGraphView"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3827,7 +4209,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "A run id, as returned by `lev run --json` or POST /api/agents."
+        "description": "A run id, as returned by `lev run --json` or POST /api/runs."
       },
       "Name": {
         "name": "name",
@@ -3901,164 +4283,6 @@
       }
     },
     "schemas": {
-      "SpawnAgentReq": {
-        "type": "object",
-        "required": [
-          "blueprint",
-          "task"
-        ],
-        "properties": {
-          "blueprint": {
-            "type": "string",
-            "description": "An installed blueprint name, or a path to one."
-          },
-          "task": {
-            "type": "string"
-          },
-          "model": {
-            "type": "string",
-            "description": "\"provider/model\", or a bare model id."
-          },
-          "max_depth": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "yolo": {
-            "type": "boolean",
-            "default": false,
-            "description": "Run unattended. Refused when the server was started with --no-remote-yolo."
-          },
-          "allow": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "no_seed_commands": {
-            "type": "boolean",
-            "default": false
-          },
-          "capture_model_input": {
-            "type": "boolean",
-            "default": false,
-            "description": "Write this run's exact requests into its journal, once per provider attempt, whatever the machine's own [observability] capture_model_input says. A captured request is the whole prompt and there is no size cap, so the journal grows by roughly the context size per attempt. Read it back on InferenceAttemptOutput.modelInput over GraphQL."
-          },
-          "workdir": {
-            "type": "string",
-            "description": "Confined to --workdir-root when the server sets one."
-          },
-          "regions": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "Seed content per named context region."
-          },
-          "output_format": {
-            "type": "string",
-            "description": "Ask for the final output in this shape, overriding the blueprint's. Any label works - nothing converts between shapes; the label reaches the model, which produces the bytes. Naming a format the blueprint does not declare retires any Rhai validator and JSON schema it declared (a check written for one shape says nothing about another); the response's warnings array names what was retired. Supply output_schema when the new shape should still be checked."
-          },
-          "output_instructions": {
-            "type": "string",
-            "description": "Extra guidance about that shape. How an unusual format gets explained."
-          },
-          "output_schema": {
-            "type": "object",
-            "description": "A JSON Schema the final output must satisfy. The only thing that inspects the answer's contents, and only because you asked: a failing submission is refused back to the agent to correct."
-          },
-          "metadata": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "callback_url": {
-            "type": "string",
-            "description": "POSTed on completion or error."
-          },
-          "callback_secret": {
-            "type": "string",
-            "description": "Shared secret for the HMAC-SHA256 signature on that callback."
-          },
-          "parts": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/PartRef"
-            },
-            "description": "Files already inside the working directory to attach as typed parts. A `multipart/form-data` body carries files instead: a `request` field holding this JSON, then any number of file fields named `part` (bound for the task region) or `part:<region>`, each with a `filename` and a `Content-Type`. A `@path` token inside `task` or a region's text attaches that file too, resolved inside the working directory, and the text keeps the token."
-          }
-        }
-      },
-      "SpawnAgentResp": {
-        "type": "object",
-        "required": [
-          "agent_id",
-          "run_id"
-        ],
-        "properties": {
-          "agent_id": {
-            "type": "string"
-          },
-          "run_id": {
-            "type": "string"
-          },
-          "warnings": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "How this run will differ from what its blueprint declares: today, the Rhai validator or JSON schema that a differing output_format retired. Omitted when there is nothing to say."
-          }
-        }
-      },
-      "AgentResultResp": {
-        "type": "object",
-        "required": [
-          "run_id",
-          "status",
-          "output",
-          "prompt_tokens",
-          "completion_tokens"
-        ],
-        "properties": {
-          "run_id": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "description": "The run's status, in the same words a run object uses: starting, running, waiting_input, paused, complete, complete_interactive, error, cancelled. A server that does not announce `events.run_status` sends the Display spelling here instead (`WaitingInput`)."
-          },
-          "output": {
-            "type": "string",
-            "description": "The tail of the last stage's log: what the run did. Prefer final_output for what it concluded."
-          },
-          "final_output": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/FinalOutput"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The answer the agent submitted, if any."
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "prompt_tokens": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "completion_tokens": {
-            "type": "integer",
-            "minimum": 0
-          }
-        }
-      },
       "FinalOutput": {
         "type": "object",
         "description": "What an agent handed back. `content` is byte-for-byte what it submitted; nothing re-serializes it. `format` is an opaque label the server never interprets - match on it to decide how to render.",
@@ -4096,7 +4320,7 @@
             "items": {
               "$ref": "#/components/schemas/Artifact"
             },
-            "description": "Files the run produced, typed and hashed. An answer is one model response, so anything larger is a file named here. Fetch one with GET /api/agents/{id}/files?path=."
+            "description": "Files the run produced, typed and hashed. An answer is one model response, so anything larger is a file named here. Fetch one with GET /api/runs/{id}/files?path=."
           }
         }
       },
@@ -4509,7 +4733,7 @@
           },
           "max_file_bytes": {
             "type": "integer",
-            "description": "Largest file `GET /api/agents/{id}/files` serves whole."
+            "description": "Largest file `GET /api/runs/{id}/files` serves whole."
           },
           "max_listing_entries": {
             "type": "integer",
@@ -4877,6 +5101,243 @@
               "$ref": "#/components/schemas/MimeTypeEntry"
             },
             "description": "Every row, keys sorted."
+          }
+        }
+      },
+      "RunResultResp": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "output",
+          "prompt_tokens",
+          "completion_tokens"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "The run's status, in the same words a run object uses: starting, running, waiting_input, paused, complete, complete_interactive, error, cancelled. A server that does not announce `events.run_status` sends the Display spelling here instead (`WaitingInput`)."
+          },
+          "output": {
+            "type": "string",
+            "description": "The tail of the last stage's log: what the run did. Prefer final_output for what it concluded."
+          },
+          "final_output": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FinalOutput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The answer the agent submitted, if any."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "SpawnRequest": {
+        "type": "object",
+        "description": "A request for a run. Its full shape is the JSON Schema GET /api/schema/spawn-request serves (docs/schema/spawn-request.schema.json): `source` names a blueprint or carries a graph, `inputs` gives the graph's inputs by name, and `attachments`, `model`, `output`, `workdir`, `launch` and `delivery` are optional. Unknown keys are refused."
+      },
+      "SpawnSummary": {
+        "type": "object",
+        "description": "A resolved run, in brief: its title, where its graph came from, its entry stage, each stage's provider, model and tools, its checked inputs, its launch policy and its workdir."
+      },
+      "RunSpec": {
+        "type": "object",
+        "description": "A run's spec, as docs/schema/run-file.schema.json describes the `spec` frame."
+      },
+      "RunState": {
+        "type": "object",
+        "description": "A run's state, as docs/schema/run-file.schema.json describes the `state` frame."
+      },
+      "StateDeltas": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "description": "One step, as docs/schema/run-file.schema.json describes the `delta` frame."
+        }
+      },
+      "InputDecl": {
+        "type": "object",
+        "description": "One input a graph declares: `name`, `type`, `required`, `default`, `description` and `binds`, as the spawn request schema describes it."
+      },
+      "SpawnedResp": {
+        "type": "object",
+        "required": [
+          "run_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "description": "The new run's id."
+          }
+        }
+      },
+      "SpawnIssue": {
+        "type": "object",
+        "required": [
+          "at",
+          "path",
+          "code",
+          "message",
+          "known"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "Where the problem is, written out: `stages.plan.model`, `inputs.items[2]`, or `(request)` for the request as a whole."
+          },
+          "path": {
+            "type": "array",
+            "description": "The same place, as typed segments: `{\"Field\": name}`, `{\"Key\": name}` or `{\"Index\": n}`.",
+            "items": {
+              "type": "object"
+            }
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "missing",
+              "unknown",
+              "wrong_type",
+              "out_of_range",
+              "invalid",
+              "duplicate",
+              "dangling",
+              "conflict",
+              "not_allowed",
+              "unresolvable",
+              "unavailable",
+              "changed"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "expected": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What would have been accepted."
+          },
+          "got": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What arrived instead."
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How to fix it."
+          },
+          "known": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The valid choices, when the problem is picking one."
+          }
+        }
+      },
+      "IssuesResp": {
+        "type": "object",
+        "required": [
+          "issues"
+        ],
+        "properties": {
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpawnIssue"
+            }
+          }
+        }
+      },
+      "RunGraphView": {
+        "type": "object",
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "stage",
+                "visits",
+                "current"
+              ],
+              "properties": {
+                "stage": {
+                  "type": "string"
+                },
+                "visits": {
+                  "type": "integer",
+                  "description": "How many times the run entered the stage."
+                },
+                "current": {
+                  "type": "boolean",
+                  "description": "Whether the run is in it, or ended in it."
+                }
+              }
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "from",
+                "to",
+                "name",
+                "condition",
+                "taken"
+              ],
+              "properties": {
+                "from": {
+                  "type": "string"
+                },
+                "to": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "condition": {
+                  "type": "string",
+                  "description": "When the run takes the edge, as the graph declares it."
+                },
+                "taken": {
+                  "type": "integer",
+                  "description": "How many times the run took it."
+                }
+              }
+            }
           }
         }
       }

@@ -1,22 +1,225 @@
 //! Starting a run, and steering one that is already going.
 //!
-//! What a surface contributes is decoding: REST takes JSON or multipart and
-//! resolves `@path` tokens against the workdir, GraphQL takes a typed input.
-//! What happens after that is here, so the refusals are the same either way: a
-//! workdir outside `--workdir-root`, a yolo flag on a server that refuses them,
-//! a callback URL the outbound policy will not allow.
+//! A run is asked for with a [`Request`]: the one typed shape every front
+//! door builds. The daemon checks it, resolves it and starts it, and a request
+//! it refuses comes back with every problem at once. What this server adds is
+//! what only it can know, since it sits between a caller on the network and
+//! the machine:
+//!
+//! - a blueprint read from a directory is for a caller on this machine;
+//! - a workdir has to sit under `--workdir-root`;
+//! - an unattended run, or one with tools allowed outright, is refused on a
+//!   server started with `--no-remote-yolo`;
+//! - a webhook URL has to pass the same outbound policy a model-supplied URL
+//!   does;
+//! - seed commands are refused on a server started with
+//!   `--no-remote-seed-commands`.
+//!
+//! The first four are [`SpawnIssue`]s like the daemon's own, so a caller with
+//! a refused workdir and a misspelled input hears about both in one answer:
+//! this server asks the daemon for its issues too before it answers. The last
+//! is not a refusal: such a run starts with its seed commands off.
 
 use leviath_core::mime::InboundPart;
 use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
+use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use leviath_runtime::spec::launch::Unattended;
+use leviath_runtime::spec::names::BlueprintPath;
+use leviath_runtime::spec::request::{SpawnRequest as Request, SpawnSource};
+use leviath_runtime::spec::summary::SpawnSummary;
 
 use super::super::types::AppState;
 use super::error::ServeError;
 
-/// Everything about a new run, after the request that carried it is decoded.
+/// What the daemon, or this server, made of a request.
+#[derive(Debug)]
+pub(crate) enum Verdict<T> {
+    /// It went ahead: the new run's id, or what the run would be.
+    Accepted(T),
+    /// It was refused, with every reason.
+    Rejected(SpawnIssues),
+}
+
+/// Start the run `request` asks for.
+///
+/// `Ok(Rejected)` is a request that cannot run as written; `Err` is a server
+/// or a daemon that could not answer.
+pub(crate) async fn start(
+    state: &AppState,
+    mut request: Request,
+) -> Result<Verdict<String>, ServeError> {
+    if let Some(issues) = refused(state, &mut request).await? {
+        return Ok(Verdict::Rejected(issues));
+    }
+    match state.control.spawn(request).await {
+        Ok(ControlResponse::Spawned { run_id }) => {
+            // No spawned frame from here. The daemon emits one for every run
+            // the world gains, however it was launched, so a second one would
+            // make exactly the runs that arrived over the network appear twice.
+            tracing::info!(run_id = %run_id, "spawned a run via the API");
+            Ok(Verdict::Accepted(run_id))
+        }
+        Ok(ControlResponse::Rejected { issues }) => Ok(Verdict::Rejected(issues)),
+        Ok(other) => Err(daemon_refusal(&other)),
+        Err(e) => Err(ServeError::from_daemon_io(&e)),
+    }
+}
+
+/// What `request` would run, without running anything.
+pub(crate) async fn validate(
+    state: &AppState,
+    mut request: Request,
+) -> Result<Verdict<SpawnSummary>, ServeError> {
+    if let Some(issues) = refused(state, &mut request).await? {
+        return Ok(Verdict::Rejected(issues));
+    }
+    match state.control.validate_spawn(request).await {
+        Ok(ControlResponse::Valid { summary }) => Ok(Verdict::Accepted(*summary)),
+        Ok(ControlResponse::Rejected { issues }) => Ok(Verdict::Rejected(issues)),
+        Ok(other) => Err(daemon_refusal(&other)),
+        Err(e) => Err(ServeError::from_daemon_io(&e)),
+    }
+}
+
+/// A reply to a spawn or a dry run that is neither an answer nor issues: the
+/// daemon shutting down, or a reply to some other question.
+fn daemon_refusal(reply: &ControlResponse) -> ServeError {
+    match reply {
+        ControlResponse::Error { message } => ServeError::DaemonUnavailable(message.clone()),
+        other => ServeError::unexpected_reply(other),
+    }
+}
+
+/// Apply this server's rules to `request`. `Some` when any refuses it, with
+/// the daemon's own issues added; `None` when the request may go ahead, as
+/// adjusted.
+async fn refused(
+    state: &AppState,
+    request: &mut Request,
+) -> Result<Option<SpawnIssues>, ServeError> {
+    let local = request.check_remote().err();
+    if local.is_none() {
+        installed_elsewhere(state, request).await;
+    }
+    let mut issues = server_issues(state, request);
+    if issues.is_empty() && local.is_none() {
+        return Ok(None);
+    }
+    // The daemon reads the blueprint a request names, so one this server
+    // refused to read is not handed on to be read for its other issues.
+    if let Some(refusal) = local {
+        issues.absorb(refusal);
+        return Ok(Some(issues));
+    }
+    match state.control.validate_spawn(request.clone()).await {
+        Ok(ControlResponse::Rejected { issues: more }) => issues.absorb(more),
+        Ok(ControlResponse::Valid { .. }) => {}
+        Ok(other) => return Err(daemon_refusal(&other)),
+        Err(e) => return Err(ServeError::from_daemon_io(&e)),
+    }
+    Ok(Some(issues))
+}
+
+/// The refusals only this server can make, for `request` as it arrived, with
+/// its workdir filled in and its seed commands turned off where this server
+/// turns them off.
+fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
+    let limits = &state.limits;
+    let mut issues = SpawnIssues::new();
+    let workdir = request
+        .workdir
+        .get_or_insert_with(|| std::env::current_dir().unwrap_or_default());
+    // `--workdir-root` is the operator's answer to "where is this API allowed
+    // to work": without it, a caller-supplied `"/"` would point a
+    // tool-executing run at the whole filesystem.
+    if let Err(message) = limits.check_workdir(workdir) {
+        issues.push(
+            SpawnIssue::new(
+                SpecPath::root().field("workdir"),
+                IssueCode::NotAllowed,
+                message,
+            )
+            .hint("send a workdir under the server's --workdir-root"),
+        );
+    }
+    // `unattended` and `allow` are the same lever: an allow list approves
+    // tools without a person just as an unattended run does, so a server that
+    // refuses one refuses both. Any `allow` is refused rather than only a
+    // wildcard: a per-agent grant belongs in the operator's own config.
+    let launch = &mut request.launch;
+    if limits.no_remote_yolo && launch.unattended != Unattended::Off {
+        issues.push(
+            SpawnIssue::new(
+                SpecPath::root().field("launch").field("unattended"),
+                IssueCode::NotAllowed,
+                "this server refuses unattended runs (--no-remote-yolo)",
+            )
+            .expected("off"),
+        );
+    }
+    if limits.no_remote_yolo && !launch.allow.is_empty() {
+        issues.push(
+            SpawnIssue::new(
+                SpecPath::root().field("launch").field("allow"),
+                IssueCode::NotAllowed,
+                "this server refuses tools allowed outright (--no-remote-yolo)",
+            )
+            .hint("leave `allow` empty; the operator grants tools in the server's own config"),
+        );
+    }
+    if limits.no_remote_seed_commands {
+        launch.seed_commands = false;
+    }
+    let callback = request.delivery.callback.as_ref();
+    if let Some(Err(message)) = callback.map(|c| limits.check_callback_url(c.url.as_str())) {
+        issues.push(SpawnIssue::new(
+            SpecPath::root()
+                .field("delivery")
+                .field("callback")
+                .field("url"),
+            IssueCode::NotAllowed,
+            message,
+        ));
+    }
+    issues
+}
+
+/// Point a request for a blueprint this server lists from a configured
+/// `agent_paths` directory, rather than the installed ones, at that
+/// directory. The daemon resolves names against the installed blueprints only,
+/// and the operator listing a directory is what puts its blueprints on offer
+/// here. A request pinned to a revision is left alone: a directory has no
+/// revision to pin.
+async fn installed_elsewhere(state: &AppState, request: &mut Request) {
+    let SpawnSource::Blueprint(reference) = &request.source else {
+        return;
+    };
+    let name = reference.name.to_string();
+    let installed = super::super::blueprints::agents_dir()
+        .join(&name)
+        .join(leviath_core::files::MANIFEST_FILENAME)
+        .is_file();
+    if installed || reference.digest.is_some() {
+        return;
+    }
+    let roots = state.current_config().agent_paths.clone();
+    let listed =
+        super::super::blocking::blocking(move || super::super::blueprints::discover_in(roots))
+            .await;
+    let path = listed
+        .into_iter()
+        .find(|blueprint| blueprint.name == name)
+        .and_then(|found| std::fs::canonicalize(found.path).ok())
+        .and_then(|dir| BlueprintPath::new(dir.to_string_lossy()).ok());
+    if let Some(path) = path {
+        request.source = SpawnSource::BlueprintFile(path);
+    }
+}
+
+/// A run asked for as a task and flags: the shape GraphQL's `spawnRun` takes.
 ///
 /// The files are separate ([`spawn`] takes them alongside) because each surface
-/// resolves them its own way: bytes uploaded in a multipart body, or paths
-/// named inside the run's workdir.
+/// resolves them its own way.
 pub(crate) struct SpawnRequest {
     /// The blueprint to start, by name.
     pub(crate) blueprint: String,
@@ -46,8 +249,8 @@ pub(crate) struct SpawnRequest {
     pub(crate) callback_secret: Option<String>,
     /// The shape this caller wants the answer in.
     pub(crate) output: Option<leviath_core::output::OutputSpec>,
-    /// Write this run's exact requests into its journal, whatever the machine's
-    /// own `[observability] capture_model_input` says.
+    /// Write this run's exact requests into its run file, whatever the
+    /// machine's own `[observability] capture_model_input` says.
     pub(crate) capture_model_input: bool,
 }
 
@@ -56,142 +259,53 @@ pub(crate) struct SpawnRequest {
 pub(crate) struct Spawned {
     /// The new run's id.
     pub(crate) run_id: String,
-    /// Retired checks the spawn noticed. Empty when there were none.
+    /// What the caller should know about how the run differs from what it
+    /// asked for. Empty when there is nothing to say.
     pub(crate) warnings: Vec<String>,
 }
 
-/// Start a run.
-///
-/// The refusals, in the order they are checked, because each one is about a
-/// different decision: the blueprint has to exist, the workdir has to be
-/// somewhere this server is allowed to work, an unattended run has to be
-/// allowed on this server at all, and a webhook URL has to pass the same
-/// outbound policy a model-supplied URL does.
+/// Start a run asked for as a task and flags: each region's text and the task
+/// become the blueprint's inputs, and `parts` its attachments. A refusal is a
+/// bad request listing every issue.
 pub(crate) async fn spawn(
     state: &AppState,
     request: SpawnRequest,
     parts: Vec<InboundPart>,
 ) -> Result<Spawned, ServeError> {
-    // A secret with nowhere to go is refused rather than accepted and dropped.
-    // It signs the webhook body, so a caller that sends one and no URL believes
-    // it has set up a signed callback, and the run will never call anything: the
-    // mistake is silent for the whole life of the run, and the thing it silently
-    // loses is a credential.
-    if request.callback_secret.is_some() && request.callback_url.is_none() {
-        return Err(ServeError::BadRequest(
-            "`callback_secret` signs the callback body, so it needs a \
-             `callback_url` to sign for. Send both, or neither."
-                .to_string(),
-        ));
-    }
-    let config = state.current_config();
-    let roots = super::super::blueprints::blueprint_roots(&config);
-    let installed =
-        super::super::blocking::blocking(move || super::super::blueprints::discover_in(roots))
-            .await;
-    let found = installed
-        .iter()
-        .find(|blueprint| blueprint.name == request.blueprint)
-        .ok_or_else(|| {
-            ServeError::NotFound(format!("Blueprint '{}' not found", request.blueprint))
-        })?;
-    let manifest_path =
-        std::path::PathBuf::from(&found.path).join(leviath_core::files::MANIFEST_FILENAME);
-
-    let workdir = request.workdir.clone().unwrap_or_else(|| {
-        std::env::current_dir()
-            .map(|dir| dir.to_string_lossy().to_string())
-            .unwrap_or_default()
-    });
-    // `--workdir-root` is the operator's answer to "where is this API allowed to
-    // work": without it, a caller-supplied `"/"` would point a tool-executing run
-    // at the whole filesystem.
-    state
-        .limits
-        .check_workdir(std::path::Path::new(&workdir))
-        .map_err(ServeError::Forbidden)?;
-    // A named profile is a kind of yolo, so it is refused with it.
-    let yolo = request.yolo || request.yolo_profile.is_some();
-    state
-        .limits
-        .check_launch_overrides(yolo, &request.allow)
-        .map_err(ServeError::Forbidden)?;
-    if let Some(callback) = request.callback_url.as_deref() {
-        state
-            .limits
-            .check_callback_url(callback)
-            .map_err(ServeError::Forbidden)?;
-    }
-
-    let output = request.output.clone();
-    let blueprint_dir = found.path.clone();
-    let spawn = daemon_request(state, request, &blueprint_dir, workdir, yolo, parts)
-        .map_err(ServeError::BadRequest)?;
-    // What this spawn tells its caller alongside the run id: the declared
-    // checks that the request's own output shape retires. The daemon logs the
-    // same retirement into its own log, which the caller never reads, and the
-    // check they may be counting on deserves a line in the response they do.
-    // Best-effort: a manifest that will not read is the daemon's to report as
-    // the spawn error, and this must never be why one fails.
-    let warnings =
-        crate::commands::run::manifest::retired_check_warnings_at(&manifest_path, output.as_ref());
-
-    match state.control.spawn(spawn).await {
-        Ok(ControlResponse::Spawned { run_id }) => {
-            // No spawned frame from here. The daemon emits one for every run the
-            // world gains, however it was launched, so a second one would make
-            // exactly the runs that arrived over the network appear twice.
-            tracing::info!(run_id = %run_id, blueprint = %blueprint_dir, "spawned agent via API");
-            Ok(Spawned { run_id, warnings })
-        }
-        // Every problem with the request, each with where it is and how to
-        // fix it.
-        Ok(ControlResponse::Rejected { issues }) => Err(ServeError::BadRequest(format!(
-            "Failed to spawn agent: {issues}"
-        ))),
-        // The daemon's own refusal: a manifest that will not load, a region the
-        // blueprint does not declare, a seed that cannot run.
-        Ok(ControlResponse::Error { message }) => Err(ServeError::BadRequest(format!(
-            "Failed to spawn agent: {message}"
-        ))),
-        Ok(other) => Err(ServeError::unexpected_reply(&other)),
-        Err(e) => Err(ServeError::from_daemon_io(&e)),
-    }
-}
-
-/// The request a decoded spawn makes of the daemon: the blueprint found for
-/// it, the task and each named region as inputs, its files as attachments, and
-/// the launch settings. Seed commands are refused when either this caller or
-/// the operator refuses them for runs that arrive over the network.
-fn daemon_request(
-    state: &AppState,
-    request: SpawnRequest,
-    blueprint_dir: &str,
-    workdir: String,
-    yolo: bool,
-    parts: Vec<InboundPart>,
-) -> Result<leviath_runtime::spec::request::SpawnRequest, String> {
-    crate::daemon::requests::TaskLaunch {
-        blueprint: blueprint_dir.to_string(),
+    let source = leviath_runtime::spec::names::BlueprintRef::parse(&request.blueprint)
+        .map(SpawnSource::Blueprint)
+        .map_err(|e| ServeError::BadRequest(format!("blueprint '{}': {e}", request.blueprint)))?;
+    let launch = crate::daemon::requests::TaskLaunch {
+        blueprint: request.blueprint,
         task: request.task,
         regions: request.regions,
         parts,
         model: request.model,
-        workdir: Some(workdir),
-        unattended: yolo,
+        workdir: request.workdir,
+        unattended: request.yolo || request.yolo_profile.is_some(),
         profile: request.yolo_profile,
         allow: request.allow,
         max_depth: request.max_depth,
-        no_seed_commands: request.no_seed_commands || state.limits.no_remote_seed_commands,
+        no_seed_commands: request.no_seed_commands,
         output: request.output,
         capture_model_input: request.capture_model_input,
         metadata: request.metadata,
         callback_url: request.callback_url,
         callback_secret: request.callback_secret,
+    };
+    let built = launch
+        .into_request_for(source)
+        .map_err(ServeError::BadRequest)?;
+    match start(state, built).await? {
+        Verdict::Accepted(run_id) => Ok(Spawned {
+            run_id,
+            warnings: Vec::new(),
+        }),
+        Verdict::Rejected(issues) => Err(ServeError::BadRequest(format!(
+            "Failed to spawn agent: {issues}"
+        ))),
     }
-    .into_request()
 }
-
 /// Deliver a message to a run that is going.
 ///
 /// The daemon decides whether the run takes one: a stage that declared

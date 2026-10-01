@@ -636,7 +636,7 @@ pub(crate) fn blob_link(
     blob.stored.then(|| {
         super::super::super::signed_url::signed_path(
             &state.signer,
-            &format!("/api/agents/{run_id}/blobs/{}", blob.sha256),
+            &format!("/api/runs/{run_id}/blobs/{}", blob.sha256),
             &[],
             leviath_core::duration::now_secs(),
         )
@@ -720,7 +720,7 @@ pub(crate) fn artifact(
     Artifact {
         url: super::super::super::signed_url::signed_path(
             &state.signer,
-            &format!("/api/agents/{run_id}/artifacts/{}", artifact.name),
+            &format!("/api/runs/{run_id}/artifacts/{}", artifact.name),
             &[],
             leviath_core::duration::now_secs(),
         ),

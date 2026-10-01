@@ -1,0 +1,123 @@
+//! A run's history read off its run file: the points, a page of them, and
+//! one found by its revision.
+
+use leviath_core::run_meta::revision::context_revision;
+use leviath_runtime::state::{EntryKind, EntryMeta, EntryState, RunEvent};
+
+use super::super::run_file::tests::{recorded, stateless, step};
+use super::*;
+
+/// Record a step that adds `text` to the run's first region.
+fn said(run_id: &str, at: i64, text: &str) {
+    step(run_id, at, vec![RunEvent::Log(text.into())], |s| {
+        s.context.regions[0].entries.push(EntryState {
+            text: text.to_string(),
+            parts: Vec::new(),
+            tokens: 2,
+            timestamp: at,
+            kind: EntryKind::Text,
+            meta: EntryMeta::None,
+            key: None,
+            reasoning: None,
+        });
+    });
+}
+
+/// A run with a start and three steps that changed its window, and one that
+/// did not.
+fn history_run() -> String {
+    let run_id = recorded();
+    said(&run_id, 10, "one");
+    step(&run_id, 15, Vec::new(), |s| s.cursor.iteration += 1);
+    said(&run_id, 20, "two");
+    said(&run_id, 30, "three");
+    run_id
+}
+
+#[tokio::test]
+async fn the_points_are_the_start_and_every_step_that_moved_the_window() {
+    crate::runstate::with_isolated_runs_dir_async("history-points", |_d| async move {
+        record_window_reads(Box::new(|_| {}));
+        let run_id = history_run();
+        assert_eq!(point_count(&run_id), Some(4));
+
+        let every = every_window(&run_id);
+        let at: Vec<i64> = every.iter().map(|p| p.at).collect();
+        let spec_at = run_file::require(&run_id).unwrap().spec().created_at;
+        assert_eq!(at, vec![spec_at, 10, 20, 30]);
+        assert!(every.iter().all(|p| p.meta.run_id == run_id));
+
+        let picked = windows_at(&run_id, &[1, 3]);
+        let indices: Vec<usize> = picked.iter().map(|(i, _)| *i).collect();
+        assert_eq!(indices, vec![1, 3]);
+        assert_eq!(picked[0].1.at, 10);
+        assert!(windows_at(&run_id, &[]).is_empty());
+
+        let revision = context_revision(&every[2].context);
+        let found = at_revision(&run_id, &revision).unwrap();
+        assert_eq!(found.at, 20);
+        assert!(at_revision(&run_id, "no-such-revision").is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_history_pages_forwards_and_backwards() {
+    crate::runstate::with_isolated_runs_dir_async("history-page", |_d| async move {
+        let run_id = history_run();
+        let first = HistorySpec::resolve(&run_id, Some(3), None, None).unwrap();
+        let page_one = page(&run_id, &first).unwrap();
+        assert_eq!(page_one.total, 4);
+        assert_eq!(page_one.points.len(), 3);
+        let cursor = page_one.next_cursor.expect("one more point");
+        let rest = HistorySpec::resolve(&run_id, Some(3), None, Some(&cursor)).unwrap();
+        let page_two = page(&run_id, &rest).unwrap();
+        assert_eq!(page_two.points.len(), 1);
+        assert_eq!(page_two.points[0].at, 30);
+        assert!(page_two.next_cursor.is_none());
+
+        let newest = HistorySpec::resolve(&run_id, Some(2), Some("desc"), None).unwrap();
+        let down = page(&run_id, &newest).unwrap();
+        let at: Vec<i64> = down.points.iter().map(|p| p.at).collect();
+        assert_eq!(at, vec![30, 20]);
+        let cursor = down.next_cursor.unwrap();
+        let older = HistorySpec::resolve(&run_id, Some(2), Some("desc"), Some(&cursor)).unwrap();
+        let at: Vec<i64> = page(&run_id, &older)
+            .unwrap()
+            .points
+            .iter()
+            .map(|p| p.at)
+            .collect();
+        assert_eq!(at[0], 10);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_run_with_no_readable_file_has_no_history() {
+    crate::runstate::with_isolated_runs_dir_async("history-none", |_d| async move {
+        assert!(point_count("ghost").is_none());
+        assert!(every_window("ghost").is_empty());
+        assert!(at_revision("ghost", "r").is_none());
+        let spec = HistorySpec::resolve("ghost", None, None, None).unwrap();
+        assert_eq!(page("ghost", &spec).unwrap_err().code(), "NOT_FOUND");
+
+        let run_id = recorded();
+        stateless(&run_id);
+        assert!(point_count(&run_id).is_none());
+    })
+    .await;
+}
+
+/// A visitor that stops at the first point stops the walk there.
+#[tokio::test]
+async fn a_walk_stopped_at_the_start_reads_nothing_more() {
+    crate::runstate::with_isolated_runs_dir_async("history-stop", |_d| async move {
+        let run_id = history_run();
+        let start = windows_at(&run_id, &[0]);
+        assert_eq!(start.len(), 1);
+        let revision = context_revision(&start[0].1.context);
+        assert_eq!(at_revision(&run_id, &revision).unwrap().at, start[0].1.at);
+    })
+    .await;
+}
