@@ -1,5 +1,4 @@
 use super::*;
-use leviath_core::run_archive::{RUN_ARCHIVE_VERSION, write_archive_start, write_record};
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus};
 
 fn meta(run_id: &str, started: i64, ended: i64) -> RunMeta {
@@ -301,8 +300,8 @@ fn the_report_prints_in_every_shape() {
     print_tree(&[t]);
 }
 
-/// A run tree on disk in an isolated runs dir: a root with a journal, one
-/// child with a journal, one child with a meta but no journal.
+/// A run tree on disk in an isolated runs dir: a root with its steps, one
+/// child with its steps, and one child whose run file will not read.
 async fn with_tree<R, Fut>(unique: &str, f: impl FnOnce(String) -> Fut) -> R
 where
     Fut: std::future::Future<Output = R>,
@@ -332,19 +331,43 @@ where
         let mut torn = meta("child-torn", 1_045, 1_345);
         torn.depth = 1;
         crate::runstate::create_run(&torn).expect("torn child");
+        let path = crate::runstate::run_file::path_in(&crate::runstate::run_dir("child-torn"));
+        let mut bytes = std::fs::read(&path).expect("the run file");
+        bytes.extend(
+            leviath_runtime::runfile::codec::encode(
+                leviath_runtime::runfile::codec::FrameKind::Delta,
+                &9u64,
+            )
+            .expect("a frame"),
+        );
+        std::fs::write(&path, bytes).expect("torn");
 
         f("root-1".to_string()).await
     })
     .await
 }
 
+/// Record `records` as steps of `run_id`'s file, one step each, the way the
+/// persistence lane records what the pipeline journals.
 fn write_journal(run_id: &str, records: &[RunRecord]) {
-    let mut bytes = Vec::new();
-    write_archive_start(&mut bytes, RUN_ARCHIVE_VERSION).expect("preamble");
-    for r in records {
-        write_record(&mut bytes, r).expect("record");
+    use leviath_runtime::state::RunStatus as State;
+    let dir = crate::runstate::run_dir(run_id);
+    for (i, record) in records.iter().enumerate() {
+        let events = leviath_runtime::runfile::journal_events(record);
+        let status = match record {
+            RunRecord::StatusChanged { status, .. } => Some(match status {
+                RunStatus::WaitingInput => State::Waiting,
+                RunStatus::Complete => State::Complete,
+                _ => State::Active,
+            }),
+            _ => None,
+        };
+        crate::runstate::run_file::tests::step_with(&dir, 1_000 + i as i64, events, |s| {
+            if let Some(status) = status {
+                s.status = status;
+            }
+        });
     }
-    std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), bytes).expect("journal");
 }
 
 #[tokio::test]
@@ -377,8 +400,8 @@ async fn the_tree_includes_children_and_skips_one_with_no_journal() {
         let root = load(&run_id).expect("root loads");
         assert_eq!(root.children.len(), 2);
         assert!(load("child-1").is_ok());
-        let err = load("child-torn").expect_err("no journal");
-        assert!(err.to_string().contains("no readable steps"), "{err}");
+        let err = load("child-torn").expect_err("a run file that will not read");
+        assert!(err.to_string().contains("no readable"), "{err}");
         execute(TimelineArgs {
             run_id,
             json: true,

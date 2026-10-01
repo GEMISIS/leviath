@@ -8,10 +8,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use leviath_core::run_archive::{
-    InferenceRequestRecord, InferenceResponseRecord, MessageRecord, RunIdentity, RunRecord,
-    ToolCallRecord, read_archive, write_archive_start, write_record,
-};
 use leviath_core::run_meta::{RunMeta, RunStatus};
 
 use super::collect::{
@@ -155,23 +151,7 @@ fn meta(id: &str, blueprint: &Path) -> RunMeta {
 }
 
 fn write_meta(runs: &Path, meta: &RunMeta) {
-    write(
-        &runs.join(&meta.run_id).join("meta.json"),
-        serde_json::to_string_pretty(meta).unwrap(),
-    );
-}
-
-fn archive(records: &[RunRecord], extra_frame: Option<&[u8]>) -> Vec<u8> {
-    let mut out = Vec::new();
-    write_archive_start(&mut out, 1).unwrap();
-    for record in records {
-        write_record(&mut out, record).unwrap();
-    }
-    if let Some(frame) = extra_frame {
-        out.extend_from_slice(&(frame.len() as u64).to_be_bytes());
-        out.extend_from_slice(frame);
-    }
-    out
+    crate::runstate::create_run_in(&runs.join(&meta.run_id), meta).unwrap();
 }
 
 /// Plant the whole install under `root`, and hand back the blueprint dir.
@@ -295,13 +275,31 @@ api_token = "{EXTRA_VALUE}"
     write_meta(&runs, &other);
 
     let run_dir = runs.join(ROOT_RUN);
-    write(&run_dir.join("stages.json"), "[]");
-    write(
-        &run_dir.join("context.json"),
-        format!(
-            r#"{{"stage_name":"analyze","total_tokens":1,"max_tokens":2,"regions":[{{"name":"task","kind":"pinned","current_tokens":1,"max_tokens":2,"entries":[{{"content":"token {JWT} here","tokens":1,"kind":"user_message"}}]}}]}}"#
-        ),
-    );
+    crate::runstate::write_context_snapshot(
+        ROOT_RUN,
+        &leviath_core::run_meta::ContextSnapshot {
+            stage_name: "analyze".to_string(),
+            total_tokens: 1,
+            max_tokens: 2,
+            regions: vec![leviath_core::run_meta::RegionSnapshot {
+                name: "task".to_string(),
+                kind: "pinned".to_string(),
+                current_tokens: 1,
+                max_tokens: 2,
+                entries: vec![leviath_core::run_meta::RegionEntrySnapshot {
+                    content: format!("token {JWT} here").into(),
+                    tokens: 1,
+                    kind: leviath_core::region::EntryKind::UserMessage,
+                    metadata: None,
+                    key: None,
+                    taint: Default::default(),
+                    reasoning: None,
+                }],
+                description: None,
+            }],
+        },
+    )
+    .unwrap();
     write(&run_dir.join("final_output"), "done");
     write(
         &run_dir.join("stages").join("0").join("output.log"),
@@ -311,76 +309,35 @@ api_token = "{EXTRA_VALUE}"
         &run_dir.join("stages").join("0").join("logs.log"),
         "log line\n",
     );
-    write(&run_dir.join("stages").join("0").join("context.json"), "{}");
     write(
         &run_dir.join("stages").join("0").join("taint_audit.json"),
         "[]",
     );
     std::fs::create_dir_all(run_dir.join("stages").join("1")).unwrap();
-    let records = [
-        RunRecord::Header {
-            identity: RunIdentity {
-                run_id: ROOT_RUN.to_string(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(root_meta.clone()),
+    // A tool call that carried secrets, as one step of the run.
+    let call = leviath_runtime::state::RunEvent::ToolStarted(
+        leviath_runtime::state::context::ToolCallState {
+            id: "c1".to_string(),
+            name: "bash".to_string(),
+            args: leviath_core::JsonDoc::new(
+                serde_json::json!({ "cmd": format!("echo {ENV_SECRET}") }),
+            ),
+            thought_signature: None,
         },
-        RunRecord::Inference {
-            stage: "analyze".to_string(),
-            iteration: 0,
-            request: InferenceRequestRecord {
-                model: "m".to_string(),
-                system: vec![format!("system with {CONFIG_KEY}")],
-                messages: vec![MessageRecord {
-                    role: "user".to_string(),
-                    content: "fix the planted bug".to_string(),
-                }],
-                tool_names: vec!["bash".to_string()],
-                temperature: 0.0,
-                max_tokens: 1,
-            },
-            response: InferenceResponseRecord {
-                content: "running a tool".to_string(),
-                tool_calls: vec![],
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                cached_tokens: 0,
-                cache_write_tokens: 0,
-            },
-            at: 1,
-        },
-        RunRecord::ToolBatch {
-            calls: vec![ToolCallRecord {
-                execution_id: String::new(),
-                id: "c1".to_string(),
-                name: "bash".to_string(),
-                arguments: format!(r#"{{"cmd":"echo {ENV_SECRET}"}}"#),
-                result: Some(format!("AWS_ACCESS_KEY_ID={AWS_KEY}").into()),
-                thought_signature: None,
-            }],
-            at: 2,
-            stage_index: 0,
-            iteration: 0,
-            visit_id: String::new(),
-            requested_by: String::new(),
-            response: String::new(),
-        },
-    ];
-    write(
-        &run_dir.join("run.lvr"),
-        archive(&records, Some(br#"{"NoSuchRecord":{"at":1}}"#)),
     );
+    let done = leviath_runtime::state::RunEvent::ToolFinished {
+        call_id: "c1".to_string(),
+        result: leviath_runtime::state::ToolResultState {
+            text: format!("AWS_ACCESS_KEY_ID={AWS_KEY}"),
+            is_error: false,
+        },
+        millis: 1,
+    };
+    crate::runstate::run_file::tests::step_with(&run_dir, 5, vec![call, done], |_| {});
     write(&run_dir.join("blobs").join("aa11"), [0u8, 159, 146, 150]);
     write(&run_dir.join("blobs").join("bb22"), b"small text blob");
-    // The child's journal is corrupt, and it has nothing else; the listed
-    // child's is clean and small.
-    write(&runs.join(CHILD_RUN).join("run.lvr"), b"not an archive");
-    write(
-        &runs.join(LISTED_CHILD).join("run.lvr"),
-        archive(&[records[0].clone()], None),
-    );
+    // The child's run file is corrupt; the listed child's is clean.
+    write(&runs.join(CHILD_RUN).join("run.lvr"), b"not a run file");
     // A blueprint file too large to be one, left out by size.
     write(&demo.join("NOTES.md"), vec![b'x'; 300 * 1024]);
     blueprint
@@ -485,16 +442,15 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "logs/serve-3000.log",
             "logs/serve-3000.log.1",
             &format!("runs/{ROOT_RUN}/meta.json"),
-            &format!("runs/{ROOT_RUN}/context.json"),
             &format!("runs/{ROOT_RUN}/final_output"),
             &format!("runs/{ROOT_RUN}/stages/0/output.log"),
             &format!("runs/{ROOT_RUN}/stages/0/taint_audit.json"),
-            &format!("runs/{ROOT_RUN}/run.lvr"),
+            &format!("runs/{ROOT_RUN}/run.json"),
             &format!("runs/{ROOT_RUN}/blobs/aa11"),
             &format!("runs/{ROOT_RUN}/blueprint/agent.toml"),
             &format!("runs/{ROOT_RUN}/blueprint/tools/helper.rhai"),
-            &format!("runs/{CHILD_RUN}/meta.json"),
             &format!("runs/{LISTED_CHILD}/meta.json"),
+            &format!("runs/{LISTED_CHILD}/run.json"),
             &format!("runs/{LISTED_CHILD}/blueprint/agent.toml"),
         ] {
             assert!(
@@ -528,10 +484,20 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
                 .unwrap();
         assert_eq!(meta["callback_secret"], serde_json::Value::Null);
         assert_eq!(meta["task"], "fix the planted bug");
-        // The journal reads back with the same tools, minus the frame this
-        // build could not parse.
-        let (_, records) = read_archive(&mut member(&members, "run.lvr")).unwrap();
-        assert_eq!(records.len(), 3);
+        // The run file reads back as its spec, its state and its steps, the
+        // tool call among them.
+        let run: serde_json::Value =
+            serde_json::from_slice(member(&members, &format!("runs/{ROOT_RUN}/run.json"))).unwrap();
+        assert_eq!(run["spec"]["run_id"], ROOT_RUN);
+        assert!(run["state"].is_object());
+        assert!(
+            run["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step.to_string().contains("ToolStarted")),
+            "{run}"
+        );
         // The binary blob came through byte for byte.
         assert_eq!(member(&members, "blobs/aa11"), &[0u8, 159, 146, 150]);
         // The manifest accounts for what was left out.
@@ -567,7 +533,9 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "{reasons:?}"
         );
         assert!(
-            reasons.iter().any(|r| r.contains("missing-blueprint")),
+            reasons
+                .iter()
+                .any(|r| r.contains(CHILD_RUN) && r.contains("meta.json")),
             "{reasons:?}"
         );
         assert!(
@@ -580,18 +548,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
                 .any(|r| r.contains("NOTES.md") && r.contains("over the")),
             "{reasons:?}"
         );
-        assert!(
-            member_names
-                .iter()
-                .any(|n| n.ends_with(&format!("runs/{LISTED_CHILD}/run.lvr")))
-        );
-        let notes = manifest["notes"].as_array().unwrap();
-        assert!(
-            notes
-                .iter()
-                .any(|n| n.as_str().unwrap().contains("frame(s)")),
-            "{notes:?}"
-        );
+
         // The README carries the warning and the sections.
         let readme = String::from_utf8_lossy(member(&members, "README.md")).into_owned();
         assert!(readme.contains("Before you share this"), "{readme}");
@@ -765,22 +722,23 @@ async fn a_config_that_will_not_load_is_still_copied_and_scrubbed() {
 }
 
 #[tokio::test]
-async fn an_unparseable_meta_is_copied_as_text() {
+async fn an_unreadable_run_file_is_left_out_and_says_why() {
     with_env(|root| async move {
         write(
-            &root.join("runs").join("r1").join("meta.json"),
-            format!("{{not json {CONFIG_KEY}"),
+            &root.join("runs").join("r1").join("run.lvr"),
+            format!("{{not a run file {CONFIG_KEY}"),
         );
         let env = env_for(&root);
         let mut sel = selection(About::Run);
         sel.run_id = Some("r1".to_string());
         let bundle = collect::collect(&env, &sel, "now").await;
-        let meta = bundle
-            .members
-            .iter()
-            .find(|m| m.path == "runs/r1/meta.json")
-            .unwrap();
-        assert!(!contains(&meta.bytes, CONFIG_KEY));
+        assert!(
+            !bundle
+                .members
+                .iter()
+                .any(|m| contains(&m.bytes, CONFIG_KEY))
+        );
+        assert!(bundle.skipped.iter().any(|s| s.path == "runs/r1/meta.json"));
         assert!(bundle.skipped.iter().any(|s| s.path == "runs/r1/run.lvr"));
     })
     .await
@@ -1216,7 +1174,6 @@ async fn the_summary_screen_shows_the_warning_and_the_sections() {
         assert!(text.contains("Your bundle"), "{text}");
         assert!(text.contains("config/"), "{text}");
         assert!(text.contains("Left out"), "{text}");
-        assert!(text.contains("note:"), "{text}");
         assert!(text.contains("more, listed in manifest.json"), "{text}");
     })
     .await

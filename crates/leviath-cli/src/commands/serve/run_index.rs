@@ -197,7 +197,7 @@ mod tests {
             create_run(&meta("good", None, 1)).unwrap();
             let bad = runstate::run_dir("bad");
             std::fs::create_dir_all(&bad).unwrap();
-            std::fs::write(bad.join(leviath_core::files::META_FILE), "{not json").unwrap();
+            std::fs::write(bad.join(leviath_core::files::RUN_FILE), "{not json").unwrap();
             assert_eq!(ids(index.snapshot().await.into_runs().iter()), vec!["good"]);
         })
         .await;

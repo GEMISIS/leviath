@@ -22,7 +22,7 @@ use super::context::{
 use super::{
     Clock, Cursor, FanOutState, FinalOutputState, Flags, MessageState, OpenInteraction,
     PendingBatch, PipelinePhase, RunState, RunStatus, Spend, StageProgress, StageRecord,
-    StageStatus, ToolResultState, Totals, TransitionRecord, VisitRecord, WorkItemState,
+    StageStatus, ToolResultState, Totals, TransitionRecord, VisitRecord, WaitState, WorkItemState,
 };
 use crate::components::{AgentState, AgentStatus, ContextWindow};
 use crate::spec::inputs::{InputValue, InputValues, RawInput};
@@ -641,7 +641,7 @@ fn final_output_of(o: &leviath_core::output::FinalOutput) -> Option<FinalOutputS
 }
 
 /// Why the run is parked, in the words `lev ps` uses, while it is.
-fn wait_reason_of(world: &World, entity: Entity, agent: &AgentState) -> Option<String> {
+fn wait_reason_of(world: &World, entity: Entity, agent: &AgentState) -> Option<WaitState> {
     let parked = matches!(agent.status, AgentStatus::Waiting | AgentStatus::Paused);
     let children = world
         .get::<crate::components::SubAgentChildren>(entity)
@@ -677,7 +677,7 @@ fn wait_reason_of(world: &World, entity: Entity, agent: &AgentState) -> Option<S
                 remedy: p.remedy.clone(),
             }),
     };
-    leviath_core::run_meta::wait_reason_from(parked, &markers).map(|r| r.to_string())
+    leviath_core::run_meta::wait_reason_from(parked, &markers).map(|r| WaitState::from(&r))
 }
 
 #[cfg(test)]

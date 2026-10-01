@@ -1010,12 +1010,10 @@ async fn parent_and_status_filter_together() {
 async fn every_status_is_selectable_by_the_word_the_api_returns() {
     crate::runstate::with_isolated_runs_dir_async("runs-handler-every-status", |_d| async move {
         let states = [
-            (RunStatus::Starting, "starting"),
             (RunStatus::Running, "running"),
             (RunStatus::WaitingInput, "waiting_input"),
             (RunStatus::Paused, "paused"),
             (RunStatus::Complete, "complete"),
-            (RunStatus::CompleteInteractive, "complete_interactive"),
             (RunStatus::Error, "error"),
             (RunStatus::Cancelled, "cancelled"),
         ];
@@ -1114,59 +1112,48 @@ async fn a_deep_search_finds_text_only_present_in_a_stage_log_and_says_where() {
     .await;
 }
 
-/// Write a journal for `run_id` whose context carries `content`, and whose
-/// metadata carries a webhook secret.
+/// A window region named `name` holding one entry of `content`.
+fn region_of(name: &str, content: &str) -> leviath_core::run_meta::RegionSnapshot {
+    leviath_core::run_meta::RegionSnapshot {
+        name: name.to_string(),
+        kind: "pinned".to_string(),
+        current_tokens: 1,
+        max_tokens: 100,
+        entries: vec![leviath_core::run_meta::RegionEntrySnapshot {
+            content: content.to_string().into(),
+            tokens: 1,
+            kind: leviath_core::region::EntryKind::Text,
+            metadata: None,
+            key: None,
+            taint: leviath_core::taint::TaintLevel::default(),
+            reasoning: None,
+        }],
+        description: None,
+    }
+}
+
+/// Record a step of `run_id`'s window holding `regions`.
+fn window_of(run_id: &str, regions: Vec<leviath_core::run_meta::RegionSnapshot>) {
+    crate::runstate::write_context_snapshot(
+        run_id,
+        &leviath_core::run_meta::ContextSnapshot {
+            stage_name: "work".to_string(),
+            total_tokens: 1,
+            max_tokens: 100,
+            regions,
+        },
+    )
+    .unwrap();
+}
+
+/// A run whose context took in `content` at some step, and whose webhook
+/// carries a signing secret.
 fn plant_journal(run_id: &str, content: &str, secret: Option<&str>) {
-    use leviath_core::run_archive::{self, RunIdentity, RunRecord};
-    use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
-
     let mut meta = meta_at(run_id, 1);
+    meta.callback_url = Some("https://example.com/hook".to_string());
     meta.callback_secret = secret.map(str::to_string);
-
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: run_id.to_string(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta),
-        },
-    )
-    .unwrap();
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::ContextCheckpoint {
-            snapshot: ContextSnapshot {
-                stage_name: "work".to_string(),
-                total_tokens: 1,
-                max_tokens: 100,
-                regions: vec![RegionSnapshot {
-                    name: "system".to_string(),
-                    kind: "pinned".to_string(),
-                    current_tokens: 1,
-                    max_tokens: 100,
-                    entries: vec![RegionEntrySnapshot {
-                        content: content.to_string().into(),
-                        tokens: 1,
-                        kind: leviath_core::region::EntryKind::Text,
-                        metadata: None,
-                        key: None,
-                        taint: leviath_core::taint::TaintLevel::default(),
-                        reasoning: None,
-                    }],
-                    description: None,
-                }],
-            },
-            at: 2,
-        },
-    )
-    .unwrap();
-    std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+    create_run(&meta).unwrap();
+    window_of(run_id, vec![region_of("system", content)]);
 }
 
 /// Regression test for a gap found by running this against real journals: runs
@@ -1177,7 +1164,6 @@ fn plant_journal(run_id: &str, content: &str, secret: Option<&str>) {
 #[tokio::test]
 async fn a_journal_match_in_a_context_record_still_explains_itself() {
     crate::runstate::with_isolated_runs_dir_async("runs-journal-context", |_d| async move {
-        create_run(&meta_at("run-j", 1)).unwrap();
         plant_journal("run-j", "the codex entry mentions xylophone here", None);
 
         let page = page_of(&[("q", "xylophone"), ("q_in", "journal")]).await;
@@ -1200,7 +1186,6 @@ async fn a_journal_match_in_a_context_record_still_explains_itself() {
 #[tokio::test]
 async fn searching_the_journal_never_echoes_the_webhook_secret() {
     crate::runstate::with_isolated_runs_dir_async("runs-journal-secret", |_d| async move {
-        create_run(&meta_at("run-s", 1)).unwrap();
         plant_journal(
             "run-s",
             "ordinary content",
@@ -1219,176 +1204,73 @@ async fn searching_the_journal_never_echoes_the_webhook_secret() {
     .await;
 }
 
-/// A journal exercising every record kind the highlighter reads: a tool call,
-/// an appended region, a replaced region, and a full checkpoint.
+/// A run whose steps carry every kind of text the highlighter reads: a tool
+/// call and its result, a question with and without a tool, an answer, a
+/// message, and context that came in across several steps.
 fn plant_rich_journal(run_id: &str) {
-    use leviath_core::run_archive::{
-        self, ContextDelta, RegionDelta, RunIdentity, RunRecord, ToolCallRecord,
-    };
-    use leviath_core::run_meta::{ContextSnapshot, RegionEntrySnapshot, RegionSnapshot};
+    let mut meta = meta_at(run_id, 1);
+    meta.num_stages = 4;
+    meta.stage_index = 3;
+    meta.current_stage = "work".to_string();
+    create_run(&meta).unwrap();
+    rich_steps(run_id);
+}
 
-    fn entry(content: &str) -> RegionEntrySnapshot {
-        RegionEntrySnapshot {
-            content: content.to_string().into(),
-            tokens: 1,
-            kind: leviath_core::region::EntryKind::Text,
-            metadata: None,
-            key: None,
-            taint: leviath_core::taint::TaintLevel::default(),
-            reasoning: None,
-        }
-    }
-    fn region(name: &str, content: &str) -> RegionSnapshot {
-        RegionSnapshot {
-            name: name.to_string(),
-            kind: "pinned".to_string(),
-            current_tokens: 1,
-            max_tokens: 100,
-            entries: vec![entry(content)],
-            description: None,
-        }
-    }
-    fn snapshot(regions: Vec<RegionSnapshot>) -> ContextSnapshot {
-        ContextSnapshot {
-            stage_name: "work".to_string(),
-            total_tokens: 1,
-            max_tokens: 100,
-            regions,
-        }
-    }
-    fn delta(regions: Vec<RegionDelta>) -> ContextDelta {
-        ContextDelta {
-            stage_name: "work".to_string(),
-            total_tokens: 1,
-            max_tokens: 100,
-            regions,
-        }
-    }
-
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-    let write = |buf: &mut Vec<u8>, record: &RunRecord| {
-        run_archive::write_record(buf, record).unwrap();
-    };
-    write(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: run_id.to_string(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta_at(run_id, 1)),
-        },
-    );
-    write(
-        &mut buf,
-        &RunRecord::ToolBatch {
-            calls: vec![ToolCallRecord {
-                execution_id: String::new(),
-                id: "c1".to_string(),
-                name: "write_file".to_string(),
-                arguments: r#"{"path":"toolneedle.rs"}"#.to_string(),
-                result: Some("wrote resultneedle".to_string().into()),
-                thought_signature: None,
-            }],
-            at: 2,
-            stage_index: 3,
-            iteration: 0,
-            visit_id: String::new(),
-            requested_by: String::new(),
-            response: String::new(),
-        },
-    );
-    write(
-        &mut buf,
-        &RunRecord::ContextCheckpoint {
-            snapshot: snapshot(vec![region("system", "checkpointneedle here")]),
-            at: 3,
-        },
-    );
-    write(
-        &mut buf,
-        &RunRecord::Progress {
-            meta: Box::new(meta_at(run_id, 1)),
-            delta: delta(vec![RegionDelta::Append {
-                name: "conversation".to_string(),
-                entries: vec![entry("appendneedle here")],
-                current_tokens: 2,
-            }]),
-            at: 4,
-        },
-    );
-    write(
-        &mut buf,
-        &RunRecord::ContextDiff {
-            delta: delta(vec![RegionDelta::Set(region("scratch", "setneedle here"))]),
-            at: 5,
-        },
-    );
-    // Arms that carry no text of their own, so the highlighter must skip them
-    // rather than treat them as a miss.
-    write(
-        &mut buf,
-        &RunRecord::ContextDiff {
-            delta: delta(vec![
-                RegionDelta::Clear {
-                    name: "conversation".to_string(),
-                },
-                RegionDelta::Remove {
-                    name: "scratch".to_string(),
-                },
-            ]),
-            at: 6,
-        },
-    );
-    write(
-        &mut buf,
-        &RunRecord::Checkpoint {
-            meta: Box::new(meta_at(run_id, 1)),
-            context: snapshot(vec![region("final", "checkneedle here")]),
-            at: 7,
-        },
-    );
-    // A question a person was asked, and the words they answered it with. The
-    // prompt is where the tool's own arguments were shown to them, so it is
-    // where "which run asked me about that" is answered.
-    write(
-        &mut buf,
-        &RunRecord::Interaction {
-            request_id: "approve-1".to_string(),
-            kind: leviath_core::interaction::InteractionKind::ToolApproval,
-            tool: Some("shell".to_string()),
-            prompt: "Run `rm -rf promptneedle`?".to_string(),
-            stage: "implement".to_string(),
-            settlement: leviath_core::interaction::Settlement::Answered {
-                approved: Some(false),
-                scope: None,
-                choice: None,
-                text: None,
-                feedback: Some("answerneedle instead".to_string()),
-            },
+/// The steps [`plant_rich_journal`] records, on a run already laid down.
+fn rich_steps(run_id: &str) {
+    use leviath_runtime::state::journal::{QuestionKind, SettledState};
+    use leviath_runtime::state::{MessageState, RunEvent, ToolResultState};
+    let dir = crate::runstate::run_dir(run_id);
+    let settled = |tool: Option<&str>, prompt: &str| {
+        RunEvent::Settled(Box::new(SettledState {
+            id: "q".to_string(),
+            kind: QuestionKind::ToolApproval,
+            tool: tool.map(str::to_string),
+            prompt: prompt.to_string(),
+            stage: "work".to_string(),
+            settlement: "{}".to_string(),
             asked_at: 8,
-            at: 9,
+        }))
+    };
+    let events = vec![
+        RunEvent::ToolStarted(leviath_runtime::state::context::ToolCallState {
+            id: "c1".to_string(),
+            name: "write_file".to_string(),
+            args: leviath_core::JsonDoc::new(serde_json::json!({"path": "toolneedle.rs"})),
+            thought_signature: None,
+        }),
+        RunEvent::ToolFinished {
+            call_id: "c1".to_string(),
+            result: ToolResultState {
+                text: "wrote resultneedle".to_string(),
+                is_error: false,
+            },
+            millis: 1,
         },
-    );
-    // One nobody answered, which carries a prompt and no answer: the arm that
-    // reads a settlement with nothing in it has to be reachable too.
-    write(
-        &mut buf,
-        &RunRecord::Interaction {
-            request_id: "ask-2".to_string(),
-            kind: leviath_core::interaction::InteractionKind::FreeText,
-            tool: None,
-            prompt: "Which of these, unanswerneedle?".to_string(),
-            stage: "plan".to_string(),
-            settlement: leviath_core::interaction::Settlement::TimedOut,
-            asked_at: 10,
-            at: 11,
+        settled(Some("shell"), "Run `rm -rf promptneedle`?"),
+        RunEvent::Answered {
+            id: "q".to_string(),
+            answer: "answerneedle instead".to_string(),
         },
+        settled(None, "Which of these, unanswerneedle?"),
+        RunEvent::Message(MessageState {
+            from: "user".to_string(),
+            text: "a messageneedle".to_string(),
+            region: None,
+        }),
+        RunEvent::Log("no text worth finding".to_string()),
+    ];
+    crate::runstate::run_file::tests::step_with(&dir, 2, events, |_| {});
+    window_of(run_id, vec![region_of("system", "checkpointneedle here")]);
+    window_of(
+        run_id,
+        vec![
+            region_of("system", "checkpointneedle here"),
+            region_of("conversation", "appendneedle here"),
+        ],
     );
-    std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+    window_of(run_id, vec![region_of("scratch", "setneedle here")]);
+    window_of(run_id, vec![region_of("final", "checkneedle here")]);
 }
 
 /// Each record kind that carries text has to be reachable, or a match in it is
@@ -1396,14 +1278,13 @@ fn plant_rich_journal(run_id: &str) {
 #[tokio::test]
 async fn journal_highlights_name_the_record_the_match_came_from() {
     crate::runstate::with_isolated_runs_dir_async("runs-journal-kinds", |_d| async move {
-        create_run(&meta_at("run-rich", 1)).unwrap();
         plant_rich_journal("run-rich");
 
         // A tool call reports the tool and its stage, so a client can jump
         // straight to that stage's log.
         for (needle, field, stage) in [
             ("toolneedle", "journal.tool.write_file", Some(3)),
-            ("resultneedle", "journal.tool.write_file", Some(3)),
+            ("resultneedle", "journal.tool_result", Some(3)),
         ] {
             let page = page_of(&[("q", needle), ("q_in", "journal")]).await;
             assert_eq!(page.items.len(), 1, "{needle} should match");
@@ -1415,8 +1296,9 @@ async fn journal_highlights_name_the_record_the_match_came_from() {
         // call somebody stopped. One with no tool is named for the asking.
         for (needle, field) in [
             ("promptneedle", "journal.asked.shell"),
-            ("answerneedle", "journal.asked.shell"),
+            ("answerneedle", "journal.answered"),
             ("unanswerneedle", "journal.asked"),
+            ("messageneedle", "journal.message"),
         ] {
             let page = page_of(&[("q", needle), ("q_in", "journal")]).await;
             assert_eq!(page.items.len(), 1, "{needle} should match");
@@ -1477,7 +1359,6 @@ async fn a_log_search_can_match_the_operational_stream() {
 #[tokio::test]
 async fn journal_highlights_stop_at_the_cap() {
     crate::runstate::with_isolated_runs_dir_async("runs-journal-cap", |_d| async move {
-        create_run(&meta_at("run-cap", 1)).unwrap();
         plant_rich_journal("run-cap");
 
         // "needle" appears in every planted record.
@@ -1690,7 +1571,7 @@ async fn deep_sources_that_read_files_and_find_nothing_are_quiet() {
         .unwrap();
         crate::runstate::append_stage_output("run-deepquiet", 0, "ordinary output");
         crate::runstate::append_stage_log("run-deepquiet", 0, "[tool] ordinary");
-        plant_rich_journal("run-deepquiet");
+        rich_steps("run-deepquiet");
 
         let page = page_of(&[
             ("q", "deepquietneedle"),
@@ -1829,7 +1710,7 @@ async fn a_run_with_unreadable_metadata_is_refused_until_the_caller_forces_it() 
     crate::runstate::with_isolated_runs_dir_async("runs-delete-corrupt", |_d| async move {
         create_run(&finished("run-corrupt", 1)).unwrap();
         std::fs::write(
-            crate::runstate::run_dir("run-corrupt").join("meta.json"),
+            crate::runstate::run_dir("run-corrupt").join(leviath_core::files::RUN_FILE),
             "{ not json",
         )
         .unwrap();
@@ -1857,7 +1738,7 @@ async fn a_bulk_sweep_never_forces_an_unreadable_run() {
     crate::runstate::with_isolated_runs_dir_async("runs-delete-bulk-corrupt", |_d| async move {
         create_run(&finished("run-corrupt", 1)).unwrap();
         std::fs::write(
-            crate::runstate::run_dir("run-corrupt").join("meta.json"),
+            crate::runstate::run_dir("run-corrupt").join(leviath_core::files::RUN_FILE),
             "{ not json",
         )
         .unwrap();

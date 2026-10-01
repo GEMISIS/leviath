@@ -65,8 +65,8 @@ pub struct RunState {
     pub title: Option<String>,
     /// Its final output, once one is handed back.
     pub final_output: Option<FinalOutputState>,
-    /// Why it is waiting, in words, when it is.
-    pub wait_reason: Option<String>,
+    /// Why it is waiting, when it is.
+    pub wait_reason: Option<WaitState>,
     /// The last edge it took.
     pub last_transition: Option<TransitionRecord>,
 }
@@ -400,6 +400,71 @@ pub struct OpenInteraction {
     pub prompt: String,
     /// The choices offered, if any.
     pub options: Vec<String>,
+}
+
+/// Why a run is parked: the run file's form of
+/// [`WaitReason`](leviath_core::run_meta::WaitReason).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub enum WaitState {
+    /// A tool call waits for approval.
+    ToolApproval,
+    /// A question the run asked waits for an answer.
+    UserPrompt,
+    /// A taint-gate clearance waits for a person.
+    TaintGate,
+    /// A stage-boundary checkpoint waits for a person.
+    InteractionPoint,
+    /// Fan-out workers still to finish.
+    FanOutWorkers(u32),
+    /// Child runs still to finish.
+    Children(u32),
+    /// Something on the machine has to change first.
+    NeedsSetup {
+        /// What kind of problem.
+        blocker: leviath_core::run_meta::SetupBlocker,
+        /// What to do about it.
+        remedy: String,
+    },
+}
+
+impl From<&leviath_core::run_meta::WaitReason> for WaitState {
+    fn from(reason: &leviath_core::run_meta::WaitReason) -> Self {
+        use leviath_core::run_meta::WaitReason as W;
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        match reason {
+            W::ToolApproval => Self::ToolApproval,
+            W::UserPrompt => Self::UserPrompt,
+            W::TaintGate => Self::TaintGate,
+            W::InteractionPoint => Self::InteractionPoint,
+            W::FanOutWorkers { outstanding } => Self::FanOutWorkers(count(*outstanding)),
+            W::Children { outstanding } => Self::Children(count(*outstanding)),
+            W::NeedsSetup { blocker, remedy } => Self::NeedsSetup {
+                blocker: *blocker,
+                remedy: remedy.clone(),
+            },
+        }
+    }
+}
+
+impl From<&WaitState> for leviath_core::run_meta::WaitReason {
+    fn from(state: &WaitState) -> Self {
+        match state {
+            WaitState::ToolApproval => Self::ToolApproval,
+            WaitState::UserPrompt => Self::UserPrompt,
+            WaitState::TaintGate => Self::TaintGate,
+            WaitState::InteractionPoint => Self::InteractionPoint,
+            WaitState::FanOutWorkers(n) => Self::FanOutWorkers {
+                outstanding: *n as usize,
+            },
+            WaitState::Children(n) => Self::Children {
+                outstanding: *n as usize,
+            },
+            WaitState::NeedsSetup { blocker, remedy } => Self::NeedsSetup {
+                blocker: *blocker,
+                remedy: remedy.clone(),
+            },
+        }
+    }
 }
 
 /// A run's final output.

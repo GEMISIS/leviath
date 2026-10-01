@@ -38,7 +38,7 @@ use super::run_dir;
 /// The name of the stage at `index` of a fixture's graph, when the record
 /// names no stage there.
 fn filler(index: usize) -> String {
-    format!("stage-{index}")
+    format!("stage{index}")
 }
 
 /// The graph a record describes: as many stages as it says, with the one it
@@ -65,9 +65,33 @@ fn graph_of(meta: &RunMeta, title: Option<String>, regions: Vec<RegionDef>) -> R
     graph
 }
 
-/// What a record says the run started from: an installed blueprint by its
-/// name when the name is one, else a graph titled with it.
+/// What a record says the run started from: the blueprint directory its
+/// `agent_path` names when it names one, an installed blueprint by its name
+/// when the name is one, else a graph titled with it.
 fn origin_of(meta: &RunMeta) -> (SpecOrigin, Option<String>) {
+    let file = std::path::Path::new(&meta.agent_path);
+    let dir = match file.file_name().and_then(|n| n.to_str()) {
+        Some(leviath_core::files::BLUEPRINT_MANIFEST) => file.parent().unwrap_or(file),
+        _ => file,
+    };
+    let path = dir
+        .is_dir()
+        .then(|| leviath_runtime::spec::names::BlueprintPath::new(dir.to_string_lossy()).ok())
+        .flatten();
+    if let (Some(path), Ok(name)) = (path, BlueprintName::new(meta.agent_name.as_str())) {
+        return (
+            SpecOrigin::BlueprintFile {
+                path,
+                name,
+                digest: meta
+                    .blueprint_digest
+                    .as_deref()
+                    .and_then(|d| Digest::new(d).ok()),
+                version: "0.0.0".to_string(),
+            },
+            None,
+        );
+    }
     match BlueprintName::new(meta.agent_name.as_str()) {
         Ok(name) => (
             SpecOrigin::Blueprint {
@@ -244,6 +268,37 @@ fn state_of(meta: &RunMeta, spec: &RunSpec, base: Option<RunState>) -> RunState 
         .filter_map(|c| RunId::new(c.as_str()).ok())
         .collect();
     state.title = meta.title.clone();
+    state.wait_reason = meta
+        .waiting_on
+        .as_ref()
+        .map(leviath_runtime::state::WaitState::from);
+    // The models a record says the run used live on its ledger.
+    if state.ledger.is_empty() && !meta.stage_models.is_empty() {
+        state.ledger.push(leviath_runtime::state::StageRecord {
+            stage: state.cursor.stage.clone(),
+            status: StageStatus::Active,
+            entered: true,
+            spend: Spend::default(),
+            models: meta
+                .stage_models
+                .iter()
+                .filter_map(|m| {
+                    Some(ModelRef {
+                        provider: ProviderName::new(m.provider.as_str()).ok(),
+                        model: ModelId::new(m.model.as_str()).ok()?,
+                    })
+                })
+                .collect(),
+            visits: Vec::new(),
+            region_tokens: BTreeMap::new(),
+            first_call_prompt_tokens: None,
+            runaway_warned: false,
+            output_cap_raised: false,
+            started_at: None,
+            ended_at: None,
+            clock: Clock::default(),
+        });
+    }
     state.final_output = meta.final_output.as_ref().map(|out| FinalOutputState {
         content: " ".repeat(out.bytes),
         format: out.format.clone(),
@@ -298,9 +353,11 @@ fn write(dir: &Path, spec: &RunSpec, state: RunState, at: i64) -> anyhow::Result
             writer
         }
     };
-    let mut next = state;
-    next.seq = writer.seq();
-    writer.record(next, at, Vec::new())?;
+    // A step that changes nothing is still a step: it is when the record
+    // says the run last moved.
+    let mut delta = leviath_runtime::state::StateDelta::between(writer.state(), &state, at, vec![]);
+    delta.seq = writer.seq() + 1;
+    writer.append_delta(&delta)?;
     Ok(())
 }
 
@@ -352,13 +409,15 @@ fn meta_in(dir: &Path, run_id: &str) -> RunMeta {
 }
 
 /// A region as a graph declares it, for a window region of `kind`, budget
-/// `max_tokens`. `None` for a kind the runtime adds on its own or a custom
-/// one, which a fixture leaves undeclared.
+/// `max_tokens`. `None` for one the run shapes the same undeclared (a pinned
+/// region, the runtime's own) or a custom one, which a fixture leaves
+/// undeclared so the spec, and with it the run's history, stays as it was.
 fn region_def(name: &str, kind: &str, max_tokens: usize) -> Option<RegionDef> {
+    if matches!(name, "conversation" | "tool_results") {
+        return None;
+    }
     let kind = match kind {
-        "pinned" | "temporary" | "clearable" | "checklist" | "compact_history" => {
-            serde_json::json!(kind)
-        }
+        "temporary" | "clearable" | "checklist" | "compact_history" => serde_json::json!(kind),
         "sliding_window" => serde_json::json!({ "kind": "sliding_window", "max_items": 50 }),
         "compacting" => serde_json::json!({ "kind": "compacting" }),
         "keyed" => serde_json::json!({ "kind": "keyed" }),
@@ -389,7 +448,8 @@ pub(crate) fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> an
             regions.push(def);
         }
     }
-    let spec = spec_of(&meta, regions);
+    let mut spec = old_spec;
+    spec.graph.layout.regions = regions;
     let mut window = leviath_runtime::ContextWindow::new(snap.max_tokens);
     for region in &snap.regions {
         let mut live = leviath_core::Region::new(

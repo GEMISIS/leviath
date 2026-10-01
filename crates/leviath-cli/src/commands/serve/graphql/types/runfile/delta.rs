@@ -300,7 +300,9 @@ impl From<&Change> for StateChange {
                 answer: answer.as_ref().map(StateAnswer::from),
             }),
             Change::WaitReason(reason) => Self::WaitReason(WaitReasonChange {
-                wait_reason: reason.clone(),
+                wait_reason: reason
+                    .as_ref()
+                    .map(|w| leviath_core::run_meta::WaitReason::from(w).to_string()),
             }),
             Change::LastTransition(transition) => Self::Transition(TransitionChange {
                 transition: transition.as_ref().map(StageTransition::from),

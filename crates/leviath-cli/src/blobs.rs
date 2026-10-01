@@ -310,8 +310,10 @@ mod tests {
                 std::io::ErrorKind::InvalidInput
             );
             assert!(read(run_id, &"f".repeat(64)).is_err());
-            // No snapshot: nothing to list.
-            assert!(list(run_id).is_none());
+            // A window with nothing stored in it lists nothing; a run with
+            // no file has no window to list.
+            assert!(list(run_id).unwrap().is_empty());
+            assert!(list("ghost").is_none());
         });
     }
 }

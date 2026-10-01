@@ -30,6 +30,9 @@ pub const INTERACTIONS_FILE: &str = "interactions.json";
 /// [`RUN_FILE`]: the two are told apart by the magic their first bytes carry.
 pub const ARCHIVE_FILE: &str = "run.lvr";
 
+/// A blueprint's file, inside its directory.
+pub const BLUEPRINT_MANIFEST: &str = "agent.toml";
+
 /// The run file: the run's spec, its code and files, the steps it took and
 /// checkpoints of its state, in the LVR2 frame format. Everything about a run
 /// is here.

@@ -73,7 +73,7 @@ pub enum Change {
     /// `final_output`.
     FinalOutput(Option<FinalOutputState>),
     /// `wait_reason`.
-    WaitReason(Option<String>),
+    WaitReason(Option<WaitState>),
     /// `last_transition`.
     LastTransition(Option<TransitionRecord>),
 }

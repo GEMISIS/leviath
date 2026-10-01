@@ -240,7 +240,8 @@ async fn a_graph_counts_the_edges_a_run_took() {
             s.cursor.stage = edge.to.clone();
             s.visits.insert(edge.to.clone(), 1);
         });
-        // Taken again, then a forced move that names no edge.
+        // A forced move that names no edge counts against the edge between
+        // the same two stages; then the edge is taken again.
         step(&run_id, 20, Vec::new(), |s| {
             s.last_transition = Some(record(None));
         });
@@ -259,7 +260,7 @@ async fn a_graph_counts_the_edges_a_run_took() {
         assert_eq!(entered.visits, 2);
         assert!(entered.current);
         assert_eq!(view.nodes.iter().filter(|n| n.current).count(), 1);
-        assert_eq!(view.edges[0].taken, 2);
+        assert_eq!(view.edges[0].taken, 3);
         assert_eq!(view.edges[0].name, edge.name.as_str());
         assert!(view.edges[1..].iter().all(|e| e.taken == 0));
         let json = serde_json::to_value(&view).unwrap();

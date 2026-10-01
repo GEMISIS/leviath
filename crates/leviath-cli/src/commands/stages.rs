@@ -1,12 +1,10 @@
 //! `lev stages <run-id>` - the per-stage ledger a staged agent's cost lives in.
 //!
-//! `stages.json` has carried per-stage token counts for a while and nothing on
-//! the CLI read it: `lev context` renders the context history, `lev result`
-//! prints the answer, and the only readers of the ledger were the dashboard,
-//! telemetry, and `serve`. For a staged agent the per-stage split *is* the
-//! diagnosis - it is how an output stage billing 252,848 prompt tokens to emit
-//! three characters was found, and how a profile stage that had run away to
-//! 1.1M was. Read-only; sources everything from disk.
+//! A run's file carries per-stage token counts and spend. For a staged agent
+//! the per-stage split *is* the diagnosis - it is how an output stage billing
+//! 252,848 prompt tokens to emit three characters was found, and how a
+//! profile stage that had run away to 1.1M was. Read-only; sources everything
+//! from disk.
 
 use clap::Args;
 use leviath_core::run_meta::StageRecord;
@@ -33,7 +31,7 @@ pub(crate) async fn execute(args: StagesArgs) -> anyhow::Result<()> {
     let stages = crate::runstate::read_stages_index(&args.run_id);
     if stages.is_empty() {
         anyhow::bail!(
-            "no stage ledger for run '{}' (no readable stages.json)",
+            "no stage ledger for run '{}' (no readable run file)",
             args.run_id
         );
     }
@@ -231,12 +229,10 @@ mod tests {
     {
         crate::runstate::with_isolated_runs_dir_async(unique, |base| async move {
             let run_id = "run-1";
-            let dir = base.join("runs").join(run_id);
-            std::fs::create_dir_all(&dir).expect("runs dir");
+            let _ = base;
             let mut rec = record("ingest", 16_832);
             rec.region_tokens.insert("data_preview".to_string(), 6692);
-            let json = serde_json::to_string(&[rec]).expect("serializes");
-            std::fs::write(dir.join("stages.json"), json).expect("write");
+            crate::runstate::write_stages_index(run_id, &[rec]).expect("write");
             f(run_id.to_string()).await
         })
         .await

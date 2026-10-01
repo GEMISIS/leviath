@@ -595,9 +595,8 @@ async fn a_context_history_filter_past_the_depth_limit_is_refused() {
     );
 }
 
-/// A run with no journal has no history, and says so with an empty page
-/// rather than an error - the same as every other listing on a run that
-/// recorded nothing.
+/// A run that has taken no step has one point of history: the window it
+/// started with.
 #[tokio::test]
 async fn a_run_with_no_journal_has_no_history() {
     crate::runstate::with_isolated_runs_dir_async("graphql-history-none", |_dir| async move {
@@ -608,12 +607,12 @@ async fn a_run_with_no_journal_has_no_history() {
             "{ run { contextHistory(first: 5) { total results { at } } } }",
         )
         .await;
-        assert_eq!(json["run"]["contextHistory"]["total"], 0);
+        assert_eq!(json["run"]["contextHistory"]["total"], 1);
         assert_eq!(
             json["run"]["contextHistory"]["results"]
                 .as_array()
                 .map(Vec::len),
-            Some(0)
+            Some(1)
         );
     })
     .await;
@@ -717,6 +716,7 @@ async fn an_unreadable_blueprint_leaves_it_unknown() {
         let workdir = tempfile::tempdir().expect("a workdir");
         let meta = meta_in(workdir.path());
         crate::runstate::create_run(&meta).expect("run written");
+        crate::commands::serve::core::run_file::tests::garbage(&meta.run_id, b"not a run file");
         let json = data(meta, "{ run { acceptsMessages } }").await;
         assert!(json["run"]["acceptsMessages"].is_null());
     })

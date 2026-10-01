@@ -165,7 +165,10 @@ pub(crate) fn from_meta(state: &mut RunState, meta: &RunMeta, graph: &RunGraph) 
         .filter_map(|c| RunId::new(c.as_str()).ok())
         .collect();
     state.title = meta.title.clone();
-    state.wait_reason = meta.waiting_on.as_ref().map(ToString::to_string);
+    state.wait_reason = meta
+        .waiting_on
+        .as_ref()
+        .map(leviath_runtime::state::WaitState::from);
 }
 
 /// The state the run was last in.

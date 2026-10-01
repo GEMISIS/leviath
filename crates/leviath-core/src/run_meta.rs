@@ -165,7 +165,7 @@ pub enum WaitReason {
 /// differ. Topping up an account, adding a provider to `config.toml` and
 /// replacing a rejected key are three different screens, and a console that
 /// had only the sentence would be reduced to matching on its wording.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SetupBlocker {
     /// The stage names a provider this install has not configured.

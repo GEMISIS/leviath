@@ -93,8 +93,9 @@ pub(super) async fn export_file(
 pub(super) async fn list_blobs(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<BlobListing>, ApiError> {
-    runstate::read_meta(&id)
-        .map_err(|_| err(StatusCode::NOT_FOUND, format!("Run '{id}' not found")))?;
+    // A run file that is there and will not read is the server's fault, not
+    // a run that does not exist.
+    super::core::run_file::require(&id).map_err(|e| super::core::error::as_api_error(&e))?;
     Ok(Json(BlobListing {
         items: stored_parts(&id)?,
     }))

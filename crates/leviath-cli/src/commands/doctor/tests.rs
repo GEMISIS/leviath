@@ -228,11 +228,7 @@ fn write_meta(run_id: &str, status: leviath_core::run_meta::RunStatus, error: Op
     meta.status = status;
     meta.error = error.map(str::to_string);
     meta.iteration = 1;
-    std::fs::write(
-        dir.join("meta.json"),
-        serde_json::to_string(&meta).expect("RunMeta serializes"),
-    )
-    .expect("write meta.json");
+    crate::runstate::create_run_in(&dir, &meta).expect("write the run");
 }
 
 // ─── format_report ────────────────────────────────────────────────────────────

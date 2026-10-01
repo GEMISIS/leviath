@@ -318,15 +318,15 @@ mod tests {
             assert!(list_only.runs.iter().all(|r| r.stages.is_empty()));
             assert_eq!(list_only.context.as_ref().unwrap().0, "newer");
             assert!(
-                list_only.runs.iter().all(|r| r.graph.is_none()),
-                "no run file, no graph"
+                list_only.runs.iter().all(|r| r.graph.is_some()),
+                "each graph is read off its run file"
             );
 
             // The full pass reads the ledgers, the settled run's included,
             // which the list-only pass had skipped.
             let full = loader.collect(Some("older"), true);
             assert!(full.runs.iter().take(2).all(|r| r.stages.len() == 1));
-            assert!(full.context.is_none(), "`older` has no context file");
+            assert_eq!(full.context.as_ref().unwrap().0, "older");
 
             // A run the directory does not hold brings no context either.
             assert!(loader.collect(Some("gone"), true).context.is_none());
@@ -334,7 +334,7 @@ mod tests {
     }
 
     /// A run's graph is read off its run file's spec, once, and runs of the
-    /// same graph share one drawing; a run with no run file has none.
+    /// same graph share one drawing; a run of another graph has its own.
     #[tokio::test]
     async fn runs_of_one_graph_share_one_drawing_read_off_their_run_files() {
         use leviath_runtime::runfile::{CheckpointPolicy, RunFileWriter};
@@ -383,7 +383,7 @@ mod tests {
             let snap = loader.collect(None, false);
             let one = graph_of(&snap, &first).expect("read off the run file");
             assert!(Arc::ptr_eq(&one, &graph_of(&snap, "twin").unwrap()));
-            assert!(graph_of(&snap, "lost").is_none());
+            assert!(!Arc::ptr_eq(&one, &graph_of(&snap, "lost").unwrap()));
             assert!(one.node("analyze").is_some());
             // The next pass hands back the drawing it kept.
             let again = loader.collect(None, false);

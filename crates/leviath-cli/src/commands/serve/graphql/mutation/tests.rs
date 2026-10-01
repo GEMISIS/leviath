@@ -50,7 +50,7 @@ fn run_in(id: &str, status: RunStatus) -> RunMeta {
 fn unreadable_run(id: &str) {
     let dir = crate::runstate::run_dir(id);
     std::fs::create_dir_all(&dir).expect("the run directory");
-    std::fs::write(dir.join(leviath_core::files::META_FILE), "{not json")
+    std::fs::write(dir.join(leviath_core::files::RUN_FILE), "{not json")
         .expect("the broken record");
 }
 

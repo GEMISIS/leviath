@@ -900,11 +900,10 @@ mod tests {
         .await;
     }
 
-    /// End-to-end for the unkillable-run shape: a run whose blueprint no longer
-    /// exists cannot be rebuilt, so the reloader declines - and a cancel that
-    /// stops there, replying "no such run" and writing nothing, leaves
-    /// `meta.json` claiming the run is live with no way to ever clear it. It
-    /// must be terminated on disk instead.
+    /// End-to-end for a run the daemon is not holding: its blueprint is gone,
+    /// but its run file holds everything a resume needs, so the cancel pages
+    /// it in and cancels it there, and the cancel reaches its file. A run id
+    /// that names nothing is still an honest miss.
     #[tokio::test]
     async fn cancelling_an_unreloadable_run_terminates_it_on_disk() {
         let _redirect = crate::daemon::script_host::REDIRECT_MIRROR.lock().await;
@@ -950,11 +949,6 @@ mod tests {
                     reply,
                 });
                 assert!(rx.await.unwrap(), "the cancel reports that it applied");
-                assert_eq!(
-                    crate::runstate::read_meta_from(&run_dir).unwrap().status,
-                    leviath_core::run_meta::RunStatus::Cancelled,
-                    "and it reached disk, so nothing shows the run as live any more"
-                );
 
                 // A run id that names nothing at all is still an honest miss.
                 let (reply, rx) = oneshot::channel();
@@ -963,6 +957,17 @@ mod tests {
                     reply,
                 });
                 assert!(!rx.await.unwrap());
+
+                // A closed control channel ends the serve loop, which writes
+                // what is queued before it returns.
+                let (control, control_rx) = tokio::sync::mpsc::unbounded_channel();
+                drop(control);
+                host.serve(control_rx).await;
+                assert_eq!(
+                    crate::runstate::read_meta_from(&run_dir).unwrap().status,
+                    leviath_core::run_meta::RunStatus::Cancelled,
+                    "and it reached disk, so nothing shows the run as live any more"
+                );
             },
         )
         .await;

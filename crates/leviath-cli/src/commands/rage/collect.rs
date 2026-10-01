@@ -10,9 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use leviath_blueprint::FILE_NAME;
-use leviath_core::files::{
-    ARCHIVE_FILE, BLOBS_DIR, CONTEXT_FILE, FANOUT_FILE, INTERACTIONS_FILE, META_FILE, STAGES_FILE,
-};
+use leviath_core::files::{BLOBS_DIR, META_FILE, RUN_FILE};
 use leviath_core::run_meta::RunMeta;
 use leviath_core::secrets::is_sensitive_env_name;
 
@@ -30,11 +28,10 @@ pub(crate) const LOG_TAIL: u64 = 2 * 1024 * 1024;
 /// left out: no log of Leviath's grows this large, and one that did is a
 /// finding in its own right.
 pub(crate) const LOG_READ_CAP: u64 = 64 * 1024 * 1024;
-/// The most a run's context snapshot or stage file may weigh before it is
-/// left out.
+/// The most a run's answer or stage file may weigh before it is left out.
 pub(crate) const RUN_FILE_CAP: u64 = 8 * 1024 * 1024;
-/// The most a run journal may weigh before it is left out. A mature run's
-/// journal is tens of megabytes, which is exactly what a reader needs.
+/// The most a run file may weigh before it is left out. A mature run's file
+/// is tens of megabytes, which is exactly what a reader needs.
 pub(crate) const ARCHIVE_CAP: u64 = 64 * 1024 * 1024;
 /// The most one stored part may weigh, and the most all of a bundle's parts
 /// may weigh together.
@@ -462,7 +459,11 @@ fn copy_run(
         Ok(meta) => {
             let value = serde_json::to_value(meta.redacted()).unwrap_or_default();
             bundle.json(format!("{dest}/{META_FILE}"), scrubber, value);
-            let blueprint = blueprint_dir_of(&meta.agent_path);
+            // A run of an installed blueprint names it, not a path.
+            let blueprint = match meta.agent_path.is_empty() {
+                true => env.agents_dir.join(&meta.agent_name),
+                false => blueprint_dir_of(&meta.agent_path),
+            };
             if blueprint.is_dir() {
                 copy_text_tree(
                     &blueprint,
@@ -481,27 +482,10 @@ fn copy_run(
                 );
             }
         }
-        // A meta that will not parse is still worth reading as text.
-        Err(_) => copy_text(
-            &dir.join(META_FILE),
-            &format!("{dest}/{META_FILE}"),
-            RUN_FILE_CAP,
-            scrubber,
-            bundle,
+        Err(e) => bundle.skip(
+            format!("{dest}/{META_FILE}"),
+            format!("the run's record could not be read: {e}"),
         ),
-    }
-
-    for name in [STAGES_FILE, FANOUT_FILE, INTERACTIONS_FILE, CONTEXT_FILE] {
-        let path = dir.join(name);
-        if path.is_file() {
-            copy_json(
-                &path,
-                &format!("{dest}/{name}"),
-                RUN_FILE_CAP,
-                scrubber,
-                bundle,
-            );
-        }
     }
     let final_output = dir.join(leviath_core::FINAL_OUTPUT_FILE);
     if final_output.is_file() {
@@ -514,7 +498,7 @@ fn copy_run(
         );
     }
     copy_stages(&dir, &dest, scrubber, bundle);
-    copy_archive(&dir, &dest, scrubber, bundle);
+    copy_run_file(&dir, &dest, scrubber, bundle);
     copy_blobs(&dir, &dest, include_blobs, BLOB_CAP, blob_budget, bundle);
 }
 
@@ -530,7 +514,7 @@ fn blueprint_dir_of(agent_path: &str) -> PathBuf {
     }
 }
 
-/// `stages/<n>/`: the per-stage logs, context and taint audit.
+/// `stages/<n>/`: the per-stage logs and taint audit.
 fn copy_stages(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle) {
     for stage in sorted_entries(&dir.join("stages")) {
         let index = file_name(&stage);
@@ -546,42 +530,44 @@ fn copy_stages(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle)
                 );
             }
         }
-        for name in [CONTEXT_FILE, "taint_audit.json"] {
-            let path = stage.join(name);
-            if path.is_file() {
-                copy_json(
-                    &path,
-                    &format!("{dest}/stages/{index}/{name}"),
-                    RUN_FILE_CAP,
-                    scrubber,
-                    bundle,
-                );
-            }
+        let audit = stage.join("taint_audit.json");
+        if audit.is_file() {
+            copy_json(
+                &audit,
+                &format!("{dest}/stages/{index}/taint_audit.json"),
+                RUN_FILE_CAP,
+                scrubber,
+                bundle,
+            );
         }
     }
 }
 
-/// `run.lvr`, re-encoded with its secrets out.
-fn copy_archive(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle) {
-    let member = format!("{dest}/{ARCHIVE_FILE}");
-    let bytes = match read_capped(&dir.join(ARCHIVE_FILE), ARCHIVE_CAP) {
+/// `run.lvr`, read and written out as `run.json` with its secrets out: the
+/// spec the run was resolved to, its state as of its last step, and every
+/// step. The webhook's signing secret is replaced before anything is read.
+fn copy_run_file(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle) {
+    let skipped = format!("{dest}/{RUN_FILE}");
+    let path = dir.join(RUN_FILE);
+    let bytes = match read_capped(&path, ARCHIVE_CAP) {
         Ok(bytes) => bytes,
         Err(reason) => {
-            bundle.skip(member, reason);
+            bundle.skip(skipped, reason);
             return;
         }
     };
-    match scrubber.scrub_run_archive(&bytes) {
-        Ok(scrubbed) => {
-            if scrubbed.skipped > 0 {
-                bundle.notes.push(format!(
-                    "{member}: {} frame(s) this build could not read were left out",
-                    scrubbed.skipped
-                ));
-            }
-            bundle.bytes(member, scrubbed.bytes, scrubbed.redactions);
+    let read = leviath_runtime::runfile::RunFileReader::from_bytes(&path, bytes).and_then(|r| {
+        let mut spec = r.spec().clone();
+        if let Some(callback) = spec.delivery.callback.as_mut() {
+            callback.secret = None;
         }
-        Err(e) => bundle.skip(member, format!("the journal could not be re-encoded: {e}")),
+        let state = r.latest_state()?;
+        let steps = r.deltas(1, r.last_seq())?;
+        Ok(serde_json::json!({ "spec": spec, "state": state, "steps": steps }))
+    });
+    match read {
+        Ok(value) => bundle.json(format!("{dest}/run.json"), scrubber, value),
+        Err(e) => bundle.skip(skipped, format!("the run file could not be read: {e}")),
     }
 }
 

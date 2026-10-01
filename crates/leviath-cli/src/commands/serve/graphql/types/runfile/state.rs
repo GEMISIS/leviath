@@ -854,7 +854,10 @@ impl From<&CoreState> for RunState {
             children: s.children.iter().map(|id| ID(id.to_string())).collect(),
             title: s.title.clone(),
             answer: s.final_output.as_ref().map(StateAnswer::from),
-            wait_reason: s.wait_reason.clone(),
+            wait_reason: s
+                .wait_reason
+                .as_ref()
+                .map(|w| leviath_core::run_meta::WaitReason::from(w).to_string()),
             last_transition: s.last_transition.as_ref().map(StageTransition::from),
         }
     }

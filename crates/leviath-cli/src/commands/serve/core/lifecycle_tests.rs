@@ -173,20 +173,6 @@ async fn a_cancel_that_lands_is_not_a_conflict() {
     .await;
 }
 
-/// A run still taking messages can be cancelled: finishing its stages is not
-/// the same as being over.
-#[tokio::test]
-async fn a_run_that_still_takes_messages_can_be_cancelled() {
-    crate::runstate::with_isolated_runs_dir_async("lifecycle-interactive", |_d| async move {
-        create_run(&run_in("run-open", RunStatus::CompleteInteractive)).expect("run written");
-        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
-        act(&state_with(control), "run-open", Action::Cancel)
-            .await
-            .expect("an interactive run can be cancelled");
-    })
-    .await;
-}
-
 /// The daemon's "no" is one answer for several reasons, so the failure names
 /// the reasons rather than claiming the run does not exist.
 #[tokio::test]

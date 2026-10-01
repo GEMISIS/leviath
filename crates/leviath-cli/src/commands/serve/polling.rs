@@ -969,6 +969,7 @@ mod tests {
                     1,
                 );
                 meta.callback_url = Some("http://127.0.0.1:0/hook".into());
+                meta.status = leviath_core::run_meta::RunStatus::Error;
                 meta.error = Some("boom".into());
                 create_run(&meta).unwrap();
 
@@ -1193,7 +1194,8 @@ mod tests {
                 );
                 meta.callback_url = Some(url);
                 meta.callback_secret = Some("topsecret".into());
-                meta.flags.empty_output = true;
+                // A finished run that wrote nothing and handed nothing back.
+                meta.status = leviath_core::run_meta::RunStatus::Complete;
                 create_run(&meta).unwrap();
 
                 fire_completion_webhook(

@@ -312,38 +312,8 @@ mod tests {
     #[test]
     fn execute_prints_history_for_a_run_with_an_archive() {
         crate::runstate::with_isolated_runs_dir("context-execute-ok", |_d| {
-            use leviath_core::run_archive::{self, RunIdentity, RunRecord};
             let run_id = "ctx-exec-run";
-            std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
-            let mut buf = Vec::new();
-            run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::Header {
-                    identity: RunIdentity {
-                        run_id: run_id.to_string(),
-                        machine_id: "m".to_string(),
-                        world_id: "w".to_string(),
-                        created_at: 0,
-                    },
-                    meta: Box::new(fixtures::run_meta(run_id)),
-                },
-            )
-            .unwrap();
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::ContextCheckpoint {
-                    snapshot: ContextSnapshot {
-                        stage_name: "plan".to_string(),
-                        total_tokens: 1,
-                        max_tokens: 100,
-                        regions: vec![],
-                    },
-                    at: 1,
-                },
-            )
-            .unwrap();
-            std::fs::write(crate::runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+            crate::runstate::create_run(&fixtures::run_meta(run_id)).unwrap();
 
             // Present archive → the success path (render + print) runs and returns Ok.
             let args = ContextArgs {

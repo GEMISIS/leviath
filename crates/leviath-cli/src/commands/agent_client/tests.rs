@@ -178,13 +178,14 @@ impl Harness {
         }
     }
 
-    /// Write `RUN_ID`'s persisted `meta.json` with the given snake_case status,
+    /// Record `RUN_ID` in its run file with the given snake_case status,
     /// simulating what the daemon's persistence lane records (the turn reads this
     /// to decide when the run is genuinely done).
     fn write_meta_status(&self, status: &str) {
         let dir = self.runs_dir.path().join(RUN_ID);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("meta.json"), format!(r#"{{"status":"{status}"}}"#)).unwrap();
+        let mut meta = crate::test_fixtures::fixtures::run_meta(RUN_ID);
+        meta.status = serde_json::from_value(serde_json::json!(status)).unwrap();
+        crate::runstate::write_meta_to(&dir, &meta).unwrap();
     }
 
     /// Write agent output to `RUN_ID`'s stage `idx` output log under the runs dir.
@@ -1635,19 +1636,12 @@ mod run_status_helpers {
     use leviath_core::run_meta::RunStatus;
 
     #[test]
-    fn read_run_status_reads_the_persisted_status_ignoring_extra_fields() {
+    fn read_run_status_reads_the_persisted_status() {
         let dir = tempfile::tempdir().unwrap();
-        let run = dir.path().join("r1");
-        std::fs::create_dir_all(&run).unwrap();
-        std::fs::write(
-            run.join("meta.json"),
-            r#"{"status":"complete_interactive","run_id":"r1","extra":1}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            read_run_status(dir.path(), "r1"),
-            Some(RunStatus::CompleteInteractive)
-        );
+        let mut meta = crate::test_fixtures::fixtures::run_meta("r1");
+        meta.status = RunStatus::Complete;
+        crate::runstate::create_run_in(&dir.path().join("r1"), &meta).unwrap();
+        assert_eq!(read_run_status(dir.path(), "r1"), Some(RunStatus::Complete));
     }
 
     #[test]
@@ -1705,10 +1699,10 @@ mod run_status_helpers {
         let dir = tempfile::tempdir().unwrap();
         // Missing file.
         assert_eq!(read_run_status(dir.path(), "nope"), None);
-        // Present but not valid JSON.
+        // Present but not a run file.
         let run = dir.path().join("bad");
         std::fs::create_dir_all(&run).unwrap();
-        std::fs::write(run.join("meta.json"), "not json").unwrap();
+        std::fs::write(run.join(leviath_core::files::RUN_FILE), "not a run file").unwrap();
         assert_eq!(read_run_status(dir.path(), "bad"), None);
     }
 }

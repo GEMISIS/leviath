@@ -935,22 +935,13 @@ fn artifact_location(
         .unwrap_or(in_workdir)
 }
 
-/// Read the persisted `RunStatus` for `run_id` from `<runs_dir>/<run_id>/meta.json`.
-///
-/// Deserializes into a minimal projection that reads only the `status` field, so
-/// it does not depend on the full [`RunMeta`](leviath_core::run_meta::RunMeta)
-/// shape and tolerates a partially-written or older metadata file. Returns
-/// `None` if the file is missing or unreadable (the run hasn't persisted yet).
+/// Read the persisted `RunStatus` for `run_id` from its run file under
+/// `runs_dir`. Returns `None` if the file is missing or unreadable (the run
+/// hasn't persisted yet).
 fn read_run_status(runs_dir: &std::path::Path, run_id: &str) -> Option<RunStatus> {
-    #[derive(serde::Deserialize)]
-    struct StatusOnly {
-        status: RunStatus,
-    }
-    let path = runs_dir.join(run_id).join(leviath_core::files::META_FILE);
-    let json = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<StatusOnly>(&json)
+    crate::runstate::read_meta_from(&runs_dir.join(run_id))
         .ok()
-        .map(|s| s.status)
+        .map(|meta| meta.status)
 }
 
 /// Mint a session id from the agent name - reuses the run-id generator's

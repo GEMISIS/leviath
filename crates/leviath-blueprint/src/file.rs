@@ -5,7 +5,7 @@ use leviath_runtime::spec::names::BlueprintName;
 use serde::{Deserialize, Serialize};
 
 /// The name of a blueprint's file inside its directory.
-pub const FILE_NAME: &str = "agent.toml";
+pub const FILE_NAME: &str = leviath_core::files::BLUEPRINT_MANIFEST;
 
 /// What a blueprint says about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

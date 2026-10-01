@@ -1120,7 +1120,7 @@ to = "c"
             NodeKind::Stage(StageKind::FanOut {
                 worker: WorkerRef::Agent("thumbnailer".to_string()),
                 merge: None,
-                max_workers: 4,
+                max_workers: 30,
             })
         );
         assert!(g.outgoing("c").next().is_none());

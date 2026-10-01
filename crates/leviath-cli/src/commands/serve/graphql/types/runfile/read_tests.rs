@@ -236,26 +236,21 @@ async fn a_step_the_run_does_not_have_is_refused() {
 #[tokio::test]
 async fn a_run_without_a_run_file_has_nothing_to_read() {
     crate::runstate::with_isolated_runs_dir_async("graphql-runfile-none", |_runs| async move {
-        let meta = crate::runstate::RunMeta::new(
-            "older".to_string(),
-            "coder".to_string(),
-            "/agents/coder".to_string(),
-            "t".to_string(),
-            None,
-            "/work".to_string(),
-            1,
+        let state: AppState = state_with_agent_paths(Vec::new());
+        assert!(read::spec("older").await.expect("a miss").is_none());
+        assert!(
+            read::state(&state, "older", Some(0))
+                .await
+                .expect("a miss")
+                .is_none()
         );
-        crate::runstate::create_run(&meta).expect("run written");
-        let answer = ask(
-            no_daemon_client(),
-            r#"{ run(id: "older") { spec { runId } state { seq } deltas { seq } graph { nodes { stage } } } }"#,
-        )
-        .await;
-        assert_eq!(
-            answer["data"]["run"],
-            serde_json::json!({ "spec": null, "state": null, "deltas": [], "graph": null }),
-            "{answer}"
+        assert!(
+            read::deltas("older", None, None)
+                .await
+                .expect("a miss")
+                .is_empty()
         );
+        assert!(read::graph("older").await.expect("a miss").is_none());
     })
     .await;
 }

@@ -698,9 +698,13 @@
             "description": "`wait_reason`.",
             "properties": {
               "WaitReason": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WaitState"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               }
             },
@@ -2563,6 +2567,51 @@
         ],
         "type": "object"
       },
+      "SetupBlocker": {
+        "description": "What is stopping a [`WaitReason::NeedsSetup`] run, in a form a client can\nbranch on.\n\nOne variant per remedy, not per error: these are the cases whose *fixes*\ndiffer. Topping up an account, adding a provider to `config.toml` and\nreplacing a rejected key are three different screens, and a console that\nhad only the sentence would be reduced to matching on its wording.",
+        "oneOf": [
+          {
+            "const": "provider_missing",
+            "description": "The stage names a provider this install has not configured.",
+            "type": "string"
+          },
+          {
+            "const": "credits_exhausted",
+            "description": "The account behind the provider is out of credits.",
+            "type": "string"
+          },
+          {
+            "const": "auth_failed",
+            "description": "The key was rejected.",
+            "type": "string"
+          },
+          {
+            "const": "forbidden",
+            "description": "The key is valid but not allowed to use the model.",
+            "type": "string"
+          },
+          {
+            "const": "providers_unavailable",
+            "description": "Every candidate is out of service, for reasons that do not agree or are\nnot known. The remedy names what was tried last.",
+            "type": "string"
+          },
+          {
+            "const": "provider_unreachable",
+            "description": "The provider could not be reached at all: the name did not resolve,\nthe connection was refused, or the TLS handshake failed. The network\nor the address is what to check.",
+            "type": "string"
+          },
+          {
+            "const": "provider_timed_out",
+            "description": "The provider was reached and did not answer in time. It is up, but\nslow, or the request was large; a resume tries again.",
+            "type": "string"
+          },
+          {
+            "const": "provider_failed",
+            "description": "The provider was reached and failed: a server error, a reply that\nstopped part-way, or one that could not be read. Nothing about the\nsetup is known to be wrong; a resume tries again once it recovers.",
+            "type": "string"
+          }
+        ]
+      },
       "Spend": {
         "description": "Tokens and cost.",
         "properties": {
@@ -3116,6 +3165,88 @@
           "clock"
         ],
         "type": "object"
+      },
+      "WaitState": {
+        "description": "Why a run is parked: the run file's form of\n[`WaitReason`](leviath_core::run_meta::WaitReason).",
+        "oneOf": [
+          {
+            "const": "ToolApproval",
+            "description": "A tool call waits for approval.",
+            "type": "string"
+          },
+          {
+            "const": "UserPrompt",
+            "description": "A question the run asked waits for an answer.",
+            "type": "string"
+          },
+          {
+            "const": "TaintGate",
+            "description": "A taint-gate clearance waits for a person.",
+            "type": "string"
+          },
+          {
+            "const": "InteractionPoint",
+            "description": "A stage-boundary checkpoint waits for a person.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Fan-out workers still to finish.",
+            "properties": {
+              "FanOutWorkers": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "FanOutWorkers"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Child runs still to finish.",
+            "properties": {
+              "Children": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "Children"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Something on the machine has to change first.",
+            "properties": {
+              "NeedsSetup": {
+                "properties": {
+                  "blocker": {
+                    "$ref": "#/$defs/SetupBlocker",
+                    "description": "What kind of problem."
+                  },
+                  "remedy": {
+                    "description": "What to do about it.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "blocker",
+                  "remedy"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "NeedsSetup"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WorkItemState": {
         "description": "One fan-out work item.",
@@ -8765,6 +8896,51 @@
           }
         ]
       },
+      "SetupBlocker": {
+        "description": "What is stopping a [`WaitReason::NeedsSetup`] run, in a form a client can\nbranch on.\n\nOne variant per remedy, not per error: these are the cases whose *fixes*\ndiffer. Topping up an account, adding a provider to `config.toml` and\nreplacing a rejected key are three different screens, and a console that\nhad only the sentence would be reduced to matching on its wording.",
+        "oneOf": [
+          {
+            "const": "provider_missing",
+            "description": "The stage names a provider this install has not configured.",
+            "type": "string"
+          },
+          {
+            "const": "credits_exhausted",
+            "description": "The account behind the provider is out of credits.",
+            "type": "string"
+          },
+          {
+            "const": "auth_failed",
+            "description": "The key was rejected.",
+            "type": "string"
+          },
+          {
+            "const": "forbidden",
+            "description": "The key is valid but not allowed to use the model.",
+            "type": "string"
+          },
+          {
+            "const": "providers_unavailable",
+            "description": "Every candidate is out of service, for reasons that do not agree or are\nnot known. The remedy names what was tried last.",
+            "type": "string"
+          },
+          {
+            "const": "provider_unreachable",
+            "description": "The provider could not be reached at all: the name did not resolve,\nthe connection was refused, or the TLS handshake failed. The network\nor the address is what to check.",
+            "type": "string"
+          },
+          {
+            "const": "provider_timed_out",
+            "description": "The provider was reached and did not answer in time. It is up, but\nslow, or the request was large; a resume tries again.",
+            "type": "string"
+          },
+          {
+            "const": "provider_failed",
+            "description": "The provider was reached and failed: a server error, a reply that\nstopped part-way, or one that could not be read. Nothing about the\nsetup is known to be wrong; a resume tries again once it recovers.",
+            "type": "string"
+          }
+        ]
+      },
       "Spend": {
         "description": "Tokens and cost.",
         "properties": {
@@ -9289,6 +9465,88 @@
         ],
         "type": "object"
       },
+      "WaitState": {
+        "description": "Why a run is parked: the run file's form of\n[`WaitReason`](leviath_core::run_meta::WaitReason).",
+        "oneOf": [
+          {
+            "const": "ToolApproval",
+            "description": "A tool call waits for approval.",
+            "type": "string"
+          },
+          {
+            "const": "UserPrompt",
+            "description": "A question the run asked waits for an answer.",
+            "type": "string"
+          },
+          {
+            "const": "TaintGate",
+            "description": "A taint-gate clearance waits for a person.",
+            "type": "string"
+          },
+          {
+            "const": "InteractionPoint",
+            "description": "A stage-boundary checkpoint waits for a person.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Fan-out workers still to finish.",
+            "properties": {
+              "FanOutWorkers": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "FanOutWorkers"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Child runs still to finish.",
+            "properties": {
+              "Children": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "Children"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Something on the machine has to change first.",
+            "properties": {
+              "NeedsSetup": {
+                "properties": {
+                  "blocker": {
+                    "$ref": "#/$defs/SetupBlocker",
+                    "description": "What kind of problem."
+                  },
+                  "remedy": {
+                    "description": "What to do about it.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "blocker",
+                  "remedy"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "NeedsSetup"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WorkItemState": {
         "description": "One fan-out work item.",
         "properties": {
@@ -9517,11 +9775,15 @@
         "type": "object"
       },
       "wait_reason": {
-        "description": "Why it is waiting, in words, when it is.",
-        "type": [
-          "string",
-          "null"
-        ]
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WaitState"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Why it is waiting, when it is."
       }
     },
     "required": [

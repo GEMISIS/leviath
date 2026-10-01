@@ -618,7 +618,7 @@ fn state() -> CoreState {
         children: vec![named!(RunId, "child-1")],
         title: Some("A title".into()),
         final_output: Some(answer()),
-        wait_reason: Some("a person".into()),
+        wait_reason: Some(leviath_runtime::state::WaitState::UserPrompt),
         last_transition: Some(transition(TransitionReason::Condition)),
     }
 }

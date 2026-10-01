@@ -440,7 +440,9 @@ fn a_final_output_without_its_file_or_stage_is_named() {
     assert_eq!(out.content, "");
     assert_eq!(out.stage.as_str(), "engine");
     assert!(report.defaulted("final_output.content").is_some());
-    assert!(report.notes.iter().any(|n| n.contains("artifacts")));
+    // The files it handed back are kept with it.
+    assert_eq!(out.artifacts.len(), 1);
+    assert_eq!(out.artifacts[0].path, "a.png");
 }
 
 #[test]

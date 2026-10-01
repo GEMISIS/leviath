@@ -293,7 +293,7 @@ fn a_fan_out_reads_with_its_items_as_typed_inputs() {
     assert_eq!(f.active, vec![("i0".into(), RunId::new("w-1").unwrap())]);
     assert_eq!(f.done, vec![("i4".into(), "fine".into())]);
     assert_eq!(f.failed, vec![("i5".into(), "bad".into())]);
-    assert_eq!(s.wait_reason.as_deref(), Some("workers(5)"));
+    assert_eq!(s.wait_reason, Some(WaitState::FanOutWorkers(5)));
 }
 
 #[test]
@@ -702,7 +702,7 @@ async fn a_busy_run_reads_every_field_from_its_components() {
         ("hero.png", "image/png")
     );
     assert_eq!(s.phase, PipelinePhase::WaitingForChildren);
-    assert_eq!(s.wait_reason.as_deref(), Some("children(1)"));
+    assert_eq!(s.wait_reason, Some(WaitState::Children(1)));
 }
 
 #[test]
@@ -724,15 +724,42 @@ fn a_parked_run_says_why() {
     let e = spawn(&mut world, AgentStatus::Waiting);
     world.entity_mut(e).insert(p::WaitingForChildren);
     assert_eq!(
-        inspect(&world, e).unwrap().wait_reason.as_deref(),
-        Some("children(0)")
+        inspect(&world, e).unwrap().wait_reason,
+        Some(WaitState::Children(0))
     );
     let paused = spawn(&mut world, AgentStatus::Paused);
     world.entity_mut(paused).insert(p::PausedForSetup {
         blocker: SetupBlocker::CreditsExhausted,
         remedy: "top up".into(),
     });
-    assert!(inspect(&world, paused).unwrap().wait_reason.is_some());
+    assert_eq!(
+        inspect(&world, paused).unwrap().wait_reason,
+        Some(WaitState::NeedsSetup {
+            blocker: SetupBlocker::CreditsExhausted,
+            remedy: "top up".into(),
+        })
+    );
+}
+
+/// Every reason a run can be parked for reads into the run file's form and
+/// back unchanged.
+#[test]
+fn every_wait_reason_survives_the_run_file() {
+    use leviath_core::run_meta::{SetupBlocker, WaitReason};
+    for reason in [
+        WaitReason::ToolApproval,
+        WaitReason::UserPrompt,
+        WaitReason::TaintGate,
+        WaitReason::InteractionPoint,
+        WaitReason::FanOutWorkers { outstanding: 3 },
+        WaitReason::Children { outstanding: 2 },
+        WaitReason::NeedsSetup {
+            blocker: SetupBlocker::AuthFailed,
+            remedy: "a new key".into(),
+        },
+    ] {
+        assert_eq!(WaitReason::from(&WaitState::from(&reason)), reason);
+    }
 }
 
 /// The reply whose calls are being run: three calls, `c1` to `c3`.

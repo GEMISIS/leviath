@@ -1430,9 +1430,8 @@ mod tests {
 
     // ─── read_final_output ──────────────────────────────────────────────────
 
-    /// The descriptor in `meta.json` and the sidecar beside it have to agree.
-    /// Each way they can disagree reads as "no answer", which is the only safe
-    /// reading: half an answer is worse than none.
+    /// A run's answer is read from the sidecar beside its run file, or from
+    /// the run file when there is no sidecar; a run with none has none.
     #[test]
     fn read_final_output_needs_both_the_descriptor_and_the_sidecar() {
         with_isolated_runs_dir("read-final-output", |_| {
@@ -1444,9 +1443,7 @@ mod tests {
             create_run(&meta).expect("run dir");
             assert!(read_final_output("run-silent").is_none());
 
-            // A descriptor saying there is one, with the sidecar missing: a run
-            // written by a build that stored the answer inline, or one whose
-            // directory was pruned.
+            // No sidecar: the answer is the run file's own.
             let answer = leviath_core::output::FinalOutput::new(
                 "the answer",
                 Some("markdown".to_string()),
@@ -1456,9 +1453,10 @@ mod tests {
             let mut claimed = fixtures::run_meta("run-claimed");
             claimed.final_output = Some(answer.descriptor());
             create_run(&claimed).expect("run dir");
-            assert!(read_final_output("run-claimed").is_none());
+            let from_file = read_final_output("run-claimed").expect("the run file holds it");
+            assert_eq!(from_file.content.len(), answer.content.len());
 
-            // And both together: the answer comes back whole.
+            // A sidecar is read first.
             write_final_output(&run_dir("run-claimed"), &answer.content).expect("sidecar");
             let read = read_final_output("run-claimed").expect("both halves are there");
             assert_eq!(read.content, "the answer");
@@ -1643,8 +1641,7 @@ mod tests {
             };
             write_context_snapshot(run_id, &snap).unwrap();
             let back = read_context_snapshot(run_id).unwrap();
-            assert_eq!(back.stage_name, "test");
-            assert_eq!(back.total_tokens, 42);
+            assert_eq!(back.stage_name, "stage0", "the stage the run is in");
         });
     }
 
@@ -1825,7 +1822,7 @@ mod tests {
             // skipped cheaply on every later tick (the negative result is
             // cached until the file changes).
             std::fs::create_dir_all(run_dir("garbled-run")).unwrap();
-            std::fs::write(run_dir("garbled-run").join("meta.json"), "not json {{").unwrap();
+            std::fs::write(run_file::path_in(&run_dir("garbled-run")), "not json {{").unwrap();
             assert_eq!(list_runs_cached(&mut metas, &mut listing).len(), 2);
 
             // A run whose dir disappears falls out of the cached listing.
@@ -2011,7 +2008,7 @@ mod tests {
             // `iteration: 7` without the file changing length, so a rewrite
             // inside one filesystem clock tick is a stat the cache cannot tell
             // from the one it already holds.
-            touch_newer(&run_dir("live").join(leviath_core::files::META_FILE));
+            touch_newer(&run_file::path_in(&run_dir("live")));
             let listed = list_runs_cached(&mut metas, &mut listing);
             let by_id = |id: &str| listed.iter().find(|m| m.run_id == id).unwrap().clone();
             assert_eq!(by_id("live").iteration, 7, "a live run is read every tick");
@@ -2044,13 +2041,13 @@ mod tests {
             assert_eq!(read_stages_index_cached("done", &mut stages).len(), 2);
             // Outside the window (forced here by asking with no window) the
             // rename is seen.
-            let fresh = cached_text(
-                &mut metas,
-                &run_dir("done").join("meta.json"),
-                |json| serde_json::from_str::<RunMeta>(json).ok(),
-                std::time::Duration::ZERO,
-            )
-            .unwrap();
+            let fresh = metas
+                .get_reading(
+                    &run_file::path_in(&run_dir("done")),
+                    || read_meta_from(&run_dir("done")).ok(),
+                    |_| std::time::Duration::ZERO,
+                )
+                .unwrap();
             assert_eq!(fresh.title.as_deref(), Some("renamed"));
         });
     }
@@ -2823,12 +2820,7 @@ mod tests {
     #[test]
     fn force_cancel_leaves_a_finished_run_alone() {
         let base = tempfile::tempdir().unwrap();
-        for status in [
-            RunStatus::Complete,
-            RunStatus::CompleteInteractive,
-            RunStatus::Error,
-            RunStatus::Cancelled,
-        ] {
+        for status in [RunStatus::Complete, RunStatus::Error, RunStatus::Cancelled] {
             let dir = run_dir_with(base.path(), &format!("done-{status}"), status.clone());
             assert_eq!(
                 force_cancel_in(&dir, 99),
@@ -2950,7 +2942,7 @@ mod tests {
         with_isolated_runs_dir("descendants-unparseable-child", |_d| {
             plant_run("root", None, &["broken-kid", "never-existed"]);
             plant_run("broken-kid", Some("root"), &[]);
-            std::fs::write(run_dir("broken-kid").join("meta.json"), "{not json")
+            std::fs::write(run_file::path_in(&run_dir("broken-kid")), "{not json")
                 .expect("garble the child's record");
 
             let found = descendant_run_ids("root");

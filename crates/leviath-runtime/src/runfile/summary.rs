@@ -35,7 +35,7 @@ pub fn summary(reader: &RunFileReader) -> Result<RunMeta, RunFileError> {
 pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta {
     let ledger = place::stage_ledger(state);
     let final_output = place::final_output(state);
-    build_run_meta(
+    let mut meta = build_run_meta(
         RunMetaSources {
             md: &place::run_metadata(spec, state),
             state: &place::agent_state(spec, state),
@@ -53,7 +53,13 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
             max_child_depth: usize::from(spec.launch.max_depth),
             active: Some(place::run_clock(state).0),
         },
-    )
+    );
+    // Why it is parked is what the state recorded when it last moved.
+    meta.waiting_on = state
+        .wait_reason
+        .as_ref()
+        .map(leviath_core::run_meta::WaitReason::from);
+    meta
 }
 
 /// The run's context window in `state`, as a snapshot: each region shaped as

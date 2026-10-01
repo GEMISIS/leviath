@@ -1226,39 +1226,40 @@ mod tests {
 
     /// Write a `run.lvr` for `run_id` with `points` context checkpoints.
     fn write_history_archive(run_id: &str, points: usize) {
-        use leviath_core::run_archive::{self, RunIdentity, RunRecord};
-        std::fs::create_dir_all(runstate::run_dir(run_id)).unwrap();
-        let mut buf = Vec::new();
-        run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
-        run_archive::write_record(
-            &mut buf,
-            &RunRecord::Header {
-                identity: RunIdentity {
-                    run_id: run_id.to_string(),
-                    machine_id: "m".to_string(),
-                    world_id: "w".to_string(),
-                    created_at: 0,
-                },
-                meta: Box::new(fixtures::run_meta(run_id)),
-            },
-        )
-        .unwrap();
-        for i in 0..points {
-            run_archive::write_record(
-                &mut buf,
-                &RunRecord::ContextCheckpoint {
-                    snapshot: runstate::ContextSnapshot {
-                        stage_name: format!("stage{i}"),
-                        total_tokens: i,
+        let mut meta = fixtures::run_meta(run_id);
+        meta.num_stages = points;
+        meta.current_stage = "stage0".to_string();
+        runstate::create_run(&meta).unwrap();
+        for i in 1..points {
+            meta.current_stage = format!("stage{i}");
+            meta.stage_index = i;
+            runstate::write_meta(&meta).unwrap();
+            runstate::write_context_snapshot(
+                run_id,
+                &runstate::ContextSnapshot {
+                    stage_name: format!("stage{i}"),
+                    total_tokens: i,
+                    max_tokens: 100,
+                    regions: vec![runstate::RegionSnapshot {
+                        name: "notes".to_string(),
+                        kind: "pinned".to_string(),
+                        current_tokens: i,
                         max_tokens: 100,
-                        regions: vec![],
-                    },
-                    at: i as i64,
+                        entries: vec![runstate::RegionEntrySnapshot {
+                            content: format!("point {i}").into(),
+                            tokens: i,
+                            kind: leviath_core::region::EntryKind::Text,
+                            metadata: None,
+                            key: None,
+                            taint: Default::default(),
+                            reasoning: None,
+                        }],
+                        description: None,
+                    }],
                 },
             )
             .unwrap();
         }
-        std::fs::write(runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
     }
 
     #[test]
@@ -3243,36 +3244,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_from_run_state_new_agent_complete_interactive() {
-        crate::runstate::with_isolated_runs_dir(
-            "sync_from_run_state_new_agent_complete_interactive",
-            |_d| {
-                let run_id = "test-sync-new-complete-interactive";
-                cleanup_run(run_id);
-                let meta = make_run_meta(run_id, RunStatus::CompleteInteractive);
-                runstate::create_run(&meta).unwrap();
-                let req = interaction::InteractionRequest::free_text(
-                    "req1",
-                    "Any feedback?",
-                    "review",
-                    false,
-                );
-
-                let mut dash = make_test_dashboard();
-                dash.pending_interactions
-                    .insert(run_id.to_string(), req.clone());
-                dash.sync_from_run_state();
-
-                let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-                assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
-                assert!(agent.waiting_prompt.is_some());
-
-                cleanup_run(run_id);
-            },
-        );
-    }
-
-    #[test]
     fn sync_from_run_state_new_agent_toasts_after_initial_sync_waiting() {
         crate::runstate::with_isolated_runs_dir(
             "sync_from_run_state_new_agent_toasts_after_initial_sync_waiting",
@@ -3839,69 +3810,6 @@ mod tests {
                 let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
                 assert_eq!(agent.workdir, "/second/workdir");
                 assert!(!dash.display_indices.is_empty());
-
-                cleanup_run(run_id);
-            },
-        );
-    }
-
-    #[test]
-    fn sync_from_run_state_existing_agent_enters_complete_interactive_no_needs_input_toast() {
-        crate::runstate::with_isolated_runs_dir(
-            "sync_from_run_state_existing_agent_enters_complete_interactive_no_needs_input_toast",
-            |_d| {
-                // Exercise the branch where:
-                //   agent.waiting_prompt.is_none()          -> true  (agent was Active, no prompt yet)
-                //   && waiting_prompt.is_some()              -> true  (a pending request is present)
-                //   && matches!(run.status, WaitingInput)    -> FALSE (status is CompleteInteractive)
-                //
-                // The full condition is false, so no "needs input" toast is emitted
-                // (CompleteInteractive input is optional, unlike WaitingInput).
-                let run_id = "test-sync-ci-no-toast";
-                cleanup_run(run_id);
-                let meta = make_run_meta(run_id, RunStatus::Running);
-                runstate::create_run(&meta).unwrap();
-
-                let mut dash = make_test_dashboard();
-                dash.sync_from_run_state(); // first sync: agent is Active, waiting_prompt=None
-
-                // Transition to CompleteInteractive and write a pending request
-                let meta2 = make_run_meta(run_id, RunStatus::CompleteInteractive);
-                runstate::write_meta(&meta2).unwrap();
-                let req = interaction::InteractionRequest::free_text(
-                    "req-ci",
-                    "Any final feedback?",
-                    "review",
-                    false,
-                );
-                dash.pending_interactions
-                    .insert(run_id.to_string(), req.clone());
-
-                dash.toasts.clear(); // clear any earlier toasts
-                dash.sync_from_run_state();
-
-                let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-                assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
-                // waiting_prompt is populated (the request exists)
-                assert!(agent.waiting_prompt.is_some());
-                // Seed a toast that *does* contain `run_id` (but not "needs input")
-                // so the closure below's `has_id && has_tag` actually evaluates
-                // `has_tag` at least once - the real "completed" toast pushed by
-                // `sync_from_run_state` uses `truncate(&agent.blueprint_name, 20)`,
-                // and `run_id` here is longer than 20 chars, so it never contains
-                // the full `run_id` substring on its own.
-                dash.toasts.push(Toast {
-                    message: format!("{run_id}: unrelated toast"),
-                    remaining_ticks: 1,
-                    level: ToastLevel::Info,
-                });
-                // But no "needs input" toast because CompleteInteractive input is optional
-                let needs_input_toast = dash.toasts.iter().find(|t| {
-                    let has_id = t.message.contains(run_id);
-                    let has_tag = t.message.contains("needs input");
-                    has_id && has_tag
-                });
-                assert!(needs_input_toast.is_none());
 
                 cleanup_run(run_id);
             },
