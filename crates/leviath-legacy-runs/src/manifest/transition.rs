@@ -158,8 +158,8 @@ pub(super) fn parse_transitions(
 pub(super) fn parse_transition_gate(
     where_: &str,
     table: &toml::value::Table,
-) -> Result<leviath_runtime::spec::blueprint::TransitionGate> {
-    let mut gate = leviath_runtime::spec::blueprint::TransitionGate::default();
+) -> Result<crate::old::blueprint::TransitionGate> {
+    let mut gate = crate::old::blueprint::TransitionGate::default();
     if let Some(rm) = bool_of(table, "require_modifications") {
         gate.require_modifications = rm;
     }
@@ -196,7 +196,7 @@ pub(super) fn parse_transition_gate(
                 "{where_}: require_region_entries needs `at_least` of 1 or more"
             )));
         }
-        gate.require_region_entries = Some(leviath_runtime::spec::blueprint::RegionCount {
+        gate.require_region_entries = Some(crate::old::blueprint::RegionCount {
             region: region.to_string(),
             at_least,
         });
@@ -251,8 +251,8 @@ pub(super) fn parse_context_transform(t: &toml::Value) -> ContextTransform {
 pub(super) fn parse_nudge_config(
     where_: &str,
     table: &toml::value::Table,
-) -> Result<leviath_runtime::spec::blueprint::NudgeConfig> {
-    let mut nudge = leviath_runtime::spec::blueprint::NudgeConfig::default();
+) -> Result<crate::old::blueprint::NudgeConfig> {
+    let mut nudge = crate::old::blueprint::NudgeConfig::default();
     if let Some(enabled) = bool_of(table, "enabled") {
         nudge.enabled = Some(enabled);
     }

@@ -111,20 +111,17 @@ fn host_with(responses: Vec<InferenceResponse>) -> WorldHost {
     WorldHost::new(world)
 }
 
-fn blueprint() -> crate::spec::Blueprint {
-    let layout = crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "conversation".to_string(),
-            RegionKind::Clearable,
-            10_000,
-        )],
+fn blueprint() -> crate::spec::graph::RunGraph {
+    use crate::test_graph as g;
+    let layout = g::layout(
+        vec![g::region("conversation", RegionKind::Clearable, 10_000)],
         12_000,
     );
-    let s = crate::spec::Stage::new(
-        "s".to_string(),
-        crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
-    );
-    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+    let s = crate::spec::graph::StageDef {
+        model: g::model("script", "m"),
+        ..g::stage("s")
+    };
+    g::graph(vec![s], layout)
 }
 
 fn window() -> crate::components::ContextWindow {
@@ -208,11 +205,15 @@ fn setup() -> StageSetup {
     }
 }
 
-/// A blueprint as the spec a spawn of it runs, every stage on [`si`].
-fn spec(bp: crate::spec::Blueprint) -> crate::insert::RunSpecC {
-    let infs: Vec<StageInference> = bp.stages.iter().map(|_| si()).collect();
-    let spec = crate::spec_bridge::test_support::spec_of_blueprint(&bp, "t-run", &infs);
-    crate::insert::RunSpecC(Arc::new(spec))
+/// A graph as the spec a spawn of it runs, every stage on [`si`] with no
+/// context window of its own.
+fn spec(graph: crate::spec::graph::RunGraph) -> crate::insert::RunSpecC {
+    let infs: Vec<StageInference> = graph.stages.iter().map(|_| si()).collect();
+    let mut spec = crate::test_graph::spec_with(graph, &infs);
+    for plan in &mut Arc::make_mut(&mut spec.0).stages {
+        plan.context_window = 0;
+    }
+    spec
 }
 
 /// Spawn a simple agent into the host and register it under `run_id`.
@@ -571,27 +572,29 @@ async fn serve_redrives_the_world_on_its_own_timer_with_no_wake() {
 /// A two-stage linear blueprint (`one` -> `two`), for the stage-boundary
 /// tests. No transitions declared, so the graph goes from `one` to `two`
 /// along its fall-through edge, which is the ordinary case.
-fn two_stage_blueprint() -> crate::spec::Blueprint {
-    let layout = crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "conversation".to_string(),
-            RegionKind::Clearable,
-            10_000,
-        )],
+fn two_stage_blueprint() -> crate::spec::graph::RunGraph {
+    use crate::test_graph as g;
+    let layout = g::layout(
+        vec![g::region("conversation", RegionKind::Clearable, 10_000)],
         12_000,
     );
-    let model = crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string());
+    let model = g::model("script", "m");
     // Both stages end by running out of iterations, which is how a stage that
     // keeps calling tools finishes. That boundary is the one the driver used
     // to miss: `enforce_max_iterations` and `resolve_transition` both run in
     // the same tick, so the agent leaves `ReadyToInfer` and comes back to it
     // with every marker count exactly as it was.
-    let mut one = crate::spec::Stage::new("one".to_string(), model.clone());
-    one.max_iterations = Some(1);
-    let mut two = crate::spec::Stage::new("two".to_string(), model);
-    two.max_iterations = Some(1);
-    let stages = vec![one, two];
-    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    let one = crate::spec::graph::StageDef {
+        model: model.clone(),
+        max_iterations: Some(1),
+        ..g::stage("one")
+    };
+    let two = crate::spec::graph::StageDef {
+        model,
+        max_iterations: Some(1),
+        ..g::stage("two")
+    };
+    g::graph(vec![one, two], layout)
 }
 
 /// Spawn an agent that starts at stage `one` of [`two_stage_blueprint`].

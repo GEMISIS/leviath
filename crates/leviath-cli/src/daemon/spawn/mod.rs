@@ -57,7 +57,7 @@ pub(crate) mod tests {
             assert_eq!(
                 parsed
                     .iter()
-                    .map(|e| (e.provider.as_str(), e.model.as_str()))
+                    .map(|e| (e.provider_or_empty(), e.model.as_str()))
                     .collect::<Vec<_>>(),
                 vec![
                     ("openrouter", "deepseek/deepseek-v4-flash"),
@@ -81,7 +81,7 @@ pub(crate) mod tests {
         assert_eq!(defaults.override_model.as_deref(), Some("deepseek"));
         assert_eq!(defaults.fallback_model.as_deref(), Some("flash"));
         assert_eq!(defaults.fallback_order.len(), 1);
-        assert_eq!(defaults.fallback_order[0].provider, "anthropic");
+        assert_eq!(defaults.fallback_order[0].provider_or_empty(), "anthropic");
     }
 
     #[test]

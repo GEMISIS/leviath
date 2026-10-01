@@ -9,8 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::spec::layout::ContextLayout;
-use leviath_core::error::ValidationError;
+use crate::old::layout::ContextLayout;
 
 // The sibling sections, reached through the parent's glob re-exports so a type
 // moving between them does not touch this import list.
@@ -177,11 +176,7 @@ pub struct FanOutConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_stage: Option<String>,
     /// Most workers running at once. Defaults to [`DEFAULT_MAX_WORKERS`].
-    ///
-    /// `0` means unlimited: every work item starts as soon as the split has
-    /// produced it, and the daemon's inference pool (`[limits]
-    /// max_concurrent_inferences`) is what paces the requests. Read it through
-    /// [`Self::worker_cap`] rather than comparing against zero by hand.
+    /// `0` means unlimited.
     #[serde(default = "default_max_workers")]
     pub max_workers: usize,
     /// How to handle worker failures.
@@ -215,7 +210,7 @@ pub struct FanOutConfig {
 
     /// How many times this stage is asked again when it ends without having
     /// called the fan-out tool, before it is let through without workers.
-    /// `None` means [`DEFAULT_FAN_OUT_ATTEMPTS`].
+    /// `None` takes the run's default.
     ///
     /// Starting the workers is the whole job of a fan-out stage, so a model
     /// that answers in prose instead is asked again. The budget is bounded
@@ -234,26 +229,7 @@ pub struct FanOutConfig {
     pub max_attempts: Option<usize>,
 }
 
-impl FanOutConfig {
-    /// The concurrency cap as an option: `Some(n)` for `max_workers = n`,
-    /// `None` when the stage is unlimited (`max_workers = 0`).
-    ///
-    /// The runtime and the API both want the question answered this way, and
-    /// answering it in one place keeps "zero is unlimited" from being restated
-    /// wherever the number is read.
-    pub fn worker_cap(&self) -> Option<usize> {
-        (self.max_workers > 0).then_some(self.max_workers)
-    }
-}
-
-/// Times a fan-out stage is asked again to start its workers before it is let
-/// through without them, when it sets no `max_attempts`.
-///
-/// Matches [`DEFAULT_GATE_ATTEMPTS`](crate::spec::blueprint::DEFAULT_GATE_ATTEMPTS)
-/// and the missing-output budget, for the same reason all three are bounded: a
-/// model that cannot produce the one thing its stage is for should cost a fixed
-/// number of prompts, not an open-ended retry.
-pub const DEFAULT_FAN_OUT_ATTEMPTS: usize = 3;
+impl FanOutConfig {}
 
 /// `max_workers` when a fan-out stage does not set one.
 ///
@@ -425,36 +401,6 @@ impl StageHooks {
             && self.on_completion.is_none()
             && self.on_error.is_none()
     }
-
-    /// Every script path this stage declares, with the hook it backs.
-    ///
-    /// Returned as pairs rather than a set because the same file may back more
-    /// than one hook, and the caller needs to know which function to look for.
-    pub fn declared(&self) -> Vec<(&'static str, &str)> {
-        let mut out = Vec::new();
-        if let Some(p) = self.on_stage_enter.as_deref() {
-            out.push(("on_stage_enter", p));
-        }
-        if let Some(p) = self.on_stage_exit.as_deref() {
-            out.push(("on_stage_exit", p));
-        }
-        if let Some(p) = self.before_inference.as_deref() {
-            out.push(("before_inference", p));
-        }
-        if let Some(p) = self.after_inference.as_deref() {
-            out.push(("after_inference", p));
-        }
-        if let Some(p) = self.on_tool_call.as_deref() {
-            out.push(("on_tool_call", p));
-        }
-        if let Some(p) = self.on_completion.as_deref() {
-            out.push(("on_completion", p));
-        }
-        if let Some(p) = self.on_error.as_deref() {
-            out.push(("on_error", p));
-        }
-        out
-    }
 }
 
 /// A single execution stage in an agent's workflow.
@@ -484,7 +430,7 @@ pub struct Stage {
     /// Tool names, exact-match and alias-aware, plus any number of group
     /// tokens (`@all`, `@builtin`, `@subagent`, `@scripts`, `@mcp`) that each
     /// stand for a whole source and resolve at spawn against what the install
-    /// has then. See [`ToolGroup`](super::ToolGroup).
+    /// has then. See [`ToolGroup`].
     pub available_tools: Vec<String>,
 
     /// Human-in-the-loop tools (`ask_user_*`, `present_for_review`,
@@ -642,7 +588,7 @@ pub struct Stage {
     /// inherits the agent-level `Blueprint.nudge` (which in turn inherits the
     /// global config's `[nudge]` section). A stage whose deliverable is text -
     /// a planner, a briefing writer - sets `enabled = false` here so it is
-    /// never told to "use your tools". See [`resolve_nudge`].
+    /// never told to "use your tools".
     #[serde(default)]
     pub nudge: Option<NudgeConfig>,
 
@@ -685,8 +631,7 @@ pub struct Stage {
 
     /// Mime type patterns this stage takes as parts, when the regions it
     /// sees do not already say (`[stages.<name>.input] accepts`). Empty means
-    /// "whatever the visible regions accept"; see
-    /// [`Blueprint::stage_inputs`](crate::spec::Blueprint::stage_inputs).
+    /// "whatever the visible regions accept".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_accepts: Vec<String>,
 
@@ -724,17 +669,6 @@ pub struct Stage {
     /// and nothing about the scripting engine is touched for this stage.
     #[serde(default, skip_serializing_if = "StageHooks::is_empty")]
     pub hooks: StageHooks,
-}
-
-/// How specific a mime routing pattern is, so the most specific match wins:
-/// an exact `type/subtype` (2) beats a family `type/*` (1) beats the catch-all
-/// `*/*` (0). Mirrors the resolution order the mime registry itself uses.
-fn mime_pattern_specificity(pattern: &str) -> u8 {
-    match pattern {
-        "*/*" => 0,
-        p if p.ends_with("/*") => 1,
-        _ => 2,
-    }
 }
 
 impl Stage {
@@ -778,146 +712,9 @@ impl Stage {
         }
     }
 
-    /// The region a produced part of `mime_type` routes to under
-    /// [`Self::output_routing`], or `None` to leave it in `conversation`.
-    ///
-    /// The most specific matching pattern wins, so a table with both
-    /// `image/png` and `image/*` sends a PNG to the first and every other
-    /// image to the second, whatever order they appear in.
-    pub fn route_for_mime(&self, mime_type: &leviath_core::mime::MimeType) -> Option<&str> {
-        self.output_routing
-            .iter()
-            .filter(|(pattern, _)| mime_type.matches(pattern))
-            .max_by_key(|(pattern, _)| mime_pattern_specificity(pattern))
-            .map(|(_, region)| region.as_str())
-    }
-
-    /// Add tools to this stage.
-    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
-        self.available_tools = tools;
-        self
-    }
-
     /// Set the interaction mode for this stage.
     pub fn with_mode(mut self, mode: StageMode) -> Self {
         self.mode = mode;
         self
-    }
-
-    /// Set a stage-specific context layout.
-    pub fn with_context_layout(mut self, layout: ContextLayout) -> Self {
-        self.context_layout = Some(layout);
-        self
-    }
-
-    /// Set the description for this stage.
-    pub fn with_description(mut self, description: String) -> Self {
-        self.description = Some(description);
-        self
-    }
-
-    /// The groups this stage's `available_tools` names, in list order.
-    pub fn tool_groups(&self) -> Vec<ToolGroup> {
-        super::groups_in(&self.available_tools)
-    }
-
-    /// Whether `available_tools` grants `group` outright, or through `@all`.
-    pub fn grants_group(&self, group: ToolGroup) -> bool {
-        self.tool_groups().iter().any(|g| g.covers(group))
-    }
-
-    /// Whether every built-in tool is granted, by `@builtin` or `@all`.
-    ///
-    /// The question every reader of `available_tools` that looks for one
-    /// particular built-in (`context_write`, `edit_file`, `shell`) has to
-    /// ask first, because with a group in the list the name is not there and
-    /// the tool is.
-    pub fn grants_all_builtins(&self) -> bool {
-        self.grants_group(ToolGroup::Builtin)
-    }
-
-    /// The entries of `available_tools` that name a tool rather than a group.
-    pub fn named_tools(&self) -> impl Iterator<Item = &String> {
-        self.available_tools
-            .iter()
-            .filter(|t| !super::is_tool_group_token(t))
-    }
-
-    /// The mime type patterns `tool` may be handed at this stage, when the
-    /// stage limits it; `None` when it does not.
-    pub fn tool_limit(&self, tool: &str) -> Option<&[String]> {
-        self.tool_accepts.get(tool).map(Vec::as_slice)
-    }
-
-    /// Validate that this stage is well-formed.
-    pub(super) fn validate(&self) -> std::result::Result<(), ValidationError> {
-        if self.name.is_empty() {
-            return Err(ValidationError::Stage {
-                stage: "(empty)".to_string(),
-                message: "stage name cannot be empty".to_string(),
-            });
-        }
-
-        // A group-shaped entry that names no group (`@builtins`, `@ALL`) can
-        // match nothing, ever - and unlike a misspelled tool name, which the
-        // lint reports against the install's inventory, this one is wrong on
-        // the manifest's own terms.
-        if let Some(entry) = self
-            .available_tools
-            .iter()
-            .find(|t| super::unknown_group(t))
-        {
-            return Err(ValidationError::Stage {
-                stage: self.name.clone(),
-                message: format!(
-                    "available_tools entry '{entry}' looks like a tool group but names none; \
-                     the groups are {}",
-                    super::group_tokens_list()
-                ),
-            });
-        }
-
-        // A `required_tools` entry the stage can't call is dead text: it looks
-        // like it keeps a tool through an unattended run, and keeps nothing.
-        // Rejected rather than ignored so the typo surfaces at `lev validate`
-        // instead of at 3am in a `--yolo` run.
-        //
-        // A group grant makes the membership question unanswerable here (which
-        // tools `@builtin` covers is the install's to say), so with one present
-        // the name is only checked by the lint, which can see the inventory.
-        let grants_a_group = !self.tool_groups().is_empty();
-        for tool in &self.required_tools {
-            if !grants_a_group && !self.available_tools.contains(tool) {
-                return Err(ValidationError::Stage {
-                    stage: self.name.clone(),
-                    message: format!(
-                        "required_tools entry '{}' is not in available_tools - a tool the \
-                         stage cannot call can't be kept through an unattended run",
-                        tool
-                    ),
-                });
-            }
-        }
-
-        // A stage told to produce a final output that cannot call the tool would
-        // burn its whole re-entry budget being nudged toward a tool it was never
-        // offered, then give up. `mode = "output"` grants the tool at parse time,
-        // so reaching this means someone set `require_output` by hand.
-        if self.require_output && !self.available_tools.iter().any(|t| t == SUBMIT_OUTPUT_TOOL) {
-            return Err(ValidationError::Stage {
-                stage: self.name.clone(),
-                message: format!(
-                    "require_output is set but '{SUBMIT_OUTPUT_TOOL}' is not in available_tools - \
-                     the stage cannot produce the output it is required to produce"
-                ),
-            });
-        }
-
-        // Validate stage-specific context layout if present
-        if let Some(layout) = &self.context_layout {
-            layout.validate()?;
-        }
-
-        Ok(())
     }
 }

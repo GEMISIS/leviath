@@ -505,3 +505,183 @@ fn a_worker_named_by_a_path_is_a_blueprint_file() {
     let json = serde_json::to_string(&WorkerSource::named(&text).unwrap()).unwrap();
     assert!(json.starts_with("{\"blueprint_file\":"), "{json}");
 }
+
+fn percent(percent: f64, min: Option<u32>, max: Option<u32>) -> Budget {
+    Budget::Percent { percent, min, max }
+}
+
+#[test]
+fn an_absolute_budget_ignores_the_window() {
+    assert_eq!(Budget::Tokens(4000).resolve(1_000_000), 4000);
+    assert_eq!(Budget::Tokens(4000).resolve(0), 4000);
+}
+
+#[test]
+fn a_percentage_budget_is_its_share_of_the_window_rounded() {
+    assert_eq!(percent(0.35, None, None).resolve(1_000_000), 350_000);
+    assert_eq!(percent(0.5, None, None).resolve(1001), 501);
+}
+
+#[test]
+fn a_percentage_budget_is_capped_then_floored_and_the_floor_wins() {
+    // The cap keeps 35% of a huge window from ballooning.
+    assert_eq!(percent(0.35, None, Some(4000)).resolve(1_000_000), 4000);
+    // The floor keeps a small window from starving the region.
+    assert_eq!(percent(0.25, Some(2000), None).resolve(4000), 2000);
+    // Inside both bounds, neither applies.
+    assert_eq!(
+        percent(0.1, Some(10_000), Some(30_000)).resolve(200_000),
+        20_000
+    );
+    // A floor above the cap wins.
+    assert_eq!(percent(0.1, Some(9000), Some(5000)).resolve(200_000), 9000);
+}
+
+#[test]
+fn an_output_cap_resolves_against_the_model_and_the_regions() {
+    let budgets = |region: &str| (region == "claims").then_some(2000);
+    assert_eq!(
+        OutputCap::Tokens(8000).resolve(100_000, 4000, budgets),
+        8000
+    );
+    assert_eq!(
+        OutputCap::WindowPercent(0.01).resolve(100_000, 4000, budgets),
+        1000
+    );
+    assert_eq!(
+        OutputCap::WindowPercent(0.5).resolve(100_000, 4000, budgets),
+        4000,
+        "a relative cap is held to the model's own maximum"
+    );
+    let of = |region: &str| OutputCap::RegionPercent {
+        percent: 0.5,
+        region: RegionName::new(region).unwrap(),
+    };
+    assert_eq!(of("claims").resolve(100_000, 4000, budgets), 1000);
+    assert_eq!(
+        of("gone").resolve(100_000, 4000, budgets),
+        4000,
+        "a region the stage lacks asks for the model's maximum"
+    );
+    assert_eq!(
+        OutputCap::WindowPercent(0.0).resolve(100_000, 4000, budgets),
+        1,
+        "never less than one token"
+    );
+}
+
+#[test]
+fn a_tool_group_is_written_and_read_as_its_token() {
+    for group in ToolGroup::ALL {
+        assert!(ToolGroup::is_token(group.token()));
+        assert_eq!(ToolGroup::parse(group.token()), Some(group));
+    }
+    assert_eq!(ToolGroup::Mcp.token(), "@mcp");
+    assert_eq!(ToolGroup::parse("read_file"), None);
+    assert_eq!(ToolGroup::parse("@builtins"), None);
+    assert!(ToolGroup::is_token("@builtins"));
+    assert!(!ToolGroup::is_token("read_file"));
+    let entries: Vec<String> = ["@mcp", "read_file", "@all", "@mcp", "@nope"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        ToolGroup::named_in(&entries),
+        vec![ToolGroup::Mcp, ToolGroup::All]
+    );
+    assert!(ToolGroup::All.covers(ToolGroup::Scripts));
+    assert!(ToolGroup::Scripts.covers(ToolGroup::Scripts));
+    assert!(!ToolGroup::Builtin.covers(ToolGroup::Mcp));
+}
+
+#[test]
+fn a_nudge_takes_each_setting_from_the_narrowest_level_that_sets_it() {
+    let nothing = NudgeDef::resolve(None, None, None, false);
+    assert!(nothing.enabled);
+    assert_eq!(nothing.max, DEFAULT_MAX_NUDGES);
+    assert_eq!(nothing.text, DEFAULT_NUDGE_TEXT);
+    let global = NudgeDef {
+        enabled: Some(false),
+        max: Some(7),
+        text: Some("global".into()),
+    };
+    let graph = NudgeDef {
+        enabled: None,
+        max: Some(5),
+        text: Some("graph".into()),
+    };
+    let stage = NudgeDef {
+        enabled: None,
+        max: Some(1),
+        text: None,
+    };
+    let got = NudgeDef::resolve(Some(&global), Some(&graph), Some(&stage), false);
+    assert_eq!(
+        (got.enabled, got.max, got.text.as_str()),
+        (false, 1, "graph")
+    );
+    let got = NudgeDef::resolve(Some(&global), None, None, false);
+    assert_eq!(
+        (got.enabled, got.max, got.text.as_str()),
+        (false, 7, "global")
+    );
+    // Being reviewed only changes the default for `enabled`.
+    assert!(!NudgeDef::resolve(None, Some(&graph), None, true).enabled);
+    let on = NudgeDef {
+        enabled: Some(true),
+        ..Default::default()
+    };
+    assert!(NudgeDef::resolve(None, None, Some(&on), true).enabled);
+}
+
+#[test]
+fn a_stage_takes_its_own_input_types_or_its_regions() {
+    let mut graph = minimal();
+    let mime = |m: &str| crate::spec::names::MimePattern::new(m).unwrap();
+    // Every region accepts anything, which reads as `*/*`, once.
+    assert_eq!(
+        graph.stage_inputs(&graph.stages[0]),
+        vec!["*/*".to_string()]
+    );
+    graph.layout.regions[0].accepts = vec![mime("image/*"), mime("text/plain")];
+    graph.layout.regions[1].accepts = vec![mime("application/pdf"), mime("image/*")];
+    assert_eq!(
+        graph.stage_inputs(&graph.stages[0]),
+        vec!["image/*".to_string(), "application/pdf".to_string()],
+        "text is always taken and never listed"
+    );
+    graph.stages[0].hide = vec![RegionName::new("system").unwrap()];
+    assert_eq!(
+        graph.stage_inputs(&graph.stages[0]),
+        vec!["application/pdf".to_string(), "image/*".to_string()],
+        "a hidden region is not read"
+    );
+    graph.stages[0].input_accepts = vec![mime("audio/*")];
+    assert_eq!(
+        graph.stage_inputs(&graph.stages[0]),
+        vec!["audio/*".to_string()],
+        "the stage's own list wins"
+    );
+}
+
+/// An artifact whose mime type does not read is reported at its place and
+/// left out of the shape.
+#[test]
+fn an_output_artifact_with_a_bad_mime_type_is_reported() {
+    let spec = leviath_core::output::OutputSpec {
+        artifacts: vec![leviath_core::output::ArtifactSpec {
+            name: "chart".into(),
+            mime_type: "not a type".into(),
+            required: true,
+            description: None,
+        }],
+        ..Default::default()
+    };
+    let issues = OutputDef::from_output_spec(&spec).unwrap_err();
+    assert!(issues.to_string().contains("artifacts[0]"), "{issues}");
+    let mut good = spec.clone();
+    good.artifacts[0].mime_type = "image/png".into();
+    let def = OutputDef::from_output_spec(&good).unwrap();
+    assert_eq!(def.artifacts[0].mime_type.as_str(), "image/png");
+    assert!(def.artifacts[0].required);
+}

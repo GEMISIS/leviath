@@ -379,7 +379,7 @@ impl Dashboard {
                             r.name.to_string(),
                             r.accepts.iter().map(|p| p.as_str().to_string()).collect(),
                             r.required,
-                            leviath_runtime::context_setup::budget_tokens(&r.budget, window),
+                            r.budget.resolve(window),
                         )
                     })
                     .collect();

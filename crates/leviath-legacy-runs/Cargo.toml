@@ -19,9 +19,8 @@ publish = false
 # `migrate` writes an `agent.toml`.
 leviath-blueprint = { workspace = true }
 leviath-core = { workspace = true }
-# The old manifest parser reads into the runtime's parsed blueprint, and
-# `RunGraph::from_blueprint` reads that as a run graph.
-leviath-runtime = { workspace = true, features = ["legacy-blueprint"] }
+# The old manifest is read as a run graph of the runtime's.
+leviath-runtime = { workspace = true }
 # The run file is written owner-only, like every run file.
 leviath-sys = { workspace = true }
 serde = { workspace = true }

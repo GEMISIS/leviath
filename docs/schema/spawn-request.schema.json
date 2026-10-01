@@ -690,7 +690,7 @@
           ]
         },
         "max_workers": {
-          "default": 4,
+          "default": 30,
           "description": "The most workers at once.",
           "format": "uint32",
           "minimum": 0,

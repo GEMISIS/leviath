@@ -219,7 +219,7 @@ pub(crate) struct OwnWorldId(pub WorldId);
 ///
 /// The provenance has to travel *with* the id, which is what this is. It cannot
 /// be built outside this module: the only sources are [`PipelineWorld::spawn_agent`]
-/// and `PipelineWorld::spawn_from_blueprint`, so an id always names an agent
+/// and `PipelineWorld::spawn_from_graph`, so an id always names an agent
 /// in the world that minted it.
 ///
 /// A tag component on the agent was tried first and does not work: looking the
@@ -751,14 +751,14 @@ impl PipelineWorld {
         }
     }
 
-    /// Spawn an agent from a blueprint + task + per-stage resolution (see
+    /// Spawn an agent from a graph + task + per-stage resolution (see
     /// [`crate::pipeline::spawn_agent`]) and wake the driver. Returns the new
     /// entity, or an error if the first stage's system prompt doesn't fit.
     #[cfg(test)]
-    pub(crate) fn spawn_from_blueprint(
+    pub(crate) fn spawn_from_graph(
         &mut self,
         agent_id: String,
-        blueprint: crate::spec::Blueprint,
+        graph: crate::spec::graph::RunGraph,
         task: &str,
         stages: Vec<crate::pipeline::ResolvedStage>,
         global_hints: leviath_core::config::PromptHints,
@@ -766,7 +766,7 @@ impl PipelineWorld {
         let entity = crate::pipeline::spawn_agent(
             &mut self.world,
             agent_id,
-            blueprint,
+            graph,
             task,
             stages,
             global_hints,
@@ -1399,26 +1399,23 @@ mod tests {
         }
     }
 
-    fn blueprint() -> crate::spec::Blueprint {
-        let layout = crate::spec::layout::ContextLayout::new(
-            vec![crate::spec::layout::RegionDefinition::new(
-                "conversation".to_string(),
-                RegionKind::Clearable,
-                10_000,
-            )],
+    fn blueprint() -> crate::spec::graph::RunGraph {
+        use crate::test_graph as g;
+        let layout = g::layout(
+            vec![g::region("conversation", RegionKind::Clearable, 10_000)],
             12_000,
         );
-        let s = crate::spec::Stage::new(
-            "s".to_string(),
-            crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+        let s = crate::spec::graph::StageDef {
+            model: g::model("script", "m"),
+            ..g::stage("s")
+        };
+        g::graph(vec![s], layout)
     }
 
     /// Spawn a single-stage agent, initially ready to infer.
     fn spawn(world: &mut PipelineWorld) -> AgentId {
         world.spawn_agent((
-            crate::spec_bridge::test_support::both(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -1809,12 +1806,12 @@ mod tests {
         // would keep the driver looping past run_until_idle's budget.
         let mut world = build_world(registry_with(vec![text("thinking"), text("final")]));
         let mut bp = blueprint();
-        bp.nudge = Some(crate::spec::NudgeConfig {
+        bp.nudge = Some(crate::spec::graph::NudgeDef {
             max: Some(1),
             ..Default::default()
         });
         let e = world.spawn_agent((
-            crate::spec_bridge::test_support::both(bp),
+            crate::test_graph::both(bp),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2296,11 +2293,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_from_blueprint_builds_a_runnable_agent() {
-        // End-to-end via the blueprint resolver: build → drive → complete.
+    async fn spawn_from_graph_builds_a_runnable_agent() {
+        // End-to-end via the graph spawn: build → drive → complete.
         let mut world = build_world(registry_with(vec![with_tool("c1", "do"), text("done")]));
         let e = world
-            .spawn_from_blueprint(
+            .spawn_from_graph(
                 "agent-1".to_string(),
                 blueprint(),
                 "do the task",
@@ -2327,32 +2324,6 @@ mod tests {
         world.run_until_idle(20).await;
 
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
-    }
-
-    /// A blueprint that parsed but cannot be read as a run graph is refused
-    /// at spawn, naming the field that did not fit.
-    #[tokio::test]
-    async fn spawn_from_blueprint_refuses_a_blueprint_that_is_not_a_graph() {
-        let mut world = build_world(registry_with(vec![text("done")]));
-        let mut bp = blueprint();
-        bp.stages[0].available_tools = vec!["bad tool".to_string()];
-        let err = world
-            .spawn_from_blueprint(
-                "agent-1".to_string(),
-                bp,
-                "do the task",
-                vec![crate::pipeline::ResolvedStage {
-                    provider_name: "script".to_string(),
-                    model: "m".to_string(),
-                    tools: vec![],
-                    fallbacks: Vec::new(),
-                    output: None,
-                    notes: Vec::new(),
-                }],
-                hints(true),
-            )
-            .unwrap_err();
-        assert!(err.contains("tools[0]"), "{err}");
     }
 
     /// The run `run_id` under `runs` as its run file lists it, once it has
@@ -2396,7 +2367,7 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            crate::spec_bridge::test_support::both(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2480,7 +2451,7 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            crate::spec_bridge::test_support::both(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2532,35 +2503,30 @@ mod tests {
 
     /// A single-stage blueprint whose stage is an `interactive_points` stage with a
     /// `plan_approval` point (the shape that blocks awaiting human approval).
-    fn interactive_blueprint() -> crate::spec::Blueprint {
-        use crate::spec::blueprint::{InteractionPoint, InteractionStyle, StageMode};
-        let layout = crate::spec::layout::ContextLayout::new(
-            vec![crate::spec::layout::RegionDefinition::new(
-                "conversation".to_string(),
-                RegionKind::Clearable,
-                10_000,
-            )],
+    fn interactive_blueprint() -> crate::spec::graph::RunGraph {
+        use crate::spec::graph::{AnswerStyle, InteractionPointDef, StageMode, UnattendedPoint};
+        use crate::test_graph as g;
+        let layout = g::layout(
+            vec![g::region("conversation", RegionKind::Clearable, 10_000)],
             12_000,
         );
-        let mut s = crate::spec::Stage::new(
-            "plan".to_string(),
-            crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        s.mode = StageMode::InteractivePoints {
-            points: vec![InteractionPoint {
-                name: "plan_approval".to_string(),
-                prompt: "Approve?".to_string(),
-                required: true,
-                unattended: crate::spec::blueprint::UnattendedPolicy::AutoApprove,
-                style: InteractionStyle::MultipleChoice,
-                options: vec!["Approve".to_string(), "Abort".to_string()],
-                directives: std::collections::HashMap::new(),
-                abort_options: vec!["Abort".to_string()],
-                edit_options: vec![],
-                document_region: None,
-            }],
+        let mut s = crate::spec::graph::StageDef {
+            model: g::model("script", "m"),
+            ..g::stage("plan")
         };
-        crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+        s.mode = StageMode::InteractivePoints(vec![InteractionPointDef {
+            name: "plan_approval".to_string(),
+            prompt: "Approve?".to_string(),
+            required: true,
+            unattended: UnattendedPoint::AutoApprove,
+            style: AnswerStyle::MultipleChoice,
+            options: vec!["Approve".to_string(), "Abort".to_string()],
+            directives: std::collections::BTreeMap::new(),
+            abort_options: vec!["Abort".to_string()],
+            edit_options: vec![],
+            document_region: None,
+        }]);
+        g::graph(vec![s], layout)
     }
 
     #[tokio::test]
@@ -2581,7 +2547,7 @@ mod tests {
         );
         world.insert_interaction_hub(crate::interaction_hub::InteractionHub::new());
         let e = world.spawn_agent((
-            crate::spec_bridge::test_support::both(interactive_blueprint()),
+            crate::test_graph::both(interactive_blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2696,7 +2662,7 @@ mod tests {
             Handle::current(),
         );
         world.spawn_agent((
-            crate::spec_bridge::test_support::both(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2768,7 +2734,7 @@ mod tests {
             Handle::current(),
         );
         let entity = world.spawn_agent((
-            crate::spec_bridge::test_support::both(blueprint()),
+            crate::test_graph::both(blueprint()),
             StageCursor { index: 0 },
             agent_state(),
             crate::components::MessageInbox::default(),
@@ -2826,7 +2792,7 @@ mod tests {
             Some(dir.path().to_path_buf()),
             Handle::current(),
         );
-        let spec = crate::spec_bridge::test_support::both(blueprint()).0;
+        let spec = crate::test_graph::both(blueprint()).0;
         let mut state = crate::insert::initial_state(&spec);
         state.cursor.iteration = 3;
         let entity = crate::restore::resume(
@@ -2851,29 +2817,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_from_blueprint_errors_on_oversized_system_prompt() {
+    async fn spawn_from_graph_errors_on_oversized_system_prompt() {
         let mut world = build_world(registry_with(vec![]));
-        // A blueprint whose stage carries an enormous system prompt in a tiny
+        // A graph whose stage carries an enormous system prompt in a tiny
         // pinned region overflows at spawn.
-        let layout = crate::spec::layout::ContextLayout::new(
-            vec![crate::spec::layout::RegionDefinition::new(
-                "task".to_string(),
-                RegionKind::Pinned,
-                50,
-            )],
-            1000,
-        );
-        let mut s = crate::spec::Stage::new(
-            "s".to_string(),
-            crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
-        );
-        s.config.insert(
-            "system_prompt".to_string(),
-            serde_json::Value::String("x".repeat(100_000)),
-        );
-        let bp = crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+        use crate::test_graph as g;
+        let layout = g::layout(vec![g::region("task", RegionKind::Pinned, 50)], 1000);
+        let s = crate::spec::graph::StageDef {
+            model: g::model("script", "m"),
+            system_prompt: Some("x".repeat(100_000)),
+            ..g::stage("s")
+        };
+        let bp = g::graph(vec![s], layout);
 
-        let err = world.spawn_from_blueprint(
+        let err = world.spawn_from_graph(
             "a".to_string(),
             bp,
             "task",

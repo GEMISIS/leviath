@@ -17,9 +17,6 @@ readme = "README.md"
 # file). Off by default so embedders compile a runtime with no daemon
 # machinery; the CLI turns it on.
 control-socket = ["dep:rand"]
-# `RunGraph::from_blueprint`, which reads the old parsed blueprint as a run
-# graph. Off by default: only the crate that converts old runs turns it on.
-legacy-blueprint = []
 
 [dependencies]
 leviath-core = { workspace = true }

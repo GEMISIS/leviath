@@ -152,14 +152,15 @@ impl AgentWorldBuilder {
     ///
     /// Call it once per target, best first. This is what keeps a blueprint
     /// that names exactly one model running when that provider runs out of
-    /// credits.
+    /// credits. A provider or model id that is not a valid name (one with
+    /// whitespace in it, say) names nowhere a request could go, and is left
+    /// out with a warning.
     pub fn fallback_route(mut self, provider: impl Into<String>, model: impl Into<String>) -> Self {
-        self.defaults
-            .fallback_order
-            .push(crate::spec::blueprint::ModelEntry::new(
-                provider.into(),
-                model.into(),
-            ));
+        let (provider, model) = (provider.into(), model.into());
+        match crate::spec::names::ModelRef::parse(&format!("{provider}/{model}")) {
+            Ok(route) => self.defaults.fallback_order.push(route),
+            Err(e) => tracing::warn!(%provider, %model, "ignoring a fallback route: {e}"),
+        }
         self
     }
 
@@ -1227,10 +1228,20 @@ budget = 20000
                 .defaults
                 .fallback_order
                 .iter()
-                .map(|e| (e.provider.as_str(), e.model.as_str()))
+                .map(|e| (e.provider_or_empty(), e.model.as_str()))
                 .collect::<Vec<_>>(),
             vec![("anthropic", "sonnet"), ("openai", "gpt")]
         );
+    }
+
+    /// A route whose model id is not a valid name goes nowhere, so it is left
+    /// out rather than carried into every stage's failover chain.
+    #[test]
+    fn a_fallback_route_that_names_nothing_is_left_out() {
+        crate::test_support::with_tracing(|| {
+            let builder = AgentWorldBuilder::new().fallback_route("openai", "has space");
+            assert!(builder.defaults.fallback_order.is_empty());
+        });
     }
 
     #[tokio::test]

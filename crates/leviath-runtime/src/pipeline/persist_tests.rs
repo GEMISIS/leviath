@@ -122,20 +122,21 @@ fn setup() -> StageSetup {
     }
 }
 
-fn blueprint() -> crate::spec::Blueprint {
-    let layout = crate::spec::layout::ContextLayout::new(
-        vec![crate::spec::layout::RegionDefinition::new(
-            "conversation".to_string(),
-            RegionKind::Clearable,
-            10_000,
-        )],
-        12_000,
+fn graph() -> crate::spec::graph::RunGraph {
+    use crate::test_graph::{layout, model, region, stage};
+    let s = crate::spec::graph::StageDef {
+        model: model("script", "m"),
+        ..stage("s")
+    };
+    let mut graph = crate::test_graph::graph(
+        vec![s],
+        layout(
+            vec![region("conversation", RegionKind::Clearable, 10_000)],
+            12_000,
+        ),
     );
-    let s = crate::spec::Stage::new(
-        "s".to_string(),
-        crate::spec::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
-    );
-    crate::spec::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout)
+    graph.description = Some("d".into());
+    graph
 }
 
 fn window() -> ContextWindow {
@@ -187,9 +188,9 @@ fn agent(stage: &str) -> AgentState {
     }
 }
 
-/// The spec a spawn of [`blueprint`] places.
+/// The spec a spawn of [`graph`] places.
 fn spec() -> Arc<crate::spec::run_spec::RunSpec> {
-    crate::spec_bridge::test_support::both(blueprint()).0
+    crate::test_graph::both(graph()).0
 }
 
 /// A mock agent runs a few turns; afterwards its run file's last state is the

@@ -871,12 +871,12 @@ mod tests {
 
     /// A one-stage spec whose stage is `mode`.
     fn spec_with_mode(name: &str, mode: StageMode) -> RunSpecC {
-        let mut stage = crate::spec_bridge::test_support::stage(name);
+        let mut stage = crate::test_graph::prompted(name);
         stage.mode = mode;
         let mut graph = crate::spec::run_spec::tests::spec().graph;
         graph.stages = vec![stage];
         graph.edges.clear();
-        crate::spec_bridge::test_support::spec_c("t", graph)
+        crate::test_graph::spec_c("t", graph)
     }
 
     fn blueprint_with(points: Vec<InteractionPointDef>) -> RunSpecC {

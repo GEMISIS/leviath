@@ -17,10 +17,11 @@
 //! old run never recorded what it relied on from the machine, so a resume
 //! treats it as unknown and does not compare it.
 //!
-//! It also holds the reader for the old `agent.leviath` blueprint format:
-//! [`parse_manifest`] parses one, [`read_manifest_tables`] reads the two
-//! tables the parsed form does not carry, and [`migrate`] turns one into an
-//! `agent.toml`, which is what `lev blueprint migrate` writes.
+//! It also holds the reader for the old `agent.leviath` blueprint format,
+//! and [`migrate()`] turns one into an `agent.toml`, which is what
+//! `lev blueprint migrate` writes. The reader parses a manifest into a private
+//! copy of the old parsed-blueprint types, kept here and nowhere else, and
+//! reads that as the runtime's run graph.
 //!
 //! This crate is temporary. It exists to carry runs and blueprints over to
 //! the new formats, only the CLI depends on it, and it is deleted before 1.0.
@@ -29,8 +30,9 @@ mod context;
 mod error;
 mod history;
 mod legacy;
-pub mod manifest;
+mod manifest;
 mod migrate;
+mod old;
 mod report;
 mod spec;
 mod state;
@@ -39,7 +41,6 @@ mod write;
 use std::path::{Path, PathBuf};
 
 pub use error::ConvertError;
-pub use manifest::{parse_manifest, read_manifest_tables};
 pub use migrate::{migrate, migrate_file};
 pub use report::{BlueprintSource, ConvertReport, Defaulted};
 

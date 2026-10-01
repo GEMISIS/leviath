@@ -71,7 +71,7 @@ pub(crate) use requirements::{
 };
 mod spawn;
 #[cfg(test)]
-pub(crate) use crate::spec_bridge::test_support::{SeededSpawn, spawn_agent, spawn_agent_seeded};
+pub(crate) use crate::test_graph::{SeededSpawn, spawn_agent, spawn_agent_seeded};
 pub(crate) use spawn::DEFAULT_CONTEXT_WINDOW_TOKENS;
 pub use spawn::ResolvedStage;
 mod transition_choice;
@@ -151,9 +151,10 @@ pub(crate) use inference::{
     InFlightWork, abort_terminal_work, dispatch_inference, retry_policy_for, track_in_flight,
 };
 mod resolve;
+pub(crate) use resolve::resolve_stage_route;
 pub use resolve::{
     HeadSource, ModelDefaults, ToolCatalog, ToolOwners, bare_user_model, expand_connector_grants,
-    filter_tools_for_stage, head_source, is_unread_catalog_refusal, model_key, providers_tried,
+    filter_tools_for_stage, is_unread_catalog_refusal, model_key, providers_tried,
     resolve_stage_model, resolve_stages, tool_source,
 };
 mod stall;
@@ -223,7 +224,7 @@ pub struct StageInference {
     /// Providers to fail over to, best first, when the current one turns out
     /// to be unusable. Consumed from the front by `collect_inference`, so an
     /// exhausted list means "nowhere left to go".
-    pub fallbacks: Vec<crate::spec::blueprint::ModelEntry>,
+    pub fallbacks: Vec<crate::spec::names::ModelRef>,
     /// The output shape resolved for this stage, carried alongside the tools it
     /// was already folded into. Dispatch reads it to know which format label to
     /// record and, when the author supplied a schema, what to validate against.

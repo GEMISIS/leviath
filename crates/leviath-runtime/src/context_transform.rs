@@ -287,7 +287,7 @@ mod tests {
     fn bp_with_transforms(name: &str, transforms: Vec<ContextTransformDef>) -> RunSpecC {
         let mut graph = crate::spec::run_spec::tests::spec().graph;
         graph.transforms = transforms;
-        crate::spec_bridge::test_support::spec_c(name, graph)
+        crate::test_graph::spec_c(name, graph)
     }
 
     fn window_with(regions: &[(&str, &str)]) -> ContextWindow {

@@ -7,9 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::spec::layout::ContextLayout;
-use leviath_core::error::ValidationError;
-
 /// Context transform for converting between agent types.
 ///
 /// When spawning a sub-agent with a different blueprint, transforms define
@@ -28,25 +25,7 @@ pub struct ContextTransform {
     pub mappings: Vec<RegionMapping>,
 }
 
-impl ContextTransform {
-    /// Validate that this transform references valid regions.
-    pub(super) fn validate(
-        &self,
-        layout: &ContextLayout,
-    ) -> std::result::Result<(), ValidationError> {
-        for mapping in &self.mappings {
-            // We can only validate target regions against the current layout
-            // (source regions belong to a different blueprint)
-            if layout.get_region(&mapping.to_region).is_none() {
-                return Err(ValidationError::Region {
-                    region: mapping.to_region.clone(),
-                    message: "transform target region not found in layout".to_string(),
-                });
-            }
-        }
-        Ok(())
-    }
-}
+impl ContextTransform {}
 
 /// Mapping rule for a single region in a context transform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,8 +63,8 @@ pub struct TransitionEdge {
     pub gate: Option<TransitionGate>,
 
     /// Thresholds arming a [`TransitionCondition::Stuck`] edge. `Some` iff the
-    /// condition is `Stuck` - both the manifest parser and [`super::Blueprint::validate`]
-    /// reject the two half-configured shapes.
+    /// condition is `Stuck`: the manifest parser rejects the two
+    /// half-configured shapes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck: Option<StuckConfig>,
 }
@@ -93,8 +72,7 @@ pub struct TransitionEdge {
 /// Thresholds that arm a [`TransitionCondition::Stuck`] edge.
 ///
 /// At least one threshold is always set: an edge with none could never fire, so
-/// both the manifest parser and [`super::Blueprint::validate`] reject that shape rather
-/// than build a dead edge. Every threshold is evaluated against the *current
+/// the manifest parser rejects that shape rather than build a dead edge. Every threshold is evaluated against the *current
 /// stage's* progress counters, which reset on each stage entry - so a blueprint
 /// can arm different stages with different thresholds independently.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,8 +137,7 @@ pub struct TransitionGate {
     pub tools: Vec<String>,
 
     /// How many times the stage is re-run before the gate gives up and lets the
-    /// transition through (with a warning). Defaults to
-    /// [`DEFAULT_GATE_ATTEMPTS`].
+    /// transition through (with a warning). `None` takes the run's default.
     #[serde(default)]
     pub max_attempts: Option<usize>,
 
@@ -230,20 +207,7 @@ pub struct RegionCount {
     pub at_least: usize,
 }
 
-/// Default re-run budget for an unsatisfied [`TransitionGate`].
-pub const DEFAULT_GATE_ATTEMPTS: usize = 3;
-
-/// Built-in tools that modify files on disk, for [`TransitionGate`]'s
-/// `require_modifications` accounting. Extended per-edge by
-/// [`TransitionGate::tools`].
-pub const MODIFYING_TOOLS: &[&str] = &["write_file", "edit_file"];
-
 pub use leviath_core::stage_tools::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
-
-/// Times a stage is re-run for a missing final output before the gate gives up
-/// and lets it through with the run's `output_forced` flag set. Matches
-/// [`DEFAULT_GATE_ATTEMPTS`], and is overridden by a stage's `max_revisits`.
-pub const DEFAULT_OUTPUT_REENTRY_CAP: usize = 3;
 
 /// Settings for the empty-response nudge: the `[System]` message injected when
 /// a stage's model replies with text before making any tool call.
@@ -261,68 +225,15 @@ pub struct NudgeConfig {
     pub enabled: Option<bool>,
 
     /// How many text-only responses to nudge before accepting the text as
-    /// final. Defaults to [`DEFAULT_MAX_NUDGES`].
+    /// final. `None` takes the next level's, then the run's default.
     #[serde(default)]
     pub max: Option<usize>,
 
-    /// The nudge text. Defaults to [`DEFAULT_NUDGE_TEXT`]. Supports `{stage}`
+    /// The nudge text, over the next level's. Supports `{stage}`
     /// (the stage's name) and `{regions}` (comma-separated names of the
     /// stage's required context regions) placeholders.
     #[serde(default)]
     pub text: Option<String>,
-}
-
-/// Default nudge injected when a model responds with text before making any
-/// tool call, used when no [`NudgeConfig`] level sets `text`.
-pub const DEFAULT_NUDGE_TEXT: &str = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
-
-/// Default number of text-only responses to nudge before accepting the text as
-/// final, used when no [`NudgeConfig`] level sets `max`.
-pub const DEFAULT_MAX_NUDGES: usize = 3;
-
-/// A fully-resolved nudge policy for one stage: every [`NudgeConfig`] field
-/// cascaded and defaulted. Produced by [`resolve_nudge`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedNudge {
-    /// Whether the nudge fires for this stage.
-    pub enabled: bool,
-    /// Text-only responses tolerated before the text is accepted as final.
-    pub max: usize,
-    /// The nudge text, before placeholder interpolation.
-    pub text: String,
-}
-
-/// Resolve the nudge policy for a stage, cascading each field independently
-/// stage → agent → global. Narrowest level wins with no clamping - like
-/// [`leviath_core::taint::resolve_batch_tool_hint`], this is a UX knob, not a
-/// permission, so a manifest may raise `max` above the global setting.
-///
-/// `stage_is_reviewed` feeds only the *default* for `enabled`: a stage with
-/// interaction points presents its text for the user to approve, so nudging it
-/// to "use your tools" is off unless some level explicitly turns it on.
-pub fn resolve_nudge(
-    global: Option<&NudgeConfig>,
-    agent: Option<&NudgeConfig>,
-    stage: Option<&NudgeConfig>,
-    stage_is_reviewed: bool,
-) -> ResolvedNudge {
-    fn field<T: Clone>(
-        global: Option<&NudgeConfig>,
-        agent: Option<&NudgeConfig>,
-        stage: Option<&NudgeConfig>,
-        get: impl Fn(&NudgeConfig) -> Option<T>,
-    ) -> Option<T> {
-        stage
-            .and_then(&get)
-            .or_else(|| agent.and_then(&get))
-            .or_else(|| global.and_then(&get))
-    }
-    ResolvedNudge {
-        enabled: field(global, agent, stage, |c| c.enabled).unwrap_or(!stage_is_reviewed),
-        max: field(global, agent, stage, |c| c.max).unwrap_or(DEFAULT_MAX_NUDGES),
-        text: field(global, agent, stage, |c| c.text.clone())
-            .unwrap_or_else(|| DEFAULT_NUDGE_TEXT.to_string()),
-    }
 }
 
 /// Condition that determines when a transition edge is available.

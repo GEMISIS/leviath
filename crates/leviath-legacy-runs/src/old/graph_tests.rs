@@ -11,7 +11,7 @@ use leviath_core::region::{EvictionStrategy, RegionKind as CoreKind};
 use serde_json::json;
 
 use super::*;
-use crate::spec::blueprint::{
+use crate::old::blueprint::{
     ContentTransform as BpContent, ContextTransform, Dependency, DependencyInstall, DependencyKind,
     EdgeTransform, FanOutConfig, FileTrackingConfig, InteractionPoint, InteractionStyle,
     McpServerTemplate as BpServer, ModelConfig, ModelEntry, NudgeConfig, ReadPathsConfig,
@@ -19,7 +19,7 @@ use crate::spec::blueprint::{
     StageMode as BpMode, ToolRescan as BpRescan, ToolResultRouting, TransitionCondition,
     TransitionEdge, TransitionGate, UnattendedPolicy, WorkerFailurePolicy,
 };
-use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition, SeedToolCall};
+use crate::old::layout::{BudgetSpec, ContextLayout, RegionDefinition, SeedToolCall};
 
 fn model() -> ModelConfig {
     ModelConfig::new("p".to_string(), "m".to_string())
@@ -96,7 +96,13 @@ fn mime_row(tokens: CoreTokenRule) -> toml::Value {
 
 fn dependency(kind: DependencyKind) -> Dependency {
     Dependency {
-        name: kind.tag().into(),
+        name: match &kind {
+            DependencyKind::McpServer { .. } => "mcp_server",
+            DependencyKind::Env { .. } => "env",
+            DependencyKind::Binary { .. } => "binary",
+            DependencyKind::Script { .. } => "script",
+        }
+        .into(),
         kind,
         required: true,
         remedy: Some("install it".into()),
@@ -198,7 +204,7 @@ fn rich() -> Blueprint {
     let mut tools = region_def("tools", CoreKind::Checklist);
     tools.seed = Some(RegionSeed::Tools {
         calls: vec![SeedToolCall::new("read_file")],
-        refresh: crate::spec::layout::SeedRefresh::EachStage,
+        refresh: crate::old::layout::SeedRefresh::EachStage,
     });
     let mut pct = region_def(
         "log",
@@ -327,7 +333,7 @@ fn rich() -> Blueprint {
 
 #[test]
 fn every_setting_a_blueprint_holds_converts() {
-    let g = RunGraph::from_blueprint(&rich()).unwrap();
+    let g = crate::old::graph::from_blueprint(&rich()).unwrap();
     assert_eq!(g.tool_permissions.len(), 1);
     assert_eq!(g.output.as_ref().unwrap().artifacts.len(), 1);
     assert_eq!(g.read_paths, vec!["~/notes/**".to_string()]);
@@ -395,14 +401,14 @@ fn a_worker_agent_path_reads_as_a_blueprint_file() {
     let dir = std::env::temp_dir().join("my-worker");
     let mut fan = stage("fan");
     fan.mode = fan_out(Some(&dir.to_string_lossy()), None, None);
-    let g = RunGraph::from_blueprint(&blueprint(vec![fan], vec![])).unwrap();
+    let g = crate::old::graph::from_blueprint(&blueprint(vec![fan], vec![])).unwrap();
     let StageMode::FanOut(def) = &g.stages[0].mode else {
         panic!("a fan-out stage");
     };
     assert_eq!(
         def.worker,
         WorkerSource::BlueprintFile(
-            crate::spec::names::BlueprintPath::new(dir.to_string_lossy()).unwrap()
+            leviath_runtime::spec::names::BlueprintPath::new(dir.to_string_lossy()).unwrap()
         )
     );
 }
@@ -411,7 +417,7 @@ fn a_worker_agent_path_reads_as_a_blueprint_file() {
 fn every_tool_rescan_converts() {
     let mut b = blueprint(vec![stage("main")], vec![]);
     b.tool_rescan = BpRescan::BeforeDispatch;
-    let g = RunGraph::from_blueprint(&b).unwrap();
+    let g = crate::old::graph::from_blueprint(&b).unwrap();
     assert_eq!(g.tool_rescan, ToolRescan::BeforeDispatch);
 }
 
@@ -427,7 +433,7 @@ fn a_stage_with_no_table_gets_the_fall_through_edge_and_no_choice() {
     b.allow_complete = true;
     let mut c = stage("c");
     c.allow_complete = true;
-    let g = RunGraph::from_blueprint(&blueprint(vec![a, b, c], vec![])).unwrap();
+    let g = crate::old::graph::from_blueprint(&blueprint(vec![a, b, c], vec![])).unwrap();
     assert_eq!(g.edges.len(), 1);
     let edge = &g.edges[0];
     assert_eq!(
@@ -444,7 +450,7 @@ fn a_stage_with_no_table_gets_the_fall_through_edge_and_no_choice() {
 
 /// The paths of every issue, sorted.
 fn paths(b: &Blueprint) -> Vec<String> {
-    let issues = RunGraph::from_blueprint(b).unwrap_err();
+    let issues = crate::old::graph::from_blueprint(b).unwrap_err();
     let mut out: Vec<String> = issues.0.iter().map(|i| i.path.to_string()).collect();
     out.sort();
     out.dedup();
@@ -655,7 +661,7 @@ fn a_callers_output_request_reads_as_an_output() {
 fn a_compacting_regions_threshold_carries_over() {
     let graph = |threshold_tokens: usize| {
         let notes = region_def("notes", CoreKind::Compacting { threshold_tokens });
-        RunGraph::from_blueprint(&blueprint(vec![stage("main")], vec![notes])).unwrap()
+        crate::old::graph::from_blueprint(&blueprint(vec![stage("main")], vec![notes])).unwrap()
     };
     let set = graph(400);
     assert_eq!(
@@ -697,7 +703,8 @@ fn caller_input_seeds_become_text_inputs() {
             name: "notes".into(),
         },
     );
-    let g = RunGraph::from_blueprint(&blueprint(vec![stage("main")], vec![task, notes])).unwrap();
+    let g = crate::old::graph::from_blueprint(&blueprint(vec![stage("main")], vec![task, notes]))
+        .unwrap();
     let names: Vec<(&str, bool)> = g
         .inputs
         .iter()
@@ -746,7 +753,7 @@ fn policies_groups_eviction_and_plain_seeds_carry_over() {
             },
         ),
     ];
-    let g = RunGraph::from_blueprint(&blueprint(vec![main], regions)).unwrap();
+    let g = crate::old::graph::from_blueprint(&blueprint(vec![main], regions)).unwrap();
     let s = &g.stages[0];
     assert_eq!(s.mode, StageMode::Output);
     assert_eq!(s.tools, [ToolSelector::Group(ToolGroup::All)]);
@@ -792,7 +799,7 @@ fn a_blueprint_with_bad_names_reports_each_with_its_path() {
     main.model
         .parameters
         .insert("nothing".into(), serde_json::Value::Null);
-    let issues = RunGraph::from_blueprint(&blueprint(vec![main], vec![])).unwrap_err();
+    let issues = crate::old::graph::from_blueprint(&blueprint(vec![main], vec![])).unwrap_err();
     let lines: Vec<String> = issues
         .iter()
         .map(|i| format!("{} {:?}", i.path, i.code))
@@ -819,7 +826,8 @@ fn a_code_seed_drops_the_blueprint_prefix() {
                 script: script.into(),
             },
         );
-        let g = RunGraph::from_blueprint(&blueprint(vec![stage("main")], vec![plan])).unwrap();
+        let g =
+            crate::old::graph::from_blueprint(&blueprint(vec![stage("main")], vec![plan])).unwrap();
         assert_eq!(
             g.layout.regions[0].seed,
             Some(Seed::Code(CodeRef::File("seeds/plan.rhai".into()))),
@@ -842,6 +850,227 @@ fn a_region_declared_again_by_a_stage_binds_its_input_once() {
     };
     let mut main = stage("main");
     main.context_layout = Some(ContextLayout::new(vec![task()], 1000));
-    let g = RunGraph::from_blueprint(&blueprint(vec![main], vec![task()])).unwrap();
+    let g = crate::old::graph::from_blueprint(&blueprint(vec![main], vec![task()])).unwrap();
     assert_eq!(g.inputs[0].binds.len(), 1, "{:?}", g.inputs[0].binds);
+}
+
+/// An edge of `condition` to `target`, carrying `transform`.
+fn edge_to(
+    target: &str,
+    condition: TransitionCondition,
+    transform: EdgeTransform,
+) -> TransitionEdge {
+    TransitionEdge {
+        target: target.into(),
+        condition,
+        hint: None,
+        transform,
+        gate: None,
+        stuck: None,
+    }
+}
+
+#[test]
+fn every_edge_kind_gate_and_stuck_rule_converts() {
+    let mut main = stage("main");
+    main.available_tools = vec!["@all".into(), "@builtin".into()];
+    main.available_connectors = vec!["github".into()];
+    main.output = Some(OutputSpec {
+        format: Some("text".into()),
+        ..OutputSpec::default()
+    });
+    let mut gated = edge_to("a", TransitionCondition::Error, EdgeTransform::Direct);
+    gated.gate = Some(TransitionGate {
+        require_modifications: true,
+        message: Some("write first".into()),
+        region: Some("notes".into()),
+        tools: vec!["put".into()],
+        max_attempts: Some(2),
+        require_region_updated: Some("notes".into()),
+        require_regions: vec!["notes".into()],
+        require_no_open_items: Some("notes".into()),
+        require_region_entries: None,
+    });
+    let mut stuck = edge_to("e", TransitionCondition::Stuck, EdgeTransform::Direct);
+    stuck.stuck = Some(crate::old::blueprint::StuckConfig {
+        after_iterations: Some(1),
+        after_minutes: Some(2),
+        after_same_file_edits: Some(3),
+        after_tool_calls: Some(4),
+    });
+    main.transitions = Some(HashMap::from([
+        ("a".to_string(), gated),
+        (
+            "b".to_string(),
+            edge_to(
+                "b",
+                TransitionCondition::MaxIterations,
+                EdgeTransform::Compact {
+                    prompt: Some("sum".into()),
+                },
+            ),
+        ),
+        (
+            "c".to_string(),
+            edge_to(
+                "c",
+                TransitionCondition::LlmChoice,
+                EdgeTransform::Custom {
+                    carry: vec!["notes".into()],
+                    compact: vec!["log".into()],
+                    clear: vec!["scratch".into()],
+                    compact_prompt: None,
+                },
+            ),
+        ),
+        (
+            "d".to_string(),
+            edge_to("d", TransitionCondition::DeadEnd, EdgeTransform::Direct),
+        ),
+        ("e".to_string(), stuck),
+    ]));
+    let mut b_stage = stage("b");
+    b_stage
+        .model
+        .parameters
+        .insert("max_output_tokens".to_string(), json!(100));
+    let BpMode::FanOut { mut config } = fan_out(None, None, Some("split")) else {
+        unreachable!("the helper builds a fan-out");
+    };
+    config.on_worker_failure = WorkerFailurePolicy::Continue;
+    b_stage.mode = BpMode::FanOut { config };
+    let mut c_stage = stage("c");
+    c_stage
+        .model
+        .parameters
+        .insert("max_output_tokens".to_string(), json!("40%"));
+    let stages = vec![main, stage("a"), b_stage, c_stage, stage("d"), stage("e")];
+    let regions = vec![
+        region_def("notes", CoreKind::Temporary),
+        region_def("scratch", CoreKind::Clearable),
+        region_def(
+            "log",
+            CoreKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+        ),
+        region_def(
+            "bulk",
+            CoreKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 2 },
+            },
+        ),
+        region_def(
+            "summary",
+            CoreKind::Compacting {
+                threshold_tokens: 700,
+            },
+        ),
+    ];
+    let mut b = blueprint(stages, regions);
+    b.nudge = Some(NudgeConfig {
+        enabled: Some(false),
+        max: Some(2),
+        text: None,
+    });
+    b.entry_stage = Some("main".into());
+    let g = crate::old::graph::from_blueprint(&b).unwrap();
+
+    assert_eq!(g.entry.as_ref().unwrap().as_str(), "main");
+    assert_eq!(g.stages[0].connectors[0].as_str(), "github");
+    assert_eq!(
+        g.stages[0].tools,
+        vec![
+            ToolSelector::Group(ToolGroup::All),
+            ToolSelector::Group(ToolGroup::Builtin)
+        ]
+    );
+    assert!(g.stages[0].output.is_some());
+    assert_eq!(g.nudge.as_ref().unwrap().max, Some(2));
+    let edge = |name: &str| g.edges.iter().find(|e| e.name.as_str() == name).unwrap();
+    assert_eq!(
+        g.stages[2].model.params.max_output_tokens,
+        Some(OutputCap::Tokens(100))
+    );
+    assert_eq!(
+        g.stages[3].model.params.max_output_tokens,
+        Some(OutputCap::WindowPercent(0.4))
+    );
+    assert!(matches!(
+        &g.stages[2].mode,
+        StageMode::FanOut(f) if f.on_worker_failure == WorkerFailure::Continue
+    ));
+    assert_eq!(edge("a").when, EdgeCondition::Error);
+    let gate = edge("a").gate.as_ref().unwrap();
+    assert_eq!(gate.region.as_ref().unwrap().as_str(), "notes");
+    assert_eq!(
+        gate.require_region_updated.as_ref().unwrap().as_str(),
+        "notes"
+    );
+    assert_eq!(
+        gate.require_no_open_items.as_ref().unwrap().as_str(),
+        "notes"
+    );
+    assert_eq!(gate.require_regions.len(), 1);
+    assert_eq!(gate.max_attempts, Some(2));
+    assert_eq!(edge("b").when, EdgeCondition::MaxIterations);
+    assert_eq!(
+        edge("b").carry,
+        EdgeCarry::Compact {
+            prompt: Some("sum".into())
+        }
+    );
+    assert_eq!(edge("c").when, EdgeCondition::LlmChoice);
+    let EdgeCarry::Custom {
+        carry,
+        compact,
+        clear,
+        ..
+    } = &edge("c").carry
+    else {
+        panic!("a custom carry: {:?}", edge("c").carry);
+    };
+    assert_eq!((carry.len(), compact.len(), clear.len()), (1, 1, 1));
+    assert_eq!(edge("d").when, EdgeCondition::DeadEnd);
+    assert_eq!(edge("e").when, EdgeCondition::Stuck);
+    assert_eq!(
+        edge("e").stuck,
+        Some(StuckDef {
+            after_iterations: Some(1),
+            after_minutes: Some(2),
+            after_same_file_edits: Some(3),
+            after_tool_calls: Some(4),
+        })
+    );
+    let kinds: Vec<&RegionKind> = g.layout.regions.iter().map(|r| &r.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            &RegionKind::Temporary,
+            &RegionKind::Clearable,
+            &RegionKind::SlidingWindow {
+                max_items: 5,
+                eviction: Eviction::PerItem
+            },
+            &RegionKind::SlidingWindow {
+                max_items: 5,
+                eviction: Eviction::Bulk(2)
+            },
+            &RegionKind::Compacting {
+                threshold_tokens: Some(700)
+            },
+        ]
+    );
+}
+
+/// A fan-out config read from text with no `max_workers` takes the default.
+#[test]
+fn a_fan_out_config_without_a_worker_cap_takes_the_default() {
+    let config: FanOutConfig = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(
+        config.max_workers,
+        crate::old::blueprint::DEFAULT_MAX_WORKERS
+    );
 }

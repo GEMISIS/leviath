@@ -13,12 +13,9 @@ use leviath_providers::Tool;
 use super::{StageInference, StageSetup};
 use crate::components::InferenceConfig;
 use crate::spec::graph::{
-    Budget, CodeRef, EdgeDef, Eviction, FileTrackingDef, NudgeDef, OutputCap, OutputDef, RegionDef,
-    RegionKind, RegionLayoutDef, RunGraph, StageDef, StageMode, ToolGroup, ToolRoutingDef,
-    ToolSelector,
+    Budget, CodeRef, EdgeDef, Eviction, NudgeDef, OutputDef, RegionDef, RegionKind,
+    RegionLayoutDef, ResolvedNudge, RunGraph, StageDef, StageMode, ToolGroup, ToolSelector,
 };
-use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition};
-use crate::spec::names::ModelRef;
 use crate::spec::run_spec::{RunSpec, StagePlan, ToolDef};
 
 /// The context window a stage is budgeted against when its plan is missing.
@@ -77,7 +74,7 @@ pub(crate) fn visible_regions<'a>(graph: &'a RunGraph, stage: &'a StageDef) -> H
         .iter()
         .map(|r| r.name.as_str())
         .collect();
-    names.extend(crate::spec::blueprint::ALWAYS_VISIBLE_REGIONS);
+    names.extend(crate::spec::graph::ALWAYS_VISIBLE_REGIONS);
     for hidden in &stage.hide {
         names.remove(hidden.as_str());
     }
@@ -116,19 +113,7 @@ fn budget_in(spec: &RunSpec, idx: usize, region: &RegionDef) -> usize {
     let planned = plan(spec, idx).and_then(|p| p.region_budgets.get(region.name.as_str()));
     match planned {
         Some(tokens) => *tokens as usize,
-        None => budget_spec(&region.budget).resolve(window_of(spec, idx) as usize),
-    }
-}
-
-/// A region's budget in the layout vocabulary the window is built from.
-pub(crate) fn budget_spec(budget: &Budget) -> BudgetSpec {
-    match budget {
-        Budget::Tokens(n) => BudgetSpec::Absolute(*n as usize),
-        Budget::Percent { percent, min, max } => BudgetSpec::Percent {
-            percent: *percent,
-            min: min.map(|m| m as usize),
-            max: max.map(|m| m as usize),
-        },
+        None => region.budget.resolve(window_of(spec, idx) as usize),
     }
 }
 
@@ -180,42 +165,26 @@ pub(crate) fn region_kind(region: &RegionDef, budget: usize) -> leviath_core::Re
     }
 }
 
-/// A region as the window's layout vocabulary writes it, with its budget
-/// already a number of tokens and its compaction threshold worked out from
-/// that budget.
-pub(crate) fn region_definition(region: &RegionDef, max_tokens: usize) -> RegionDefinition {
-    let mut def =
-        RegionDefinition::new(region.name.to_string(), region_kind(region, max_tokens), 0);
-    def.max_tokens = max_tokens;
-    def.budget = BudgetSpec::Absolute(max_tokens);
-    def.compact_at = region.compact_at;
-    def.description = region.description.clone();
-    def.describe_in_prompt = region.describe_in_prompt;
-    def.required = region.required;
-    def.required_message = region.required_message.clone();
-    def.summarizable = region.summarizable;
-    def.admission = region.admission;
-    def.volatility = region.volatility;
-    def.accepts = region.accepts.iter().map(ToString::to_string).collect();
-    def
+/// A layout's regions as a window holds them, each region's budget chosen by
+/// `budget`. Compaction thresholds that are a share of a region's budget are
+/// worked out from the chosen budget.
+fn regions_with(
+    def: &RegionLayoutDef,
+    budget: impl Fn(&RegionDef) -> usize,
+) -> Vec<leviath_core::Region> {
+    def.regions
+        .iter()
+        .map(|r| crate::context_setup::region_from_def(r, budget(r)))
+        .collect()
 }
 
-/// A layout with each region's budget chosen by `budget`, and the window
-/// total `total`. Compaction thresholds that are a share of a region's
-/// budget are worked out from the chosen budget.
-fn layout_with(
-    def: &RegionLayoutDef,
-    total: usize,
-    budget: impl Fn(&RegionDef) -> usize,
-) -> ContextLayout {
-    let regions = def
-        .regions
-        .iter()
-        .map(|r| region_definition(r, budget(r)))
-        .collect();
-    ContextLayout::new(regions, total)
-        .with_eviction_order(def.eviction_order.iter().map(ToString::to_string).collect())
-        .resolved(total)
+/// A layout laid out for a window: its regions, each holding its budget in
+/// tokens, and the window's whole budget.
+pub(crate) struct LaidOut {
+    /// The regions, in the layout's order.
+    pub regions: Vec<leviath_core::Region>,
+    /// The tokens the whole window may hold.
+    pub total: usize,
 }
 
 /// Whether any region of a layout is budgeted as a share of the window.
@@ -231,7 +200,7 @@ fn has_percent(def: &RegionLayoutDef) -> bool {
 /// see the region gives it, so a region budgeted for a wide-window stage is
 /// never counted against a narrow one that shares it. A region no such stage
 /// sees takes the first stage's budget, which nothing reads.
-pub(crate) fn graph_layout(spec: &RunSpec) -> ContextLayout {
+pub(crate) fn graph_layout(spec: &RunSpec) -> LaidOut {
     let graph = &spec.graph;
     let seeing = |region: &str| -> Vec<usize> {
         graph
@@ -259,51 +228,20 @@ pub(crate) fn graph_layout(spec: &RunSpec) -> ContextLayout {
             .unwrap_or(graph.layout.total_budget_tokens as usize),
         false => graph.layout.total_budget_tokens as usize,
     };
-    layout_with(&graph.layout, total, |r| {
+    let regions = regions_with(&graph.layout, |r| {
         seeing(r.name.as_str())
             .into_iter()
             .map(|i| budget_in(spec, i, r))
             .min()
             .unwrap_or_else(|| budget_in(spec, 0, r))
-    })
+    });
+    LaidOut { regions, total }
 }
 
-/// A stage's own layout, sized for that stage, when it declares one.
-pub(crate) fn stage_layout(spec: &RunSpec, idx: usize) -> Option<ContextLayout> {
+/// A stage's own layout's regions, sized for that stage, when it declares one.
+pub(crate) fn stage_layout(spec: &RunSpec, idx: usize) -> Option<Vec<leviath_core::Region>> {
     let def = spec.graph.stages.get(idx)?.layout.as_ref()?;
-    let total = match has_percent(def) {
-        true => window_of(spec, idx) as usize,
-        false => def.total_budget_tokens as usize,
-    };
-    Some(layout_with(def, total, |r| budget_in(spec, idx, r)))
-}
-
-/// Tool-result routing in the vocabulary the tool systems read.
-pub(crate) fn tool_routing(def: &ToolRoutingDef) -> crate::spec::ToolResultRouting {
-    crate::spec::ToolResultRouting {
-        default_region: def.default_region.to_string(),
-        tool_overrides: def
-            .tool_regions
-            .iter()
-            .map(|(t, r)| (t.to_string(), r.to_string()))
-            .collect(),
-        keep_results: def.keep_results,
-        max_result_tokens: def.max_result_tokens.map(|n| n as usize),
-        tool_max_result_tokens: def
-            .tool_max_result_tokens
-            .iter()
-            .map(|(t, n)| (t.to_string(), *n as usize))
-            .collect(),
-    }
-}
-
-/// A nudge setting in the vocabulary the nudge cascade reads.
-pub(crate) fn nudge_config(def: &NudgeDef) -> crate::spec::NudgeConfig {
-    crate::spec::NudgeConfig {
-        enabled: def.enabled,
-        max: def.max.map(|m| m as usize),
-        text: def.text.clone(),
-    }
+    Some(regions_with(def, |r| budget_in(spec, idx, r)))
 }
 
 /// The nudge a stage sends when its model answers with text alone: each
@@ -318,25 +256,18 @@ pub(crate) fn nudge_config(def: &NudgeDef) -> crate::spec::NudgeConfig {
 pub(crate) fn stage_nudge(
     graph: &RunGraph,
     stage: Option<&StageDef>,
-    global: Option<&crate::spec::NudgeConfig>,
-) -> crate::spec::ResolvedNudge {
+    global: Option<&NudgeDef>,
+) -> ResolvedNudge {
     let reviewed = matches!(
         stage.map(|s| &s.mode),
         Some(StageMode::InteractivePoints(points)) if !points.is_empty()
     );
-    let agent = graph.nudge.as_ref().map(nudge_config);
-    let own = stage.and_then(|s| s.nudge.as_ref()).map(nudge_config);
-    crate::spec::resolve_nudge(global, agent.as_ref(), own.as_ref(), reviewed)
-}
-
-/// File tracking in the vocabulary the tool-result systems read.
-pub(crate) fn file_tracking(def: &FileTrackingDef) -> crate::spec::FileTrackingConfig {
-    crate::spec::FileTrackingConfig {
-        region: def.region.to_string(),
-        track_reads: def.track_reads,
-        track_writes: def.track_writes,
-        max_file_tokens: def.max_file_tokens.map(|n| n as usize),
-    }
+    NudgeDef::resolve(
+        global,
+        graph.nudge.as_ref(),
+        stage.and_then(|s| s.nudge.as_ref()),
+        reviewed,
+    )
 }
 
 /// An output shape in the vocabulary the output tool and the prompt read.
@@ -362,37 +293,12 @@ pub(crate) fn output_spec(def: &OutputDef) -> leviath_core::output::OutputSpec {
     }
 }
 
-/// A model reference as a fallback entry.
-pub(crate) fn model_entry(model: &ModelRef) -> crate::spec::blueprint::ModelEntry {
-    crate::spec::blueprint::ModelEntry::new(
-        model
-            .provider
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-        model.model.to_string(),
-    )
-}
-
 /// A tool as a provider is told about it.
 pub(crate) fn tool(def: &ToolDef) -> Tool {
     Tool {
         name: def.name.to_string(),
         description: def.description.clone(),
         parameters: def.schema.value().clone(),
-    }
-}
-
-/// An output cap in the vocabulary the request builder reads.
-fn output_cap(cap: &OutputCap) -> crate::spec::blueprint::OutputCap {
-    use crate::spec::blueprint::OutputCap as Old;
-    match cap {
-        OutputCap::Tokens(n) => Old::Tokens(*n as usize),
-        OutputCap::WindowPercent(p) => Old::WindowPercent(*p),
-        OutputCap::RegionPercent { percent, region } => Old::RegionPercent {
-            percent: *percent,
-            region: region.to_string(),
-        },
     }
 }
 
@@ -413,7 +319,7 @@ fn system_prompt(
     let (Some(spec), true) = (output, stage.require_output) else {
         return prompt;
     };
-    let tool = crate::spec::blueprint::SUBMIT_OUTPUT_TOOL;
+    let tool = leviath_core::stage_tools::SUBMIT_OUTPUT_TOOL;
     let described = leviath_core::describe_spec(spec);
     let demand = match described.is_empty() {
         true => format!(
@@ -446,7 +352,7 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
     StageSetup {
         inference_config: InferenceConfig {
             temperature: params.temperature,
-            max_output_tokens: params.max_output_tokens.as_ref().map(output_cap),
+            max_output_tokens: params.max_output_tokens.clone(),
             extra_params: params
                 .extra
                 .iter()
@@ -469,7 +375,7 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
             ),
             request_timeout_secs: stage.model.request_timeout_secs,
         },
-        routing: stage.tool_routing.as_ref().map(tool_routing),
+        routing: stage.tool_routing.clone(),
         accepts_messages: stage.accepts_messages,
         context_layout: stage_layout(spec, idx),
         context_hide: stage.hide.iter().map(ToString::to_string).collect(),
@@ -503,7 +409,7 @@ pub(crate) fn stage_inference(
         model: plan.model.to_string(),
         tools,
         tool_filter: None,
-        fallbacks: plan.fallbacks.iter().map(model_entry).collect(),
+        fallbacks: plan.fallbacks.clone(),
         output: plan.output.as_ref().map(output_spec),
     }
 }
@@ -515,7 +421,7 @@ pub(crate) fn any_stage_can_modify(graph: &RunGraph) -> bool {
         grants_all_builtins(stage)
             || named_tools(stage).any(|t| {
                 let canonical = leviath_tools::canonical_tool_name(t);
-                crate::spec::blueprint::MODIFYING_TOOLS.contains(&canonical)
+                crate::spec::graph::MODIFYING_TOOLS.contains(&canonical)
                     || edges_from(graph, stage)
                         .iter()
                         .filter_map(|e| e.gate.as_ref())

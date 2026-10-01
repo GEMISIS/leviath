@@ -17,7 +17,7 @@ pub struct ResolvedStage {
     pub tools: Vec<Tool>,
     /// Where to go if `provider_name` turns out to be unusable, best first.
     /// See `crate::pipeline::resolve_stage_candidates`.
-    pub fallbacks: Vec<crate::spec::blueprint::ModelEntry>,
+    pub fallbacks: Vec<crate::spec::names::ModelRef>,
     /// The output shape resolved for this stage: the blueprint's default, the
     /// stage's override, and the launching caller's request, combined. Resolved
     /// caller-side (like the model and tool choices beside it) because only the
@@ -38,25 +38,28 @@ pub(crate) const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 8192;
 mod stage_instructions_fit_tests {
     //! A stage prompt bigger than the first pinned region, spawned end to end.
 
+    use crate::spec::graph::RegionDef;
+    use crate::test_graph::pct;
+
+    /// `regions` laid out for a window of `window` tokens: each one's
+    /// percentage budget sized against it.
+    fn laid_out(regions: &[RegionDef], window: usize) -> Vec<leviath_core::Region> {
+        regions
+            .iter()
+            .map(|r| crate::context_setup::region_from_def(r, r.budget.resolve(window)))
+            .collect()
+    }
+
     /// A small `task` region beside a dedicated `stage_instructions` region
-    /// with room for a stage prompt.
-    fn layout(window: usize) -> crate::spec::layout::ContextLayout {
-        use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition};
-        let pct = |p: f64| BudgetSpec::Percent {
-            percent: p,
-            min: None,
-            max: None,
-        };
-        let mut task =
-            RegionDefinition::new("task".to_string(), leviath_core::RegionKind::Pinned, 0);
-        task.budget = pct(0.02);
-        let mut instr = RegionDefinition::new(
-            crate::spec::layout::STAGE_INSTRUCTIONS_REGION.to_string(),
-            leviath_core::RegionKind::Pinned,
-            0,
-        );
-        instr.budget = pct(0.03);
-        ContextLayout::new(vec![task, instr], window).resolved(window)
+    /// with room for a stage prompt, laid out for a window of `window` tokens.
+    fn layout(window: usize) -> Vec<leviath_core::Region> {
+        laid_out(
+            &[
+                pct("task", 0.02),
+                pct(crate::spec::graph::STAGE_INSTRUCTIONS_REGION, 0.03),
+            ],
+            window,
+        )
     }
 
     /// A ~2.9k-token stage prompt: too big for 2% of a 128k window, comfortable
@@ -70,15 +73,13 @@ mod stage_instructions_fit_tests {
         let window_tokens = 128_000;
         let layout = layout(window_tokens);
         let task_max = layout
-            .regions
             .iter()
             .find(|r| r.name == "task")
             .expect("task")
             .max_tokens;
         let instr_max = layout
-            .regions
             .iter()
-            .find(|r| r.name == crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
+            .find(|r| r.name == crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
             .expect("stage_instructions")
             .max_tokens;
         let prompt = big_prompt();
@@ -89,17 +90,8 @@ mod stage_instructions_fit_tests {
              stage_instructions {instr_max}"
         );
 
-        let bp = crate::spec::Blueprint::new(
-            "t".to_string(),
-            "d".to_string(),
-            vec![crate::spec::Stage::new(
-                "work".to_string(),
-                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )],
-            layout,
-        );
         let mut window = crate::components::ContextWindow::new(window_tokens);
-        crate::context_setup::lay_out(&mut window, &bp.context_layout);
+        crate::context_setup::lay_out(&mut window, layout);
         let setup = crate::pipeline::transition::StageSetup {
             inference_config: crate::components::InferenceConfig {
                 temperature: None,
@@ -121,7 +113,7 @@ mod stage_instructions_fit_tests {
             .expect("the prompt fits the region declared for it");
 
         let instr = window
-            .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
             .expect("region exists");
         assert!(
             instr.content.iter().any(|e| e.content.contains("word")),
@@ -138,31 +130,14 @@ mod stage_instructions_fit_tests {
     /// stage prompt, coupling an unrelated region to prompt lengths.
     #[test]
     fn a_blueprint_that_declares_no_region_still_gets_one() {
-        use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let window_tokens = 128_000;
         let prompt = big_prompt();
 
         // Only `task`, at 2% - a region sized for a sentence from the caller.
-        let mut task =
-            RegionDefinition::new("task".to_string(), leviath_core::RegionKind::Pinned, 0);
-        task.budget = BudgetSpec::Percent {
-            percent: 0.02,
-            min: None,
-            max: None,
-        };
-        let only_task = ContextLayout::new(vec![task], window_tokens).resolved(window_tokens);
-        let bp = crate::spec::Blueprint::new(
-            "t".to_string(),
-            "d".to_string(),
-            vec![crate::spec::Stage::new(
-                "work".to_string(),
-                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )],
-            only_task,
-        );
+        let only_task = laid_out(&[pct("task", 0.02)], window_tokens);
 
         let mut window = crate::components::ContextWindow::new(window_tokens);
-        crate::context_setup::lay_out(&mut window, &bp.context_layout);
+        crate::context_setup::lay_out(&mut window, only_task);
         let prompts = vec![Some(prompt.clone())];
         crate::context_setup::ensure_stage_instructions_region(&mut window, &prompts);
 
@@ -192,7 +167,7 @@ mod stage_instructions_fit_tests {
             "the task region is left for the caller's task"
         );
         let instr = window
-            .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
             .expect("the runtime made one");
         assert!(instr.content.iter().any(|e| e.content.contains("word")));
     }
@@ -205,7 +180,7 @@ mod stage_instructions_fit_tests {
         crate::context_setup::ensure_stage_instructions_region(&mut window, &[None, None]);
         assert!(
             window
-                .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
                 .is_none()
         );
     }
@@ -215,14 +190,14 @@ mod stage_instructions_fit_tests {
     fn a_declared_region_is_not_resized() {
         let mut window = crate::components::ContextWindow::new(100_000);
         window.add_region(leviath_core::Region::new(
-            crate::spec::layout::STAGE_INSTRUCTIONS_REGION.to_string(),
+            crate::spec::graph::STAGE_INSTRUCTIONS_REGION.to_string(),
             leviath_core::RegionKind::Pinned,
             4_242,
         ));
         crate::context_setup::ensure_stage_instructions_region(&mut window, &[Some(big_prompt())]);
         assert_eq!(
             window
-                .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
                 .expect("declared")
                 .max_tokens,
             4_242
@@ -248,7 +223,7 @@ mod stage_instructions_fit_tests {
         // Capped at a quarter of the window rather than sized to the prompt.
         assert_eq!(
             window
-                .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
                 .expect("made")
                 .max_tokens,
             250
@@ -274,7 +249,7 @@ mod stage_instructions_fit_tests {
         let err = crate::pipeline::transition::apply_stage_context(&setup, &mut window)
             .expect_err("a prompt larger than the window cannot be housed");
         assert!(
-            err.contains(crate::spec::layout::STAGE_INSTRUCTIONS_REGION),
+            err.contains(crate::spec::graph::STAGE_INSTRUCTIONS_REGION),
             "{err}"
         );
     }
@@ -293,7 +268,7 @@ mod stage_instructions_fit_tests {
         );
         assert_eq!(
             window
-                .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
+                .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
                 .expect("made")
                 .max_tokens,
             expected
@@ -304,33 +279,15 @@ mod stage_instructions_fit_tests {
     /// does not re-declare `stage_instructions`.
     #[test]
     fn a_scoped_stage_layout_still_routes_to_the_declared_region() {
-        use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition};
         let window_tokens = 128_000;
         let prompt = big_prompt();
 
         // The stage narrows what it attends to and says nothing about
         // stage_instructions - the region is the runtime's to fill.
-        let mut scoped_task =
-            RegionDefinition::new("task".to_string(), leviath_core::RegionKind::Pinned, 0);
-        scoped_task.budget = BudgetSpec::Percent {
-            percent: 0.02,
-            min: None,
-            max: None,
-        };
-        let scoped = ContextLayout::new(vec![scoped_task], window_tokens).resolved(window_tokens);
-
-        let bp = crate::spec::Blueprint::new(
-            "t".to_string(),
-            "d".to_string(),
-            vec![crate::spec::Stage::new(
-                "work".to_string(),
-                crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-            )],
-            layout(window_tokens),
-        );
+        let scoped = laid_out(&[pct("task", 0.02)], window_tokens);
 
         let mut window = crate::components::ContextWindow::new(window_tokens);
-        crate::context_setup::lay_out(&mut window, &bp.context_layout);
+        crate::context_setup::lay_out(&mut window, layout(window_tokens));
         let setup = crate::pipeline::transition::StageSetup {
             inference_config: crate::components::InferenceConfig {
                 temperature: None,
@@ -352,7 +309,7 @@ mod stage_instructions_fit_tests {
             .expect("the prompt fits the region declared for it");
 
         let instr = window
-            .get_region(crate::spec::layout::STAGE_INSTRUCTIONS_REGION)
+            .get_region(crate::spec::graph::STAGE_INSTRUCTIONS_REGION)
             .expect("carried through the scoped layout");
         assert!(
             instr.content.iter().any(|e| e.content.contains("word")),

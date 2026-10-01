@@ -117,8 +117,8 @@ fn code_is_checked_for_what_it_is_used_as() {
 fn a_stage_gets_its_own_model_on_a_registered_provider_with_its_window() {
     let defaults = ModelDefaults {
         fallback_order: vec![
-            ModelEntry::new("mock".into(), "backup".into()),
-            ModelEntry::new("mock".into(), "has space".into()),
+            ModelRef::parse("mock/backup").unwrap(),
+            ModelRef::parse("ghost/unregistered").unwrap(),
         ],
         ..Default::default()
     };
@@ -135,7 +135,7 @@ fn a_stage_gets_its_own_model_on_a_registered_provider_with_its_window() {
     assert_eq!(
         plan.fallbacks,
         vec![ModelRef::parse("mock/backup").unwrap()],
-        "a fallback that is not a valid model id is left out"
+        "a fallback on a provider that is not registered is left out"
     );
 }
 

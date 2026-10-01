@@ -1,17 +1,19 @@
 use super::*;
 use crate::spec::graph::tests::{region, stage};
-use crate::spec::graph::{ArtifactDef, FanOutDef, GateDef, WorkerFailure, WorkerSource};
-use crate::spec::names::{MimePattern, ModelId, ProviderName, RegionName, StageName, ToolName};
+use crate::spec::graph::{
+    ArtifactDef, FanOutDef, GateDef, OutputCap, ToolRoutingDef, WorkerFailure, WorkerSource,
+};
+use crate::spec::names::{
+    MimePattern, ModelId, ModelRef, ProviderName, RegionName, StageName, ToolName,
+};
 use crate::spec::run_spec::{StagePlan, ToolSource};
 
-/// A parsed stage as a run graph reads it, by way of a one-stage blueprint.
-pub(crate) fn stage_def_of(stage: crate::spec::Stage) -> StageDef {
-    let layout = crate::spec::ContextLayout::new(Vec::new(), 1000);
-    let bp = crate::spec::Blueprint::new("t".into(), "d".into(), vec![stage], layout);
-    RunGraph::from_blueprint(&bp)
-        .expect("a test stage reads as a graph")
-        .stages
-        .remove(0)
+/// A region of `regions` by name.
+fn find<'a>(regions: &'a [leviath_core::Region], name: &str) -> &'a leviath_core::Region {
+    regions
+        .iter()
+        .find(|r| r.name == name)
+        .unwrap_or_else(|| panic!("no region {name}"))
 }
 
 fn rn(name: &str) -> RegionName {
@@ -199,37 +201,18 @@ fn every_region_kind_reads_as_the_kind_the_window_keeps() {
 }
 
 #[test]
-fn a_region_definition_carries_every_setting_with_its_budget() {
+fn a_window_region_carries_every_setting_with_its_budget() {
     let mut r = region("notes");
     r.compact_at = Some(0.5);
     r.description = Some("d".into());
     r.describe_in_prompt = true;
-    r.required = true;
-    r.required_message = Some("fill it".into());
     r.summarizable = false;
     r.accepts = vec![MimePattern::new("text/*").unwrap()];
-    let def = region_definition(&r, 640);
-    assert_eq!(
-        (def.max_tokens, def.budget.clone()),
-        (640, BudgetSpec::Absolute(640))
-    );
-    assert_eq!(def.compact_at, Some(0.5));
-    assert_eq!(def.description.as_deref(), Some("d"));
-    assert!(def.describe_in_prompt && def.required && !def.summarizable);
-    assert_eq!(def.required_message.as_deref(), Some("fill it"));
-    assert_eq!(def.accepts, vec!["text/*".to_string()]);
-    assert_eq!(
-        budget_spec(&Budget::Percent {
-            percent: 0.5,
-            min: Some(1),
-            max: Some(9)
-        }),
-        BudgetSpec::Percent {
-            percent: 0.5,
-            min: Some(1),
-            max: Some(9)
-        }
-    );
+    let region = crate::context_setup::region_from_def(&r, 640);
+    assert_eq!(region.max_tokens, 640);
+    assert_eq!(region.description.as_deref(), Some("d"));
+    assert!(region.describe_in_prompt && !region.summarizable);
+    assert_eq!(region.accepts, vec!["text/*".to_string()]);
 }
 
 #[test]
@@ -250,18 +233,18 @@ fn the_graph_layout_sizes_each_region_for_the_narrowest_stage_that_sees_it() {
         max: None,
     };
     let layout = graph_layout(&spec);
-    let system = layout.get_region("system").unwrap();
+    let system = find(&layout.regions, "system");
     assert_eq!(
         system.max_tokens, 32_000,
         "half of the smaller window (64k)"
     );
-    let task = layout.get_region("task").unwrap();
+    let task = find(&layout.regions, "task");
     assert_eq!(
         task.max_tokens, 300,
         "the build stage's planned figure is smaller than 1% of 128k"
     );
     assert_eq!(
-        layout.total_budget_tokens, 64_000,
+        layout.total, 64_000,
         "a percentage layout spans the widest window any region is sized for"
     );
 
@@ -270,10 +253,7 @@ fn the_graph_layout_sizes_each_region_for_the_narrowest_stage_that_sees_it() {
     for s in &mut spec.graph.stages {
         s.hide = vec![rn("system")];
     }
-    assert_eq!(
-        graph_layout(&spec).get_region("system").unwrap().max_tokens,
-        111
-    );
+    assert_eq!(find(&graph_layout(&spec).regions, "system").max_tokens, 111);
 }
 
 #[test]
@@ -284,15 +264,15 @@ fn an_absolute_layout_keeps_its_total_and_resolves_compaction_from_its_budget() 
     };
     spec.graph.layout.regions[0].compact_at = Some(0.5);
     let layout = graph_layout(&spec);
-    assert_eq!(layout.total_budget_tokens, 10_000);
+    assert_eq!(layout.total, 10_000);
     assert!(matches!(
-        layout.get_region("system").unwrap().kind,
+        find(&layout.regions, "system").kind,
         leviath_core::RegionKind::Compacting {
             threshold_tokens: 500
         }
     ));
     assert_eq!(
-        layout.get_region("task").unwrap().max_tokens,
+        find(&layout.regions, "task").max_tokens,
         500,
         "the plan's figure"
     );
@@ -311,11 +291,13 @@ fn a_stage_layout_is_sized_for_that_stage() {
     };
     spec.graph.stages[1].layout = Some(own.clone());
     let layout = stage_layout(&spec, 1).unwrap();
-    assert_eq!(layout.get_region("system").unwrap().max_tokens, 16_000);
-    assert_eq!(layout.total_budget_tokens, 64_000);
+    assert_eq!(find(&layout, "system").max_tokens, 16_000);
     own.regions[0].budget = Budget::Tokens(10);
     spec.graph.stages[1].layout = Some(own);
-    assert_eq!(stage_layout(&spec, 1).unwrap().total_budget_tokens, 10_000);
+    assert_eq!(
+        find(&stage_layout(&spec, 1).unwrap(), "system").max_tokens,
+        10
+    );
 }
 
 #[test]
@@ -335,45 +317,6 @@ fn a_stage_with_no_plan_is_budgeted_against_the_fallback_window() {
 
 #[test]
 fn settings_read_in_the_vocabulary_their_systems_use() {
-    let routing = tool_routing(&ToolRoutingDef {
-        default_region: rn("results"),
-        tool_regions: [(ToolName::new("grep").unwrap(), rn("hits"))].into(),
-        keep_results: false,
-        max_result_tokens: Some(9),
-        tool_max_result_tokens: [(ToolName::new("grep").unwrap(), 3)].into(),
-    });
-    assert_eq!(routing.default_region, "results");
-    assert_eq!(routing.tool_overrides["grep"], "hits");
-    assert!(!routing.keep_results);
-    assert_eq!(routing.max_result_tokens, Some(9));
-    assert_eq!(routing.tool_max_result_tokens["grep"], 3);
-
-    let nudge = nudge_config(&NudgeDef {
-        enabled: Some(true),
-        max: Some(2),
-        text: Some("go".into()),
-    });
-    assert_eq!(
-        (nudge.enabled, nudge.max, nudge.text.as_deref()),
-        (Some(true), Some(2), Some("go"))
-    );
-
-    let ft = file_tracking(&FileTrackingDef {
-        region: rn("files"),
-        track_reads: false,
-        track_writes: true,
-        max_file_tokens: Some(5),
-    });
-    assert_eq!(
-        (
-            ft.region.as_str(),
-            ft.track_reads,
-            ft.track_writes,
-            ft.max_file_tokens
-        ),
-        ("files", false, true, Some(5))
-    );
-
     let out = output_spec(&OutputDef {
         format: Some("json".into()),
         schema: Some(leviath_core::JsonDoc::new(
@@ -392,9 +335,8 @@ fn settings_read_in_the_vocabulary_their_systems_use() {
     assert_eq!(out.validator.as_deref(), Some("v.rhai"));
     assert_eq!(out.artifacts[0].mime_type, "image/png");
 
-    let routed = ModelRef::parse("p/m").unwrap();
-    assert_eq!(model_entry(&routed).provider, "p");
-    assert_eq!(model_entry(&ModelRef::parse("m").unwrap()).provider, "");
+    assert_eq!(ModelRef::parse("p/m").unwrap().provider_or_empty(), "p");
+    assert_eq!(ModelRef::parse("m").unwrap().provider_or_empty(), "");
 
     let t = tool(&ToolDef {
         name: ToolName::new("t").unwrap(),
@@ -426,20 +368,17 @@ fn model_settings_reach_the_request_as_written() {
     .into();
     spec.graph.stages[0].input_as_text = vec![MimePattern::new("text/csv").unwrap()];
     spec.graph.stages[0].model.request_timeout_secs = Some(30);
-    for (cap, want) in [
-        (OutputCap::Tokens(5), "Tokens(5)"),
-        (OutputCap::WindowPercent(0.5), "WindowPercent(0.5)"),
-        (
-            OutputCap::RegionPercent {
-                percent: 0.5,
-                region: rn("task"),
-            },
-            "RegionPercent { percent: 0.5, region: \"task\" }",
-        ),
+    for cap in [
+        OutputCap::Tokens(5),
+        OutputCap::WindowPercent(0.5),
+        OutputCap::RegionPercent {
+            percent: 0.5,
+            region: rn("task"),
+        },
     ] {
-        spec.graph.stages[0].model.params.max_output_tokens = Some(cap);
+        spec.graph.stages[0].model.params.max_output_tokens = Some(cap.clone());
         let cfg = stage_setup(&spec, 0).inference_config;
-        assert_eq!(format!("{:?}", cfg.max_output_tokens.unwrap()), want);
+        assert_eq!(cfg.max_output_tokens, Some(cap));
     }
     let cfg = stage_setup(&spec, 0).inference_config;
     assert_eq!(cfg.temperature, Some(0.2));
@@ -524,7 +463,7 @@ fn a_stage_is_entered_with_what_its_definition_says() {
     assert!(!setup.accepts_messages);
     assert_eq!(setup.context_hide, vec!["system".to_string()]);
     assert_eq!(setup.context_reset, vec!["task".to_string()]);
-    assert_eq!(setup.routing.unwrap().default_region, "task");
+    assert_eq!(setup.routing.unwrap().default_region.as_str(), "task");
     assert!(setup.context_layout.is_none());
     let missing = stage_setup(&spec, 7);
     assert!(missing.system_prompt.is_none() && !missing.accepts_messages);
@@ -539,7 +478,7 @@ fn a_stage_calls_what_its_plan_says_unless_its_tools_were_looked_up_again() {
         ("mock", "gpt-mock")
     );
     assert_eq!(si.tools.len(), 3);
-    assert_eq!(si.fallbacks[0].provider, "other");
+    assert_eq!(si.fallbacks[0].provider_or_empty(), "other");
     assert!(si.output.is_some());
     let overrides = StageToolOverrides([(0, vec![tool(&spec.stages[0].tools[0])])].into());
     assert_eq!(stage_inference(&spec, 0, Some(&overrides)).tools.len(), 1);
@@ -571,6 +510,84 @@ fn a_graph_can_modify_files_through_a_tool_a_group_or_a_gate() {
     assert!(any_stage_can_modify(&graph));
 }
 
+/// A one-stage graph whose stage grants `tools` (a group by its token), with
+/// `gate_tools` named by the gate on an edge leaving it. `None` gives the
+/// stage no edge at all; an empty list gives it an edge with no gate.
+fn writing_graph(tools: &[&str], gate_tools: Option<&[&str]>) -> crate::spec::graph::RunGraph {
+    let mut graph = crate::spec::graph::tests::minimal();
+    graph.stages.truncate(1);
+    graph.edges.clear();
+    graph.stages[0].tools = tools
+        .iter()
+        .map(|t| match ToolGroup::parse(t) {
+            Some(g) => ToolSelector::Group(g),
+            None => ToolSelector::Tool(ToolName::new(*t).unwrap()),
+        })
+        .collect();
+    if let Some(extra) = gate_tools {
+        let mut edge = crate::spec::graph::tests::edge("next", "plan", "plan");
+        edge.gate = (!extra.is_empty()).then(|| GateDef {
+            require_modifications: true,
+            tools: extra.iter().map(|t| ToolName::new(*t).unwrap()).collect(),
+            ..Default::default()
+        });
+        graph.edges.push(edge);
+    }
+    graph
+}
+
+#[test]
+fn whether_any_stage_could_have_written_is_asked_of_its_tools() {
+    let none = |graph: crate::spec::graph::RunGraph| !any_stage_can_modify(&graph);
+    // A graph with no stages offers nothing.
+    let mut empty = writing_graph(&[], None);
+    empty.stages.clear();
+    assert!(none(empty));
+    // Read-only, and the sub-agent tools a router would use: nothing the
+    // framework tracks as a file change.
+    assert!(none(writing_graph(
+        &["read_file", "spawn_agent", "context_write"],
+        None
+    )));
+    // `shell` confers no tracked write: an agent editing through `sed -i`
+    // leaves no record, so silence from it stays suspicious rather than
+    // excused. The alias resolves, so `bash` is judged as `shell`.
+    assert!(none(writing_graph(&["bash"], None)));
+    // A built-in group carries `write_file` and `edit_file` unnamed.
+    assert!(!none(writing_graph(&["@builtin"], None)));
+    assert!(none(writing_graph(&["@scripts"], None)));
+    // A built-in modifying tool, under either name.
+    assert!(!none(writing_graph(&["write_file"], None)));
+    assert!(!none(writing_graph(&["edit_file"], None)));
+    // Only one stage needs it.
+    let mut two = writing_graph(&["read_file"], None);
+    let mut second = two.stages[0].clone();
+    second.name = crate::spec::names::StageName::new("write").unwrap();
+    second.tools = vec![ToolSelector::Tool(ToolName::new("write_file").unwrap())];
+    two.stages.push(second);
+    assert!(!none(two));
+}
+
+#[test]
+fn a_gate_declaring_its_own_write_tool_counts_as_a_write() {
+    let none = |graph: crate::spec::graph::RunGraph| !any_stage_can_modify(&graph);
+    // An MCP/script write tool the stage advertises AND a gate names is a
+    // tracked write - the same escape hatch `stage_modifying_tools` gives.
+    assert!(!none(writing_graph(
+        &["mcp__fs__put"],
+        Some(&["mcp__fs__put"])
+    )));
+    // Declared by the gate but never advertised: the stage cannot call it.
+    assert!(none(writing_graph(&["read_file"], Some(&["mcp__fs__put"]))));
+    // An edge, but no gate on it.
+    assert!(none(writing_graph(&["read_file"], Some(&[]))));
+    // A gate that names a tool unrelated to what the stage advertises.
+    assert!(none(writing_graph(
+        &["mcp__fs__put"],
+        Some(&["mcp__other__put"])
+    )));
+}
+
 #[test]
 fn a_compacting_region_is_summarized_at_its_share_of_the_budget_it_is_given() {
     let mut r = region("log");
@@ -579,7 +596,7 @@ fn a_compacting_region_is_summarized_at_its_share_of_the_budget_it_is_given() {
     };
     r.compact_at = Some(0.5);
     assert!(matches!(
-        region_definition(&r, 1000).kind,
+        region_kind(&r, 1000),
         leviath_core::RegionKind::Compacting {
             threshold_tokens: 500
         }
@@ -588,14 +605,14 @@ fn a_compacting_region_is_summarized_at_its_share_of_the_budget_it_is_given() {
         threshold_tokens: Some(300),
     };
     assert!(matches!(
-        region_definition(&r, 1000).kind,
+        region_kind(&r, 1000),
         leviath_core::RegionKind::Compacting {
             threshold_tokens: 300
         }
     ));
     r.kind = RegionKind::Pinned;
     assert!(matches!(
-        region_definition(&r, 1000).kind,
+        region_kind(&r, 1000),
         leviath_core::RegionKind::Pinned
     ));
 }
@@ -610,7 +627,7 @@ fn a_compacting_region_with_no_trigger_is_summarized_at_four_fifths_of_its_budge
     r.kind = RegionKind::Compacting {
         threshold_tokens: None,
     };
-    let threshold = |r: &RegionDef| match region_definition(r, 1001).kind {
+    let threshold = |r: &RegionDef| match region_kind(r, 1001) {
         leviath_core::RegionKind::Compacting { threshold_tokens } => threshold_tokens,
         other => panic!("{other:?}"),
     };
@@ -632,7 +649,7 @@ fn a_position_past_the_last_stage_has_no_plan() {
 #[test]
 fn a_stages_nudge_cascades_from_the_stage_to_the_graph_to_the_operator() {
     let mut graph = crate::spec::graph::tests::minimal();
-    let operator = crate::spec::NudgeConfig {
+    let operator = NudgeDef {
         enabled: None,
         max: Some(7),
         text: Some("operator".into()),

@@ -31,13 +31,13 @@ use crate::components::ContextWindow;
 /// region must not be mistaken for the animated one this stage made.
 #[cfg(test)]
 pub(crate) fn try_emit(
-    stage: &crate::spec::blueprint::Stage,
+    stage: &crate::spec::graph::StageDef,
     spec: Option<&OutputSpec>,
     now: i64,
     window: &mut ContextWindow,
 ) -> Option<FinalOutput> {
-    let targets: Vec<&str> = stage.output_routing.values().map(String::as_str).collect();
-    try_emit_for(&stage.name, &targets, spec, now, window)
+    let targets: Vec<&str> = stage.output_routing.values().map(|r| r.as_str()).collect();
+    try_emit_for(stage.name.as_str(), &targets, spec, now, window)
 }
 
 /// [`try_emit`] for the stage named `stage`, whose output routing sends parts
@@ -119,7 +119,7 @@ fn describe(records: &[Artifact]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::blueprint::{ModelConfig, Stage};
+    use crate::spec::graph::StageDef;
     use leviath_core::mime::{Blob, MimeRegistry, MimeType};
     use leviath_core::region::{Region, RegionKind};
 
@@ -139,15 +139,16 @@ mod tests {
         }
     }
 
-    fn stage_routing(rules: &[(&str, &str)]) -> Stage {
-        let mut stage = Stage::new(
-            "build".to_string(),
-            ModelConfig::new("meshy".to_string(), "image-to-3d".to_string()),
-        );
+    fn stage_routing(rules: &[(&str, &str)]) -> StageDef {
+        let mut stage = StageDef {
+            model: crate::test_graph::model("meshy", "image-to-3d"),
+            ..crate::test_graph::stage("build")
+        };
         for (pattern, region) in rules {
-            stage
-                .output_routing
-                .insert((*pattern).to_string(), (*region).to_string());
+            stage.output_routing.insert(
+                (*pattern).to_string(),
+                crate::test_graph::region_name(region),
+            );
         }
         stage
     }
@@ -281,9 +282,10 @@ mod tests {
     #[test]
     fn two_declared_artifacts_take_two_distinct_parts() {
         let mut stage = stage_routing(&[("model/*", "model")]);
-        stage
-            .output_routing
-            .insert("image/*".to_string(), "preview".to_string());
+        stage.output_routing.insert(
+            "image/*".to_string(),
+            crate::test_graph::region_name("preview"),
+        );
         let spec = spec_with(vec![
             artifact_spec("model", "model/gltf-binary", true),
             artifact_spec("preview", "image/*", true),

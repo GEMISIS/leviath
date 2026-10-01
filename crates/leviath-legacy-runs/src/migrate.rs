@@ -6,7 +6,6 @@
 //! `lev blueprint migrate` writes is [`migrate`]'s output.
 
 use leviath_blueprint::{BlueprintFile, BlueprintMeta};
-use leviath_runtime::spec::graph::RunGraph;
 use leviath_runtime::spec::names::BlueprintName;
 
 use crate::manifest::{parse_manifest, read_manifest_tables, unread_keys};
@@ -25,7 +24,7 @@ pub fn migrate(manifest: &str) -> Result<String, Vec<String>> {
 /// Convert the text of an `agent.leviath` into a blueprint file.
 pub fn migrate_file(manifest: &str) -> Result<BlueprintFile, Vec<String>> {
     let blueprint = parse_manifest(manifest).map_err(|e| vec![e.to_string()])?;
-    let graph = RunGraph::from_blueprint(&blueprint)
+    let graph = crate::old::graph::from_blueprint(&blueprint)
         .and_then(|mut graph| read_manifest_tables(&mut graph, manifest).map(|()| graph))
         .map_err(|issues| issues.iter().map(ToString::to_string).collect::<Vec<_>>());
     let name =

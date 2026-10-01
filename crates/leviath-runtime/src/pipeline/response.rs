@@ -447,7 +447,7 @@ pub(crate) fn collect_inference(
                     tracing::warn!(
                         from_provider = %called_provider,
                         from_model = %called_model,
-                        to_provider = %next.provider,
+                        to_provider = %next.provider_or_empty(),
                         to_model = %next.model,
                         error = %err,
                         "provider unusable; failing over to the next configured model"
@@ -458,7 +458,8 @@ pub(crate) fn collect_inference(
                             format!(
                                 "[failover] {called_provider}/{called_model} is unusable \
                                  ({err}); retrying on {}/{}",
-                                next.provider, next.model
+                                next.provider_or_empty(),
+                                next.model
                             ),
                         ));
                     }
@@ -478,8 +479,8 @@ pub(crate) fn collect_inference(
                             iteration: state.iteration,
                             from_provider: called_provider.clone(),
                             from_model: called_model.clone(),
-                            to_provider: next.provider.clone(),
-                            to_model: next.model.clone(),
+                            to_provider: next.provider_or_empty().to_string(),
+                            to_model: next.model.to_string(),
                             reason: err
                                 .unavailable_reason()
                                 .map(leviath_providers::UnavailableReason::label)
@@ -499,8 +500,8 @@ pub(crate) fn collect_inference(
                     let si = inference
                         .as_deref_mut()
                         .expect("the failover branch only runs with a StageInference");
-                    si.provider_name = next.provider;
-                    si.model = next.model;
+                    si.provider_name = next.provider_or_empty().to_string();
+                    si.model = next.model.to_string();
                     // Back to ready, not errored: the next tick dispatches it
                     // against the new provider and takes that model's permit.
                     // The iteration is deliberately not bumped - the agent has
@@ -878,10 +879,10 @@ pub(crate) fn edited_path(call: &crate::components::ToolCall) -> Option<&str> {
 /// a hot-reloaded config applies from the next run rather than mutating live
 /// ones (same snapshot semantics as the batch-tool-hint global). Absent on
 /// worlds that spawn agents without going through the seeded spawn (tests,
-/// embedders); [`crate::spec::resolve_nudge`] then falls through to the
-/// built-in defaults.
+/// embedders); [`NudgeDef::resolve`](crate::spec::graph::NudgeDef::resolve)
+/// then falls through to the built-in defaults.
 #[derive(Component, Debug, Clone, Default)]
-pub(crate) struct GlobalNudge(pub crate::spec::NudgeConfig);
+pub(crate) struct GlobalNudge(pub crate::spec::graph::NudgeDef);
 
 /// What `handle_empty_response` selects.
 ///
@@ -908,7 +909,7 @@ type EmptyResponseQuery = (
 ///
 /// The nudge is programmable per stage (`[stages.<name>.nudge]`), per agent
 /// (`[agent.nudge]`), and globally (config `[nudge]`), each field cascading
-/// independently through [`crate::spec::resolve_nudge`]. With nothing
+/// independently through [`NudgeDef::resolve`](crate::spec::graph::NudgeDef::resolve). With nothing
 /// configured, a stage whose output is reviewed is never nudged - see
 /// [`stage_nudge`](super::spec_view::stage_nudge) - but an explicit `enabled`
 /// at any level speaks for itself. The text supports `{stage}` and `{regions}`

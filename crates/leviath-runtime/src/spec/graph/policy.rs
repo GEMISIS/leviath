@@ -57,7 +57,7 @@ impl OutputDef {
 
     /// `spec` as an output shape, with every artifact whose mime type does not
     /// read pushed onto `issues` at its place under `at` and left out.
-    pub(crate) fn read(
+    pub fn read(
         spec: &leviath_core::output::OutputSpec,
         at: &SpecPath,
         issues: &mut SpawnIssues,
@@ -170,6 +170,53 @@ pub struct NudgeDef {
     /// The nudge's text.
     #[serde(default)]
     pub text: Option<String>,
+}
+
+/// The nudge text when no level sets one.
+pub const DEFAULT_NUDGE_TEXT: &str = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
+
+/// How many text-only replies are nudged before the text is taken as final,
+/// when no level sets `max`.
+pub const DEFAULT_MAX_NUDGES: usize = 3;
+
+/// One stage's nudge with every setting decided. Made by [`NudgeDef::resolve`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNudge {
+    /// Whether the nudge fires for this stage.
+    pub enabled: bool,
+    /// Text-only replies tolerated before the text is taken as final.
+    pub max: usize,
+    /// The nudge text, before its `{stage}` and `{regions}` are filled in.
+    pub text: String,
+}
+
+impl NudgeDef {
+    /// A stage's nudge, each setting taken from the narrowest level that sets
+    /// it: the stage, then the graph, then the operator's `global`, then the
+    /// built-in default. Nothing is clamped: like the batch-tool hint this is a
+    /// question of style, not a permission, so a graph may raise `max` above
+    /// the operator's.
+    ///
+    /// `reviewed` decides only the default for `enabled`: a stage with
+    /// interaction points presents its text for a person to approve, so it is
+    /// not told to "use your tools" unless some level turns the nudge on.
+    pub fn resolve(
+        global: Option<&NudgeDef>,
+        graph: Option<&NudgeDef>,
+        stage: Option<&NudgeDef>,
+        reviewed: bool,
+    ) -> ResolvedNudge {
+        let levels = || [stage, graph, global].into_iter().flatten();
+        ResolvedNudge {
+            enabled: levels().find_map(|d| d.enabled).unwrap_or(!reviewed),
+            max: levels()
+                .find_map(|d| d.max)
+                .map_or(DEFAULT_MAX_NUDGES, |m| m as usize),
+            text: levels()
+                .find_map(|d| d.text.clone())
+                .unwrap_or_else(|| DEFAULT_NUDGE_TEXT.to_string()),
+        }
+    }
 }
 
 /// When repeated tool calls count as a loop.

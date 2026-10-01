@@ -26,6 +26,10 @@ use std::path::Path;
 /// own: the conventional `task` text.
 pub(crate) const TASK_INPUT: &str = "task";
 
+/// The most workers at once for a `fan_out` called outside a fan-out stage,
+/// which has no `max_workers` of its own: the same default a stage gets.
+const CALLED_MAX_WORKERS: u32 = crate::spec::graph::stage::DEFAULT_MAX_WORKERS;
+
 /// The label a worker's request carries its work item's id under, so the
 /// host can name the worker after the item it runs.
 pub const WORK_ITEM_LABEL: &str = "fan_out_item";
@@ -67,7 +71,7 @@ pub(crate) struct FanOutRequest {
 
 /// Whether a tool call is the fan-out tool.
 pub(crate) fn is_fan_out_tool(name: &str) -> bool {
-    name == crate::spec::blueprint::FAN_OUT_TOOL
+    name == leviath_core::stage_tools::FAN_OUT_TOOL
 }
 
 /// Read a `fan_out` call's arguments.
@@ -143,7 +147,7 @@ pub(crate) fn config_for(
         (None, Some(worker)) => FanOutDef {
             worker,
             merge_stage: None,
-            max_workers: clamp(crate::spec::blueprint::DEFAULT_MAX_WORKERS),
+            max_workers: CALLED_MAX_WORKERS,
             on_worker_failure: WorkerFailure::Continue,
             split_prompt: String::new(),
             results_region: None,
@@ -357,7 +361,7 @@ mod tests {
         let schema = tools
             .tool_defs()
             .into_iter()
-            .find(|t| t.name == crate::spec::blueprint::FAN_OUT_TOOL)
+            .find(|t| t.name == leviath_core::stage_tools::FAN_OUT_TOOL)
             .expect("fan_out is advertised")
             .parameters;
         for (call, readable) in [
@@ -471,10 +475,7 @@ mod tests {
             config.worker,
             WorkerSource::Blueprint(BlueprintRef::parse("researcher").unwrap())
         );
-        assert_eq!(
-            config.max_workers as usize,
-            crate::spec::blueprint::DEFAULT_MAX_WORKERS
-        );
+        assert_eq!(config.max_workers, CALLED_MAX_WORKERS);
         assert_eq!(config.on_worker_failure, WorkerFailure::Continue);
         assert_eq!(config.max_items, None);
         let err = config_for(&request(None, None), None, None).unwrap_err();

@@ -103,17 +103,19 @@ impl RepetitionDetector {
         Self::new(RepetitionConfig::default())
     }
 
-    /// Build a detector from a blueprint's
-    /// [`RepetitionDetectionConfig`](crate::spec::blueprint::RepetitionDetectionConfig),
-    /// filling any unset field from the [`RepetitionConfig`] defaults.
-    pub(crate) fn from_detection_config(
-        cfg: &crate::spec::blueprint::RepetitionDetectionConfig,
-    ) -> Self {
+    /// Build a detector from a graph's
+    /// [`RepetitionDef`](crate::spec::graph::RepetitionDef), filling any unset
+    /// field from the [`RepetitionConfig`] defaults.
+    pub(crate) fn from_def(def: &crate::spec::graph::RepetitionDef) -> Self {
         let d = RepetitionConfig::default();
         Self::new(RepetitionConfig {
-            max_repeat_calls: cfg.max_repeat_calls.unwrap_or(d.max_repeat_calls),
-            max_readonly_streak: cfg.max_readonly_streak.unwrap_or(d.max_readonly_streak),
-            enabled: cfg.enabled.unwrap_or(d.enabled),
+            max_repeat_calls: def
+                .max_repeat_calls
+                .map_or(d.max_repeat_calls, |n| n as usize),
+            max_readonly_streak: def
+                .max_readonly_streak
+                .map_or(d.max_readonly_streak, |n| n as usize),
+            enabled: def.enabled.unwrap_or(d.enabled),
         })
     }
 
@@ -175,24 +177,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_detection_config_maps_set_fields_and_defaults_unset() {
-        use crate::spec::blueprint::RepetitionDetectionConfig;
-        let all = RepetitionDetectionConfig {
+    fn from_def_maps_set_fields_and_defaults_unset() {
+        use crate::spec::graph::RepetitionDef;
+        let all = RepetitionDef {
             max_repeat_calls: Some(1),
             max_readonly_streak: Some(2),
             enabled: Some(false),
         };
-        let d = RepetitionDetector::from_detection_config(&all);
+        let d = RepetitionDetector::from_def(&all);
         assert_eq!(d.config.max_repeat_calls, 1);
         assert_eq!(d.config.max_readonly_streak, 2);
         assert!(!d.config.enabled);
 
-        let unset = RepetitionDetectionConfig {
+        let unset = RepetitionDef {
             max_repeat_calls: None,
             max_readonly_streak: None,
             enabled: None,
         };
-        let d2 = RepetitionDetector::from_detection_config(&unset);
+        let d2 = RepetitionDetector::from_def(&unset);
         assert_eq!(d2.config.max_repeat_calls, 3);
         assert_eq!(d2.config.max_readonly_streak, 10);
         assert!(d2.config.enabled);

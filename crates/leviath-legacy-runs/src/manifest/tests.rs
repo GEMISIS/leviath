@@ -6,11 +6,11 @@
 //! quarter of that.
 
 use super::*;
-use leviath_runtime::spec::layout::SeedToolCall;
+use crate::old::layout::SeedToolCall;
 
 // ─── [stages.<name>.hooks] ────────────────────────────────────────────
 
-fn stage_with_hooks(body: &str) -> Result<leviath_runtime::spec::Stage> {
+fn stage_with_hooks(body: &str) -> Result<crate::old::blueprint::Stage> {
     let toml_src = format!("[stages.main]\n{body}\n");
     let parsed: toml::Value = toml::from_str(&toml_src).expect("fixture parses");
     let stage_value = parsed
@@ -111,9 +111,7 @@ fn a_hook_that_is_not_a_path_is_refused() {
 /// Extract the `points` vec from a `StageMode::InteractivePoints`.
 /// Panics (with a diagnostic) when the mode is any other variant.
 /// The panic branch is exercised by `unwrap_interactive_points_panics_on_wrong_mode`.
-fn unwrap_interactive_points(
-    mode: &StageMode,
-) -> &[leviath_runtime::spec::blueprint::InteractionPoint] {
+fn unwrap_interactive_points(mode: &StageMode) -> &[crate::old::blueprint::InteractionPoint] {
     match mode {
         StageMode::InteractivePoints { points } => points,
         other => panic!(
@@ -185,14 +183,14 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
     assert_eq!(bp.entry_stage, Some("start".to_string()));
     assert_eq!(
         bp.tool_rescan,
-        leviath_runtime::spec::blueprint::ToolRescan::BeforeDispatch
+        crate::old::blueprint::ToolRescan::BeforeDispatch
     );
     assert_eq!(bp.stages.len(), 2);
 
     let start = bp.find_stage("start").unwrap();
     assert_eq!(start.mode, StageMode::Autonomous);
-    assert_eq!(start.model.provider(), "openai");
-    assert_eq!(start.model.model(), "gpt-5");
+    assert_eq!(start.model.models[0].provider, "openai");
+    assert_eq!(start.model.models[0].model, "gpt-5");
     assert_eq!(start.max_iterations, Some(25));
     assert_eq!(start.available_tools, vec!["read_file", "bash"]);
     assert!(start.requires_children);
@@ -326,7 +324,7 @@ mode = "autonomous"
         .expect("the edge survives");
     assert_eq!(
         edge.condition,
-        leviath_runtime::spec::blueprint::TransitionCondition::DeadEnd
+        crate::old::blueprint::TransitionCondition::DeadEnd
     );
 }
 
@@ -544,17 +542,10 @@ brain = { kind = "custom", script = "b.rhai", budget = "40%", min_tokens = 10000
         .iter()
         .find(|r| r.name == "brain")
         .unwrap();
-    assert!(brain.budget.is_percent());
-    let resolved = bp.context_layout.resolved(200_000);
-    assert_eq!(
-        resolved
-            .regions
-            .iter()
-            .find(|r| r.name == "brain")
-            .unwrap()
-            .max_tokens,
-        80_000
-    );
+    assert!(matches!(
+        brain.budget,
+        crate::old::layout::BudgetSpec::Percent { percent, min: Some(10_000), .. } if percent == 0.4
+    ));
 }
 
 #[test]
@@ -679,15 +670,9 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
 
     // Back-compat: with no `budget`, every region is an Absolute budget
     // matching its max_tokens, and compact_at stays None.
-    assert_eq!(
-        sys.budget,
-        leviath_runtime::spec::BudgetSpec::Absolute(1000)
-    );
+    assert_eq!(sys.budget, crate::old::layout::BudgetSpec::Absolute(1000));
     assert_eq!(sys.compact_at, None);
-    assert_eq!(
-        comp.budget,
-        leviath_runtime::spec::BudgetSpec::Absolute(6000)
-    );
+    assert_eq!(comp.budget, crate::old::layout::BudgetSpec::Absolute(6000));
     assert_eq!(comp.compact_at, None);
 }
 
@@ -706,7 +691,7 @@ abs  = { kind = "pinned", max_tokens = 3000 }
     let task = bp.context_layout.get_region("task").unwrap();
     assert_eq!(
         task.budget,
-        leviath_runtime::spec::BudgetSpec::Percent {
+        crate::old::layout::BudgetSpec::Percent {
             percent: 0.02,
             min: Some(500),
             max: Some(4000),
@@ -718,7 +703,7 @@ abs  = { kind = "pinned", max_tokens = 3000 }
     let free = bp.context_layout.get_region("free").unwrap();
     assert_eq!(
         free.budget,
-        leviath_runtime::spec::BudgetSpec::Percent {
+        crate::old::layout::BudgetSpec::Percent {
             percent: 0.25,
             min: None,
             max: None,
@@ -728,12 +713,8 @@ abs  = { kind = "pinned", max_tokens = 3000 }
     assert_eq!(free.max_tokens, 0);
 
     let abs = bp.context_layout.get_region("abs").unwrap();
-    assert_eq!(
-        abs.budget,
-        leviath_runtime::spec::BudgetSpec::Absolute(3000)
-    );
+    assert_eq!(abs.budget, crate::old::layout::BudgetSpec::Absolute(3000));
 
-    assert!(bp.context_layout.has_percent_budgets());
     // Only the absolute region contributes to the summed total.
     assert_eq!(bp.context_layout.total_budget_tokens, 3000);
 }
@@ -864,11 +845,10 @@ task = { kind = "pinned", max_tokens = 4000 }
     // The plan stage has its own layout with percentage budgets.
     let plan_stage = bp.stages.iter().find(|s| s.name == "plan").unwrap();
     let plan_layout = plan_stage.context_layout.as_ref().unwrap();
-    assert!(plan_layout.has_percent_budgets());
     let plan_region = plan_layout.get_region("plan").unwrap();
     assert_eq!(
         plan_region.budget,
-        leviath_runtime::spec::BudgetSpec::Percent {
+        crate::old::layout::BudgetSpec::Percent {
             percent: 0.20,
             min: None,
             max: Some(40000),
@@ -911,8 +891,8 @@ model = { provider = "google", model = "gemini-3.5-pro" }
 "#;
     let bp = parse_manifest(toml).unwrap();
     let stage = bp.find_stage("main").unwrap();
-    assert_eq!(stage.model.provider(), "google");
-    assert_eq!(stage.model.model(), "gemini-3.5-pro");
+    assert_eq!(stage.model.models[0].provider, "google");
+    assert_eq!(stage.model.models[0].model, "gemini-3.5-pro");
 }
 
 #[test]
@@ -1051,7 +1031,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         region("clock"),
         Some(RegionSeed::Tools {
             calls: vec![SeedToolCall::new("current_time")],
-            refresh: leviath_runtime::spec::layout::SeedRefresh::Once,
+            refresh: crate::old::layout::SeedRefresh::Once,
         })
     );
     // A list of bare names is a list of argument-free calls, in order.
@@ -1062,7 +1042,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
                 SeedToolCall::new("current_time"),
                 SeedToolCall::new("system_info"),
             ],
-            refresh: leviath_runtime::spec::layout::SeedRefresh::Once,
+            refresh: crate::old::layout::SeedRefresh::Once,
         })
     );
     // The two entry spellings mix in one list, because most calls take no
@@ -1077,7 +1057,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
                 SeedToolCall::new("system_info"),
                 SeedToolCall::new("locale_info"),
             ],
-            refresh: leviath_runtime::spec::layout::SeedRefresh::Once,
+            refresh: crate::old::layout::SeedRefresh::Once,
         })
     );
     assert!(
@@ -1120,7 +1100,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
             _ => None,
         }
     };
-    use leviath_runtime::spec::layout::SeedRefresh;
+    use crate::old::layout::SeedRefresh;
     // Unset is `once`, for both spellings of a tool seed.
     assert_eq!(
         refresh_of(
@@ -1218,7 +1198,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         ),
         Some(RegionSeed::Tools {
             calls: vec![SeedToolCall::new("current_time")],
-            refresh: leviath_runtime::spec::layout::SeedRefresh::Once,
+            refresh: crate::old::layout::SeedRefresh::Once,
         })
     );
 }
@@ -1333,7 +1313,7 @@ model = "claude-sonnet-5"
 
 #[test]
 fn parse_manifest_reads_transforms_with_all_mapping_kinds() {
-    use leviath_runtime::spec::blueprint::ContentTransform;
+    use crate::old::blueprint::ContentTransform;
     let toml = r#"
 [agent]
 name = "xform-test"
@@ -1539,8 +1519,8 @@ mode = "autonomous"
 "#;
     let bp = parse_manifest(toml).unwrap();
     let stage = bp.find_stage("main").unwrap();
-    assert_eq!(stage.model.provider(), "anthropic");
-    assert_eq!(stage.model.model(), "claude-sonnet-4-6");
+    assert_eq!(stage.model.models[0].provider, "anthropic");
+    assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
 }
 
 #[test]
@@ -1676,7 +1656,7 @@ style = "confirm"
     assert!(points[0].required);
     assert_eq!(
         points[0].style,
-        leviath_runtime::spec::blueprint::InteractionStyle::MultipleChoice
+        crate::old::blueprint::InteractionStyle::MultipleChoice
     );
     assert_eq!(points[0].options, vec!["approve", "reject", "revise"]);
     assert_eq!(points[0].document_region.as_deref(), Some("plan"));
@@ -1687,13 +1667,13 @@ style = "confirm"
     assert!(!points[1].required);
     assert_eq!(
         points[1].style,
-        leviath_runtime::spec::blueprint::InteractionStyle::FreeText
+        crate::old::blueprint::InteractionStyle::FreeText
     );
 
     assert_eq!(points[2].name, "confirm");
     assert_eq!(
         points[2].style,
-        leviath_runtime::spec::blueprint::InteractionStyle::Confirm
+        crate::old::blueprint::InteractionStyle::Confirm
     );
 }
 
@@ -1758,15 +1738,15 @@ required = true
 
     assert_eq!(
         policy_of(""),
-        leviath_runtime::spec::blueprint::UnattendedPolicy::AutoApprove
+        crate::old::blueprint::UnattendedPolicy::AutoApprove
     );
     assert_eq!(
         policy_of("unattended = \"auto_approve\""),
-        leviath_runtime::spec::blueprint::UnattendedPolicy::AutoApprove
+        crate::old::blueprint::UnattendedPolicy::AutoApprove
     );
     assert_eq!(
         policy_of("unattended = \"ask\""),
-        leviath_runtime::spec::blueprint::UnattendedPolicy::Ask
+        crate::old::blueprint::UnattendedPolicy::Ask
     );
 }
 
@@ -2208,11 +2188,11 @@ text = 7
     let bp = parse_manifest(toml).unwrap();
     assert_eq!(
         bp.nudge.as_ref().unwrap(),
-        &leviath_runtime::spec::blueprint::NudgeConfig::default()
+        &crate::old::blueprint::NudgeConfig::default()
     );
     assert_eq!(
         bp.find_stage("main").unwrap().nudge.as_ref().unwrap(),
-        &leviath_runtime::spec::blueprint::NudgeConfig::default()
+        &crate::old::blueprint::NudgeConfig::default()
     );
 }
 
@@ -2343,14 +2323,14 @@ mode = "autonomous"
 "#;
     let bp = parse_manifest(toml).unwrap();
     // Compare the whole mode (no never-taken fallback arm to leave uncovered).
-    let expected = leviath_runtime::spec::blueprint::StageMode::FanOut {
-        config: leviath_runtime::spec::blueprint::FanOutConfig {
+    let expected = crate::old::blueprint::StageMode::FanOut {
+        config: crate::old::blueprint::FanOutConfig {
             worker_agent: None,
             worker_stage: Some("worker".to_string()),
             worker_query: None,
             merge_stage: Some("merge".to_string()),
             max_workers: 7,
-            on_worker_failure: leviath_runtime::spec::blueprint::WorkerFailurePolicy::FailAll,
+            on_worker_failure: crate::old::blueprint::WorkerFailurePolicy::FailAll,
             split_prompt: "split the work".to_string(),
             results_region: None,
             max_items: None,
@@ -2375,14 +2355,14 @@ worker_agent = "external-worker"
 split_prompt = "go"
 "#;
     let bp = parse_manifest(toml).unwrap();
-    let expected = leviath_runtime::spec::blueprint::StageMode::FanOut {
-        config: leviath_runtime::spec::blueprint::FanOutConfig {
+    let expected = crate::old::blueprint::StageMode::FanOut {
+        config: crate::old::blueprint::FanOutConfig {
             worker_agent: Some("external-worker".to_string()),
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
-            max_workers: leviath_runtime::spec::blueprint::DEFAULT_MAX_WORKERS,
-            on_worker_failure: leviath_runtime::spec::blueprint::WorkerFailurePolicy::Continue,
+            max_workers: crate::old::blueprint::DEFAULT_MAX_WORKERS,
+            on_worker_failure: crate::old::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "go".to_string(),
             results_region: None,
             max_items: None,
@@ -2412,14 +2392,14 @@ max_items = 12
 "#;
     // The whole mode, so there is no never-taken match arm left behind.
     let bp = parse_manifest(toml).unwrap();
-    let expected = leviath_runtime::spec::blueprint::StageMode::FanOut {
-        config: leviath_runtime::spec::blueprint::FanOutConfig {
+    let expected = crate::old::blueprint::StageMode::FanOut {
+        config: crate::old::blueprint::FanOutConfig {
             worker_agent: Some("w".to_string()),
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
-            max_workers: leviath_runtime::spec::blueprint::DEFAULT_MAX_WORKERS,
-            on_worker_failure: leviath_runtime::spec::blueprint::WorkerFailurePolicy::Continue,
+            max_workers: crate::old::blueprint::DEFAULT_MAX_WORKERS,
+            on_worker_failure: crate::old::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "go".to_string(),
             results_region: Some("worker_rows".to_string()),
             max_items: Some(12),
@@ -2447,14 +2427,14 @@ max_items = 0
 max_workers = 0
 "#;
     let bp = parse_manifest(toml).unwrap();
-    let expected = leviath_runtime::spec::blueprint::StageMode::FanOut {
-        config: leviath_runtime::spec::blueprint::FanOutConfig {
+    let expected = crate::old::blueprint::StageMode::FanOut {
+        config: crate::old::blueprint::FanOutConfig {
             worker_agent: Some("w".to_string()),
             worker_stage: None,
             worker_query: None,
             merge_stage: None,
             max_workers: 0,
-            on_worker_failure: leviath_runtime::spec::blueprint::WorkerFailurePolicy::Continue,
+            on_worker_failure: crate::old::blueprint::WorkerFailurePolicy::Continue,
             split_prompt: "go".to_string(),
             results_region: None,
             max_items: None,
@@ -2463,10 +2443,6 @@ max_workers = 0
     };
     let stage = bp.find_stage("parallel").unwrap();
     assert_eq!(stage.mode, expected);
-    let leviath_runtime::spec::blueprint::StageMode::FanOut { config } = &stage.mode else {
-        unreachable!("asserted equal to a fan-out above");
-    };
-    assert_eq!(config.worker_cap(), None);
 }
 
 /// A negative or non-numeric cap is a mistake the author should hear about at
@@ -2581,10 +2557,7 @@ mode = "autonomous"
     // holds. (A negative attempt budget is refused instead; see
     // `every_negative_manifest_integer_fails_to_load_naming_the_key`.)
     let gate = transitions["c"].gate.as_ref().unwrap();
-    assert_eq!(
-        gate,
-        &leviath_runtime::spec::blueprint::TransitionGate::default()
-    );
+    assert_eq!(gate, &crate::old::blueprint::TransitionGate::default());
     // Zero, on the other hand, is a deliberate "record it but never hold".
     let toml = toml.replace("max_attempts = \"four\"", "max_attempts = 0");
     let bp = parse_manifest(&toml).unwrap();
@@ -2668,7 +2641,7 @@ text = true
     // table is left out of it.
     let json = serde_json::to_string(&bp).unwrap();
     assert!(json.contains("\"mime_types\""));
-    let back: leviath_runtime::spec::Blueprint = serde_json::from_str(&json).unwrap();
+    let back: crate::old::blueprint::Blueprint = serde_json::from_str(&json).unwrap();
     assert_eq!(back.mime_types, bp.mime_types);
     let plain = parse_manifest("[agent]\nname = \"plain\"\n").unwrap();
     assert!(plain.mime_types.is_empty());
@@ -2943,13 +2916,12 @@ mode = "output"
     assert!(
         stage
             .available_tools
-            .contains(&leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL.to_string())
+            .contains(&crate::old::blueprint::SUBMIT_OUTPUT_TOOL.to_string())
     );
     // An output stage is normally the last thing a run does.
     assert!(stage.allow_complete);
     // And the grant survives validation, which would otherwise reject a
     // stage required to produce an output it cannot submit.
-    bp.validate().expect("the auto-grant satisfies validation");
 }
 
 /// `max_attempts` is how many times a fan-out stage is asked again before it is
@@ -3038,7 +3010,7 @@ allow_as_worker = true
         .expect("the stage exists");
     assert_eq!(
         stage.available_tools,
-        vec![leviath_runtime::spec::blueprint::FAN_OUT_TOOL.to_string()],
+        vec![crate::old::blueprint::FAN_OUT_TOOL.to_string()],
         "granted even though the author wrote an empty list"
     );
 
@@ -3054,7 +3026,7 @@ allow_as_worker = true
     assert_eq!(
         stage.available_tools,
         vec![
-            leviath_runtime::spec::blueprint::FAN_OUT_TOOL.to_string(),
+            crate::old::blueprint::FAN_OUT_TOOL.to_string(),
             "read_file".to_string()
         ],
         "the author's own list is kept and the grant is not duplicated"
@@ -3101,7 +3073,6 @@ require_output = true
     let stage = bp.find_stage("fix_worker").expect("the stage exists");
     assert!(stage.require_output);
     assert_eq!(stage.mode, StageMode::Autonomous);
-    bp.validate().expect("the stage can submit");
 }
 
 /// An output shape is read at both levels, and `format` is taken as an
@@ -3363,7 +3334,6 @@ fn coder_plan_stage_branches_on_choice() {
 fn shipped_coding_agents_gate_every_non_error_implement_edge() {
     for manifest_content in [include_str!("fixtures/coder.leviath")] {
         let bp = parse_manifest(manifest_content).unwrap();
-        bp.validate().unwrap();
         let implement = bp.find_stage("implement").unwrap();
         assert!(
             implement.available_tools.iter().any(|t| t == "write_file")
@@ -3380,9 +3350,9 @@ fn shipped_coding_agents_gate_every_non_error_implement_edge() {
             // escape it exists to provide.
             if matches!(
                 edge.condition,
-                leviath_runtime::spec::blueprint::TransitionCondition::Error
-                    | leviath_runtime::spec::blueprint::TransitionCondition::Stuck
-                    | leviath_runtime::spec::blueprint::TransitionCondition::DeadEnd
+                crate::old::blueprint::TransitionCondition::Error
+                    | crate::old::blueprint::TransitionCondition::Stuck
+                    | crate::old::blueprint::TransitionCondition::DeadEnd
             ) {
                 continue;
             }
@@ -3428,7 +3398,7 @@ fn coder_plan_routes_errors_and_cannot_end_the_run() {
     assert!(
         transitions
             .get("error_recovery")
-            .map(|e| e.condition == leviath_runtime::spec::blueprint::TransitionCondition::Error)
+            .map(|e| e.condition == crate::old::blueprint::TransitionCondition::Error)
             .unwrap_or(false)
     );
 
@@ -3512,17 +3482,9 @@ fn coder_review_stage_can_finish_and_routes_errors() {
     assert!(
         transitions
             .get("error_recovery")
-            .map(|e| e.condition == leviath_runtime::spec::blueprint::TransitionCondition::Error)
+            .map(|e| e.condition == crate::old::blueprint::TransitionCondition::Error)
             .unwrap_or(false)
     );
-}
-
-#[test]
-fn coder_blueprint_passes_full_validation() {
-    let manifest_content = include_str!("fixtures/coder.leviath");
-    let bp = parse_manifest(manifest_content).unwrap();
-    bp.validate()
-        .expect("the shipped coder blueprint must pass Blueprint::validate()");
 }
 
 #[test]
@@ -4088,51 +4050,6 @@ mode = "autonomous"
 }
 
 #[test]
-fn output_routing_to_a_region_no_layout_declares_is_refused() {
-    let toml = r#"
-[agent]
-name = "draw"
-
-[context.regions]
-conversation = { kind = "sliding_window" }
-
-[stages.draw]
-mode = "autonomous"
-
-[stages.draw.output_routing]
-"image/*" = "artwork"
-"#;
-    let err = parse_manifest(toml)
-        .expect("shape is fine")
-        .validate()
-        .expect_err("artwork is not declared anywhere");
-    let msg = err.to_string();
-    assert!(msg.contains("artwork"), "{msg}");
-    assert!(msg.contains("output_routing"), "{msg}");
-}
-
-#[test]
-fn output_routing_to_a_declared_region_validates() {
-    let toml = r#"
-[agent]
-name = "draw"
-
-[context.regions]
-artwork = { kind = "pinned" }
-
-[stages.draw]
-mode = "autonomous"
-
-[stages.draw.output_routing]
-"image/*" = "artwork"
-"#;
-    parse_manifest(toml)
-        .expect("shape is fine")
-        .validate()
-        .expect("artwork is declared, so the route is valid");
-}
-
-#[test]
 fn context_reset_must_be_a_list() {
     let toml = r#"
 [agent]
@@ -4149,58 +4066,6 @@ reset = "conversation"
         err.to_string().contains("context.reset must be a list"),
         "{err}"
     );
-}
-
-#[test]
-fn route_for_mime_picks_the_most_specific_pattern() {
-    use leviath_core::mime::MimeType;
-    let toml = r#"
-[agent]
-name = "draw"
-
-[context.regions]
-pngs = { kind = "pinned" }
-images = { kind = "pinned" }
-anything = { kind = "pinned" }
-
-[stages.draw]
-mode = "autonomous"
-
-[stages.draw.output_routing]
-"image/png" = "pngs"
-"image/*" = "images"
-"*/*" = "anything"
-"#;
-    let bp = parse_manifest(toml).unwrap();
-    let draw = bp.find_stage("draw").unwrap();
-    let png = MimeType::parse("image/png").unwrap();
-    let jpeg = MimeType::parse("image/jpeg").unwrap();
-    let pdf = MimeType::parse("application/pdf").unwrap();
-    assert_eq!(draw.route_for_mime(&png), Some("pngs"));
-    assert_eq!(draw.route_for_mime(&jpeg), Some("images"));
-    assert_eq!(draw.route_for_mime(&pdf), Some("anything"));
-}
-
-#[test]
-fn route_for_mime_is_none_when_nothing_matches() {
-    use leviath_core::mime::MimeType;
-    let toml = r#"
-[agent]
-name = "draw"
-
-[context.regions]
-artwork = { kind = "pinned" }
-
-[stages.draw]
-mode = "autonomous"
-
-[stages.draw.output_routing]
-"image/*" = "artwork"
-"#;
-    let bp = parse_manifest(toml).unwrap();
-    let draw = bp.find_stage("draw").unwrap();
-    let text = MimeType::parse("text/plain").unwrap();
-    assert_eq!(draw.route_for_mime(&text), None);
 }
 
 #[test]
@@ -4221,44 +4086,6 @@ reset = ["conversation", "artwork"]
     let bp = parse_manifest(toml).unwrap();
     let describe = bp.find_stage("describe").unwrap();
     assert_eq!(describe.context_reset, vec!["conversation", "artwork"]);
-}
-
-#[test]
-fn context_reset_may_name_the_conversation() {
-    // Unlike hide, reset is allowed on the always-visible regions.
-    let toml = r#"
-[agent]
-name = "draw"
-
-[stages.describe]
-mode = "autonomous"
-
-[stages.describe.context]
-reset = ["conversation"]
-"#;
-    parse_manifest(toml)
-        .expect("shape is fine")
-        .validate()
-        .expect("resetting the conversation is allowed");
-}
-
-#[test]
-fn context_reset_of_an_unknown_region_is_refused() {
-    let toml = r#"
-[agent]
-name = "draw"
-
-[stages.describe]
-mode = "autonomous"
-
-[stages.describe.context]
-reset = ["ghost"]
-"#;
-    let err = parse_manifest(toml)
-        .expect("shape is fine")
-        .validate()
-        .expect_err("ghost is not declared");
-    assert!(err.to_string().contains("context.reset"), "{err}");
 }
 
 #[test]
@@ -4878,73 +4705,6 @@ fn parse_manifest_reads_a_stage_description() {
 
 // ─── Region names that match nothing ─────────────────────────────────────────
 
-#[test]
-fn validate_rejects_a_routing_override_naming_no_region() {
-    let bp = parse_manifest(&keys_fixture(
-        "[stages.work.tool_routing.overrides]\nread_file = \"ghost\"",
-    ))
-    .expect("parses");
-    let err = bp.validate().unwrap_err().to_string();
-    assert!(err.contains("'ghost'"), "names the region: {err}");
-}
-
-#[test]
-fn validate_rejects_a_gate_naming_no_region() {
-    let bp = parse_manifest(&keys_fixture(
-        "[stages.work.transitions.done]\ncondition = \"always\"\ngate = { require_region_updated = \"nope\" }\n\n[stages.done]\nmode = \"autonomous\"\nsystem_prompt = \"end\"",
-    ))
-    .expect("parses");
-    let err = bp.validate().unwrap_err().to_string();
-    assert!(err.contains("'nope'"), "names the region: {err}");
-}
-
-/// A checklist gate counts open items, which only a checklist region has.
-/// Pointed at a text region it reads zero every time, so it passes on the
-/// first attempt - a gate that looks armed and holds nothing.
-#[test]
-fn validate_rejects_a_checklist_gate_on_a_non_checklist_region() {
-    let bp = parse_manifest(&keys_fixture(
-        "[stages.work.transitions.done]\ncondition = \"always\"\ngate = { require_no_open_items = \"bulk\" }\n\n[stages.done]\nmode = \"autonomous\"\nsystem_prompt = \"end\"",
-    ))
-    .expect("parses");
-    let err = bp.validate().unwrap_err().to_string();
-    assert!(err.contains("not a checklist region"), "got: {err}");
-}
-
-/// A stage may name a region another stage declares: omitting a region hides
-/// it rather than destroying it, so this is legitimate and must not be
-/// mistaken for a typo.
-#[test]
-fn validate_allows_a_gate_on_a_region_declared_by_another_stage() {
-    // A gate is evaluated by the runtime against the region's contents, not by
-    // the model reading it, so a region this stage does not render is still a
-    // sound thing to gate on. Routing is the opposite case and is checked
-    // per-stage; see the routing tests.
-    let toml = r#"
-[agent]
-name = "keys"
-entry_stage = "work"
-
-[stages.work]
-mode = "autonomous"
-system_prompt = "go"
-
-[stages.work.transitions.other]
-condition = "always"
-gate = { require_region_updated = "notes" }
-
-[stages.other]
-mode = "autonomous"
-system_prompt = "go"
-
-[stages.other.context.regions]
-notes = { kind = "pinned", max_tokens = 1000 }
-"#;
-    let bp = parse_manifest(toml).expect("parses");
-    bp.validate()
-        .expect("a cross-stage region reference is fine for a gate");
-}
-
 /// The count gate parses as an inline table, both halves required and the
 /// count positive; the validator holds its region to the same rule as every
 /// other gate's.
@@ -4981,7 +4741,6 @@ views = { kind = "pinned", max_tokens = 1000 }
         .unwrap();
     assert_eq!(count.region, "views");
     assert_eq!(count.at_least, 4);
-    bp.validate().expect("a declared region is fine");
 
     let no_region = good.replace(r#"region = "views", "#, "");
     let err = parse_manifest(&no_region).unwrap_err().to_string();
@@ -4994,66 +4753,6 @@ views = { kind = "pinned", max_tokens = 1000 }
     let negative = good.replace("at_least = 4", "at_least = -2");
     let err = parse_manifest(&negative).unwrap_err().to_string();
     assert!(err.contains("must not be negative"), "{err}");
-
-    let ghost = good.replace(r#"region = "views""#, r#"region = "ghost""#);
-    let err = parse_manifest(&ghost)
-        .expect("parses")
-        .validate()
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("gate.require_region_entries names region 'ghost'"),
-        "{err}"
-    );
-}
-
-#[test]
-fn validate_rejects_a_default_region_naming_no_region() {
-    let bp = parse_manifest(&keys_fixture(
-        "[stages.work.tool_routing]\ndefault_region = \"ghost\"",
-    ))
-    .expect("parses");
-    let err = bp.validate().unwrap_err().to_string();
-    assert!(err.contains("'ghost'"), "names the region: {err}");
-}
-
-/// A checklist gate pointed at a real checklist region validates, which is
-/// what makes the rejection beside it mean something.
-#[test]
-fn validate_allows_a_checklist_gate_on_a_checklist_region() {
-    let toml = r#"
-[agent]
-name = "keys"
-entry_stage = "work"
-
-[context.regions]
-todos = { kind = "checklist", max_tokens = 2000 }
-
-[stages.work]
-mode = "autonomous"
-system_prompt = "go"
-
-[stages.work.transitions.done]
-condition = "always"
-gate = { require_no_open_items = "todos" }
-
-[stages.done]
-mode = "autonomous"
-system_prompt = "end"
-"#;
-    let bp = parse_manifest(toml).expect("parses");
-    bp.validate()
-        .expect("a checklist gate on a checklist region is fine");
-}
-
-/// The three the runtime adds when nobody declares them stay addressable.
-#[test]
-fn validate_allows_the_auto_added_regions() {
-    let bp = parse_manifest(&keys_fixture(
-        "[stages.work.tool_routing]\ndefault_region = \"tool_results\"",
-    ))
-    .expect("parses");
-    bp.validate().expect("tool_results always exists");
 }
 
 /// The `{ region, max_result_tokens }` shape routes *and* caps.
@@ -5449,156 +5148,6 @@ on_unavailable = "explode"
 
 // ─── Routing into a region the stage cannot see ──────────────────────────────
 
-/// The reported shape: a stage scopes its context and routes a tool into a
-/// region it left out. The result is written where the stage cannot read it,
-/// and the pointer left in `conversation` tells the model to go read it.
-#[test]
-fn validate_rejects_routing_into_a_region_the_stage_omits() {
-    let toml = r#"
-[agent]
-name = "scoped"
-entry_stage = "verify"
-
-[context.regions]
-data_preview = { kind = "pinned", max_tokens = 8000 }
-plan = { kind = "pinned", max_tokens = 2000 }
-
-[stages.verify]
-mode = "autonomous"
-system_prompt = "check the rules against the manual"
-
-[stages.verify.context.regions]
-plan = { kind = "pinned", max_tokens = 2000 }
-
-[stages.verify.tool_routing.overrides]
-read_file = "data_preview"
-"#;
-    let bp = parse_manifest(toml).expect("parses");
-    let err = bp.validate().unwrap_err().to_string();
-    assert!(err.contains("data_preview"), "names the region: {err}");
-    assert!(
-        err.contains("could not read them back"),
-        "says what is wrong: {err}"
-    );
-    assert!(
-        err.contains("[stages.verify.context.regions]"),
-        "says how to fix it: {err}"
-    );
-}
-
-/// `scratch` in the report: declared globally, named as a routing target, and
-/// in no stage's layout at all - unreachable by construction for the whole life
-/// of the blueprint.
-#[test]
-fn validate_rejects_a_default_region_no_stage_renders() {
-    let toml = r#"
-[agent]
-name = "scoped"
-entry_stage = "plan"
-
-[context.regions]
-scratch = { kind = "temporary", max_tokens = 4000 }
-notes = { kind = "pinned", max_tokens = 2000 }
-
-[stages.plan]
-mode = "autonomous"
-system_prompt = "go"
-
-[stages.plan.context.regions]
-notes = { kind = "pinned", max_tokens = 2000 }
-
-[stages.plan.tool_routing]
-default_region = "scratch"
-"#;
-    let bp = parse_manifest(toml).expect("parses");
-    let err = bp.validate().unwrap_err().to_string();
-    assert!(err.contains("scratch"), "{err}");
-}
-
-/// A stage that declares no layout of its own sees the blueprint's, so routing
-/// into any global region is fine. Without this the check would reject the
-/// ordinary un-scoped blueprint, which is most of them.
-#[test]
-fn validate_allows_routing_into_a_global_region_from_an_unscoped_stage() {
-    let toml = r#"
-[agent]
-name = "plain"
-entry_stage = "work"
-
-[context.regions]
-codebase = { kind = "compacting", max_tokens = 8000 }
-
-[stages.work]
-mode = "autonomous"
-system_prompt = "go"
-
-[stages.work.tool_routing.overrides]
-read_file = "codebase"
-"#;
-    let bp = parse_manifest(toml).expect("parses");
-    bp.validate()
-        .expect("an unscoped stage sees the global layout");
-}
-
-/// The regions the runtime carries visible whatever a stage declares are always
-/// legitimate routing targets, or a scoped stage could not route anywhere.
-#[test]
-fn validate_allows_routing_into_the_always_visible_regions() {
-    for target in ["conversation", "tool_results", "final_output"] {
-        let toml = format!(
-            r#"
-[agent]
-name = "scoped"
-entry_stage = "work"
-
-[context.regions]
-notes = {{ kind = "pinned", max_tokens = 2000 }}
-
-[stages.work]
-mode = "autonomous"
-system_prompt = "go"
-
-[stages.work.context.regions]
-notes = {{ kind = "pinned", max_tokens = 2000 }}
-
-[stages.work.tool_routing]
-default_region = "{target}"
-"#
-        );
-        let bp = parse_manifest(&toml).expect("parses");
-        bp.validate()
-            .unwrap_or_else(|e| panic!("{target} is always visible: {e}"));
-    }
-}
-
-/// A stage that scopes its context and routes into a region it *did* declare is
-/// the case this must not touch.
-#[test]
-fn validate_allows_routing_into_a_region_the_stage_declares() {
-    let toml = r#"
-[agent]
-name = "scoped"
-entry_stage = "work"
-
-[context.regions]
-codebase = { kind = "compacting", max_tokens = 8000 }
-notes = { kind = "pinned", max_tokens = 2000 }
-
-[stages.work]
-mode = "autonomous"
-system_prompt = "go"
-
-[stages.work.context.regions]
-codebase = { kind = "compacting", max_tokens = 8000 }
-
-[stages.work.tool_routing.overrides]
-read_file = "codebase"
-"#;
-    let bp = parse_manifest(toml).expect("parses");
-    bp.validate()
-        .expect("routing into a declared region is fine");
-}
-
 // ─── Regions an edge transform must not paraphrase ───────────────────────────
 
 /// `summarizable = false` parses, and the default is on.
@@ -5808,7 +5357,7 @@ fn a_region_definition_without_the_field_deserializes_as_summarizable() {
         "kind": "Temporary",
         "max_tokens": 1000,
     });
-    let def: leviath_runtime::spec::layout::RegionDefinition =
+    let def: crate::old::layout::RegionDefinition =
         serde_json::from_value(json).expect("an older definition still loads");
     assert!(def.summarizable);
 }
@@ -5904,12 +5453,10 @@ model = { models = ["claude-sonnet-5"], parameters = { max_output_tokens = "100%
     let manifest = parse_manifest(good).expect("loads");
     assert_eq!(
         manifest.stages[0].model.output_cap(),
-        Ok(Some(
-            leviath_runtime::spec::blueprint::OutputCap::RegionPercent {
-                percent: 1.0,
-                region: "report".to_string()
-            }
-        ))
+        Ok(Some(crate::old::blueprint::OutputCap::RegionPercent {
+            percent: 1.0,
+            region: "report".to_string()
+        }))
     );
 }
 
@@ -5940,9 +5487,6 @@ hide = ["sources"]
     let manifest = parse_manifest(good).expect("loads");
     assert_eq!(manifest.stages[1].context_hide, vec!["sources".to_string()]);
     assert!(manifest.stages[0].context_hide.is_empty());
-    manifest
-        .validate()
-        .expect("a hidden region the layout declares is fine");
 
     let bad_shape = good.replace(r#"hide = ["sources"]"#, r#"hide = "sources""#);
     let err = parse_manifest(&bad_shape).expect_err("not a list");
@@ -5950,32 +5494,6 @@ hide = ["sources"]
         err.to_string().contains("context.hide must be a list"),
         "{err}"
     );
-
-    let unknown = good.replace(r#"hide = ["sources"]"#, r#"hide = ["sauces"]"#);
-    let err = parse_manifest(&unknown)
-        .expect("shape is fine")
-        .validate()
-        .expect_err("no such region");
-    assert!(err.to_string().contains("'sauces'"), "{err}");
-
-    let always = good.replace(r#"hide = ["sources"]"#, r#"hide = ["conversation"]"#);
-    let err = parse_manifest(&always)
-        .expect("shape is fine")
-        .validate()
-        .expect_err("cannot hide the conversation");
-    assert!(err.to_string().contains("cannot hide"), "{err}");
-
-    // A tool result routed to a region the stage hid is a result the stage
-    // cannot read, and is refused the way routing to an undeclared region is.
-    let routed = good.replace(
-        r#"hide = ["sources"]"#,
-        "hide = [\"sources\"]\n\n[stages.polish.tool_routing]\ndefault_region = \"sources\"",
-    );
-    let err = parse_manifest(&routed)
-        .expect("shape is fine")
-        .validate()
-        .expect_err("routed into a hidden region");
-    assert!(err.to_string().contains("sources"), "{err}");
 }
 
 // ─── Arithmetic on hostile numbers ─────────────────────────────────────
@@ -6256,19 +5774,19 @@ type = "text/*"
     )
     .unwrap();
     let look = &bp.stages[0];
-    assert_eq!(bp.stage_inputs(look), ["image/*", "image/png"]);
+    assert!(look.input_accepts.is_empty());
     let cut = &bp.stages[1];
-    assert_eq!(bp.stage_inputs(cut), ["audio/wav"]);
+    assert_eq!(cut.input_accepts, ["audio/wav"]);
     assert_eq!(cut.input_as_text, ["model/*"]);
     assert_eq!(
-        cut.tool_limit("spawn_agent"),
+        cut.tool_accepts.get("spawn_agent").map(Vec::as_slice),
         Some(["image/*".to_string(), "audio/wav".to_string()].as_slice())
     );
     assert_eq!(
-        cut.tool_limit("context_export"),
+        cut.tool_accepts.get("context_export").map(Vec::as_slice),
         Some(["image/png".to_string()].as_slice())
     );
-    assert!(cut.tool_limit("read_file").is_none());
+    assert!(!cut.tool_accepts.contains_key("read_file"));
     assert!(look.tool_accepts.is_empty());
     let spec = cut.output.as_ref().unwrap();
     assert_eq!(spec.artifacts.len(), 2);
@@ -6277,12 +5795,6 @@ type = "text/*"
     assert!(spec.artifacts[0].required);
     assert_eq!(spec.artifacts[0].description.as_deref(), Some("the cut"));
     assert!(!spec.artifacts[1].required);
-    // A region that takes anything reports `*/*`.
-    let open = parse_manifest(
-        "[agent]\nname = \"o\"\n\n[context.regions]\ntask = { kind = \"pinned\" }\n\n[stages.s]\nmode = \"autonomous\"\n[stages.s.model]\nprovider = \"anthropic\"\nmodel = \"m\"\n",
-    )
-    .unwrap();
-    assert_eq!(open.stage_inputs(&open.stages[0]), ["*/*"]);
 }
 
 #[test]
@@ -6335,11 +5847,9 @@ fn artifact_declarations_are_checked_at_load() {
 
 // ─── [[dependencies]] ─────────────────────────────────────────────────────
 
-use leviath_runtime::spec::blueprint::{
-    Dependency, DependencyInstall, DependencyKind, McpServerTemplate,
-};
+use crate::old::blueprint::{Dependency, DependencyInstall, DependencyKind, McpServerTemplate};
 
-fn deps_manifest(body: &str) -> Result<leviath_runtime::spec::Blueprint> {
+fn deps_manifest(body: &str) -> Result<crate::old::blueprint::Blueprint> {
     parse_manifest(&format!("[agent]\nname = \"deps\"\n{body}\n"))
 }
 
@@ -6390,28 +5900,6 @@ check = "deps/check.rhai"
     assert!(
         matches!(&bp.dependencies[3].kind, DependencyKind::Script { check } if check == "deps/check.rhai")
     );
-    bp.validate().unwrap();
-}
-
-#[test]
-fn dependency_kind_tag_names_each_variant() {
-    assert_eq!(
-        DependencyKind::McpServer {
-            server: "s".into(),
-            env: vec![]
-        }
-        .tag(),
-        "mcp_server"
-    );
-    assert_eq!(DependencyKind::Env { var: "v".into() }.tag(), "env");
-    assert_eq!(
-        DependencyKind::Binary {
-            command: "c".into()
-        }
-        .tag(),
-        "binary"
-    );
-    assert_eq!(DependencyKind::Script { check: "x".into() }.tag(), "script");
 }
 
 #[test]
@@ -6466,7 +5954,6 @@ MESHY_API_KEY = "${MESHY_API_KEY}"
         server.env.get("MESHY_API_KEY").map(String::as_str),
         Some("${MESHY_API_KEY}")
     );
-    bp.validate().unwrap();
 }
 
 #[test]
@@ -6484,7 +5971,6 @@ script = "deps/install.rhai"
     .unwrap();
     let install = bp.dependencies[0].install.as_ref().unwrap();
     assert_eq!(install.script.as_deref(), Some("deps/install.rhai"));
-    bp.validate().unwrap();
 
     // A stdio server template (command, no transport) parses too.
     let bp = deps_manifest(
@@ -6506,7 +5992,6 @@ command = "srv-mcp"
         .as_ref()
         .unwrap();
     assert_eq!(server.command.as_deref(), Some("srv-mcp"));
-    bp.validate().unwrap();
 }
 
 #[test]
@@ -6580,47 +6065,6 @@ fn dependency_parse_errors() {
 }
 
 #[test]
-fn dependency_validate_errors() {
-    for (body, expect) in [
-        (
-            "[[dependencies]]\nname=\"d\"\nkind=\"env\"\nvar=\"A\"\n[[dependencies]]\nname=\"d\"\nkind=\"env\"\nvar=\"B\"",
-            "two dependencies share this name",
-        ),
-        (
-            "[[dependencies]]\nname=\"d\"\nkind=\"binary\"\ncommand=\"c\"\n[dependencies.install.server]\ncommand=\"x\"",
-            "install.server is only valid",
-        ),
-        (
-            "[[dependencies]]\nname=\"d\"\nkind=\"mcp_server\"\nserver=\"s\"\n[dependencies.install.server]\ntransport=\"ftp\"",
-            "must be \"stdio\" or \"http\"",
-        ),
-        (
-            "[[dependencies]]\nname=\"d\"\nkind=\"binary\"\ncommand=\"c\"\n[dependencies.install.commands]\nfreebsd=\"x\"",
-            "must be \"macos\", \"linux\" or \"windows\"",
-        ),
-    ] {
-        let bp = deps_manifest(body).unwrap();
-        let err = bp.validate().unwrap_err().to_string();
-        assert!(err.contains(expect), "body {body:?} -> {err}");
-    }
-}
-
-#[test]
-fn empty_dependency_name_fails_validate() {
-    let mut bp = parse_manifest("[agent]\nname = \"a\"\n").unwrap();
-    bp.dependencies.push(Dependency {
-        name: "  ".into(),
-        kind: DependencyKind::Env { var: "X".into() },
-        required: true,
-        remedy: None,
-        description: None,
-        install: None,
-    });
-    let err = bp.validate().unwrap_err().to_string();
-    assert!(err.contains("non-empty name"), "{err}");
-}
-
-#[test]
 fn dependencies_round_trip_through_json() {
     let bp = deps_manifest(
         r#"
@@ -6660,51 +6104,6 @@ fn install_and_template_defaults_are_empty() {
     assert!(DependencyInstall::default().commands.is_empty());
     assert!(McpServerTemplate::default().transport.is_none());
     assert!(McpServerTemplate::default().args.is_empty());
-}
-
-#[test]
-fn empty_kind_fields_fail_validate() {
-    // The parser rejects an empty kind field up front, so these are only
-    // reachable on a blueprint built in code or restored from JSON. Validate
-    // catches them there too.
-    let cases = [
-        (
-            DependencyKind::McpServer {
-                server: " ".into(),
-                env: vec![],
-            },
-            "non-empty 'server'",
-        ),
-        (
-            DependencyKind::Env { var: String::new() },
-            "non-empty 'var'",
-        ),
-        (
-            DependencyKind::Binary {
-                command: "  ".into(),
-            },
-            "non-empty 'command'",
-        ),
-        (
-            DependencyKind::Script {
-                check: String::new(),
-            },
-            "non-empty 'check'",
-        ),
-    ];
-    for (kind, expect) in cases {
-        let mut bp = parse_manifest("[agent]\nname = \"a\"\n").unwrap();
-        bp.dependencies.push(Dependency {
-            name: "d".into(),
-            kind,
-            required: true,
-            remedy: None,
-            description: None,
-            install: None,
-        });
-        let err = bp.validate().unwrap_err().to_string();
-        assert!(err.contains(expect), "{err}");
-    }
 }
 
 /// Every key that was renamed is still read under the name it used to have.
@@ -6795,7 +6194,7 @@ keep_results = true
 /// `before_dispath` is the failure the strict key checks exist to prevent.
 #[test]
 fn tool_rescan_reads_every_value_and_the_flag_it_replaced() {
-    use leviath_runtime::spec::blueprint::ToolRescan;
+    use crate::old::blueprint::ToolRescan;
     let with = |line: &str| {
         format!("[agent]\nname = \"a\"\n{line}\n\n[stages.main]\nmode = \"autonomous\"\n")
     };
@@ -6843,21 +6242,35 @@ fn tool_rescan_reads_every_value_and_the_flag_it_replaced() {
     );
 }
 
-/// What each value turns on, said once so the daemon and the API agree.
-#[test]
-fn each_rescan_value_says_what_it_turns_on() {
-    use leviath_runtime::spec::blueprint::ToolRescan;
-    assert!(!ToolRescan::AtSpawn.rescans());
-    assert!(!ToolRescan::AtSpawn.before_dispatch());
-    assert!(ToolRescan::AfterWrites.rescans());
-    assert!(!ToolRescan::AfterWrites.before_dispatch());
-    // Strictly more eager, so it does everything the one before it does.
-    assert!(ToolRescan::BeforeDispatch.rescans());
-    assert!(ToolRescan::BeforeDispatch.before_dispatch());
-
-    // The word round-trips, which is what the manifest and the schema share.
-    for value in ToolRescan::ALL {
-        assert_eq!(ToolRescan::parse(value.wire()), Some(value));
+/// Test conveniences over the parsed types.
+impl crate::old::blueprint::Blueprint {
+    /// A stage by name.
+    fn find_stage(&self, name: &str) -> Option<&crate::old::blueprint::Stage> {
+        self.stages.iter().find(|s| s.name == name)
     }
-    assert_eq!(ToolRescan::parse("dynamic"), None);
+}
+
+impl crate::old::layout::ContextLayout {
+    /// A region by name.
+    fn get_region(&self, name: &str) -> Option<&crate::old::layout::RegionDefinition> {
+        self.regions.iter().find(|r| r.name == name)
+    }
+}
+
+impl crate::old::blueprint::StageHooks {
+    /// Every hook that is set, with the field it was set under.
+    fn declared(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("on_stage_enter", &self.on_stage_enter),
+            ("on_stage_exit", &self.on_stage_exit),
+            ("before_inference", &self.before_inference),
+            ("after_inference", &self.after_inference),
+            ("on_tool_call", &self.on_tool_call),
+            ("on_completion", &self.on_completion),
+            ("on_error", &self.on_error),
+        ]
+        .into_iter()
+        .filter_map(|(name, hook)| hook.as_deref().map(|h| (name, h)))
+        .collect()
+    }
 }

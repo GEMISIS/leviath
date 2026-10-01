@@ -26,7 +26,7 @@ system_prompt = "p"
 "#,
     )
     .unwrap();
-    let g = RunGraph::from_blueprint(&bp).unwrap();
+    let g = crate::old::graph::from_blueprint(&bp).unwrap();
     let names: Vec<(&str, bool)> = g
         .inputs
         .iter()
@@ -46,7 +46,7 @@ fn a_manifests_own_mcp_servers_and_script_permissions_are_read_into_the_graph() 
         [[mcp_servers]]\nname = \"web\"\ntransport = \"http\"\nurl = \"https://mcp.example\"\n\
         [tool_script_permissions]\nshell = \"deny\"\nhttp_get = \"inherit\"\n";
     let bp = parse_manifest(manifest).unwrap();
-    let mut g = RunGraph::from_blueprint(&bp).unwrap();
+    let mut g = crate::old::graph::from_blueprint(&bp).unwrap();
     assert!(g.mcp_servers.is_empty());
     read_manifest_tables(&mut g, manifest).unwrap();
     assert_eq!(g.mcp_servers.len(), 2);
