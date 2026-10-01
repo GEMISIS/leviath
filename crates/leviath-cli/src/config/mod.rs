@@ -1956,7 +1956,7 @@ some_custom_thing = \"forwarded to the script\"
             ),
             (
                 "NudgeConfig",
-                "../leviath-core/src/blueprint/transition.rs",
+                "../leviath-runtime/src/spec/blueprint/transition.rs",
                 &["properties", "nudge", "properties"],
                 true,
             ),
