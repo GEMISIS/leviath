@@ -65,10 +65,11 @@ impl WorldHost {
         });
     }
 
-    /// Resolve `request` as a top-level run without starting it.
+    /// Resolve `request` for `caller` without starting it.
     pub(super) fn validate(
         &mut self,
         request: SpawnRequest,
+        caller: Caller,
         reply: oneshot::Sender<Result<SpawnSummary, SpawnIssues>>,
     ) {
         let Some(starter) = self.starter.clone() else {
@@ -76,7 +77,7 @@ impl WorldHost {
             return;
         };
         tokio::spawn(async move {
-            let job = tokio::spawn(async move { starter.check(request, Caller::TopLevel).await });
+            let job = tokio::spawn(async move { starter.check(request, caller).await });
             let result = job
                 .await
                 .unwrap_or_else(|_| Err(host_refusal("checking the run panicked")));

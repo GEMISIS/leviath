@@ -3,8 +3,8 @@
 //! A `fan_out` call lists work items. Each carries typed inputs for the graph
 //! its worker runs, and a same-graph worker's items are checked against that
 //! graph's declared inputs before any worker starts, so a mistyped item is
-//! refused with the path of the value that did not fit. A worker running an
-//! installed blueprint has its inputs checked when that blueprint is resolved.
+//! refused with the path of the value that did not fit. A worker running a
+//! blueprint of its own has its inputs checked when that blueprint is resolved.
 //!
 //! Kept apart from [`super`], which starts, tracks and merges workers: this
 //! is the shape of the work and the request each worker is spawned from.
@@ -18,9 +18,9 @@ use crate::spec::graph::{FanOutDef, WorkerFailure, WorkerSource};
 use crate::spec::inputs::{CheckCtx, InputDecl, RawInput};
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::launch::LaunchRequest;
-use crate::spec::names::BlueprintRef;
 use crate::spec::request::{SpawnRequest, SpawnSource};
 use crate::spec::run_spec::RunSpec;
+use std::path::Path;
 
 /// The input a worker's work item fills when a graph declares none of its
 /// own: the conventional `task` text.
@@ -41,48 +41,23 @@ pub struct WorkItem {
     pub inputs: BTreeMap<String, RawInput>,
 }
 
-/// A work item as a `fan_out` call writes it.
+/// A work item as a `fan_out` call writes it: an id, and the worker's inputs
+/// by name. Nothing else is accepted, so a misspelled key is refused rather
+/// than dropped.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ItemArgs {
-    #[serde(default)]
     id: String,
     #[serde(default)]
-    inputs: Option<BTreeMap<String, RawInput>>,
-    /// Free-form context, as the tool's schema still offers it. It reaches
-    /// the worker as its `task` text: the item's id, then the context as JSON.
-    #[serde(default)]
-    context: Option<serde_json::Value>,
-}
-
-impl ItemArgs {
-    fn into_item(self) -> Result<WorkItem, String> {
-        let inputs = match (self.inputs, self.context) {
-            (Some(_), Some(_)) => {
-                return Err(format!(
-                    "fan_out item '{}' carries both `inputs` and `context`; send `inputs`",
-                    self.id
-                ));
-            }
-            (Some(inputs), None) => inputs,
-            (None, Some(context)) => BTreeMap::from([(
-                TASK_INPUT.to_string(),
-                RawInput::Text(format!("Work item id: {}\nContext: {context}", self.id)),
-            )]),
-            (None, None) => BTreeMap::new(),
-        };
-        Ok(WorkItem {
-            id: self.id,
-            inputs,
-        })
-    }
+    inputs: BTreeMap<String, RawInput>,
 }
 
 /// A `fan_out` call the dispatcher has read but not yet started.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FanOutRequest {
-    /// The agent to run for every item, when the caller named one. `None` inside
-    /// a fan-out stage, whose graph names the worker instead.
+    /// The blueprint to run for every item, when the caller named one: an
+    /// installed name, or the absolute directory of one that is not installed.
+    /// `None` inside a fan-out stage, whose graph names the worker instead.
     pub agent: Option<String>,
     /// The work, one entry per worker.
     pub items: Vec<WorkItem>,
@@ -112,10 +87,14 @@ pub(crate) fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOut
     };
     let items: Vec<WorkItem> = items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(i, item)| {
             serde_json::from_value::<ItemArgs>(item.clone())
-                .map_err(|e| format!("fan_out item is not {{id, inputs}}: {e}"))
-                .and_then(ItemArgs::into_item)
+                .map(|item| WorkItem {
+                    id: item.id,
+                    inputs: item.inputs,
+                })
+                .map_err(|e| format!("fan_out items[{i}] is not {{id, inputs}}: {e}"))
         })
         .collect::<Result<_, _>>()?;
     let agent = object
@@ -141,16 +120,19 @@ pub(crate) fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOut
 /// must name its worker in the call. Either way the result is one
 /// [`FanOutDef`], so the cap, the failure policy and the report are the same
 /// code for both entry points.
+///
+/// An `agent` the call names by its directory must be absolute, and may not
+/// be inside `workdir`: the run's own files are ones its model could have
+/// written, and a worker blueprint brings its own seeds and MCP servers.
 pub(crate) fn config_for(
     request: &FanOutRequest,
     stage: Option<&FanOutDef>,
+    workdir: Option<&Path>,
 ) -> Result<FanOutDef, String> {
     // A named agent wins over the graph's worker: an ordinary stage has no
     // worker to inherit, and a fan-out stage that names one in the call meant it.
     let named = match &request.agent {
-        Some(agent) => Some(WorkerSource::Blueprint(
-            BlueprintRef::parse(agent).map_err(|e| format!("fan_out `agent`: {e}"))?,
-        )),
+        Some(agent) => Some(named_worker(agent, workdir)?),
         None => None,
     };
     let mut config = match (stage, named) {
@@ -180,6 +162,26 @@ pub(crate) fn config_for(
         config.max_workers = clamp(max_workers);
     }
     Ok(config)
+}
+
+/// The worker a `fan_out` call's `agent` names. See [`config_for`].
+fn named_worker(agent: &str, workdir: Option<&Path>) -> Result<WorkerSource, String> {
+    let worker = WorkerSource::named(agent).map_err(|e| {
+        format!(
+            "fan_out `agent`: {e}. Name an installed blueprint, or give the absolute \
+             directory of one"
+        )
+    })?;
+    if let (WorkerSource::BlueprintFile(path), Some(workdir)) = (&worker, workdir)
+        && leviath_core::resolves_within(path.path(), workdir)
+    {
+        return Err(format!(
+            "fan_out `agent`: '{agent}' is inside this run's own working directory. Name an \
+             installed blueprint, or one outside the workspace: an agent may not author the \
+             blueprint its workers run"
+        ));
+    }
+    Ok(worker)
 }
 
 /// A count as the graph stores it.
@@ -263,7 +265,9 @@ pub(crate) fn worker_request(
         depth: u8::try_from(depth).unwrap_or(u8::MAX),
         stage: match &config.worker {
             WorkerSource::Stage(stage) => Some(stage.clone()),
-            WorkerSource::Blueprint(_) | WorkerSource::Query(_) => None,
+            WorkerSource::Blueprint(_)
+            | WorkerSource::BlueprintFile(_)
+            | WorkerSource::Query(_) => None,
         },
     };
     (request, caller)
@@ -273,7 +277,7 @@ pub(crate) fn worker_request(
 mod tests {
     use super::*;
     use crate::spec::inputs::InputType;
-    use crate::spec::names::{InputName, StageName};
+    use crate::spec::names::{BlueprintRef, InputName, StageName};
 
     fn stage_def(max_workers: u32) -> FanOutDef {
         FanOutDef {
@@ -317,32 +321,93 @@ mod tests {
         }
     }
 
-    /// Typed inputs travel as the call wrote them; a `context` object becomes
-    /// the worker's `task` text, and naming both is refused.
+    /// Typed inputs travel as the call wrote them. A `context` is no longer
+    /// read as the worker's task text: it is an unknown key like any other,
+    /// and an item with no id is refused at its index.
     #[test]
-    fn items_carry_inputs_or_a_context_as_their_task() {
+    fn items_carry_typed_inputs_and_nothing_else() {
         let request = parse_fan_out_call(&serde_json::json!({
             "items": [
                 {"id": "a", "inputs": {"topic": "rust", "depth": 2}},
-                {"id": "b", "context": {"file": "a.rs"}},
                 {"id": "c"}
             ]
         }))
         .unwrap();
         assert_eq!(request.items[0].inputs["depth"], RawInput::Int(2));
-        assert_eq!(
-            request.items[1].inputs[TASK_INPUT],
-            RawInput::Text("Work item id: b\nContext: {\"file\":\"a.rs\"}".into())
-        );
-        assert!(request.items[2].inputs.is_empty());
+        assert!(request.items[1].inputs.is_empty());
         let err = parse_fan_out_call(&serde_json::json!({
-            "items": [{"id": "x", "inputs": {}, "context": {}}]
+            "items": [{"id": "x", "inputs": {}}, {"id": "b", "context": {"file": "a.rs"}}]
         }))
         .unwrap_err();
-        assert!(err.contains("both `inputs` and `context`"), "{err}");
-        let err = parse_fan_out_call(&serde_json::json!({"items": [{"id": "x", "extra": 1}]}))
-            .unwrap_err();
-        assert!(err.contains("unknown field `extra`"), "{err}");
+        assert!(err.contains("items[1]"), "{err}");
+        assert!(err.contains("unknown field `context`"), "{err}");
+        let err = parse_fan_out_call(&serde_json::json!({"items": [{"inputs": {}}]})).unwrap_err();
+        assert!(err.contains("missing field `id`"), "{err}");
+    }
+
+    /// The schema `fan_out` is advertised with and the reader agree: every
+    /// call the reader takes, the schema takes, and every call the schema
+    /// refuses, the reader refuses too.
+    #[test]
+    fn the_advertised_schema_and_the_reader_agree() {
+        use leviath_tools::validate::{ArgValidation, validate_tool_args};
+        let tools =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()));
+        let schema = tools
+            .tool_defs()
+            .into_iter()
+            .find(|t| t.name == crate::spec::blueprint::FAN_OUT_TOOL)
+            .expect("fan_out is advertised")
+            .parameters;
+        for (call, readable) in [
+            (serde_json::json!({"items": []}), true),
+            (
+                serde_json::json!({"agent": "a", "items": [{"id": "x"}]}),
+                true,
+            ),
+            (
+                serde_json::json!({"items": [{"id": "x", "inputs": {"task": "t", "n": 2}}], "max_workers": 3}),
+                true,
+            ),
+            (serde_json::json!({"items": [{"inputs": {}}]}), false),
+            (
+                serde_json::json!({"items": [{"id": "x", "context": {}}]}),
+                false,
+            ),
+            (serde_json::json!({"items": "all"}), false),
+            (serde_json::json!({}), false),
+        ] {
+            let valid = validate_tool_args("fan_out", &schema, &call) == ArgValidation::Valid;
+            assert_eq!(valid, readable, "the schema on {call}");
+            assert_eq!(
+                parse_fan_out_call(&call).is_ok(),
+                readable,
+                "the reader on {call}"
+            );
+        }
+    }
+
+    /// An `agent` given as a directory runs the blueprint there, unless it is
+    /// inside the run's own workspace; a relative path names nothing.
+    #[test]
+    fn an_agent_named_by_its_directory_runs_from_there() {
+        let work = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().to_string_lossy().into_owned();
+        let config = config_for(&request(Some(&outside), None), None, Some(work.path())).unwrap();
+        assert_eq!(
+            config.worker,
+            WorkerSource::BlueprintFile(
+                crate::spec::names::BlueprintPath::new(outside.as_str()).unwrap()
+            )
+        );
+        let inside = work.path().join("x").to_string_lossy().into_owned();
+        let err = config_for(&request(Some(&inside), None), None, Some(work.path())).unwrap_err();
+        assert!(err.contains("own working directory"), "{err}");
+        // With no workspace to compare against, the directory is taken as named.
+        assert!(config_for(&request(Some(&inside), None), None, None).is_ok());
+        let err = config_for(&request(Some("./x"), None), None, None).unwrap_err();
+        assert!(err.contains("absolute directory"), "{err}");
     }
 
     /// A mistyped item is refused at its own path, every problem at once, and
@@ -400,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_bare_call_names_its_worker_and_takes_the_defaults() {
-        let config = config_for(&request(Some("researcher"), None), None).unwrap();
+        let config = config_for(&request(Some("researcher"), None), None, None).unwrap();
         assert_eq!(
             config.worker,
             WorkerSource::Blueprint(BlueprintRef::parse("researcher").unwrap())
@@ -411,18 +476,18 @@ mod tests {
         );
         assert_eq!(config.on_worker_failure, WorkerFailure::Continue);
         assert_eq!(config.max_items, None);
-        let err = config_for(&request(None, None), None).unwrap_err();
+        let err = config_for(&request(None, None), None, None).unwrap_err();
         assert!(err.contains("needs an `agent`"), "{err}");
-        let err = config_for(&request(Some("x@nothex"), None), None).unwrap_err();
+        let err = config_for(&request(Some("x@nothex"), None), None, None).unwrap_err();
         assert!(err.contains("fan_out `agent`"), "{err}");
     }
 
     #[test]
     fn a_stage_call_keeps_the_stages_settings_under_the_calls_own() {
         let stage = stage_def(3);
-        let config = config_for(&request(None, None), Some(&stage)).unwrap();
+        let config = config_for(&request(None, None), Some(&stage), None).unwrap();
         assert_eq!(config, stage);
-        let config = config_for(&request(Some("other"), Some(9)), Some(&stage)).unwrap();
+        let config = config_for(&request(Some("other"), Some(9)), Some(&stage), None).unwrap();
         assert_eq!(
             config.worker,
             WorkerSource::Blueprint(BlueprintRef::parse("other").unwrap())

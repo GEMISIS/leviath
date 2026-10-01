@@ -454,7 +454,7 @@ impl WorldHost {
                 self.start(*request, crate::spec::env::Caller::TopLevel, None, reply);
             }
             ControlOp::ValidateSpawn { request, reply } => {
-                self.validate(*request, reply);
+                self.validate(*request, crate::spec::env::Caller::TopLevel, reply);
             }
             ControlOp::Inspect { run_id, reply } => {
                 let _ = reply.send(self.inspect(&run_id).map(Box::new));

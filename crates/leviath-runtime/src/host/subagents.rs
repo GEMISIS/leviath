@@ -23,6 +23,24 @@ impl WorldHost {
                     let _ = reply.send(Err(issues));
                 }
             },
+            SubAgentOp::Validate {
+                request,
+                parent_run_id,
+                reply,
+            } => match self.child_caller(&parent_run_id) {
+                Ok(caller) => self.validate(*request, caller, reply),
+                Err(issues) => {
+                    let _ = reply.send(Err(issues));
+                }
+            },
+            SubAgentOp::History {
+                run_id,
+                caller_run_id,
+                at,
+                reply,
+            } => {
+                let _ = reply.send(self.history(&run_id, &caller_run_id, at));
+            }
             SubAgentOp::Check { run_id, reply } => {
                 let report = self.live_entity(&run_id).and_then(|agent| {
                     self.world.agent_status(agent).map(|status| SubAgentReport {
@@ -70,6 +88,90 @@ impl WorldHost {
                 let _ = reply.send(within && self.cancel_tree(&run_id));
             }
         }
+    }
+
+    /// What `run_history` reads of `run_id` for `caller_run_id`: the run's
+    /// spec in brief, its state (now, or as of step `at`), and every edge it
+    /// took, all from its run file except a live run's current state, which
+    /// is read off the world.
+    ///
+    /// Only the caller's own tree can be read: the caller, the runs it
+    /// started, and theirs. An agent has no business reading an unrelated
+    /// run, which may hold another person's work; an operator reads any run
+    /// with `lev run show`. The tree is walked through each run's recorded
+    /// children, so a finished child that is no longer in the world is still
+    /// found, and nothing is paged back in to answer.
+    pub(super) fn history(
+        &self,
+        run_id: &str,
+        caller_run_id: &str,
+        at: Option<u64>,
+    ) -> Result<RunHistory, String> {
+        if !self.in_recorded_tree(run_id, caller_run_id) {
+            return Err(format!(
+                "'{run_id}' is not this run or one it started. run_history reads only this \
+                 run's own tree: itself, the runs it started, and theirs"
+            ));
+        }
+        let path = self
+            .world
+            .runs_dir()
+            .ok_or_else(|| "this host keeps no run files".to_string())?
+            .join(run_id)
+            .join(leviath_core::files::RUN_FILE);
+        let reader = crate::runfile::RunFileReader::open(&path)
+            .map_err(|e| format!("the run file of '{run_id}' cannot be read: {e}"))?;
+        let last_seq = reader.last_seq();
+        let (recorded, deltas) = reader
+            .state_at(at.unwrap_or(last_seq))
+            .and_then(|state| reader.deltas(0, last_seq).map(|deltas| (state, deltas)))
+            .map_err(|e| e.to_string())?;
+        // Now, for a run the world holds, is what the world holds.
+        let live = match at {
+            Some(_) => None,
+            None => self.live_entity(run_id).and_then(|agent| {
+                crate::state::inspect::inspect(self.world.world(), agent.entity())
+            }),
+        };
+        let state = live.unwrap_or(recorded);
+        let transitions = deltas
+            .into_iter()
+            .flat_map(|delta| {
+                let seq = delta.seq;
+                delta
+                    .changes
+                    .into_iter()
+                    .filter_map(move |change| match change {
+                        crate::state::Change::LastTransition(Some(t)) => Some((seq, t)),
+                        _ => None,
+                    })
+            })
+            .collect();
+        Ok(RunHistory {
+            summary: crate::spec::summary::SpawnSummary::of(reader.spec()),
+            state,
+            last_seq,
+            transitions,
+        })
+    }
+
+    /// Whether `run_id` is `ancestor` or a run below it, following each run's
+    /// recorded children (live, or as its run file last had them).
+    fn in_recorded_tree(&self, run_id: &str, ancestor: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack = vec![ancestor.to_string()];
+        while let Some(id) = stack.pop() {
+            if id == run_id {
+                return true;
+            }
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(state) = self.inspect(&id) {
+                stack.extend(state.children.iter().map(ToString::to_string));
+            }
+        }
+        false
     }
 
     /// Who a child of `parent_run_id` is started for: that run, with the

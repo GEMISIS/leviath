@@ -19,8 +19,8 @@ use crate::spec::inputs::{InputDecl, InputSlot, InputType, RegionBinding};
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::layout::{BudgetSpec, ContextLayout, RegionSeed};
 use crate::spec::names::{
-    BlueprintName, BlueprintRef, EdgeName, InputName, McpServerName, MimePattern, ModelId,
-    ModelRef, NameError, ProviderName, RegionName, StageName, ToolName, WorkdirPath,
+    BlueprintName, EdgeName, InputName, McpServerName, MimePattern, ModelId, ModelRef, NameError,
+    ProviderName, RegionName, StageName, ToolName, WorkdirPath,
 };
 
 impl RunGraph {
@@ -471,8 +471,8 @@ impl Conv {
 
     fn fan_out(&mut self, f: &bp::FanOutConfig, p: &SpecPath) -> Option<FanOutDef> {
         let worker = match (&f.worker_agent, &f.worker_stage, &f.worker_query) {
-            (Some(agent), None, None) => match BlueprintRef::parse(agent) {
-                Ok(r) => WorkerSource::Blueprint(r),
+            (Some(agent), None, None) => match WorkerSource::named(agent) {
+                Ok(worker) => worker,
                 Err(e) => {
                     self.bad(p.field("worker"), e);
                     return None;

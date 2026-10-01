@@ -4793,3 +4793,171 @@ fn a_prepared_run_debugs_as_its_run_and_step() {
         "{shown}"
     );
 }
+
+/// A child's spawn checked without starting it is checked as that parent's
+/// child, and a parent the host does not hold cannot ask.
+#[tokio::test]
+async fn subagent_validate_checks_a_child_without_starting_it() {
+    let mut host = host_with(vec![]);
+    let starter = TestStarter::new(Starts::Place);
+    host.set_starter(starter.clone());
+    spawn(&mut host, "parent", "parent");
+    let summary = ask_sub(&mut host, |reply| SubAgentOp::Validate {
+        request: named("child"),
+        parent_run_id: "parent".to_string(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(summary.entry_stage.as_str(), "s");
+    assert!(!host.by_run_id.contains_key("child"), "nothing started");
+    let refused = ask_sub(&mut host, |reply| SubAgentOp::Validate {
+        request: named("child"),
+        parent_run_id: "ghost".to_string(),
+        reply,
+    })
+    .await;
+    assert!(refused.unwrap_err().to_string().contains("not live"));
+}
+
+/// A host that keeps run files in `dir`.
+fn host_in(dir: &std::path::Path) -> WorldHost {
+    WorldHost::new(PipelineWorld::new(
+        crate::providers::ProviderRegistry::new(),
+        Arc::new(NoTools),
+        InferencePoolConfig::new(),
+        1,
+        Some(dir.to_path_buf()),
+        Handle::current(),
+    ))
+}
+
+/// Write `states` as the run file of `run_id` under `dir`.
+fn write_run_file(dir: &std::path::Path, run_id: &str, states: &[crate::state::RunState]) {
+    let run_dir = dir.join(run_id);
+    std::fs::create_dir_all(&run_dir).unwrap();
+    crate::runfile::reader_tests::write_run(
+        &run_dir.join(leviath_core::files::RUN_FILE),
+        states,
+        Default::default(),
+    );
+}
+
+/// `run_history` reads a run in the caller's tree from its run file: the
+/// spec in brief, the state now or at a step, and each edge it took. The
+/// tree is followed through each run's recorded children, so a finished
+/// child no longer in the world is found; a run outside the tree is refused,
+/// and a step past the file's end, a missing file and a host with no run
+/// files each say why.
+#[tokio::test]
+async fn subagent_history_reads_the_callers_own_tree() {
+    use crate::spec::names::{RunId, StageName};
+    use crate::state::{TransitionReason, TransitionRecord};
+    let dir = tempfile::tempdir().unwrap();
+    let mut parent = crate::runfile::reader_tests::scripted_run(2);
+    // `gone` was recorded as a child but left no run file to read.
+    parent.last_mut().unwrap().children =
+        vec![RunId::new("t-2").unwrap(), RunId::new("gone").unwrap()];
+    write_run_file(dir.path(), "t-1", &parent);
+    let mut child = crate::runfile::reader_tests::scripted_run(2);
+    let moved = TransitionRecord {
+        from: StageName::new("plan").unwrap(),
+        to: StageName::new("build").unwrap(),
+        edge: None,
+        reason: TransitionReason::Forced,
+        visit: "v2".to_string(),
+    };
+    child[1].last_transition = Some(moved.clone());
+    write_run_file(dir.path(), "t-2", &child);
+    write_run_file(dir.path(), "t-3", &child);
+    let mut host = host_in(dir.path());
+
+    let history = |run_id: &str, caller: &str, at: Option<u64>| {
+        let (run_id, caller) = (run_id.to_string(), caller.to_string());
+        move |reply| SubAgentOp::History {
+            run_id,
+            caller_run_id: caller,
+            at,
+            reply,
+        }
+    };
+    let read = ask_sub(&mut host, history("t-2", "t-1", None))
+        .await
+        .unwrap();
+    assert_eq!(read.last_seq, child.len() as u64 - 1);
+    assert_eq!(read.state.seq, read.last_seq);
+    assert_eq!(read.transitions, vec![(1, moved)]);
+    let early = ask_sub(&mut host, history("t-2", "t-1", Some(1)))
+        .await
+        .unwrap();
+    assert_eq!(early.state.seq, 1);
+    let own = ask_sub(&mut host, history("t-1", "t-1", None)).await;
+    assert!(own.unwrap().transitions.is_empty());
+
+    let outside = ask_sub(&mut host, history("t-3", "t-1", None)).await;
+    assert!(
+        outside
+            .unwrap_err()
+            .contains("not this run or one it started")
+    );
+    let past = ask_sub(&mut host, history("t-2", "t-1", Some(99))).await;
+    assert!(past.is_err());
+    let missing = ask_sub(&mut host, history("ghost", "ghost", None)).await;
+    assert!(missing.unwrap_err().contains("cannot be read"));
+    let mut bare = host_with(vec![]);
+    let none = ask_sub(&mut bare, history("t-1", "t-1", None)).await;
+    assert_eq!(none.unwrap_err(), "this host keeps no run files");
+}
+
+/// A live run's current state is read off the world, not its file, and a
+/// cycle in recorded children does not loop.
+#[tokio::test]
+async fn subagent_history_reads_a_live_run_off_the_world() {
+    use crate::spec::names::RunId;
+    let dir = tempfile::tempdir().unwrap();
+    let mut states = crate::runfile::reader_tests::scripted_run(1);
+    states.last_mut().unwrap().children =
+        vec![RunId::new("t-1").unwrap(), RunId::new("live").unwrap()];
+    write_run_file(dir.path(), "t-1", &states);
+    let mut host = host_in(dir.path());
+    let live = spawn(&mut host, "live", "live");
+    let read = ask_sub(&mut host, |reply| SubAgentOp::History {
+        run_id: "live".to_string(),
+        caller_run_id: "live".to_string(),
+        at: None,
+        reply,
+    })
+    .await;
+    // The live run has no file of its own here, so it cannot be read.
+    assert!(read.unwrap_err().contains("cannot be read"));
+    write_run_file(dir.path(), "live", &states);
+    let read = ask_sub(&mut host, |reply| SubAgentOp::History {
+        run_id: "live".to_string(),
+        caller_run_id: "live".to_string(),
+        at: None,
+        reply,
+    })
+    .await
+    .unwrap();
+    let now = crate::state::inspect::inspect(host.world.world(), live.entity()).unwrap();
+    assert_eq!(read.state, now);
+    // A step asked for is read from the file, live or not, and the live run
+    // is found below a parent whose recorded children include itself.
+    let at_one = ask_sub(&mut host, |reply| SubAgentOp::History {
+        run_id: "live".to_string(),
+        caller_run_id: "t-1".to_string(),
+        at: Some(1),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(at_one.state.seq, 1);
+    let looped = ask_sub(&mut host, |reply| SubAgentOp::History {
+        run_id: "nowhere".to_string(),
+        caller_run_id: "t-1".to_string(),
+        at: None,
+        reply,
+    })
+    .await;
+    assert!(looped.is_err());
+}

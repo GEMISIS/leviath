@@ -44,11 +44,34 @@ below. The stage is sugar over the same tool, not a separate mechanism.
 
 ```jsonc
 spawn_agent({
-  "blueprint": "researcher",
-  "task": "What does the FLOW trial say about kidney outcomes?",
+  "source": {"blueprint": "researcher"},
+  "inputs": {"task": "What does the FLOW trial say about kidney outcomes?"},
   "wait": true            // block until it finishes and return its answer
 })
 ```
+
+`source` names what the child runs. That is an installed blueprint by name, or
+`{"name": ..., "digest": ...}` to pin one revision. It can also be the absolute directory of a
+blueprint outside your workspace, or `{"graph": {...}}` for a whole run graph the model writes
+itself. `inputs` carries the values the blueprint declares, each checked against its type.
+
+A graph the model wrote can declare its own seed commands and MCP servers, so it answers to the
+`spawn_raw_graph` permission as well as `spawn_agent`'s. That permission defaults to `ask`; set it
+under `[tool_permissions]` like any tool.
+
+Four tools help an agent get a spawn right the first time, and none of them starts anything:
+
+| Tool | What it returns |
+| --- | --- |
+| `describe_blueprint` | An installed blueprint's stages and declared inputs, with a call that would spawn it. |
+| `spawn_schema` | The spawn request's JSON Schema, one named part at a time. |
+| `validate_spawn` | Takes `spawn_agent`'s arguments and returns what would start, or every problem found. |
+| `run_history` | A child's starting summary, its state now or at a step, and the edges it took. |
+
+A refused spawn comes back as a numbered list, one problem per line. Each line names the argument
+it is about, what was expected, and how to fix it, so the model can correct all of them in one
+retry. `run_history` reads only the caller's own tree: itself, the runs it started, and theirs. To
+read any other run, use `lev run show`.
 
 With `wait: false` you get the child's id straight back and check on it yourself with
 `check_agent`, or block later with `wait_for_agent`. `send_to_agent` passes it a message mid-run and
@@ -57,15 +80,14 @@ With `wait: false` you get the child's id straight back and check on it yourself
 Waiting does not hold a slot on the tool lane, so a parent waiting on a child cannot starve the
 child of the capacity it needs to finish.
 
-`seed_context` injects starting material into the child's first pinned region, `parts` hands
-it files this run holds as stored [parts](/docs/mime), and
-`output_format` / `output_instructions` ask it for a particular shape of answer, overriding its
-blueprint's.
+`parts` hands the child files this run holds as stored [parts](/docs/mime), and `output`
+(`format`, `instructions`, `example`, `schema`) asks it for a particular shape of answer,
+overriding its blueprint's.
 
 ```jsonc
 spawn_agent({
-  "blueprint": "sprite-editor",
-  "task": "make the arm longer on @hero.png",
+  "source": {"blueprint": "sprite-editor"},
+  "inputs": {"task": "make the arm longer on @hero.png"},
   "parts": ["hero.png"]        // by name, or by six or more characters of the sha256
 })
 ```
@@ -80,7 +102,7 @@ than a stand-in. A name that matches nothing, or bytes the store no longer holds
 by name. A child started without the file its parent meant to hand it would work from a stand-in
 and never know.
 
-Override with care. An `output_format` that differs from what the child's blueprint
+Override with care. An `output.format` that differs from what the child's blueprint
 declares retires any Rhai validator and JSON schema it declared, since a check written for one
 shape cannot judge another. The only warning goes to the daemon log.
 
@@ -90,18 +112,20 @@ shape cannot judge another. The only warning goes to the daemon log.
 fan_out({
   "agent": "researcher",
   "items": [
-    {"id": "half-life",      "context": {"question": "How long does semaglutide stay active?"}},
-    {"id": "after-stopping", "context": {"question": "What happens when someone stops?"}}
+    {"id": "half-life",      "inputs": {"task": "How long does semaglutide stay active?"}},
+    {"id": "after-stopping", "inputs": {"task": "What happens when someone stops?"}}
   ]
 })
 ```
 
-Every item starts one worker, they all run at once, and the call returns a single report covering
-all of them. Three things are worth knowing:
+`agent` is an installed blueprint's name, or the absolute directory of one outside the run's
+workspace. Every item starts one worker, they all run at once, and the call returns a single
+report covering all of them. Three things are worth knowing:
 
-**Each item's `context` is everything its worker gets.** A worker is a separate agent with a clean
-context window and never sees the caller's conversation, so a reference to "the topic above"
-reaches nobody.
+**Each item's `inputs` are everything its worker gets.** They are the inputs the worker's blueprint
+declares, each checked against its type before any worker starts. A worker is a separate agent
+with a clean context window and never sees the caller's conversation, so a reference to "the topic
+above" reaches nobody.
 
 **Put all the work in one call.** The engine paces the concurrency itself (`max_workers`, default
 30), so a hundred items in one call is fine and a second call would only wait for the first. One

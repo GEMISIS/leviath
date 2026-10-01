@@ -589,11 +589,13 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
         }
         // `fan_out` is many `spawn_agent`s at once.
         "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent"
-        | "fan_out" => ToolClassification::new(
-            TaintLevel::Internal,
-            ToolDirection::Internal,
-            TaintLevel::Public,
-        ),
+        | "spawn_schema" | "describe_blueprint" | "validate_spawn" | "run_history" | "fan_out" => {
+            ToolClassification::new(
+                TaintLevel::Internal,
+                ToolDirection::Internal,
+                TaintLevel::Public,
+            )
+        }
         _ => return None,
     };
     Some(classification)
@@ -1084,6 +1086,10 @@ mod tests {
             "wait_for_agent",
             "send_to_agent",
             "kill_agent",
+            "spawn_schema",
+            "describe_blueprint",
+            "validate_spawn",
+            "run_history",
         ] {
             let tc = builtin_tool_classification(name);
             assert_eq!(tc.direction, ToolDirection::Internal);

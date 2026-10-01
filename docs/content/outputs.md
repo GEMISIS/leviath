@@ -162,8 +162,8 @@ The answer arrives as the turn's closing `agent_message_chunk`, set apart from t
 
 ### From a parent agent
 
-A parent asks a child through `spawn_agent`, using `output_format` and `output_instructions`. The
-child's answer comes back from `wait_for_agent`.
+A parent asks a child through `spawn_agent`, using its `output` argument (`format`, `instructions`,
+`example`, `schema`). The child's answer comes back from `wait_for_agent`.
 
 Three levels combine, and the later one wins per field.
 
