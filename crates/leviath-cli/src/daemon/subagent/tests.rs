@@ -1591,6 +1591,77 @@ async fn run_history_answers_each_view() {
     assert!(out.contains("dropped the history request"), "{out}");
 }
 
+/// Each sub-agent tool's advertised schema and its handler agree on the same
+/// examples: a call the handler reads is one the schema takes, and a call the
+/// schema refuses is one the handler refuses too. A raw graph's inside is
+/// only an object to the schema; the handler checks it field by field, so it
+/// is held to the one direction.
+#[tokio::test]
+async fn every_subagent_schema_agrees_with_its_handler() {
+    use leviath_tools::validate::{ArgValidation, validate_tool_args};
+    let schema_of = |name: &str| {
+        leviath_tools::BuiltinTools::subagent_tool_defs()
+            .into_iter()
+            .find(|t| t.name == name)
+            .unwrap()
+            .parameters
+    };
+    let (h, _seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+    let refused = |out: &str| out.starts_with("[error]");
+    let elsewhere = temp_blueprint();
+    let mut cases: Vec<(&str, serde_json::Value)> = Vec::new();
+    for tool in ["spawn_agent", "validate_spawn"] {
+        for args in [
+            spawn_args("coder", "go"),
+            bp_args(&elsewhere, "go"),
+            json!({"source": {"blueprint": {"name": "coder"}}, "wait": false, "max_child_depth": 2}),
+            json!({"source": {"blueprint": "coder"}, "output": {"format": "json"}, "parts": []}),
+            json!({"source": {"graph": {}}}),
+            json!({"source": {"blueprint": "coder", "graph": {}}}),
+            json!({"source": {"blueprint": 7}}),
+            json!({"source": {"blueprint": {"name": "c", "pin": 1}}}),
+            json!({"source": "coder"}),
+            json!({"blueprint": "coder", "task": "go"}),
+            json!({"source": {"blueprint": "coder"}, "max_child_depth": 300}),
+            json!({"source": {"blueprint": "coder"}, "output": {"shape": "x"}}),
+        ] {
+            cases.push((tool, args));
+        }
+    }
+    for args in [
+        json!({"run_id": "child-1"}),
+        json!({"run_id": "child-1", "view": "transitions", "at": 2}),
+        json!({"run_id": "child-1", "view": "everything"}),
+        json!({"run_id": "child-1", "at": -1}),
+        json!({"run": "child-1"}),
+    ] {
+        cases.push(("run_history", args));
+    }
+    for args in [
+        json!({}),
+        json!({"part": "RunGraph"}),
+        json!({"parts": "x"}),
+    ] {
+        cases.push(("spawn_schema", args));
+    }
+    for args in [
+        json!({"blueprint": {"name": "x", "extra": 1}}),
+        json!({"blueprint": 3}),
+        json!({}),
+    ] {
+        cases.push(("describe_blueprint", args));
+    }
+    for (tool, args) in cases {
+        let valid = validate_tool_args(tool, &schema_of(tool), &args) == ArgValidation::Valid;
+        let out = handle(&h, &tc(tool, args.clone())).await;
+        let took = !refused(&out);
+        assert!(
+            valid || !took,
+            "{tool} took what its schema refuses: {args} -> {out}"
+        );
+    }
+}
+
 /// One edge reads as one.
 #[test]
 fn a_single_transition_is_not_plural() {

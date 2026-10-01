@@ -345,6 +345,48 @@ mod tests {
         assert!(err.contains("missing field `id`"), "{err}");
     }
 
+    /// The schema `fan_out` is advertised with and the reader agree: every
+    /// call the reader takes, the schema takes, and every call the schema
+    /// refuses, the reader refuses too.
+    #[test]
+    fn the_advertised_schema_and_the_reader_agree() {
+        use leviath_tools::validate::{ArgValidation, validate_tool_args};
+        let tools =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(std::env::temp_dir()));
+        let schema = tools
+            .tool_defs()
+            .into_iter()
+            .find(|t| t.name == crate::spec::blueprint::FAN_OUT_TOOL)
+            .expect("fan_out is advertised")
+            .parameters;
+        for (call, readable) in [
+            (serde_json::json!({"items": []}), true),
+            (
+                serde_json::json!({"agent": "a", "items": [{"id": "x"}]}),
+                true,
+            ),
+            (
+                serde_json::json!({"items": [{"id": "x", "inputs": {"task": "t", "n": 2}}], "max_workers": 3}),
+                true,
+            ),
+            (serde_json::json!({"items": [{"inputs": {}}]}), false),
+            (
+                serde_json::json!({"items": [{"id": "x", "context": {}}]}),
+                false,
+            ),
+            (serde_json::json!({"items": "all"}), false),
+            (serde_json::json!({}), false),
+        ] {
+            let valid = validate_tool_args("fan_out", &schema, &call) == ArgValidation::Valid;
+            assert_eq!(valid, readable, "the schema on {call}");
+            assert_eq!(
+                parse_fan_out_call(&call).is_ok(),
+                readable,
+                "the reader on {call}"
+            );
+        }
+    }
+
     /// An `agent` given as a directory runs the blueprint there, unless it is
     /// inside the run's own workspace; a relative path names nothing.
     #[test]
