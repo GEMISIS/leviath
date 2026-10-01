@@ -1,4 +1,56 @@
 {
+  "blob": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A stored part's bytes, stored once by their digest.",
+    "properties": {
+      "bytes": {
+        "description": "The bytes.",
+        "items": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "digest": {
+        "description": "The sha256 of `bytes`. First, for the same reason as\n[`CodeFrame::digest`].",
+        "type": "string"
+      }
+    },
+    "required": [
+      "digest",
+      "bytes"
+    ],
+    "title": "BlobFrame",
+    "type": "object"
+  },
+  "code": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Code the run uses, stored once by its digest.",
+    "properties": {
+      "bytes": {
+        "description": "The code.",
+        "items": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "digest": {
+        "description": "The sha256 of `bytes`. First, so a reader can index the frame by\nreading only the start of its payload.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "digest",
+      "bytes"
+    ],
+    "title": "CodeFrame",
+    "type": "object"
+  },
   "delta": {
     "$defs": {
       "BlobState": {
@@ -2276,6 +2328,32 @@
       "events"
     ],
     "title": "StateDelta",
+    "type": "object"
+  },
+  "owner": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A machine and daemon taking the run over.",
+    "properties": {
+      "at": {
+        "description": "When, in unix seconds.",
+        "format": "int64",
+        "type": "integer"
+      },
+      "machine_id": {
+        "description": "The machine's stable id.",
+        "type": "string"
+      },
+      "world_id": {
+        "description": "The daemon process's id.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "machine_id",
+      "world_id",
+      "at"
+    ],
+    "title": "OwnerFrame",
     "type": "object"
   },
   "spec": {

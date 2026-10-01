@@ -164,10 +164,8 @@ pub(crate) use stall::{
     note_stall,
 };
 mod wedge;
-#[cfg(test)]
-pub(crate) use wedge::Wedged;
-pub(crate) use wedge::fail_wedged_runs;
 pub use wedge::{DEFAULT_WEDGE_TIMEOUT_SECS, WedgeTimeout};
+pub(crate) use wedge::{Wedged, fail_wedged_runs};
 mod circuit;
 pub(crate) use circuit::rotate_open_circuits;
 pub use circuit::{

@@ -8,13 +8,24 @@
 //! run is now; any earlier point is the spec's state with the deltas up to
 //! it applied.
 //!
-//! [`codec`] is the byte layout.
+//! [`codec`] is the byte layout, [`writer`] and [`reader`] write and read
+//! it, and [`view`] renders what it holds as TOML.
 
 use std::sync::OnceLock;
 
 use sha2::Digest as _;
 
 pub mod codec;
+mod error;
+pub mod frames;
+pub(crate) mod lane;
+pub mod reader;
+pub mod view;
+pub mod writer;
+
+pub use error::{RunFileError, RunFileErrorKind};
+pub use reader::RunFileReader;
+pub use writer::{CheckpointPolicy, RunFileWriter};
 
 /// The JSON Schemas of every type a run file stores, as one document.
 ///
@@ -25,6 +36,9 @@ pub fn frame_schemas() -> serde_json::Value {
         "spec": schemars::schema_for!(crate::spec::run_spec::RunSpec),
         "state": schemars::schema_for!(crate::state::RunState),
         "delta": schemars::schema_for!(crate::state::StateDelta),
+        "code": schemars::schema_for!(frames::CodeFrame),
+        "blob": schemars::schema_for!(frames::BlobFrame),
+        "owner": schemars::schema_for!(frames::OwnerFrame),
     })
 }
 
@@ -43,42 +57,9 @@ pub fn spawn_request_schema() -> serde_json::Value {
 }
 
 #[cfg(test)]
-mod tests {
-    /// The published schemas are the ones this build generates. Run with
-    /// `LEVIATH_WRITE_SCHEMAS=1` to rewrite them after changing a type.
-    #[test]
-    fn the_published_schemas_match_this_build() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/schema");
-        let files = [
-            ("spawn-request.schema.json", super::spawn_request_schema()),
-            ("run-file.schema.json", super::frame_schemas()),
-        ];
-        for (name, schema) in files {
-            let path = dir.join(name);
-            let text = format!("{}\n", serde_json::to_string_pretty(&schema).unwrap());
-            if std::env::var_os("LEVIATH_WRITE_SCHEMAS").is_some() {
-                std::fs::write(&path, &text).unwrap();
-            }
-            let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
-            assert!(
-                on_disk == text,
-                "{name} is out of date; rerun this test with LEVIATH_WRITE_SCHEMAS=1 and commit the file"
-            );
-        }
-    }
+#[path = "reader_tests.rs"]
+pub(crate) mod reader_tests;
 
-    #[test]
-    fn the_fingerprint_is_stable_and_covers_every_frame_type() {
-        assert_eq!(super::fingerprint(), super::fingerprint());
-        let text = super::frame_schemas().to_string();
-        for name in [
-            "RunSpec",
-            "RunState",
-            "StateDelta",
-            "ContextState",
-            "PipelinePhase",
-        ] {
-            assert!(text.contains(name), "{name} missing");
-        }
-    }
-}
+#[cfg(test)]
+#[path = "schema_tests.rs"]
+mod tests;
