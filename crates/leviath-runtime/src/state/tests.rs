@@ -35,7 +35,7 @@ fn region(name: &str, entries: Vec<EntryState>) -> RegionState {
     }
 }
 
-fn base() -> RunState {
+pub(crate) fn base() -> RunState {
     let context = ContextState {
         regions: vec![
             region("system", vec![entry("be good")]),
@@ -49,7 +49,7 @@ fn base() -> RunState {
 
 /// A state with every field set away from its default, so a codec that
 /// drops or mangles any field fails the round trip.
-fn busy() -> RunState {
+pub(crate) fn busy() -> RunState {
     let mut s = base();
     s.seq = 7;
     s.status = RunStatus::Error("boom".into());

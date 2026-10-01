@@ -42,11 +42,26 @@ pub fn frame_schemas() -> serde_json::Value {
     })
 }
 
-/// The hash of [`frame_schemas`]: two builds share it exactly when their run
-/// files have the same shape.
+/// The binary layout's version.
+///
+/// [`frame_schemas`] describes the readable form of every frame type, and a
+/// few graph types read and write a short form there that hides their
+/// binary shape. So the fingerprint also carries this number, and a test
+/// encodes a fully populated sample of every frame and compares its bytes
+/// with a recorded hash: a change to the binary layout fails that test until
+/// this number is bumped.
+pub const LAYOUT_VERSION: u32 = 1;
+
+/// The hash of [`frame_schemas`] and [`LAYOUT_VERSION`]: two builds share it
+/// exactly when their run files have the same shape.
 pub fn fingerprint() -> &'static [u8; 32] {
     static FP: OnceLock<[u8; 32]> = OnceLock::new();
-    FP.get_or_init(|| sha2::Sha256::digest(frame_schemas().to_string().as_bytes()).into())
+    FP.get_or_init(|| {
+        let mut h = sha2::Sha256::new();
+        h.update(frame_schemas().to_string().as_bytes());
+        h.update(LAYOUT_VERSION.to_le_bytes());
+        h.finalize().into()
+    })
 }
 
 /// The JSON Schema of a spawn request, as published for outside tools and
