@@ -281,8 +281,10 @@ async fn a_run_gets_a_file_on_its_first_step_and_events_on_its_next() {
         },
         at: 1,
     };
-    // Nothing is buffered for a run with no file open.
+    // What is noted for a run with no file is dropped when it is flushed.
     lane.note("r1", &message());
+    assert_eq!(lane.noted(), ["r1"]);
+    assert_eq!(lane.flush(runs.path(), "r1").await.unwrap(), None);
     assert!(lane.events.is_empty());
     assert_eq!(
         lane.record(runs.path(), step("r1", states[0].clone()))
@@ -339,6 +341,22 @@ async fn a_finished_run_closes_its_file_and_a_new_lane_carries_one_on() {
         .collect();
     assert_eq!(owners, vec!["first", "second"]);
     assert_eq!(r.last_checkpoint().0, 2);
+    // What happens after the run's last change of state still reaches its
+    // file, which is opened again for it and closed again after.
+    lane.note(
+        "r1",
+        &RunRecord::Message {
+            message: leviath_core::run_archive::MessageRecord {
+                role: "user".into(),
+                content: "too late?".into(),
+            },
+            at: 9,
+        },
+    );
+    assert_eq!(lane.flush(runs.path(), "r1").await.unwrap(), Some(3));
+    assert!(lane.writers.is_empty() && lane.noted().is_empty());
+    let r = file(runs.path(), "r1");
+    assert_eq!(r.deltas(3, 3).unwrap()[0].events.len(), 1);
 }
 
 #[tokio::test]

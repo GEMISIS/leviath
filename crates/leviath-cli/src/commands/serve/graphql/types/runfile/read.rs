@@ -1,17 +1,15 @@
 //! Reading a run's file for `Run.spec`, `Run.state`, `Run.deltas` and
 //! `Run.graph`.
 //!
-//! The file is read whole into memory and indexed there, never opened for
-//! writing: the daemon may be appending to it as this reads, and a reader
-//! that cut a torn tail off a live run's file would be cutting off the step
-//! being written. A torn tail is dropped from what is read and left on disk
-//! for the writer.
-
-use leviath_runtime::control_socket::ControlResponse;
-use leviath_runtime::runfile::{RunFileError, RunFileErrorKind, RunFileReader};
+//! These are the REST routes' own reads (`core::inspect`), so a run answers
+//! the same on both surfaces. What this adds is GraphQL's shape: a run with
+//! no run file reads as null rather than as a miss, a step a client names is
+//! a GraphQL `Int` checked here, and one `deltas` call answers at most
+//! [`MAX_STEPS`] steps.
 
 use super::super::super::super::blocking::blocking;
 use super::super::super::super::core::error::ServeError;
+use super::super::super::super::core::inspect;
 use super::super::super::super::types::AppState;
 use super::super::run::counted;
 use super::delta::StateDelta;
@@ -22,39 +20,15 @@ use super::state::RunState;
 /// The most steps one `deltas` call answers with.
 pub(crate) const MAX_STEPS: u64 = 200;
 
-/// A run file that would not read, as the failure a client sees.
-///
-/// Asking for a step the file does not have is the caller's mistake; anything
-/// else is a file this server cannot make sense of.
-fn file_error(e: &RunFileError) -> ServeError {
-    match e.kind {
-        RunFileErrorKind::NoSuchStep { .. } => ServeError::BadRequest(e.to_string()),
-        _ => ServeError::Unprocessable(e.to_string()),
+/// `read`'s answer, with a run that has no run file read as `None`, and a
+/// step the run does not have as the caller's mistake.
+fn present<T>(read: Result<T, ServeError>) -> Result<Option<T>, ServeError> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(ServeError::NotFound(_)) => Ok(None),
+        Err(ServeError::RangeNotSatisfiable(message)) => Err(ServeError::BadRequest(message)),
+        Err(e) => Err(e),
     }
-}
-
-/// Read the run file at `path`. `None` when there is none.
-fn read_at(path: &std::path::Path) -> Result<Option<RunFileReader>, ServeError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(ServeError::Internal(format!(
-                "{} could not be read: {e}",
-                path.display()
-            )));
-        }
-    };
-    RunFileReader::from_bytes(path, bytes)
-        .map(Some)
-        .map_err(|e| file_error(&e))
-}
-
-/// Open a run's file. `None` for a run that has none.
-pub(crate) async fn open(run_id: &str) -> Result<Option<RunFileReader>, ServeError> {
-    counted(run_id);
-    let path = crate::runstate::run_dir(run_id).join(leviath_core::files::RUN_FILE);
-    blocking(move || read_at(&path)).await
 }
 
 /// A step a client named, as the run file counts them.
@@ -64,42 +38,23 @@ fn step(name: &str, n: i32) -> Result<u64, ServeError> {
 
 /// The run as it was resolved. Null for a run with no run file.
 pub(crate) async fn spec(run_id: &str) -> Result<Option<RunSpec>, ServeError> {
-    Ok(open(run_id)
-        .await?
-        .map(|reader| RunSpec::from(reader.spec())))
+    counted(run_id);
+    let id = run_id.to_string();
+    let spec = present(blocking(move || inspect::spec(&id)).await)?;
+    Ok(spec.as_ref().map(RunSpec::from))
 }
 
-/// The run's state as the daemon holds it now, when the daemon answers with
-/// one.
-async fn live(app: &AppState, run_id: &str) -> Option<leviath_runtime::state::RunState> {
-    match app.control.inspect(run_id).await {
-        Ok(ControlResponse::State { state }) => Some(*state),
-        _ => None,
-    }
-}
-
-/// The run's state at step `at`, or now.
-///
-/// Now is the daemon's answer while it holds the run, so a live run reads at
-/// this tick rather than at its last write. A run the daemon does not hold,
-/// or a daemon that is not there, is read from the file.
+/// The run's state at step `at`, or now: the daemon's answer while it holds
+/// the run, so a live run reads at this tick rather than at its last write.
 pub(crate) async fn state(
     app: &AppState,
     run_id: &str,
     at: Option<i32>,
 ) -> Result<Option<RunState>, ServeError> {
     let at = at.map(|n| step("at", n)).transpose()?;
-    if at.is_none()
-        && let Some(state) = live(app, run_id).await
-    {
-        return Ok(Some(RunState::from(&state)));
-    }
-    let Some(reader) = open(run_id).await? else {
-        return Ok(None);
-    };
-    let seq = at.unwrap_or_else(|| reader.last_seq());
-    let state = reader.state_at(seq).map_err(|e| file_error(&e))?;
-    Ok(Some(RunState::from(&state)))
+    counted(run_id);
+    let state = present(inspect::state(app, run_id, at).await)?;
+    Ok(state.as_ref().map(RunState::from))
 }
 
 /// The steps from `from` to `to`, both included.
@@ -130,24 +85,19 @@ pub(crate) async fn deltas(
             to - from + 1
         )));
     }
-    let Some(reader) = open(run_id).await? else {
-        return Ok(Vec::new());
-    };
-    let to = to.unwrap_or_else(|| reader.last_seq().min(from + MAX_STEPS - 1));
-    let deltas = reader.deltas(from, to).map_err(|e| file_error(&e))?;
-    Ok(deltas.iter().map(StateDelta::from).collect())
+    counted(run_id);
+    let id = run_id.to_string();
+    let to = to.unwrap_or(from + MAX_STEPS - 1);
+    let deltas = present(blocking(move || inspect::deltas(&id, Some(from), Some(to))).await)?;
+    Ok(deltas.iter().flatten().map(StateDelta::from).collect())
 }
 
 /// The run's graph, with each edge's count. Null for a run with no run file.
 pub(crate) async fn graph(run_id: &str) -> Result<Option<RunGraph>, ServeError> {
-    let Some(reader) = open(run_id).await? else {
-        return Ok(None);
-    };
-    let state = reader.latest_state().map_err(|e| file_error(&e))?;
-    let deltas = reader
-        .deltas(1, reader.last_seq())
-        .map_err(|e| file_error(&e))?;
-    Ok(Some(RunGraph::of(reader.spec(), &state, &deltas)))
+    counted(run_id);
+    let id = run_id.to_string();
+    let view = present(blocking(move || inspect::graph(&id)).await)?;
+    Ok(view.as_ref().map(RunGraph::from))
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ pub use delta::{Change, RunEvent, StateDelta, TransitionReason, TransitionRecord
 
 use crate::spec::names::{EdgeName, ModelRef, RunId, StageName};
 use context::ToolCallState;
+use journal::ArtifactState;
 
 /// Everything about a run that changes as it runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -414,6 +415,8 @@ pub struct FinalOutputState {
     pub submitted_at: i64,
     /// Whether it was cut to fit the size limit.
     pub truncated: bool,
+    /// The files it handed back with it.
+    pub artifacts: Vec<ArtifactState>,
 }
 
 #[cfg(test)]

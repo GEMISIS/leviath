@@ -139,7 +139,7 @@ impl Dashboard {
             context_tree: ContextTreeState::default(),
             history: None,
             history_loader: runstate::run_history,
-            history_stamp: runstate::archive_stamp,
+            history_stamp: runstate::run_file_stamp,
             detail_scroll: 0,
             choice_selected: 0,
             selected_stage: 0,

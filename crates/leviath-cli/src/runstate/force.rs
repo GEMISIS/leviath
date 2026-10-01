@@ -12,7 +12,8 @@ pub(crate) enum ForceCancelOutcome {
     AlreadyTerminal,
     /// No run directory with that id exists.
     NoSuchRun,
-    /// The directory exists but its metadata could not be rewritten.
+    /// The directory exists but the cancel could not be recorded in its run
+    /// file.
     WriteFailed,
 }
 
@@ -38,28 +39,14 @@ pub(crate) fn force_cancel(run_id: &str) -> ForceCancelOutcome {
 /// the daemon's force-terminator seam and `lev cancel --force` route here so
 /// there is one definition of "terminated on disk".
 ///
-/// A run with a run file has the cancel recorded there as its last step. A
-/// directory in the older layout has its `meta.json` rewritten, and one whose
-/// metadata is missing or unparseable still gets a minimal `Cancelled` record
-/// written: such a run is otherwise skipped by `list_runs`, which makes it
-/// invisible *and* permanent.
+/// The cancel is recorded as the last step of the run's file. A directory
+/// whose run file is missing or will not open cannot record one.
 pub(crate) fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
-    if let Some(outcome) = cancel_in_run_file(run_dir, now) {
-        return outcome;
-    }
-    force_terminal_in(run_dir, RunStatus::Cancelled, None, now)
-}
-
-/// Record the run in `run_dir` cancelled as the last step of its run file.
-/// `None` when the directory holds no run file to record it in (an older
-/// layout's journal at the same name is not one).
-fn cancel_in_run_file(run_dir: &Path, now: i64) -> Option<ForceCancelOutcome> {
     use leviath_runtime::state::{PipelinePhase, RunStatus as State};
-    let path = run_dir.join(leviath_core::files::RUN_FILE);
-    let head = std::fs::read(&path).ok()?;
-    if !head.starts_with(leviath_runtime::runfile::codec::MAGIC) {
-        return None;
+    if !run_dir.is_dir() {
+        return ForceCancelOutcome::NoSuchRun;
     }
+    let path = run_file::path_in(run_dir);
     let recorded = leviath_runtime::runfile::RunFileWriter::open(&path, Default::default())
         .and_then(|mut writer| {
             let mut next = writer.state().clone();
@@ -75,71 +62,8 @@ fn cancel_in_run_file(run_dir: &Path, now: i64) -> Option<ForceCancelOutcome> {
                 .record(next, now, Vec::new())
                 .map(|_| ForceCancelOutcome::Terminated)
         });
-    Some(recorded.unwrap_or_else(|e| {
+    recorded.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "could not record a cancel in a run's file");
         ForceCancelOutcome::WriteFailed
-    }))
-}
-
-/// Rewrite the run in `run_dir` to a terminal `status`, attaching `error` when
-/// there is something to say.
-fn force_terminal_in(
-    run_dir: &Path,
-    status: RunStatus,
-    error: Option<String>,
-    now: i64,
-) -> ForceCancelOutcome {
-    if !run_dir.is_dir() {
-        return ForceCancelOutcome::NoSuchRun;
-    }
-    let run_id = run_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let terminated = match read_meta_from(run_dir) {
-        Ok(meta) if is_terminal_status(&meta.status) => return ForceCancelOutcome::AlreadyTerminal,
-        Ok(meta) => RunMeta {
-            status,
-            updated_at: now,
-            // Keep whatever the run had already recorded when there is nothing
-            // new to say (the cancel path).
-            error: error.clone().or(meta.error),
-            ..meta
-        },
-        // Unreadable metadata: synthesize just enough to record the outcome. The
-        // run id is the directory name, which is the one field always recoverable.
-        Err(_) => RunMeta {
-            status,
-            updated_at: now,
-            error: Some(
-                error
-                    .clone()
-                    .unwrap_or_else(|| "run metadata was unreadable; cancelled".to_string()),
-            ),
-            ..RunMeta::new(
-                run_id.clone(),
-                run_id,
-                String::new(),
-                String::new(),
-                None,
-                String::new(),
-                0,
-            )
-        },
-    };
-    match write_meta_to(run_dir, &terminated) {
-        Ok(()) => ForceCancelOutcome::Terminated,
-        Err(e) => {
-            // Formatted outside the macro: a method call inside a `%field` is
-            // only evaluated when a subscriber visits the value, so it would go
-            // unexercised under the tests' no-op subscriber.
-            let path = run_dir.display().to_string();
-            tracing::warn!(
-                run_dir = %path,
-                error = %e,
-                "could not force a run to a terminal state on disk"
-            );
-            ForceCancelOutcome::WriteFailed
-        }
-    }
+    })
 }

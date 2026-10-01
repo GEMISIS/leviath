@@ -325,6 +325,42 @@ async fn an_acked_record_is_a_step_of_its_own() {
     );
 }
 
+/// A record no ack waits on, and no later change of state carries, is still
+/// written when its batch ends: what happened after a run's last change does
+/// not wait for a change that may never come. One for a run this lane never
+/// wrote is dropped.
+#[tokio::test]
+async fn a_noted_record_is_written_when_its_batch_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    run_lane(
+        dir.path(),
+        vec![
+            PersistMsg::Snapshot(stepped("run-1")),
+            PersistMsg::Append {
+                run_id: "run-1".to_string(),
+                record: Box::new(batch_record("c1")),
+                ack: None,
+            },
+            PersistMsg::Append {
+                run_id: "never-written".to_string(),
+                record: Box::new(batch_record("c2")),
+                ack: None,
+            },
+        ],
+    )
+    .await;
+    let read = crate::runfile::RunFileReader::open(
+        &dir.path().join("run-1").join(leviath_core::files::RUN_FILE),
+    )
+    .unwrap();
+    let steps = read.deltas(1, read.last_seq()).unwrap();
+    assert!(
+        matches!(&steps[0].events[0], crate::state::RunEvent::ToolStarted(call) if call.id == "c1"),
+        "{steps:?}"
+    );
+    assert!(!dir.path().join("never-written").exists());
+}
+
 /// A run file step that cannot be written is the run's history lost: it is
 /// counted and names its run, so the world fails it. A file beside it that
 /// is lost is only counted.
@@ -380,12 +416,12 @@ async fn an_acked_record_that_cannot_be_written_says_so() {
     let stats = health();
     record_run_file(&mut lane, dir.path(), *step("run-1").unwrap(), &stats).await;
     // Nothing noted, or no file open, writes nothing.
-    assert_eq!(lane.flush("run-1").await.unwrap(), None);
-    assert_eq!(lane.flush("no-file").await.unwrap(), None);
+    assert_eq!(lane.flush(dir.path(), "run-1").await.unwrap(), None);
+    assert_eq!(lane.flush(dir.path(), "no-file").await.unwrap(), None);
     lane.note("run-1", &batch_record("c1"));
     lane.break_writes("run-1");
     assert_eq!(
-        flush_run_file(&mut lane, "run-1", &stats).await,
+        flush_run_file(&mut lane, dir.path(), "run-1", &stats).await,
         Appended::Failed
     );
     assert_eq!(stats.report().appends_failed, 1);

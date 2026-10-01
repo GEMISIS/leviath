@@ -32,18 +32,6 @@ async fn a_run_is_listed_from_its_run_file() {
         listed.iter().map(|m| m.run_id.clone()).collect::<Vec<_>>(),
         std::slice::from_ref(&run_id)
     );
-    assert_eq!(
-        listing_file(&runs.path().join(&run_id)),
-        runs.path()
-            .join(&run_id)
-            .join(leviath_core::files::RUN_FILE)
-    );
-    assert_eq!(
-        listing_file(&runs.path().join("older")),
-        runs.path()
-            .join("older")
-            .join(leviath_core::files::META_FILE)
-    );
 }
 
 /// The poller's cache reads a run file once per change, and drops a run
@@ -104,23 +92,6 @@ async fn a_forced_cancel_is_the_run_files_last_step() {
     crate::test_support::with_tracing(|| {
         assert_eq!(force_cancel_in(&torn, 5), ForceCancelOutcome::WriteFailed);
     });
-}
-
-/// A run directory in the older layout, whose journal shares the run file's
-/// name, is cancelled in its `meta.json`.
-#[test]
-fn a_forced_cancel_of_an_older_run_rewrites_its_metadata() {
-    let runs = tempfile::tempdir().unwrap();
-    let dir = runs.path().join("old-run");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join(leviath_core::files::ARCHIVE_FILE),
-        b"LVR1 and the rest",
-    )
-    .unwrap();
-    write_meta_to(&dir, &crate::test_fixtures::fixtures::run_meta("old-run")).unwrap();
-    assert_eq!(force_cancel_in(&dir, 9), ForceCancelOutcome::Terminated);
-    assert_eq!(read_meta_from(&dir).unwrap().status, RunStatus::Cancelled);
 }
 
 /// A run file whose state does not decode lists nothing.

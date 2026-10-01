@@ -563,6 +563,7 @@ impl WorldHost {
                     .world
                     .send_message(AgentMessage {
                         agent_id,
+                        from: crate::components::FROM_PERSON.to_string(),
                         content,
                         target_region,
                         parts,

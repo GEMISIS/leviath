@@ -505,6 +505,8 @@ fn ledger() -> p::StageLedger {
     r.cost_priced_usd = 0.5;
     r.cost_is_exact = false;
     r.unpriced_calls = 1;
+    r.computed_calls = 1;
+    r.reported_calls = 2;
     r.models = vec![
         StageModelUse {
             provider: "mock".into(),
@@ -566,6 +568,7 @@ async fn a_busy_run_reads_every_field_from_its_components() {
     let mut inbox = MessageInbox::default();
     inbox.messages.push(crate::components::AgentMessage {
         agent_id: "a".into(),
+        from: crate::components::FROM_PERSON.to_string(),
         content: "hurry".into(),
         target_region: Some("conversation".into()),
         parts: vec![],
@@ -586,12 +589,21 @@ async fn a_busy_run_reads_every_field_from_its_components() {
             validators,
         ),
         (
-            crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
-                "the answer",
-                Some("markdown".into()),
-                "plan".into(),
-                9,
-            )),
+            crate::persistence::FinalOutput(leviath_core::output::FinalOutput {
+                artifacts: vec![leviath_core::output::Artifact {
+                    name: "hero".into(),
+                    path: "hero.png".into(),
+                    mime_type: MimeType::parse("image/png").unwrap(),
+                    size: 4,
+                    sha256: "ab".into(),
+                }],
+                ..leviath_core::output::FinalOutput::new(
+                    "the answer",
+                    Some("markdown".into()),
+                    "plan".into(),
+                    9,
+                )
+            }),
             crate::persistence::RunMetadata {
                 title: Some("Fix it".into()),
                 ..metadata()
@@ -648,6 +660,7 @@ async fn a_busy_run_reads_every_field_from_its_components() {
     );
     let active = &s.ledger[1];
     assert_eq!(active.spend.computed_calls, 1);
+    assert_eq!(active.spend.reported_calls, 2);
     assert_eq!(active.spend.unpriced_calls, 1);
     assert_eq!(active.models.len(), 2);
     assert_eq!(active.models[1].provider, None);
@@ -660,7 +673,7 @@ async fn a_busy_run_reads_every_field_from_its_components() {
     assert_eq!(
         s.inbox,
         vec![MessageState {
-            from: String::new(),
+            from: "user".into(),
             text: "hurry".into(),
             region: Some("conversation".into())
         }]
@@ -679,6 +692,14 @@ async fn a_busy_run_reads_every_field_from_its_components() {
     assert_eq!(
         (out.content.as_str(), out.stage.as_str()),
         ("the answer", "plan")
+    );
+    assert_eq!(out.artifacts.len(), 1);
+    assert_eq!(
+        (
+            out.artifacts[0].path.as_str(),
+            out.artifacts[0].mime_type.as_str()
+        ),
+        ("hero.png", "image/png")
     );
     assert_eq!(s.phase, PipelinePhase::WaitingForChildren);
     assert_eq!(s.wait_reason.as_deref(), Some("children(1)"));

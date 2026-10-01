@@ -582,6 +582,7 @@ fn answer() -> FinalOutputState {
         stage: stage("review"),
         submitted_at: 99,
         truncated: true,
+        artifacts: Vec::new(),
     }
 }
 
@@ -994,7 +995,11 @@ impl Probe {
             )))],
             events: Vec::new(),
         };
-        RunGraph::of(&spec, &state(), &[step.clone(), step])
+        RunGraph::from(&crate::commands::serve::core::inspect::graph_of(
+            &spec,
+            &state(),
+            &[step.clone(), step],
+        ))
     }
 }
 
@@ -1215,7 +1220,11 @@ fn each_move_counts_against_the_edge_it_took() {
             events: Vec::new(),
         })
         .collect();
-    let graph = RunGraph::of(&spec, &state(), &steps);
+    let graph = RunGraph::from(&crate::commands::serve::core::inspect::graph_of(
+        &spec,
+        &state(),
+        &steps,
+    ));
     assert_eq!(graph.edges[0].taken, 2);
     assert!(graph.edges.iter().skip(1).all(|edge| edge.taken == 0));
     let current: Vec<&str> = graph

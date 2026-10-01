@@ -71,6 +71,7 @@ impl WorldHost {
                     .world
                     .send_message(AgentMessage {
                         agent_id: run_id,
+                        from: caller_run_id,
                         content,
                         target_region,
                         // A sub-agent's `send_message` carries text only.

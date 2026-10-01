@@ -1282,6 +1282,13 @@
       "FinalOutputState": {
         "description": "A run's final output.",
         "properties": {
+          "artifacts": {
+            "description": "The files it handed back with it.",
+            "items": {
+              "$ref": "#/$defs/ArtifactState"
+            },
+            "type": "array"
+          },
           "content": {
             "description": "The output.",
             "type": "string"
@@ -1311,7 +1318,8 @@
           "content",
           "stage",
           "submitted_at",
-          "truncated"
+          "truncated",
+          "artifacts"
         ],
         "type": "object"
       },
@@ -7532,6 +7540,41 @@
   },
   "state": {
     "$defs": {
+      "ArtifactState": {
+        "description": "A file an execution produced.",
+        "properties": {
+          "mime_type": {
+            "description": "Its mime type.",
+            "type": "string"
+          },
+          "name": {
+            "description": "What it is called.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Where it is, inside the run's workdir.",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "The sha256 of its bytes, when it was taken.",
+            "type": "string"
+          },
+          "size": {
+            "description": "Its size in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "mime_type",
+          "size",
+          "sha256"
+        ],
+        "type": "object"
+      },
       "BlobState": {
         "description": "A stored part's bytes, by digest.",
         "properties": {
@@ -8043,6 +8086,13 @@
       "FinalOutputState": {
         "description": "A run's final output.",
         "properties": {
+          "artifacts": {
+            "description": "The files it handed back with it.",
+            "items": {
+              "$ref": "#/$defs/ArtifactState"
+            },
+            "type": "array"
+          },
           "content": {
             "description": "The output.",
             "type": "string"
@@ -8072,7 +8122,8 @@
           "content",
           "stage",
           "submitted_at",
-          "truncated"
+          "truncated",
+          "artifacts"
         ],
         "type": "object"
       },

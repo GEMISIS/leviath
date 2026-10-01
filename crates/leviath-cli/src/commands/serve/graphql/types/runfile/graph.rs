@@ -3,14 +3,14 @@
 //! The nodes and edges are the spec's own graph. What this adds is the run's
 //! record of walking it: how often each stage was entered, which one it is in,
 //! and how often each edge was taken, counted from the moves its run file
-//! records rather than inferred from the order stages were visited in.
+//! records rather than inferred from the order stages were visited in. The
+//! counting is the REST route's own (`core::inspect::graph_of`).
 
 use async_graphql::{Enum, SimpleObject};
 use leviath_graphql_derive::mirror;
 use leviath_runtime::spec::graph::EdgeCondition as CoreCondition;
-use leviath_runtime::spec::run_spec::RunSpec;
-use leviath_runtime::state::{Change, RunState, StateDelta, TransitionRecord};
 
+use super::super::super::super::core::inspect::RunGraphView;
 use super::saturating;
 
 /// When an edge is followed.
@@ -82,61 +82,27 @@ pub(crate) struct RunGraph {
     pub(crate) edges: Vec<RunGraphEdge>,
 }
 
-/// Every move between stages a run's steps record, in order.
-fn transitions(deltas: &[StateDelta]) -> Vec<&TransitionRecord> {
-    deltas
-        .iter()
-        .flat_map(|delta| delta.changes.iter())
-        .filter_map(|change| match change {
-            Change::LastTransition(Some(record)) => Some(record),
-            _ => None,
-        })
-        .collect()
-}
-
-impl RunGraph {
-    /// The graph of `spec`, walked as far as `state`, with each edge's count
-    /// taken from `deltas`.
-    ///
-    /// A move names the edge it took when it took a named one. One that names
-    /// none (a forced move, a router's choice) counts against the first edge
-    /// between the same two stages, and a move no edge joins is not counted.
-    pub(crate) fn of(spec: &RunSpec, state: &RunState, deltas: &[StateDelta]) -> Self {
-        let moves = transitions(deltas);
-        let graph = &spec.graph;
-        let mut taken = vec![0u32; graph.edges.len()];
-        for record in moves {
-            let found = graph.edges.iter().position(|edge| {
-                edge.from == record.from
-                    && match &record.edge {
-                        Some(name) => &edge.name == name,
-                        None => edge.to == record.to,
-                    }
-            });
-            if let Some(at) = found {
-                taken[at] += 1;
-            }
-        }
+impl From<&RunGraphView> for RunGraph {
+    fn from(view: &RunGraphView) -> Self {
         Self {
-            nodes: graph
-                .stages
+            nodes: view
+                .nodes
                 .iter()
-                .map(|stage| RunGraphNode {
-                    stage: stage.name.to_string(),
-                    visits: saturating(state.visits.get(&stage.name).copied().unwrap_or(0)),
-                    current: state.cursor.stage == stage.name,
+                .map(|node| RunGraphNode {
+                    stage: node.stage.clone(),
+                    visits: saturating(node.visits),
+                    current: node.current,
                 })
                 .collect(),
-            edges: graph
+            edges: view
                 .edges
                 .iter()
-                .zip(taken)
-                .map(|(edge, count)| RunGraphEdge {
-                    from: edge.from.to_string(),
-                    to: edge.to.to_string(),
-                    name: edge.name.to_string(),
-                    condition: EdgeCondition::from(edge.when),
-                    taken: saturating(count),
+                .map(|edge| RunGraphEdge {
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                    name: edge.name.clone(),
+                    condition: EdgeCondition::from(edge.condition),
+                    taken: saturating(edge.taken),
                 })
                 .collect(),
         }

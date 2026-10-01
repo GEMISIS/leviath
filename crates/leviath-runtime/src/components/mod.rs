@@ -388,6 +388,9 @@ pub(crate) struct ToolCall {
 pub struct AgentMessage {
     /// Target agent ID
     pub agent_id: String,
+    /// Who sent it: the id of the run that sent it, or [`FROM_PERSON`] for a
+    /// message a person sent through the CLI, the dashboard or the API.
+    pub from: String,
     /// Message content
     pub content: String,
     /// Which region to add the message to (default: "conversation")
@@ -396,6 +399,9 @@ pub struct AgentMessage {
     /// beside the text in one entry.
     pub parts: Vec<leviath_core::mime::InboundPart>,
 }
+
+/// The sender of a message a person sent, as [`AgentMessage::from`] names it.
+pub const FROM_PERSON: &str = "user";
 
 /// Inbox component for receiving messages sent to a running agent.
 #[derive(Component, Debug, Clone)]
@@ -669,6 +675,7 @@ mod tests {
 
         inbox.push(AgentMessage {
             agent_id: "agent-1".to_string(),
+            from: crate::components::FROM_PERSON.to_string(),
             content: "hello".to_string(),
             target_region: None,
             parts: Vec::new(),
@@ -686,6 +693,7 @@ mod tests {
         for content in ["first", "second", "third"] {
             inbox.push(AgentMessage {
                 agent_id: "a".to_string(),
+                from: crate::components::FROM_PERSON.to_string(),
                 content: content.to_string(),
                 target_region: None,
                 parts: Vec::new(),
@@ -926,6 +934,7 @@ mod tests {
         let mut inbox = MessageInbox::new();
         inbox.push(AgentMessage {
             agent_id: "a".to_string(),
+            from: crate::components::FROM_PERSON.to_string(),
             content: "msg".to_string(),
             target_region: None,
             parts: Vec::new(),
@@ -941,6 +950,7 @@ mod tests {
     fn test_agent_message_clone() {
         let msg = AgentMessage {
             agent_id: "agent-1".to_string(),
+            from: crate::components::FROM_PERSON.to_string(),
             content: "hello".to_string(),
             target_region: Some("conv".to_string()),
             parts: Vec::new(),

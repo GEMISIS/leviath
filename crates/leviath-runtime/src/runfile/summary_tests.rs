@@ -46,6 +46,7 @@ fn a_run_is_listed_as_of_its_last_step() {
         stage: next.cursor.stage.clone(),
         submitted_at: 7,
         truncated: false,
+        artifacts: Vec::new(),
     });
     writer.record(next, 1234, Vec::new()).unwrap();
 

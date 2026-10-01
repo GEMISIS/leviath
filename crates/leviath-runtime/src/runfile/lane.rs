@@ -70,47 +70,82 @@ impl RunFileLane {
         self.events.remove(run_id);
     }
 
-    /// Keep what `record` says happened, for the run's next delta. Only for a
-    /// run whose file is open: a run without one has no delta to carry it.
+    /// Keep what `record` says happened, for the run's next step: the next
+    /// state it records, or the [`flush`](Self::flush) that writes what is
+    /// noted on its own.
     pub(crate) fn note(&mut self, run_id: &str, record: &RunRecord) {
-        if !self.writers.contains_key(run_id) {
-            return;
-        }
         let buffered = self.events.entry(run_id.to_string()).or_default();
         push_events(buffered, record);
     }
 
+    /// The runs with something noted that no step has written yet.
+    pub(crate) fn noted(&self) -> Vec<String> {
+        let mut runs: Vec<String> = self
+            .events
+            .iter()
+            .filter(|(_, events)| !events.is_empty())
+            .map(|(run_id, _)| run_id.clone())
+            .collect();
+        runs.sort();
+        runs
+    }
+
     /// Write what was noted for `run_id` since its last step as a step of its
     /// own, now, with the state as it last was: how a tool batch's record is
-    /// on disk before the batch runs. `None` when the run has no file open or
-    /// nothing was noted. A step that cannot be written closes the file, as
-    /// [`record`](Self::record) does.
-    pub(crate) async fn flush(&mut self, run_id: &str) -> Result<Option<u64>, RunFileError> {
+    /// on disk before the batch runs, and how what happened after a run's
+    /// last change of state (a finished run's last lines) reaches its file.
+    ///
+    /// The file is the one open, or the one on disk under `runs_dir` (a
+    /// finished run's is closed). `None`, with what was noted dropped, when
+    /// the run has no file or nothing was noted. A step that cannot be
+    /// written closes the file, as [`record`](Self::record) does.
+    pub(crate) async fn flush(
+        &mut self,
+        runs_dir: &Path,
+        run_id: &str,
+    ) -> Result<Option<u64>, RunFileError> {
         let events = self.events.remove(run_id).unwrap_or_default();
-        let Some(mut writer) = self.writers.remove(run_id) else {
-            return Ok(None);
-        };
+        let slot = self.writers.remove(run_id);
         if events.is_empty() {
-            self.writers.insert(run_id.to_string(), writer);
+            if let Some(writer) = slot {
+                self.writers.insert(run_id.to_string(), writer);
+            }
+            return Ok(None);
+        }
+        let path = runs_dir.join(run_id).join(leviath_core::files::RUN_FILE);
+        if slot.is_none() && !path.is_file() {
             return Ok(None);
         }
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let policy = self.policy;
         let job = move || {
-            let state = writer.state().clone();
-            let written = writer.record(state, at, events);
-            (writer, written)
+            let opened = match slot {
+                Some(writer) => Ok(writer),
+                None => RunFileWriter::open(&path, policy),
+            };
+            opened.and_then(|mut writer| {
+                let state = writer.state().clone();
+                let finished = matches!(
+                    state.status,
+                    RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+                );
+                let seq = writer.record(state, at, events)?;
+                Ok(((!finished).then_some(writer), seq))
+            })
         };
         // Nothing on the blocking side panics: frames always encode and every
         // failure is a returned error.
-        let (writer, written) = tokio::task::spawn_blocking(job)
+        let written = tokio::task::spawn_blocking(job)
             .await
             .expect("writing a run file step does not panic");
-        if written.is_ok() {
-            self.writers.insert(run_id.to_string(), writer);
-        }
-        written
+        written.map(|(writer, seq)| {
+            if let Some(writer) = writer {
+                self.writers.insert(run_id.to_string(), writer);
+            }
+            seq
+        })
     }
 
     /// Make every later write to `run_id`'s open file fail.

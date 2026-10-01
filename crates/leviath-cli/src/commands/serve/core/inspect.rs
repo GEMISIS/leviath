@@ -7,8 +7,6 @@
 //! which a finished run, or one the daemon has not loaded, reads the same as a
 //! live one.
 
-use std::ops::ControlFlow;
-
 use leviath_core::run_meta::{ContextSnapshot, StageRecord};
 use leviath_runtime::control_socket::ControlResponse;
 use leviath_runtime::runfile::{RunFileErrorKind, RunFileReader};
@@ -129,25 +127,42 @@ pub(crate) struct GraphEdge {
 /// A run's graph, with the visits of its last step and every edge it took.
 pub(crate) fn graph(run_id: &str) -> Result<RunGraphView, ServeError> {
     let reader = run_file::require(run_id)?;
-    let graph = &reader.spec().graph;
+    let state = state_at(&reader, run_id, reader.last_seq())?;
+    let deltas = reader
+        .deltas(1, reader.last_seq())
+        .map_err(|e| run_file::unreadable(run_id, &e))?;
+    Ok(graph_of(reader.spec(), &state, &deltas))
+}
+
+/// The graph of `spec`, walked as far as `state`, with each edge's count
+/// taken from the moves `deltas` record.
+///
+/// A move names the edge it took when it took a named one. One that names
+/// none (a forced move, a router's choice) counts against the first edge
+/// between the same two stages, and a move no edge joins is not counted.
+pub(crate) fn graph_of(spec: &RunSpec, state: &RunState, deltas: &[StateDelta]) -> RunGraphView {
+    let graph = &spec.graph;
     let mut taken = vec![0u32; graph.edges.len()];
-    run_file::walk(run_id, &reader, &mut |step| {
-        let moves = step.delta.changes.iter().filter_map(|change| match change {
+    let moves = deltas
+        .iter()
+        .flat_map(|delta| delta.changes.iter())
+        .filter_map(|change| match change {
             Change::LastTransition(Some(record)) => Some(record),
             _ => None,
         });
-        for record in moves {
-            let edge = graph.edges.iter().position(|edge| {
-                edge.from == record.from && record.edge.as_ref() == Some(&edge.name)
-            });
-            if let Some(i) = edge {
-                taken[i] += 1;
-            }
+    for record in moves {
+        let found = graph.edges.iter().position(|edge| {
+            edge.from == record.from
+                && match &record.edge {
+                    Some(name) => &edge.name == name,
+                    None => edge.to == record.to,
+                }
+        });
+        if let Some(at) = found {
+            taken[at] += 1;
         }
-        ControlFlow::Continue(())
-    })?;
-    let state = state_at(&reader, run_id, reader.last_seq())?;
-    Ok(RunGraphView {
+    }
+    RunGraphView {
         nodes: graph
             .stages
             .iter()
@@ -169,7 +184,7 @@ pub(crate) fn graph(run_id: &str) -> Result<RunGraphView, ServeError> {
                 taken,
             })
             .collect(),
-    })
+    }
 }
 
 /// The run's context window as of its last step.

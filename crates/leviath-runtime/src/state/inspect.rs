@@ -226,19 +226,18 @@ fn clock_of(active: Option<leviath_core::run_meta::ActiveClock>) -> Clock {
     })
 }
 
-/// A spend from the ledger's figures. The ledger keeps whether its cost is
-/// exact rather than how each call was priced, so an inexact record reads as
-/// one call priced from published rates.
-fn spend_of(tokens: [usize; 4], priced_usd: f64, unpriced_calls: usize, exact: bool) -> Spend {
+/// A spend from the ledger's figures: its tokens, its priced subtotal, and
+/// its calls as `[reported, computed, unpriced]`.
+fn spend_of(tokens: [usize; 4], priced_usd: f64, calls: [usize; 3]) -> Spend {
     Spend {
         prompt_tokens: tokens[0] as u64,
         completion_tokens: tokens[1] as u64,
         cached_tokens: tokens[2] as u64,
         cache_write_tokens: tokens[3] as u64,
         priced_usd,
-        reported_calls: 0,
-        computed_calls: u32::from(!exact),
-        unpriced_calls: unpriced_calls as u32,
+        reported_calls: calls[0] as u32,
+        computed_calls: calls[1] as u32,
+        unpriced_calls: calls[2] as u32,
     }
 }
 
@@ -263,8 +262,7 @@ fn stage_record_of(r: &leviath_core::run_meta::StageRecord) -> Option<StageRecor
                 r.cache_write_tokens,
             ],
             r.cost_priced_usd,
-            r.unpriced_calls,
-            r.cost_is_exact,
+            [r.reported_calls, r.computed_calls, r.unpriced_calls],
         ),
         models: r
             .models
@@ -291,8 +289,7 @@ fn stage_record_of(r: &leviath_core::run_meta::StageRecord) -> Option<StageRecor
                         v.cache_write_tokens,
                     ],
                     v.cost_priced_usd,
-                    v.unpriced_calls,
-                    v.cost_is_exact,
+                    [v.reported_calls, v.computed_calls, v.unpriced_calls],
                 ),
                 clock: clock_of(v.active),
             })
@@ -552,8 +549,7 @@ fn input_of(value: RawInput) -> InputValue {
 
 fn message_of(m: &crate::components::AgentMessage) -> MessageState {
     MessageState {
-        // The inbox keeps who a message is for, not who sent it.
-        from: String::new(),
+        from: m.from.clone(),
         text: m.content.clone(),
         region: m.target_region.clone(),
     }
@@ -630,6 +626,17 @@ fn final_output_of(o: &leviath_core::output::FinalOutput) -> Option<FinalOutputS
         stage: StageName::new(o.stage.as_str()).ok()?,
         submitted_at: o.submitted_at,
         truncated: o.truncated,
+        artifacts: o
+            .artifacts
+            .iter()
+            .map(|a| super::ArtifactState {
+                name: a.name.clone(),
+                path: a.path.clone(),
+                mime_type: a.mime_type.as_str().to_string(),
+                size: a.size,
+                sha256: a.sha256.clone(),
+            })
+            .collect(),
     })
 }
 

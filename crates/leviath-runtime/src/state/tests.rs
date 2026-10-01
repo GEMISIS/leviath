@@ -218,6 +218,7 @@ pub(crate) fn busy() -> RunState {
         stage: stage("build"),
         submitted_at: 9,
         truncated: false,
+        artifacts: Vec::new(),
     });
     s.wait_reason = Some("children".into());
     s.last_transition = Some(TransitionRecord {

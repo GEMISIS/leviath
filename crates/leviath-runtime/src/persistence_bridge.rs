@@ -229,8 +229,13 @@ pub(crate) async fn persistence_worker(
                     // assuming the record landed.
                     if let Some(ack) = ack {
                         let landed = match may_write(&runs_dir, &run_id, &mut staked, false) {
-                            true => flush_run_file(&mut run_files, &run_id, &stats).await,
-                            false => Appended::NoJournal,
+                            true => {
+                                flush_run_file(&mut run_files, &runs_dir, &run_id, &stats).await
+                            }
+                            false => {
+                                run_files.forget(&run_id);
+                                Appended::NoJournal
+                            }
                         };
                         let _ = ack.send(landed);
                     }
@@ -251,6 +256,17 @@ pub(crate) async fn persistence_worker(
                         append_stage_line(&dir, *idx, "logs.log", line, &run_id).await;
                     }
                 }
+            }
+        }
+        // What the batch noted and no step carried (a run that did not change
+        // state after it, or one that has finished) is written now, so a
+        // run's file never waits on a next change that may not come.
+        for run_id in run_files.noted() {
+            match may_write(&runs_dir, &run_id, &mut staked, false) {
+                true => {
+                    flush_run_file(&mut run_files, &runs_dir, &run_id, &stats).await;
+                }
+                false => run_files.forget(&run_id),
             }
         }
     }
@@ -277,11 +293,12 @@ async fn record_run_file(
 /// own, now, and say where it landed.
 async fn flush_run_file(
     run_files: &mut crate::runfile::lane::RunFileLane,
+    runs_dir: &Path,
     run_id: &str,
     stats: &PersistLaneStats,
 ) -> Appended {
     stats.append_attempted();
-    match run_files.flush(run_id).await {
+    match run_files.flush(runs_dir, run_id).await {
         Ok(Some(seq)) => Appended::Landed { position: seq },
         Ok(None) => Appended::NoJournal,
         Err(e) => {

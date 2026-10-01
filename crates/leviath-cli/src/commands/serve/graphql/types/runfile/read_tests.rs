@@ -274,7 +274,7 @@ async fn a_run_file_that_will_not_read_is_a_failure() {
         )
         .expect("garbage written");
         let failure = read::spec("garbled").await.expect_err("it does not read");
-        assert_eq!(failure.code(), "UNPROCESSABLE");
+        assert_eq!(failure.code(), "INTERNAL");
 
         let shut = runs.join("shut");
         std::fs::create_dir_all(shut.join(leviath_core::files::RUN_FILE)).expect("a directory");
@@ -313,7 +313,7 @@ async fn a_step_that_will_not_decode_fails_what_reads_it() {
             read::graph(&run_id).await.err(),
         ];
         for failure in codes {
-            assert_eq!(failure.map(|f| f.code()), Some("UNPROCESSABLE"));
+            assert_eq!(failure.map(|f| f.code()), Some("INTERNAL"));
         }
     })
     .await;
@@ -345,7 +345,7 @@ async fn a_bad_step_behind_a_checkpoint_fails_only_what_reads_it() {
         let failure = read::graph(&run_id)
             .await
             .expect_err("a step does not decode");
-        assert_eq!(failure.code(), "UNPROCESSABLE");
+        assert_eq!(failure.code(), "INTERNAL");
     })
     .await;
 }

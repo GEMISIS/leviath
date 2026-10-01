@@ -149,6 +149,13 @@ pub struct StageVisitRecord {
     /// Whether every priced call in this visit carried the provider's own cost
     /// figure rather than one computed from published rates.
     pub cost_is_exact: bool,
+    /// Priced calls in this visit whose cost the provider reported.
+    #[serde(default)]
+    pub reported_calls: usize,
+    /// Priced calls in this visit whose cost was computed from published
+    /// rates.
+    #[serde(default)]
+    pub computed_calls: usize,
     /// The priced subtotal, kept even while `cost_usd` is `None` so a resumed
     /// run does not restart this visit's accounting from zero.
     pub cost_priced_usd: f64,
@@ -176,6 +183,8 @@ impl StageVisitRecord {
             cost_usd: Some(0.0),
             unpriced_calls: 0,
             cost_is_exact: true,
+            reported_calls: 0,
+            computed_calls: 0,
             cost_priced_usd: 0.0,
             active: None,
         }
@@ -187,14 +196,26 @@ impl StageVisitRecord {
         self.completion_tokens += call.completion_tokens;
         self.cached_tokens += call.cached_tokens;
         self.cache_write_tokens += call.cache_write_tokens;
-        match call.cost_usd {
-            Some(usd) => self.cost_priced_usd += usd,
-            None => self.unpriced_calls += 1,
-        }
+        self.count_call(call);
         // One call priced from a rate card makes the whole figure a
         // reconstruction, and nothing later can turn it back into the invoice.
         self.cost_is_exact &= call.cost_reported;
         self.cost_usd = (self.unpriced_calls == 0).then_some(self.cost_priced_usd);
+    }
+
+    /// Count `call` as priced (reported or computed) or unpriced.
+    fn count_call(&mut self, call: &StageCall) {
+        match (call.cost_usd, call.cost_reported) {
+            (Some(usd), true) => {
+                self.cost_priced_usd += usd;
+                self.reported_calls += 1;
+            }
+            (Some(usd), false) => {
+                self.cost_priced_usd += usd;
+                self.computed_calls += 1;
+            }
+            (None, _) => self.unpriced_calls += 1,
+        }
     }
 
     /// How long this visit has actually been working, at `now`.
@@ -298,6 +319,13 @@ pub struct StageRecord {
     /// total is a reconstruction of the invoice, not the invoice.
     #[serde(default)]
     pub cost_is_exact: bool,
+    /// Priced calls in this stage whose cost the provider reported.
+    #[serde(default)]
+    pub reported_calls: usize,
+    /// Priced calls in this stage whose cost was computed from published
+    /// rates.
+    #[serde(default)]
+    pub computed_calls: usize,
     /// The priced subtotal, kept even when `cost_usd` is `None` so a resumed run
     /// does not restart this stage's accounting from zero.
     #[serde(default)]
@@ -420,6 +448,8 @@ impl StageRecord {
             cost_usd: Some(0.0),
             unpriced_calls: 0,
             cost_is_exact: true,
+            reported_calls: 0,
+            computed_calls: 0,
             cost_priced_usd: 0.0,
             models: Vec::new(),
             visits: Vec::new(),
@@ -451,9 +481,16 @@ impl StageRecord {
         self.completion_tokens += call.completion_tokens;
         self.cached_tokens += call.cached_tokens;
         self.cache_write_tokens += call.cache_write_tokens;
-        match call.cost_usd {
-            Some(usd) => self.cost_priced_usd += usd,
-            None => self.unpriced_calls += 1,
+        match (call.cost_usd, call.cost_reported) {
+            (Some(usd), true) => {
+                self.cost_priced_usd += usd;
+                self.reported_calls += 1;
+            }
+            (Some(usd), false) => {
+                self.cost_priced_usd += usd;
+                self.computed_calls += 1;
+            }
+            (None, _) => self.unpriced_calls += 1,
         }
         self.cost_is_exact &= call.cost_reported;
         self.cost_usd = (self.unpriced_calls == 0).then_some(self.cost_priced_usd);
@@ -657,6 +694,21 @@ mod tests {
         assert!(!rec.cost_is_exact);
         rec.record_call(&reported, 120);
         assert!(!rec.cost_is_exact, "one reconstruction taints the total");
+        // How each call was priced is kept, for the stage and its visit.
+        rec.record_call(&StageCall::default(), 130);
+        assert_eq!(
+            (rec.reported_calls, rec.computed_calls, rec.unpriced_calls),
+            (2, 1, 1)
+        );
+        let visit = &rec.visits[0];
+        assert_eq!(
+            (
+                visit.reported_calls,
+                visit.computed_calls,
+                visit.unpriced_calls
+            ),
+            (2, 1, 1)
+        );
     }
 
     /// Each stay gets its own line. The accumulated record is the sum, which is

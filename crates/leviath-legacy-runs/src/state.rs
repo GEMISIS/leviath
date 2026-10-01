@@ -493,12 +493,6 @@ fn final_output(
     report: &mut Report,
 ) -> Option<FinalOutputState> {
     let d = old.meta().final_output.as_ref()?;
-    if !d.artifacts.is_empty() {
-        report.note(format!(
-            "the {} artifacts of the final output are not kept: the run file records only the answer",
-            d.artifacts.len()
-        ));
-    }
     let content = old.final_output.clone().unwrap_or_else(|| {
         report.fill(
             "final_output.content",
@@ -513,5 +507,16 @@ fn final_output(
         stage: StageName::new(d.stage.as_str()).unwrap_or_else(|_| stage.name.clone()),
         submitted_at: d.submitted_at,
         truncated: d.truncated,
+        artifacts: d
+            .artifacts
+            .iter()
+            .map(|a| leviath_runtime::state::journal::ArtifactState {
+                name: a.name.clone(),
+                path: a.path.clone(),
+                mime_type: a.mime_type.as_str().to_string(),
+                size: a.size,
+                sha256: a.sha256.clone(),
+            })
+            .collect(),
     })
 }

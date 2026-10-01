@@ -530,6 +530,17 @@ fn mid_run() -> RunState {
         stage: sn("plan"),
         submitted_at: 4,
         truncated: true,
+        // A file of a type this build cannot name is left off the answer.
+        artifacts: ["image/png", "not a type"]
+            .into_iter()
+            .map(|mime_type| crate::state::journal::ArtifactState {
+                name: "hero".into(),
+                path: "hero.png".into(),
+                mime_type: mime_type.into(),
+                size: 4,
+                sha256: "ab".into(),
+            })
+            .collect(),
     });
     state.last_transition = Some(TransitionRecord {
         from: sn("plan"),
@@ -625,6 +636,8 @@ fn a_mid_run_state_is_placed_exactly() {
         (out.content.as_str(), out.stage.as_str(), out.truncated),
         ("done", "plan", true)
     );
+    assert_eq!(out.artifacts.len(), 1);
+    assert_eq!(out.artifacts[0].mime_type.as_str(), "image/png");
     assert_eq!(
         world.get::<LastTransition>(e).unwrap().0,
         state.last_transition.clone().unwrap()

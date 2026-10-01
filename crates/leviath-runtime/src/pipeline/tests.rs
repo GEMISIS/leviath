@@ -8692,6 +8692,7 @@ fn collect_tools_drops_stale_outcome() {
 fn msg(agent_id: &str, content: &str, region: Option<&str>) -> AgentMessage {
     AgentMessage {
         agent_id: agent_id.to_string(),
+        from: crate::components::FROM_PERSON.to_string(),
         content: content.to_string(),
         target_region: region.map(String::from),
         parts: Vec::new(),
@@ -20508,6 +20509,7 @@ mod message_parts {
     fn with_parts(content: &str, parts: Vec<InboundPart>) -> AgentMessage {
         AgentMessage {
             agent_id: "a1".to_string(),
+            from: crate::components::FROM_PERSON.to_string(),
             content: content.to_string(),
             target_region: None,
             parts,

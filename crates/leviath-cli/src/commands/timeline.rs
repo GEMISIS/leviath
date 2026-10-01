@@ -162,16 +162,15 @@ pub(crate) async fn execute(args: TimelineArgs) -> anyhow::Result<()> {
 }
 
 /// Read one run's record and steps and reduce them to a [`RunTimeline`]: from
-/// its run file, or for a directory in the older layout, its journal.
+/// its run file.
 fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
     let meta = crate::runstate::read_meta(run_id)
         .map_err(|e| anyhow::anyhow!("no readable record for run '{run_id}': {e}"))?;
     let dir = crate::runstate::run_dir(run_id);
-    let records = match crate::runstate::run_file::open_in(&dir) {
-        Ok(reader) => run_file_records(&reader),
-        Err(_) => crate::runstate::read_run_archive(run_id),
-    }
-    .ok_or_else(|| anyhow::anyhow!("no readable steps (run.lvr) for run '{run_id}'"))?;
+    let records = crate::runstate::run_file::open_in(&dir)
+        .ok()
+        .and_then(|reader| run_file_records(&reader))
+        .ok_or_else(|| anyhow::anyhow!("no readable steps (run.lvr) for run '{run_id}'"))?;
     Ok(analyze(&meta, &records))
 }
 

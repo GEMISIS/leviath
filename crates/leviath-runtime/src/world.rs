@@ -1912,6 +1912,7 @@ mod tests {
         world
             .send_message(AgentMessage {
                 agent_id: "a".to_string(),
+                from: crate::components::FROM_PERSON.to_string(),
                 content: "hello".to_string(),
                 target_region: Some("conversation".to_string()),
                 parts: Vec::new(),
@@ -1971,6 +1972,7 @@ mod tests {
 
         let err = world.send_message(AgentMessage {
             agent_id: "a".to_string(),
+            from: crate::components::FROM_PERSON.to_string(),
             content: "x".to_string(),
             target_region: None,
             parts: Vec::new(),

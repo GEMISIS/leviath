@@ -65,6 +65,7 @@ pub(crate) fn message_inbox(spec: &RunSpec, state: &RunState) -> MessageInbox {
             .iter()
             .map(|m| AgentMessage {
                 agent_id: spec.run_id.to_string(),
+                from: m.from.clone(),
                 content: m.text.clone(),
                 target_region: m.region.clone(),
                 parts: Vec::new(),
@@ -176,6 +177,8 @@ fn visit_record(visit: &VisitRecord) -> leviath_core::run_meta::StageVisitRecord
         cost_usd,
         unpriced_calls: visit.spend.unpriced_calls as usize,
         cost_is_exact,
+        reported_calls: visit.spend.reported_calls as usize,
+        computed_calls: visit.spend.computed_calls as usize,
         cost_priced_usd: visit.spend.priced_usd,
         active: active_clock(&visit.clock),
     }
@@ -203,6 +206,8 @@ pub(crate) fn stage_ledger(state: &RunState) -> StageLedger {
                     cost_usd,
                     unpriced_calls: rec.spend.unpriced_calls as usize,
                     cost_is_exact,
+                    reported_calls: rec.spend.reported_calls as usize,
+                    computed_calls: rec.spend.computed_calls as usize,
                     cost_priced_usd: rec.spend.priced_usd,
                     models: rec
                         .models
@@ -508,7 +513,19 @@ pub(crate) fn final_output(state: &RunState) -> Option<FinalOutput> {
             stage: out.stage.to_string(),
             submitted_at: out.submitted_at,
             truncated: out.truncated,
-            artifacts: Vec::new(),
+            artifacts: out
+                .artifacts
+                .iter()
+                .filter_map(|a| {
+                    Some(leviath_core::output::Artifact {
+                        name: a.name.clone(),
+                        path: a.path.clone(),
+                        mime_type: leviath_core::mime::MimeType::parse(&a.mime_type).ok()?,
+                        size: a.size,
+                        sha256: a.sha256.clone(),
+                    })
+                })
+                .collect(),
         })
     })
 }
