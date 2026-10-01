@@ -2557,6 +2557,29 @@
         ],
         "type": "object"
       },
+      "AutoAnswers": {
+        "description": "What a run answers for itself instead of asking a person.",
+        "properties": {
+          "checkpoints": {
+            "description": "Stage checkpoints approve themselves.",
+            "type": "boolean"
+          },
+          "gate": {
+            "description": "Taint-gate prompts approve themselves.",
+            "type": "boolean"
+          },
+          "questions": {
+            "description": "The model's own questions (`ask_user_*` and the like): the tools that\nonly ask are not offered, and any asked anyway are answered for it.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "questions",
+          "checkpoints",
+          "gate"
+        ],
+        "type": "object"
+      },
       "BlobState": {
         "description": "A stored part's bytes, by digest.",
         "properties": {
@@ -3897,6 +3920,72 @@
         ],
         "type": "object"
       },
+      "McpServerDef": {
+        "additionalProperties": false,
+        "description": "An MCP server the run brings with it, connected for the runs that need it\nbeside the operator's own servers.",
+        "properties": {
+          "args": {
+            "default": [],
+            "description": "The command's arguments.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "default": null,
+            "description": "The command that starts it, for stdio.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Environment variables the command is started with.",
+            "type": "object"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "HTTP headers. A value may name an environment variable as `${NAME}`.",
+            "type": "object"
+          },
+          "name": {
+            "description": "The server's name, which its tools are prefixed with.",
+            "type": "string"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/McpTransport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "How it is reached. Left out, `command` means stdio and `url` HTTP."
+          },
+          "url": {
+            "default": null,
+            "description": "Where it is, for HTTP.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "McpServerTemplate": {
         "additionalProperties": false,
         "description": "An MCP server entry a dependency's install adds.",
@@ -3951,6 +4040,21 @@
           }
         },
         "type": "object"
+      },
+      "McpTransport": {
+        "description": "How an MCP server is reached.",
+        "oneOf": [
+          {
+            "const": "stdio",
+            "description": "Started as a child process, spoken to over its pipes.",
+            "type": "string"
+          },
+          {
+            "const": "http",
+            "description": "Reached over HTTP.",
+            "type": "string"
+          }
+        ]
       },
       "MimeRowDef": {
         "additionalProperties": false,
@@ -4811,6 +4915,14 @@
               "null"
             ]
           },
+          "mcp_servers": {
+            "default": [],
+            "description": "MCP servers the run brings with it.",
+            "items": {
+              "$ref": "#/$defs/McpServerDef"
+            },
+            "type": "array"
+          },
           "mime_types": {
             "additionalProperties": {
               "$ref": "#/$defs/MimeRowDef"
@@ -4882,6 +4994,18 @@
             ],
             "default": null,
             "description": "Where tools run."
+          },
+          "script_permissions": {
+            "$ref": "#/$defs/ScriptPermissionsDef",
+            "default": {
+              "env_var": null,
+              "http_get": null,
+              "http_post": null,
+              "read_file": null,
+              "shell": null,
+              "write_file": null
+            },
+            "description": "What its script tools may do, stricter than the operator allows."
           },
           "shell_hint": {
             "default": null,
@@ -5036,6 +5160,105 @@
             "type": "string"
           }
         ]
+      },
+      "ScriptPermission": {
+        "description": "What a script tool's host function may do.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "It may run.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "It is refused.",
+            "type": "string"
+          },
+          {
+            "const": "inherit",
+            "description": "It follows the run's own permission for the matching built-in tool.",
+            "type": "string"
+          }
+        ]
+      },
+      "ScriptPermissionsDef": {
+        "additionalProperties": false,
+        "description": "What the run's script tools may do, per host function. A graph can only\nmake the operator's settings stricter; a function it leaves out keeps the\noperator's.",
+        "properties": {
+          "env_var": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScriptPermission"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`env_var`."
+          },
+          "http_get": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScriptPermission"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`http_get`."
+          },
+          "http_post": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScriptPermission"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`http_post`."
+          },
+          "read_file": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScriptPermission"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`read_file`."
+          },
+          "shell": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScriptPermission"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`shell`."
+          },
+          "write_file": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ScriptPermission"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "`write_file`."
+          }
+        },
+        "type": "object"
       },
       "Secret": {
         "description": "A secret that must never reach a log line. `Debug` and `Display` print\n`[redacted]`; serialization keeps the value, because the run file is how a\nresumed run gets it back (the file is written owner-only).",
@@ -6356,6 +6579,10 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "A run, fully resolved.",
     "properties": {
+      "auto_answers": {
+        "$ref": "#/$defs/AutoAnswers",
+        "description": "What its unattended setting answers without a person, as read when\nthe run was resolved."
+      },
       "code": {
         "description": "The code the run uses, by the reference the graph makes to it.",
         "items": {
@@ -6457,6 +6684,7 @@
       "seeded",
       "code",
       "launch",
+      "auto_answers",
       "placement",
       "delivery",
       "env",

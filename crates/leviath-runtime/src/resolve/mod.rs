@@ -23,17 +23,22 @@
 //! 2. The graph's own consistency ([`RunGraph::validate`]). A graph that fails
 //!    it is not resolved further, since every later step walks its names; the
 //!    request-level checks below still run so their issues come back too.
-//! 3. The attachments: unique names, the size limit, their types.
+//! 3. The attachments: unique names, the size limit, their types by the
+//!    run's own mime registry (the machine's rows with the graph's on top).
 //! 4. The inputs, checked against the graph's declarations, then the checks
 //!    that need the attachments or the workdir.
-//! 5. The inputs' slots applied to the graph.
-//! 6. The launch policy and where the run sits.
-//! 7. The graph's dependencies.
-//! 8. Each stage's model, tools, budgets, output cap and output shape.
-//! 9. Every piece of code the graph names, read and checked once.
-//! 10. The spawn-time seeds, then what each region holds at spawn.
+//! 5. The launch policy, where the run sits, and what its unattended setting
+//!    answers without a person.
+//! 6. The inputs' slots applied to the graph, then the operator's defaults
+//!    for whatever the graph leaves open (iteration ceilings, prompt hints,
+//!    the nudge, taint tracking).
+//! 7. Every piece of code the graph names, read and checked once.
+//! 8. The graph's dependencies, and the compaction model.
+//! 9. Each stage's model, tools, budgets, output cap and output shape.
+//! 10. The run's id, the spawn-time seeds, then what each region holds at
+//!     spawn.
 //! 11. The fingerprint of what the run relies on from this machine.
-//! 12. The run's id and creation time.
+//! 12. The run's creation time.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -48,6 +53,7 @@ use crate::spec::run_spec::{RunSpec, SpecOrigin};
 
 mod attach;
 mod code;
+mod defaults;
 mod inputs;
 mod launch;
 mod output;
@@ -106,7 +112,8 @@ pub async fn resolve(
     };
     let graph_ok = issues.take(src.graph.validate(&src.at)).is_some();
 
-    let files = attach::read(request, env, &limits, &mut issues);
+    let registry = attach::registry(&src, env, &mut issues);
+    let files = attach::read(request, env, &registry, &limits, &mut issues);
     let checked = inputs::check(
         &src.graph,
         request,
@@ -116,15 +123,22 @@ pub async fn resolve(
         &mut issues,
     );
     let (launch, placement) = launch::decide(request, caller, &src.graph, &limits, &mut issues);
+    let auto_answers = launch::auto_answers(&launch, env, &mut issues);
     if !graph_ok {
         return Err(issues);
     }
 
     let mut graph = src.graph.clone();
     inputs::apply_slots(&mut graph, &checked.values);
+    defaults::fold(&mut graph, &limits);
+    let mut code = code::read_all(&graph, request, &src, env, &mut issues).await;
     let mut notes = Vec::new();
     for (i, dependency) in graph.dependencies.iter().enumerate() {
-        if let Err(message) = env.dependency(dependency).await {
+        let check = match &dependency.needs {
+            crate::spec::graph::Needs::Check(reference) => code.bytes(reference),
+            _ => None,
+        };
+        if let Err(message) = env.dependency(dependency, check).await {
             let at = src.at.field("dependencies").index(i);
             match dependency.required {
                 true => issues.push(dependency_issue(at, dependency, message)),
@@ -135,28 +149,44 @@ pub async fn resolve(
             }
         }
     }
+    defaults::check_compaction(&graph, &src.at, env, &mut issues);
 
-    let code = code::read_all(&graph, request, &src, env, &mut issues).await;
     let plans = stages::plan_all(
         &graph,
         request,
-        &launch,
+        &auto_answers,
         &code.files,
-        &src.at,
+        &src,
         env,
         &mut issues,
     )
     .await;
+    let plans = plans.map(|(plans, found)| {
+        code.add_found(found);
+        plans
+    });
 
+    let title = match &src.origin {
+        SpecOrigin::Blueprint { blueprint, .. } => blueprint.name.to_string(),
+        SpecOrigin::Raw => graph.title.clone().unwrap_or_else(|| "run".to_string()),
+    };
+    let run_id = env.new_run_id(&title);
+    let agent = match &src.origin {
+        SpecOrigin::Blueprint { blueprint, .. } => blueprint.name.to_string(),
+        SpecOrigin::Raw => graph.title.clone().unwrap_or_else(|| "raw".to_string()),
+    };
     let placed = regions::place(&graph, &checked, &files, request, &mut issues);
     let seeded = match &workdir {
         Some(dir) => {
             let cx = seeds::SeedRun {
+                run_id: &run_id,
+                agent: &agent,
                 graph: &graph,
                 at: &src.at,
                 workdir: dir,
                 launch: &launch,
                 code: &code.files,
+                code_refs: &code.refs,
                 inputs: &checked.values,
                 mode,
             };
@@ -184,12 +214,8 @@ pub async fn resolve(
         .unwrap_or(0);
     stages[entry].notes.extend(notes);
     let env_fingerprint = stages::fingerprint(&graph, &stages, env);
-    let title = match &src.origin {
-        SpecOrigin::Blueprint { blueprint, .. } => blueprint.name.to_string(),
-        SpecOrigin::Raw => graph.title.clone().unwrap_or_else(|| "run".to_string()),
-    };
     let spec = RunSpec {
-        run_id: env.new_run_id(&title),
+        run_id,
         origin: src.origin,
         graph,
         inputs: checked.values,
@@ -199,6 +225,7 @@ pub async fn resolve(
         requested_output: request.output.clone(),
         requested_model: request.model.clone(),
         launch,
+        auto_answers,
         placement: Placement {
             workdir: workdir.unwrap_or_default(),
             ..placement

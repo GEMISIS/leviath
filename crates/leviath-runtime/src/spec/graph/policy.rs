@@ -264,6 +264,81 @@ pub struct McpServerTemplate {
     pub env: BTreeMap<String, String>,
 }
 
+/// How an MCP server is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransport {
+    /// Started as a child process, spoken to over its pipes.
+    Stdio,
+    /// Reached over HTTP.
+    Http,
+}
+
+/// An MCP server the run brings with it, connected for the runs that need it
+/// beside the operator's own servers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerDef {
+    /// The server's name, which its tools are prefixed with.
+    pub name: McpServerName,
+    /// How it is reached. Left out, `command` means stdio and `url` HTTP.
+    #[serde(default)]
+    pub transport: Option<McpTransport>,
+    /// The command that starts it, for stdio.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Where it is, for HTTP.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The command's arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables the command is started with.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// HTTP headers. A value may name an environment variable as `${NAME}`.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// What a script tool's host function may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptPermission {
+    /// It may run.
+    Allow,
+    /// It is refused.
+    Deny,
+    /// It follows the run's own permission for the matching built-in tool.
+    Inherit,
+}
+
+/// What the run's script tools may do, per host function. A graph can only
+/// make the operator's settings stricter; a function it leaves out keeps the
+/// operator's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptPermissionsDef {
+    /// `http_get`.
+    #[serde(default)]
+    pub http_get: Option<ScriptPermission>,
+    /// `http_post`.
+    #[serde(default)]
+    pub http_post: Option<ScriptPermission>,
+    /// `shell`.
+    #[serde(default)]
+    pub shell: Option<ScriptPermission>,
+    /// `read_file`.
+    #[serde(default)]
+    pub read_file: Option<ScriptPermission>,
+    /// `write_file`.
+    #[serde(default)]
+    pub write_file: Option<ScriptPermission>,
+    /// `env_var`.
+    #[serde(default)]
+    pub env_var: Option<ScriptPermission>,
+}
+
 /// How a child run's context is built from its parent's, by blueprint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

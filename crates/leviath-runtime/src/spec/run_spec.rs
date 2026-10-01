@@ -46,6 +46,9 @@ pub struct RunSpec {
     pub requested_model: Option<ModelRef>,
     /// What the run is trusted with.
     pub launch: LaunchPolicy,
+    /// What its unattended setting answers without a person, as read when
+    /// the run was resolved.
+    pub auto_answers: AutoAnswers,
     /// Where it runs.
     pub placement: Placement,
     /// Who hears about it.
@@ -66,6 +69,31 @@ impl RunSpec {
     /// The digest the graph's reference to some code resolved to.
     pub fn code_digest(&self, code: &CodeRef) -> Option<&Digest> {
         self.code.iter().find(|(c, _)| c == code).map(|(_, d)| d)
+    }
+}
+
+/// What a run answers for itself instead of asking a person.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct AutoAnswers {
+    /// The model's own questions (`ask_user_*` and the like): the tools that
+    /// only ask are not offered, and any asked anyway are answered for it.
+    pub questions: bool,
+    /// Stage checkpoints approve themselves.
+    pub checkpoints: bool,
+    /// Taint-gate prompts approve themselves.
+    pub gate: bool,
+}
+
+impl AutoAnswers {
+    /// Everything answered: a run nobody is watching at all.
+    pub fn all() -> Self {
+        Self {
+            questions: true,
+            checkpoints: true,
+            gate: true,
+        }
     }
 }
 
@@ -232,6 +260,7 @@ pub(crate) mod tests {
                 seed_commands: true,
                 capture_model_input: false,
             },
+            auto_answers: AutoAnswers::all(),
             placement: Placement {
                 workdir: "/tmp/w".into(),
                 parent: None,

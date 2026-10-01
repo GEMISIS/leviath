@@ -1,4 +1,4 @@
-//! Step 9: every piece of code the graph names, read once and checked for
+//! Step 7: every piece of code the graph names, read once and checked for
 //! each use.
 //!
 //! A hook, a validator, a custom region, a code seed, a mime check, a
@@ -25,6 +25,29 @@ pub(super) struct Code {
     pub(super) files: CodeFiles,
     /// Each reference the graph makes, and the digest it read as.
     pub(super) refs: Vec<(CodeRef, Digest)>,
+}
+
+impl Code {
+    /// The bytes a reference read as, when it was read.
+    pub(super) fn bytes(&self, code: &CodeRef) -> Option<&[u8]> {
+        self.refs
+            .iter()
+            .find(|(c, _)| c == code)
+            .and_then(|(_, digest)| self.files.get(digest))
+            .map(Vec::as_slice)
+    }
+
+    /// Add code the host found for the run's tools, each reference once.
+    pub(super) fn add_found(&mut self, found: Vec<(CodeRef, Vec<u8>)>) {
+        for (code, bytes) in found {
+            if self.refs.iter().any(|(c, _)| *c == code) {
+                continue;
+            }
+            let digest = Digest::of(&bytes);
+            self.refs.push((code, digest.clone()));
+            self.files.insert(digest, bytes);
+        }
+    }
 }
 
 /// One reference and every place it is used.
@@ -113,7 +136,7 @@ fn collect(graph: &RunGraph, request: &SpawnRequest, at: &SpecPath) -> Vec<Wante
         let script = dependency.install.as_ref().and_then(|i| i.script.as_ref());
         if let Some(code) = script {
             let path = dat.field("install").field("script");
-            want(&mut all, code, CodeUse::DependencyCheck, path);
+            want(&mut all, code, CodeUse::Install, path);
         }
     }
     all

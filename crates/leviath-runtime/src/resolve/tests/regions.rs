@@ -127,6 +127,7 @@ async fn a_required_region_left_empty_is_refused() {
     own.regions.push(own.regions[0].clone());
     own.regions[2].name = n("scratch");
     g.stages[1].layout = Some(own);
+    g.inputs.push(text_input("notes", "scratch"));
     let issues = spawn(&raw(g), &Fake::default()).await.unwrap_err();
     assert_eq!(
         found(&issues),
@@ -141,6 +142,19 @@ async fn a_required_region_left_empty_is_refused() {
     );
     assert_eq!(issues.0[0].known, ["diff"]);
     assert_eq!(issues.0[1].message, "hand the reviewer a diff");
+}
+
+/// A required region no input binds to and no seed fills is the run's to
+/// fill (the coder's `discovery`, written by its first stage), so a spawn
+/// leaves it empty; one with a seed that came up empty is still refused.
+#[tokio::test]
+async fn a_required_region_the_run_fills_itself_is_not_judged_at_spawn() {
+    let mut g = graph();
+    g.layout.regions[0].required = true;
+    assert!(spawn(&raw(g.clone()), &Fake::default()).await.is_ok());
+    g.layout.regions[0].seed = Some(Seed::Literal("   ".into()));
+    let issues = spawn(&raw(g), &Fake::default()).await.unwrap_err();
+    assert_eq!(found(&issues), ["source.raw.layout.regions[0] Missing"]);
 }
 
 #[tokio::test]

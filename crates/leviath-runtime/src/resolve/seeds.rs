@@ -16,20 +16,23 @@ use std::path::Path;
 use super::ResolveMode;
 use super::regions::layouts;
 use crate::spec::env::{CodeFiles, ResolveEnv, SeedCx};
-use crate::spec::graph::{RegionDef, RunGraph, Seed};
+use crate::spec::graph::{CodeRef, RegionDef, RunGraph, Seed};
 use crate::spec::inputs::InputValues;
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::launch::LaunchPolicy;
-use crate::spec::names::RegionName;
+use crate::spec::names::{Digest, RegionName, RunId};
 use crate::spec::run_spec::SeededContent;
 
 /// Everything the seeds of one run see.
 pub(super) struct SeedRun<'a> {
+    pub(super) run_id: &'a RunId,
+    pub(super) agent: &'a str,
     pub(super) graph: &'a RunGraph,
     pub(super) at: &'a SpecPath,
     pub(super) workdir: &'a Path,
     pub(super) launch: &'a LaunchPolicy,
     pub(super) code: &'a CodeFiles,
+    pub(super) code_refs: &'a [(CodeRef, Digest)],
     pub(super) inputs: &'a InputValues,
     pub(super) mode: ResolveMode,
 }
@@ -77,9 +80,14 @@ pub(super) async fn run_all(
                 continue;
             }
             let cx = SeedCx {
+                run_id: run.run_id,
+                agent: run.agent,
+                graph: run.graph,
+                launch: run.launch,
                 workdir: run.workdir,
                 commands_allowed: run.launch.seed_commands,
                 code: run.code,
+                code_refs: run.code_refs,
                 inputs: run.inputs,
             };
             match env.seed(seed, cx).await {

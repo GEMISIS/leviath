@@ -103,7 +103,7 @@ async fn a_small_window_is_not_held_to_the_working_room_floor() {
 }
 
 #[tokio::test]
-async fn output_caps_resolve_against_the_window_and_the_regions() {
+async fn output_caps_resolve_against_the_window_the_regions_and_the_models_most() {
     let mut g = graph();
     g.stages.push(StageDef {
         name: n("three"),
@@ -135,7 +135,9 @@ async fn output_caps_resolve_against_the_window_and_the_regions() {
         .iter()
         .map(|s| s.max_output_tokens)
         .collect();
-    assert_eq!(caps, [Some(512), Some(25_000), Some(500), None]);
+    // A quarter of the 100k window is more than the model writes in one reply
+    // (4096), and a cap on a region the stage lacks is the model's own most.
+    assert_eq!(caps, [Some(512), Some(4096), Some(500), Some(4096)]);
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@
 //! it stands, the registry, the MCP tools the pool has connected), the same
 //! way the spawn path builds its `SpawnDeps`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,21 +26,26 @@ use leviath_runtime::host::SubAgentOp;
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::pipeline::ToolOwners;
 use leviath_runtime::spec::env::{
-    CodeFiles, CodeUse, LoadedBlueprint, ModelPlan, ResolveEnv, SeedCx, SpawnLimits,
+    CodeFiles, CodeUse, LoadedBlueprint, ModelPlan, OperatorDefaults, ResolveEnv, SeedCx,
+    SpawnLimits, StageTools,
 };
-use leviath_runtime::spec::graph::{CodeRef, DependencyDef, Needs, RunGraph, Seed, StageDef};
+use leviath_runtime::spec::graph::{
+    CodeRef, DependencyDef, MimeRows, Needs, NudgeDef, RunGraph, Seed, StageDef,
+};
 use leviath_runtime::spec::inputs::PathKind;
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use leviath_runtime::spec::launch::Unattended;
 use leviath_runtime::spec::names::{
     BlueprintRef, Digest, McpServerName, MimePattern, ModelRef, ProviderName, RunId, WorkdirPath,
 };
-use leviath_runtime::spec::run_spec::{SeededContent, ToolDef, ToolSource};
+use leviath_runtime::spec::run_spec::{AutoAnswers, SeededContent, ToolDef, ToolSource};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
 use crate::daemon::tool_service::CliToolService;
 
 mod bind;
+mod layers;
 mod seeds;
 
 /// The longest part of a title a run id is minted from.
@@ -68,8 +73,14 @@ pub struct DaemonEnv {
     pub(crate) hub: InteractionHub,
     /// The channel a run's sub-agent tools send on.
     pub(crate) subagent_tx: UnboundedSender<SubAgentOp>,
-    /// The mime registry attached bytes are typed by.
+    /// The mime registry attached bytes are typed by: the compiled rows with
+    /// the operator's on top.
     pub(crate) mime: Arc<leviath_core::mime::MimeRegistry>,
+    /// Where a run's stored parts go, which its tools and child runs share.
+    pub(crate) blob_store: Arc<dyn leviath_core::mime::BlobStore>,
+    /// The operator's reclassified MCP tools (`policy.toml`), which every
+    /// taint gate applies.
+    pub(crate) mcp_overrides: HashMap<String, leviath_core::policy::McpToolOverride>,
 }
 
 impl DaemonEnv {
@@ -116,12 +127,9 @@ impl DaemonEnv {
             .map(|tools| host::tools_fingerprint(&tools))
     }
 
-    /// Every tool a stage could be given: the built-ins (with the
-    /// stage-control tools), the sub-agent tools, each connected MCP server's
-    /// tools, the global script tools, and any script tool the run's own code
-    /// holds. A script tool whose name another tool already has is left out,
-    /// so it never shadows one.
-    fn catalog(&self, code: &CodeFiles) -> Vec<ToolDef> {
+    /// The built-in tools (with the stage-control tools), the sub-agent tools
+    /// and each connected MCP server's tools: every tool that is not a script.
+    fn static_defs(&self) -> Vec<ToolDef> {
         let workdir = PathBuf::from(".");
         let builtins =
             leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(workdir)).tool_defs();
@@ -134,18 +142,46 @@ impl DaemonEnv {
         for (server, tools) in self.mcp_by_server() {
             defs.extend(host::mcp_defs(&server, &tools));
         }
+        defs
+    }
+
+    /// Every tool a stage could be given: [`Self::static_defs`], then the
+    /// script tools in the blueprint's own `tools/` (from `base`), then the
+    /// global ones in `~/.leviath/tools`, then any the run's own code holds.
+    /// The first of a name wins, and a script tool never shadows a tool that
+    /// is not one.
+    ///
+    /// Each script tool found on disk comes back with its code, recorded
+    /// under the path it was read from (blueprint-relative for the
+    /// blueprint's own), so the run can carry it.
+    fn catalog(&self, code: &CodeFiles, base: Option<&Path>) -> Catalog {
+        let mut defs = self.static_defs();
         let mut taken: HashSet<String> = defs.iter().map(|d| d.name.to_string()).collect();
-        let dirs: Vec<PathBuf> = leviath_core::tools_dir().into_iter().collect();
-        let (set, _, _) = crate::daemon::spawn::discover_script_tools_in(&dirs, &taken);
-        let on_disk = set
-            .sources()
+        let mut found = BTreeMap::new();
+        let dirs: Vec<(PathBuf, Option<&Path>)> = base
+            .map(|b| (b.join("tools"), Some(b)))
             .into_iter()
-            .filter_map(|(meta, path)| std::fs::read(path).ok().map(|bytes| (meta, bytes)));
-        for (meta, bytes) in on_disk {
-            if crate::daemon::spawn::current_platform_satisfies(&meta.required_caps)
-                && taken.insert(meta.name.clone())
-            {
-                defs.extend(script_def(&meta, Digest::of(&bytes)));
+            .chain(leviath_core::tools_dir().map(|d| (d, None)))
+            .collect();
+        for (dir, under) in dirs {
+            let (set, _, _) =
+                crate::daemon::spawn::discover_script_tools_in(std::slice::from_ref(&dir), &taken);
+            let on_disk = set
+                .sources()
+                .into_iter()
+                .filter_map(|(meta, path)| std::fs::read(&path).ok().map(|b| (meta, path, b)));
+            for (meta, path, bytes) in on_disk {
+                if crate::daemon::spawn::current_platform_satisfies(&meta.required_caps)
+                    && taken.insert(meta.name.clone())
+                {
+                    let shown = under
+                        .and_then(|b| path.strip_prefix(b).ok())
+                        .unwrap_or(&path);
+                    let digest = Digest::of(&bytes);
+                    defs.extend(script_def(&meta, digest.clone()));
+                    let reference = CodeRef::File(shown.to_string_lossy().replace('\\', "/"));
+                    found.insert(digest, (reference, bytes));
+                }
             }
         }
         for (digest, bytes) in code {
@@ -156,8 +192,15 @@ impl DaemonEnv {
                 defs.extend(script_def(&meta, digest.clone()));
             }
         }
-        defs
+        Catalog { defs, found }
     }
+}
+
+/// Every tool a stage could be given, and the code of the script tools that
+/// were found on disk, by digest.
+struct Catalog {
+    defs: Vec<ToolDef>,
+    found: BTreeMap<Digest, (CodeRef, Vec<u8>)>,
 }
 
 /// A script tool as the model is offered it.
@@ -189,17 +232,15 @@ fn installed(agents_dir: Option<&Path>) -> Vec<String> {
 }
 
 /// Load an installed blueprint as a run graph: `<agents_dir>/<name>/agent.leviath`,
-/// parsed and validated as every spawn has done, with the operator's
-/// `default_max_iterations` filled into each stage that sets no ceiling of its
-/// own (a stage writing `0` asked for none, and does not get to opt out of the
-/// operator's).
+/// parsed and validated as every spawn has done, with its `[[mcp_servers]]`
+/// and `[tool_script_permissions]` read into the graph too. The operator's
+/// defaults are not folded in here; resolution does that for every graph.
 ///
 /// The one place the blueprint format is read, so the file format can change
 /// behind it.
 pub fn load_installed(
     agents_dir: Option<&Path>,
     reference: &BlueprintRef,
-    config: &Config,
 ) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
     let at = SpecPath::root().field("source").field("blueprint");
     let name = &reference.name;
@@ -238,24 +279,18 @@ pub fn load_installed(
     blueprint
         .validate()
         .map_err(|e| issue(IssueCode::Invalid, format!("invalid blueprint: {e}{stale}")))?;
-    let mut graph = RunGraph::from_blueprint(&blueprint).map_err(|issues| {
-        let each: Vec<String> = issues.iter().map(ToString::to_string).collect();
-        issue(
-            IssueCode::Invalid,
-            format!(
-                "blueprint '{name}' does not read as a run graph: {}",
-                each.join("; ")
-            ),
-        )
-    })?;
-    if let Some(ceiling) = config.limits.default_max_iterations {
-        let ceiling = u32::try_from(ceiling).unwrap_or(u32::MAX);
-        for stage in &mut graph.stages {
-            if matches!(stage.max_iterations, None | Some(0)) {
-                stage.max_iterations = Some(ceiling);
-            }
-        }
-    }
+    let graph = RunGraph::from_blueprint(&blueprint)
+        .and_then(|mut graph| graph.read_manifest_tables(&content).map(|()| graph))
+        .map_err(|issues| {
+            let each: Vec<String> = issues.iter().map(ToString::to_string).collect();
+            issue(
+                IssueCode::Invalid,
+                format!(
+                    "blueprint '{name}' does not read as a run graph: {}",
+                    each.join("; ")
+                ),
+            )
+        })?;
     Ok(LoadedBlueprint {
         graph,
         reference: BlueprintRef {
@@ -270,16 +305,60 @@ pub fn load_installed(
 #[async_trait]
 impl ResolveEnv for DaemonEnv {
     async fn blueprint(&self, reference: &BlueprintRef) -> Result<LoadedBlueprint, SpawnIssue> {
-        load_installed(self.agents_dir.as_deref(), reference, &self.config).map_err(|issue| *issue)
+        load_installed(self.agents_dir.as_deref(), reference).map_err(|issue| *issue)
     }
 
     fn limits(&self) -> SpawnLimits {
+        let config = &self.config;
+        let nudge = &config.nudge;
         SpawnLimits {
             default_max_depth: u8::try_from(crate::daemon::spawn::DEFAULT_SUBAGENT_DEPTH)
                 .unwrap_or(u8::MAX),
-            seed_commands_allowed: self.config.security.allow_seed_commands,
-            max_attachment_bytes: self.config.max_part_bytes(),
+            seed_commands_allowed: config.security.allow_seed_commands,
+            max_attachment_bytes: config.max_part_bytes(),
+            default_max_iterations: config
+                .limits
+                .default_max_iterations
+                .map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+            defaults: OperatorDefaults {
+                batch_tool_hint: config.batch_tool_hint,
+                shell_hint: config.shell_hint,
+                nudge: NudgeDef {
+                    enabled: nudge.enabled,
+                    max: nudge.max.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+                    text: nudge.text.clone(),
+                },
+                taint_tracking: config.taint_tracking,
+                capture_model_input: config.observability.capture_model_input,
+            },
         }
+    }
+
+    fn compaction_model(&self, model: &ModelRef) -> Result<(), String> {
+        host::compaction_model(
+            model,
+            &crate::daemon::spawn::model_defaults(&self.config),
+            &self.registry,
+        )
+    }
+
+    fn auto_answers(&self, unattended: &Unattended) -> Result<AutoAnswers, Box<SpawnIssue>> {
+        let (profile, _) = layers::profile(unattended)
+            .map_err(|e| {
+                let known = match &e {
+                    crate::yolo::YoloError::UnknownProfile { known, .. } => known.clone(),
+                    _ => Vec::new(),
+                };
+                SpawnIssue::new(SpecPath::root(), IssueCode::Unresolvable, e.to_string())
+                    .hint("name a profile `lev yolo` lists, or run unattended with `all`")
+                    .known(known)
+            })
+            .map_err(Box::new)?;
+        Ok(profile.map_or_else(AutoAnswers::default, |p| AutoAnswers {
+            questions: p.spec.questions.is_auto(),
+            checkpoints: p.spec.checkpoints.is_auto(),
+            gate: p.spec.gate.is_auto(),
+        }))
     }
 
     fn new_run_id(&self, title: &str) -> RunId {
@@ -336,8 +415,18 @@ impl ResolveEnv for DaemonEnv {
         _graph: &RunGraph,
         stage: &StageDef,
         code: &CodeFiles,
-    ) -> Result<Vec<ToolDef>, SpawnIssues> {
-        host::select_tools(&self.catalog(code), stage)
+        base: Option<&Path>,
+    ) -> Result<StageTools, SpawnIssues> {
+        let mut catalog = self.catalog(code, base);
+        let tools = host::select_tools(&catalog.defs, stage)?;
+        let code = tools
+            .iter()
+            .filter_map(|t| match &t.source {
+                ToolSource::Script(digest) => catalog.found.remove(digest),
+                _ => None,
+            })
+            .collect();
+        Ok(StageTools { tools, code })
     }
 
     async fn code(&self, code: &CodeRef, base: Option<&Path>) -> Result<Vec<u8>, String> {
@@ -362,16 +451,25 @@ impl ResolveEnv for DaemonEnv {
         })
     }
 
+    fn mime_registry(&self, rows: &MimeRows) -> Result<leviath_core::mime::MimeRegistry, String> {
+        host::run_registry(&self.mime, rows)
+    }
+
     fn sniff(
         &self,
+        registry: &leviath_core::mime::MimeRegistry,
         name: &str,
         bytes: &[u8],
         declared: Option<&MimePattern>,
     ) -> Result<String, String> {
-        host::sniff(&self.mime, name, bytes, declared)
+        host::sniff(registry, name, bytes, declared)
     }
 
-    async fn dependency(&self, dependency: &DependencyDef) -> Result<(), String> {
+    async fn dependency(
+        &self,
+        dependency: &DependencyDef,
+        code: Option<&[u8]>,
+    ) -> Result<(), String> {
         use leviath_runtime::spec::blueprint::{Dependency, DependencyKind};
         let kind = match &dependency.needs {
             Needs::McpServer { server, env } => DependencyKind::McpServer {
@@ -382,13 +480,7 @@ impl ResolveEnv for DaemonEnv {
             Needs::Binary(command) => DependencyKind::Binary {
                 command: command.clone(),
             },
-            Needs::Check(CodeRef::Inline(source)) => return host::run_inline_check(source),
-            Needs::Check(CodeRef::File(file)) => {
-                return Err(format!(
-                    "the check '{file}' is named by file, and a dependency is judged from the \
-                     run's own code; write the check inline"
-                ));
-            }
+            Needs::Check(_) => return host::run_check(code),
         };
         let legacy = Dependency {
             name: dependency.name.clone(),
@@ -421,3 +513,6 @@ impl ResolveEnv for DaemonEnv {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod parity_tests;

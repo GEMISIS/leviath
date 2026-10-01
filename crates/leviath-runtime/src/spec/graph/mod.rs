@@ -24,8 +24,9 @@ pub use edge::{
 };
 pub use policy::{
     ArtifactDef, CompactionDef, ContentTransform, ContextTransformDef, DependencyDef,
-    FileTrackingDef, InstallDef, McpServerTemplate, MimeRowDef, MimeRows, Needs, NudgeDef,
-    OutputDef, RegionMappingDef, RepetitionDef, SafeCommandsDef, SandboxDef, TokenRule, ToolRescan,
+    FileTrackingDef, InstallDef, McpServerDef, McpServerTemplate, McpTransport, MimeRowDef,
+    MimeRows, Needs, NudgeDef, OutputDef, RegionMappingDef, RepetitionDef, SafeCommandsDef,
+    SandboxDef, ScriptPermission, ScriptPermissionsDef, TokenRule, ToolRescan,
 };
 pub use region::{Budget, Eviction, RegionDef, RegionKind, RegionLayoutDef, Seed, SeedRefresh};
 pub use stage::{
@@ -111,6 +112,12 @@ pub struct RunGraph {
     /// What the run needs from the machine.
     #[serde(default)]
     pub dependencies: Vec<DependencyDef>,
+    /// MCP servers the run brings with it.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerDef>,
+    /// What its script tools may do, stricter than the operator allows.
+    #[serde(default)]
+    pub script_permissions: ScriptPermissionsDef,
 }
 
 impl RunGraph {

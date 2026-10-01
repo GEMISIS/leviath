@@ -102,7 +102,10 @@ async fn every_piece_of_code_is_read_once_and_stored_by_digest() {
         assert_eq!(spec.code_digest(&file(path)), Some(&digest), "{path}");
         assert_eq!(resolved.code[&digest], text.as_bytes());
     }
-    assert_eq!(resolved.spec.seeded["task"].text, "code saw 1 inputs\n\ngo");
+    assert_eq!(
+        resolved.spec.seeded["task"].text,
+        "code fn seed() {} saw 1 inputs\n\ngo"
+    );
 }
 
 #[tokio::test]

@@ -318,6 +318,8 @@ mod tests {
                 transforms: vec![],
                 mime_types: Default::default(),
                 dependencies: vec![],
+                mcp_servers: vec![],
+                script_permissions: Default::default(),
             })),
         };
         let request =

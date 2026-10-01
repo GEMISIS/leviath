@@ -1026,3 +1026,96 @@ fn every_stage_status_reads_as_the_ledger_status_it_names() {
         assert_eq!(rec.status, want);
     }
 }
+
+/// What the run answers for itself lands as the markers the pipeline reads:
+/// checkpoints that approve themselves, and gate prompts that do on a run
+/// under the taint gate.
+#[test]
+fn the_runs_own_answers_land_as_markers() {
+    use crate::components::{GateAutoApprove, InteractionAutoApprove};
+    use crate::spec::run_spec::AutoAnswers;
+    let placed = |answers: AutoAnswers, taint: Option<bool>| {
+        let mut spec = two_stage_spec();
+        spec.auto_answers = answers;
+        spec.graph.taint_tracking = taint;
+        let spec = Arc::new(spec);
+        let mut world = World::new();
+        let e = insert(
+            &mut world,
+            spec.clone(),
+            Bindings::new(),
+            &initial_state(&spec),
+        );
+        (
+            world.get::<InteractionAutoApprove>(e).is_some(),
+            world.get::<GateAutoApprove>(e).is_some(),
+        )
+    };
+    assert_eq!(placed(AutoAnswers::all(), Some(true)), (true, true));
+    assert_eq!(placed(AutoAnswers::all(), None), (true, false), "no gate");
+    assert_eq!(placed(AutoAnswers::default(), Some(true)), (false, false));
+    let gate_only = AutoAnswers {
+        gate: true,
+        ..AutoAnswers::default()
+    };
+    assert_eq!(placed(gate_only, Some(true)), (false, true));
+}
+
+/// A fresh top-level run with a task asks for a title when the host bound the
+/// chain a title call walks; nothing else does.
+#[test]
+fn a_new_named_run_asks_for_a_title_only_when_the_host_wants_one() {
+    use crate::title::{PendingTitle, TitleCandidates};
+    let tasked = || {
+        let mut spec = two_stage_spec();
+        spec.placement.parent = None;
+        spec.seeded.insert(
+            crate::spec::names::RegionName::new("task").unwrap(),
+            crate::spec::run_spec::SeededContent {
+                text: "do it".into(),
+                parts: vec![],
+            },
+        );
+        spec
+    };
+    let chain = || Bindings::new().with(TitleCandidates(vec![("p".into(), "m".into())]));
+    let asks = |spec: RunSpec, bindings: Bindings, state: Option<RunState>| {
+        let spec = Arc::new(spec);
+        let state = state.unwrap_or_else(|| initial_state(&spec));
+        let mut world = World::new();
+        let e = insert(&mut world, spec, bindings, &state);
+        world.get::<PendingTitle>(e).is_some()
+    };
+    assert!(asks(tasked(), chain(), None));
+    assert!(!asks(tasked(), Bindings::new(), None), "titles are off");
+    let mut child = tasked();
+    child.placement.parent = Some(RunId::new("p-1").unwrap());
+    assert!(!asks(child, chain(), None), "a child is not titled");
+    let mut blank = tasked();
+    blank.seeded.clear();
+    assert!(!asks(blank, chain(), None), "nothing to name it after");
+    let spec = tasked();
+    let mut resumed = initial_state(&spec);
+    resumed.seq = 4;
+    assert!(!asks(spec.clone(), chain(), Some(resumed)), "had its turn");
+    let mut named = initial_state(&spec);
+    named.title = Some("Named".into());
+    assert!(!asks(spec, chain(), Some(named)));
+}
+
+/// A binding can fill a field of a component insertion placed, and does
+/// nothing to an entity without that component.
+#[test]
+fn a_binding_edits_what_insertion_placed() {
+    let spec = Arc::new(two_stage_spec());
+    let mut world = World::new();
+    let bindings = Bindings::new()
+        .edit(|meta: &mut crate::persistence::RunMetadata| {
+            meta.agent_path = "/agents/coder/agent.leviath".into();
+        })
+        .edit(|m: &mut Marker| m.0 = 9);
+    let e = insert(&mut world, spec.clone(), bindings, &initial_state(&spec));
+    let md = world.get::<crate::persistence::RunMetadata>(e).unwrap();
+    assert_eq!(md.agent_path, "/agents/coder/agent.leviath");
+    assert!(world.get::<Marker>(e).is_none());
+}

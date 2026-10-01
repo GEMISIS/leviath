@@ -10,8 +10,9 @@
 //! from the [`RunSpec`] (the current stage's inference, routing and inference
 //! settings, the run's metadata, compaction, loop detection and markers). What
 //! the run has done so far comes from the [`RunState`], one field at a time,
-//! in [`place`]. What only the host can build (compiled code, tool services,
-//! the taint gate, the title chain) comes from the [`Bindings`].
+//! in [`place`]. What only the host can build (compiled code, the run's mime
+//! registry, tool services, the taint gate, the title chain) comes from the
+//! [`Bindings`]; a run asks for its title only when the host bound a chain.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,8 +37,7 @@ pub struct RunSpecC(pub Arc<RunSpec>);
 /// Bound like any other compiled code. [`insert`] moves them into the run's
 /// window, which is where the render and write paths look for them, and the
 /// component itself does not stay on the entity.
-#[derive(Component, Default)]
-pub struct RegionScripts(pub HashMap<String, Arc<leviath_scripting::region_hook::RegionScript>>);
+pub use crate::bind::RegionScripts;
 
 /// Place a run into the world and return its entity.
 ///
@@ -83,6 +83,7 @@ pub fn insert(
     place::optional_state(&mut entity, state);
     place::phase(&mut entity, &spec, state);
     bindings.apply(&mut entity);
+    place::title_request(&mut entity, &spec, state);
     if let Some(scripts) = entity.take::<RegionScripts>()
         && let Some(mut window) = entity.get_mut::<ContextWindow>()
     {

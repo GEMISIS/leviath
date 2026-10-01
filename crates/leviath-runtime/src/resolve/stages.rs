@@ -1,18 +1,16 @@
-//! Steps 8 and 11: each stage decided, and what the run relies on from the
+//! Steps 9 and 11: each stage decided, and what the run relies on from the
 //! machine.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::output;
-use super::rebase;
+use super::{Source, output, rebase};
 use crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS;
 use crate::spec::env::{CodeFiles, ModelPlan, ResolveEnv};
-use crate::spec::graph::{Budget, OutputCap, RegionKind, RunGraph, StageDef};
+use crate::spec::graph::{Budget, CodeRef, OutputCap, RegionKind, RunGraph, StageDef};
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
-use crate::spec::launch::{LaunchPolicy, Unattended};
 use crate::spec::names::RegionName;
 use crate::spec::request::SpawnRequest;
-use crate::spec::run_spec::{EnvFingerprint, StagePlan, ToolDef, ToolSource};
+use crate::spec::run_spec::{AutoAnswers, EnvFingerprint, StagePlan, ToolDef, ToolSource};
 
 /// Below this many tokens of room after its fixed regions, a stage cannot
 /// hold a conversation.
@@ -28,13 +26,15 @@ const WORKING_ROOM_MIN_WINDOW: u32 = 20_000;
 pub(super) async fn plan_all(
     graph: &RunGraph,
     request: &SpawnRequest,
-    launch: &LaunchPolicy,
+    auto: &AutoAnswers,
     code: &CodeFiles,
-    at: &SpecPath,
+    src: &Source,
     env: &dyn ResolveEnv,
     issues: &mut SpawnIssues,
-) -> Option<Vec<StagePlan>> {
+) -> Option<(Vec<StagePlan>, Vec<(CodeRef, Vec<u8>)>)> {
+    let at = &src.at;
     let mut chosen = Vec::new();
+    let mut found = Vec::new();
     for stage in &graph.stages {
         let sat = at.field("stages").key(stage.name.as_str());
         let requested = request
@@ -48,12 +48,15 @@ pub(super) async fn plan_all(
                 None
             }
         };
-        let tools = match env.tools(graph, stage, code).await {
-            Ok(tools) => tools,
-            Err(found) => {
+        let tools = match env.tools(graph, stage, code, src.base.as_deref()).await {
+            Ok(got) => {
+                found.extend(got.code);
+                got.tools
+            }
+            Err(refused) => {
                 let base = sat.field("tools");
                 issues.absorb(SpawnIssues(
-                    found.0.into_iter().map(|i| rebase(&base, i)).collect(),
+                    refused.0.into_iter().map(|i| rebase(&base, i)).collect(),
                 ));
                 Vec::new()
             }
@@ -70,10 +73,10 @@ pub(super) async fn plan_all(
         let sat = at.field("stages").key(stage.name.as_str());
         let budgets = budgets(graph, i, &windows);
         working_room(graph, stage, windows[i], &budgets, at, issues);
-        let tools = stage_tools(stage, tools, launch, &sat, issues);
+        let tools = stage_tools(stage, tools, auto, &sat, issues);
         plans.push(plan(graph, stage, request, model, tools, budgets));
     }
-    Some(plans)
+    Some((plans, found))
 }
 
 fn plan(
@@ -92,7 +95,7 @@ fn plan(
     output::describe_submit(&mut tools, shape.as_ref());
     let max_output_tokens = output_cap(
         stage.model.params.max_output_tokens.as_ref(),
-        model.context_window,
+        &model,
         &region_budgets,
     );
     StagePlan {
@@ -111,18 +114,20 @@ fn plan(
 
 /// The tools a stage really gets.
 ///
-/// A run nobody is watching loses every tool whose only outcome is a prompt
-/// for a person, unless the stage names it in `required_tools`: the model
-/// never sees it, so it decides for itself instead of spending a turn to be
-/// told nobody is there. Then every tool the stage requires must be there.
+/// A run whose questions nobody answers (unattended, under a setting that
+/// does not keep them for a person) loses every tool whose only outcome is a
+/// prompt for a person, unless the stage names it in `required_tools`: the
+/// model never sees it, so it decides for itself instead of spending a turn to
+/// be told nobody is there. This is the one place that cut is made. Then every
+/// tool the stage requires must be there.
 fn stage_tools(
     stage: &StageDef,
     mut tools: Vec<ToolDef>,
-    launch: &LaunchPolicy,
+    auto: &AutoAnswers,
     sat: &SpecPath,
     issues: &mut SpawnIssues,
 ) -> Vec<ToolDef> {
-    if launch.unattended == Unattended::All {
+    if auto.questions {
         tools.retain(|t| {
             !BLOCKING_INTERACTION_TOOLS.contains(&t.name.as_str())
                 || stage.required_tools.contains(&t.name)
@@ -240,23 +245,23 @@ fn working_room(
     }
 }
 
-/// The cap on one reply, in tokens. A relative cap is never more than the
-/// window, and never less than one token. A cap on a region the stage does not
-/// carry is no cap: the model's own maximum applies, which is what the author
-/// was reaching for.
+/// The cap on one reply, in tokens, as the pipeline works it out for each
+/// request: a relative cap is never more than the model's own maximum reply,
+/// and never less than one token. A cap on a region the stage does not carry
+/// is the model's own maximum, which is what the author was reaching for.
 fn output_cap(
     cap: Option<&OutputCap>,
-    window: u32,
+    model: &ModelPlan,
     budgets: &BTreeMap<RegionName, u32>,
 ) -> Option<u32> {
-    let share = |whole: u32, fraction: f64| {
-        ((f64::from(whole) * fraction).round() as u32).clamp(1, window.max(1))
-    };
+    let most = model.max_output_tokens.max(1);
+    let share =
+        |whole: u32, fraction: f64| ((f64::from(whole) * fraction).round() as u32).clamp(1, most);
     match cap? {
         OutputCap::Tokens(n) => Some(*n),
-        OutputCap::WindowPercent(fraction) => Some(share(window, *fraction)),
+        OutputCap::WindowPercent(fraction) => Some(share(model.context_window, *fraction)),
         OutputCap::RegionPercent { percent, region } => {
-            budgets.get(region).map(|b| share(*b, *percent))
+            Some(budgets.get(region).map_or(most, |b| share(*b, *percent)))
         }
     }
 }

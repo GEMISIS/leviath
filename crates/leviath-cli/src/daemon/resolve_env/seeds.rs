@@ -3,19 +3,17 @@
 //! Each kind runs under the machinery a spawn has always used: files and
 //! globs read inside the workdir and never outside it, code runs on the Rhai
 //! engine with the task and workdir in hand, a shell command runs under
-//! `[security] allow_seed_commands` and the safe-command list, and a tool
-//! call answers to `[tool_permissions]` through the seed tool runner.
-//!
-//! A seed sees only its [`SeedCx`], so the policies here are the operator's
-//! alone: no blueprint safe-command list, no launch `--allow`, and no stage
-//! sandbox.
+//! `[security] allow_seed_commands`, the safe-command list (the operator's and
+//! the graph's) and the entry stage's sandbox, and a tool call answers to the
+//! same permission layers and yolo profile the run's tools do (see
+//! [`layers`](super::layers)).
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use leviath_runtime::spec::graph::SeedToolCall;
 use leviath_runtime::spec::inputs::InputValue;
 
+use super::layers::{self, Layers};
 use super::*;
 use crate::daemon::seed_tool;
 
@@ -57,15 +55,14 @@ fn read(workdir: &Path, paths: Vec<PathBuf>) -> Result<String, String> {
         .map(Option::unwrap_or_default)
 }
 
-/// Run a code seed: the text its script returns.
+/// Run a code seed, from the run's own copy of its code however the graph
+/// named it: the text its script returns.
 fn run_code(code: &CodeRef, cx: SeedCx<'_>) -> Result<String, String> {
-    let CodeRef::Inline(source) = code else {
-        return Err(
-            "a code seed runs the code it carries; name the script by file and the run's own \
-             copy is used"
-                .to_string(),
-        );
-    };
+    let source = cx
+        .code_of(code)
+        .ok_or("the run holds no code for this seed")?;
+    let source =
+        std::str::from_utf8(source).map_err(|e| format!("the seed is not UTF-8 text: {e}"))?;
     let task = match cx.inputs.get("task") {
         Some(InputValue::Text(text)) => text.clone(),
         _ => String::new(),
@@ -82,7 +79,25 @@ fn run_code(code: &CodeRef, cx: SeedCx<'_>) -> Result<String, String> {
         .map_err(|e| format!("code seed failed: {e}"))
 }
 
-/// Run a shell-command seed, when seed commands may run at all.
+/// The sandbox the entry stage's shell runs in, for a seed.
+fn sandbox(
+    env: &DaemonEnv,
+    cx: &SeedCx<'_>,
+    layers: &Layers,
+) -> Result<Option<Arc<crate::daemon::sandbox_manager::SandboxManager>>, String> {
+    let built = layers::sandbox(
+        &env.config,
+        cx.graph,
+        cx.run_id.as_str(),
+        cx.workdir,
+        layers.entry_index,
+    )?;
+    Ok(built.map(Arc::new))
+}
+
+/// Run a shell-command seed, when seed commands may run at all: pre-approved
+/// only by the operator's and the graph's safe-command lists (a seed runs
+/// before any prompt exists), inside the entry stage's sandbox.
 fn run_command(env: &DaemonEnv, command: &str, cx: SeedCx<'_>) -> Result<String, String> {
     if !cx.commands_allowed {
         return Err(
@@ -92,63 +107,69 @@ fn run_command(env: &DaemonEnv, command: &str, cx: SeedCx<'_>) -> Result<String,
         );
     }
     let config = &env.config;
+    let layers = Layers::new(config, cx.graph, cx.launch, cx.agent);
+    let safe = layers::blueprint_safe(cx.graph);
     let policy = crate::daemon::seed_command::SeedCommandPolicy::new(
         true,
         Duration::from_secs(config.limits.script_shell_timeout_secs),
-        Arc::new(config.safe_keys_for_agent("", None).into_keys().collect()),
-        None,
+        Arc::new(
+            config
+                .safe_keys_for_agent(cx.agent, safe.as_ref())
+                .into_keys()
+                .collect(),
+        ),
+        sandbox(env, &cx, &layers)?,
         crate::daemon::spawn::shell_env_policy(config),
     );
     policy.run(command, cx.workdir)
 }
 
-/// Run a tool seed's calls under `[tool_permissions]`, one block per call
-/// that produced something. A call that fails is left out; the seed fails
-/// only when nothing produced anything and something failed.
+/// Run a tool seed's calls under the run's permission layers and yolo
+/// profile, one block per call that produced something. A call that fails is
+/// left out; the seed fails only when nothing produced anything and something
+/// failed.
 fn run_tools(env: &DaemonEnv, calls: &[SeedToolCall], cx: SeedCx<'_>) -> Result<String, String> {
     let config = &env.config;
     let workdir = cx.workdir.to_path_buf();
-    let builtins = Arc::new(leviath_tools::BuiltinTools::new(
-        leviath_tools::ToolContext::new(workdir.clone())
-            .with_shell_env(crate::daemon::spawn::shell_env_policy(config)),
-    ));
+    let layers = Layers::new(config, cx.graph, cx.launch, cx.agent);
+    let (profile, _) = layers::profile(&cx.launch.unattended).map_err(|e| e.to_string())?;
+    let sandbox = sandbox(env, &cx, &layers)?;
+    let builtins = sandbox.iter().fold(
+        leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(workdir.clone())
+                .with_shell_env(crate::daemon::spawn::shell_env_policy(config)),
+        ),
+        |tools, mgr| {
+            tools.with_shell_executor(mgr.clone() as Arc<dyn leviath_tools::ShellExecutor>)
+        },
+    );
+    let builtins = Arc::new(builtins);
     let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
     let writes = Arc::new(crate::daemon::tool_service::WriteBudget::new(
         config.limits.write_limits(),
     ));
-    let nothing = crate::daemon::script_host::ScriptAllow {
-        http_get: false,
-        http_post: false,
-        shell: false,
-        read_file: false,
-        write_file: false,
-        env_var: false,
-    };
+    let allow = layers::script_allow(config, cx.graph, &layers, profile.as_deref(), &workdir);
     let script_host = Arc::new(
-        crate::daemon::script_host::DaemonScriptHost::new(nothing, workdir)
+        crate::daemon::script_host::DaemonScriptHost::new(allow, workdir.clone())
             .with_write_budget(writes.clone()),
     );
-    let global = config.permissions_for_agent("");
-    let may_loosen = config.security.allow_blueprint_permissions;
-    let none = HashMap::new();
-    let untouched = HashMap::new();
+    let (script_tools, script_names) = layers::code_tools(cx.code);
+    let known_builtins = builtin_names.clone();
     let resolve: seed_tool::SeedPolicyResolver = Arc::new(
-        move |name: &str, is_builtin: bool, _args: &serde_json::Value| {
-            seed_tool::SeedToolPermissions {
-                launch: &none,
-                stage: &untouched,
-                agent: &untouched,
-                global: &global,
-                may_loosen,
-            }
-            .resolve(name, is_builtin)
+        move |name: &str, is_builtin: bool, args: &serde_json::Value| {
+            let kind = crate::yolo::ToolKind::classify(
+                name,
+                known_builtins.contains(name),
+                script_names.contains(name),
+            );
+            layers.decide(profile.as_deref(), name, args, kind, is_builtin, &workdir)
         },
     );
     let runner = seed_tool::production_runner(
         seed_tool::SeedToolContext {
             builtins,
             builtin_names,
-            script_tools: leviath_scripting::ScriptToolSet::default(),
+            script_tools,
             script_host,
             mcp: env.shared_mcp.clone(),
             writes,

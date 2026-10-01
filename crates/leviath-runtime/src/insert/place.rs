@@ -414,7 +414,8 @@ pub(crate) fn outcome_flags(state: &RunState) -> RunOutcomeFlags {
 }
 
 /// What the spec alone decides: the current stage's routing, compaction, loop
-/// detection, and the markers for input capture and tool re-scans.
+/// detection, and the markers for input capture, self-approving checkpoints
+/// and gate prompts, and tool re-scans.
 pub(crate) fn spec_components(
     entity: &mut EntityWorldMut<'_>,
     spec: &RunSpec,
@@ -457,12 +458,39 @@ pub(crate) fn spec_components(
     if spec.launch.capture_model_input {
         entity.insert(crate::pipeline::CaptureModelInput);
     }
+    if spec.auto_answers.checkpoints {
+        entity.insert(crate::components::InteractionAutoApprove);
+    }
+    // Only a run under the taint gate has gate prompts to answer.
+    if spec.auto_answers.gate && graph.taint_tracking == Some(true) {
+        entity.insert(crate::components::GateAutoApprove);
+    }
     use crate::spec::graph::ToolRescan;
     if graph.tool_rescan != ToolRescan::AtSpawn {
         entity.insert(crate::pipeline::DynamicTools);
     }
     if graph.tool_rescan == ToolRescan::BeforeDispatch {
         entity.insert(crate::pipeline::RescanBeforeDispatch);
+    }
+}
+
+/// `title`: a run that has not been named yet asks for a title, when the host
+/// bound the chain of models a title call may walk (which is how the operator
+/// says titles are wanted at all). Only a top-level run that was given a task
+/// and has done nothing yet: a child is listed under its parent, a run with no
+/// task has nothing to be named after, and a resumed run already had its turn.
+pub(crate) fn title_request(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, state: &RunState) {
+    let has_task = spec
+        .seeded
+        .get("task")
+        .is_some_and(|s| !s.text.trim().is_empty());
+    let wanted = entity.contains::<crate::title::TitleCandidates>()
+        && state.seq == 0
+        && state.title.is_none()
+        && spec.placement.parent.is_none()
+        && has_task;
+    if wanted {
+        entity.insert(crate::title::PendingTitle);
     }
 }
 

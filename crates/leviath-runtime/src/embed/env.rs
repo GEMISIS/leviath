@@ -20,15 +20,15 @@ use crate::provider_creds::ProviderCreds;
 use crate::providers::ProviderRegistry;
 use crate::spec::env::{
     BindEnv, Bindings, CodeFiles, CodeUse, LoadedBlueprint, ModelPlan, ResolveEnv, SeedCx,
-    SpawnLimits,
+    SpawnLimits, StageTools,
 };
-use crate::spec::graph::{CodeRef, DependencyDef, Needs, RunGraph, Seed, StageDef};
+use crate::spec::graph::{CodeRef, DependencyDef, MimeRows, Needs, RunGraph, Seed, StageDef};
 use crate::spec::inputs::PathKind;
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::{
     BlueprintRef, Digest, McpServerName, MimePattern, ModelRef, ProviderName, RunId, WorkdirPath,
 };
-use crate::spec::run_spec::{RunSpec, SeededContent, ToolDef};
+use crate::spec::run_spec::{RunSpec, SeededContent};
 
 /// The child-run depth an embedded run gets when it does not say.
 const DEFAULT_MAX_DEPTH: u8 = 3;
@@ -60,6 +60,8 @@ impl EmbedEnv {
                 default_max_depth: DEFAULT_MAX_DEPTH,
                 seed_commands_allowed: false,
                 max_attachment_bytes: crate::blob_store::MimeLimits::default().max_part_bytes,
+                default_max_iterations: None,
+                defaults: Default::default(),
             },
             workdir: None,
             mime: leviath_core::mime::MimeRegistry::builtin(),
@@ -198,14 +200,19 @@ impl ResolveEnv for EmbedEnv {
         host::choose_model(stage, requested, &self.defaults, &self.registry).map_err(|issue| *issue)
     }
 
+    fn compaction_model(&self, model: &ModelRef) -> Result<(), String> {
+        host::compaction_model(model, &self.defaults, &self.registry)
+    }
+
     async fn tools(
         &self,
         _graph: &RunGraph,
         stage: &StageDef,
         _code: &CodeFiles,
-    ) -> Result<Vec<ToolDef>, SpawnIssues> {
+        _base: Option<&Path>,
+    ) -> Result<StageTools, SpawnIssues> {
         let catalog = host::builtin_defs(&BasicToolService::tool_defs(Path::new(".")));
-        host::select_tools(&catalog, stage)
+        host::select_tools(&catalog, stage).map(StageTools::from)
     }
 
     async fn code(&self, code: &CodeRef, base: Option<&Path>) -> Result<Vec<u8>, String> {
@@ -235,16 +242,25 @@ impl ResolveEnv for EmbedEnv {
         ))
     }
 
+    fn mime_registry(&self, rows: &MimeRows) -> Result<leviath_core::mime::MimeRegistry, String> {
+        host::run_registry(&self.mime, rows)
+    }
+
     fn sniff(
         &self,
+        registry: &leviath_core::mime::MimeRegistry,
         name: &str,
         bytes: &[u8],
         declared: Option<&MimePattern>,
     ) -> Result<String, String> {
-        host::sniff(&self.mime, name, bytes, declared)
+        host::sniff(registry, name, bytes, declared)
     }
 
-    async fn dependency(&self, dependency: &DependencyDef) -> Result<(), String> {
+    async fn dependency(
+        &self,
+        dependency: &DependencyDef,
+        code: Option<&[u8]>,
+    ) -> Result<(), String> {
         let unmet = |default: String| Err(dependency.remedy.clone().unwrap_or(default));
         match &dependency.needs {
             Needs::Env(var) => match std::env::var(var).is_ok_and(|v| !v.trim().is_empty()) {
@@ -258,11 +274,7 @@ impl ResolveEnv for EmbedEnv {
             Needs::McpServer { server, .. } => unmet(format!(
                 "'{server}' is an MCP server, and an embedded world connects none"
             )),
-            Needs::Check(CodeRef::Inline(source)) => host::run_inline_check(source),
-            Needs::Check(CodeRef::File(file)) => Err(format!(
-                "the check '{file}' is a file, and an embedded world has no blueprint \
-                 directory to read it from; write the check inline"
-            )),
+            Needs::Check(_) => host::run_check(code),
         }
     }
 
@@ -286,7 +298,8 @@ impl BindEnv for EmbedEnv {
     }
 
     async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues> {
-        let mut bindings = crate::bind::scripts::compile(spec, code)?;
+        let registry = crate::bind::scripts::mime_registry(spec, code, &self.mime)?;
+        let mut bindings = crate::bind::scripts::compile(spec, code)?.with(registry);
         if let Some(tools) = self.tools.clone() {
             let run_id = spec.run_id.to_string();
             let workdir = spec.placement.workdir.clone();
