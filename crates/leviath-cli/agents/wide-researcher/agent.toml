@@ -1,30 +1,98 @@
-[agent]
+[blueprint]
 name = "wide-researcher"
-version = "0.4.8"
+version = "0.5.0"
 description = "Broad multi-topic survey - cast a wide net, research the threads in parallel, compare approaches, and produce a landscape overview"
-max_child_depth = 2
-entry_stage = "survey"
 
-[tool_permissions]
-read_file  = "allow"
-list_dir   = "allow"
-web_search = "allow"
-web_fetch  = "allow"
-current_time = "allow"
-write_file = "ask"
-bash       = "ask"
+# survey -> investigate (fan out) -> compare -> deep_dive -> challenge -> summarize -> polish -> summary
+#
+# `compare` and `deep_dive` loop between themselves and back to `survey` until
+# the threads worth reading have been read. `error_recovery` is reached only
+# through an `error` edge, so it never shows up in a run that goes well.
+
+[graph]
+entry = "survey"
+max_child_depth = 2
+
+tool_permissions = { read_file = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", current_time = "allow", write_file = "ask", bash = "ask" }
+
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "query" }]
+
+[[graph.inputs]]
+name = "scope"
+type = { kind = "text", multiline = true }
+binds = [{ region = "scope" }]
+
+# How many threads are researched at once, over the 12 this blueprint runs
+# by default: `lev run wide-researcher --input max_workers=4`.
+[[graph.inputs]]
+name = "max_workers"
+type = { kind = "int", min = 1, max = 30 }
+description = "How many threads are researched at once (12 when left out)."
+binds = [{ fan_out_max_workers = "investigate" }]
+
+# ─── Context layout ───────────────────────────────────────────────────────────
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "report_path", kind = "pinned", budget = "1%", description = "The exact filename of the report, written by the stage that created it so the polish stage rewrites that file rather than guessing among the workers' own reports in the same directory." },
+    { name = "progress_report", kind = "clearable", budget = "1%", description = "What your last visit to this stage actually added, measured. Weigh another pass against it." },
+    { name = "challenges", kind = "pinned", budget = "4%", description = "Adversarial challenges to the analysis: leads to check, not verdicts", volatility = "grows" },
+    { name = "query", kind = "pinned", budget = "1%", required = true, required_message = "State the survey topic/area via --task.", volatility = "stable" },
+    { name = "scope", kind = "pinned", budget = "1%", volatility = "stable" },
+    { name = "environment", kind = "pinned", budget = "1%", volatility = "stable", seed = { tools = { calls = [{ tool = "current_time", args = {} }, { tool = "locale_info", args = {} }] } } },
+    # `required`: the overview is built from this, and a stage that gathered
+    # nothing would hand an empty bibliography to `summarize`, which writes the
+    # references from memory rather than reporting that it had none. The gate
+    # binds the stages that can write context and no-ops for the ones that
+    # cannot, so it can never deadlock the deliverable.
+    { name = "sources_index", kind = "pinned", budget = "3%", required = true, required_message = 'You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region="sources_index"): `[n] <title> - <url or path> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered.', volatility = "grows" },
+    { name = "format", kind = "pinned", budget = "1%", volatility = "stable", seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Prefer comparison tables where they clarify tradeoffs. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." } },
+
+    # Declared `grows` because it is appended to and never rewritten: tool results
+    # land here and earlier ones stay put. Undeclared it would default to
+    # `rewritten`, which assumes the whole region changes every turn and so caches
+    # none of it - measured at 4% cache hits on a run where this region held 280K
+    # tokens, every one of them re-sent and re-paid on every single inference.
+    # Sized by the percentage alone, with no absolute ceiling on top: a ceiling
+    # binds on every model above 200K, so the percentage - which is the whole
+    # mechanism for scaling with the model in front of you - would decide nothing
+    # across the range anyone runs on. The size is not the cost anyway. 280K
+    # tokens re-sent at 4% cached is expensive; the same 280K mostly cached is
+    # not, and `volatility` is what makes the difference.
+    { name = "landscape", kind = "temporary", budget = "30%", volatility = "grows" },
+    { name = "deep_dives", kind = { kind = "sliding_window", max_items = 15 }, budget = "8%" },
+    # What the parallel researcher workers hand back, one entry each. Pinned: it is
+    # the whole point of the fan-out, and compare reads it directly.
+    { name = "thread_findings", kind = "pinned", budget = "20%", volatility = "grows" },
+    { name = "comparisons", kind = "compacting", budget = "25%", compact_at = 0.8, volatility = "grows" },
+    { name = "comparison_history", kind = { kind = "compact_history", source = "comparisons" }, budget = "3%", volatility = "grows" },
+
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 12, eviction = { bulk = 10 } }, budget = "12%" },
+
+    # Written by the RUNTIME on an abnormal stage ending: a failed inference
+    # call's error text, or a note that a stage hit its iteration cap. Pinned so
+    # it survives the edge into the stage that acts on it.
+    { name = "error_report", kind = "pinned", budget = "1%" },
+]
 
 # ─── Stage 1: Survey ──────────────────────────────────────────────────────────
-[stages.survey]
-mode = "autonomous"
-model = { models = ["grok-4.6", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.stages]]
+name = "survey"
 description = "Survey the landscape across multiple sub-topics"
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
+model = { models = [{ model = "grok-4.6" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
+max_iterations = 25
+max_revisits = 2
 # The ask tools block on a person, which is the point: this stage decides what
 # the whole fan-out investigates. An unattended run is never offered them.
 allow_blocking_tools = true
-max_iterations = 25
-max_revisits = 2
+tool_routing = { default_region = "conversation", tool_regions = { web_search = "landscape", web_fetch = "landscape", read_file = "landscape", list_dir = "landscape" }, keep_results = true }
 system_prompt = """
 Map the landscape of the area in `query` (within any bounds in `scope`). Breadth
 over depth:
@@ -130,36 +198,34 @@ pages that repeat it? If a number exists only in roundups, go and fetch the
 artifact - the paper, the model card, the spec, the vendor's own docs - before
 leaving this stage. Coming back for it later costs a whole extra pass, and going
 without means the report states a number on the authority of a page that was
-guessing.
-"""
-
-[stages.survey.tool_routing]
-default_region = "conversation"
-[stages.survey.tool_routing.overrides]
-web_search = "landscape"
-web_fetch  = "landscape"
-read_file  = "landscape"
-list_dir   = "landscape"
-
-# The only way forward. Covering the threads in parallel is what this blueprint
-# is for, so it is not a choice: an edge straight to `compare` used to sit here
-# for areas that "turned out to be narrow", and a model that took it compared a
-# landscape nothing had investigated. One thread is a fan-out of one.
-[stages.survey.transitions.investigate]
-hint = "Landscape mapped - the threads worth covering are identified"
-transform = "direct"
+guessing."""
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.survey.transitions.challenge]
+[[graph.edges]]
+name = "challenge"
+from = "survey"
+to = "challenge"
+when = "dead_end"
 hint = "Out of revisits here - hand what exists to the adversarial pass, which is the only way to the report"
-condition = "dead_end"
-transform = "compact"
+carry = { compact = {} }
 
-[stages.survey.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+[[graph.edges]]
+name = "error_recovery"
+from = "survey"
+to = "error_recovery"
+when = "error"
+
+# The only way forward. Covering the threads in parallel is what this blueprint
+# is for, so it is not a choice: offered an edge straight to `compare` for areas
+# that "turn out to be narrow", a model that takes it compares a landscape
+# nothing has investigated. One thread is a fan-out of one.
+[[graph.edges]]
+name = "investigate"
+from = "survey"
+to = "investigate"
+hint = "Landscape mapped - the threads worth covering are identified"
 
 # ─── Stage 2: Investigate (fan out) ──────────────────────────────────────────
 # The survey found the threads; this covers them at the same time instead of one
@@ -169,17 +235,19 @@ transform = "direct"
 #
 # `researcher` is a separate installed blueprint. `lev setup` installs the
 # bundled set together, so it is there in the normal case; installing this agent
-# on its own leaves the workers with nothing to run, and
-# `on_worker_failure = "continue"` means the run reports that rather than dying.
-[stages.investigate]
-mode = "fan_out"
-model = { models = ["claude-sonnet-5", "grok-4.6", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# on its own leaves the workers with nothing to run, and a failed worker is
+# reported rather than ending the run.
+[[graph.stages]]
+name = "investigate"
 description = "Research each thread of the landscape in parallel"
-available_tools = []
+model = { models = [{ model = "claude-sonnet-5" }, { model = "grok-4.6" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["fan_out"]
 max_iterations = 4
 # investigate to error_recovery and back is a cycle, so it needs a ceiling.
 max_revisits = 1
-worker_agent = "researcher"
+
+[graph.stages.mode.fan_out]
+worker = { blueprint = { name = "researcher" } }
 merge_stage = "compare"
 # Every thread at once rather than in waves; the daemon's inference pool paces the
 # requests. Set to 0 for no cap at all.
@@ -190,7 +258,6 @@ results_region = "thread_findings"
 # usable share of the region for its answer; the compare stage is told when
 # that share had to be trimmed. Set to 0 for no ceiling.
 max_items = 30
-on_worker_failure = "continue"
 split_prompt = """
 Split the landscape in `landscape` into threads that can be researched
 independently, one work item each. A thread is an approach, a project, a school
@@ -199,7 +266,10 @@ workers covering the same ground.
 
 Call `fan_out` with one entry in `items` per work item:
 
-  items: [{"id": "<short-slug>", "context": {"thread": "<what to research>", "why": "<what the survey wants to know about it>"}}]
+  items: [{"id": "<short-slug>", "inputs": {"task": "<the thread to research>", "scope": "<what the survey wants to know about it>"}}]
+
+Each item's inputs are the worker's own: "task" is the question it
+researches, and "scope" what its answer is for. Nothing else reaches it.
 
 Every item MUST carry enough to work from alone: a worker is a separate agent
 and does not share this run's context, so the work item is all it gets.
@@ -239,25 +309,31 @@ Prefer a handful of substantial threads over many thin ones. One thread is fine
 for a narrow area.
 """
 
-[stages.investigate.transitions.error_recovery]
-condition = "error"
-transform = "direct"
-
 # Un-exhaustible escape (lint: dead-end-possible). Conditioned, like every
-# other escape here: unconditioned, it sat on the model's menu and let a
+# other escape here: unconditioned, it would sit on the model's menu and let a
 # fan-out stage answer "summarize" and walk past its own workers.
-[stages.investigate.transitions.challenge]
+[[graph.edges]]
+name = "challenge"
+from = "investigate"
+to = "challenge"
+when = "dead_end"
 hint = "Out of revisits here - hand what exists to the adversarial pass, which is the only way to the report"
-condition = "dead_end"
-transform = "compact"
+carry = { compact = {} }
 
-# ─── Stage 2: Compare ─────────────────────────────────────────────────────────
-# Three edges: more breadth (survey), dive on a thread (deep_dive), or write it up.
-[stages.compare]
-mode = "autonomous"
-model = { models = ["deepseek-v4-pro", "claude-opus-5", "gpt-5.5", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.edges]]
+name = "error_recovery"
+from = "investigate"
+to = "error_recovery"
+when = "error"
+
+# ─── Stage 3: Compare ─────────────────────────────────────────────────────────
+# Three edges: more breadth (survey), dive on a thread (deep_dive), or have the
+# comparison attacked before it is written up (challenge).
+[[graph.stages]]
+name = "compare"
 description = "Compare and contrast approaches across the landscape"
-available_tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
+model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 15
 max_revisits = 4  # backstop only; the convergence note is what should end this loop
 transition_prompt = """
@@ -278,8 +354,7 @@ Decide the next move:
   writing stage cannot use.
 - The `[Progress in stage ...]` note says this pass added little next to the one
   before it, and you cannot name a specific gap you would go and fill → the work
-  here has converged → respond with: challenge
-"""
+  here has converged → respond with: challenge"""
 system_prompt = """
 Compare across the `landscape` and `thread_findings`, organizing by THEME not by
 source:
@@ -297,23 +372,8 @@ heading. They are not files. A work item's name is not a filename, and
 answers came back to you.
 
 If `error_report` says a previous stage hit its iteration cap, that stage was cut
-off before finishing - treat its coverage as incomplete when judging the field.
-"""
+off before finishing - treat its coverage as incomplete when judging the field."""
 
-# One way forward: a thread worth comparing is worth reading properly before the
-# overview is written, so `deep_dive` is required rather than offered. The "do we
-# need more" decision now lives in `deep_dive`, which is the first stage to have
-# actually read a thread in depth and can judge whether the landscape is thin.
-[stages.compare.transitions.deep_dive]
-hint = "Threads compared - read the most significant one in depth"
-transform = "compact"
-
-# Un-exhaustible escape (lint: dead-end-possible): once `deep_dive` has spent its
-# revisits there is nowhere else to go, and the overview still gets written.
-
-[stages.compare.transitions.challenge]
-hint = "Evidence is sufficient - have it attacked before writing"
-transform = "compact"
 # Gated on the region this agent exists to produce. Measured on a finished run,
 # `comparisons` held 2,560 tokens of its 125,000 while `landscape` sat at 83%: the
 # comparing was happening and only the recording was not.
@@ -321,27 +381,45 @@ transform = "compact"
 # This edge and not `deep_dive` as well. Everything written passes through here,
 # so this is where the region has to exist; asking a pass that went to read one
 # thread in depth to also add something new would block it for being honest.
+# It is also the way out once `deep_dive` has spent its revisits, so the
+# overview still gets written.
+[[graph.edges]]
+name = "challenge"
+from = "compare"
+to = "challenge"
+hint = "Evidence is sufficient - have it attacked before writing"
+carry = { compact = {} }
 gate = { require_region_updated = "comparisons", message = "Write the comparative judgments you reached this pass into `comparisons` with context_write before moving on. The adversarial pass reads that region, and the overview is written from it." }
 
-[stages.compare.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+# A thread worth comparing is worth reading properly before the overview is
+# written. The "do we need more" decision lives in `deep_dive`, which is the
+# first stage to have actually read a thread in depth and can judge whether the
+# landscape is thin.
+[[graph.edges]]
+name = "deep_dive"
+from = "compare"
+to = "deep_dive"
+hint = "Threads compared - read the most significant one in depth"
+carry = { compact = {} }
 
-# ─── Stage 3: Deep dive ───────────────────────────────────────────────────────
-[stages.deep_dive]
-mode = "autonomous"
-model = { models = ["deepseek-v4-pro", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.edges]]
+name = "error_recovery"
+from = "compare"
+to = "error_recovery"
+when = "error"
+
+# ─── Stage 4: Deep dive ───────────────────────────────────────────────────────
+# This is where the run decides whether it has enough, because it is the first
+# stage that has read a thread properly rather than surveyed it. Three ways out:
+# another thread, more breadth, or the deliverable.
+[[graph.stages]]
+name = "deep_dive"
 description = "Focused deep read on one interesting thread flagged during comparison"
-available_tools = ["web_search", "web_fetch", "read_file", "context_append", "current_time", "context_read"]
+model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["web_search", "web_fetch", "read_file", "context_append", "current_time", "context_read"]
 max_iterations = 12
 max_revisits = 2
-system_prompt = """
-Compare flagged a specific thread for a focused read. web_search / web_fetch the
-best sources on JUST that thread, read them, and append the findings to
-`landscape` plus a note to `deep_dives` capturing what makes it notable (with
-source refs) and a bibliography line to `sources_index`. Then hand back to compare.
-Stay on the flagged thread - this is depth on one item, not a new broad survey.
-"""
+tool_routing = { default_region = "conversation", tool_regions = { web_search = "landscape", web_fetch = "landscape", read_file = "landscape" }, keep_results = true }
 transition_prompt = """
 Decide the next move:
 - This read exposed something the survey never covered - a name, a category, a
@@ -350,48 +428,54 @@ Decide the next move:
   report can draw on, so take it whenever the gap is nameable rather than noting
   it and moving on.
 - Another flagged thread is still worth a focused read → respond with: compare
-- The threads worth reading have been read → respond with: challenge
-"""
+- The threads worth reading have been read → respond with: challenge"""
+system_prompt = """
+Compare flagged a specific thread for a focused read. web_search / web_fetch the
+best sources on JUST that thread, read them, and append the findings to
+`landscape` plus a note to `deep_dives` capturing what makes it notable (with
+source refs) and a bibliography line to `sources_index`. Then hand back to compare.
+Stay on the flagged thread - this is depth on one item, not a new broad survey."""
 
-[stages.deep_dive.tool_routing]
-default_region = "conversation"
-[stages.deep_dive.tool_routing.overrides]
-web_search = "landscape"
-web_fetch  = "landscape"
-read_file  = "landscape"
-
-# This is where the run decides whether it has enough, because it is the first
-# stage that has read a thread properly rather than surveyed it. Three ways out:
-# another thread, more breadth, or the deliverable.
-[stages.deep_dive.transitions.compare]
-hint = "Thread explored - compare again to pick the next one worth reading"
-transform = "compact"
-
-[stages.deep_dive.transitions.survey]
-hint = "This depth exposed gaps in the landscape - survey additional areas"
-transform = "compact"
-
-[stages.deep_dive.transitions.challenge]
-hint = "Done here - hand to the adversarial pass, which is the only way to the report"
-transform = "compact"
 # Everything leaving this stage for good passes through here, so this is where
 # the region has to exist. Without it the stage produced nothing at all: on one
 # measured run it spent 77 seconds, made no tool call, and left `deep_dives`
 # empty, while `compare` next door - which has a gate - filled its region every
 # pass. A focused read that records nothing is indistinguishable from one that
 # never happened.
+[[graph.edges]]
+name = "challenge"
+from = "deep_dive"
+to = "challenge"
+hint = "Done here - hand to the adversarial pass, which is the only way to the report"
+carry = { compact = {} }
 gate = { require_region_updated = "deep_dives", message = "This stage is a focused read and it has to leave a trace. Append what you found to `deep_dives` with context_append: what makes this thread notable, with source refs, and a bibliography line to `sources_index` for anything you opened. If the read changed nothing about your judgment, write THAT and why - a thread that turned out to be ordinary is a finding the report can use." }
 
-[stages.deep_dive.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+[[graph.edges]]
+name = "compare"
+from = "deep_dive"
+to = "compare"
+hint = "Thread explored - compare again to pick the next one worth reading"
+carry = { compact = {} }
 
-# ─── Stage 4: Summarize (terminal) ────────────────────────────────────────────
-[stages.summarize]
-mode = "autonomous"
-model = { models = ["claude-opus-5", "gpt-5.5", "claude-sonnet-5", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.edges]]
+name = "error_recovery"
+from = "deep_dive"
+to = "error_recovery"
+when = "error"
+
+[[graph.edges]]
+name = "survey"
+from = "deep_dive"
+to = "survey"
+hint = "This depth exposed gaps in the landscape - survey additional areas"
+carry = { compact = {} }
+
+# ─── Stage 5: Summarize ───────────────────────────────────────────────────────
+[[graph.stages]]
+name = "summarize"
 description = "Produce a landscape overview with recommendations"
-available_tools = ["write_file", "read_file", "context_write"]
+model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["write_file", "read_file", "context_write"]
 max_iterations = 10
 system_prompt = """
 Write a landscape overview (write_file) built from `comparisons` and `deep_dives`,
@@ -455,83 +539,94 @@ When you have written the report, record its filename with `context_write` to
 the `report_path` region, exactly as you passed it to `write_file` and nothing
 else. The stage after this one rewrites that file, and the working directory
 also holds a report from every worker, so a name it has to guess at is a name it
-gets wrong.
-"""
+gets wrong."""
 
-[stages.summarize.transitions.polish]
-hint = "The comparison is written"
 # The transcript of the research is not wanted here: this stage rewrites the
 # report named in `report_path`, and the turns that produced it are only
-# prompt weight on the run's most expensive model. Carrying them also handed
+# prompt weight on the run's most expensive model. Carrying them also hands
 # this stage function calls made by a different model family, which Gemini
 # refuses because it never signed them.
-transform = "custom"
-transform_config = { clear = ["conversation"] }
+[[graph.edges]]
+name = "polish"
+from = "summarize"
+to = "polish"
+hint = "The comparison is written"
+carry = { custom = { clear = ["conversation"] } }
 
-# ─── Stage 5: Error recovery ──────────────────────────────────────────────────
-[stages.error_recovery]
-mode = "autonomous"
-model = { models = ["claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# ─── Stage 6: Error recovery ──────────────────────────────────────────────────
+[[graph.stages]]
+name = "error_recovery"
 description = "Recover from a failed source fetch during the survey"
-available_tools = ["read_file", "bash"]
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
 A call failed during the survey. The `error_report` region holds the error text
 the runtime captured - read it first, note the gap it leaves, and return to
-compare to continue with the coverage you have.
-"""
+compare to continue with the coverage you have."""
+
+[[graph.edges]]
+name = "compare"
+from = "error_recovery"
+to = "compare"
+hint = "Recovered - continue comparing"
+carry = { compact = {} }
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.error_recovery.transitions.summarize]
+[[graph.edges]]
+name = "summarize"
+from = "error_recovery"
+to = "summarize"
 hint = "Recovery is not converging - write the overview from what exists"
-transform = "compact"
-
-[stages.error_recovery.transitions.compare]
-hint = "Recovered - continue comparing"
-transform = "compact"
-
-[compaction]
-provider = "anthropic"
-model = "claude-sonnet-5"
+carry = { compact = {} }
 
 # ─── Final output ────────────────────────────────────────────────────────────
-# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
-# lets the run end here. No file tools on purpose: this stage reports, it does
-# not work.
-[stages.summary]
-mode = "output"
-model = { models = ["claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# The last stage. An output stage hands back the run's answer with
+# `submit_output`, must call it, and may end the run. No file tools on
+# purpose: this stage reports, it does not work.
+[[graph.stages]]
+name = "summary"
 description = "Say what the survey found"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+mode = "output"
+tools = ["submit_output"]
 max_iterations = 8
+allow_complete = true
+require_output = true
 system_prompt = """
 Say what this survey found, for whoever asked for it.
 
 Lead with the recommendation or the shape of the answer. Then the axes that
 actually separated the options, and where the comparison is weakest. Name the
-file you wrote.
-"""
-
-[stages.summary.transitions]
-
-# ─── Context layout ───────────────────────────────────────────────────────────
+file you wrote."""
 
 # ─── Challenge: an adversary that flags, and cannot rewrite ───────────────────
 # A different vendor's model reading the analysis with no attachment to it. The
 # point is independence, not authority: it writes only to `challenges`, so it
-# can annotate a finding and never alter one, and `synthesize` decides what
+# can annotate a finding and never alter one, and `summarize` decides what
 # survives. Grok is here because it is the least likely to agree with a Claude
 # analysis out of politeness - and because it may simply be wrong, which is why
 # its output is a lead to check rather than a verdict to apply.
-[stages.challenge]
-mode = "autonomous"
-model = { models = ["grok-4.6", "deepseek-v4-pro", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.stages]]
+name = "challenge"
 description = "Attack the analysis: what is thin, unsupported, or too confident"
-available_tools = ["context_read", "context_append", "web_search", "web_fetch", "current_time"]
+model = { models = [{ model = "grok-4.6" }, { model = "deepseek-v4-pro" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["context_read", "context_append", "web_search", "web_fetch", "current_time"]
 max_iterations = 10
 max_revisits = 1
+transition_prompt = """
+Decide the next move:
+- A challenge you just wrote needs evidence nobody has gathered, or you named a
+  kind of source missing from `sources_index` → respond with: survey, naming
+  what to go and get. Going back is the point of this stage existing before the
+  report rather than after it, and it is the ONLY remaining way to add anything
+  the survey missed. Prefer it whenever you named an absence: a gap you record
+  and do not fill is one the report ships with.
+- Every challenge is recorded and each one is either settled or is a caveat the
+  report can state honestly → respond with: summarize"""
 system_prompt = """
 You are reading someone else's analysis in order to attack it. You did not
 write it and you owe it nothing.
@@ -576,36 +671,32 @@ You are not required to invent fault. You are required to look: read the regions
 named above and say what you found, per claim. "It all looks fine" without that
 reading is the one answer this stage cannot give, because it is also what an
 adversary that never ran would produce, and the two are indistinguishable from
-outside.
-"""
-transition_prompt = """
-Decide the next move:
-- A challenge you just wrote needs evidence nobody has gathered, or you named a
-  kind of source missing from `sources_index` → respond with: survey, naming
-  what to go and get. Going back is the point of this stage existing before the
-  report rather than after it, and it is the ONLY remaining way to add anything
-  the survey missed. Prefer it whenever you named an absence: a gap you record
-  and do not fill is one the report ships with.
-- Every challenge is recorded and each one is either settled or is a caveat the
-  report can state honestly → respond with: summarize
-"""
+outside."""
 
-[stages.challenge.transitions.survey]
-hint = "A challenge needs evidence nobody has gathered yet - name what to fetch"
-transform = "compact"
+[[graph.edges]]
+name = "error_recovery"
+from = "challenge"
+to = "error_recovery"
+when = "error"
 
-[stages.challenge.transitions.summarize]
-hint = "Challenges are recorded - write the overview"
-transform = "compact"
 # On the edge to the report, not on the one back to `survey`: a pass that found
 # a real gap should be able to go and fill it without first writing up why it is
 # leaving. This is the last edge before the deliverable, so it is where "the
 # adversarial pass actually ran" has to be provable.
+[[graph.edges]]
+name = "summarize"
+from = "challenge"
+to = "summarize"
+hint = "Challenges are recorded - write the overview"
+carry = { compact = {} }
 gate = { require_region_updated = "challenges", message = "Write this pass's challenges to `challenges` with context_append, one line each: `[!] <claim> - <what is wrong with the support> - <what would settle it>`, or `[ok] <claim> - <why the support is sufficient>` for the ones that hold. Include at least one line about what is MISSING from `sources_index` rather than wrong in it. The stage is not done until that region has them: a pass that leaves it empty is indistinguishable from one that never read anything." }
 
-[stages.challenge.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+[[graph.edges]]
+name = "survey"
+from = "challenge"
+to = "survey"
+hint = "A challenge needs evidence nobody has gathered yet - name what to fetch"
+carry = { compact = {} }
 
 # ─── Polish: the same report, readable ───────────────────────────────────────
 # Measured on a real report: this model took it from grade 12.8 to 9.6 and
@@ -617,12 +708,11 @@ transform = "direct"
 # No web tools and no send-back edge: this is a filter, not a decision point.
 # A validator enforces what the prompt asks for, because "keep every citation"
 # is not something to leave to good intentions.
-[stages.polish]
-mode = "autonomous"
-model = { models = ["gemini-3.1-pro-preview", "claude-opus-5", "gpt-5.5", "claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = 24000 } }
+[[graph.stages]]
+name = "polish"
 description = "Rewrite the report in plain language without changing what it says"
-
-available_tools = ["context_read", "context_write", "read_file", "write_file", "list_dir"]
+model = { models = [{ model = "gemini-3.1-pro-preview" }, { model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }], params = { max_output_tokens = 24000 } }
+tools = ["context_read", "context_write", "read_file", "write_file", "list_dir"]
 max_iterations = 10
 system_prompt = """
 Rewrite the report so a smart reader outside this field can follow it.
@@ -672,56 +762,18 @@ The file to rewrite is named in the `report_path` region. Read that file, and
 write your rewrite back to that same path, replacing it. Do not go looking for
 it: this directory also holds a separate report from every worker, and rewriting
 one of those instead would leave the real report untouched while the stage
-reports success.
-"""
+reports success."""
 
-[stages.polish.transitions.summary]
-gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it in plain language, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }
+[[graph.edges]]
+name = "error_recovery"
+from = "polish"
+to = "error_recovery"
+when = "error"
+
+[[graph.edges]]
+name = "summary"
+from = "polish"
+to = "summary"
 hint = "The report reads clearly - produce the final answer"
-transform = "compact"
-
-[stages.polish.transitions.error_recovery]
-condition = "error"
-transform = "direct"
-
-
-[context.regions]
-report_path    = { kind = "pinned", budget = "1%", volatility = "rewritten", description = "The exact filename of the report, written by the stage that created it so the polish stage rewrites that file rather than guessing among the workers' own reports in the same directory." }
-progress_report = { kind = "clearable", budget = "1%", volatility = "rewritten", description = "What your last visit to this stage actually added, measured. Weigh another pass against it." }
-challenges     = { kind = "pinned", budget = "4%", volatility = "grows", description = "Adversarial challenges to the analysis: leads to check, not verdicts" }
-query              = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the survey topic/area via --task.", volatility = "stable" }
-scope              = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
-environment        = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
-# `required`: the overview is built from this, and a stage that gathered nothing
-# used to hand an empty bibliography to `summarize`, which wrote the references
-# from memory rather than reporting that it had none. The gate binds the stages
-# that can write context and no-ops for the ones that cannot, so it can never
-# deadlock the deliverable.
-sources_index      = { kind = "pinned", budget = "3%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region=\"sources_index\"): `[n] <title> - <url or path> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered." }
-format             = { kind = "pinned", budget = "1%", seed = { literal = "Cite non-obvious claims as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Prefer comparison tables where they clarify tradeoffs. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
-
-# Declared `grows` because it is appended to and never rewritten: tool results
-# land here and earlier ones stay put. Undeclared it would default to
-# `rewritten`, which assumes the whole region changes every turn and so caches
-# none of it - measured at 4% cache hits on a run where this region held 280K
-# tokens, every one of them re-sent and re-paid on every single inference.
-# Sized by the percentage alone. An absolute ceiling was tried here and removed:
-# it bound on every model above 200K, so the percentage - which is the whole
-# mechanism for scaling with the model in front of you - decided nothing across
-# the range anyone runs on. The size was never the fault anyway. 280K tokens
-# re-sent at 4% cached is expensive; the same 280K mostly cached is not, and the
-# `volatility` above is what makes the difference.
-landscape          = { kind = "temporary",      budget = "30%", volatility = "grows" }
-deep_dives         = { kind = "sliding_window", max_items = 15, budget = "8%" }
-# What the parallel researcher workers hand back, one entry each. Pinned: it is
-# the whole point of the fan-out, and compare reads it directly.
-thread_findings    = { kind = "pinned", budget = "20%", volatility = "grows" }
-comparisons        = { kind = "compacting",      budget = "25%", compact_at = "80%", volatility = "grows" }
-comparison_history = { kind = "compact_history", source_region = "comparisons", budget = "3%", volatility = "grows" }
-
-conversation       = { kind = "sliding_window", max_items = 12, budget = "12%", strategy = "bulk", overflow = 10 }
-
-# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
-# inference call's error text, or a note that a stage hit its iteration cap.
-# Pinned so it survives the edge transform into the stage that acts on it.
-error_report       = { kind = "pinned", budget = "1%" }
+carry = { compact = {} }
+gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it in plain language, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }

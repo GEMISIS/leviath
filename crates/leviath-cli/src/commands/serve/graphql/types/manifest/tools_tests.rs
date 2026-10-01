@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use leviath_runtime::spec::Blueprint as CoreBlueprint;
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 use super::{
     OutputRoute, ToolAcceptRule, ToolPermissionPolicy, ToolPermissionRule, ToolRouteOverride,
@@ -12,21 +12,17 @@ use super::{
 use crate::commands::serve::graphql::filter::testkit::{exercise, exercise_enum, exercise_list};
 
 /// A blueprint with the regions these types resolve names against.
-fn blueprint() -> Arc<CoreBlueprint> {
-    let text = "[agent]\n\
-                name = \"router\"\n\
-                \n\
-                [context.regions.notes]\n\
-                kind = \"temporary\"\n\
-                max_tokens = 100\n\
-                \n\
-                [context.regions.scratch]\n\
-                kind = \"temporary\"\n\
-                max_tokens = 100\n\
-                \n\
-                [stages.plan]\n\
-                mode = \"autonomous\"\n";
-    Arc::new(leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses"))
+fn blueprint() -> Arc<ParsedBlueprint> {
+    super::super::parsed(
+        r#"[blueprint]
+name = "router"
+version = "1.0.0"
+
+[graph]
+stages = [{ name = "plan" }]
+layout = { total_budget_tokens = 200, regions = [{ name = "notes", kind = "temporary", budget = 100 }, { name = "scratch", kind = "temporary", budget = 100 }] }
+"#,
+    )
 }
 
 /// One permission rule, as `from_table` would build it.
@@ -46,7 +42,7 @@ fn ceiling() -> ToolTokenCeiling {
 }
 
 /// One override, resolving to a declared region.
-fn route_override(blueprint: &Arc<CoreBlueprint>) -> ToolRouteOverride {
+fn route_override(blueprint: &Arc<ParsedBlueprint>) -> ToolRouteOverride {
     ToolRouteOverride {
         blueprint: Arc::clone(blueprint),
         tool: "shell".to_string(),
@@ -64,17 +60,18 @@ fn accept_rule() -> ToolAcceptRule {
 
 /// One routing block with an override and a per-tool ceiling, so both of
 /// `ToolRouting`'s list fields carry something.
-fn tool_result_routing() -> leviath_runtime::spec::blueprint::ToolResultRouting {
-    let mut tool_overrides = std::collections::HashMap::new();
-    tool_overrides.insert("shell".to_string(), "notes".to_string());
-    let mut tool_max_result_tokens = std::collections::HashMap::new();
-    tool_max_result_tokens.insert("read_file".to_string(), 2000usize);
-    leviath_runtime::spec::blueprint::ToolResultRouting {
-        default_region: "notes".to_string(),
-        tool_overrides,
+fn tool_result_routing() -> leviath_runtime::spec::graph::ToolRoutingDef {
+    use leviath_runtime::spec::names::{RegionName, ToolName};
+    leviath_runtime::spec::graph::ToolRoutingDef {
+        default_region: RegionName::new("notes").unwrap(),
+        tool_regions: [(
+            ToolName::new("shell").unwrap(),
+            RegionName::new("notes").unwrap(),
+        )]
+        .into(),
         keep_results: true,
         max_result_tokens: Some(4000),
-        tool_max_result_tokens,
+        tool_max_result_tokens: [(ToolName::new("read_file").unwrap(), 2000)].into(),
     }
 }
 

@@ -285,7 +285,7 @@ pub(super) struct BlueprintInfo {
     /// slower and a failure path that cannot happen, since a row only exists
     /// when its manifest parsed.
     #[serde(skip)]
-    pub(super) parsed: Arc<leviath_runtime::spec::Blueprint>,
+    pub(super) parsed: Arc<super::core::blueprints::ParsedBlueprint>,
     pub(super) name: String,
     pub(super) version: String,
     pub(super) description: String,

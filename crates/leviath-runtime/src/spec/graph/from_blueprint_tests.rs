@@ -653,19 +653,195 @@ fn a_callers_output_request_reads_as_an_output() {
 /// A compacting region's threshold carries over; one left unset stays unset.
 #[test]
 fn a_compacting_regions_threshold_carries_over() {
-    let graph = |threshold: &str| {
-        let text = format!(
-            "[agent]\nname = \"a\"\n\n[stages.main]\nmode = \"autonomous\"\n\n\
-             [context.regions]\nnotes = {{ kind = \"compacting\", max_tokens = 500{threshold} }}\n"
-        );
-        let bp = crate::spec::manifest::parse_manifest(&text).unwrap();
-        RunGraph::from_blueprint(&bp).unwrap()
+    let graph = |threshold_tokens: usize| {
+        let notes = region_def("notes", CoreKind::Compacting { threshold_tokens });
+        RunGraph::from_blueprint(&blueprint(vec![stage("main")], vec![notes])).unwrap()
     };
-    let set = graph(", threshold_tokens = 400");
-    assert!(matches!(
+    let set = graph(400);
+    assert_eq!(
         set.layout.regions[0].kind,
         RegionKind::Compacting {
             threshold_tokens: Some(400)
         }
-    ));
+    );
+    let unset = graph(usize::MAX);
+    assert_eq!(
+        unset.layout.regions[0].kind,
+        RegionKind::Compacting {
+            threshold_tokens: None
+        }
+    );
+}
+
+/// A region seeded from `seed`.
+fn seeded(name: &str, seed: RegionSeed) -> RegionDefinition {
+    let mut r = region_def(name, CoreKind::Pinned);
+    r.seed = Some(seed);
+    r
+}
+
+/// Every caller-input seed becomes a text input bound to its region, required
+/// when the region is, and leaves the region unseeded.
+#[test]
+fn caller_input_seeds_become_text_inputs() {
+    let mut task = seeded(
+        "task",
+        RegionSeed::CallerInput {
+            name: "task".into(),
+        },
+    );
+    task.required = true;
+    let notes = seeded(
+        "notes",
+        RegionSeed::CallerInput {
+            name: "notes".into(),
+        },
+    );
+    let g = RunGraph::from_blueprint(&blueprint(vec![stage("main")], vec![task, notes])).unwrap();
+    let names: Vec<(&str, bool)> = g
+        .inputs
+        .iter()
+        .map(|i| (i.name.as_str(), i.required))
+        .collect();
+    assert_eq!(names, vec![("notes", false), ("task", true)]);
+    assert!(g.layout.regions.iter().all(|r| r.seed.is_none()));
+    assert_eq!(g.title.as_deref(), Some("t"));
+}
+
+/// Tool policies, an output stage, the `@all` group, bulk eviction and the
+/// seeds that read files, text and commands all carry over.
+#[test]
+fn policies_groups_eviction_and_plain_seeds_carry_over() {
+    let mut main = stage("main");
+    main.mode = BpMode::Output;
+    main.available_tools = vec!["@all".into()];
+    main.tool_permissions = HashMap::from([
+        ("read_file".to_string(), "allow".to_string()),
+        ("bash".to_string(), "ask".to_string()),
+    ]);
+    let regions = vec![
+        seeded(
+            "files",
+            RegionSeed::Files {
+                paths: vec!["README.md".into()],
+            },
+        ),
+        seeded(
+            "text",
+            RegionSeed::Literal {
+                text: "hello".into(),
+            },
+        ),
+        seeded(
+            "listing",
+            RegionSeed::Command {
+                command: "ls".into(),
+            },
+        ),
+        region_def(
+            "log",
+            CoreKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 2 },
+            },
+        ),
+    ];
+    let g = RunGraph::from_blueprint(&blueprint(vec![main], regions)).unwrap();
+    let s = &g.stages[0];
+    assert_eq!(s.mode, StageMode::Output);
+    assert_eq!(s.tools, [ToolSelector::Group(ToolGroup::All)]);
+    let policies: Vec<(&str, ToolPolicy)> = s
+        .tool_permissions
+        .iter()
+        .map(|(t, p)| (t.as_str(), *p))
+        .collect();
+    assert_eq!(
+        policies,
+        [("bash", ToolPolicy::Ask), ("read_file", ToolPolicy::Allow)]
+    );
+    let seeds: Vec<Option<Seed>> = g.layout.regions.iter().map(|r| r.seed.clone()).collect();
+    assert_eq!(
+        seeds,
+        [
+            Some(Seed::Files(vec![WorkdirPath::new("README.md").unwrap()])),
+            Some(Seed::Literal("hello".into())),
+            Some(Seed::Command("ls".into())),
+            None,
+        ]
+    );
+    assert_eq!(
+        g.layout.regions[3].kind,
+        RegionKind::SlidingWindow {
+            max_items: 5,
+            eviction: Eviction::Bulk(2),
+        }
+    );
+}
+
+/// A bad tool name, a policy that is not one, and model parameters with no
+/// scalar shape are each reported at their own path.
+#[test]
+fn a_blueprint_with_bad_names_reports_each_with_its_path() {
+    let mut main = stage("main");
+    main.available_tools = vec!["bad tool".into(), "@all".into()];
+    main.tool_permissions
+        .insert("bash".into(), "sometimes".into());
+    main.model
+        .parameters
+        .insert("weird".into(), json!({"a": 1}));
+    main.model
+        .parameters
+        .insert("nothing".into(), serde_json::Value::Null);
+    let issues = RunGraph::from_blueprint(&blueprint(vec![main], vec![])).unwrap_err();
+    let lines: Vec<String> = issues
+        .iter()
+        .map(|i| format!("{} {:?}", i.path, i.code))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            "stages.main.tools[0] Invalid",
+            "stages.main.model.params.nothing Invalid",
+            "stages.main.model.params.weird Invalid",
+            "stages.main.tool_permissions.bash Invalid",
+        ]
+    );
+}
+
+/// A code seed drops the `blueprint:` prefix a code file never needs, since
+/// code always sits beside its blueprint.
+#[test]
+fn a_code_seed_drops_the_blueprint_prefix() {
+    for script in ["blueprint:seeds/plan.rhai", "seeds/plan.rhai"] {
+        let plan = seeded(
+            "plan",
+            RegionSeed::Rhai {
+                script: script.into(),
+            },
+        );
+        let g = RunGraph::from_blueprint(&blueprint(vec![stage("main")], vec![plan])).unwrap();
+        assert_eq!(
+            g.layout.regions[0].seed,
+            Some(Seed::Code(CodeRef::File("seeds/plan.rhai".into()))),
+            "{script}"
+        );
+    }
+}
+
+/// A region a stage declares again under its own layout binds the input
+/// that fills it once, not once per layout.
+#[test]
+fn a_region_declared_again_by_a_stage_binds_its_input_once() {
+    let task = || {
+        seeded(
+            "task",
+            RegionSeed::CallerInput {
+                name: "task".into(),
+            },
+        )
+    };
+    let mut main = stage("main");
+    main.context_layout = Some(ContextLayout::new(vec![task()], 1000));
+    let g = RunGraph::from_blueprint(&blueprint(vec![main], vec![task()])).unwrap();
+    assert_eq!(g.inputs[0].binds.len(), 1, "{:?}", g.inputs[0].binds);
 }

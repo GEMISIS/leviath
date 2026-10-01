@@ -396,6 +396,30 @@ fn a_fan_out_and_an_open_point_that_do_not_fit_are_named() {
     assert!(report.defaulted("interactions[0].prompt").is_some());
 }
 
+/// A fan-out its stage declares resumes with the stage's own settings, and
+/// nothing is said about them.
+#[test]
+fn a_declared_fan_out_keeps_its_settings() {
+    let run = Run::fixture("fanout-parent");
+    let text = std::fs::read_to_string(run.path("blueprint.leviath")).unwrap();
+    run.write(
+        "blueprint.leviath",
+        &text.replace(
+            "mode = \"autonomous\"",
+            "mode = \"fan_out\"\nworker_agent = \"waiter\"\nmax_workers = 3",
+        ),
+    );
+    let (report, file) = run.converted();
+    let fan = file.last.fan_out.as_ref().unwrap();
+    assert_eq!(fan.config.max_workers, 3);
+    assert!(
+        !report
+            .notes
+            .iter()
+            .any(|n| n.contains("resumes with that stage"))
+    );
+}
+
 #[test]
 fn a_final_output_without_its_file_or_stage_is_named() {
     let run = Run::fixture("real-finished");
@@ -454,7 +478,7 @@ fn broken_directories_are_refused_by_name() {
     assert!(err.to_string().contains("has no meta.json"));
 
     type BreakIt = fn(&Run);
-    let cases: [(&str, BreakIt, &str); 13] = [
+    let cases: [(&str, BreakIt, &str); 14] = [
         ("bad meta", |r| r.write("meta.json", "{"), "does not parse"),
         (
             "bad stages",
@@ -514,6 +538,17 @@ fn broken_directories_are_refused_by_name() {
                 r.write(
                     "blueprint.leviath",
                     &text.replace("\"shell\"", "\"bad tool\""),
+                );
+            },
+            "not a valid run graph",
+        ),
+        (
+            "bad server table",
+            |r| {
+                let text = std::fs::read_to_string(r.path("blueprint.leviath")).unwrap();
+                r.write(
+                    "blueprint.leviath",
+                    &format!("{text}\n[[mcp_servers]]\nname = \"bad name\"\n"),
                 );
             },
             "not a valid run graph",

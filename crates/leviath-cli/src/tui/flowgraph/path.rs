@@ -17,7 +17,7 @@
 //! Free of ratatui and of the dashboard's own types: visits come in as
 //! [`Visit`], which the caller maps from whatever it reads off disk.
 
-use leviath_runtime::spec::TransitionCondition;
+use leviath_runtime::spec::graph::EdgeCondition;
 
 use super::content::RunPhase;
 use super::model::{EdgeClass, NodeKind, StageEdge, StageGraph, StageKind, StageNode};
@@ -100,7 +100,7 @@ pub(crate) fn stage_of(id: &str, blueprint: Option<&StageGraph>) -> String {
 /// The path `visits` walked, as a graph: a chain of one node per visit.
 ///
 /// `blueprint` lends each node what the stage is (its mode, its description,
-/// its iteration ceiling); a run whose manifest could not be read still gets
+/// its iteration ceiling); a run whose graph could not be read still gets
 /// its path, drawn as plain autonomous stages.
 pub(crate) fn run_path(blueprint: Option<&StageGraph>, visits: &[Visit]) -> StageGraph {
     let ids = visit_ids(visits);
@@ -140,7 +140,7 @@ pub(crate) fn run_path(blueprint: Option<&StageGraph>, visits: &[Visit]) -> Stag
             unseen: Vec::new(),
             from: pair[0].clone(),
             to: pair[1].clone(),
-            condition: TransitionCondition::Always,
+            condition: EdgeCondition::Always,
             hint: None,
             transform: "direct",
             class: EdgeClass::Primary,
@@ -207,30 +207,47 @@ pub(crate) fn path_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_runtime::spec::manifest::parse_manifest;
+    use crate::tui::flowgraph::model::test_graph;
 
     fn blueprint() -> StageGraph {
-        StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
-name = "grapher"
-[stages.plan]
+        test_graph(
+            r#"
+[[graph.stages]]
+name = "plan"
 description = "think first"
 max_iterations = 4
-[stages.plan.transitions.implement]
-[stages.implement]
+
+[[graph.stages]]
+name = "implement"
 mode = "interactive"
-[stages.implement.transitions.review]
-[stages.review]
-[stages.review.transitions.implement]
-condition = "llm_choice"
-[stages.review.transitions.done]
-[stages.done]
-[stages.done.transitions]
+
+[[graph.stages]]
+name = "review"
+
+[[graph.stages]]
+name = "done"
+
+[[graph.edges]]
+name = "implement"
+from = "plan"
+to = "implement"
+
+[[graph.edges]]
+name = "review"
+from = "implement"
+to = "review"
+
+[[graph.edges]]
+name = "implement"
+from = "review"
+to = "implement"
+when = "llm_choice"
+
+[[graph.edges]]
+name = "done"
+from = "review"
+to = "done"
 "#,
-            )
-            .unwrap(),
         )
     }
 

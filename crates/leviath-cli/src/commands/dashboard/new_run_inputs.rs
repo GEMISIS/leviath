@@ -364,22 +364,24 @@ impl Dashboard {
         self.new_run_inputs_key = path;
         let config_path = self.new_run_ctx.config_path.clone();
         self.new_run_inputs = blueprint
-            .and_then(|bp| {
-                let graph = leviath_runtime::spec::graph::RunGraph::from_blueprint(&bp).ok();
-                graph.map(|graph| (bp, graph))
-            })
-            .map(|(bp, graph)| {
+            .map(|graph| {
                 // Resolve each region's percentage budget against the entry
                 // stage's effective (smallest) model window, so a row knows
                 // the token room it really has.
                 let cache_path = leviath_core::paths::capability_cache_path();
-                let window = entry_stage_window(&bp, &config_path, cache_path.as_deref());
-                let regions: Vec<RegionRoom> = bp
-                    .context_layout
-                    .resolved(window)
+                let window = entry_stage_window(&graph, &config_path, cache_path.as_deref());
+                let regions: Vec<RegionRoom> = graph
+                    .layout
                     .regions
-                    .into_iter()
-                    .map(|r| (r.name, r.accepts, r.required, r.max_tokens))
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.name.to_string(),
+                            r.accepts.iter().map(|p| p.as_str().to_string()).collect(),
+                            r.required,
+                            leviath_runtime::context_setup::budget_tokens(&r.budget, window),
+                        )
+                    })
                     .collect();
                 rows_for(&graph.inputs, &regions)
             })
@@ -692,30 +694,32 @@ fn issue_text(issue: &SpawnIssue) -> String {
     }
 }
 
-/// The effective context window of the blueprint's entry stage, resolved
+/// The effective context window of the graph's entry stage, resolved
 /// offline: the **smallest** window across the stage's declared models, since a
 /// region's percentage budget must fit the tightest of them. Each model
 /// resolves through [`offline_model_window`]. Region percentage budgets resolve
 /// against this, so the picker's token room matches the tightest a run will get.
 fn entry_stage_window(
-    blueprint: &leviath_runtime::spec::blueprint::Blueprint,
+    graph: &leviath_runtime::spec::graph::RunGraph,
     config_path: &Path,
     cache_path: Option<&Path>,
 ) -> usize {
     const DEFAULT_WINDOW: usize = 8192;
-    let entry = blueprint.resolve_entry_stage_name();
     let config = crate::config::Config::load_from_path_public(config_path).ok();
     let cache = cache_path.and_then(leviath_providers::CapabilityCache::load);
     // A missing entry stage and a stage that names no models both fold into an
     // empty iterator, so both take the `unwrap_or` default without a dead arm.
-    blueprint
-        .stages
-        .iter()
-        .find(|s| s.name == entry)
+    // A model with no provider asks under an empty one, which no override,
+    // cache row or catalogue entry names.
+    graph
+        .entry_stage()
         .map(|s| &s.model.models)
         .into_iter()
         .flatten()
-        .map(|m| offline_model_window(&m.provider, &m.model, config.as_ref(), cache.as_ref()))
+        .map(|m| {
+            let provider = m.provider.as_ref().map_or("", |p| p.as_str());
+            offline_model_window(provider, m.model.as_str(), config.as_ref(), cache.as_ref())
+        })
         .min()
         .unwrap_or(DEFAULT_WINDOW)
 }

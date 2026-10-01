@@ -1,33 +1,111 @@
-[agent]
+[blueprint]
 name = "deep-researcher"
-version = "0.4.8"
+version = "0.5.0"
 description = "Thorough single-topic investigation - searches, follows citation chains, cross-checks claims, and produces a structured cited report"
+
+# gather -> investigate (fan out) -> analyze -> challenge -> synthesize -> polish -> summary
+#
+# `analyze` can loop back to `gather` or out to `follow_citations` before it
+# hands the evidence to `challenge`. `error_recovery` is reached only through an
+# `error` edge, so it never shows up in a run that goes well.
+
+[graph]
+entry = "gather"
 max_child_depth = 2
-entry_stage = "gather"
 
 # Read/search agent: writes only its final report.
-[tool_permissions]
-read_file  = "allow"
-list_dir   = "allow"
-web_search = "allow"
-web_fetch  = "allow"
-current_time = "allow"
-write_file = "ask"
-bash       = "ask"
+tool_permissions = { read_file = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", current_time = "allow", write_file = "ask", bash = "ask" }
+
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "query" }]
+
+[[graph.inputs]]
+name = "scope"
+type = { kind = "text", multiline = true }
+binds = [{ region = "scope" }]
+
+# How many sub-questions are researched at once, over the 12 this blueprint runs
+# by default: `lev run deep-researcher --input max_workers=4`.
+[[graph.inputs]]
+name = "max_workers"
+type = { kind = "int", min = 1, max = 30 }
+description = "How many sub-questions are researched at once (12 when left out)."
+binds = [{ fan_out_max_workers = "investigate" }]
+
+# ─── Context layout ───────────────────────────────────────────────────────────
+# Budgets are a percentage of the model's context window, so every region
+# scales with whatever model the stage runs on.
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "report_path", kind = "pinned", budget = "1%", description = "The exact filename of the report, written by the stage that created it so the polish stage rewrites that file rather than guessing among the workers' own reports in the same directory." },
+    { name = "progress_report", kind = "clearable", budget = "1%", description = "What your last visit to this stage actually added, measured. Weigh another pass against it." },
+    { name = "challenges", kind = "pinned", budget = "4%", description = "Adversarial challenges to the analysis: leads to check, not verdicts", volatility = "grows" },
+    { name = "query", kind = "pinned", budget = "1%", required = true, required_message = "State the research topic via --task.", volatility = "stable" },
+    { name = "scope", kind = "pinned", budget = "1%", volatility = "stable" },
+    { name = "environment", kind = "pinned", budget = "1%", volatility = "stable", seed = { tools = { calls = [{ tool = "current_time", args = {} }, { tool = "locale_info", args = {} }] } } },
+    # `required`: the whole report is built from this, and a stage that gathered
+    # nothing would hand an empty bibliography to `synthesize`, which writes the
+    # references from memory rather than reporting that it had none. The gate
+    # binds the stages that can write context (gather, analyze, follow_citations)
+    # and no-ops for the ones that cannot, so it can never deadlock the
+    # deliverable.
+    { name = "sources_index", kind = "pinned", budget = "4%", required = true, required_message = 'You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region="sources_index"): `[n] <title> - <url/path> - <date> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered.', volatility = "grows" },
+    { name = "format", kind = "pinned", budget = "1%", volatility = "stable", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the References bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Mark each key finding's confidence as high / medium / low based on source count and credibility. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." } },
+
+    # Declared `grows` because it is appended to and never rewritten: tool results
+    # land here and earlier ones stay put. Undeclared it would default to
+    # `rewritten`, which assumes the whole region changes every turn and so caches
+    # none of it - measured at 4% cache hits on a run where this region held 280K
+    # tokens, every one of them re-sent and re-paid on every single inference.
+    # Sized by the percentage alone, with no absolute ceiling on top: a ceiling
+    # binds on every model above 200K, so the percentage - which is the whole
+    # mechanism for scaling with the model in front of you - would decide nothing
+    # across the range anyone runs on. The size is not the cost anyway. 280K
+    # tokens re-sent at 4% cached is expensive; the same 280K mostly cached is
+    # not, and `volatility` is what makes the difference.
+    { name = "sources", kind = "temporary", budget = "30%", volatility = "grows" },
+    # The report is written FROM this region, so anything evicted here is a finding
+    # the run paid for and cannot deliver. 40 items bounds the report long before the
+    # reading is done - and this blueprint sits above a fan-out of up to 12 workers,
+    # so it is the level where the ceiling costs most: every worker's findings funnel
+    # through these slots. Wide enough that the budget is what limits it, which is a
+    # limit that scales with the model.
+    { name = "claims", kind = { kind = "sliding_window", max_items = 150 }, budget = "15%", volatility = "grows" },
+    { name = "contradictions", kind = "clearable", budget = "3%" },
+    # What the parallel researcher workers hand back, one entry each. Pinned: the
+    # analysis stage reads it directly and it is the point of the fan-out.
+    { name = "sub_findings", kind = "pinned", budget = "20%", volatility = "grows" },
+    { name = "analysis", kind = "compacting", budget = "30%", compact_at = 0.8 },
+    { name = "analysis_history", kind = { kind = "compact_history", source = "analysis" }, budget = "3%", volatility = "grows" },
+
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 12, eviction = { bulk = 10 } }, budget = "12%" },
+
+    # Written by the RUNTIME on an abnormal stage ending: a failed inference
+    # call's error text, or a note that a stage hit its iteration cap. Pinned so
+    # it survives the edge into the stage that acts on it.
+    { name = "error_report", kind = "pinned", budget = "1%" },
+]
 
 # ─── Stage 1: Gather ──────────────────────────────────────────────────────────
-[stages.gather]
-mode = "autonomous"
-model = { models = ["grok-4.6", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.stages]]
+name = "gather"
 description = "Gather primary sources and key references on the topic"
-# web_search / web_fetch are provided by this agent's tools/ (issue #97).
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
+model = { models = [{ model = "grok-4.6" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+# web_search / web_fetch are provided by this agent's tools/.
+tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "current_time", "context_read", "ask_user_text", "ask_user_choice"]
+max_iterations = 25
+max_revisits = 3
 # The ask tools block on a person, which is the point: a wrong reading of the
 # question costs the whole run. An unattended run is never offered them (the
 # resolver drops a blocking tool when nobody is watching), so this is free there.
 allow_blocking_tools = true
-max_iterations = 25
-max_revisits = 3
+tool_routing = { default_region = "conversation", tool_regions = { web_search = "sources", web_fetch = "sources", read_file = "sources", list_dir = "sources" }, keep_results = true }
 system_prompt = """
 You are investigating the topic in the `query` region in DEPTH, within any bounds
 in `scope`. This is a single-topic deep dive - go for primary sources and
@@ -143,38 +221,36 @@ leaving this stage. Coming back for it later costs a whole extra pass, and going
 without means the report states a number on the authority of a page that was
 guessing.
 
-Once you have solid primary coverage of the core facets, hand off to analyze.
-"""
-
-[stages.gather.tool_routing]
-default_region = "conversation"
-[stages.gather.tool_routing.overrides]
-web_search = "sources"
-web_fetch  = "sources"
-read_file  = "sources"
-list_dir   = "sources"
-
-# The only way forward. Investigating is what makes this a deep researcher, so
-# it is not a choice: an edge straight to `analyze` used to sit here for topics
-# that "turned out to be one question", and a model that took it produced a
-# report from the gather stage's sources alone while another model on the same
-# topic ran the full fan-out. A single sub-question is a fan-out of one, which
-# costs one worker; skipping the stage costs the whole investigation.
-[stages.gather.transitions.investigate]
-hint = "Primary sources gathered - break the topic into sub-questions and research them"
-transform = "direct"
+Once you have solid primary coverage of the core facets, hand off to analyze."""
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.gather.transitions.challenge]
+[[graph.edges]]
+name = "challenge"
+from = "gather"
+to = "challenge"
+when = "dead_end"
 hint = "Out of revisits here - hand what exists to the adversarial pass, which is the only way to the report"
-condition = "dead_end"
-transform = "compact"
+carry = { compact = {} }
 
-[stages.gather.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+[[graph.edges]]
+name = "error_recovery"
+from = "gather"
+to = "error_recovery"
+when = "error"
+
+# The only way forward. Investigating is what makes this a deep researcher, so
+# it is not a choice: offered an edge straight to `analyze` for topics that
+# "turn out to be one question", a model that takes it produces a report from
+# the gather stage's sources alone while another model on the same topic runs
+# the full fan-out. A single sub-question is a fan-out of one, which costs one
+# worker; skipping the stage costs the whole investigation.
+[[graph.edges]]
+name = "investigate"
+from = "gather"
+to = "investigate"
+hint = "Primary sources gathered - break the topic into sub-questions and research them"
 
 # ─── Stage 2: Investigate (fan out) ──────────────────────────────────────────
 # A thorough investigation is usually several questions wearing one coat. This
@@ -183,17 +259,19 @@ transform = "direct"
 #
 # `researcher` is a separate installed blueprint. `lev setup` installs the
 # bundled set together, so it is there in the normal case; installing this agent
-# on its own leaves the workers with nothing to run, and
-# `on_worker_failure = "continue"` means the run reports that rather than dying.
-[stages.investigate]
-mode = "fan_out"
-model = { models = ["claude-sonnet-5", "grok-4.6", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# on its own leaves the workers with nothing to run, and a failed worker is
+# reported rather than ending the run.
+[[graph.stages]]
+name = "investigate"
 description = "Research each sub-question of the topic in parallel"
-available_tools = []
+model = { models = [{ model = "claude-sonnet-5" }, { model = "grok-4.6" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["fan_out"]
 max_iterations = 4
 # investigate to error_recovery and back is a cycle, so it needs a ceiling.
 max_revisits = 1
-worker_agent = "researcher"
+
+[graph.stages.mode.fan_out]
+worker = { blueprint = { name = "researcher" } }
 merge_stage = "analyze"
 # Every sub-question at once rather than in waves; the daemon's inference
 # pool paces the requests. Set to 0 for no cap at all.
@@ -204,7 +282,6 @@ results_region = "sub_findings"
 # worker a usable share of the region for its answer; the analyze stage is told
 # when that share had to be trimmed. Set to 0 for no ceiling.
 max_items = 30
-on_worker_failure = "continue"
 split_prompt = """
 Split the topic in `query` into sub-questions that can be researched
 independently, one work item each, using what `sources` has already turned up to
@@ -212,7 +289,10 @@ decide where the real questions are.
 
 Call `fan_out` with one entry in `items` per work item:
 
-  items: [{"id": "<short-slug>", "context": {"question": "<the sub-question>", "why": "<what this settles for the wider topic>"}}]
+  items: [{"id": "<short-slug>", "inputs": {"task": "<the sub-question>", "scope": "<what this settles for the wider topic>"}}]
+
+Each item's inputs are the worker's own: "task" is the question it
+researches, and "scope" what its answer is for. Nothing else reaches it.
 
 Every item MUST carry enough to work from alone: a worker is a separate agent
 and does not share this run's context, so the work item is all it gets. Name the
@@ -253,26 +333,31 @@ Prefer a handful of substantial questions over many thin ones. One question is
 fine for a narrow topic.
 """
 
-[stages.investigate.transitions.error_recovery]
-condition = "error"
-transform = "direct"
-
 # Un-exhaustible escape (lint: dead-end-possible). Conditioned, like every
-# other escape here: an unconditioned edge is on the model's menu, so this one
-# let a fan-out stage answer "synthesize" and walk past its own workers.
-[stages.investigate.transitions.challenge]
+# other escape here: an unconditioned edge is on the model's menu, where a
+# fan-out stage can answer with it and walk past its own workers.
+[[graph.edges]]
+name = "challenge"
+from = "investigate"
+to = "challenge"
+when = "dead_end"
 hint = "Out of revisits here - hand what exists to the adversarial pass, which is the only way to the report"
-condition = "dead_end"
-transform = "compact"
+carry = { compact = {} }
 
-# ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
+[[graph.edges]]
+name = "error_recovery"
+from = "investigate"
+to = "error_recovery"
+when = "error"
+
+# ─── Stage 3: Analyze ─────────────────────────────────────────────────────────
 # Three open edges: more breadth (gather), chase a specific citation
-# (follow_citations), or write the report (synthesize).
-[stages.analyze]
-mode = "autonomous"
-model = { models = ["deepseek-v4-pro", "claude-opus-5", "gpt-5.5", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# (follow_citations), or have the evidence attacked before writing (challenge).
+[[graph.stages]]
+name = "analyze"
 description = "Analyze findings, cross-reference claims, and decide the next move"
-available_tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
+model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "web_fetch", "context_write", "context_append", "current_time"]
 max_iterations = 20
 max_revisits = 4  # backstop only; the convergence note is what should end this loop
 transition_prompt = """
@@ -294,8 +379,7 @@ Decide the next move:
   in your reply and not in the region is one neither of them can see.
 - The `[Progress in stage ...]` note says this pass added little next to the one
   before it, and you cannot name a specific gap you would go and fill → the work
-  here has converged → respond with: challenge
-"""
+  here has converged → respond with: challenge"""
 system_prompt = """
 Analyze the `sources` and `sub_findings` against `sources_index`. Be rigorous:
 1. Extract factual claims into `claims` (context_append), each with its source
@@ -320,41 +404,51 @@ hinges on a source you haven't read directly.
 
 If `error_report` says a previous stage hit its iteration cap, that stage was cut
 off before finishing - treat its output as incomplete and verify coverage before
-concluding.
-"""
+concluding."""
 
-[stages.analyze.transitions.gather]
-hint = "Broad gaps - need new sources on specific sub-topics"
-transform = "compact"
-
-[stages.analyze.transitions.follow_citations]
-hint = "A specific cited source should be pulled and read directly"
-transform = "compact"
-
-
-[stages.analyze.transitions.challenge]
-hint = "Evidence is sufficient - have it attacked before writing"
-transform = "compact"
 # `challenge` and `synthesize` both read `claims`, so leaving analyze without
 # having written it hands them an empty region. Measured on a finished run:
 # `claims` held nothing for all 225 snapshots while `sources` sat at 99% of its
 # budget, because everything went into the accumulator instead.
+[[graph.edges]]
+name = "challenge"
+from = "analyze"
+to = "challenge"
+hint = "Evidence is sufficient - have it attacked before writing"
+carry = { compact = {} }
 gate = { require_region_updated = "claims", message = "Add the claims from this pass to `claims` with context_append, one per line as `<claim> [n]` with its source ref, and any source disagreements to `contradictions`. The adversarial pass reads those regions, and the report is written from them." }
 
-[stages.analyze.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+[[graph.edges]]
+name = "error_recovery"
+from = "analyze"
+to = "error_recovery"
+when = "error"
 
-# ─── Stage 3: Follow citations ────────────────────────────────────────────────
+[[graph.edges]]
+name = "follow_citations"
+from = "analyze"
+to = "follow_citations"
+hint = "A specific cited source should be pulled and read directly"
+carry = { compact = {} }
+
+[[graph.edges]]
+name = "gather"
+from = "analyze"
+to = "gather"
+hint = "Broad gaps - need new sources on specific sub-topics"
+carry = { compact = {} }
+
+# ─── Stage 4: Follow citations ────────────────────────────────────────────────
 # The "follows citation chains" behavior as a real stage: pull the specific
 # sources analyze flagged, then hand back.
-[stages.follow_citations]
-mode = "autonomous"
-model = { models = ["deepseek-v4-pro", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.stages]]
+name = "follow_citations"
 description = "Pull and read specific cited sources flagged during analysis"
-available_tools = ["web_fetch", "web_search", "read_file", "context_append", "current_time", "context_read"]
+model = { models = [{ model = "deepseek-v4-pro" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["web_fetch", "web_search", "read_file", "context_append", "current_time", "context_read"]
 max_iterations = 12
 max_revisits = 3
+tool_routing = { default_region = "conversation", tool_regions = { web_fetch = "sources", web_search = "sources", read_file = "sources" }, keep_results = true }
 system_prompt = """
 Analysis flagged specific citations to chase. For each: web_fetch the source
 directly (or web_search for it by title/author first), read it, and append the
@@ -362,39 +456,43 @@ new material to `sources` plus a bibliography line to `sources_index`. Extract
 any new or corrected claims to `claims`. Then hand back to analyze.
 
 Stay focused on the flagged citations - this is a targeted deep read, not a new
-broad search.
-"""
+broad search."""
 
-[stages.follow_citations.tool_routing]
-default_region = "conversation"
-[stages.follow_citations.tool_routing.overrides]
-web_fetch  = "sources"
-web_search = "sources"
-read_file  = "sources"
-
-[stages.follow_citations.transitions.analyze]
+[[graph.edges]]
+name = "analyze"
+from = "follow_citations"
+to = "analyze"
 hint = "Cited sources read - resume analysis"
-transform = "compact"
+carry = { compact = {} }
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.follow_citations.transitions.challenge]
+[[graph.edges]]
+name = "challenge"
+from = "follow_citations"
+to = "challenge"
+when = "dead_end"
 hint = "Done here - hand to the adversarial pass, which is the only way to the report"
-condition = "dead_end"
-transform = "compact"
+carry = { compact = {} }
 
-[stages.follow_citations.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+[[graph.edges]]
+name = "error_recovery"
+from = "follow_citations"
+to = "error_recovery"
+when = "error"
 
-# ─── Stage 4: Synthesize (terminal) ───────────────────────────────────────────
-[stages.synthesize]
-mode = "autonomous"
-model = { models = ["claude-opus-5", "gpt-5.5", "claude-sonnet-5", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# ─── Stage 5: Synthesize ──────────────────────────────────────────────────────
+[[graph.stages]]
+name = "synthesize"
 description = "Produce a structured, cited research report"
-available_tools = ["write_file", "read_file", "context_write"]
+model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["write_file", "read_file", "context_write"]
 max_iterations = 15
+# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
+# and this stage's instructions never read it: it works from the regions the
+# earlier stages distilled. Left in, it is re-sent on every call for nothing.
+hide = ["sources"]
 system_prompt = """
 Write the report (write_file), built from `claims` and citing `sources_index`,
 following the citation/confidence rules in `format`. Structure:
@@ -439,63 +537,67 @@ When you have written the report, record its filename with `context_write` to
 the `report_path` region, exactly as you passed it to `write_file` and nothing
 else. The stage after this one rewrites that file, and the working directory
 also holds a report from every worker, so a name it has to guess at is a name it
-gets wrong.
-"""
+gets wrong."""
 
-# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
-# and this stage's instructions never read it: it works from the regions the
-# earlier stages distilled. Left in, it is re-sent on every call for nothing.
-[stages.synthesize.context]
-hide = ["sources"]
-
-[stages.synthesize.transitions.polish]
-hint = "The synthesis is written"
 # The transcript of the research is not wanted here: this stage rewrites the
 # report named in `report_path`, and the turns that produced it are only
-# prompt weight on the run's most expensive model. Carrying them also handed
+# prompt weight on the run's most expensive model. Carrying them also hands
 # this stage function calls made by a different model family, which Gemini
 # refuses because it never signed them.
-transform = "custom"
-transform_config = { clear = ["conversation"] }
+[[graph.edges]]
+name = "polish"
+from = "synthesize"
+to = "polish"
+hint = "The synthesis is written"
+carry = { custom = { clear = ["conversation"] } }
 
-# ─── Stage 5: Error recovery ──────────────────────────────────────────────────
-[stages.error_recovery]
-mode = "autonomous"
-model = { models = ["claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# ─── Stage 6: Error recovery ──────────────────────────────────────────────────
+[[graph.stages]]
+name = "error_recovery"
 description = "Recover from a failed source fetch or parse during research"
-available_tools = ["read_file", "bash"]
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
 A call failed mid-research. The `error_report` region holds the error text the
 runtime captured - read it first. Record which source is unavailable and why (as
-a gap), and hand back to analyze to continue with the material you do have.
-"""
+a gap), and hand back to analyze to continue with the material you do have."""
+
+[[graph.edges]]
+name = "analyze"
+from = "error_recovery"
+to = "analyze"
+hint = "Recovered - continue analysis"
+carry = { compact = {} }
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.error_recovery.transitions.synthesize]
+[[graph.edges]]
+name = "synthesize"
+from = "error_recovery"
+to = "synthesize"
 hint = "Recovery is not converging - synthesize what was gathered"
-transform = "compact"
-
-[stages.error_recovery.transitions.analyze]
-hint = "Recovered - continue analysis"
-transform = "compact"
-
-[compaction]
-provider = "anthropic"
-model = "claude-sonnet-5"
+carry = { compact = {} }
 
 # ─── Final output ────────────────────────────────────────────────────────────
-# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
-# lets the run end here. No file tools on purpose: this stage reports, it does
-# not work.
-[stages.summary]
-mode = "output"
-model = { models = ["claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# The last stage. An output stage hands back the run's answer with
+# `submit_output`, must call it, and may end the run. No file tools on
+# purpose: this stage reports, it does not work.
+[[graph.stages]]
+name = "summary"
 description = "Say what the investigation found"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+mode = "output"
+tools = ["submit_output"]
 max_iterations = 8
+allow_complete = true
+require_output = true
+# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
+# and this stage's instructions never read it: it works from the regions the
+# earlier stages distilled. Left in, it is re-sent on every call for nothing.
+hide = ["sources"]
 system_prompt = """
 Say what this investigation concluded, for whoever asked for it.
 
@@ -507,19 +609,7 @@ one. Your only tool here is `submit_output`; do not try to write a file, and do
 not paste the whole report into the answer.
 
 Where the sources disagreed, say so - a summary that hides a live disagreement
-is worse than no summary.
-"""
-
-# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
-# and this stage's instructions never read it: it works from the regions the
-# earlier stages distilled. Left in, it is re-sent on every call for nothing.
-[stages.summary.context]
-hide = ["sources"]
-
-[stages.summary.transitions]
-
-# ─── Context layout ───────────────────────────────────────────────────────────
-# Percentage budgets (issue #100) with absolute guard-rails.
+is worse than no summary."""
 
 # ─── Challenge: an adversary that flags, and cannot rewrite ───────────────────
 # A different vendor's model reading the analysis with no attachment to it. The
@@ -528,13 +618,17 @@ hide = ["sources"]
 # survives. Grok is here because it is the least likely to agree with a Claude
 # analysis out of politeness - and because it may simply be wrong, which is why
 # its output is a lead to check rather than a verdict to apply.
-[stages.challenge]
-mode = "autonomous"
-model = { models = ["grok-4.6", "deepseek-v4-pro", "claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.stages]]
+name = "challenge"
 description = "Attack the analysis: what is thin, unsupported, or too confident"
-available_tools = ["context_read", "context_append", "web_search", "web_fetch", "current_time"]
+model = { models = [{ model = "grok-4.6" }, { model = "deepseek-v4-pro" }, { model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["context_read", "context_append", "web_search", "web_fetch", "current_time"]
 max_iterations = 10
 max_revisits = 1
+# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
+# and this stage's instructions never read it: it works from the regions the
+# earlier stages distilled. Left in, it is re-sent on every call for nothing.
+hide = ["sources"]
 system_prompt = """
 You are reading someone else's analysis in order to attack it. You did not
 write it and you owe it nothing.
@@ -568,26 +662,27 @@ ever objects is indistinguishable from noise, and the reader cannot tell which
 of your objections to take seriously.
 
 If the analysis is sound throughout, say so and stop. You are not required to
-find fault.
-"""
+find fault."""
 
-# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
-# and this stage's instructions never read it: it works from the regions the
-# earlier stages distilled. Left in, it is re-sent on every call for nothing.
-[stages.challenge.context]
-hide = ["sources"]
+[[graph.edges]]
+name = "error_recovery"
+from = "challenge"
+to = "error_recovery"
+when = "error"
 
-[stages.challenge.transitions.gather]
+[[graph.edges]]
+name = "gather"
+from = "challenge"
+to = "gather"
 hint = "A challenge needs evidence nobody has gathered yet - name what to fetch"
-transform = "compact"
+carry = { compact = {} }
 
-[stages.challenge.transitions.synthesize]
+[[graph.edges]]
+name = "synthesize"
+from = "challenge"
+to = "synthesize"
 hint = "Challenges are recorded - write the report"
-transform = "compact"
-
-[stages.challenge.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+carry = { compact = {} }
 
 # ─── Polish: the same report, readable ───────────────────────────────────────
 # Measured on a real report: this model took it from grade 12.8 to 9.6 and
@@ -599,16 +694,19 @@ transform = "direct"
 # No web tools and no send-back edge: this is a filter, not a decision point.
 # A validator enforces what the prompt asks for, because "keep every citation"
 # is not something to leave to good intentions.
-[stages.polish]
-mode = "autonomous"
-# The reply IS the whole report, so the cap is whatever the model can give:
-# a fixed number here (24000, once) was smaller than the report, every reply
-# was cut off at the cap, and the stage re-sent the same reply five times.
-model = { models = ["gemini-3.1-pro-preview", "claude-opus-5", "gpt-5.5", "claude-sonnet-5", { provider = "ollama", model = "qwen3.5:9b" }], parameters = { max_output_tokens = "100%" } }
+[[graph.stages]]
+name = "polish"
 description = "Rewrite the report in plain language without changing what it says"
-
-available_tools = ["context_read", "context_write", "read_file", "write_file", "list_dir"]
+# The reply IS the whole report, so the cap is whatever the model can give: a
+# fixed number smaller than the report cuts every reply off at the cap, and the
+# stage re-sends the same reply until it runs out of tries.
+model = { models = [{ model = "gemini-3.1-pro-preview" }, { model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "claude-sonnet-5" }, { provider = "ollama", model = "qwen3.5:9b" }], params = { max_output_tokens = "100%" } }
+tools = ["context_read", "context_write", "read_file", "write_file", "list_dir"]
 max_iterations = 10
+# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
+# and this stage's instructions never read it: it works from the regions the
+# earlier stages distilled. Left in, it is re-sent on every call for nothing.
+hide = ["sources"]
 system_prompt = """
 Rewrite the report so a smart reader outside this field can follow it.
 
@@ -657,69 +755,18 @@ The file to rewrite is named in the `report_path` region. Read that file, and
 write your rewrite back to that same path, replacing it. Do not go looking for
 it: this directory also holds a separate report from every worker, and rewriting
 one of those instead would leave the real report untouched while the stage
-reports success.
-"""
+reports success."""
 
-# `sources` is the raw material - fetched pages, ~125k tokens on a real run -
-# and this stage's instructions never read it: it works from the regions the
-# earlier stages distilled. Left in, it is re-sent on every call for nothing.
-[stages.polish.context]
-hide = ["sources"]
+[[graph.edges]]
+name = "error_recovery"
+from = "polish"
+to = "error_recovery"
+when = "error"
 
-[stages.polish.transitions.summary]
-gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it in plain language, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }
+[[graph.edges]]
+name = "summary"
+from = "polish"
+to = "summary"
 hint = "The report reads clearly - produce the final answer"
-transform = "compact"
-
-[stages.polish.transitions.error_recovery]
-condition = "error"
-transform = "direct"
-
-
-[context.regions]
-report_path    = { kind = "pinned", budget = "1%", volatility = "rewritten", description = "The exact filename of the report, written by the stage that created it so the polish stage rewrites that file rather than guessing among the workers' own reports in the same directory." }
-progress_report = { kind = "clearable", budget = "1%", volatility = "rewritten", description = "What your last visit to this stage actually added, measured. Weigh another pass against it." }
-challenges     = { kind = "pinned", budget = "4%", volatility = "grows", description = "Adversarial challenges to the analysis: leads to check, not verdicts" }
-query          = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the research topic via --task.", volatility = "stable" }
-scope          = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
-environment    = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
-# `required`: the whole report is built from this, and a stage that gathered
-# nothing used to hand an empty bibliography to `synthesize`, which wrote the
-# references from memory rather than reporting that it had none. The gate binds
-# the stages that can write context (gather, analyze, follow_citations) and
-# no-ops for the ones that cannot, so it can never deadlock the deliverable.
-sources_index  = { kind = "pinned", budget = "4%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region=\"sources_index\"): `[n] <title> - <url/path> - <date> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered." }
-format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the References bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Mark each key finding's confidence as high / medium / low based on source count and credibility. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
-
-# Declared `grows` because it is appended to and never rewritten: tool results
-# land here and earlier ones stay put. Undeclared it would default to
-# `rewritten`, which assumes the whole region changes every turn and so caches
-# none of it - measured at 4% cache hits on a run where this region held 280K
-# tokens, every one of them re-sent and re-paid on every single inference.
-# Sized by the percentage alone. An absolute ceiling was tried here and removed:
-# it bound on every model above 200K, so the percentage - which is the whole
-# mechanism for scaling with the model in front of you - decided nothing across
-# the range anyone runs on. The size was never the fault anyway. 280K tokens
-# re-sent at 4% cached is expensive; the same 280K mostly cached is not, and the
-# `volatility` above is what makes the difference.
-sources        = { kind = "temporary",      budget = "30%", volatility = "grows" }
-# The report is written FROM this region, so anything evicted here is a finding
-# the run paid for and cannot deliver. 40 items bounds the report long before the
-# reading is done - and this blueprint sits above a fan-out of up to 12 workers,
-# so it is the level where the ceiling costs most: every worker's findings funnel
-# through these slots. Wide enough now that the budget is what limits it, which
-# is a limit that scales with the model.
-claims         = { kind = "sliding_window", max_items = 150, budget = "15%", volatility = "grows" }
-contradictions = { kind = "clearable",      budget = "3%" }
-# What the parallel researcher workers hand back, one entry each. Pinned: the
-# analysis stage reads it directly and it is the point of the fan-out.
-sub_findings   = { kind = "pinned", budget = "20%", volatility = "grows" }
-analysis         = { kind = "compacting",      budget = "30%", compact_at = "80%" }
-analysis_history = { kind = "compact_history", source_region = "analysis", budget = "3%", volatility = "grows" }
-
-conversation   = { kind = "sliding_window", max_items = 12, budget = "12%", strategy = "bulk", overflow = 10 }
-
-# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
-# inference call's error text, or a note that a stage hit its iteration cap.
-# Pinned so it survives the edge transform into the stage that acts on it.
-error_report   = { kind = "pinned", budget = "1%" }
+carry = { compact = {} }
+gate = { require_modifications = true, message = "You have not written the report yet. Read the file named in `report_path`, rewrite it in plain language, and write it back to that same path with write_file. The stage is not done until that file has been replaced." }

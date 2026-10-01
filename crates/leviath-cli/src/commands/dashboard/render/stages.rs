@@ -465,11 +465,24 @@ mod tests {
         .into();
         agent.num_stages = 2;
         agent.graph = Some(std::sync::Arc::new(
-            crate::tui::flowgraph::StageGraph::from_blueprint(
-                &leviath_runtime::spec::manifest::parse_manifest(
-                    "[agent]\nname = \"g\"\n[stages.plan]\n[stages.plan.transitions.implement]\n[stages.implement]\n",
-                )
-                .unwrap(),
+            crate::tui::flowgraph::model::toml_graph(
+                r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "implement", from = "plan", to = "implement" }]
+
+[[graph.stages]]
+name = "plan"
+
+[[graph.stages]]
+name = "implement"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
             ),
         ));
         terminal

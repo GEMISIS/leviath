@@ -85,7 +85,7 @@ pub(crate) fn find_installed(
     BlueprintRef::parse(&name).map_err(|e| e.to_string())
 }
 
-/// Find an installed agent whose directory name or manifest description contains
+/// Find an installed agent whose directory name or blueprint description contains
 /// `query` (case-insensitive). Returns the agent's directory.
 pub(crate) fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<PathBuf, String> {
     let dir = agents_dir.ok_or_else(|| "no agents directory to search for a worker".to_string())?;
@@ -94,7 +94,7 @@ pub(crate) fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<
         std::fs::read_dir(dir).map_err(|e| format!("read agents dir '{}': {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
-        let manifest = path.join(leviath_core::files::MANIFEST_FILENAME);
+        let manifest = path.join(leviath_blueprint::FILE_NAME);
         if !manifest.is_file() {
             continue;
         }
@@ -104,8 +104,9 @@ pub(crate) fn discover_worker(agents_dir: Option<&Path>, query: &str) -> Result<
             .is_some_and(|n| n.to_lowercase().contains(&needle));
         let desc_matches = std::fs::read_to_string(&manifest)
             .ok()
-            .and_then(|c| leviath_runtime::spec::manifest::parse_manifest(&c).ok())
-            .is_some_and(|bp| bp.description.to_lowercase().contains(&needle));
+            .and_then(|c| leviath_blueprint::BlueprintMeta::read(&c).ok())
+            .and_then(|meta| meta.description)
+            .is_some_and(|d| d.to_lowercase().contains(&needle));
         if name_matches || desc_matches {
             return Ok(path);
         }
@@ -140,11 +141,36 @@ mod tests {
 
     /// A two-stage blueprint whose second stage opts in as a fan-out worker.
     fn two_stage_manifest() -> String {
-        "[agent]\nname = \"host\"\nversion = \"0.1.0\"\ndescription = \"d\"\nentry_stage = \"first\"\n\n\
-         [stages.first]\nmodel = { provider = \"anthropic\", model = \"m\" }\nsystem_prompt = \"first\"\n\n\
-         [stages.second]\nmodel = { provider = \"anthropic\", model = \"m\" }\nallow_as_worker = true\nsystem_prompt = \"second\"\n\n\
-         [context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000 }\n"
-            .to_string()
+        r#"[blueprint]
+name = "host"
+version = "0.1.0"
+description = "d"
+
+[graph]
+entry = "first"
+edges = [{ name = "next", from = "first", to = "second" }]
+
+[[graph.stages]]
+name = "first"
+system_prompt = "first"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[[graph.stages]]
+name = "second"
+system_prompt = "second"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+allow_as_worker = true
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 2000 }]
+total_budget_tokens = 2000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#
+        .to_string()
     }
 
     /// A spawner whose runs are kept under `runs_dir`, registering tools
@@ -285,8 +311,29 @@ mod tests {
         let agent = dir.path().join("test-fixer");
         std::fs::create_dir_all(&agent).unwrap();
         std::fs::write(
-            agent.join("agent.leviath"),
-            "[agent]\nname = \"test-fixer\"\nversion = \"0.1.0\"\ndescription = \"fixes tests\"\n\n[stages.main]\nmodel = { provider = \"anthropic\", model = \"claude-sonnet-4-6\" }\n",
+            agent.join("agent.toml"),
+            r#"[blueprint]
+name = "test-fixer"
+version = "0.1.0"
+description = "fixes tests"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
         )
         .unwrap();
         let mut spawner = spawner_with(Arc::new(CliToolService::new()), dir.path());
@@ -302,8 +349,28 @@ mod tests {
         let odd = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(odd.path().join("x@fixer")).unwrap();
         std::fs::write(
-            odd.path().join("x@fixer").join("agent.leviath"),
-            "[agent]\nname = \"x\"\n",
+            odd.path().join("x@fixer").join("agent.toml"),
+            r#"[blueprint]
+name = "x"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
         )
         .unwrap();
         spawner.agents_dir = Some(odd.path().to_path_buf());
@@ -317,8 +384,29 @@ mod tests {
         let a = dir.path().join("alpha");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::write(
-            a.join("agent.leviath"),
-            "[agent]\nname = \"alpha\"\nversion = \"0.1.0\"\ndescription = \"a widget wrangler\"\n\n[stages.main]\nmodel = { provider = \"anthropic\", model = \"claude-sonnet-4-6\" }\n",
+            a.join("agent.toml"),
+            r#"[blueprint]
+name = "alpha"
+version = "0.1.0"
+description = "a widget wrangler"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
         )
         .unwrap();
         // A directory without a manifest is skipped.
@@ -341,7 +429,7 @@ mod tests {
         // No agents dir.
         assert!(discover_worker(None, "x").is_err());
         // Unreadable dir (path is a file).
-        let file = dir.path().join("alpha").join("agent.leviath");
+        let file = dir.path().join("alpha").join("agent.toml");
         assert!(discover_worker(Some(&file), "x").is_err());
     }
 
@@ -383,12 +471,17 @@ mod tests {
     #[tokio::test]
     async fn spawn_worker_is_not_held_to_the_parents_required_caller_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        let requiring = two_stage_manifest().replace(
-            "[context.regions]\n",
-            "[context.regions]\ndiff = { kind = \"pinned\", max_tokens = 2000, seed = \"diff\", required = true }\n",
-        );
+        let requiring = two_stage_manifest()
+            .replace(
+                "regions = [",
+                "regions = [{ name = \"diff\", kind = \"pinned\", budget = 2000, required = true }, ",
+            )
+            .replace(
+                "[[graph.inputs]]\n",
+                "[[graph.inputs]]\nname = \"diff\"\ntype = \"text\"\nrequired = true\nbinds = [{ region = \"diff\" }]\n\n[[graph.inputs]]\n",
+            );
         assert!(
-            requiring.contains("seed = \"diff\""),
+            requiring.contains("name = \"diff\""),
             "fixture gained the region"
         );
         let manifest = crate::daemon::starter::testing::manifest_in(dir.path(), &requiring);
@@ -497,7 +590,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
 
-        // worker_agent given as a directory containing agent.leviath.
+        // The worker named by a directory holding an agent.toml.
         let worker_dir = dir.path().join("worker");
         std::fs::create_dir_all(&worker_dir).unwrap();
         two_stage_in(&worker_dir);
@@ -532,10 +625,27 @@ mod tests {
         std::fs::create_dir_all(&bad_dir).unwrap();
         crate::daemon::starter::testing::manifest_in(
             &bad_dir,
-            "[agent]\nname = \"bad\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.only]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-             [stages.only.transitions.nowhere]\n\n\
-             [context.regions]\ntask = { kind = \"pinned\", max_tokens = 500 }\n",
+            r#"[blueprint]
+name = "bad"
+version = "0.1.0"
+description = "d"
+
+[graph]
+edges = [{ name = "nowhere", from = "only", to = "nowhere" }]
+
+[[graph.stages]]
+name = "only"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 500 }]
+total_budget_tokens = 500
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
         );
         let err = spawn(
             &mut world,
@@ -576,8 +686,8 @@ mod tests {
         crate::daemon::starter::testing::manifest_in(
             &worker_dir,
             &two_stage_manifest().replace(
-                "[context.regions]\n",
-                "[[mcp_servers]]\nname = \"srv\"\ncommand = \"/no/such/mcp-server\"\n\n[context.regions]\n",
+                "[graph]\n",
+                "[graph]\nmcp_servers = [{ name = \"srv\", command = \"/no/such/mcp-server\" }]\n",
             ),
         );
         let agent = worker_dir.to_string_lossy().into_owned();
@@ -625,10 +735,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("broken");
         std::fs::create_dir_all(&bad).unwrap();
-        std::fs::write(bad.join("agent.leviath"), "this is not valid toml : : :").unwrap();
-        // Name doesn't match and the manifest won't parse → skipped → miss.
+        std::fs::write(bad.join("agent.toml"), "this is not valid toml : : :").unwrap();
+        // Name doesn't match and the file won't parse → skipped → miss.
         assert!(discover_worker(Some(dir.path()), "zzz").is_err());
-        // But the directory name still matches even when the manifest is broken.
+        // But the directory name still matches even when the file is broken.
         assert!(
             discover_worker(Some(dir.path()), "broken")
                 .unwrap()

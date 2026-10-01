@@ -812,21 +812,39 @@ mod tests {
     use crate::commands::dashboard::test_support::make_test_dashboard;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    /// A manifest the real parser accepts, for the agent picker's catalog.
+    /// A blueprint the real reader accepts, for the agent picker's catalog.
     fn write_agent(dir: &Path, name: &str, description: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
-            dir.join("agent.leviath"),
+            dir.join("agent.toml"),
             format!(
-                "[agent]\nname = \"{name}\"\nversion = \"0.1.0\"\n\
-                 description = \"{description}\"\n\n\
-                 [stages.main]\nmode = \"autonomous\"\n\n\
-                 [stages.main.model]\n\
-                 provider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
-                 [context.regions]\n\
-                 task = {{ kind = \"pinned\", max_tokens = 1000, seed = \"task\" }}\n\
-                 conversation = {{ kind = \"sliding_window\", max_items = 20, \
-                 max_tokens = 10000 }}\n"
+                r#"[blueprint]
+name = "{name}"
+version = "0.1.0"
+description = "{description}"
+
+[[graph.stages]]
+name = "main"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-5" }}] }}
+
+[graph.layout]
+total_budget_tokens = 11000
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 1000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = {{ kind = "sliding_window", max_items = 20 }}
+budget = 10000
+
+[[graph.inputs]]
+name = "task"
+type = {{ kind = "text", multiline = true }}
+binds = [{{ region = "task" }}]
+"#
             ),
         )
         .unwrap();
@@ -1702,7 +1720,7 @@ mod tests {
         (ControlClient::new(id), handle)
     }
 
-    /// Drive one spawn of a real manifest through the loop against a daemon
+    /// Drive one spawn of a real blueprint through the loop against a daemon
     /// giving `reply`, and return what the dashboard would toast.
     async fn spawn_outcome(reply: Option<&'static str>) -> SpawnOutcome {
         let dir = tempfile::tempdir().unwrap();

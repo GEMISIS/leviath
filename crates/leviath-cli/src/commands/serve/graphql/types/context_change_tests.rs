@@ -20,7 +20,7 @@ fn meta() -> RunMeta {
     let mut meta = RunMeta::new(
         "moved-regions".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "move a few regions".to_string(),
         None,
         "/tmp".to_string(),

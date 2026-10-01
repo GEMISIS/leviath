@@ -1945,9 +1945,7 @@ mod tests {
     /// A parsed blueprint's stage graph, the way `sync_from_run_state` loads it.
     fn graph_from(toml: &str) -> Option<std::sync::Arc<crate::tui::flowgraph::StageGraph>> {
         Some(std::sync::Arc::new(
-            crate::tui::flowgraph::StageGraph::from_blueprint(
-                &leviath_runtime::spec::manifest::parse_manifest(toml).expect("fixture parses"),
-            ),
+            crate::tui::flowgraph::model::toml_graph(toml),
         ))
     }
 
@@ -1957,13 +1955,25 @@ mod tests {
         let mut agent = make_test_agent("run-graph", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph = graph_from(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "g"
-[stages.main]
-[stages.main.transitions.implement]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+
+[[graph.stages]]
+name = "implement"
+
+[[graph.edges]]
+name = "implement"
+from = "main"
+to = "implement"
 hint = "after plan"
-[stages.implement]
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
@@ -1991,12 +2001,22 @@ hint = "after plan"
         let mut agent = make_test_agent("run-graph-fallback", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph = graph_from(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "g"
-[stages.main]
-[stages.main.transitions.implement]
-[stages.implement]
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "implement", from = "main", to = "implement" }]
+
+[[graph.stages]]
+name = "main"
+
+[[graph.stages]]
+name = "implement"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
         );
         agent.stages = vec![].into(); // no stage records at all -> .get(0) is None
@@ -2014,8 +2034,23 @@ name = "g"
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-graph-visited", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        agent.graph =
-            graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.main.transitions]\n");
+        // A stage that may go round again: a branch, so the block is drawn.
+        agent.graph = graph_from(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "again", from = "main", to = "main", when = "llm_choice" }]
+
+[[graph.stages]]
+name = "main"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
+        );
         // Two records named "main" -> visited count 2, exercising the plural "s".
         let rec = crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Active,
@@ -2039,13 +2074,25 @@ name = "g"
         let mut agent = make_test_agent("run-graph-cond", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         agent.graph = graph_from(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "g"
-[stages.main]
-[stages.main.transitions.error_recovery]
-condition = "error"
-[stages.error_recovery]
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+
+[[graph.stages]]
+name = "error_recovery"
+
+[[graph.edges]]
+name = "error_recovery"
+from = "main"
+to = "error_recovery"
+when = "error"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
@@ -2143,13 +2190,24 @@ condition = "error"
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
         // "plan" has an edge to "implement", which is the selected stage.
         agent.graph = graph_from(
-            r#"
-[agent]
+            r#"[blueprint]
 name = "g"
-[stages.plan]
-[stages.plan.transitions.implement]
-transform = "clear"
-[stages.implement]
+version = "0.1.0"
+
+[graph]
+edges = [
+    { name = "implement", from = "plan", to = "implement", carry = "clear" },
+]
+
+[[graph.stages]]
+name = "plan"
+
+[[graph.stages]]
+name = "implement"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
 "#,
         );
         agent.stages = vec![crate::runstate::StageRecord {
@@ -2179,9 +2237,27 @@ transform = "clear"
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-terminal", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        // "plan" has no outgoing edges (terminal)
-        agent.graph =
-            graph_from("[agent]\nname = \"g\"\n[stages.plan]\n[stages.plan.transitions]\n");
+        // "plan" has no outgoing edges (terminal); the edge into it from
+        // "start" is a branch, so the block is drawn.
+        agent.graph = graph_from(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "plan", from = "start", to = "plan" }]
+
+[[graph.stages]]
+name = "start"
+
+[[graph.stages]]
+name = "plan"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
+        );
         agent.stages = vec![crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Complete,
             entered: true,
@@ -2207,7 +2283,25 @@ transform = "clear"
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-noedge", AgentDisplayStatus::Active);
         agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
-        agent.graph = graph_from("[agent]\nname = \"g\"\n[stages.main]\n[stages.next]\n");
+        agent.graph = graph_from(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[graph]
+edges = [{ name = "next", from = "main", to = "next" }]
+
+[[graph.stages]]
+name = "main"
+
+[[graph.stages]]
+name = "next"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
+        );
         agent.stages = vec![crate::runstate::StageRecord {
             status: crate::runstate::StageRunStatus::Active,
             entered: true,

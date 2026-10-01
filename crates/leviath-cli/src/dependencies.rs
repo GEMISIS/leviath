@@ -1,6 +1,6 @@
-//! Checking a blueprint's declared `[[dependencies]]` against this machine.
+//! Checking a graph's declared `dependencies` against this machine.
 //!
-//! A blueprint says what it needs (see [`leviath_runtime::spec::blueprint::Dependency`]);
+//! A graph says what it needs (see [`DependencyDef`]);
 //! this module answers whether the machine has it. The same evaluator is used
 //! two ways: the spawn gate fails a run before the first billed inference if a
 //! required dependency is missing, and `lev deps` reports the same findings
@@ -14,7 +14,17 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use leviath_mcp::MCPServerConfig;
-use leviath_runtime::spec::blueprint::{Dependency, DependencyKind};
+use leviath_runtime::spec::graph::{CodeRef, DependencyDef, Needs};
+
+/// A dependency's kind, as a status line and `lev deps` name it.
+pub(crate) fn kind_tag(needs: &Needs) -> &'static str {
+    match needs {
+        Needs::McpServer { .. } => "mcp_server",
+        Needs::Env(_) => "env",
+        Needs::Binary(_) => "binary",
+        Needs::Check(_) => "script",
+    }
+}
 
 /// The machine facts a check reads: environment variables and what is on
 /// `PATH`. Injected so the evaluator can be tested against a fake machine.
@@ -159,10 +169,10 @@ impl DependencyReport {
 /// Evaluate every dependency of a blueprint against this machine.
 ///
 /// `servers` is the operator's configured MCP servers, `blueprint_dir` the
-/// directory holding the manifest (a `script` check is resolved and fenced
-/// against it), and `probe` reads env and `PATH`.
+/// directory holding the blueprint (a check named by file is read from it,
+/// and never from outside it), and `probe` reads env and `PATH`.
 pub fn evaluate(
-    deps: &[Dependency],
+    deps: &[DependencyDef],
     servers: &[MCPServerConfig],
     blueprint_dir: &Path,
     probe: &dyn Probe,
@@ -171,7 +181,7 @@ pub fn evaluate(
         .iter()
         .map(|dep| DependencyStatus {
             name: dep.name.clone(),
-            kind: dep.kind.tag(),
+            kind: kind_tag(&dep.needs),
             required: dep.required,
             state: evaluate_one(dep, servers, blueprint_dir, probe),
         })
@@ -180,19 +190,19 @@ pub fn evaluate(
 }
 
 /// A dependency's own remedy, or a sensible default sentence.
-fn remedy_or(dep: &Dependency, default: String) -> String {
+fn remedy_or(dep: &DependencyDef, default: String) -> String {
     dep.remedy.clone().unwrap_or(default)
 }
 
 fn evaluate_one(
-    dep: &Dependency,
+    dep: &DependencyDef,
     servers: &[MCPServerConfig],
     blueprint_dir: &Path,
     probe: &dyn Probe,
 ) -> DependencyState {
-    match &dep.kind {
-        DependencyKind::McpServer { server, env } => {
-            if !servers.iter().any(|s| &s.name == server) {
+    match &dep.needs {
+        Needs::McpServer { server, env } => {
+            if !servers.iter().any(|s| s.name == server.as_str()) {
                 return DependencyState::Unmet(remedy_or(
                     dep,
                     format!("configure the MCP server '{server}' in your config"),
@@ -208,7 +218,7 @@ fn evaluate_one(
             }
             DependencyState::Satisfied
         }
-        DependencyKind::Env { var } => {
+        Needs::Env(var) => {
             if env_is_set(probe, var) {
                 DependencyState::Satisfied
             } else {
@@ -218,7 +228,7 @@ fn evaluate_one(
                 ))
             }
         }
-        DependencyKind::Binary { command } => {
+        Needs::Binary(command) => {
             if probe.which(command) {
                 DependencyState::Satisfied
             } else {
@@ -228,25 +238,27 @@ fn evaluate_one(
                 ))
             }
         }
-        DependencyKind::Script { check } => evaluate_script(check, blueprint_dir),
+        Needs::Check(check) => evaluate_script(check, blueprint_dir),
     }
 }
 
-/// Compile and run a `script` dependency's check, fenced to the blueprint dir.
-fn evaluate_script(check: &str, blueprint_dir: &Path) -> DependencyState {
-    let path = blueprint_dir.join(check);
-    if !leviath_core::resolves_within(&path, blueprint_dir) {
-        return DependencyState::Unusable(format!(
-            "the check script '{check}' resolves outside the blueprint directory"
-        ));
+/// What a check is called in a message: its file, or `inline check`.
+pub(crate) fn code_label(code: &CodeRef) -> &str {
+    match code {
+        CodeRef::File(path) => path,
+        CodeRef::Inline(_) => "inline check",
     }
-    let source = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            return DependencyState::Unusable(format!("read check script '{check}': {e}"));
-        }
+}
+
+/// Compile and run a dependency's check. A check named by file is read from
+/// the blueprint's directory, and never from outside it.
+fn evaluate_script(check: &CodeRef, blueprint_dir: &Path) -> DependencyState {
+    let label = code_label(check);
+    let source = match leviath_runtime::bind::host::read_code(check, Some(blueprint_dir)) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) => return DependencyState::Unusable(format!("check script: {e}")),
     };
-    let compiled = match leviath_scripting::dependency_check::compile(check, &source) {
+    let compiled = match leviath_scripting::dependency_check::compile(label, &source) {
         Ok(c) => c,
         Err(e) => return DependencyState::Unusable(e.to_string()),
     };
@@ -264,7 +276,7 @@ fn evaluate_script(check: &str, blueprint_dir: &Path) -> DependencyState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_runtime::spec::blueprint::DependencyKind;
+    use leviath_runtime::spec::names::McpServerName;
     use std::collections::HashMap;
 
     struct FakeProbe {
@@ -280,10 +292,10 @@ mod tests {
         }
     }
 
-    fn dep(name: &str, kind: DependencyKind) -> Dependency {
-        Dependency {
+    fn dep(name: &str, needs: Needs) -> DependencyDef {
+        DependencyDef {
             name: name.to_string(),
-            kind,
+            needs,
             required: true,
             remedy: None,
             description: None,
@@ -299,7 +311,7 @@ mod tests {
     }
 
     fn eval_one(
-        dep: &Dependency,
+        dep: &DependencyDef,
         servers: &[MCPServerConfig],
         probe: &dyn Probe,
     ) -> DependencyState {
@@ -317,8 +329,8 @@ mod tests {
         };
         let d = dep(
             "meshy",
-            DependencyKind::McpServer {
-                server: "meshy".into(),
+            Needs::McpServer {
+                server: McpServerName::new("meshy").unwrap(),
                 env: vec!["MESHY_API_KEY".into()],
             },
         );
@@ -354,37 +366,19 @@ mod tests {
             bins: vec!["blender".into()],
         };
         assert_eq!(
-            eval_one(
-                &dep(
-                    "t",
-                    DependencyKind::Env {
-                        var: "TOKEN".into()
-                    }
-                ),
-                &[],
-                &probe
-            ),
+            eval_one(&dep("t", Needs::Env("TOKEN".into())), &[], &probe),
             DependencyState::Satisfied
         );
         assert!(matches!(
-            eval_one(&dep("t", DependencyKind::Env { var: "NOPE".into() }), &[], &probe),
+            eval_one(&dep("t", Needs::Env("NOPE".into())), &[], &probe),
             DependencyState::Unmet(m) if m.contains("NOPE")
         ));
         assert_eq!(
-            eval_one(
-                &dep(
-                    "b",
-                    DependencyKind::Binary {
-                        command: "blender".into()
-                    }
-                ),
-                &[],
-                &probe
-            ),
+            eval_one(&dep("b", Needs::Binary("blender".into())), &[], &probe),
             DependencyState::Satisfied
         );
         assert!(matches!(
-            eval_one(&dep("b", DependencyKind::Binary { command: "nope".into() }), &[], &probe),
+            eval_one(&dep("b", Needs::Binary("nope".into())), &[], &probe),
             DependencyState::Unmet(m) if m.contains("nope")
         ));
     }
@@ -395,7 +389,7 @@ mod tests {
             env: HashMap::new(),
             bins: vec![],
         };
-        let mut d = dep("t", DependencyKind::Env { var: "NOPE".into() });
+        let mut d = dep("t", Needs::Env("NOPE".into()));
         d.remedy = Some("do the thing".into());
         assert_eq!(
             eval_one(&d, &[], &probe),
@@ -418,7 +412,7 @@ mod tests {
         write("broken.rhai", r#"fn check() { throw "boom" }"#);
         let run = |name: &str| {
             evaluate(
-                &[dep("s", DependencyKind::Script { check: name.into() })],
+                &[dep("s", Needs::Check(CodeRef::File(name.into())))],
                 &[],
                 dir.path(),
                 &probe,
@@ -431,7 +425,7 @@ mod tests {
         assert_eq!(run("bad.rhai"), DependencyState::Unmet("install it".into()));
         assert!(matches!(run("broken.rhai"), DependencyState::Unusable(r) if r.contains("boom")));
         assert!(
-            matches!(run("missing.rhai"), DependencyState::Unusable(r) if r.contains("read check script"))
+            matches!(run("missing.rhai"), DependencyState::Unusable(r) if r.contains("cannot read"))
         );
         // A path escaping the blueprint dir is refused.
         assert!(matches!(
@@ -443,6 +437,20 @@ mod tests {
         assert!(
             matches!(run("nofn.rhai"), DependencyState::Unusable(r) if r.contains("fn check()"))
         );
+        // A check written inline needs no file.
+        let inline = |source: &str| {
+            evaluate(
+                &[dep("s", Needs::Check(CodeRef::Inline(source.into())))],
+                &[],
+                dir.path(),
+                &probe,
+            )
+            .statuses
+            .remove(0)
+        };
+        let ok = inline("fn check() { () }");
+        assert_eq!((ok.kind, ok.state), ("script", DependencyState::Satisfied));
+        assert_eq!(code_label(&CodeRef::Inline(String::new())), "inline check");
     }
 
     #[test]
@@ -451,13 +459,13 @@ mod tests {
             env: HashMap::new(),
             bins: vec![],
         };
-        let mut optional = dep("opt", DependencyKind::Env { var: "NOPE".into() });
+        let mut optional = dep("opt", Needs::Env("NOPE".into()));
         optional.required = false;
         let report = evaluate(
             &[
-                dep("need", DependencyKind::Env { var: "NOPE".into() }),
+                dep("need", Needs::Env("NOPE".into())),
                 optional,
-                dep("have", DependencyKind::Env { var: "NOPE".into() }),
+                dep("have", Needs::Env("NOPE".into())),
             ],
             &[],
             Path::new("."),
@@ -511,12 +519,7 @@ mod tests {
             bins: vec![],
         };
         let report = evaluate(
-            &[dep(
-                "t",
-                DependencyKind::Env {
-                    var: "TOKEN".into(),
-                },
-            )],
+            &[dep("t", Needs::Env("TOKEN".into()))],
             &[],
             Path::new("."),
             &probe,

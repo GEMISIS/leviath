@@ -9,6 +9,7 @@ use leviath_core::sandbox::{OnUnavailable, SandboxKind};
 use serde::{Deserialize, Serialize};
 
 use super::stage::CodeRef;
+use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::{
     BlueprintName, McpServerName, MimePattern, ModelRef, RegionName, ToolName,
 };
@@ -43,6 +44,56 @@ pub struct OutputDef {
     /// Files the answer hands back beside its text.
     #[serde(default)]
     pub artifacts: Vec<ArtifactDef>,
+}
+
+impl OutputDef {
+    /// The output shape `spec` describes, as a graph or a request carries it.
+    /// An artifact whose mime type does not read is an issue under `output`.
+    pub fn from_output_spec(spec: &leviath_core::output::OutputSpec) -> Result<Self, SpawnIssues> {
+        let mut issues = SpawnIssues::new();
+        let def = Self::read(spec, &SpecPath::root().field("output"), &mut issues);
+        issues.into_result(def)
+    }
+
+    /// `spec` as an output shape, with every artifact whose mime type does not
+    /// read pushed onto `issues` at its place under `at` and left out.
+    pub(crate) fn read(
+        spec: &leviath_core::output::OutputSpec,
+        at: &SpecPath,
+        issues: &mut SpawnIssues,
+    ) -> Self {
+        let artifacts = spec
+            .artifacts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| match a.mime_type.parse::<MimePattern>() {
+                Ok(mime_type) => Some(ArtifactDef {
+                    name: a.name.clone(),
+                    mime_type,
+                    required: a.required,
+                    description: a.description.clone(),
+                }),
+                Err(e) => {
+                    issues.push(SpawnIssue::new(
+                        at.field("artifacts").index(i),
+                        IssueCode::Invalid,
+                        e.to_string(),
+                    ));
+                    None
+                }
+            })
+            .collect();
+        OutputDef {
+            format: spec.format.clone(),
+            instructions: spec.instructions.clone(),
+            example: spec.example.clone(),
+            schema: spec.schema.clone().map(JsonDoc::new),
+            validator: spec.validator.clone().map(CodeRef::File),
+            on_validator_error: spec.on_validator_error,
+            overwrite_artifacts: spec.overwrite_artifacts,
+            artifacts,
+        }
+    }
 }
 
 /// A file the final output hands back.

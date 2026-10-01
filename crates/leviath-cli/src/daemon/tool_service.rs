@@ -282,10 +282,10 @@ impl<T> Live<T> {
 pub(crate) struct ConfigSource {
     /// The blueprint's name, which the per-agent config tables are keyed by.
     pub agent_name: String,
-    /// The blueprint's `[safe_commands]`, when it declares any.
-    pub blueprint_safe: Option<leviath_runtime::spec::blueprint::SafeCommandsConfig>,
-    /// The blueprint's `[read_paths]`, when it declares any.
-    pub blueprint_read_paths: Option<leviath_runtime::spec::blueprint::ReadPathsConfig>,
+    /// The graph's `safe_commands`, when it declares any.
+    pub blueprint_safe: Option<leviath_runtime::spec::graph::SafeCommandsDef>,
+    /// The graph's `read_paths`, empty when it declares none.
+    pub blueprint_read_paths: Vec<String>,
     /// The run's workdir, which read-path entries compile relative to.
     pub workdir: std::path::PathBuf,
     /// The yolo profile the run was launched under by name, so a resume reads
@@ -386,7 +386,7 @@ impl AgentToolState {
         // edit to get unstuck. A set that will not compile is left alone.
         if let Some(policy) = crate::daemon::spawn::read_path_policy_for(
             &source.agent_name,
-            source.blueprint_read_paths.as_ref(),
+            &source.blueprint_read_paths,
             config,
             &source.workdir,
         ) {
@@ -1206,7 +1206,7 @@ mod tests {
         Arc::new(ConfigSource {
             agent_name: "tester".to_string(),
             blueprint_safe: None,
-            blueprint_read_paths: None,
+            blueprint_read_paths: Vec::new(),
             workdir: std::env::temp_dir(),
             yolo_profile: None,
         })
@@ -1733,9 +1733,7 @@ mod tests {
             config_source: Arc::new(ConfigSource {
                 agent_name: "tester".to_string(),
                 blueprint_safe: None,
-                blueprint_read_paths: Some(leviath_runtime::spec::blueprint::ReadPathsConfig {
-                    allow: vec![outside.path().to_string_lossy().to_string()],
-                }),
+                blueprint_read_paths: vec![outside.path().to_string_lossy().to_string()],
                 workdir: workdir.path().to_path_buf(),
                 yolo_profile: None,
             }),
@@ -1784,11 +1782,9 @@ mod tests {
             config_source: Arc::new(ConfigSource {
                 agent_name: "tester".to_string(),
                 blueprint_safe: None,
-                blueprint_read_paths: Some(leviath_runtime::spec::blueprint::ReadPathsConfig {
-                    // An empty entry is refused by the compiler, which is the
-                    // arm a resume has to survive.
-                    allow: vec![String::new()],
-                }),
+                // An empty entry is refused by the compiler, which is the arm
+                // a resume has to survive.
+                blueprint_read_paths: vec![String::new()],
                 workdir: workdir.path().to_path_buf(),
                 yolo_profile: None,
             }),
@@ -4281,7 +4277,7 @@ mod tests {
             Arc::get_mut(&mut state).expect("sole owner").config_source = Arc::new(ConfigSource {
                 agent_name: "tester".to_string(),
                 blueprint_safe: None,
-                blueprint_read_paths: None,
+                blueprint_read_paths: Vec::new(),
                 workdir: std::env::temp_dir(),
                 yolo_profile: Some("careful".to_string()),
             });

@@ -4,15 +4,15 @@
 //! dependencies. Filesystem-based manifest discovery (`find_manifest`) lives in
 //! `leviath-cli`, since it depends on cli-only path helpers.
 
-use crate::spec::blueprint::{
-    ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
-    StageMode, StuckConfig, ToolRescan, TransitionCondition, TransitionEdge,
-};
-use crate::spec::layout::{RegionDefinition, RegionSeed};
-use crate::spec::{Blueprint, ContextLayout, Stage};
 use leviath_core::error::{Error, Result};
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{EvictionStrategy, RegionKind};
+use leviath_runtime::spec::blueprint::{
+    ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
+    StageMode, StuckConfig, ToolRescan, TransitionCondition, TransitionEdge,
+};
+use leviath_runtime::spec::layout::{RegionDefinition, RegionSeed};
+use leviath_runtime::spec::{Blueprint, ContextLayout, Stage};
 
 /// Parse an agent.leviath TOML manifest into a Blueprint.
 pub fn parse_manifest(content: &str) -> Result<Blueprint> {
@@ -226,6 +226,12 @@ mod regions;
 pub mod renamed;
 mod sections;
 mod stage;
+mod tables;
+mod transition;
+mod unread;
+
+pub use tables::read_manifest_tables;
+pub(crate) use unread::unread_keys;
 
 // Glob re-exports, so this split is invisible to every caller and to the
 // test module, exactly as `pipeline/mod.rs` does it.
@@ -234,12 +240,12 @@ use read::*;
 use regions::*;
 use sections::*;
 use stage::*;
+use transition::*;
 
 /// Every key `parse_manifest` reads off the `[agent]` table, for the schema
-/// guard in `tests.rs`. A list and not a check: the table ignores what it
-/// does not know.
-#[cfg(test)]
-const AGENT_KEYS: &[&str] = &[
+/// guard in `tests.rs` and the unread keys `migrate` reports. The parser
+/// itself ignores what it does not know.
+pub(super) const AGENT_KEYS: &[&str] = &[
     "batch_tool_hint",
     "description",
     "dynamic_tools",
@@ -253,5 +259,7 @@ const AGENT_KEYS: &[&str] = &[
     "version",
 ];
 
+#[cfg(test)]
+mod graph_tests;
 #[cfg(test)]
 mod tests;

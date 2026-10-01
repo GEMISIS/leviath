@@ -321,7 +321,7 @@ impl AgentDisplayStatus {
 pub(crate) struct DashboardAgent {
     /// The run id, which is also what every action against this row quotes.
     pub id: String,
-    /// The blueprint's name, as the manifest declares it.
+    /// The blueprint's name, as its `agent.toml` declares it.
     pub blueprint_name: String,
     /// The stage the run is in, by name.
     pub stage: String,
@@ -396,8 +396,8 @@ pub(crate) struct DashboardAgent {
     /// stage tabs render. Capped at the run's `updated_at` when nothing is
     /// driving the run, so an abandoned run's stage does not tick forever.
     pub clock_now: i64,
-    /// The blueprint's stage graph, loaded once when the run first appears.
-    /// `None` when the manifest could not be read: the run still shows, the
+    /// The run's stage graph, read off its run file when the run first
+    /// appears. `None` when it could not be read: the run still shows, the
     /// graph surfaces say why they are empty. Shared, not owned: the detail
     /// view clones the whole agent every frame.
     pub(super) graph: Option<std::sync::Arc<crate::tui::flowgraph::StageGraph>>,
@@ -570,7 +570,7 @@ pub(super) struct NewRunAgent {
     /// Where it came from: `installed`, `configured`, `local`, or `bundled`.
     pub(super) source: String,
     pub(super) description: String,
-    /// What gets handed to `lev run`'s resolver: the manifest's directory for a
+    /// What gets handed to `lev run`'s resolver: the blueprint's directory for a
     /// discovered agent, the bare name for a bundled one (which resolves only
     /// once `lev setup` has installed it - and says so if it has not).
     pub(super) path: String,

@@ -1,5 +1,5 @@
 //! The checks on a `fan_out` stage: where it goes when a worker fails, and
-//! whether the workers it runs on this blueprint can be spawned at all.
+//! whether the workers it runs on this graph have anywhere to put their work.
 //!
 //! Next to, not inside, the shape checks: a fan-out is the one place a
 //! blueprint spawns *itself*, so what it demands of the caller it also demands
@@ -7,6 +7,7 @@
 //! stage in isolation sit in one file.
 
 use super::*;
+use leviath_runtime::spec::graph::{EdgeCondition, StageDef, WorkerFailure, WorkerSource};
 
 /// A `fail_all` fan-out stage with nowhere to go when a worker fails.
 ///
@@ -21,24 +22,16 @@ use super::*;
 ///
 /// A warning rather than an error, because a run that ends loudly on a failed
 /// worker is a defensible design, just rarely the intended one.
-pub(super) fn lint_fanout_escape(stage: &leviath_runtime::spec::Stage) -> Vec<LintFinding> {
-    let StageMode::FanOut { config } = &stage.mode else {
+pub(super) fn lint_fanout_escape(graph: &RunGraph, stage: &StageDef) -> Vec<LintFinding> {
+    let StageMode::FanOut(config) = &stage.mode else {
         return Vec::new();
     };
-    if config.on_worker_failure != leviath_runtime::spec::blueprint::WorkerFailurePolicy::FailAll {
+    if config.on_worker_failure != WorkerFailure::FailAll {
         return Vec::new();
     }
-    let escapes = stage
-        .transitions
-        .iter()
-        .flat_map(|t| t.values())
-        .any(|edge| {
-            matches!(
-                edge.condition,
-                leviath_runtime::spec::blueprint::TransitionCondition::Error
-                    | leviath_runtime::spec::blueprint::TransitionCondition::DeadEnd
-            )
-        });
+    let escapes = graph
+        .edges_from(stage.name.as_str())
+        .any(|edge| matches!(edge.when, EdgeCondition::Error | EdgeCondition::DeadEnd));
     if escapes {
         return Vec::new();
     }
@@ -46,42 +39,45 @@ pub(super) fn lint_fanout_escape(stage: &leviath_runtime::spec::Stage) -> Vec<Li
         LintFinding::new(
             LintSeverity::Warning,
             "fanout-no-escape",
-            "sets on_worker_failure = \"fail_all\" but declares no 'error' or 'dead_end' \
-             transition, so one failed worker ends the run with nowhere to go"
+            "sets on_worker_failure = \"fail_all\" but has no 'error' or 'dead_end' \
+             edge, so one failed worker ends the run with nowhere to go"
                 .to_string(),
         )
-        .in_stage(&stage.name)
+        .in_stage(stage.name.as_str())
         .with_fix(
-            "add a transition with condition = \"error\" to a recovery stage, or use the \
+            "add an edge with when = \"error\" to a recovery stage, or use the \
              default on_worker_failure = \"continue\""
                 .to_string(),
         ),
     ]
 }
 
-/// A fan-out whose workers are this blueprint, which cannot take a task.
+/// A fan-out whose workers run this graph, which declares no input for a work
+/// item to fill.
 ///
-/// A worker is spawned with its work item as the task, the way `lev run --task`
-/// hands one in. The spawn refuses a task the blueprint has nowhere to put,
-/// because a run that drops its task answers a question nobody asked. That
-/// refusal is right for a person and silent for a fan-out: every worker fails
-/// the same way, the merge is told to cover for all of them, and the run
-/// completes looking like the parallel part happened. It never did.
+/// Each work item is `{ id, inputs }`, its inputs checked against the inputs
+/// the worker's graph declares. A graph that binds no input to a region has
+/// nowhere to put what an item carries, so every worker starts without the
+/// work it was split off to do, the merge is told to cover for all of them,
+/// and the run completes looking like the parallel part happened. It never
+/// did.
 ///
-/// Only `worker_stage` fan-outs are checked. `worker_agent` names another
-/// blueprint, which may or may not be installed here, and that one is linted
-/// when it is validated itself.
-pub(super) fn lint_fanout_worker_task(
-    blueprint: &Blueprint,
-    stage: &leviath_runtime::spec::Stage,
-) -> Vec<LintFinding> {
-    let StageMode::FanOut { config } = &stage.mode else {
+/// Only fan-outs onto a stage of this graph are checked. One onto another
+/// blueprint is linted when that blueprint is validated itself.
+pub(super) fn lint_fanout_worker_task(graph: &RunGraph, stage: &StageDef) -> Vec<LintFinding> {
+    let StageMode::FanOut(config) = &stage.mode else {
         return Vec::new();
     };
-    let Some(worker) = config.worker_stage.as_deref() else {
+    let WorkerSource::Stage(worker) = &config.worker else {
         return Vec::new();
     };
-    if blueprint.accepts_task() {
+    let lands = graph.inputs.iter().any(|input| {
+        input
+            .binds
+            .iter()
+            .any(|b| matches!(b, leviath_runtime::spec::inputs::InputSlot::Region(_)))
+    });
+    if lands {
         return Vec::new();
     }
     vec![
@@ -89,16 +85,16 @@ pub(super) fn lint_fanout_worker_task(
             LintSeverity::Error,
             "fanout-worker-task-unheld",
             format!(
-                "runs its workers on stage '{worker}' of this blueprint, and each worker \
-                 is spawned with its work item as the task, but no region here is seeded \
-                 from the task, so every worker is refused at spawn and the merge stage \
-                 reviews alone"
+                "runs its workers on stage '{worker}' of this graph, but the graph declares \
+                 no input bound to a region, so a work item's inputs have nowhere to land and \
+                 every worker starts without its work"
             ),
         )
-        .in_stage(&stage.name)
+        .in_stage(stage.name.as_str())
         .with_fix(
-            "add a region seeded from the task, for example \
-             task = { kind = \"pinned\", budget = \"10%\", seed = \"task\" }"
+            "declare an input the split prompt fills for each item and bind it to a region, \
+             for example [[graph.inputs]] name = \"task\", type = \"text\", \
+             binds = [{ region = \"task\" }]"
                 .to_string(),
         ),
     ]

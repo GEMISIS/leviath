@@ -225,13 +225,11 @@ async fn a_spawn_carries_every_field_it_was_given() {
 #[tokio::test]
 async fn a_raw_graph_is_sent_whole_and_a_run_not_yet_written_is_null() {
     crate::runstate::with_isolated_runs_dir_async("graphql-spawn-raw", |_d| async move {
-        let manifest = leviath_runtime::spec::manifest::parse_manifest(
-            "[agent]\nname = \"raw\"\n\n[context.regions.plan]\nkind = \"pinned\"\n\
-             max_tokens = 100\n\n[stages.only]\nmode = \"autonomous\"\n",
+        let graph: leviath_runtime::spec::graph::RunGraph = toml::from_str(
+            "title = \"raw\"\n\n[[stages]]\nname = \"only\"\n\n[layout]\n\
+             total_budget_tokens = 100\nregions = [{ name = \"plan\", kind = \"pinned\", budget = 100 }]\n",
         )
-        .expect("the manifest parses");
-        let graph = leviath_runtime::spec::graph::RunGraph::from_blueprint(&manifest)
-            .expect("it reads as a graph");
+        .expect("the graph parses");
         let sent = graph.clone();
         let (control, _dir, _srv) = fake_daemon(move |request| {
             let ControlRequest::Spawn { request } = request else {

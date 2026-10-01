@@ -24,7 +24,7 @@
 //!   started in.
 //!
 //! What the operator configured stays theirs: the default blueprint that
-//! `session/new` runs (`--agent`, or the `agent.leviath` in the session's
+//! `session/new` runs (`--agent`, or the `agent.toml` in the session's
 //! directory) is read from wherever it is, since the operator chose it when
 //! they set the host up.
 //!
@@ -229,12 +229,14 @@ pub(super) mod tests {
 
     /// A one-stage graph, as a host sending its own would write it.
     pub(in super::super) fn a_graph() -> leviath_runtime::spec::graph::RunGraph {
-        leviath_runtime::spec::env::LoadedBlueprint::from_manifest(
-            "[agent]\nname = \"sketch\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[stages.work]\nsystem_prompt = \"Work.\"\n",
-            std::env::temp_dir(),
+        leviath_blueprint::BlueprintFile::parse(
+            "[blueprint]\nname = \"sketch\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n\
+             [graph]\nstages = [{ name = \"work\", system_prompt = \"Work.\" }]\n\
+             layout = { total_budget_tokens = 1000, regions = [\
+             { name = \"conversation\", kind = { kind = \"sliding_window\", max_items = 20 }, budget = 1000 }] }\n",
         )
         .unwrap()
-        .graph
+        .run_graph()
     }
 
     fn named(name: &str) -> SpawnRequest {

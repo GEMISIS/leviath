@@ -23,10 +23,10 @@ pub(crate) use leviath_core::config::TelemetryExporterKind;
 /// Permission for one Rhai *script-tool* host function (Layer 3 of the
 /// four-layer permission model). Gates what a registered script may *do*,
 /// independent of
-/// whether the tool itself is visible ([`available_tools`]) or approved at
+/// whether the tool itself is visible ([`tools`]) or approved at
 /// runtime ([`ToolPolicy`]).
 ///
-/// [`available_tools`]: leviath_runtime::spec::blueprint::Stage::available_tools
+/// [`tools`]: leviath_runtime::spec::graph::StageDef::tools
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptPermission {

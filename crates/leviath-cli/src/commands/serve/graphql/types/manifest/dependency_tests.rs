@@ -24,21 +24,23 @@ fn server() -> McpServerTemplate {
     }
 }
 
-/// A core dependency of one kind, with the fields every kind shares filled in.
+/// A graph's dependency of one kind, with the fields every kind shares filled
+/// in.
 fn core_dependency(
-    kind: leviath_runtime::spec::blueprint::DependencyKind,
-) -> leviath_runtime::spec::blueprint::Dependency {
-    leviath_runtime::spec::blueprint::Dependency {
+    needs: leviath_runtime::spec::graph::Needs,
+) -> leviath_runtime::spec::graph::DependencyDef {
+    use leviath_runtime::spec::graph::CodeRef;
+    leviath_runtime::spec::graph::DependencyDef {
         name: "thing".to_string(),
-        kind,
+        needs,
         required: true,
         remedy: Some("install it".to_string()),
         description: Some("needed for the run".to_string()),
-        install: Some(leviath_runtime::spec::blueprint::DependencyInstall {
+        install: Some(leviath_runtime::spec::graph::InstallDef {
             command: Some("npm i -g docs-mcp".to_string()),
             commands: BTreeMap::from([("macos".to_string(), "brew install thing".to_string())]),
-            script: Some("install.rhai".to_string()),
-            server: Some(leviath_runtime::spec::blueprint::McpServerTemplate {
+            script: Some(CodeRef::File("install.rhai".to_string())),
+            server: Some(leviath_runtime::spec::graph::McpServerTemplate {
                 transport: Some("stdio".to_string()),
                 command: Some("docs-mcp".to_string()),
                 url: None,
@@ -50,14 +52,15 @@ fn core_dependency(
     }
 }
 
-/// Every kind a manifest can declare maps to the one field set that kind uses,
+/// Every kind a graph can declare maps to the one field set that kind uses,
 /// and the shared fields and the install block carry over untouched.
 #[test]
 fn every_dependency_kind_maps_to_its_own_fields() {
-    use leviath_runtime::spec::blueprint::DependencyKind as Core;
+    use leviath_runtime::spec::graph::{CodeRef, Needs as Core};
+    use leviath_runtime::spec::names::McpServerName;
 
     let mcp = BlueprintDependency::from(&core_dependency(Core::McpServer {
-        server: "docs".to_string(),
+        server: McpServerName::new("docs").unwrap(),
         env: vec!["DOCS_TOKEN".to_string()],
     }));
     assert_eq!(mcp.kind, DependencyKind::McpServer);
@@ -77,23 +80,19 @@ fn every_dependency_kind_maps_to_its_own_fields() {
     assert_eq!(server.transport, Some(McpTransport::Stdio));
     assert_eq!(server.env[0].name, "DOCS_TOKEN");
 
-    let env = BlueprintDependency::from(&core_dependency(Core::Env {
-        var: "API_KEY".to_string(),
-    }));
+    let env = BlueprintDependency::from(&core_dependency(Core::Env("API_KEY".to_string())));
     assert_eq!(env.kind, DependencyKind::Env);
     assert_eq!(env.var, Some("API_KEY".to_string()));
     assert!(env.server.is_none());
 
-    let binary = BlueprintDependency::from(&core_dependency(Core::Binary {
-        command: "blender".to_string(),
-    }));
+    let binary = BlueprintDependency::from(&core_dependency(Core::Binary("blender".to_string())));
     assert_eq!(binary.kind, DependencyKind::Binary);
     assert_eq!(binary.command, Some("blender".to_string()));
     assert!(binary.var.is_none());
 
-    let script = BlueprintDependency::from(&core_dependency(Core::Script {
-        check: "checks/thing.rhai".to_string(),
-    }));
+    let script = BlueprintDependency::from(&core_dependency(Core::Check(CodeRef::File(
+        "checks/thing.rhai".to_string(),
+    ))));
     assert_eq!(script.kind, DependencyKind::Script);
     assert_eq!(script.check, Some("checks/thing.rhai".to_string()));
     assert!(script.command.is_none());
@@ -103,7 +102,7 @@ fn every_dependency_kind_maps_to_its_own_fields() {
 /// else is left out rather than guessed at.
 #[test]
 fn a_transport_reads_back_or_is_left_out() {
-    let template = |transport: Option<&str>| leviath_runtime::spec::blueprint::McpServerTemplate {
+    let template = |transport: Option<&str>| leviath_runtime::spec::graph::McpServerTemplate {
         transport: transport.map(str::to_string),
         command: None,
         url: None,
@@ -114,7 +113,7 @@ fn a_transport_reads_back_or_is_left_out() {
     assert_eq!(
         McpServerTemplate::from(&template(Some("HTTP"))).transport,
         Some(McpTransport::Http),
-        "case-insensitive, like the manifest reader"
+        "case-insensitive, like the installer"
     );
     assert!(
         McpServerTemplate::from(&template(Some("carrier-pigeon")))

@@ -14,215 +14,191 @@ use super::stage::{
     EffectiveNudge, EffectiveStageSettings, FanOut, OutputRequirement, Stage, StageContext,
     StageMode,
 };
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 use crate::commands::serve::testutil::state_with_agent_paths;
 
-/// A manifest that exercises the detail types.
+/// A blueprint that exercises the detail types.
 pub(super) fn manifest() -> String {
-    r#"
-[agent]
+    r#"[blueprint]
 name = "detailed"
 version = "2.0.0"
 description = "uses the awkward corners"
-entry_stage = "plan"
 
-[security]
+[graph]
+entry = "plan"
 taint_tracking = true
+safe_commands = { tools = ["read_file"], shell = ["cargo test"] }
+nudge = { max = 5 }
+repetition = { max_repeat_calls = 4 }
+file_tracking = { region = "files", track_writes = false }
 
-[sandbox]
-kind = "container"
-image = "python:3.12"
-network = false
-mounts = ["./data:/data"]
+[[graph.stages]]
+name = "plan"
+description = "decide"
+tools = ["read_file", "shell"]
+max_iterations = 8
+hide = ["facts"]
+reset = ["env"]
+tool_permissions = { read_file = "allow", shell = "ask" }
+transition_prompt = "pick the next step"
+output_routing = { "image/*" = "notes" }
+tool_accepts = { spawn_agent = ["image/*"] }
+hooks = { on_stage_enter = { file = "hooks/enter.rhai" } }
 
-[agent.nudge]
-max = 5
+[graph.stages.model]
+models = [{ provider = "anthropic", model = "claude-sonnet-5" }]
+allow_user_default = false
+request_timeout_secs = 300
+params = { temperature = 0.2, max_output_tokens = "40%", extra = { top_p = 0.9 } }
 
-[compaction]
-provider = "anthropic"
-model = "claude-haiku-4-5"
-max_summary_tokens = 800
-temperature = 0.1
-
-[context.file_tracking]
-region = "files"
-track_reads = true
-track_writes = false
-
-[repetition_detection]
-max_repeat_calls = 4
-
-[safe_commands]
-tools = ["read_file"]
-shell = ["cargo test"]
-
-[agent.output]
-format = "json"
-instructions = "one object per finding"
-validator = "checks/output.rhai"
-on_validator_error = "accept"
-
-[[agent.output.artifacts]]
-name = "report"
-type = "text/markdown"
+[[graph.stages.mode.interactive_points]]
+name = "review"
+prompt = "Does this look right?"
 required = true
-description = "the write-up"
+unattended = "ask"
+style = "multiple_choice"
+options = ["Approve", "Revise"]
+directives = { Revise = "ask what to change" }
+document_region = "plan"
 
-[[dependencies]]
-name = "blender"
-kind = "binary"
-command = "blender"
-remedy = "install Blender and put it on PATH"
+[graph.stages.tool_routing]
+default_region = "notes"
+tool_regions = { shell = "env" }
+max_result_tokens = 4000
+tool_max_result_tokens = { read_file = 2000 }
 
-[[dependencies]]
-name = "docs"
-kind = "mcp_server"
-server = "docs"
-env = ["DOCS_TOKEN"]
+[[graph.stages]]
+name = "stuck_out"
 
-[dependencies.install]
-command = "npm i -g docs-mcp"
+[[graph.stages]]
+name = "build"
+description = "split the work"
 
-[dependencies.install.server]
-transport = "stdio"
-command = "docs-mcp"
-args = ["--stdio"]
+[graph.stages.mode.fan_out]
+worker = { stage = "worker" }
+merge_stage = "merge"
+max_workers = 4
+on_worker_failure = "fail_all"
+split_prompt = "one item per file"
+results_region = "notes"
+max_items = 20
 
-[dependencies.install.server.env]
-DOCS_TOKEN = "${DOCS_TOKEN}"
+[[graph.stages]]
+name = "worker"
+allow_as_worker = true
 
-[mime_types."model/gltf+json"]
-family = "model"
-text = true
-extensions = ["gltf"]
-tokens = { fixed = 500 }
+[[graph.stages]]
+name = "merge"
+mode = "output"
 
-[context.regions.plan]
+[[graph.edges]]
+name = "build"
+from = "plan"
+to = "build"
+when = "llm_choice"
+hint = "when the plan is settled"
+carry = { custom = { carry = ["plan"], clear = ["env"], compact_prompt = "keep the decisions" } }
+gate = { require_modifications = true, message = "write the plan first", max_attempts = 2, require_region_updated = "plan", require_regions = ["plan"] }
+
+[[graph.edges]]
+name = "stuck_out"
+from = "plan"
+to = "stuck_out"
+when = "stuck"
+stuck = { after_iterations = 12 }
+
+[graph.layout]
+total_budget_tokens = 3200
+
+[[graph.layout.regions]]
+name = "plan"
 kind = "pinned"
-budget = "20%"
-min_tokens = 500
-max_tokens = 4000
+budget = { percent = "20%", min = 500, max = 4000 }
 description = "the plan"
 required = true
 required_message = "{region} has to say something first"
 volatility = "rewritten"
 admission = "reject"
-accepts = ["text/*"]
 seed = { literal = "start here" }
+accepts = ["text/*"]
 
-[context.regions.notes]
-kind = "sliding_window"
-max_tokens = 1000
-max_items = 20
-strategy = "bulk"
-overflow = 3
+[[graph.layout.regions]]
+name = "notes"
+kind = { kind = "sliding_window", max_items = 20, eviction = { bulk = 3 } }
+budget = 1000
 
-[context.regions.facts]
-kind = "hashmap"
-max_tokens = 1000
-max_entries = 50
+[[graph.layout.regions]]
+name = "facts"
+kind = { kind = "keyed", max_entries = 50 }
+budget = 1000
 
-[context.regions.files]
-kind = "hashmap"
-max_tokens = 800
-max_entries = 20
+[[graph.layout.regions]]
+name = "files"
+kind = { kind = "keyed", max_entries = 20 }
+budget = 800
 
-[context.regions.env]
+[[graph.layout.regions]]
+name = "env"
 kind = "temporary"
-max_tokens = 400
-seed = { tools = [{ name = "which_command", args = { command = "git" } }], refresh = "each_stage" }
+budget = 400
+seed = { tools = { calls = [{ tool = "which_command", args = { command = "git" } }], refresh = "each_stage" } }
 
-[stages.plan]
-mode = "interactive_points"
-description = "decide"
-available_tools = ["read_file", "shell"]
-max_iterations = 8
-transition_prompt = "pick the next step"
-tool_permissions = { shell = "ask", read_file = "allow" }
-tool_accepts = { spawn_agent = ["image/*"] }
-output_routing = { "image/*" = "notes" }
+[graph.output]
+format = "json"
+instructions = "one object per finding"
+validator = { file = "checks/output.rhai" }
+on_validator_error = "accept"
+artifacts = [{ name = "report", mime_type = "text/markdown", required = true, description = "the write-up" }]
 
-[stages.plan.context]
-hide = ["facts"]
-reset = ["env"]
+[graph.compaction]
+model = { provider = "anthropic", model = "claude-haiku-4-5" }
+max_summary_tokens = 800
+temperature = 0.1
 
-[stages.plan.model]
-models = [{ provider = "anthropic", model = "claude-sonnet-5" }]
-allow_user_default = false
-parameters = { temperature = 0.2, max_output_tokens = "40%", top_p = 0.9 }
-request_timeout_secs = 300
+[graph.sandbox]
+kind = "container"
+image = "python:3.12"
+network = false
+mounts = ["./data:/data"]
 
-[stages.plan.tool_routing]
-default_region = "notes"
-keep_results = false
-max_result_tokens = 4000
-overrides = { shell = "env" }
-max_result_tokens_per_tool = { read_file = 2000 }
+[graph.mime_types."model/gltf+json"]
+family = "model"
+text = true
+tokens = { fixed = 500 }
+extensions = ["gltf"]
 
-[stages.plan.hooks]
-on_stage_enter = "hooks/enter.rhai"
+[[graph.dependencies]]
+name = "blender"
+needs = { binary = "blender" }
+remedy = "install Blender and put it on PATH"
 
-[[stages.plan.interaction_points]]
-name = "review"
-prompt = "Does this look right?"
-style = "multiple_choice"
-options = ["Approve", "Revise"]
-unattended = "ask"
-document_region = "plan"
-directives = { Revise = "ask what to change" }
+[[graph.dependencies]]
+name = "docs"
+needs = { mcp_server = { server = "docs", env = ["DOCS_TOKEN"] } }
 
-[stages.plan.transitions.build]
-condition = "llm_choice"
-hint = "when the plan is settled"
-transform = "custom"
+[graph.dependencies.install]
+command = "npm i -g docs-mcp"
 
-[stages.plan.transitions.build.transform_config]
-carry = ["plan"]
-clear = ["env"]
-compact_prompt = "keep the decisions"
-
-[stages.plan.transitions.build.gate]
-require_modifications = true
-require_regions = ["plan"]
-require_region_updated = "plan"
-max_attempts = 2
-message = "write the plan first"
-
-[stages.plan.transitions.stuck_out]
-condition = "stuck"
-stuck_after_iterations = 12
-
-[stages.stuck_out]
-mode = "autonomous"
-
-[stages.build]
-mode = "fan_out"
-description = "split the work"
-worker_stage = "worker"
-merge_stage = "merge"
-split_prompt = "one item per file"
-max_workers = 4
-max_items = 20
-on_worker_failure = "fail_all"
-results_region = "notes"
-
-[stages.worker]
-mode = "autonomous"
-allow_as_worker = true
-
-[stages.merge]
-mode = "output"
+[graph.dependencies.install.server]
+transport = "stdio"
+command = "docs-mcp"
+args = ["--stdio"]
+env = { DOCS_TOKEN = "${DOCS_TOKEN}" }
 "#
     .to_string()
 }
 
-/// Ask the schema about the manifest, with a server behind it so `effective`
+/// Ask the schema about the blueprint, with a server behind it so `effective`
 /// has a config to resolve against.
 async fn ask(query: &str) -> serde_json::Value {
-    let parsed =
-        leviath_runtime::spec::manifest::parse_manifest(&manifest()).expect("the manifest parses");
+    ask_about(&manifest(), query).await
+}
+
+/// Ask the schema about the blueprint in `text`.
+async fn ask_about(text: &str, query: &str) -> serde_json::Value {
     let schema = Schema::build(
         StageProbe {
-            blueprint: Arc::new(parsed),
+            blueprint: super::parsed(text),
         },
         EmptyMutation,
         EmptySubscription,
@@ -236,18 +212,14 @@ async fn ask(query: &str) -> serde_json::Value {
 
 /// A root handing out stages by name, so one field test is one query.
 struct StageProbe {
-    blueprint: Arc<leviath_runtime::spec::Blueprint>,
+    blueprint: Arc<ParsedBlueprint>,
 }
 
 #[async_graphql::Object]
 impl StageProbe {
     /// The stage under test.
     async fn stage(&self, name: String) -> Option<Stage> {
-        let at = self.blueprint.stages.iter().position(|s| s.name == name)?;
-        Some(Stage {
-            blueprint: Arc::clone(&self.blueprint),
-            at,
-        })
+        super::refs::stage(&self.blueprint, &name)
     }
 }
 
@@ -302,8 +274,7 @@ async fn a_stage_carries_what_its_tools_may_do() {
            } }"#)
     .await;
     let stage = &json["stage"];
-    // Sorted by tool, because the manifest's own table is a hash map and an
-    // unsorted answer would reorder between two reads of one blueprint.
+    // Sorted by tool, so two reads of one blueprint list them alike.
     assert_eq!(stage["toolPermissions"][0]["tool"], "read_file");
     assert_eq!(stage["toolPermissions"][0]["policy"], "ALLOW");
     assert_eq!(stage["toolPermissions"][1]["tool"], "shell");
@@ -453,7 +424,7 @@ async fn declared_and_effective_settings_are_both_answered() {
     // the author wrote and what the daemon resolved are different questions.
     assert!(stage["nudge"].is_null(), "the stage declares no nudge");
     assert!(stage["sandbox"].is_null(), "nor a sandbox");
-    assert!(stage["security"].is_null(), "nor a security block");
+    assert!(stage["security"].is_null(), "nor taint tracking");
     assert_eq!(stage["hooks"]["onStageEnter"], "hooks/enter.rhai");
     assert!(stage["hooks"]["onStageExit"].is_null());
 
@@ -463,7 +434,7 @@ async fn declared_and_effective_settings_are_both_answered() {
     assert_eq!(effective["sandbox"]["image"], "python:3.12");
     assert_eq!(effective["sandbox"]["allowNetwork"], false);
     assert_eq!(effective["tracksTaint"], true);
-    assert_eq!(effective["nudge"]["max"], 5, "from the agent block");
+    assert_eq!(effective["nudge"]["max"], 5, "from the graph");
     // A stage with checkpoints is not nudged: its text is its work product.
     assert_eq!(effective["nudge"]["nudges"], false);
     assert!(
@@ -514,31 +485,22 @@ async fn a_stage_says_what_it_does_to_the_context() {
 /// stage rather than from the blueprint.
 #[tokio::test]
 async fn a_stage_can_declare_regions_of_its_own() {
-    let text = r#"
-[agent]
+    let text = r#"[blueprint]
 name = "local-regions"
 version = "1.0.0"
 description = "a stage with its own regions"
 
-[context.regions.shared]
-kind = "pinned"
-max_tokens = 100
+[graph]
+layout = { total_budget_tokens = 1000, regions = [{ name = "shared", kind = "pinned", budget = 100 }] }
 
-[stages.only]
-mode = "autonomous"
-
-[stages.only.context.regions.scratch]
-kind = "temporary"
-max_tokens = 50
-
-[stages.only.context]
+[[graph.stages]]
+name = "only"
 hide = ["shared"]
+layout = { total_budget_tokens = 1000, regions = [{ name = "scratch", kind = "temporary", budget = 50 }] }
 "#;
-    let parsed =
-        leviath_runtime::spec::manifest::parse_manifest(text).expect("the manifest parses");
     let schema = Schema::build(
         StageProbe {
-            blueprint: Arc::new(parsed),
+            blueprint: super::parsed(text),
         },
         EmptyMutation,
         EmptySubscription,
@@ -573,18 +535,18 @@ async fn every_mirrored_function_in_stage_runs() {
         exercise, exercise_enum, exercise_list,
     };
 
-    let parsed = Arc::new(
-        leviath_runtime::spec::manifest::parse_manifest(&manifest()).expect("the manifest parses"),
-    );
+    let parsed = super::parsed(&manifest());
     let plan_at = parsed
+        .graph
         .stages
         .iter()
-        .position(|s| s.name == "plan")
+        .position(|s| s.name.as_str() == "plan")
         .expect("the plan stage");
     let build_at = parsed
+        .graph
         .stages
         .iter()
-        .position(|s| s.name == "build")
+        .position(|s| s.name.as_str() == "build")
         .expect("the build stage");
 
     let stages = vec![
@@ -610,8 +572,8 @@ async fn every_mirrored_function_in_stage_runs() {
 
     exercise(&[OutputRequirement { reasks: 3 }]).await;
 
-    let fan_out_config = match &parsed.stages[build_at].mode {
-        leviath_runtime::spec::blueprint::StageMode::FanOut { config } => config.clone(),
+    let fan_out_config = match &parsed.graph.stages[build_at].mode {
+        leviath_runtime::spec::graph::StageMode::FanOut(config) => config.clone(),
         _ => panic!("the build stage is a fan-out"),
     };
     let fan_out = FanOut {
@@ -663,23 +625,22 @@ async fn every_mirrored_function_in_stage_runs() {
 /// "there is none".
 #[tokio::test]
 async fn a_fan_out_that_names_no_stage_or_region_answers_null() {
-    let manifest = r#"
-[agent]
+    let manifest = r#"[blueprint]
 name = "spread"
 version = "1.0.0"
 description = "fans out onto another blueprint"
-entry_stage = "build"
 
-[stages.build]
-mode = "fan_out"
-worker_agent = "helper"
-split_prompt = "one item per file"
+[graph]
+entry = "build"
+layout = { total_budget_tokens = 1000, regions = [] }
+
+[[graph.stages]]
+name = "build"
+mode = { fan_out = { worker = { blueprint = { name = "helper" } }, split_prompt = "one item per file" } }
 "#;
-    let parsed =
-        leviath_runtime::spec::manifest::parse_manifest(manifest).expect("the manifest parses");
     let schema = Schema::build(
         StageProbe {
-            blueprint: Arc::new(parsed),
+            blueprint: super::parsed(manifest),
         },
         EmptyMutation,
         EmptySubscription,
@@ -705,4 +666,30 @@ split_prompt = "one item per file"
     assert!(fan["mergeStageName"].is_null());
     assert!(fan["resultsRegion"].is_null());
     assert!(fan["resultsRegionName"].is_null());
+}
+
+/// A worker read from a directory is named by that directory, and a worker
+/// picked by a query names neither an agent nor a stage.
+#[tokio::test]
+async fn a_fan_out_names_a_worker_directory_or_a_query() {
+    let fanned = |worker: &str| {
+        format!(
+            "[blueprint]\nname = \"spread\"\nversion = \"1.0.0\"\n\n[graph]\n\
+             layout = {{ total_budget_tokens = 1000, regions = [] }}\n\
+             stages = [{{ name = \"build\", mode = {{ fan_out = {{ worker = {worker} }} }} }}]\n"
+        )
+    };
+    let query =
+        r#"{ stage(name: "build") { fanOut { workerAgent workerStageName workerQuery } } }"#;
+
+    let from_dir = ask_about(&fanned(r#"{ blueprint_file = "/agents/helper" }"#), query).await;
+    let fan = &from_dir["stage"]["fanOut"];
+    assert_eq!(fan["workerAgent"], "/agents/helper");
+    assert!(fan["workerQuery"].is_null());
+
+    let by_query = ask_about(&fanned(r#"{ query = "a code reviewer" }"#), query).await;
+    let fan = &by_query["stage"]["fanOut"];
+    assert_eq!(fan["workerQuery"], "a code reviewer");
+    assert!(fan["workerAgent"].is_null());
+    assert!(fan["workerStageName"].is_null());
 }

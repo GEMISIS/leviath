@@ -1,16 +1,17 @@
-//! The checks a caller's output request retires, said out loud at spawn.
+//! The checks a caller's output request retires, said out loud before a run
+//! starts.
 //!
 //! [`resolve_output_spec`](leviath_core::output::resolve_output_spec) lets a
-//! caller's format replace a blueprint's declared one, and with it the declared
-//! validator and schema. This walks a blueprint's stages ahead of time so the
+//! caller's format replace a graph's declared one, and with it the declared
+//! validator and schema. This walks a graph's stages ahead of time so the
 //! caller hears about it before the run starts.
 
 use leviath_core::output::OutputSpec;
-
-use super::Blueprint;
+use leviath_runtime::spec::graph::{CodeRef, OutputDef, RunGraph};
 
 /// The warnings a caller's requested output shape earns at spawn: what
-/// [`resolve_output_spec`](leviath_core::output::resolve_output_spec) will retire, said out loud before it happens.
+/// [`resolve_output_spec`](leviath_core::output::resolve_output_spec) will
+/// retire, said out loud before it happens.
 ///
 /// Retiring the declared Rhai validator and JSON schema when the request names
 /// a different format is deliberate and stays: a check written for one shape
@@ -18,7 +19,7 @@ use super::Blueprint;
 /// `--output-format json` over a blueprint with a validator does not go on
 /// believing the run is still being checked.
 ///
-/// One line per group of stages losing the same checks, so an agent-level
+/// One line per group of stages losing the same checks, so a graph-level
 /// validator shared by four stages reads as one sentence naming four stages.
 /// Empty when there is nothing to say: no request, no format in it, the
 /// declared format re-stated (which retires nothing), or nothing declared that
@@ -26,15 +27,18 @@ use super::Blueprint;
 /// also not warned about: supplying a schema for the new shape is exactly what
 /// the warning would have asked for. A declared validator is always worth the
 /// line, because no request can bring a replacement for it.
-pub fn retired_check_warnings(blueprint: &Blueprint, request: Option<&OutputSpec>) -> Vec<String> {
+pub(crate) fn retired_check_warnings(
+    graph: &RunGraph,
+    request: Option<&OutputSpec>,
+) -> Vec<String> {
     let Some(requested) = request.and_then(|r| r.format.as_deref()) else {
         return Vec::new();
     };
     let request_has_schema = request.is_some_and(|r| r.schema.is_some());
     let mut groups: Vec<(RetiredChecks, Vec<String>)> = Vec::new();
-    for stage in &blueprint.stages {
+    for stage in &graph.stages {
         let Some(retired) = retired_checks_for_stage(
-            blueprint.output.as_ref(),
+            graph.output.as_ref(),
             stage.output.as_ref(),
             requested,
             request_has_schema,
@@ -42,8 +46,8 @@ pub fn retired_check_warnings(blueprint: &Blueprint, request: Option<&OutputSpec
             continue;
         };
         match groups.iter_mut().find(|(g, _)| *g == retired) {
-            Some((_, stages)) => stages.push(stage.name.clone()),
-            None => groups.push((retired, vec![stage.name.clone()])),
+            Some((_, stages)) => stages.push(stage.name.to_string()),
+            None => groups.push((retired, vec![stage.name.to_string()])),
         }
     }
     groups
@@ -58,41 +62,53 @@ pub fn retired_check_warnings(blueprint: &Blueprint, request: Option<&OutputSpec
 struct RetiredChecks {
     /// The format the retired checks were written for, when one was declared.
     declared_format: Option<String>,
-    /// The retired Rhai validator's path, when one was declared.
+    /// The retired Rhai validator, as the warning names it, when one was
+    /// declared.
     validator: Option<String>,
     /// Whether a declared JSON schema is retired with nothing in its place.
     schema: bool,
 }
 
+/// How a warning names a validator: its path when it is a file beside the
+/// blueprint, `inline` when the graph holds the code itself.
+fn validator_label(code: &CodeRef) -> String {
+    match code {
+        CodeRef::File(path) => path.clone(),
+        CodeRef::Inline(_) => "inline".to_string(),
+    }
+}
+
 /// What `requested` retires for one stage, or `None` when it retires nothing.
 ///
-/// Asks [`resolve_output_spec`](leviath_core::output::resolve_output_spec)'s question ahead of time, with the same
-/// cascade: the stage's declaration wins over the agent's, and re-stating the
-/// declared format keeps every check. Kept beside it so the two cannot drift.
+/// Asks [`resolve_output_spec`](leviath_core::output::resolve_output_spec)'s
+/// question ahead of time, with the same cascade: the stage's declaration wins
+/// over the graph's, and re-stating the declared format keeps every check.
 fn retired_checks_for_stage(
-    agent: Option<&OutputSpec>,
-    stage: Option<&OutputSpec>,
+    graph: Option<&OutputDef>,
+    stage: Option<&OutputDef>,
     requested: &str,
     request_has_schema: bool,
 ) -> Option<RetiredChecks> {
-    let declared =
-        |get: fn(&OutputSpec) -> Option<&str>| stage.and_then(get).or_else(|| agent.and_then(get));
-    let declared_format = declared(|s| s.format.as_deref());
+    let declared_format = stage
+        .and_then(|s| s.format.as_deref())
+        .or_else(|| graph.and_then(|g| g.format.as_deref()));
     if declared_format == Some(requested) {
         return None;
     }
-    let validator = declared(|s| s.validator.as_deref());
+    let validator = stage
+        .and_then(|s| s.validator.as_ref())
+        .or_else(|| graph.and_then(|g| g.validator.as_ref()));
     let schema = !request_has_schema
         && stage
             .and_then(|s| s.schema.as_ref())
-            .or_else(|| agent.and_then(|a| a.schema.as_ref()))
+            .or_else(|| graph.and_then(|g| g.schema.as_ref()))
             .is_some();
     if validator.is_none() && !schema {
         return None;
     }
     Some(RetiredChecks {
         declared_format: declared_format.map(str::to_string),
-        validator: validator.map(str::to_string),
+        validator: validator.map(validator_label),
         schema,
     })
 }
@@ -159,34 +175,40 @@ mod tests {
         }
     }
 
-    /// A parsed blueprint whose agent-level output is `agent`, over stages
-    /// named and shaped by `stages`. Both take TOML output tables (or `None`),
-    /// because a manifest is where these declarations really come from.
-    fn blueprint_with(agent: Option<&str>, stages: &[(&str, Option<&str>)]) -> Blueprint {
-        let mut manifest =
-            String::from("[agent]\nname = \"checked\"\nversion = \"1.0.0\"\ndescription = \"d\"\n");
-        if let Some(fields) = agent {
-            manifest.push_str(&format!("\n[agent.output]\n{fields}\n"));
+    /// A graph whose own output is `graph` (inline TOML fields, or `None`),
+    /// over stages named and shaped by `stages` the same way: a blueprint file
+    /// is where these declarations really come from.
+    fn graph_with(graph: Option<&str>, stages: &[(&str, Option<&str>)]) -> RunGraph {
+        let mut text =
+            String::from("[blueprint]\nname = \"checked\"\nversion = \"1.0.0\"\n\n[graph]\n");
+        if let Some(fields) = graph {
+            text.push_str(&format!("output = {{ {fields} }}\n"));
         }
+        text.push_str(
+            "layout = { total_budget_tokens = 1000, regions = [{ name = \"conversation\", \
+             kind = { kind = \"sliding_window\", max_items = 10 }, budget = 1000 }] }\n",
+        );
         for (name, output) in stages {
-            manifest.push_str(&format!("\n[stages.{name}]\nsystem_prompt = \"p\"\n"));
+            text.push_str(&format!("\n[[graph.stages]]\nname = \"{name}\"\n"));
             if let Some(fields) = output {
-                manifest.push_str(&format!("\n[stages.{name}.output]\n{fields}\n"));
+                text.push_str(&format!("output = {{ {fields} }}\n"));
             }
         }
-        crate::spec::manifest::parse_manifest(&manifest).expect("the test manifest parses")
+        leviath_blueprint::BlueprintFile::parse(&text)
+            .expect("the test blueprint parses")
+            .run_graph()
     }
 
     /// The headline: a differing format retires the declared validator, and
     /// the warning names the stage, the script, and both formats.
     #[test]
     fn a_differing_format_earns_a_warning_naming_the_retired_validator() {
-        let bp = blueprint_with(
-            Some("format = \"markdown\"\nvalidator = \"checks/report.rhai\""),
+        let graph = graph_with(
+            Some("format = \"markdown\", validator = { file = \"checks/report.rhai\" }"),
             &[("plan", None)],
         );
         let request = spec(Some("json"), None);
-        let warnings = retired_check_warnings(&bp, Some(&request));
+        let warnings = retired_check_warnings(&graph, Some(&request));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         let line = &warnings[0];
         assert!(line.contains("'json'"), "{line}");
@@ -198,37 +220,39 @@ mod tests {
         assert!(line.contains("stage 'plan'"), "{line}");
     }
 
-    /// Re-stating the declared format keeps the checks (see
-    /// `re_stating_the_declared_format_keeps_its_shape_checks`), so it earns
-    /// no warning - and neither does a request with no format in it, nor no
+    /// Re-stating the declared format keeps the checks, so it earns no
+    /// warning, and neither does a request with no format in it, nor no
     /// request at all.
     #[test]
     fn nothing_retired_means_nothing_warned() {
-        let bp = blueprint_with(
-            Some("format = \"markdown\"\nvalidator = \"v.rhai\"\nschema = { type = \"object\" }"),
+        let graph = graph_with(
+            Some(
+                "format = \"markdown\", validator = { file = \"v.rhai\" }, \
+                 schema = { type = \"object\" }",
+            ),
             &[("plan", None)],
         );
         let restated = spec(Some("markdown"), None);
-        assert!(retired_check_warnings(&bp, Some(&restated)).is_empty());
+        assert!(retired_check_warnings(&graph, Some(&restated)).is_empty());
         let formatless = OutputSpec {
             instructions: Some("keep it short".to_string()),
             ..OutputSpec::default()
         };
-        assert!(retired_check_warnings(&bp, Some(&formatless)).is_empty());
-        assert!(retired_check_warnings(&bp, None).is_empty());
-        // And a blueprint with nothing retirable has nothing to lose.
-        let unchecked = blueprint_with(Some("format = \"markdown\""), &[("plan", None)]);
+        assert!(retired_check_warnings(&graph, Some(&formatless)).is_empty());
+        assert!(retired_check_warnings(&graph, None).is_empty());
+        // And a graph with nothing retirable has nothing to lose.
+        let unchecked = graph_with(Some("format = \"markdown\""), &[("plan", None)]);
         let reshaped = spec(Some("json"), None);
         assert!(retired_check_warnings(&unchecked, Some(&reshaped)).is_empty());
     }
 
     /// A schema alone, a validator alone, and the two together each word the
-    /// loss precisely.
+    /// loss precisely. Inline validator code is named as such.
     #[test]
     fn the_warning_names_exactly_what_is_lost() {
         let request = spec(Some("json"), None);
-        let schema_only = blueprint_with(
-            Some("format = \"markdown\"\nschema = { type = \"object\" }"),
+        let schema_only = graph_with(
+            Some("format = \"markdown\", schema = { type = \"object\" }"),
             &[("plan", None)],
         );
         let warnings = retired_check_warnings(&schema_only, Some(&request));
@@ -236,13 +260,25 @@ mod tests {
             warnings[0].contains("the JSON schema declared"),
             "{warnings:?}"
         );
-        let both = blueprint_with(
-            Some("format = \"markdown\"\nvalidator = \"v.rhai\"\nschema = { type = \"object\" }"),
+        let both = graph_with(
+            Some(
+                "format = \"markdown\", validator = { file = \"v.rhai\" }, \
+                 schema = { type = \"object\" }",
+            ),
             &[("plan", None)],
         );
         let warnings = retired_check_warnings(&both, Some(&request));
         assert!(
             warnings[0].contains("the Rhai validator 'v.rhai' and the JSON schema"),
+            "{warnings:?}"
+        );
+        let inline = graph_with(
+            Some("format = \"markdown\", validator = { inline = \"fn validate(c) { () }\" }"),
+            &[("plan", None)],
+        );
+        let warnings = retired_check_warnings(&inline, Some(&request));
+        assert!(
+            warnings[0].contains("the Rhai validator 'inline'"),
             "{warnings:?}"
         );
     }
@@ -252,12 +288,15 @@ mod tests {
     /// still worth a warning.
     #[test]
     fn a_replacement_schema_is_not_warned_about() {
-        let bp = blueprint_with(
-            Some("format = \"markdown\"\nvalidator = \"v.rhai\"\nschema = { type = \"object\" }"),
+        let graph = graph_with(
+            Some(
+                "format = \"markdown\", validator = { file = \"v.rhai\" }, \
+                 schema = { type = \"object\" }",
+            ),
             &[("plan", None)],
         );
         let request = spec(Some("json"), Some(json!({"type": "array"})));
-        let warnings = retired_check_warnings(&bp, Some(&request));
+        let warnings = retired_check_warnings(&graph, Some(&request));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains("the Rhai validator 'v.rhai'"),
@@ -275,27 +314,30 @@ mod tests {
         );
         // With nothing but the schema declared, the replacement leaves nothing
         // retired at all.
-        let schema_only = blueprint_with(
-            Some("format = \"markdown\"\nschema = { type = \"object\" }"),
+        let schema_only = graph_with(
+            Some("format = \"markdown\", schema = { type = \"object\" }"),
             &[("plan", None)],
         );
         assert!(retired_check_warnings(&schema_only, Some(&request)).is_empty());
     }
 
-    /// An agent-level validator shared by several stages is one line naming
+    /// A graph-level validator shared by several stages is one line naming
     /// them all, and a stage with its own distinct declaration gets its own.
     #[test]
     fn stages_losing_the_same_checks_share_one_line() {
-        let bp = blueprint_with(
-            Some("format = \"markdown\"\nvalidator = \"shared.rhai\""),
+        let graph = graph_with(
+            Some("format = \"markdown\", validator = { file = \"shared.rhai\" }"),
             &[
                 ("plan", None),
                 ("draft", None),
-                ("wrap", Some("format = \"a2ui\"\nvalidator = \"a2ui.rhai\"")),
+                (
+                    "wrap",
+                    Some("format = \"a2ui\", validator = { file = \"a2ui.rhai\" }"),
+                ),
             ],
         );
         let request = spec(Some("json"), None);
-        let warnings = retired_check_warnings(&bp, Some(&request));
+        let warnings = retired_check_warnings(&graph, Some(&request));
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(
             warnings[0].contains("stages 'plan' and 'draft'"),
@@ -306,18 +348,18 @@ mod tests {
     }
 
     /// A declaration that lives only on a stage retires the same way: the
-    /// warning does not need an agent-level `[agent.output]` to exist.
+    /// warning does not need a graph-level output to exist.
     #[test]
-    fn a_stage_level_declaration_retires_without_an_agent_one() {
-        let bp = blueprint_with(
+    fn a_stage_level_declaration_retires_without_a_graph_one() {
+        let graph = graph_with(
             None,
             &[(
                 "plan",
-                Some("format = \"markdown\"\nvalidator = \"v.rhai\""),
+                Some("format = \"markdown\", validator = { file = \"v.rhai\" }"),
             )],
         );
         let request = spec(Some("json"), None);
-        let warnings = retired_check_warnings(&bp, Some(&request));
+        let warnings = retired_check_warnings(&graph, Some(&request));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains("the Rhai validator 'v.rhai'"),
@@ -329,12 +371,12 @@ mod tests {
     /// while its siblings lose theirs, because the cascade is per stage.
     #[test]
     fn a_stage_already_in_the_requested_format_keeps_its_checks() {
-        let bp = blueprint_with(
-            Some("format = \"markdown\"\nvalidator = \"shared.rhai\""),
+        let graph = graph_with(
+            Some("format = \"markdown\", validator = { file = \"shared.rhai\" }"),
             &[("plan", None), ("emit", Some("format = \"json\""))],
         );
         let request = spec(Some("json"), None);
-        let warnings = retired_check_warnings(&bp, Some(&request));
+        let warnings = retired_check_warnings(&graph, Some(&request));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("stage 'plan'"), "{warnings:?}");
     }
@@ -344,9 +386,9 @@ mod tests {
     /// warning says so without inventing a declared format.
     #[test]
     fn a_formatless_declaration_is_reshaped_by_any_request() {
-        let bp = blueprint_with(Some("validator = \"v.rhai\""), &[("plan", None)]);
+        let graph = graph_with(Some("validator = { file = \"v.rhai\" }"), &[("plan", None)]);
         let request = spec(Some("json"), None);
-        let warnings = retired_check_warnings(&bp, Some(&request));
+        let warnings = retired_check_warnings(&graph, Some(&request));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains("declared without a format"),

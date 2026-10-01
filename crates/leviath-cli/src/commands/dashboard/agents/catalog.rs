@@ -125,10 +125,10 @@ impl Catalog {
         }
         let name = entry.name.clone();
         let view = match entry.manifest.as_deref() {
-            Some(text) => leviath_runtime::spec::manifest::parse_manifest(text)
-                .map(|bp| FlowView::new(Arc::new(StageGraph::from_blueprint(&bp)), true))
-                .map_err(|e| e.to_string()),
-            None => Err("the manifest could not be read".to_string()),
+            Some(text) => leviath_blueprint::BlueprintFile::parse(text).map(|file| {
+                FlowView::new(Arc::new(StageGraph::from_graph(&file.run_graph())), true)
+            }),
+            None => Err("its agent.toml could not be read".to_string()),
         };
         self.preview = Some((name, view));
     }

@@ -399,37 +399,3 @@ async fn an_embedded_host_reads_no_blueprint_from_a_path() {
     assert_eq!(issue.code, IssueCode::NotAllowed);
     assert!(issue.message.contains("coder"), "{}", issue.message);
 }
-
-/// A manifest that parses and validates but does not read as a graph, or
-/// whose name cannot be a blueprint's, is refused with why.
-#[test]
-fn a_manifest_that_does_not_read_as_a_graph_is_refused() {
-    let base = || PathBuf::from("/nowhere");
-    let bad_stage = "[agent]\nname = \"a\"\n\n[stages.\" padded\"]\nmode = \"autonomous\"\n";
-    assert!(LoadedBlueprint::from_manifest(bad_stage, base()).is_err());
-    let bad_table = "[agent]\nname = \"a\"\n\n[stages.main]\nmode = \"autonomous\"\n\n[[mcp_servers]]\nname = 7\n";
-    assert!(LoadedBlueprint::from_manifest(bad_table, base()).is_err());
-    let bad_name = format!(
-        "[agent]\nname = \"{}\"\n\n[stages.main]\nmode = \"autonomous\"\n",
-        "x".repeat(200)
-    );
-    let err = LoadedBlueprint::from_manifest(&bad_name, base()).unwrap_err();
-    assert!(err.contains("blueprint name"), "{err}");
-}
-
-/// Text that is not a manifest, or a manifest that does not validate, is
-/// refused with why; a blueprint parsed without its text is not pinned.
-#[test]
-fn a_blueprint_that_does_not_parse_or_validate_is_refused() {
-    let base = || PathBuf::from("/nowhere");
-    let err = LoadedBlueprint::from_manifest("not = [valid", base()).unwrap_err();
-    assert!(err.starts_with("parse manifest"), "{err}");
-    let text =
-        "[agent]\nname = \"a\"\nentry_stage = \"main\"\n\n[stages.main]\nmode = \"autonomous\"\n";
-    let mut parsed = crate::spec::manifest::parse_manifest(text).unwrap();
-    let unpinned = LoadedBlueprint::from_parsed(parsed.clone(), None, base()).unwrap();
-    assert_eq!(unpinned.reference.digest, None);
-    parsed.entry_stage = Some("ghost".to_string());
-    let err = LoadedBlueprint::from_parsed(parsed, None, base()).unwrap_err();
-    assert!(err.starts_with("invalid blueprint"), "{err}");
-}

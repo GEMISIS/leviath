@@ -13,6 +13,7 @@ use leviath_core::policy::ToolPolicy;
 use serde::{Deserialize, Serialize};
 
 pub mod edge;
+#[cfg(any(test, feature = "legacy-blueprint"))]
 mod from_blueprint;
 pub mod policy;
 pub mod region;

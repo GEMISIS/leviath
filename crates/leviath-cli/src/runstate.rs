@@ -165,57 +165,20 @@ impl<T> Default for StatCache<T> {
 }
 
 impl<T> StatCache<T> {
-    /// The value parsed from `path`, re-reading only when the file's stat
-    /// changed since the last call. `None` when the file is missing,
-    /// unreadable, or `parse` rejects it - negative results are cached too, so
-    /// a persistently-bad file costs one stat per tick, not one parse.
-    pub(crate) fn get_with(
-        &mut self,
-        path: &Path,
-        parse: impl FnOnce(&str) -> Option<T>,
-    ) -> Option<Arc<T>> {
-        self.get_with_recheck(path, parse, std::time::Duration::ZERO)
-    }
-
-    /// [`get_with`](Self::get_with), skipping the stat when the entry was
-    /// checked less than `recheck_after` ago.
+    /// The value `read` works out for `path`, worked out again only when the
+    /// file's stat changed since the last call. `None` when the file is
+    /// missing, or `read` finds nothing; negative results are cached too, so
+    /// a persistently-bad file costs one stat per tick, not one read.
     ///
-    /// The stat is the cost. A dashboard over 750 runs stat'ed 1,500 files
-    /// ten times a second to learn that 1,490 of them, belonging to runs that
-    /// finished days ago, had not changed; two thirds of its idle CPU was that
+    /// The stat is skipped while the entry was checked less than
+    /// `recheck_after` ago, the window worked out from what the cache holds
+    /// for `path` (`None` for nothing, or a file that did not read). The stat
+    /// is the cost. A dashboard over 750 runs stat'ed 1,500 files ten times a
+    /// second to learn that 1,490 of them, belonging to runs that finished
+    /// days ago, had not changed; two thirds of its idle CPU was that
     /// question. A caller that knows a file has settled (a finished run's
     /// record) asks it once a second instead, and a file it knows is live
-    /// passes `Duration::ZERO` and is stat'ed every time, as before.
-    pub(crate) fn get_with_recheck(
-        &mut self,
-        path: &Path,
-        parse: impl FnOnce(&str) -> Option<T>,
-        recheck_after: std::time::Duration,
-    ) -> Option<Arc<T>> {
-        self.get_with_recheck_by(path, parse, |_| recheck_after)
-    }
-
-    /// [`get_with_recheck`](Self::get_with_recheck), with the window worked
-    /// out from what the cache holds for `path` (`None` for nothing, or a file
-    /// that did not parse), in one lookup: a poller over thousands of settled
-    /// runs does little else per run but hash its path.
-    pub(crate) fn get_with_recheck_by(
-        &mut self,
-        path: &Path,
-        parse: impl FnOnce(&str) -> Option<T>,
-        recheck_after: impl FnOnce(Option<&T>) -> std::time::Duration,
-    ) -> Option<Arc<T>> {
-        let read = || {
-            std::fs::read_to_string(path)
-                .ok()
-                .and_then(|text| parse(&text))
-        };
-        self.get_reading(path, read, recheck_after)
-    }
-
-    /// [`get_with_recheck_by`](Self::get_with_recheck_by), with the value
-    /// worked out by `read` rather than parsed from the file's text: for a
-    /// file that is not text, or a value read from more than the one file.
+    /// passes `Duration::ZERO` and is stat'ed every time.
     pub(crate) fn get_reading(
         &mut self,
         path: &Path,
@@ -1973,6 +1936,22 @@ mod tests {
         });
     }
 
+    /// Read `path` as text through `cache`, parsed by `parse`, rechecked
+    /// after `window`.
+    fn cached_text<T>(
+        cache: &mut StatCache<T>,
+        path: &Path,
+        parse: impl FnOnce(&str) -> Option<T>,
+        window: std::time::Duration,
+    ) -> Option<Arc<T>> {
+        let read = || {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| parse(&text))
+        };
+        cache.get_reading(path, read, |_| window)
+    }
+
     /// The stat cache's contract: parse once, serve from cache while the stat
     /// is unchanged, re-parse on change, cache negative results, and forget
     /// files that disappear.
@@ -1984,12 +1963,16 @@ mod tests {
         let mut cache: StatCache<i64> = StatCache::default();
         let mut parses = 0;
         let get = |cache: &mut StatCache<i64>, path: &std::path::Path, parses: &mut usize| {
-            cache
-                .get_with(path, |text| {
+            cached_text(
+                cache,
+                path,
+                |text| {
                     *parses += 1;
                     text.trim().parse().ok()
-                })
-                .map(|v| *v)
+                },
+                std::time::Duration::ZERO,
+            )
+            .map(|v| *v)
         };
 
         assert_eq!(get(&mut cache, &path, &mut parses), Some(41));
@@ -2026,8 +2009,19 @@ mod tests {
         std::fs::write(live.join("meta.json"), "1").unwrap();
         std::fs::write(dead.join("meta.json"), "2").unwrap();
         let mut cache: StatCache<i64> = StatCache::default();
-        cache.get_with(&live.join("meta.json"), |t| t.trim().parse().ok());
-        cache.get_with(&dead.join("meta.json"), |t| t.trim().parse().ok());
+        let now = std::time::Duration::ZERO;
+        cached_text(
+            &mut cache,
+            &live.join("meta.json"),
+            |t| t.trim().parse().ok(),
+            now,
+        );
+        cached_text(
+            &mut cache,
+            &dead.join("meta.json"),
+            |t| t.trim().parse().ok(),
+            now,
+        );
         assert_eq!(cache.entries.len(), 2);
 
         let keep: std::collections::HashSet<PathBuf> = [live.clone()].into_iter().collect();
@@ -2175,21 +2169,18 @@ mod tests {
         std::fs::write(&path, "1").unwrap();
         let mut cache: StatCache<String> = StatCache::default();
         let parse = |s: &str| Some(s.to_string());
+        let read = || std::fs::read_to_string(&path).ok();
         let mut seen = Vec::new();
         let mut window_for = |cached: Option<&String>| {
             seen.push(cached.cloned());
             std::time::Duration::from_secs(3600)
         };
         assert_eq!(
-            *cache
-                .get_with_recheck_by(&path, parse, &mut window_for)
-                .unwrap(),
+            *cache.get_reading(&path, read, &mut window_for).unwrap(),
             "1"
         );
         assert_eq!(
-            *cache
-                .get_with_recheck_by(&path, parse, &mut window_for)
-                .unwrap(),
+            *cache.get_reading(&path, read, &mut window_for).unwrap(),
             "1"
         );
         // Nothing was cached for the first read, so it had no window to ask
@@ -2203,17 +2194,18 @@ mod tests {
         // ticks) is invisible to it by design.
         std::fs::write(&path, "22").unwrap();
         let hour = std::time::Duration::from_secs(3600);
-        assert_eq!(*cache.get_with_recheck(&path, parse, hour).unwrap(), "1");
-        assert_eq!(*cache.get_with(&path, parse).unwrap(), "22");
+        let now = std::time::Duration::ZERO;
+        assert_eq!(*cached_text(&mut cache, &path, parse, hour).unwrap(), "1");
+        assert_eq!(*cached_text(&mut cache, &path, parse, now).unwrap(), "22");
         // A stat that finds the same stamp refreshes the check time without a
         // parse, so the next windowed read is answered from memory too.
-        assert_eq!(*cache.get_with(&path, parse).unwrap(), "22");
-        assert_eq!(*cache.get_with_recheck(&path, parse, hour).unwrap(), "22");
+        assert_eq!(*cached_text(&mut cache, &path, parse, now).unwrap(), "22");
+        assert_eq!(*cached_text(&mut cache, &path, parse, hour).unwrap(), "22");
 
         // A missing file is forgotten, and a window does not resurrect it.
         std::fs::remove_file(&path).unwrap();
-        assert!(cache.get_with(&path, parse).is_none());
-        assert!(cache.get_with_recheck(&path, parse, hour).is_none());
+        assert!(cached_text(&mut cache, &path, parse, now).is_none());
+        assert!(cached_text(&mut cache, &path, parse, hour).is_none());
     }
 
     /// A finished run settles; a live, waiting or paused one does not.
@@ -2335,11 +2327,13 @@ mod tests {
             assert_eq!(read_stages_index_cached("done", &mut stages).len(), 2);
             // Outside the window (forced here by asking with no window) the
             // rename is seen.
-            let fresh = metas
-                .get_with(&run_dir("done").join("meta.json"), |json| {
-                    serde_json::from_str::<RunMeta>(json).ok()
-                })
-                .unwrap();
+            let fresh = cached_text(
+                &mut metas,
+                &run_dir("done").join("meta.json"),
+                |json| serde_json::from_str::<RunMeta>(json).ok(),
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
             assert_eq!(fresh.title.as_deref(), Some("renamed"));
         });
     }

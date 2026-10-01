@@ -30,7 +30,7 @@ pub(crate) fn read_and_concat(
     Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
 }
 
-/// Resolve an agent's `[read_paths]` declarations against the user's config
+/// Resolve a graph's `read_paths` declarations against the user's config
 /// into the policy its file tools enforce, plus a warning to surface when the
 /// declarations exist but nothing grants them.
 ///
@@ -41,23 +41,24 @@ pub(crate) fn read_and_concat(
 /// is a hard error: silently dropping it would either under-grant or run the
 /// agent with less vision than its author designed for.
 ///
-/// Taken over its parts rather than a whole blueprint, so a run that has
+/// Taken over its parts rather than a whole graph, so a run that has
 /// already started can redo it: [`AgentToolState::reread_config`] keeps only
 /// the declared half on the run.
 ///
 /// [`AgentToolState::reread_config`]: crate::daemon::tool_service::AgentToolState::reread_config
 pub(crate) fn compile_read_path_policy(
     agent_name: &str,
-    declared: Option<&leviath_runtime::spec::blueprint::ReadPathsConfig>,
+    declared: &[String],
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Result<(leviath_core::ReadPathPolicy, Option<String>), String> {
-    let Some(rp) = declared.filter(|rp| !rp.allow.is_empty()) else {
+    if declared.is_empty() {
         return Ok((leviath_core::ReadPathPolicy::inactive(), None));
-    };
+    }
+    let allow = declared;
     let home = leviath_core::home_dir();
     let declared =
-        leviath_core::ReadPathSet::compile(&rp.allow, workdir, home.as_deref(), cfg!(windows))
+        leviath_core::ReadPathSet::compile(allow, workdir, home.as_deref(), cfg!(windows))
             .map_err(|e| format!("agent '{agent_name}' [read_paths]: {e}"))?;
     let grant_entries = config.read_path_grants_for_agent(agent_name);
     let grants =
@@ -65,8 +66,7 @@ pub(crate) fn compile_read_path_policy(
             .map_err(|e| format!("read_paths grant in your config.toml: {e}"))?;
     let allow_blueprint = config.security.allow_blueprint_read_paths;
     let warning = (!allow_blueprint && grants.is_empty()).then(|| {
-        let entries = rp
-            .allow
+        let entries = allow
             .iter()
             .map(|e| format!("\"{e}\""))
             .collect::<Vec<_>>()
@@ -100,7 +100,7 @@ pub(crate) fn compile_read_path_policy(
 /// grants it had rather than losing them to a typo.
 pub(crate) fn read_path_policy_for(
     agent_name: &str,
-    declared: Option<&leviath_runtime::spec::blueprint::ReadPathsConfig>,
+    declared: &[String],
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Option<leviath_core::ReadPathPolicy> {

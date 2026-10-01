@@ -7,7 +7,7 @@ use std::sync::Arc;
 use leviath_runtime::ProviderRegistry;
 use leviath_runtime::host::RunStarter;
 use leviath_runtime::runfile::RunFileReader;
-use leviath_runtime::spec::env::{Caller, LoadedBlueprint};
+use leviath_runtime::spec::env::Caller;
 use leviath_runtime::spec::graph::RunGraph;
 use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
 use leviath_runtime::state::RunStatus;
@@ -39,11 +39,11 @@ fn nowhere() -> SpawnRequest {
     ))
 }
 
-/// The graph of `manifest`.
-fn graph_of_manifest(manifest: &str) -> RunGraph {
-    LoadedBlueprint::from_manifest(manifest, PathBuf::from("/"))
-        .expect("the manifest loads")
-        .graph
+/// The graph of the blueprint `text`.
+fn graph_of_manifest(text: &str) -> RunGraph {
+    leviath_blueprint::BlueprintFile::parse(text)
+        .expect("the blueprint reads")
+        .run_graph()
 }
 
 /// The coder blueprint, in `dir`.
@@ -52,19 +52,20 @@ fn coder(dir: &Path) -> PathBuf {
 }
 
 /// A blueprint in `dir` whose `parallel` stage fans out to `worker`, a
-/// `worker_agent` path or a `worker_query`.
+/// `WorkerSource` as TOML: `{ blueprint_file = "/path" }`,
+/// `{ blueprint = { name = "x" } }`, `{ query = "x" }` or `{ stage = "w" }`.
 fn fanning_out(dir: &Path, worker: &str) -> PathBuf {
+    let model = "model = { models = [{ provider = \"fake\", model = \"m\" }] }";
     manifest_in(
         dir,
         &format!(
-            "[agent]\nname = \"parent\"\nentry_stage = \"main\"\n\n\
-             [stages.main]\nmode = \"autonomous\"\nmodel = {{ provider = \"fake\", model = \"m\" }}\n\
-             [stages.main.transitions.parallel]\n\n\
-             [stages.parallel]\nmode = \"fan_out\"\n{worker}\nsplit_prompt = \"go\"\n\
-             model = {{ provider = \"fake\", model = \"m\" }}\n\n\
-             [stages.w]\nmode = \"autonomous\"\nallow_as_worker = true\n\
-             model = {{ provider = \"fake\", model = \"m\" }}\n\n\
-             [context.regions]\ntask = {{ kind = \"pinned\", max_tokens = 200, seed = {{ caller = \"task\" }} }}\n"
+            "[blueprint]\nname = \"parent\"\nversion = \"0.1.0\"\n\n[graph]\nentry = \"main\"\n\
+             layout = {{ total_budget_tokens = 200, regions = [{{ name = \"task\", kind = \"pinned\", budget = 200 }}] }}\n\
+             inputs = [{{ name = \"task\", type = \"text\", binds = [{{ region = \"task\" }}] }}]\n\
+             edges = [{{ name = \"parallel\", from = \"main\", to = \"parallel\" }}]\n\n\
+             [[graph.stages]]\nname = \"main\"\n{model}\n\n\
+             [[graph.stages]]\nname = \"parallel\"\n{model}\nmode = {{ fan_out = {{ worker = {worker}, split_prompt = \"go\" }} }}\n\n\
+             [[graph.stages]]\nname = \"w\"\nallow_as_worker = true\n{model}\n"
         ),
     )
 }
@@ -74,23 +75,46 @@ fn fanning_out(dir: &Path, worker: &str) -> PathBuf {
 #[test]
 fn a_graphs_models_are_each_named_once() {
     let graph = graph_of_manifest(
-        r#"
-[agent]
+        r#"[blueprint]
 name = "m"
-entry_stage = "one"
+version = "0.1.0"
 
-[stages.one]
+[graph]
+entry = "one"
+edges = [
+    { name = "two", from = "one", to = "two" },
+    { name = "three", from = "two", to = "three" },
+]
+
+[[graph.stages]]
+name = "one"
 system_prompt = "x"
-model = { models = ["shared", { provider = "ollama", model = "local:latest" }] }
-[stages.one.transitions.two]
 
-[stages.two]
+[graph.stages.model]
+models = [{ model = "shared" }, { provider = "ollama", model = "local:latest" }]
+
+[[graph.stages]]
+name = "two"
 system_prompt = "y"
-model = { models = ["shared", "other"] }
-[stages.two.transitions.three]
+model = { models = [{ model = "shared" }, { model = "other" }] }
 
-[stages.three]
+[[graph.stages]]
+name = "three"
 system_prompt = "z"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
 "#,
     );
     assert_eq!(
@@ -136,7 +160,8 @@ async fn a_requests_graph_is_its_blueprints_or_its_own() {
 async fn a_fan_outs_worker_servers_are_found_by_path_or_query() {
     let (_stub_dir, stub) = stub_server_py();
     let agents = tempfile::tempdir().unwrap();
-    let worker = agents.path().join("searcher");
+    // Installed under the name it gives itself.
+    let worker = agents.path().join("mcpagent");
     std::fs::create_dir_all(&worker).unwrap();
     blueprint_with_mcp(&worker, &stub);
     let runs = tempfile::tempdir().unwrap();
@@ -153,13 +178,13 @@ async fn a_fan_outs_worker_servers_are_found_by_path_or_query() {
             .map(|s| s.name)
             .collect::<Vec<_>>()
     };
-    let by_path = format!("worker_agent = '{}'", worker.display());
+    let by_path = format!("{{ blueprint_file = '{}' }}", worker.display());
     assert_eq!(names(&by_path), ["search"]);
-    assert_eq!(names("worker_agent = \"searcher\""), ["search"]);
-    assert_eq!(names("worker_query = \"searcher\""), ["search"]);
-    assert!(names("worker_query = \"nothing-matches\"").is_empty());
-    assert!(names("worker_stage = \"w\"").is_empty());
-    assert!(names("worker_agent = '/no/such/worker'").is_empty());
+    assert_eq!(names("{ blueprint = { name = \"mcpagent\" } }"), ["search"]);
+    assert_eq!(names("{ query = \"mcpagent\" }"), ["search"]);
+    assert!(names("{ query = \"nothing-matches\" }").is_empty());
+    assert!(names("{ stage = \"w\" }").is_empty());
+    assert!(names("{ blueprint_file = '/no/such/worker' }").is_empty());
 }
 
 /// Warming a run connects its own MCP servers and its fan-out workers', so
@@ -172,7 +197,7 @@ async fn warming_connects_the_runs_servers_and_its_workers() {
     let parent = tempfile::tempdir().unwrap();
     let manifest = fanning_out(
         parent.path(),
-        &format!("worker_agent = '{}'", worker.path().display()),
+        &format!("{{ blueprint_file = '{}' }}", worker.path().display()),
     );
     let runs = tempfile::tempdir().unwrap();
     let starter = starter(Config::default(), registry(), runs.path());
@@ -435,11 +460,28 @@ async fn a_run_refused_at_its_binding_ends_on_its_file() {
     let runs = tempfile::tempdir().unwrap();
     let manifest = manifest_in(
         dir.path(),
-        "[agent]\nname = \"reader\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [read_paths]\nallow = [\"/tmp\"]\n\n\
-         [context.regions]\ntask = { kind = \"pinned\", max_tokens = 4000 }\n\n\
-         [stages.main]\nmode = \"autonomous\"\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-         available_tools = []\nsystem_prompt = \"be brief\"\n",
+        r#"[blueprint]
+name = "reader"
+version = "0.1.0"
+description = "d"
+
+[graph]
+read_paths = ["/tmp"]
+
+[[graph.stages]]
+name = "main"
+system_prompt = "be brief"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 4000 }]
+total_budget_tokens = 4000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
     );
     let mut config = Config::default();
     config.security.read_paths = vec!["glob:[".to_string()];

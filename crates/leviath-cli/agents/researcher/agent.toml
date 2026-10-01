@@ -1,34 +1,135 @@
-[agent]
+[blueprint]
 name = "researcher"
-version = "0.4.8"
+version = "0.5.0"
 description = "Research assistant - gather, analyze, and summarize with a gather↔analyze refinement loop, error recovery, and multi-provider fallback"
+
+# gather -> analyze -> summarize -> summary
+#
+# `analyze` can send the run back to `gather` when it finds a gap, and `gather`
+# can hand a thread that turned out to be several subjects to `dig`, which splits
+# it across researchers one level deeper. `error_recovery` is reached only
+# through an `error` edge, so it never shows up in a run that goes well.
+
+[graph]
+entry = "gather"
 max_child_depth = 2
-entry_stage = "gather"
 
 # Read/search agent: it gathers and synthesizes, writing only its final report.
-[tool_permissions]
-read_file  = "allow"
-list_dir   = "allow"
-web_search = "allow"
-web_fetch  = "allow"
-current_time = "allow"
 # `fan_out` is deliberately not pre-approved here. A blueprint may only loosen
 # `web_search` and `web_fetch` on a stock machine; spawning sub-agents spends
-# money and can recurse, so it is worth a consent prompt. `available_tools`
-# below still offers it, and an unattended run waives the prompt as it does
+# money and can recurse, so it is worth a consent prompt. The gather stage's
+# `tools` still offers it, and an unattended run waives the prompt as it does
 # every other.
-write_file = "ask"
-bash       = "ask"
+tool_permissions = { read_file = "allow", list_dir = "allow", web_search = "allow", web_fetch = "allow", current_time = "allow", write_file = "ask", bash = "ask" }
+
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+
+# The research question. Supplied via --task (or the API/ACP task field).
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "query" }]
+
+# Optional caller bounds: --scope "peer-reviewed sources since 2020 only".
+# A fan-out that runs this blueprint as its worker puts what the worker's
+# answer is for here.
+[[graph.inputs]]
+name = "scope"
+type = { kind = "text", multiline = true }
+description = "Bounds on the research, or, for a fan-out worker, what its answer is for."
+binds = [{ region = "scope" }]
+
+# ─── Context layout ──────────────────────────────────────────────────────────
+# Budgets are a percentage of the model's context window, and the percentage is
+# the whole answer: every region scales with whatever model the stage runs on.
+# There are no absolute token caps on top, because a cap below the percentage
+# silently wins on every window worth having, which is how a 1M-context run
+# ends up with a 40k findings region. Percentages are ceilings, not
+# reservations: a region costs only what is stored in it, so a ceiling it never
+# reaches is free, and they may sum past 100% because regions rarely fill
+# together.
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "sub_findings", kind = "pinned", budget = "15%", description = "What deeper workers returned, one entry each", volatility = "grows" },
+    # The research question, bound to the `task` input.
+    { name = "query", kind = "pinned", budget = "1%", required = true, required_message = "State the research question via --task.", volatility = "stable" },
+    { name = "scope", kind = "pinned", budget = "1%", volatility = "stable" },
+    # The date and locale, read once at spawn.
+    { name = "environment", kind = "pinned", budget = "1%", volatility = "stable", seed = { tools = { calls = [{ tool = "current_time", args = {} }, { tool = "locale_info", args = {} }] } } },
+    # Growing bibliography with credibility notes (curated by the agent).
+    # `required`: the report is built from this, and without the gate a stage
+    # that gathered nothing would hand an empty bibliography to `summarize`,
+    # which writes the references from memory rather than reporting that it had
+    # none. The gate binds the stages that can write context and no-ops for the
+    # ones that cannot, so it can never deadlock the deliverable.
+    { name = "sources_index", kind = "pinned", budget = "3%", required = true, required_message = 'You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region="sources_index"): `[n] <title> - <url or path> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered.', volatility = "grows" },
+    # Citation/confidence rules (seeded with a sensible default the agent follows).
+    { name = "format", kind = "pinned", budget = "1%", volatility = "stable", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Mark each finding's confidence as high / medium / low based on source count and credibility. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." } },
+
+    # Raw source material (bulk, evictable).
+    # Declared `grows` because it is appended to and never rewritten: tool
+    # results land here and earlier ones stay put. Undeclared it would default
+    # to `rewritten`, which assumes the whole region changes every turn and so
+    # caches none of it - measured at 4% cache hits on a run where this region
+    # held 280K tokens, every one of them re-sent and re-paid on every single
+    # inference.
+    # Sized by the percentage alone, with no budget max. A max low enough to
+    # matter binds on every model above the window it was chosen for, so from
+    # there up it decides the size and the percentage - the whole mechanism for
+    # scaling with the model in front of you - decides nothing. The size is not
+    # the fault anyway. 280K tokens re-sent at 4% cached is expensive; the same
+    # 280K mostly cached is not, and the `volatility` is what makes the
+    # difference.
+    { name = "raw_findings", kind = "temporary", budget = "30%", volatility = "grows" },
+    # Extracted claims (with source refs) and cross-source conflicts.
+    # The report is written FROM this region, so anything evicted here is a
+    # finding the run paid for and cannot deliver. A 30-item window is reached
+    # long before the reading is: on one measured run an agent read 8.8M
+    # tokens, spent $35, and handed back 2,596 bytes - fewer than one that read
+    # 462K and spent $2.41, because both filled the same 30 slots. 150 is wide
+    # enough that the budget is what limits it, which is a limit that scales
+    # with the model.
+    { name = "claims", kind = { kind = "sliding_window", max_items = 150 }, budget = "15%", volatility = "grows" },
+    { name = "contradictions", kind = "clearable", budget = "3%" },
+
+    # Synthesis workspace (compacts to a running history when it grows).
+    { name = "synthesis", kind = "compacting", budget = "40%", compact_at = 0.8 },
+    { name = "synthesis_history", kind = { kind = "compact_history", source = "synthesis" }, budget = "3%", volatility = "grows" },
+
+    # The message stream. An explicit sliding_window `conversation` region is
+    # required: the per-stage layout is rebuilt from this list on each
+    # transition, so an auto-added one would be dropped after the first stage.
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 30, eviction = { bulk = 10 } }, budget = "12%" },
+
+    # Written by the RUNTIME on an abnormal stage ending: a failed inference
+    # call's error text, or a note that a stage hit its iteration cap. Pinned so
+    # it survives the edge into the stage that acts on it.
+    { name = "error_report", kind = "pinned", budget = "1%" },
+]
 
 # ─── Stage 1: Gather ──────────────────────────────────────────────────────────
-[stages.gather]
-mode = "autonomous"
-model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.stages]]
+name = "gather"
 description = "Gather relevant information on the topic"
-# web_search / web_fetch are provided by the agent's script tools (issue #97).
-available_tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "context_read", "current_time", "fan_out"]
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+# web_search / web_fetch are provided by the agent's script tools.
+tools = ["web_search", "web_fetch", "read_file", "list_dir", "context_append", "context_read", "current_time", "fan_out"]
 max_iterations = 8
 max_revisits = 2
+tool_routing = { default_region = "raw_findings", keep_results = true }
+transition_prompt = """
+Say what this topic actually is. Answer this EARLY - `dig` exists to
+split work before you do it, so choosing it after a full gather saves nothing:
+- Several INDEPENDENT subjects that share a name - separate companies, systems,
+  incidents, products - each with its own sources and its own answer. Each one
+  is worth a researcher of its own. Respond with: dig
+- ONE subject, however deep, examined from several angles. Respond with: analyze
+
+Depth is not a reason to split and neither is a long source list; independence
+is. Six pages about one system are one subject. A dozen companies are a dozen
+subjects."""
 system_prompt = """
 You are gathering source material on the topic in the `query` region, within any
 bounds set in `scope`.
@@ -128,7 +229,8 @@ forum, or vendor claim. FIRST, before the broad search: read the task and count 
 
 Several INDEPENDENT subjects - separate companies, systems, incidents, products,
 each with its own sources and its own answer, no shared thread - call the
-`fan_out` tool RIGHT NOW, one item per subject, `agent` set to "researcher".
+`fan_out` tool RIGHT NOW, one item per subject, `agent` set to "researcher",
+each item's `inputs.task` naming its subject.
 That is how you split; you do not need to finish this stage first. It researches them in parallel and hands the findings back. Do one
 orienting search if you need it, then go; do not research them one at a time.
 Researching five subjects yourself costs five times what splitting them costs
@@ -141,60 +243,52 @@ Say which it is and why in one line before you do anything else.
 
 If you are still gathering at the end of this stage, that decision is already
 made - you are the single-subject case, so finish and go to `analyze`. `analyze`
-will send you back if it finds a real gap.
-"""
+will send you back if it finds a real gap."""
 
-transition_prompt = """
-Say what this topic actually is. Answer this EARLY - `dig` exists to
-split work before you do it, so choosing it after a full gather saves nothing:
-- Several INDEPENDENT subjects that share a name - separate companies, systems,
-  incidents, products - each with its own sources and its own answer. Each one
-  is worth a researcher of its own. Respond with: dig
-- ONE subject, however deep, examined from several angles. Respond with: analyze
-
-Depth is not a reason to split and neither is a long source list; independence
-is. Six pages about one system are one subject. A dozen companies are a dozen
-subjects.
-"""
-
-[stages.gather.tool_routing]
-default_region = "raw_findings"
-
-[stages.gather.transitions.dig]
-hint = "This thread is several independent investigations, not one"
-transform = "direct"
-
-[stages.gather.transitions.analyze]
+[[graph.edges]]
+name = "analyze"
+from = "gather"
+to = "analyze"
 hint = "Enough gathered for a first pass of analysis"
-transform = "direct"
+
+[[graph.edges]]
+name = "dig"
+from = "gather"
+to = "dig"
+hint = "This thread is several independent investigations, not one"
+
+[[graph.edges]]
+name = "error_recovery"
+from = "gather"
+to = "error_recovery"
+when = "error"
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.gather.transitions.summarize]
+[[graph.edges]]
+name = "summarize"
+from = "gather"
+to = "summarize"
+when = "dead_end"
 hint = "Analysis is out of revisits - summarize from the material in hand"
-condition = "dead_end"
-transform = "compact"
-
-[stages.gather.transitions.error_recovery]
-condition = "error"
-transform = "direct"
+carry = { compact = {} }
 
 # ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
-# Two open edges (gather / summarize) → the LLM decides via transition_prompt
+# Two open edges (gather / summarize): the model decides via transition_prompt
 # whether it needs more sources or is ready to summarize.
-[stages.analyze]
-mode = "autonomous"
-model = { models = ["claude-opus-5", "gpt-5.5", "gemini-3.1-pro-preview", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.stages]]
+name = "analyze"
 description = "Analyze and synthesize findings"
-available_tools = ["read_file", "web_fetch", "context_write", "context_append", "context_read", "current_time"]
+model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "web_fetch", "context_write", "context_append", "context_read", "current_time"]
 max_iterations = 20
 max_revisits = 3
+tool_routing = { default_region = "raw_findings", keep_results = true }
 transition_prompt = """
 You've analyzed the material gathered so far. Decide what happens next:
 - If there are clear gaps you can't fill from what you have, respond with: gather
-- If you have enough to write a useful summary, respond with: summarize
-"""
+- If you have enough to write a useful summary, respond with: summarize"""
 system_prompt = """
 Analyze the `raw_findings` against the `sources_index`. Do three things:
 
@@ -210,31 +304,39 @@ Flag open questions you couldn't resolve.
 
 If `error_report` says a previous stage hit its iteration cap, that stage was cut
 off before finishing - treat its output as incomplete and verify coverage before
-concluding.
-"""
+concluding."""
 
-[stages.analyze.tool_routing]
-default_region = "raw_findings"
+[[graph.edges]]
+name = "error_recovery"
+from = "analyze"
+to = "error_recovery"
+when = "error"
 
-[stages.analyze.transitions.gather]
+[[graph.edges]]
+name = "gather"
+from = "analyze"
+to = "gather"
 hint = "More information needed on specific sub-topics"
-transform = "compact"
+carry = { compact = {} }
 
-[stages.analyze.transitions.summarize]
+[[graph.edges]]
+name = "summarize"
+from = "analyze"
+to = "summarize"
 hint = "Analysis complete - ready to summarize"
-transform = "compact"
+carry = { compact = {} }
 
-[stages.analyze.transitions.error_recovery]
-condition = "error"
-transform = "direct"
-
-# ─── Stage 3: Summarize (terminal) ────────────────────────────────────────────
-[stages.summarize]
-mode = "autonomous"
-model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# ─── Stage 3: Summarize ───────────────────────────────────────────────────────
+[[graph.stages]]
+name = "summarize"
 description = "Write up everything found, organized by theme"
-available_tools = ["write_file", "read_file"]
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["write_file", "read_file"]
 max_iterations = 10
+# `raw_findings` is the raw material - every fetched page - and this stage's
+# instructions work from `claims`, `contradictions` and `sources_index`. Left
+# in, it is re-sent on every call for nothing.
+hide = ["raw_findings"]
 system_prompt = """
 Write the research report (write_file), built from the `claims` region and citing
 `sources_index`. Follow the citation/confidence rules in the `format` region.
@@ -288,57 +390,62 @@ Citations are load-bearing, so two rules bind absolutely:
    its sources, drop the `[n]` markers, mark every finding low confidence, and
    present what you have as background knowledge rather than findings.
 
-Confidence describes the evidence, not how sure the prose sounds.
-"""
+Confidence describes the evidence, not how sure the prose sounds."""
 
-# `raw_findings` is the raw material - every fetched page - and this stage's
-# instructions work from `claims`, `contradictions` and `sources_index`. Left
-# in, it is re-sent on every call for nothing.
-[stages.summarize.context]
-hide = ["raw_findings"]
-
-[stages.summarize.transitions.summary]
+[[graph.edges]]
+name = "summary"
+from = "summarize"
+to = "summary"
 hint = "The report is written"
 
 # ─── Stage 4: Error recovery ──────────────────────────────────────────────────
-[stages.error_recovery]
-mode = "autonomous"
-model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+[[graph.stages]]
+name = "error_recovery"
 description = "Diagnose and recover from errors during gathering or analysis"
-available_tools = ["read_file", "bash"]
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "bash"]
 max_iterations = 8
 max_revisits = 1
 system_prompt = """
 Something failed during research (a source fetch, a parse, etc.). The
 `error_report` region holds the error text the runtime captured - read it first,
 work out what went wrong, and note a workaround. Then hand back to analyze to
-continue with whatever material is available.
-"""
+continue with whatever material is available."""
+
+[[graph.edges]]
+name = "analyze"
+from = "error_recovery"
+to = "analyze"
+hint = "Recovered - continue analysis"
+carry = { compact = {} }
 
 # Un-exhaustible escape (lint: dead-end-possible): when every looping
 # target has spent its max_revisits budget, the run can still move forward
 # to the deliverable instead of dead-ending.
-[stages.error_recovery.transitions.summarize]
+[[graph.edges]]
+name = "summarize"
+from = "error_recovery"
+to = "summarize"
 hint = "Recovery is not converging - summarize what was found"
-transform = "compact"
-
-[stages.error_recovery.transitions.analyze]
-hint = "Recovered - continue analysis"
-transform = "compact"
-
-[compaction]
-provider = "anthropic"
-model = "claude-sonnet-5"
+carry = { compact = {} }
 
 # ─── Final output ────────────────────────────────────────────────────────────
-# Terminal. `mode = "output"` grants `submit_output`, requires the call, and
-# lets the run end here. No file tools on purpose: this stage reports, it does
-# not work.
-[stages.summary]
-mode = "output"
-model = { models = ["claude-sonnet-5", "gpt-5.4-mini", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
+# The last stage. An output stage hands back the run's answer with
+# `submit_output`, must call it, and may end the run. No file tools on
+# purpose: this stage reports, it does not work.
+[[graph.stages]]
+name = "summary"
 description = "Say what the research found"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+mode = "output"
+tools = ["submit_output"]
 max_iterations = 8
+allow_complete = true
+require_output = true
+# `raw_findings` is the raw material - every fetched page - and this stage's
+# instructions work from `claims`, `contradictions` and `sources_index`. Left
+# in, it is re-sent on every call for nothing.
+hide = ["raw_findings"]
 system_prompt = """
 Say what this research produced, for whoever asked for it.
 
@@ -350,51 +457,38 @@ fan-out, the agent that spawned you reads that file by that name, and a name
 it has to guess at is a report it never sees.
 
 Do not re-derive anything or re-list every source. This is the summary someone
-reads instead of the report, not a second copy of it.
-"""
-
-# `raw_findings` is the raw material - every fetched page - and this stage's
-# instructions work from `claims`, `contradictions` and `sources_index`. Left
-# in, it is re-sent on every call for nothing.
-[stages.summary.context]
-hide = ["raw_findings"]
-
-[stages.summary.transitions]
-
-# ─── Context layout ───────────────────────────────────────────────────────────
-# Budgets are a percentage of the model's context window (issue #100), and the
-# percentage is the whole answer: every region scales with whatever model the
-# stage runs on. No absolute `max_tokens`/`threshold_tokens` guard-rails - a cap
-# below the percentage silently wins on every window worth having, which is how
-# a 1M-context run ended up with a 40k findings region. Percentages are ceilings,
-# not reservations: a region costs only what is stored in it, so a ceiling it
-# never reaches is free, and they may sum past 100% because regions rarely fill
-# together.
+reads instead of the report, not a second copy of it."""
 
 # ─── Dig: one more level, only when the thread is genuinely several ──────────
 # A worker handed "compare the sandboxing stories" may find that is four
 # separate investigations. Splitting once more finds what one pass cannot,
 # which is the whole reason for sub-agents. Three items, not twelve: this is
 # the level where a generous cap multiplies.
-[stages.dig]
-mode = "fan_out"
+[[graph.stages]]
+name = "dig"
+description = "Split a thread that turned out to be several, one level deeper"
 # The split decision is an inference like any other, so this stage names its own
 # model. sonnet-5 measured best at it: given the same material it produced eight
 # subject-shaped items where deepseek produced three vague buckets.
-model = { models = ["claude-sonnet-5", "gpt-5.4", "gemini-3.5-flash", { provider = "ollama", model = "qwen3.5:9b" }] }
-worker_agent = "researcher"
-max_workers = 3
-max_items = 3
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["fan_out"]
 max_iterations = 4
 max_revisits = 1
-description = "Split a thread that turned out to be several, one level deeper"
+
+[graph.stages.mode.fan_out]
+worker = { blueprint = { name = "researcher" } }
+max_workers = 3
+max_items = 3
 split_prompt = """
 Split when this thread turned out to be several distinct subjects rather than
 one - different companies, systems, standards or approaches, each needing its
 own reading. Worth checking for every time.
 
 Name one sub-question per subject, as a JSON array:
-[{"id": "...", "context": {"question": "...", "why": "..."}}]
+[{"id": "...", "inputs": {"task": "<the sub-question>", "scope": "<why it matters to this thread>"}}]
+
+Each item's inputs are the worker's own: "task" is the question it
+researches, and "scope" what its answer is for. Nothing else reaches it.
 
 The unit is a SUBJECT, not a source:
 - Several distinct subjects is several items. They do not overlap.
@@ -406,66 +500,14 @@ The unit is a SUBJECT, not a source:
 If this really is a single subject, reply with exactly: []
 """
 
-[stages.dig.transitions.analyze]
+[[graph.edges]]
+name = "analyze"
+from = "dig"
+to = "analyze"
 hint = "Sub-findings are in - fold them into the analysis"
-transform = "direct"
 
-[stages.dig.transitions.error_recovery]
-condition = "error"
-transform = "direct"
-
-[context.regions]
-sub_findings   = { kind = "pinned", budget = "15%", volatility = "grows", description = "What deeper workers returned, one entry each" }
-# The research question - required. Supplied via --task (or the API/ACP task field).
-query          = { kind = "pinned", budget = "1%", required = true, seed = "task", required_message = "State the research question via --task.", volatility = "stable" }
-# Optional caller bounds: --scope "peer-reviewed sources since 2020 only".
-scope          = { kind = "pinned", budget = "1%", seed = "scope", volatility = "stable" }
-# Growing bibliography with credibility notes (curated by the agent).
-environment    = { kind = "pinned", budget = "1%", seed = { tools = ["current_time", "locale_info"] }, volatility = "stable" }
-# `required`: the report is built from this, and a stage that gathered nothing
-# used to hand an empty bibliography to `summarize`, which wrote the references
-# from memory rather than reporting that it had none. The gate binds the stages
-# that can write context and no-ops for the ones that cannot, so it can never
-# deadlock the deliverable.
-sources_index  = { kind = "pinned", budget = "3%", volatility = "grows", required = true, required_message = "You have not recorded a single source in `sources_index`. Append one bibliography line per source you actually read (context_append, region=\"sources_index\"): `[n] <title> - <url or path> - credibility: <high/med/low + why>`. If the searches came back empty or unavailable, record THAT as the finding - do not proceed as though sources were gathered." }
-# Citation/confidence rules (seeded with a sensible default the agent follows).
-format         = { kind = "pinned", budget = "1%", seed = { literal = "Cite every non-obvious claim as [n], matching a numbered entry in the Sources bibliography (title + URL/path). Write every marker as a link to the source it cites - `[[n]](<url>)`, which renders as [n] and clicks through - so a reader can check a claim without scrolling to the bibliography and pasting a URL by hand. Use the URL from that source's `sources_index` line; a source that has a local path instead of a URL stays a bare [n]. The bibliography entry keeps its full URL either way. Mark each finding's confidence as high / medium / low based on source count and credibility. Credibility is about what a source IS, not how authoritative it sounds: only the primary artifact - the paper, the spec, the model card, the official docs, the registry or leaderboard - can be high for a factual claim about that artifact. A roundup, listicle or vendor blog is medium at best however confident its title, and a number that appears in exactly one such page with nothing corroborating it is low and says so. A claim about something the task names only as a comparison rests on what THIS run read about it, not on the credibility of your own topic's sources: grade it on that, and when a figure reaches you through a source that mentions a study rather than one that reports it, say so and grade it down." }, volatility = "stable" }
-
-# Raw source material (bulk, evictable).
-# Declared `grows` because it is appended to and never rewritten: tool results
-# land here and earlier ones stay put. Undeclared it would default to
-# `rewritten`, which assumes the whole region changes every turn and so caches
-# none of it - measured at 4% cache hits on a run where this region held 280K
-# tokens, every one of them re-sent and re-paid on every single inference.
-# Sized by the percentage alone. An absolute ceiling has been tried here twice
-# and removed twice - once at 40,000 with the note that "the percentages were
-# decorative from about 167k upward", once at 60,000 for the same reason found
-# again. A cap low enough to matter binds on every model above the window it was
-# chosen for, so from there up it decides the size and the percentage - the whole
-# mechanism for scaling with the model in front of you - decides nothing. The size was never the fault anyway. 280K tokens
-# re-sent at 4% cached is expensive; the same 280K mostly cached is not, and the
-# `volatility` above is what makes the difference.
-raw_findings   = { kind = "temporary", budget = "30%", volatility = "grows" }
-# Extracted claims (with source refs) and cross-source conflicts.
-# The report is written FROM this region, so anything evicted here is a finding
-# the run paid for and cannot deliver. At 30 items that bound was reached long
-# before the reading was: on one measured run an agent read 8.8M tokens, spent
-# $35, and handed back 2,596 bytes - fewer than one that read 462K and spent
-# $2.41, because both filled the same 30 slots. Wide enough now that the budget
-# is what limits it, which is a limit that scales with the model.
-claims         = { kind = "sliding_window", max_items = 150, budget = "15%", volatility = "grows" }
-contradictions = { kind = "clearable",      budget = "3%" }
-
-# Synthesis workspace (compacts to a running history when it grows).
-synthesis         = { kind = "compacting",      budget = "40%", compact_at = "80%" }
-synthesis_history = { kind = "compact_history", source_region = "synthesis", budget = "3%", volatility = "grows" }
-
-# The message stream. An explicit sliding_window `conversation` region is required -
-# the per-stage layout is rebuilt from this table on each transition, so an
-# auto-added one would be dropped after the first stage.
-conversation      = { kind = "sliding_window", max_items = 30, budget = "12%", strategy = "bulk", overflow = 10 }
-
-# Written by the RUNTIME on an abnormal stage ending (issue #154): a failed
-# inference call's error text, or a note that a stage hit its iteration cap.
-# Pinned so it survives the edge transform into the stage that acts on it.
-error_report      = { kind = "pinned", budget = "1%" }
+[[graph.edges]]
+name = "error_recovery"
+from = "dig"
+to = "error_recovery"
+when = "error"

@@ -3266,7 +3266,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "The stage splits its work over worker runs.",
+          "description": "The stage splits its work over worker runs. It is given the\n`fan_out` tool it starts them with, whether or not its `tools` name it.",
           "properties": {
             "fan_out": {
               "$ref": "#/$defs/FanOutDef"
@@ -3279,7 +3279,7 @@
         },
         {
           "const": "output",
-          "description": "The stage only writes the run's final output.",
+          "description": "The stage only writes the run's final output. It is given the\n`submit_output` tool and must call it, whether or not its `tools` name\nit, and it may end the run when no edge leaves it.",
           "type": "string"
         }
       ]

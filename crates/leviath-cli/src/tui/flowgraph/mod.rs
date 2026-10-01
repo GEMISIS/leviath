@@ -1,13 +1,12 @@
 //! Stage graphs on a canvas.
 //!
-//! An agent blueprint is a graph: stages are nodes, transitions are edges,
-//! and a run walks it. Every surface that shows that shape draws it through
+//! A run graph is stages joined by edges, and a run walks it. Every surface that shows that shape draws it through
 //! this module, so the stage explorer, the detail view's graph band, the
 //! new-run preview and `lev validate --graph` agree on what a stage looks
 //! like and where it sits.
 //!
-//! - [`model`] reads a [`leviath_runtime::spec::Blueprint`] into a [`StageGraph`]:
-//!   both manifest shapes, fan-out hand-offs, self-loops as badges.
+//! - [`model`] reads a [`leviath_runtime::spec::graph::RunGraph`] into a
+//!   [`StageGraph`]: fan-out hand-offs, self-loops as badges.
 //! - [`path`] turns a run's visit timeline into a graph of its own: one node
 //!   per visit, chained in the order they happened.
 //! - [`layout`] places it on layers, deterministically, or snakes a path

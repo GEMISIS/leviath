@@ -206,15 +206,10 @@ impl DaemonEnv {
             layers::sandbox(config, graph, run_id, &workdir, layers.entry_index)
                 .map_err(|e| at("sandbox", IssueCode::Unavailable, e)),
         );
-        let declared_reads = (!graph.read_paths.is_empty()).then(|| {
-            leviath_runtime::spec::blueprint::ReadPathsConfig {
-                allow: graph.read_paths.clone(),
-            }
-        });
         let reads = issues.take(
             crate::daemon::spawn::compile_read_path_policy(
                 &agent,
-                declared_reads.as_ref(),
+                &graph.read_paths,
                 config,
                 &workdir,
             )
@@ -366,7 +361,7 @@ impl DaemonEnv {
             yolo_profile: profile_name,
             protected: crate::tools::permission_files(config),
             blueprint_safe: safe.as_ref(),
-            blueprint_read_paths: declared_reads.as_ref(),
+            blueprint_read_paths: &graph.read_paths,
             workdir,
         });
         Ok(ToolState {
@@ -461,7 +456,7 @@ impl DaemonEnv {
         });
         let path = self
             .blueprint_dir(spec)
-            .map(|d| d.join(leviath_core::files::MANIFEST_FILENAME))
+            .map(|d| d.join(leviath_blueprint::FILE_NAME))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         Bindings::new().edit(

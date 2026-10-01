@@ -197,7 +197,7 @@ async fn installed_elsewhere(state: &AppState, request: &mut Request) {
     let name = reference.name.to_string();
     let installed = super::super::blueprints::agents_dir()
         .join(&name)
-        .join(leviath_core::files::MANIFEST_FILENAME)
+        .join(leviath_blueprint::FILE_NAME)
         .is_file();
     if installed || reference.digest.is_some() {
         return;

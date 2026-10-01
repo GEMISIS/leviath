@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::resolve_cwd;
 use crate::config::Config;
-use leviath_runtime::spec::manifest::parse_manifest;
+use leviath_blueprint::FILE_NAME;
 
 /// Which half of the catalog `lev list` reports.
 ///
@@ -49,7 +49,7 @@ pub struct ListArgs {
     pub json: bool,
 }
 
-/// Info parsed from an agent manifest for display.
+/// Info read from an agent's `agent.toml` for display.
 #[derive(serde::Serialize)]
 pub(crate) struct AgentInfo {
     pub(crate) name: String,
@@ -89,14 +89,16 @@ pub(crate) struct BundledEntry {
     pub(crate) version: String,
 }
 
+/// The listing line for the blueprint in `manifest_path`, or `None` when it
+/// does not read as one.
 fn read_agent_info(manifest_path: &Path, config: &Config, cwd: &Path) -> Option<AgentInfo> {
-    let content = fs::read_to_string(manifest_path).ok()?;
-    let blueprint = parse_manifest(&content).ok()?;
-    let read_paths = read_path_summary(&blueprint, config, cwd);
+    let blueprint = crate::commands::run::locate::loaded_at(manifest_path)?;
+    let name = blueprint.reference.name.to_string();
+    let read_paths = read_path_summary(&blueprint.graph, &name, config, cwd);
     Some(AgentInfo {
-        name: blueprint.name,
+        description: blueprint.graph.description.unwrap_or_default(),
+        name,
         version: blueprint.version,
-        description: blueprint.description,
         read_paths,
     })
 }
@@ -105,11 +107,12 @@ fn read_agent_info(manifest_path: &Path, config: &Config, cwd: &Path) -> Option<
 /// none. A config whose own grant list is broken says so here rather than
 /// staying silent; `lev validate` and the spawn error carry the detail.
 fn read_path_summary(
-    blueprint: &leviath_runtime::spec::Blueprint,
+    graph: &leviath_runtime::spec::graph::RunGraph,
+    name: &str,
     config: &Config,
     cwd: &Path,
 ) -> Option<String> {
-    match crate::read_path_report::build(blueprint, config, cwd)? {
+    match crate::read_path_report::build(graph, name, config, cwd)? {
         Ok(report) if report.has_ungranted() => Some(format!(
             "read_paths: {} - `lev validate` shows which",
             report.summary()
@@ -125,7 +128,7 @@ fn scan_directory_for_agents(dir: &Path, config: &Config, cwd: &Path) -> Vec<(Pa
         return agents;
     }
 
-    let direct_manifest = dir.join(leviath_core::files::MANIFEST_FILENAME);
+    let direct_manifest = dir.join(FILE_NAME);
     if direct_manifest.exists()
         && let Some(info) = read_agent_info(&direct_manifest, config, cwd)
     {
@@ -136,7 +139,7 @@ fn scan_directory_for_agents(dir: &Path, config: &Config, cwd: &Path) -> Vec<(Pa
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let manifest_path = path.join(leviath_core::files::MANIFEST_FILENAME);
+                let manifest_path = path.join(FILE_NAME);
                 if manifest_path.exists()
                     && let Some(info) = read_agent_info(&manifest_path, config, cwd)
                 {
@@ -220,11 +223,7 @@ pub(crate) fn build_list_report(
         };
     }
     let installed = scan_directory_for_agents(agents_dir, config, cwd);
-    let local = read_agent_info(
-        &cwd.join(leviath_core::files::MANIFEST_FILENAME),
-        config,
-        cwd,
-    );
+    let local = read_agent_info(&cwd.join(FILE_NAME), config, cwd);
     let configured: Vec<(PathBuf, AgentInfo)> = config
         .agent_paths
         .iter()
@@ -245,10 +244,7 @@ pub(crate) fn build_list_report(
         agents.push(ListedAgent {
             info,
             source: "local",
-            path: cwd
-                .join(leviath_core::files::MANIFEST_FILENAME)
-                .display()
-                .to_string(),
+            path: cwd.join(FILE_NAME).display().to_string(),
         });
     }
 
@@ -304,7 +300,7 @@ fn print_agent_listing(
     }
 
     // 2. Local (current directory)
-    let local_manifest = cwd.join(leviath_core::files::MANIFEST_FILENAME);
+    let local_manifest = cwd.join(FILE_NAME);
     if filter.shows_agents()
         && local_manifest.exists()
         && let Some(info) = read_agent_info(&local_manifest, config, cwd)
@@ -441,19 +437,14 @@ mod tests {
 
     fn write_manifest_with_description(dir: &Path, name: &str, description: &str) {
         let content = format!(
-            r#"[agent]
+            r#"[blueprint]
 name = "{}"
 version = "1.0.0"
 description = "{}"
 
-[stages.main]
-mode = "autonomous"
-model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
+[graph]
+stages = [{{ name = "main", description = "Main", max_iterations = 5 }}]
+layout = {{ total_budget_tokens = 1000, regions = [{{ name = "system", kind = "pinned", budget = 1000 }}] }}
 "#,
             name, description
         );
@@ -464,29 +455,22 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
     /// line. Written as an absolute entry so it compiles the same on every OS.
     fn write_read_paths_manifest(dir: &Path, name: &str) {
         let content = format!(
-            r#"[agent]
+            r#"[blueprint]
 name = "{name}"
 version = "1.0.0"
 description = "Test agent"
 
-[stages.main]
-mode = "autonomous"
-model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = {{ kind = "pinned", max_tokens = 1000 }}
-
-[read_paths]
-allow = ["/data/runs"]
+[graph]
+stages = [{{ name = "main", description = "Main", max_iterations = 5 }}]
+layout = {{ total_budget_tokens = 1000, regions = [{{ name = "system", kind = "pinned", budget = 1000 }}] }}
+read_paths = ["/data/runs"]
 "#
         );
         write_test_agent(dir, content);
     }
 
     fn info_with_config(dir: &Path, config: &Config) -> AgentInfo {
-        super::read_agent_info(&dir.join("agent.leviath"), config, Path::new("/work"))
+        super::read_agent_info(&dir.join("agent.toml"), config, Path::new("/work"))
             .expect("manifest parses")
     }
 
@@ -544,7 +528,7 @@ allow = ["/data/runs"]
     fn read_agent_info_valid_manifest() {
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), "my-agent");
-        let info = read_agent_info(&dir.path().join("agent.leviath")).unwrap();
+        let info = read_agent_info(&dir.path().join("agent.toml")).unwrap();
         assert_eq!(info.name, "my-agent");
         assert_eq!(info.version, "1.0.0");
         assert_eq!(info.description, "Test agent");
@@ -552,15 +536,15 @@ allow = ["/data/runs"]
 
     #[test]
     fn read_agent_info_missing_file_returns_none() {
-        let result = read_agent_info(Path::new("/nonexistent/agent.leviath"));
+        let result = read_agent_info(Path::new("/nonexistent/agent.toml"));
         assert!(result.is_none());
     }
 
     #[test]
     fn read_agent_info_invalid_toml_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("agent.leviath"), "not valid toml {{{{").unwrap();
-        let result = read_agent_info(&dir.path().join("agent.leviath"));
+        fs::write(dir.path().join("agent.toml"), "not valid toml {{{{").unwrap();
+        let result = read_agent_info(&dir.path().join("agent.toml"));
         assert!(result.is_none());
     }
 
@@ -591,7 +575,7 @@ allow = ["/data/runs"]
         // exercises that branch's `None` arm when the manifest at the
         // directory's own root is present but unparseable.
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("agent.leviath"), "not valid toml {{{{").unwrap();
+        fs::write(dir.path().join("agent.toml"), "not valid toml {{{{").unwrap();
         let agents = scan_directory_for_agents(dir.path());
         assert!(agents.is_empty());
     }
@@ -716,7 +700,7 @@ allow = ["/data/runs"]
     fn read_agent_info_extracts_description() {
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), "my-agent");
-        let info = read_agent_info(&dir.path().join("agent.leviath")).unwrap();
+        let info = read_agent_info(&dir.path().join("agent.toml")).unwrap();
         assert_eq!(info.description, "Test agent");
         assert_eq!(info.version, "1.0.0");
     }
@@ -756,7 +740,7 @@ allow = ["/data/runs"]
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("bad-agent");
         fs::create_dir_all(&sub).unwrap();
-        fs::write(sub.join("agent.leviath"), "invalid toml {{{{").unwrap();
+        fs::write(sub.join("agent.toml"), "invalid toml {{{{").unwrap();
 
         let agents = scan_directory_for_agents(dir.path());
         assert!(agents.is_empty());
@@ -791,22 +775,17 @@ allow = ["/data/runs"]
     #[test]
     fn read_agent_info_minimal_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        let content = r#"[agent]
+        let content = r#"[blueprint]
 name = "minimal"
 version = "0.0.1"
 description = ""
 
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+[graph]
+stages = [{ name = "main", description = "Main", max_iterations = 5 }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#;
         write_test_agent(dir.path(), content);
-        let info = read_agent_info(&dir.path().join("agent.leviath")).unwrap();
+        let info = read_agent_info(&dir.path().join("agent.toml")).unwrap();
         assert_eq!(info.name, "minimal");
         assert_eq!(info.description, "");
     }
@@ -1129,12 +1108,12 @@ system = { kind = "pinned", max_tokens = 1000 }
     fn print_agent_listing_local_manifest_invalid_is_skipped() {
         // The local-manifest section has its own `if let Some(info) = ...`
         // construct with no `else`; this exercises its false arm (an
-        // existing but unparseable `agent.leviath` in the cwd), which
+        // existing but unparseable `agent.toml` in the cwd), which
         // `print_agent_listing_finds_local_manifest` (valid manifest) never
         // reaches.
         let agents_dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        fs::write(cwd.path().join("agent.leviath"), "not valid toml {{{{").unwrap();
+        fs::write(cwd.path().join("agent.toml"), "not valid toml {{{{").unwrap();
         let config = Config::default();
 
         let result = print_agent_listing(
@@ -1328,19 +1307,14 @@ system = { kind = "pinned", max_tokens = 1000 }
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("my-agent");
         fs::create_dir_all(&sub).unwrap();
-        let content = r#"[agent]
+        let content = r#"[blueprint]
 name = "my-agent"
 version = "2.0.0"
 description = ""
 
-[stages.main]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-description = "Main"
-max_iterations = 5
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
+[graph]
+stages = [{ name = "main", description = "Main", max_iterations = 5 }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#;
         write_test_agent(sub, content);
 
@@ -1362,7 +1336,7 @@ system = { kind = "pinned", max_tokens = 1000 }
         fs::create_dir_all(&empty).unwrap();
 
         write_manifest(&good, "good-agent");
-        fs::write(bad.join("agent.leviath"), "bad {{ toml").unwrap();
+        fs::write(bad.join("agent.toml"), "bad {{ toml").unwrap();
 
         let agents = scan_directory_for_agents(dir.path());
         assert_eq!(agents.len(), 1);

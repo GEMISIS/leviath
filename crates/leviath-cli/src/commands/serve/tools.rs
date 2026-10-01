@@ -15,8 +15,41 @@ use axum::extract::{Query, State};
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
+use leviath_runtime::spec::graph::ToolGroup;
+
 use super::types::{ApiError, AppState};
 use crate::tool_inventory::ToolInventory;
+
+/// Every tool group a stage's `tools` may name, in the order a picker lists
+/// them: the group, the token a blueprint writes for it, and what it covers.
+pub(crate) const TOOL_GROUPS: &[(ToolGroup, &str, &str)] = &[
+    (
+        ToolGroup::All,
+        "@all",
+        "every tool this install has: built in, sub-agent, scripts, and MCP",
+    ),
+    (
+        ToolGroup::Builtin,
+        "@builtin",
+        "every tool compiled into Leviath",
+    ),
+    (
+        ToolGroup::Subagent,
+        "@subagent",
+        "the sub-agent tools: spawn, validate, check, wait for, message and kill a child, \
+         and read the spawn schema, a blueprint and a run's history",
+    ),
+    (
+        ToolGroup::Scripts,
+        "@scripts",
+        "every Rhai script tool, the agent's own and the global ones",
+    ),
+    (
+        ToolGroup::Mcp,
+        "@mcp",
+        "every tool every connected MCP server advertises",
+    ),
+];
 
 /// The directory of the agent called `name`, refusing a name that is not a
 /// single safe path component.
@@ -139,11 +172,11 @@ pub(super) async fn list_tools(
     };
     let inventory = ToolInventory::discover(dir.as_deref(), q.agent.as_deref());
 
-    let groups = leviath_runtime::spec::blueprint::ToolGroup::ALL
+    let groups = TOOL_GROUPS
         .iter()
-        .map(|g| GroupItem {
-            name: g.token().to_string(),
-            description: g.describe().to_string(),
+        .map(|(_, token, description)| GroupItem {
+            name: token.to_string(),
+            description: description.to_string(),
         })
         .collect();
     let tools = inventory
@@ -349,12 +382,10 @@ mod tests {
             let workspace = home.join("workspace");
             let agent = workspace.join("researcher");
             std::fs::create_dir_all(&agent).expect("the agent directory");
-            std::fs::write(
-                agent.join("agent.leviath"),
-                "[agent]\nname = \"researcher\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\
-                 \n[stages.main]\nsystem_prompt = \"go\"\n",
-            )
-            .expect("the manifest");
+            crate::test_support::write_test_agent(
+                &agent,
+                crate::test_support::tiny_blueprint("researcher"),
+            );
             write_tool(
                 &agent.join("tools"),
                 "web_search.rhai",

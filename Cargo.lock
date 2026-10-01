@@ -2712,7 +2712,9 @@ version = "0.6.4"
 dependencies = [
  "leviath-core",
  "leviath-runtime",
+ "schemars",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "toml",
@@ -2830,6 +2832,7 @@ dependencies = [
 name = "leviath-legacy-runs"
 version = "0.6.4"
 dependencies = [
+ "leviath-blueprint",
  "leviath-core",
  "leviath-runtime",
  "leviath-sys",
@@ -2837,6 +2840,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -2890,7 +2895,6 @@ dependencies = [
  "leviath-testkit",
  "tar",
  "tempfile",
- "toml",
  "tracing",
 ]
 

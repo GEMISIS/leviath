@@ -14,9 +14,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, bail};
+use anyhow::bail;
 use leviath_mcp::{MCPServerConfig, MCPTransport};
-use leviath_runtime::spec::blueprint::{Blueprint, Dependency, DependencyInstall, DependencyKind};
+use leviath_runtime::spec::env::LoadedBlueprint;
+use leviath_runtime::spec::graph::{CodeRef, DependencyDef, InstallDef, McpServerTemplate, Needs};
 
 use crate::dependencies::{self, Probe};
 
@@ -39,17 +40,17 @@ pub enum DepsCommand {
     Install(InstallArgs),
 }
 
-/// An installed agent name, or a path to a blueprint directory or manifest.
+/// An installed agent name, or a path to a blueprint directory or its `agent.toml`.
 #[derive(clap::Args, Debug)]
 pub struct AgentRef {
-    /// An installed agent name, or a path to its directory or `agent.leviath`.
+    /// An installed agent name, or a path to its directory or `agent.toml`.
     pub agent: String,
 }
 
 /// Arguments for `lev deps install`.
 #[derive(clap::Args, Debug)]
 pub struct InstallArgs {
-    /// An installed agent name, or a path to its directory or `agent.leviath`.
+    /// An installed agent name, or a path to its directory or `agent.toml`.
     pub agent: String,
     /// Install without the per-dependency confirmation prompt.
     #[arg(long)]
@@ -116,25 +117,17 @@ pub fn execute_with(args: DepsArgs, env: &DepsEnv) -> anyhow::Result<()> {
     }
 }
 
-/// Resolve an agent name-or-path to its parsed blueprint and its directory,
-/// by the rule `lev run` resolves one: the manifest file, a directory
-/// holding one, an installed name, or the manifest in the current directory.
-fn resolve_agent(agent: &str, env: &DepsEnv) -> anyhow::Result<(Blueprint, PathBuf)> {
-    let manifest = crate::commands::run::manifest::find_manifest_in(
+/// Resolve an agent name-or-path to its checked blueprint, by the rule
+/// `lev run` resolves one: the `agent.toml` itself, a directory holding one,
+/// an installed name, or the one in the current directory. The blueprint's
+/// directory, where its check and install scripts live, is its `base_dir`.
+fn resolve_agent(agent: &str, env: &DepsEnv) -> anyhow::Result<LoadedBlueprint> {
+    let file = crate::commands::run::locate::find_blueprint_in(
         agent,
         env.agents_dir.as_deref(),
         Path::new("."),
     )?;
-    let dir = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let content = std::fs::read_to_string(&manifest).map_err(|e| {
-        anyhow::anyhow!("could not read the manifest at {}: {e}", manifest.display())
-    })?;
-    let blueprint = leviath_runtime::spec::manifest::parse_manifest(&content)
-        .map_err(|e| anyhow::anyhow!("parse {}: {e}", manifest.display()))?;
-    blueprint
-        .validate()
-        .map_err(|e| anyhow::anyhow!("invalid blueprint {}: {e}", manifest.display()))?;
-    Ok((blueprint, dir))
+    Ok(leviath_blueprint::validate(&file)?)
 }
 
 /// The configured MCP servers, or an empty list when there is no config yet.
@@ -152,16 +145,21 @@ fn load_config_or_default(path: &Path) -> anyhow::Result<crate::config::Config> 
 }
 
 fn list(agent: &str, env: &DepsEnv) -> anyhow::Result<()> {
-    let (blueprint, _dir) = resolve_agent(agent, env)?;
-    if blueprint.dependencies.is_empty() {
-        println!("'{}' declares no dependencies.", blueprint.name);
+    let blueprint = resolve_agent(agent, env)?;
+    let name = &blueprint.reference.name;
+    if blueprint.graph.dependencies.is_empty() {
+        println!("'{name}' declares no dependencies.");
         return Ok(());
     }
-    println!("'{}' dependencies:", blueprint.name);
-    for dep in &blueprint.dependencies {
+    println!("'{name}' dependencies:");
+    for dep in &blueprint.graph.dependencies {
         let req = if dep.required { "required" } else { "optional" };
-        println!("  - {} ({}, {req})", dep.name, dep.kind.tag());
-        println!("      {}", describe_kind(&dep.kind));
+        println!(
+            "  - {} ({}, {req})",
+            dep.name,
+            dependencies::kind_tag(&dep.needs)
+        );
+        println!("      {}", describe_kind(&dep.needs));
         if let Some(desc) = &dep.description {
             println!("      {desc}");
         }
@@ -172,31 +170,36 @@ fn list(agent: &str, env: &DepsEnv) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A one-line "what it wants" for a dependency kind.
-fn describe_kind(kind: &DependencyKind) -> String {
-    match kind {
-        DependencyKind::McpServer { server, env } if env.is_empty() => {
+/// A one-line "what it wants" for a dependency.
+fn describe_kind(needs: &Needs) -> String {
+    match needs {
+        Needs::McpServer { server, env } if env.is_empty() => {
             format!("MCP server '{server}'")
         }
-        DependencyKind::McpServer { server, env } => {
+        Needs::McpServer { server, env } => {
             format!("MCP server '{server}' with {}", env.join(", "))
         }
-        DependencyKind::Env { var } => format!("environment variable {var}"),
-        DependencyKind::Binary { command } => format!("program '{command}' on PATH"),
-        DependencyKind::Script { check } => format!("script check {check}"),
+        Needs::Env(var) => format!("environment variable {var}"),
+        Needs::Binary(command) => format!("program '{command}' on PATH"),
+        Needs::Check(check) => format!("script check {}", dependencies::code_label(check)),
     }
 }
 
 fn check(agent: &str, env: &DepsEnv) -> anyhow::Result<()> {
-    let (blueprint, dir) = resolve_agent(agent, env)?;
+    let blueprint = resolve_agent(agent, env)?;
+    let name = &blueprint.reference.name;
     let servers = configured_servers(env)?;
-    let report =
-        dependencies::evaluate(&blueprint.dependencies, &servers, &dir, env.probe.as_ref());
+    let report = dependencies::evaluate(
+        &blueprint.graph.dependencies,
+        &servers,
+        &blueprint.base_dir,
+        env.probe.as_ref(),
+    );
     if report.statuses.is_empty() {
-        println!("'{}' declares no dependencies.", blueprint.name);
+        println!("'{name}' declares no dependencies.");
         return Ok(());
     }
-    println!("'{}' dependencies:", blueprint.name);
+    println!("'{name}' dependencies:");
     for s in &report.statuses {
         println!("  {}", s.line());
     }
@@ -208,19 +211,20 @@ fn check(agent: &str, env: &DepsEnv) -> anyhow::Result<()> {
 }
 
 fn install(args: InstallArgs, env: &DepsEnv) -> anyhow::Result<()> {
-    let (blueprint, dir) = resolve_agent(&args.agent, env)?;
+    let blueprint = resolve_agent(&args.agent, env)?;
+    let dir = &blueprint.base_dir;
     // Load the whole config once, so an MCP-server install mutates and saves
     // this copy rather than re-reading the file.
     let mut config = load_config_or_default(&env.config_path)?;
     let report = dependencies::evaluate(
-        &blueprint.dependencies,
+        &blueprint.graph.dependencies,
         &config.mcp_servers,
-        &dir,
+        dir,
         env.probe.as_ref(),
     );
 
     let mut acted = false;
-    for (dep, status) in blueprint.dependencies.iter().zip(&report.statuses) {
+    for (dep, status) in blueprint.graph.dependencies.iter().zip(&report.statuses) {
         let satisfied = status.state.is_satisfied();
         if satisfied && !args.all {
             continue;
@@ -230,7 +234,7 @@ fn install(args: InstallArgs, env: &DepsEnv) -> anyhow::Result<()> {
                 println!(
                     "  {} ({}): nothing to install - {}",
                     dep.name,
-                    dep.kind.tag(),
+                    dependencies::kind_tag(&dep.needs),
                     dep.remedy
                         .clone()
                         .unwrap_or_else(|| "no install steps declared".to_string())
@@ -249,7 +253,7 @@ fn install(args: InstallArgs, env: &DepsEnv) -> anyhow::Result<()> {
             continue;
         }
         acted = true;
-        run_plan(&plan, &dir, env, &mut config)?;
+        run_plan(&plan, dir, env, &mut config)?;
     }
 
     if !acted {
@@ -269,8 +273,8 @@ struct Plan {
     server: Option<(MCPServerConfig, Vec<String>)>,
     /// A shell command to run.
     command: Option<String>,
-    /// A Rhai install script (path relative to the blueprint).
-    script: Option<String>,
+    /// A Rhai install script: a file beside the blueprint, or inline.
+    script: Option<CodeRef>,
 }
 
 impl Plan {
@@ -286,7 +290,10 @@ impl Plan {
             lines.push(format!("  - run: {cmd}"));
         }
         if let Some(script) = &self.script {
-            lines.push(format!("  - run install script {script}"));
+            lines.push(format!(
+                "  - run install script {}",
+                dependencies::code_label(script)
+            ));
         }
         lines.join("\n")
     }
@@ -294,12 +301,12 @@ impl Plan {
 
 /// Build the install plan for a dependency, or `None` when it declares no way to
 /// install itself.
-fn install_plan(dep: &Dependency, os: &str) -> Option<Plan> {
+fn install_plan(dep: &DependencyDef, os: &str) -> Option<Plan> {
     let install = dep.install.as_ref();
-    let server = match &dep.kind {
-        DependencyKind::McpServer { server, env } => install
+    let server = match &dep.needs {
+        Needs::McpServer { server, env } => install
             .and_then(|i| i.server.as_ref())
-            .map(|tpl| (mcp_from_template(server, tpl), env.clone())),
+            .map(|tpl| (mcp_from_template(server.as_str(), tpl), env.clone())),
         _ => None,
     };
     let command = install.and_then(|i| chosen_command(i, os));
@@ -315,7 +322,7 @@ fn install_plan(dep: &Dependency, os: &str) -> Option<Plan> {
 }
 
 /// The install command for this OS: the per-OS entry, else the generic one.
-fn chosen_command(install: &DependencyInstall, os: &str) -> Option<String> {
+fn chosen_command(install: &InstallDef, os: &str) -> Option<String> {
     install
         .commands
         .get(os)
@@ -324,10 +331,7 @@ fn chosen_command(install: &DependencyInstall, os: &str) -> Option<String> {
 }
 
 /// Turn a blueprint's MCP server template into a config entry.
-fn mcp_from_template(
-    name: &str,
-    tpl: &leviath_runtime::spec::blueprint::McpServerTemplate,
-) -> MCPServerConfig {
+fn mcp_from_template(name: &str, tpl: &McpServerTemplate) -> MCPServerConfig {
     MCPServerConfig {
         name: name.to_string(),
         transport: tpl.transport.as_deref().map(|t| match t {
@@ -382,7 +386,7 @@ fn run_plan(
         println!("  done.");
     }
     if let Some(script) = &plan.script {
-        run_install_script(&dir.join(script), script, env)?;
+        run_install_script(script, dir, env)?;
         println!("  install script done.");
     }
     Ok(())
@@ -425,10 +429,13 @@ fn add_server(
 }
 
 /// Run a Rhai install script, giving it one host function - `sh(command)` -
-/// backed by the injected runner, plus the read-only probes a check gets.
-fn run_install_script(path: &Path, shown: &str, env: &DepsEnv) -> anyhow::Result<()> {
-    let source =
-        std::fs::read_to_string(path).with_context(|| format!("read install script {shown}"))?;
+/// backed by the injected runner. A script named by file is read from the
+/// blueprint's directory `dir`, and never from outside it.
+fn run_install_script(code: &CodeRef, dir: &Path, env: &DepsEnv) -> anyhow::Result<()> {
+    let shown = dependencies::code_label(code);
+    let bytes = leviath_runtime::bind::host::read_code(code, Some(dir))
+        .map_err(|e| anyhow::anyhow!("read install script {shown}: {e}"))?;
+    let source = String::from_utf8_lossy(&bytes);
     let mut engine = rhai::Engine::new();
     leviath_scripting::harden(&mut engine, 1_000_000);
     let runner = env.runner.clone();
@@ -506,18 +513,21 @@ mod tests {
         }
     }
 
+    /// A one-stage blueprint named `name`, with `deps_toml` (its
+    /// `[[graph.dependencies]]` tables) after the graph.
+    fn agent_toml(name: &str, deps_toml: &str) -> String {
+        format!(
+            "[blueprint]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n\
+             [graph]\nstages = [{{ name = \"main\" }}]\n\
+             layout = {{ total_budget_tokens = 1000, regions = [{{ name = \"conversation\", kind = \"pinned\", budget = 1000 }}] }}\n\n\
+             {deps_toml}"
+        )
+    }
+
     fn write_agent(dir: &Path, name: &str, deps_toml: &str) -> PathBuf {
         let adir = dir.join("agents").join(name);
         std::fs::create_dir_all(&adir).unwrap();
-        let manifest = adir.join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            format!(
-                "[agent]\nname = \"{name}\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-                 [stages.main]\nmodel = {{ provider = \"anthropic\", model = \"m\" }}\n\n{deps_toml}"
-            ),
-        )
-        .unwrap();
+        crate::test_support::write_test_agent(&adir, agent_toml(name, deps_toml));
         adir
     }
 
@@ -527,7 +537,7 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"e\"\nkind = \"env\"\nvar = \"TOKEN\"\n",
+            "[[graph.dependencies]]\nname = \"e\"\nneeds = { env = \"TOKEN\" }\n",
         );
         let env = env_with(
             dir.path(),
@@ -582,23 +592,13 @@ mod tests {
         // By directory path.
         let adir = dir.path().join("agents").join("a");
         assert!(resolve_agent(adir.to_str().unwrap(), &env).is_ok());
-        // By manifest path.
-        let manifest = adir.join("agent.leviath");
-        assert!(resolve_agent(manifest.to_str().unwrap(), &env).is_ok());
+        // By file path.
+        let file = adir.join(leviath_blueprint::FILE_NAME);
+        let loaded = resolve_agent(file.to_str().unwrap(), &env).unwrap();
+        assert_eq!(loaded.base_dir, adir);
         // Missing.
         let err = resolve_agent("nope", &env).unwrap_err().to_string();
-        assert!(err.contains("agent manifest for 'nope'"), "{err}");
-        // Resolves, but is not a readable file: an installed name whose
-        // manifest path is a directory.
-        std::fs::create_dir_all(
-            dir.path()
-                .join("agents")
-                .join("hollow")
-                .join(leviath_core::files::MANIFEST_FILENAME),
-        )
-        .unwrap();
-        let err = resolve_agent("hollow", &env).unwrap_err().to_string();
-        assert!(err.contains("could not read the manifest at"), "{err}");
+        assert!(err.contains("blueprint for 'nope'"), "{err}");
     }
 
     #[test]
@@ -613,30 +613,19 @@ mod tests {
         // Unparseable TOML.
         let bad = dir.path().join("agents").join("bad");
         std::fs::create_dir_all(&bad).unwrap();
-        std::fs::write(bad.join("agent.leviath"), "not = = valid").unwrap();
-        assert!(
-            resolve_agent("bad", &env)
-                .unwrap_err()
-                .to_string()
-                .contains("parse")
-        );
-        // Parses but fails blueprint validation (two deps share a name).
+        crate::test_support::write_test_agent(&bad, "not = = valid");
+        let err = resolve_agent("bad", &env).unwrap_err().to_string();
+        assert!(err.contains("is not a valid blueprint"), "{err}");
+        // Parses, but its graph does not hold together (an entry stage that
+        // is not declared).
         let inv = dir.path().join("agents").join("inv");
         std::fs::create_dir_all(&inv).unwrap();
-        std::fs::write(
-            inv.join("agent.leviath"),
-            "[agent]\nname = \"inv\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.main]\nmodel = { provider = \"a\", model = \"m\" }\n\n\
-             [[dependencies]]\nname = \"d\"\nkind = \"env\"\nvar = \"X\"\n\n\
-             [[dependencies]]\nname = \"d\"\nkind = \"env\"\nvar = \"Y\"\n",
-        )
-        .unwrap();
-        assert!(
-            resolve_agent("inv", &env)
-                .unwrap_err()
-                .to_string()
-                .contains("invalid blueprint")
+        crate::test_support::write_test_agent(
+            &inv,
+            agent_toml("inv", "").replace("[graph]\n", "[graph]\nentry = \"nowhere\"\n"),
         );
+        let err = resolve_agent("inv", &env).unwrap_err().to_string();
+        assert!(err.contains("does not hold together"), "{err}");
     }
 
     #[test]
@@ -650,7 +639,7 @@ mod tests {
         );
         env.agents_dir = None;
         let err = resolve_agent("bare-name", &env).unwrap_err().to_string();
-        assert!(err.contains("agent manifest for 'bare-name'"), "{err}");
+        assert!(err.contains("blueprint for 'bare-name'"), "{err}");
     }
 
     #[test]
@@ -659,8 +648,8 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"meshy\"\nkind = \"mcp_server\"\nserver = \"meshy\"\n\
-             env = [\"MESHY_API_KEY\"]\ndescription = \"3d\"\n[dependencies.install.server]\nurl = \"https://x\"\n",
+            "[[graph.dependencies]]\nname = \"meshy\"\nneeds = { mcp_server = { server = \"meshy\", env = [\"MESHY_API_KEY\"] } }\n\
+             description = \"3d\"\n[graph.dependencies.install.server]\nurl = \"https://x\"\n",
         );
         let env = env_with(
             dir.path(),
@@ -680,7 +669,7 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"key\"\nkind = \"env\"\nvar = \"TOKEN\"\n",
+            "[[graph.dependencies]]\nname = \"key\"\nneeds = { env = \"TOKEN\" }\n",
         );
         // Missing -> error (non-zero exit).
         let miss = env_with(
@@ -710,8 +699,8 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"meshy\"\nkind = \"mcp_server\"\nserver = \"meshy\"\n\
-             env = [\"MESHY_API_KEY\"]\n[dependencies.install.server]\ntransport = \"http\"\nurl = \"https://api.meshy.ai/mcp\"\n",
+            "[[graph.dependencies]]\nname = \"meshy\"\nneeds = { mcp_server = { server = \"meshy\", env = [\"MESHY_API_KEY\"] } }\n\
+             [graph.dependencies.install.server]\ntransport = \"http\"\nurl = \"https://api.meshy.ai/mcp\"\n",
         );
         let env = env_with(
             dir.path(),
@@ -764,8 +753,8 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"blender\"\nkind = \"binary\"\ncommand = \"blender\"\n\
-             [dependencies.install]\ncommand = \"echo installing\"\n",
+            "[[graph.dependencies]]\nname = \"blender\"\nneeds = { binary = \"blender\" }\n\
+             [graph.dependencies.install]\ncommand = \"echo installing\"\n",
         );
         let runner = Arc::new(FakeRunner::default());
         let env = env_with(dir.path(), HashMap::new(), runner.clone(), true);
@@ -805,8 +794,8 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"b\"\nkind = \"binary\"\ncommand = \"x\"\n\
-             [dependencies.install]\ncommand = \"echo hi\"\n",
+            "[[graph.dependencies]]\nname = \"b\"\nneeds = { binary = \"x\" }\n\
+             [graph.dependencies.install]\ncommand = \"echo hi\"\n",
         );
         let runner = Arc::new(FakeRunner::default());
         let env = env_with(dir.path(), HashMap::new(), runner.clone(), false);
@@ -833,8 +822,8 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"key\"\nkind = \"env\"\nvar = \"TOKEN\"\n\n\
-             [[dependencies]]\nname = \"key2\"\nkind = \"env\"\nvar = \"TOKEN2\"\n\
+            "[[graph.dependencies]]\nname = \"key\"\nneeds = { env = \"TOKEN\" }\n\n\
+             [[graph.dependencies]]\nname = \"key2\"\nneeds = { env = \"TOKEN2\" }\n\
              remedy = \"ask an admin for TOKEN2\"\n",
         );
         let env = env_with(
@@ -877,8 +866,8 @@ mod tests {
         let adir = write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"thing\"\nkind = \"binary\"\ncommand = \"x\"\n\
-             [dependencies.install]\nscript = \"install.rhai\"\n",
+            "[[graph.dependencies]]\nname = \"thing\"\nneeds = { binary = \"x\" }\n\
+             [graph.dependencies.install]\nscript = { file = \"install.rhai\" }\n",
         );
         std::fs::write(
             adir.join("install.rhai"),
@@ -944,12 +933,12 @@ mod tests {
         write_agent(
             dir.path(),
             "all",
-            "[[dependencies]]\nname = \"m1\"\nkind = \"mcp_server\"\nserver = \"meshy\"\n\
-             env = [\"KEY\"]\ndescription = \"d1\"\n[dependencies.install.server]\nurl = \"https://x\"\n\n\
-             [[dependencies]]\nname = \"m2\"\nkind = \"mcp_server\"\nserver = \"other\"\n\n\
-             [[dependencies]]\nname = \"e\"\nkind = \"env\"\nvar = \"TOKEN\"\n\n\
-             [[dependencies]]\nname = \"b\"\nkind = \"binary\"\ncommand = \"blender\"\n\n\
-             [[dependencies]]\nname = \"s\"\nkind = \"script\"\ncheck = \"chk.rhai\"\nrequired = false\n",
+            "[[graph.dependencies]]\nname = \"m1\"\nneeds = { mcp_server = { server = \"meshy\", env = [\"KEY\"] } }\n\
+             description = \"d1\"\n[graph.dependencies.install.server]\nurl = \"https://x\"\n\n\
+             [[graph.dependencies]]\nname = \"m2\"\nneeds = { mcp_server = { server = \"other\" } }\n\n\
+             [[graph.dependencies]]\nname = \"e\"\nneeds = { env = \"TOKEN\" }\n\n\
+             [[graph.dependencies]]\nname = \"b\"\nneeds = { binary = \"blender\" }\n\n\
+             [[graph.dependencies]]\nname = \"s\"\nneeds = { check = { file = \"chk.rhai\" } }\nrequired = false\n",
         );
         let env = env_with(
             dir.path(),
@@ -966,10 +955,10 @@ mod tests {
         let adir = write_agent(
             dir.path(),
             "c",
-            "[[dependencies]]\nname = \"ok\"\nkind = \"env\"\nvar = \"TOKEN\"\n\n\
-             [[dependencies]]\nname = \"miss\"\nkind = \"binary\"\ncommand = \"nope\"\n\n\
-             [[dependencies]]\nname = \"broke\"\nkind = \"script\"\ncheck = \"chk.rhai\"\n\n\
-             [[dependencies]]\nname = \"opt\"\nkind = \"env\"\nvar = \"NOPE\"\nrequired = false\n",
+            "[[graph.dependencies]]\nname = \"ok\"\nneeds = { env = \"TOKEN\" }\n\n\
+             [[graph.dependencies]]\nname = \"miss\"\nneeds = { binary = \"nope\" }\n\n\
+             [[graph.dependencies]]\nname = \"broke\"\nneeds = { check = { file = \"chk.rhai\" } }\n\n\
+             [[graph.dependencies]]\nname = \"opt\"\nneeds = { env = \"NOPE\" }\nrequired = false\n",
         );
         std::fs::write(adir.join("chk.rhai"), r#"fn check() { throw "boom" }"#).unwrap();
         let env = env_with(
@@ -989,8 +978,8 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"m\"\nkind = \"mcp_server\"\nserver = \"m\"\n\
-             [dependencies.install.server]\n",
+            "[[graph.dependencies]]\nname = \"m\"\nneeds = { mcp_server = { server = \"m\" } }\n\
+             [graph.dependencies.install.server]\n",
         );
         let env = env_with(
             dir.path(),
@@ -1041,7 +1030,7 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"m\"\nkind = \"mcp_server\"\nserver = \"m\"\n",
+            "[[graph.dependencies]]\nname = \"m\"\nneeds = { mcp_server = { server = \"m\" } }\n",
         );
         std::fs::write(dir.path().join("config.toml"), "this = = broken").unwrap();
         let env = env_with(
@@ -1070,8 +1059,8 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"m\"\nkind = \"mcp_server\"\nserver = \"m\"\n\
-             [dependencies.install.server]\nurl = \"https://x\"\n",
+            "[[graph.dependencies]]\nname = \"m\"\nneeds = { mcp_server = { server = \"m\" } }\n\
+             [graph.dependencies.install.server]\nurl = \"https://x\"\n",
         );
         // A file where the config's parent dir would go makes the save fail.
         std::fs::write(dir.path().join("blocker"), b"x").unwrap();
@@ -1101,8 +1090,8 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"b\"\nkind = \"binary\"\ncommand = \"x\"\n\
-             [dependencies.install]\nscript = \"missing.rhai\"\n",
+            "[[graph.dependencies]]\nname = \"b\"\nneeds = { binary = \"x\" }\n\
+             [graph.dependencies.install]\nscript = { file = \"missing.rhai\" }\n",
         );
         let env = env_with(
             dir.path(),
@@ -1129,7 +1118,7 @@ mod tests {
         write_agent(
             dir.path(),
             "a",
-            "[[dependencies]]\nname = \"e\"\nkind = \"env\"\nvar = \"TOKEN\"\n",
+            "[[graph.dependencies]]\nname = \"e\"\nneeds = { env = \"TOKEN\" }\n",
         );
         let env = env_with(
             dir.path(),
@@ -1151,7 +1140,7 @@ mod tests {
 
     #[test]
     fn chosen_command_prefers_the_per_os_entry() {
-        let mut install = DependencyInstall {
+        let mut install = InstallDef {
             command: Some("generic".into()),
             ..Default::default()
         };
@@ -1169,7 +1158,7 @@ mod tests {
 
     #[test]
     fn mcp_template_maps_transport_and_headers() {
-        let tpl = leviath_runtime::spec::blueprint::McpServerTemplate {
+        let tpl = McpServerTemplate {
             transport: Some("http".into()),
             url: Some("https://x".into()),
             headers: std::collections::BTreeMap::from([("A".into(), "b".into())]),
@@ -1178,7 +1167,7 @@ mod tests {
         let server = mcp_from_template("s", &tpl);
         assert_eq!(server.transport, Some(MCPTransport::Http));
         assert_eq!(server.headers.get("A").map(String::as_str), Some("b"));
-        let stdio = leviath_runtime::spec::blueprint::McpServerTemplate {
+        let stdio = McpServerTemplate {
             transport: Some("stdio".into()),
             command: Some("srv".into()),
             ..Default::default()

@@ -6,21 +6,23 @@
 //! in the document and comes back out of [`ManifestDoc::to_toml`] as it went
 //! in.
 
-use leviath_runtime::spec::Blueprint;
-use leviath_runtime::spec::manifest::parse_manifest;
-use toml_edit::{DocumentMut, Item, TableLike, Value};
+use leviath_blueprint::BlueprintFile;
+use toml_edit::{ArrayOfTables, DocumentMut, Item, TableLike, Value};
 
-use super::tables::{as_table, child, get_bool, get_int, get_str, get_strings, table_keys};
-use super::{EditError, order};
+use super::EditError;
+use super::tables::{
+    get_bool, get_count, get_str, get_strings, index_named, list_tables, list_tables_mut,
+    named_mut, sub,
+};
 
-/// An `agent.leviath` manifest held as a document: comments, key order and
-/// formatting included.
+/// An `agent.toml` held as a document: comments, key order and formatting
+/// included.
 #[derive(Debug, Clone)]
 pub(crate) struct ManifestDoc {
     doc: DocumentMut,
 }
 
-/// The `[agent]` table as the editor shows it.
+/// The `[blueprint]` table, and the graph's entry, as the editor shows them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentView {
     /// `name`, or empty when the table has none.
@@ -29,12 +31,12 @@ pub(crate) struct AgentView {
     pub version: String,
     /// `description`, or empty.
     pub description: String,
-    /// `entry_stage`, when written.
+    /// `[graph] entry`, when written.
     pub entry_stage: Option<String>,
     /// The `provider/model` every stage tries first, when they all agree;
     /// `None` when they differ (or no stage names one). Not a key of the
-    /// manifest: The Lair shows it as the agent's "default model" and writes
-    /// it back to every stage.
+    /// file: The Lair shows it as the agent's "default model" and writes it
+    /// back to every stage.
     pub default_model: Option<String>,
 }
 
@@ -45,9 +47,9 @@ pub(crate) enum StageModeView {
     Autonomous,
     /// `interactive`.
     Interactive,
-    /// `interactive_points`.
+    /// `{ interactive_points = [...] }`.
     InteractivePoints,
-    /// `fan_out`.
+    /// `{ fan_out = {...} }`.
     FanOut,
     /// `output`.
     Output,
@@ -57,7 +59,7 @@ pub(crate) enum StageModeView {
 }
 
 impl StageModeView {
-    /// The manifest spelling.
+    /// The mode's name in the file.
     pub(crate) fn as_str(&self) -> &str {
         match self {
             StageModeView::Autonomous => "autonomous",
@@ -69,7 +71,7 @@ impl StageModeView {
         }
     }
 
-    /// From the manifest spelling.
+    /// From the mode's name in the file.
     pub(crate) fn parse(s: &str) -> Self {
         match s {
             "autonomous" => StageModeView::Autonomous,
@@ -105,46 +107,48 @@ impl StageModeView {
 /// Where a fan-out stage gets its workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerKind {
-    /// `worker_agent`: a separate installed blueprint.
+    /// `worker = { blueprint = { name = "..." } }`: another blueprint,
+    /// installed or (as `{ blueprint_file = "/path" }`) read from a
+    /// directory.
     Agent,
-    /// `worker_stage`: a stage of this blueprint.
+    /// `worker = { stage = "..." }`: a stage of this blueprint.
     Stage,
-    /// `worker_query`: matched against installed blueprints at run time.
+    /// `worker = { query = "..." }`: matched against installed blueprints at
+    /// run time.
     Query,
 }
 
 impl WorkerKind {
-    /// The manifest key.
+    /// The key under `worker` the kind is written as.
     pub(crate) fn key(self) -> &'static str {
         match self {
-            WorkerKind::Agent => "worker_agent",
-            WorkerKind::Stage => "worker_stage",
-            WorkerKind::Query => "worker_query",
+            WorkerKind::Agent => "blueprint",
+            WorkerKind::Stage => "stage",
+            WorkerKind::Query => "query",
         }
     }
 }
 
-/// A stage's fan-out keys. Meaningful when its mode is `fan_out`; read
-/// regardless, so nothing is lost when a mode flips back and forth.
+/// A fan-out stage's settings, under `mode = { fan_out = {...} }`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct FanOutView {
-    /// Which of `worker_agent`/`worker_stage`/`worker_query` is written, and
-    /// its value; the first found when several are.
+    /// What the workers run, and its value: a stage, a blueprint's name (or
+    /// `name@digest`, or a directory), or a query.
     pub worker: Option<(WorkerKind, String)>,
     /// `merge_stage`.
     pub merge_stage: Option<String>,
-    /// `max_workers` (0 = unlimited).
+    /// `max_workers`.
     pub max_workers: Option<u64>,
-    /// `max_items` (0 reads as unlimited too).
+    /// `max_items`.
     pub max_items: Option<u64>,
     /// `on_worker_failure`: `continue` or `fail_all`.
     pub on_worker_failure: Option<String>,
 }
 
-/// One `[stages.<name>]` table as the editor shows it.
+/// One `[[graph.stages]]` entry as the editor shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StageView {
-    /// The table key.
+    /// `name`.
     pub name: String,
     /// `mode`.
     pub mode: StageModeView,
@@ -156,63 +160,61 @@ pub(crate) struct StageView {
     pub max_revisits: Option<u64>,
     /// `allow_complete`, when written.
     pub allow_complete: Option<bool>,
-    /// The `provider/model` fallback chain; a bare-string `model` reads as
-    /// one entry.
+    /// The `model.models` chain, each as `provider/model`, or the bare model
+    /// name when the stage leaves the provider open.
     pub models: Vec<String>,
-    /// `available_tools`.
+    /// `tools`: tool names and `@group`s.
     pub tools: Vec<String>,
-    /// `available_connectors`: MCP servers whose whole tool set the stage
-    /// may use.
+    /// `connectors`: MCP servers whose whole tool set the stage may use.
     pub connectors: Vec<String>,
     /// `system_prompt`, or empty.
     pub system_prompt: String,
     /// `transition_prompt`, or empty.
     pub transition_prompt: String,
-    /// The fan-out keys.
+    /// The fan-out settings, when the mode is a fan-out.
     pub fan_out: FanOutView,
-    /// Whether the stage declares `[stages.<name>.context.regions]` of its
-    /// own instead of inheriting the agent's.
+    /// Whether the stage declares a `layout` of its own instead of using the
+    /// graph's.
     pub has_own_layout: bool,
-    /// Whether the stage has a `transitions` table with nothing in it: the
-    /// run can end here.
+    /// Whether no edge leaves the stage: the run can end here.
     pub is_terminal: bool,
-    /// `[stages.<name>.input] accepts`: what the stage takes as parts when
-    /// its regions do not already say.
+    /// `input_accepts`: what the stage takes as parts when its regions do
+    /// not already say.
     pub input_accepts: Vec<String>,
-    /// `[stages.<name>.input] as_text`: types whose parts reach the model as
-    /// text whatever it takes.
+    /// `input_as_text`: types whose parts reach the model as text whatever
+    /// it takes.
     pub input_as_text: Vec<String>,
     /// The files the stage declares it hands back, in declaration order.
     pub artifacts: Vec<super::mime::ArtifactView>,
-    /// `[stages.<name>.output] format`, or empty.
+    /// `output.format`, or empty.
     pub output_format: String,
-    /// `[stages.<name>.tool_accepts]`: each tool and what it may be handed,
-    /// in document order.
+    /// `tool_accepts`: each tool and what it may be handed, in document
+    /// order.
     pub tool_accepts: Vec<(String, Vec<String>)>,
-    /// `[stages.<name>.output_routing]`: the mime patterns the model's
-    /// produced parts are routed by, each to a region, in document order.
+    /// `output_routing`: the mime patterns the model's produced parts are
+    /// routed by, each to a region, in document order.
     pub output_routing: Vec<(String, String)>,
-    /// `[stages.<name>.context] reset`: the regions emptied when the stage is
-    /// entered, in the order written.
+    /// `reset`: the regions emptied when the stage is entered, in the order
+    /// written.
     pub context_reset: Vec<String>,
 }
 
 /// When a path is taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EdgeKind {
-    /// A `hint = "..."` the model routes on (no `condition` key).
+    /// A `hint` the model routes on, with no `when` (or `when = "always"`).
     Hint,
-    /// `condition = "always"`.
+    /// No `when` and no `hint`: the run always continues here.
     Always,
-    /// `condition = "llm_choice"`, or neither `condition` nor `hint`.
+    /// `when = "llm_choice"`.
     LlmChoice,
-    /// `condition = "error"`.
+    /// `when = "error"`.
     Error,
-    /// `condition = "max_iterations"`.
+    /// `when = "max_iterations"`.
     MaxIterations,
-    /// `condition = "stuck"`.
+    /// `when = "stuck"`.
     Stuck,
-    /// `condition = "dead_end"`.
+    /// `when = "dead_end"`.
     DeadEnd,
 }
 
@@ -228,7 +230,7 @@ impl EdgeKind {
         EdgeKind::DeadEnd,
     ];
 
-    /// The `condition` spelling; `Hint` has none (it is a `hint` key).
+    /// The `when` spelling; `Hint` has none (it is a `hint` key).
     pub(crate) fn condition(self) -> Option<&'static str> {
         match self {
             EdgeKind::Hint => None,
@@ -241,7 +243,7 @@ impl EdgeKind {
         }
     }
 
-    /// The `condition` spelling read back; `None` for one the editor does not
+    /// The `when` spelling read back; `None` for one the editor does not
     /// know, which it then leaves alone.
     pub(crate) fn from_condition(s: &str) -> Option<Self> {
         Self::CHOICES.into_iter().find(|k| k.condition() == Some(s))
@@ -274,16 +276,16 @@ impl EdgeKind {
     }
 }
 
-/// How context crosses a path.
+/// How context crosses a path: its `carry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TransformKind {
-    /// Carry everything: `transform` absent or `"direct"`.
+    /// Carry everything: `carry` absent or `"direct"`.
     Direct,
-    /// Keep only pinned regions.
+    /// Empty every clearable region: `"clear"`.
     Clear,
-    /// Summarize everything: `"compact"`, and `"summarize"` until changed.
+    /// Summarize the conversation: `{ compact = {} }`.
     Compact,
-    /// Per-region rules in `transform_config`.
+    /// Per-region rules: `{ custom = {...} }`.
     Custom,
     /// A spelling the editor does not know; shown as written.
     Other(String),
@@ -298,7 +300,7 @@ impl TransformKind {
         TransformKind::Custom,
     ];
 
-    /// The manifest spelling; `Direct` is written as absent.
+    /// The name of the `carry` variant.
     pub(crate) fn as_str(&self) -> &str {
         match self {
             TransformKind::Direct => "direct",
@@ -309,12 +311,12 @@ impl TransformKind {
         }
     }
 
-    /// From the manifest spelling (absent reads as `Direct`).
+    /// From the name of the `carry` variant (absent reads as `Direct`).
     pub(crate) fn parse(s: &str) -> Self {
         match s {
             "" | "direct" => TransformKind::Direct,
             "clear" => TransformKind::Clear,
-            "compact" | "summarize" => TransformKind::Compact,
+            "compact" => TransformKind::Compact,
             "custom" => TransformKind::Custom,
             other => TransformKind::Other(other.to_string()),
         }
@@ -332,23 +334,24 @@ impl TransformKind {
     }
 }
 
-/// A path's `transform_config`, as typed lists.
+/// A path's per-region rules, `carry = { custom = {...} }`, as typed lists.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct TransformRules {
     /// Regions carried as they are.
     pub carry: Vec<String>,
     /// Regions summarized.
     pub compact: Vec<String>,
-    /// Regions dropped.
+    /// Regions emptied.
     pub clear: Vec<String>,
-    /// `compact_prompt`, or empty.
+    /// The summarizing instructions (`compact_prompt` of a custom carry,
+    /// `prompt` of a compacting one), or empty.
     pub compact_prompt: String,
-    /// Whether the table exists at all: the cue to seed it when a path first
-    /// turns custom.
+    /// Whether the rules table exists at all: the cue to seed it when a path
+    /// first turns custom.
     pub present: bool,
 }
 
-/// One `[stages.<from>.transitions.<to>]` table as the editor shows it.
+/// One `[[graph.edges]]` entry as the editor shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeView {
     /// The stage the path leaves.
@@ -357,7 +360,7 @@ pub(crate) struct EdgeView {
     pub to: String,
     /// When it is taken.
     pub kind: EdgeKind,
-    /// The `hint`, when written (kept even under a `condition`).
+    /// The `hint`, when written (kept even under a `when`).
     pub hint: Option<String>,
     /// Whether a `gate` is written.
     pub gated: bool,
@@ -370,19 +373,20 @@ pub(crate) struct EdgeView {
 /// One region of a layout as the editor shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RegionView {
-    /// The table key.
+    /// `name`.
     pub name: String,
-    /// `kind`, or empty.
+    /// The kind's name (`pinned`, `sliding_window`, ...), or empty.
     pub kind: String,
-    /// The `budget = "N%"` percentage, when it parses.
+    /// The percentage of a `budget = "N%"` (or `{ percent = "N%" }`), when
+    /// it parses.
     pub budget_percent: Option<f64>,
-    /// `max_tokens`, the absolute ceiling on a percentage budget.
+    /// The budget's `max`, the absolute ceiling on a percentage.
     ///
     /// Usually absent: the percentage is what decides a region's size, and a
     /// ceiling below it just clamps the region on every model large enough to
     /// matter. Set it only where a region genuinely must not grow.
     pub max_tokens: Option<u64>,
-    /// `min_tokens`, the absolute floor under a percentage budget.
+    /// The budget's `min`, the absolute floor under a percentage.
     ///
     /// The counterpart to `max_tokens`, and the one small pinned regions want:
     /// a research question needs its ~1000 tokens whatever the model's window
@@ -392,17 +396,18 @@ pub(crate) struct RegionView {
     pub required: bool,
     /// `required_message`, or empty.
     pub required_message: String,
-    /// A string `seed`; a table-shaped seed reads as empty and is never
-    /// clobbered (see `seed_is_table`).
+    /// The input that fills the region at spawn: the first `[[graph.inputs]]`
+    /// that binds to it, or empty.
     pub seed: String,
-    /// The `seed` is a table (`{ files = [...] }`, ...) the editor cannot
-    /// display, so clearing the field will not touch it.
+    /// The region has a `seed` of its own (files, a command, code) the editor
+    /// cannot display, so the seed field is left alone.
     pub seed_is_table: bool,
-    /// `max_items` (sliding windows).
+    /// The kind's `max_items` (sliding windows).
     pub max_items: Option<u64>,
-    /// `strategy` (sliding windows), or empty.
+    /// How a sliding window evicts: `per_item`, `bulk` or `compact`, or
+    /// empty when the kind does not say.
     pub strategy: String,
-    /// `overflow` (sliding windows).
+    /// The count a `bulk` or `compact` eviction carries.
     pub overflow: Option<u64>,
     /// `description`, or empty.
     pub description: String,
@@ -416,8 +421,8 @@ pub(crate) struct RegionView {
 pub(crate) struct EffectiveRegions {
     /// The regions, in document order.
     pub regions: Vec<RegionView>,
-    /// `true` when they are the agent's shared regions, `false` when the
-    /// stage has its own `[stages.<name>.context.regions]`.
+    /// `true` when they are the graph's shared regions, `false` when the
+    /// stage has a `layout` of its own.
     pub inherited: bool,
 }
 
@@ -426,74 +431,143 @@ pub(crate) struct EffectiveRegions {
 pub(crate) struct ToolRouting {
     /// `default_region`.
     pub default_region: Option<String>,
-    /// `overrides`, tool to region, in document order.
+    /// `tool_regions`, tool to region, in document order.
     pub overrides: Vec<(String, String)>,
 }
 
 impl ManifestDoc {
-    /// Read a manifest. Refuses text that is not TOML, has no `[agent]`
-    /// table, or has no stage table: the editor needs those to stand on.
+    /// Read an `agent.toml`. Refuses text that is not TOML, has no
+    /// `[blueprint]` table, or has no stage: the editor needs those to stand
+    /// on.
     pub(crate) fn parse(text: &str) -> Result<Self, EditError> {
         let doc: DocumentMut = text
             .parse()
             .map_err(|e: toml_edit::TomlError| EditError::Toml(e.to_string()))?;
-        if doc.get("agent").and_then(as_table).is_none() {
-            return Err(EditError::NoAgent);
+        if doc.get("blueprint").and_then(Item::as_table_like).is_none() {
+            return Err(EditError::NoBlueprint);
         }
-        let this = Self { doc };
-        if this.stage_names().is_empty() {
+        let has_stage = doc
+            .get("graph")
+            .and_then(Item::as_table_like)
+            .and_then(|g| g.get("stages"))
+            .is_some_and(|s| !list_tables(s).is_empty());
+        if !has_stage {
             return Err(EditError::NoStages);
         }
-        Ok(this)
+        Ok(Self { doc })
     }
 
-    /// The manifest text, exactly as it will be written.
+    /// The file's text, exactly as it will be written.
     pub(crate) fn to_toml(&self) -> String {
         self.doc.to_string()
     }
 
-    /// The manifest as the runtime reads it, or the runtime's parse error.
-    pub(crate) fn blueprint(&self) -> Result<Blueprint, String> {
-        parse_manifest(&self.to_toml()).map_err(|e| e.to_string())
-    }
-
-    pub(super) fn doc(&self) -> &DocumentMut {
-        &self.doc
+    /// The file as the runtime reads it, or the reader's error.
+    pub(crate) fn file(&self) -> Result<BlueprintFile, String> {
+        BlueprintFile::parse(&self.to_toml())
     }
 
     pub(super) fn doc_mut(&mut self) -> &mut DocumentMut {
         &mut self.doc
     }
 
-    /// The `[agent]` table.
-    pub(super) fn agent_table(&self) -> &dyn TableLike {
+    /// The `[blueprint]` table.
+    pub(super) fn meta(&self) -> &dyn TableLike {
         self.doc
-            .get("agent")
-            .and_then(as_table)
-            .expect("parse() checked [agent] is a table")
-    }
-
-    /// The `[stages.<name>]` item.
-    pub(super) fn stage_item(&self, name: &str) -> Option<&Item> {
-        self.doc
-            .get("stages")
+            .get("blueprint")
             .and_then(Item::as_table_like)
-            .and_then(|t| t.get(name))
-            .filter(|i| i.as_table_like().is_some())
+            .expect("parse() checked [blueprint] is a table")
     }
 
-    /// The `[stages.<name>]` item, mutably.
-    pub(super) fn stage_item_mut(&mut self, name: &str) -> Option<&mut Item> {
+    /// The `[blueprint]` table, mutably.
+    pub(super) fn meta_mut(&mut self) -> &mut dyn TableLike {
         self.doc
-            .get_mut("stages")
+            .get_mut("blueprint")
             .and_then(Item::as_table_like_mut)
-            .and_then(|t| t.get_mut(name))
-            .filter(|i| i.as_table_like().is_some())
+            .expect("parse() checked [blueprint] is a table")
     }
 
-    /// The `[agent]` view.
+    /// The `[graph]` table.
+    pub(super) fn graph(&self) -> &dyn TableLike {
+        self.doc
+            .get("graph")
+            .and_then(Item::as_table_like)
+            .expect("parse() checked [graph] is a table")
+    }
+
+    /// The `[graph]` table, mutably.
+    pub(super) fn graph_mut(&mut self) -> &mut dyn TableLike {
+        self.doc
+            .get_mut("graph")
+            .and_then(Item::as_table_like_mut)
+            .expect("parse() checked [graph] is a table")
+    }
+
+    /// `graph.stages`.
+    pub(super) fn stages_list(&self) -> &Item {
+        self.graph()
+            .get("stages")
+            .expect("parse() checked there are stages")
+    }
+
+    /// `graph.stages`, mutably.
+    pub(super) fn stages_list_mut(&mut self) -> &mut Item {
+        self.graph_mut()
+            .get_mut("stages")
+            .expect("parse() checked there are stages")
+    }
+
+    /// Whether the stages are `[[graph.stages]]` tables (and so new lists
+    /// beside them are written that way too).
+    pub(super) fn headed(&self) -> bool {
+        self.stages_list().is_array_of_tables()
+    }
+
+    /// Where the stage called `name` sits in `graph.stages`.
+    pub(super) fn stage_index(&self, name: &str) -> Option<usize> {
+        index_named(self.stages_list(), name)
+    }
+
+    /// The stage called `name`.
+    pub(super) fn stage_table(&self, name: &str) -> Option<&dyn TableLike> {
+        list_tables(self.stages_list())
+            .into_iter()
+            .find(|t| get_str(*t, "name") == Some(name))
+    }
+
+    /// The stage called `name`, mutably, or [`EditError::NoSuchStage`].
+    pub(super) fn stage_table_mut(&mut self, name: &str) -> Result<&mut dyn TableLike, EditError> {
+        named_mut(self.stages_list_mut(), name)
+            .ok_or_else(|| EditError::NoSuchStage(name.to_string()))
+    }
+
+    /// A list under `[graph]` (`edges`, `inputs`), when there is one.
+    pub(super) fn graph_list(&self, key: &str) -> Option<&Item> {
+        self.graph().get(key)
+    }
+
+    /// A list under `[graph]`, mutably, created in the stages' shape when
+    /// missing. Refuses a key that holds something other than a list.
+    pub(super) fn graph_list_mut(&mut self, key: &str) -> Result<&mut Item, EditError> {
+        let headed = self.headed();
+        let graph = self.graph_mut();
+        if !graph.contains_key(key) {
+            let empty = match headed {
+                true => Item::ArrayOfTables(ArrayOfTables::new()),
+                false => Item::Value(Value::Array(toml_edit::Array::new())),
+            };
+            graph.insert(key, empty);
+        }
+        let list = graph.get_mut(key).expect("present or inserted just above");
+        match list.is_array_of_tables() || list.is_array() {
+            true => Ok(list),
+            false => Err(EditError::NotATable(key.to_string())),
+        }
+    }
+
+    /// The `[blueprint]` view.
     pub(crate) fn agent(&self) -> AgentView {
-        let agent = self.agent_table();
+        let meta = self.meta();
         let firsts: Vec<Option<String>> = self
             .stages()
             .iter()
@@ -506,103 +580,35 @@ impl ManifestDoc {
             _ => None,
         };
         AgentView {
-            name: get_str(agent, "name").unwrap_or_default().to_string(),
-            version: get_str(agent, "version").unwrap_or_default().to_string(),
-            description: get_str(agent, "description")
-                .unwrap_or_default()
-                .to_string(),
-            entry_stage: get_str(agent, "entry_stage").map(str::to_string),
+            name: get_str(meta, "name").unwrap_or_default().to_string(),
+            version: get_str(meta, "version").unwrap_or_default().to_string(),
+            description: get_str(meta, "description").unwrap_or_default().to_string(),
+            entry_stage: get_str(self.graph(), "entry").map(str::to_string),
             default_model,
         }
     }
 
-    /// The stage names, in the order the file shows them.
+    /// The stage names, in the order the graph lists them.
     pub(crate) fn stage_names(&self) -> Vec<String> {
-        order::stage_order(&self.doc)
+        list_tables(self.stages_list())
+            .into_iter()
+            .filter_map(|t| get_str(t, "name").map(str::to_string))
+            .collect()
     }
 
     /// Whether a stage of that name exists.
     pub(crate) fn has_stage(&self, name: &str) -> bool {
-        self.stage_item(name).is_some()
+        self.stage_table(name).is_some()
     }
 
     /// One stage's view.
     pub(crate) fn stage(&self, name: &str) -> Option<StageView> {
-        self.stage_item(name).map(|item| stage_view(name, item))
+        let table = self.stage_table(name)?;
+        let is_terminal = !self.edges().iter().any(|e| e.from == name);
+        Some(stage_view(name, table, is_terminal))
     }
-}
 
-fn stage_view(name: &str, item: &Item) -> StageView {
-    {
-        let table = as_table(item).expect("stage_item is a table");
-        let transitions = child(item, "transitions");
-        let worker = [WorkerKind::Agent, WorkerKind::Stage, WorkerKind::Query]
-            .into_iter()
-            .find_map(|k| get_str(table, k.key()).map(|v| (k, v.to_string())));
-        StageView {
-            name: name.to_string(),
-            mode: get_str(table, "mode")
-                .map(StageModeView::parse)
-                .unwrap_or(StageModeView::Autonomous),
-            description: get_str(table, "description")
-                .unwrap_or_default()
-                .to_string(),
-            max_iterations: get_int(table, "max_iterations").and_then(|n| u64::try_from(n).ok()),
-            max_revisits: get_int(table, "max_revisits").and_then(|n| u64::try_from(n).ok()),
-            allow_complete: get_bool(table, "allow_complete"),
-            models: model_chain(table.get("model")),
-            tools: get_strings(table, "available_tools"),
-            connectors: get_strings(table, "available_connectors"),
-            system_prompt: get_str(table, "system_prompt")
-                .unwrap_or_default()
-                .to_string(),
-            transition_prompt: get_str(table, "transition_prompt")
-                .unwrap_or_default()
-                .to_string(),
-            fan_out: FanOutView {
-                worker,
-                merge_stage: get_str(table, "merge_stage").map(str::to_string),
-                max_workers: get_int(table, "max_workers").and_then(|n| u64::try_from(n).ok()),
-                max_items: get_int(table, "max_items").and_then(|n| u64::try_from(n).ok()),
-                on_worker_failure: get_str(table, "on_worker_failure").map(str::to_string),
-            },
-            has_own_layout: child(item, "context")
-                .and_then(|c| c.get("regions"))
-                .and_then(Item::as_table_like)
-                .is_some(),
-            is_terminal: transitions.is_some_and(|t| t.is_empty()),
-            input_accepts: super::mime::input_list(item, super::mime::InputList::Accepts),
-            input_as_text: super::mime::input_list(item, super::mime::InputList::AsText),
-            artifacts: super::mime::artifacts_of(item),
-            output_format: super::mime::output_format_of(item),
-            tool_accepts: super::mime::tool_limits_of(item),
-            output_routing: output_routing_of(item),
-            context_reset: child(item, "context")
-                .map(|c| get_strings(c, "reset"))
-                .unwrap_or_default(),
-        }
-    }
-}
-
-/// `[stages.<name>.output_routing]`: mime pattern to region, in document
-/// order. An entry whose value is not a string is left out (and left alone).
-fn output_routing_of(item: &Item) -> Vec<(String, String)> {
-    child(item, "output_routing")
-        .map(|routing| {
-            routing
-                .iter()
-                .filter_map(|(pattern, region)| {
-                    region
-                        .as_str()
-                        .map(|r| (pattern.to_string(), r.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-impl ManifestDoc {
-    /// Every stage's view, in file order.
+    /// Every stage's view, in graph order.
     pub(crate) fn stages(&self) -> Vec<StageView> {
         self.stage_names()
             .iter()
@@ -610,73 +616,55 @@ impl ManifestDoc {
             .collect()
     }
 
-    /// Every path, grouped by the stage it leaves, in file order. A path
-    /// whose `condition` the editor does not know is left out (and left
-    /// alone).
+    /// Every path, in file order. A path whose `when` the editor does not
+    /// know is left out (and left alone).
     pub(crate) fn edges(&self) -> Vec<EdgeView> {
-        self.stage_names()
+        self.graph_list("edges")
+            .map(list_tables)
+            .unwrap_or_default()
             .into_iter()
-            .filter_map(|from| {
-                self.stage_item(&from)
-                    .and_then(|item| child(item, "transitions"))
-                    .map(|transitions| (from, transitions))
-            })
-            .flat_map(|(from, transitions)| {
-                transitions
-                    .iter()
-                    .filter_map(|(to, edge)| edge_view(&from, to, edge))
-                    .collect::<Vec<_>>()
-            })
+            .filter_map(edge_view)
             .collect()
     }
 
-    /// One path's view.
+    /// The first path from `from` to `to`.
     pub(crate) fn edge(&self, from: &str, to: &str) -> Option<EdgeView> {
-        self.stage_item(from)
-            .and_then(|item| child(item, "transitions"))
-            .and_then(|transitions| transitions.get(to))
-            .and_then(|edge| edge_view(from, to, edge))
+        self.edges()
+            .into_iter()
+            .find(|e| e.from == from && e.to == to)
     }
 
-    /// The `[context.regions]` item of a scope: the agent's, or a stage's own.
-    pub(super) fn regions_item(&self, stage: Option<&str>) -> Option<&Item> {
-        let parent = match stage {
-            None => Some(self.doc.as_item()),
-            Some(name) => self.stage_item(name),
-        };
-        parent
-            .and_then(Item::as_table_like)
-            .and_then(|p| p.get("context"))
-            .and_then(Item::as_table_like)
-            .and_then(|c| c.get("regions"))
-            .filter(|r| r.as_table_like().is_some())
+    /// The layout table of a scope: the graph's, or a stage's own.
+    pub(super) fn layout_table(&self, stage: Option<&str>) -> Option<&dyn TableLike> {
+        match stage {
+            None => sub(self.graph(), "layout"),
+            Some(name) => self.stage_table(name).and_then(|s| sub(s, "layout")),
+        }
     }
 
     /// The regions of a scope, in document order; empty when the scope has
-    /// no `regions` table.
+    /// no layout.
     pub(crate) fn regions(&self, stage: Option<&str>) -> Vec<RegionView> {
-        self.regions_item(stage)
-            .map(|item| {
-                table_keys(item)
-                    .into_iter()
-                    .filter_map(|name| child(item, &name).map(|table| region_view(&name, table)))
-                    .collect()
-            })
+        let bindings = self.region_bindings();
+        self.layout_table(stage)
+            .and_then(|l| l.get("regions"))
+            .map(list_tables)
             .unwrap_or_default()
+            .into_iter()
+            .filter_map(|t| region_view(t, &bindings))
+            .collect()
     }
 
     /// One region's view.
     pub(crate) fn region(&self, stage: Option<&str>, name: &str) -> Option<RegionView> {
-        self.regions_item(stage)
-            .and_then(|item| child(item, name))
-            .map(|table| region_view(name, table))
+        self.regions(stage).into_iter().find(|r| r.name == name)
     }
 
     /// The layout a stage runs with: its own when it declares one, the
-    /// agent's otherwise. `None` asks for the agent's.
+    /// graph's otherwise. `None` asks for the graph's.
     pub(crate) fn effective_regions(&self, stage: Option<&str>) -> EffectiveRegions {
         match stage {
-            Some(name) if self.regions_item(Some(name)).is_some() => EffectiveRegions {
+            Some(name) if self.layout_table(Some(name)).is_some() => EffectiveRegions {
                 regions: self.regions(Some(name)),
                 inherited: false,
             },
@@ -687,17 +675,25 @@ impl ManifestDoc {
         }
     }
 
+    /// Each input's name with the regions it fills, in declaration order.
+    pub(super) fn region_bindings(&self) -> Vec<(String, Vec<String>)> {
+        self.graph_list("inputs")
+            .map(list_tables)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|input| {
+                let name = get_str(input, "name")?.to_string();
+                Some((name, bound_regions(input)))
+            })
+            .collect()
+    }
+
     /// A stage's tool routing; empty when it has none.
     pub(crate) fn tool_routing(&self, stage: &str) -> ToolRouting {
-        let Some(routing) = self
-            .stage_item(stage)
-            .and_then(|i| child(i, "tool_routing"))
-        else {
+        let Some(routing) = self.stage_table(stage).and_then(|s| sub(s, "tool_routing")) else {
             return ToolRouting::default();
         };
-        let overrides = routing
-            .get("overrides")
-            .and_then(Item::as_table_like)
+        let overrides = sub(routing, "tool_regions")
             .map(|o| {
                 o.iter()
                     .filter_map(|(tool, region)| {
@@ -712,7 +708,7 @@ impl ManifestDoc {
         }
     }
 
-    /// The stages whose tool routing (default or an override) lands in
+    /// The stages whose tool routing (default or per tool) lands in
     /// `region`: what deleting the region would break.
     pub(crate) fn stages_routing_into(&self, region: &str) -> Vec<String> {
         self.stage_names()
@@ -742,24 +738,127 @@ impl ManifestDoc {
     }
 }
 
+/// The regions an input's `binds` fill: every `{ region = "..." }` entry.
+pub(super) fn bound_regions(input: &dyn TableLike) -> Vec<String> {
+    input
+        .get("binds")
+        .and_then(Item::as_array)
+        .map(|binds| {
+            binds
+                .iter()
+                .filter_map(Value::as_inline_table)
+                .filter_map(|b| b.get("region").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn stage_view(name: &str, table: &dyn TableLike, is_terminal: bool) -> StageView {
+    let output = sub(table, "output");
+    StageView {
+        name: name.to_string(),
+        mode: mode_of(table),
+        description: get_str(table, "description")
+            .unwrap_or_default()
+            .to_string(),
+        max_iterations: get_count(table, "max_iterations"),
+        max_revisits: get_count(table, "max_revisits"),
+        allow_complete: get_bool(table, "allow_complete"),
+        models: model_chain(table.get("model")),
+        tools: get_strings(table, "tools"),
+        connectors: get_strings(table, "connectors"),
+        system_prompt: get_str(table, "system_prompt")
+            .unwrap_or_default()
+            .to_string(),
+        transition_prompt: get_str(table, "transition_prompt")
+            .unwrap_or_default()
+            .to_string(),
+        fan_out: fan_out_table(table).map(fan_out_view).unwrap_or_default(),
+        has_own_layout: sub(table, "layout").is_some(),
+        is_terminal,
+        input_accepts: get_strings(table, "input_accepts"),
+        input_as_text: get_strings(table, "input_as_text"),
+        artifacts: super::mime::artifacts_of(table),
+        output_format: output
+            .and_then(|o| get_str(o, "format"))
+            .unwrap_or_default()
+            .to_string(),
+        tool_accepts: super::mime::tool_limits_of(table),
+        output_routing: sub(table, "output_routing")
+            .map(|routing| {
+                routing
+                    .iter()
+                    .filter_map(|(pattern, region)| {
+                        region
+                            .as_str()
+                            .map(|r| (pattern.to_string(), r.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        context_reset: get_strings(table, "reset"),
+    }
+}
+
+/// A stage's mode: a name, or a table whose one key is the mode
+/// (`{ fan_out = {...} }`).
+fn mode_of(stage: &dyn TableLike) -> StageModeView {
+    let Some(mode) = stage.get("mode") else {
+        return StageModeView::Autonomous;
+    };
+    if let Some(name) = mode.as_str() {
+        return StageModeView::parse(name);
+    }
+    mode.as_table_like()
+        .and_then(|t| t.iter().next().map(|(k, _)| StageModeView::parse(k)))
+        .unwrap_or(StageModeView::Other(String::new()))
+}
+
+/// A stage's `mode.fan_out` table, when its mode is a fan-out.
+pub(super) fn fan_out_table(stage: &dyn TableLike) -> Option<&dyn TableLike> {
+    sub(stage, "mode").and_then(|m| sub(m, "fan_out"))
+}
+
+fn fan_out_view(fan_out: &dyn TableLike) -> FanOutView {
+    FanOutView {
+        worker: sub(fan_out, "worker").and_then(worker_of),
+        merge_stage: get_str(fan_out, "merge_stage").map(str::to_string),
+        max_workers: get_count(fan_out, "max_workers"),
+        max_items: get_count(fan_out, "max_items"),
+        on_worker_failure: get_str(fan_out, "on_worker_failure").map(str::to_string),
+    }
+}
+
+/// What a `worker` table names. A blueprint reads as `name` or
+/// `name@digest`, a blueprint directory as its path.
+fn worker_of(worker: &dyn TableLike) -> Option<(WorkerKind, String)> {
+    if let Some(stage) = get_str(worker, "stage") {
+        return Some((WorkerKind::Stage, stage.to_string()));
+    }
+    if let Some(query) = get_str(worker, "query") {
+        return Some((WorkerKind::Query, query.to_string()));
+    }
+    if let Some(path) = get_str(worker, "blueprint_file") {
+        return Some((WorkerKind::Agent, path.to_string()));
+    }
+    let blueprint = sub(worker, "blueprint")?;
+    let name = get_str(blueprint, "name")?;
+    Some(match get_str(blueprint, "digest") {
+        Some(digest) => (WorkerKind::Agent, format!("{name}@{digest}")),
+        None => (WorkerKind::Agent, name.to_string()),
+    })
+}
+
 /// The model chain a stage's `model` value stands for, each entry rendered as
 /// `provider/model` when the blueprint pins a route and as a bare model name
 /// when it leaves the route open.
-///
-/// Dropping the entries that name no provider is what made a migrated blueprint
-/// show a single local model where it lists five: the open-route form is now
-/// the ordinary one, so it has to read, not merely parse.
 fn model_chain(value: Option<&Item>) -> Vec<String> {
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    if let Some(s) = value.as_str() {
-        return vec![s.to_string()];
-    }
-    let Some(table) = value.as_table_like() else {
-        return Vec::new();
-    };
-    let Some(models) = table.get("models").and_then(Item::as_array) else {
+    let Some(models) = value
+        .and_then(Item::as_table_like)
+        .and_then(|t| t.get("models"))
+        .and_then(Item::as_array)
+    else {
         return Vec::new();
     };
     models
@@ -779,64 +878,113 @@ fn model_chain(value: Option<&Item>) -> Vec<String> {
         .collect()
 }
 
-fn edge_view(from: &str, to: &str, edge: &Item) -> Option<EdgeView> {
-    edge.as_table_like()
-        .and_then(|table| edge_table_view(from, to, table))
-}
-
-fn edge_table_view(from: &str, to: &str, table: &dyn TableLike) -> Option<EdgeView> {
+fn edge_view(table: &dyn TableLike) -> Option<EdgeView> {
+    let from = get_str(table, "from")?.to_string();
+    let to = get_str(table, "to")?.to_string();
     let hint = get_str(table, "hint").map(str::to_string);
-    let kind = match get_str(table, "condition") {
-        Some(c) => EdgeKind::from_condition(c)?,
-        None if hint.is_some() => EdgeKind::Hint,
-        None => EdgeKind::LlmChoice,
+    let kind = match get_str(table, "when") {
+        None | Some("always") if hint.is_some() => EdgeKind::Hint,
+        None => EdgeKind::Always,
+        Some(when) => EdgeKind::from_condition(when)?,
     };
-    let config = table.get("transform_config").and_then(Item::as_table_like);
+    let carry = table.get("carry");
+    let transform = match carry {
+        None => TransformKind::Direct,
+        Some(c) => match c.as_str() {
+            Some(name) => TransformKind::parse(name),
+            None => c
+                .as_table_like()
+                .and_then(|t| t.iter().next().map(|(k, _)| TransformKind::parse(k)))
+                .unwrap_or(TransformKind::Other(String::new())),
+        },
+    };
+    let carry = carry.and_then(Item::as_table_like);
+    let custom = carry.and_then(|c| sub(c, "custom"));
+    let compact_prompt = custom
+        .and_then(|c| get_str(c, "compact_prompt"))
+        .or_else(|| {
+            carry
+                .and_then(|c| sub(c, "compact"))
+                .and_then(|c| get_str(c, "prompt"))
+        })
+        .unwrap_or_default()
+        .to_string();
     let rules = TransformRules {
-        carry: config.map(|c| get_strings(c, "carry")).unwrap_or_default(),
-        compact: config
+        carry: custom.map(|c| get_strings(c, "carry")).unwrap_or_default(),
+        compact: custom
             .map(|c| get_strings(c, "compact"))
             .unwrap_or_default(),
-        clear: config.map(|c| get_strings(c, "clear")).unwrap_or_default(),
-        compact_prompt: config
-            .and_then(|c| get_str(c, "compact_prompt"))
-            .unwrap_or_default()
-            .to_string(),
-        present: config.is_some(),
+        clear: custom.map(|c| get_strings(c, "clear")).unwrap_or_default(),
+        compact_prompt,
+        present: custom.is_some(),
     };
     Some(EdgeView {
-        from: from.to_string(),
-        to: to.to_string(),
+        from,
+        to,
         kind,
         hint,
         gated: table.contains_key("gate"),
-        transform: TransformKind::parse(get_str(table, "transform").unwrap_or_default()),
+        transform,
         rules,
     })
 }
 
-fn region_view(name: &str, table: &dyn TableLike) -> RegionView {
-    let seed = table.get("seed");
-    RegionView {
-        name: name.to_string(),
-        kind: get_str(table, "kind").unwrap_or_default().to_string(),
-        budget_percent: get_str(table, "budget").and_then(parse_percent),
-        max_tokens: get_int(table, "max_tokens").and_then(|n| u64::try_from(n).ok()),
-        min_tokens: get_int(table, "min_tokens").and_then(|n| u64::try_from(n).ok()),
+fn region_view(table: &dyn TableLike, bindings: &[(String, Vec<String>)]) -> Option<RegionView> {
+    let name = get_str(table, "name")?.to_string();
+    let kind = table.get("kind");
+    let kind_table = kind.and_then(Item::as_table_like);
+    let kind_name = kind
+        .and_then(Item::as_str)
+        .or_else(|| kind_table.and_then(|k| get_str(k, "kind")))
+        .unwrap_or_default()
+        .to_string();
+    let eviction = kind_table.and_then(|k| k.get("eviction"));
+    let (strategy, overflow) = match eviction {
+        None => (String::new(), None),
+        Some(e) => match e.as_str() {
+            Some(name) => (name.to_string(), None),
+            None => e
+                .as_table_like()
+                .and_then(|t| t.iter().next())
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        v.as_integer().and_then(|n| u64::try_from(n).ok()),
+                    )
+                })
+                .unwrap_or_default(),
+        },
+    };
+    let budget = table.get("budget");
+    let budget_table = budget.and_then(Item::as_table_like);
+    let percent_text = budget
+        .and_then(Item::as_str)
+        .or_else(|| budget_table.and_then(|b| get_str(b, "percent")));
+    let seed = bindings
+        .iter()
+        .find(|(_, regions)| regions.contains(&name))
+        .map(|(input, _)| input.clone())
+        .unwrap_or_default();
+    Some(RegionView {
+        kind: kind_name,
+        budget_percent: percent_text.and_then(parse_percent),
+        max_tokens: budget_table.and_then(|b| get_count(b, "max")),
+        min_tokens: budget_table.and_then(|b| get_count(b, "min")),
         required: get_bool(table, "required") == Some(true),
         required_message: get_str(table, "required_message")
             .unwrap_or_default()
             .to_string(),
-        seed: seed.and_then(Item::as_str).unwrap_or_default().to_string(),
-        seed_is_table: seed.is_some_and(|s| s.as_table_like().is_some()),
-        max_items: get_int(table, "max_items").and_then(|n| u64::try_from(n).ok()),
-        strategy: get_str(table, "strategy").unwrap_or_default().to_string(),
-        overflow: get_int(table, "overflow").and_then(|n| u64::try_from(n).ok()),
+        seed,
+        seed_is_table: table.contains_key("seed"),
+        max_items: kind_table.and_then(|k| get_count(k, "max_items")),
+        strategy,
+        overflow,
         description: get_str(table, "description")
             .unwrap_or_default()
             .to_string(),
         accepts: get_strings(table, "accepts"),
-    }
+        name,
+    })
 }
 
 /// `"35%"` as 35.0; anything else as `None`.
@@ -844,4 +992,12 @@ pub(super) fn parse_percent(s: &str) -> Option<f64> {
     s.trim()
         .strip_suffix('%')
         .and_then(|digits| digits.trim().parse().ok())
+}
+
+/// The edges list's tables, mutably; empty when there is none.
+pub(super) fn edge_tables_mut(doc: &mut ManifestDoc) -> Vec<&mut dyn TableLike> {
+    match doc.graph_mut().get_mut("edges") {
+        Some(list) => list_tables_mut(list),
+        None => Vec::new(),
+    }
 }

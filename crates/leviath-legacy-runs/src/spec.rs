@@ -15,7 +15,6 @@ use leviath_runtime::spec::launch::{
     Callback, Delivery, LaunchPolicy, Placement, Secret, Unattended,
 };
 use leviath_runtime::spec::layout::RegionSeed;
-use leviath_runtime::spec::manifest::parse_manifest;
 use leviath_runtime::spec::names::{
     BlueprintName, BlueprintRef, Digest, HttpUrl, MimePattern, ModelId, ModelRef, ProfileName,
     ProviderName, RegionName, RunId,
@@ -27,6 +26,7 @@ use leviath_runtime::spec::run_spec::{
 use crate::ConvertError;
 use crate::context::{Losses, n32, parts};
 use crate::legacy::LegacyRun;
+use crate::manifest::{parse_manifest, read_manifest_tables};
 use crate::report::{BlueprintSource, Report};
 
 /// Why the tool definitions are left out of every stage plan.
@@ -60,9 +60,7 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
         why: e.to_string(),
     })?;
     let mut graph = RunGraph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
-    graph
-        .read_manifest_tables(&old.blueprint.text)
-        .map_err(ConvertError::Graph)?;
+    read_manifest_tables(&mut graph, &old.blueprint.text).map_err(ConvertError::Graph)?;
     let digest = match meta.blueprint_digest.as_deref().map(Digest::new) {
         Some(Ok(d)) => d,
         _ => {

@@ -51,27 +51,20 @@ impl FlowView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_runtime::spec::manifest::parse_manifest;
+    use crate::tui::flowgraph::model::{bundled_run_graphs, test_graph};
 
     #[test]
     fn every_bundled_agent_renders_every_stage_without_trailing_spaces() {
-        for agent in crate::bundled::BUNDLED_AGENTS {
-            let manifest = agent
-                .files
-                .iter()
-                .find(|(path, _)| *path == "agent.leviath")
-                .map(|(_, content)| *content)
-                .expect("a bundled agent has a manifest");
-            let graph = StageGraph::from_blueprint(&parse_manifest(manifest).expect("parses"));
+        for (name, run_graph) in bundled_run_graphs() {
+            let graph = StageGraph::from_graph(&run_graph);
             let text = render_to_text(&graph, 400);
             for id in graph.ids() {
                 let shown = id.trim_start_matches("ext:");
-                assert!(text.contains(shown), "{}: {shown} in\n{text}", agent.name);
+                assert!(text.contains(shown), "{name}: {shown} in\n{text}");
             }
             assert!(
                 text.lines().all(|l| l == l.trim_end()),
-                "{}: trailing spaces",
-                agent.name
+                "{name}: trailing spaces"
             );
             assert!(!text.ends_with('\n'));
         }
@@ -79,25 +72,35 @@ mod tests {
 
     #[test]
     fn a_narrow_width_shrinks_the_picture_and_the_floor_is_twenty_columns() {
-        let graph = StageGraph::from_blueprint(
-            &parse_manifest(
-                r#"
-[agent]
-name = "wide"
-[stages.first_stage_name]
-[stages.second_stage_name]
-[stages.third_stage_name]
+        let graph = test_graph(
+            r#"
+[[graph.stages]]
+name = "first_stage_name"
+
+[[graph.stages]]
+name = "second_stage_name"
+
+[[graph.stages]]
+name = "third_stage_name"
+
+[[graph.edges]]
+name = "next"
+from = "first_stage_name"
+to = "second_stage_name"
+
+[[graph.edges]]
+name = "next"
+from = "second_stage_name"
+to = "third_stage_name"
 "#,
-            )
-            .unwrap(),
         );
         let wide = render_to_text(&graph, 200);
         let narrow = render_to_text(&graph, 5);
         assert!(wide.lines().map(|l| l.chars().count()).max().unwrap() > 60);
         assert!(narrow.lines().all(|l| l.chars().count() <= 20), "{narrow}");
         assert!(!narrow.is_empty());
-        // A manifest with no stages gets the parser's default one.
-        let bare = StageGraph::from_blueprint(&parse_manifest("[agent]\nname = \"e\"\n").unwrap());
+        // A one-stage graph is one box.
+        let bare = test_graph("[[graph.stages]]\nname = \"main\"\n");
         assert!(render_to_text(&bare, 40).contains("main"));
     }
 }

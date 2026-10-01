@@ -338,11 +338,9 @@ fn decls() -> Vec<CoreDecl> {
 
 /// A graph with stages and edges, read from the coder-shaped test blueprint.
 fn graph() -> CoreGraph {
-    let manifest = leviath_runtime::spec::manifest::parse_manifest(
-        &crate::test_support::inline_coder_manifest(),
-    )
-    .expect("the test blueprint parses");
-    CoreGraph::from_blueprint(&manifest).expect("it reads as a graph")
+    leviath_blueprint::BlueprintFile::parse(&crate::test_support::inline_coder_manifest())
+        .expect("the test blueprint parses")
+        .run_graph()
 }
 
 fn tool(name: &str, source: ToolSource) -> CoreTool {

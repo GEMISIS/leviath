@@ -4,27 +4,34 @@ use leviath_runtime::spec::graph::{ToolGroup, ToolSelector};
 use leviath_runtime::spec::names::ToolName;
 
 /// A small valid manifest: two stages, one without an iteration ceiling.
-pub(crate) const MANIFEST: &str = r#"[agent]
+pub(crate) const MANIFEST: &str = r#"[blueprint]
 name = "helper"
 version = "1.2.3"
 
-[stages.plan]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
-available_tools = ["read_file"]
-max_iterations = 5
-[stages.plan.transitions.work]
-transform = "direct"
+[graph]
+edges = [{ name = "work", from = "plan", to = "work" }]
 
-[stages.work]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
-available_tools = ["read_file", "write_file"]
+[[graph.stages]]
+name = "plan"
+model = { models = [{ provider = "mock", model = "m" }] }
+tools = ["read_file"]
+max_iterations = 5
+
+[[graph.stages]]
+name = "work"
+model = { models = [{ provider = "mock", model = "m" }] }
+tools = [
+    "read_file",
+    "write_file",
+]
 max_iterations = 0
 
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-task = { kind = "pinned", max_tokens = 1000, seed = { caller_input = "task" } }
+[graph.layout]
+regions = [
+    { name = "system", kind = "pinned", budget = 1000 },
+    { name = "task", kind = "pinned", budget = 1000 },
+]
+total_budget_tokens = 2000
 "#;
 
 /// A tool definition with a plain schema.
@@ -64,11 +71,13 @@ pub(crate) fn env() -> (DaemonEnv, tempfile::TempDir) {
     env_with(Config::default())
 }
 
-/// Install `manifest` as `name` under the env's agents directory.
+/// Install `manifest` as `name` under the env's agents directory, renamed
+/// to match: an installed blueprint is named after itself.
 pub(crate) fn install(agents: &tempfile::TempDir, name: &str, manifest: &str) -> PathBuf {
     let dir = agents.path().join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    crate::test_support::write_test_agent(&dir, manifest)
+    let named = manifest.replace("name = \"helper\"", &format!("name = \"{name}\""));
+    crate::test_support::write_test_agent(&dir, named)
 }
 
 fn reference(text: &str) -> BlueprintRef {
@@ -107,18 +116,20 @@ async fn an_installed_blueprint_loads_as_a_graph_pinned_to_what_was_read() {
         .blueprint(&reference(&format!("helper@{}", Digest::of(b"older"))))
         .await
         .unwrap_err();
-    assert_eq!(moved.code, IssueCode::Unresolvable);
-    assert_eq!(moved.got, Some(format!("revision {digest}")));
+    assert_eq!(moved.code, IssueCode::Changed);
+    assert_eq!(moved.path.to_string(), "digest");
+    assert_eq!(moved.got, Some(format!("helper@{digest}")));
 
-    let with_servers = format!(
-        "{MANIFEST}\n[[mcp_servers]]\nname = \"own\"\ncommand = \"own-server\"\n\n\
-         [tool_script_permissions]\nshell = \"deny\"\n"
+    let with_servers = MANIFEST.replace(
+        "[graph]\n",
+        "[graph]\nmcp_servers = [{ name = \"own\", command = \"own-server\" }]\n\
+         script_permissions = { shell = \"deny\" }\n",
     );
     install(&agents, "served", &with_servers);
     let served = env.blueprint(&reference("served")).await.unwrap();
     assert_eq!(served.graph.mcp_servers[0].name.as_str(), "own");
     assert!(served.graph.script_permissions.shell.is_some());
-    let bad = format!("{MANIFEST}\n[[mcp_servers]]\nname = 3\n");
+    let bad = MANIFEST.replace("[graph]\n", "[graph]\nmcp_servers = [{ name = 3 }]\n");
     install(&agents, "bad-servers", &bad);
     let refused = env.blueprint(&reference("bad-servers")).await.unwrap_err();
     assert!(refused.message.contains("mcp_servers"), "{refused}");
@@ -222,35 +233,30 @@ async fn a_blueprint_that_is_missing_or_will_not_load_is_an_issue() {
 
     install(&agents, "broken", "this is not toml [");
     let broken = env.blueprint(&reference("broken")).await.unwrap_err();
-    assert!(broken.message.starts_with("parse manifest"), "{broken}");
-
-    install(
-        &agents,
-        "invalid",
-        &MANIFEST.replace(
-            "version = \"1.2.3\"",
-            "version = \"1.2.3\"\nentry_stage = \"ghost\"",
-        ),
-    );
-    let invalid = env.blueprint(&reference("invalid")).await.unwrap_err();
+    assert_eq!(broken.code, IssueCode::Invalid);
     assert!(
-        invalid.message.starts_with("invalid blueprint"),
-        "{invalid}"
+        broken.message.contains("is not a valid blueprint"),
+        "{broken}"
     );
+    assert!(broken.hint.is_some());
 
+    // A tool name that is not a name is refused as the file is read.
     install(
         &agents,
         "odd",
-        &MANIFEST.replace(
-            "available_tools = [\"read_file\"]",
-            "available_tools = [\"no spaces allowed\"]",
-        ),
+        &MANIFEST.replace("tools = [\"read_file\"]", "tools = [\"no spaces allowed\"]"),
     );
     let odd = env.blueprint(&reference("odd")).await.unwrap_err();
-    assert!(
-        odd.message.contains("does not read as a run graph"),
-        "{odd}"
+    assert!(odd.message.contains("is not a valid blueprint"), "{odd}");
+
+    // A graph that reads but does not hold together loads; resolving it is
+    // what refuses it, with every problem.
+    install(
+        &agents,
+        "invalid",
+        &MANIFEST.replace("[graph]\n", "[graph]\nentry = \"ghost\"\n"),
     );
+    assert!(env.blueprint(&reference("invalid")).await.is_ok());
 
     let nowhere = DaemonEnv {
         agents_dir: None,
@@ -552,7 +558,29 @@ fn a_blueprint_file_with_a_name_too_long_is_refused() {
     let long = "x".repeat(200);
     crate::daemon::starter::testing::manifest_in(
         dir.path(),
-        &format!("[agent]\nname = \"{long}\"\n\n[stages.main]\nmode = \"autonomous\"\n"),
+        &format!(
+            r#"[blueprint]
+name = "{long}"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+model = {{ models = [{{ provider = "anthropic", model = "claude-sonnet-4-6" }}] }}
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = {{ kind = "sliding_window", max_items = 10 }}
+budget = 10000
+"#
+        ),
     );
     let path =
         leviath_runtime::spec::names::BlueprintPath::new(dir.path().to_string_lossy()).unwrap();

@@ -253,17 +253,8 @@ pub(super) fn script_allow(
 /// declares one.
 pub(super) fn blueprint_safe(
     graph: &RunGraph,
-) -> Option<leviath_runtime::spec::blueprint::SafeCommandsConfig> {
-    let safe = leviath_runtime::spec::blueprint::SafeCommandsConfig {
-        tools: graph
-            .safe_commands
-            .tools
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
-        shell: graph.safe_commands.shell.clone(),
-    };
-    (safe != Default::default()).then_some(safe)
+) -> Option<leviath_runtime::spec::graph::SafeCommandsDef> {
+    (graph.safe_commands != Default::default()).then(|| graph.safe_commands.clone())
 }
 
 /// Every script tool the run's code holds, compiled, with their names.

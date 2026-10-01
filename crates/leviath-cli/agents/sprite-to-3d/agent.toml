@@ -1,120 +1,89 @@
-[agent]
+[blueprint]
 name = "sprite-to-3d"
-version = "0.3.2"
+version = "0.4.0"
 description = "Turn a sprite sheet or character image into a rigged, game-ready 3D model with Meshy"
-entry_stage = "prep-references"
 
-# Meshy is a first-class Leviath provider now, not an MCP server: the build and
-# rig stages below select `provider = "meshy"` the way any stage selects a model.
+# Meshy is a Leviath provider, not an MCP server: the build and rig stages
+# below select `provider = "meshy"` the way any stage selects a model.
 # Configure it like any other provider - set MESHY_API_KEY, or `lev setup` and
 # choose Meshy - and no per-agent dependency or npx install is needed.
 
-# ── Regions ────────────────────────────────────────────────────────────────
+[graph]
+entry = "prep-references"
 
-[context.regions.task]
-kind = "pinned"
-budget = "5%"
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
 
-# Where a stage's provider failure is written when its error edge is taken,
-# so the stage that catches it can say what went wrong. The rig is the one
-# that fails: Meshy refuses a mesh it finds no humanoid pose in, and the run
-# then finalizes the unrigged build with the refusal quoted here.
-[context.regions.error_report]
-kind = "pinned"
-budget = "2%"
+# ─── Context layout ──────────────────────────────────────────────────────────
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "task", kind = "pinned", budget = "5%" },
+    # Where a stage's provider failure is written when its error edge is taken,
+    # so the stage that catches it can say what went wrong. The rig is the one
+    # that fails: Meshy refuses a mesh it finds no humanoid pose in, and the run
+    # then finalizes the unrigged build with the refusal quoted here.
+    { name = "error_report", kind = "pinned", budget = "2%" },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 40 }, budget = { percent = "5%", max = 8000 } },
+    { name = "source", kind = "pinned", budget = "15%", accepts = ["image/*"] },
+    # Optional high-resolution "marketing" or official art of the character,
+    # richer than a low-res sprite sheet: it carries the true colors,
+    # proportions and signature features - a long ponytail, an arm cannon, a
+    # hat's real shape - that a tiny sprite only hints at. Supply any number
+    # with `--attach <file>:marketing`; the run works fine without it.
+    # Clearable rather than pinned so it never counts against the
+    # working-budget floor on a small window, yet stays put at a real one.
+    # Only the reference-drawing and critique stages read it - Meshy is fed the
+    # clean generated views, never this busy, dynamically-posed art.
+    { name = "marketing", kind = "clearable", budget = "15%", accepts = ["image/*"] },
+    # Every view render the prep and generate stages draw lands here, one entry
+    # each. Because a produced image is named after its own bytes
+    # (image-<sha>.png), the candidates never collide and the filter stage can
+    # point at one exactly to keep or drop. The filter stage prunes this down
+    # to the good views, and the generate stage refills it, so no rejected
+    # render lingers to distract Meshy.
+    { name = "references", kind = "pinned", budget = "20%", accepts = ["image/*"] },
+    { name = "review", kind = "pinned", budget = "8%", accepts = ["text/*"] },
+    # The running list of details that are absent or wrong in the reference
+    # renders compared with the source: a missing arm cannon, a shoulder pad, a
+    # color that drifted. The critique stage owns this region - it is the only
+    # stage that adds or clears an item, and it clears one only after
+    # confirming, on the images, that the detail is now present. Every
+    # generation pass reads it to know what to fix.
+    { name = "missing", kind = "pinned", budget = "6%", accepts = ["text/*"] },
+    # A window of one: build-model writes the generated mesh here, then
+    # rig-model reads it and writes the rigged mesh back, and keeping only the
+    # latest means the rigged mesh replaces the unrigged one rather than both
+    # piling up. The mesh is held as a reference plus a short stand-in, not
+    # inlined bytes, so a small budget is plenty.
+    { name = "model", kind = { kind = "sliding_window", max_items = 1 }, budget = "8%", accepts = ["model/*"] },
+    # A rendered preview IMAGE of the built model (Meshy returns a thumbnail
+    # render alongside the mesh). The model region holds the GLB itself, which
+    # is binary and nothing can look at; this holds a picture the verify stage
+    # can actually see and compare against the reference views. Clearable, so
+    # it stays off the fixed floor.
+    { name = "model_preview", kind = "clearable", budget = "10%", accepts = ["image/*"] },
+    # The text hint that steers the 3D texturing, written by assess-coverage
+    # once the references are settled. build-model is a meshy provider stage,
+    # and the meshy provider reads a visible text region as its texture prompt,
+    # so whatever assess-coverage writes here (the palette and materials the
+    # references agree on) becomes Meshy's texture_prompt. Kept as a
+    # first-class, reviewable field rather than improvised at build time.
+    { name = "build_spec", kind = "pinned", budget = "5%", accepts = ["text/*"] },
+    { name = "scratchpad", kind = "clearable", budget = { percent = "20%", max = 20000 } },
+]
 
-[context.regions.conversation]
-kind = "sliding_window"
-max_items = 40
-max_tokens = 8000
-budget = "5%"
-
-[context.regions.source]
-kind = "pinned"
-budget = "15%"
-accepts = ["image/*"]
-
-# Optional high-resolution "marketing" or official art of the character, richer
-# than a low-res sprite sheet: it carries the true colors, proportions and
-# signature features - a long ponytail, an arm cannon, a hat's real shape - that
-# a tiny sprite only hints at. Supply any number with `--attach <file>:marketing`;
-# the run works fine without it. Clearable rather than pinned so it never counts
-# against the working-budget floor on a small window, yet stays put at a real one.
-# Only the reference-drawing and critique stages read it - Meshy is fed the clean
-# generated views, never this busy, dynamically-posed art.
-[context.regions.marketing]
-kind = "clearable"
-budget = "15%"
-accepts = ["image/*"]
-
-# Every view render the prep and generate stages draw lands here, one entry
-# each. Because a produced image is named after its own bytes (image-<sha>.png),
-# the candidates never collide and the filter stage can point at one exactly to
-# keep or drop. The filter stage prunes this down to the good views, and the
-# generate stage refills it, so no rejected render lingers to distract Meshy.
-[context.regions.references]
-kind = "pinned"
-budget = "20%"
-accepts = ["image/*"]
-
-[context.regions.review]
-kind = "pinned"
-budget = "8%"
-accepts = ["text/*"]
-
-# The running list of details that are absent or wrong in the reference renders
-# compared with the source: a missing arm cannon, a shoulder pad, a color that
-# drifted. The critique stage owns this region - it is the only stage that adds
-# or clears an item, and it clears one only after confirming, on the images, that
-# the detail is now present. Every generation pass reads it to know what to fix.
-[context.regions.missing]
-kind = "pinned"
-budget = "6%"
-accepts = ["text/*"]
-
-[context.regions.model]
-# A window of one: build-model writes the generated mesh here, then rig-model
-# reads it and writes the rigged mesh back, and keeping only the latest means the
-# rigged mesh replaces the unrigged one rather than both piling up. The mesh is
-# held as a reference plus a short stand-in, not inlined bytes, so a small budget
-# is plenty - it no longer needs room for the whole mesh.
-kind = "sliding_window"
-max_items = 1
-budget = "8%"
-accepts = ["model/*"]
-
-# A rendered preview IMAGE of the built model (Meshy returns a thumbnail render
-# alongside the mesh). The model region holds the GLB itself, which is binary and
-# nothing can look at; this holds a picture the verify stage can actually see and
-# compare against the reference views. Clearable, so it stays off the fixed floor.
-[context.regions.model_preview]
-kind = "clearable"
-budget = "10%"
-accepts = ["image/*"]
-
-# The text hint that steers the 3D texturing, written by assess-coverage once the
-# references are settled. build-model is a meshy provider stage, and the meshy
-# provider reads a visible text region as its texture prompt, so whatever
-# assess-coverage writes here (the palette and materials the references agree on)
-# becomes Meshy's texture_prompt. Kept as a first-class, reviewable field rather
-# than improvised at build time.
-[context.regions.build_spec]
-kind = "pinned"
-budget = "5%"
-accepts = ["text/*"]
-
-[context.regions.scratchpad]
-kind = "clearable"
-max_tokens = 20000
-budget = "20%"
-
-# ── 1. Draw clean multi-view A-pose references from the sprite ────────────────
-
-[stages.prep-references]
-mode = "autonomous"
+# ─── 1. Draw clean multi-view A-pose references from the sprite ──────────────
+[[graph.stages]]
+name = "prep-references"
 description = "Render four consistent three-quarter A-pose reference views from the sprite"
+model = { models = [{ provider = "openrouter", model = "google/gemini-2.5-flash-image" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 max_iterations = 14
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
+output_routing = { "image/*" = "references" }
+output = { format = "image/*" }
 system_prompt = """
 The source region holds a sprite sheet or a single image of a character. Your
 job is to turn it into a small set of clean reference renders that a 3D model
@@ -221,39 +190,29 @@ EIGHT renders in all. A larger set will not fit in a single request downstream,
 and the oldest images are dropped when it does not. When the references region
 holds a good front-left, front-right, back-left and back-right three-quarter
 view, stop even if you could draw more, and the run moves on to filter them. Use
-the scratchpad for notes.
-"""
+the scratchpad for notes."""
 
-[stages.prep-references.model]
-allow_user_default = false
-
-[[stages.prep-references.model.models]]
-provider = "openrouter"
-model = "google/gemini-2.5-flash-image"
-
-[stages.prep-references.output]
-format = "image/*"
-
-[stages.prep-references.output_routing]
-"image/*" = "references"
-
-[stages.prep-references.transitions.filter-references]
-hint = "Once the references region holds view renders of the character to filter."
-transform = "direct"
 # Do not leave until four renders are actually stored. An image model returns
 # as many pictures as it likes per reply, so the gate holds the stage and asks
 # again until the set is complete.
+[[graph.edges]]
+name = "filter-references"
+from = "prep-references"
+to = "filter-references"
+hint = "Once the references region holds view renders of the character to filter."
 gate = { require_region_updated = "references", require_region_entries = { region = "references", at_least = 4 }, max_attempts = 4, message = "The references region does not hold four renders yet. Draw the views still missing - one image per view, matching the anchor's pose, style and likeness - and let them land in the references region before moving on." }
 
-# ── 2. Filter: drop the bad renders, keep the good single views ──────────────
-
-[stages.filter-references]
-mode = "autonomous"
+# ─── 2. Filter: drop the bad renders, keep the good single views ─────────────
+[[graph.stages]]
+name = "filter-references"
 description = "Delete off-model, malformed, or multi-view renders; keep the best four single views"
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 # One delete per call, and a busy pass can leave twenty renders to prune.
 max_iterations = 24
 max_revisits = 4
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
+reset = ["conversation"]
+hide = ["marketing", "model_preview"]
 system_prompt = """
 The references region holds the view renders drawn so far. Compare them against
 the source and against each other, and remove the ones that would hurt the model.
@@ -290,32 +249,23 @@ region must hold AT MOST FOUR renders, and the four it holds must be the ones
 you want built from, ideally one per angle. Each render is its own entry, keyed
 by its file name (image-<sha>.png), so delete exactly the one you mean with
 context_delete and its key; deleting is cheap and drawing again is not, so
-never leave a bad or redundant render in place because it sits among good ones.
-"""
+never leave a bad or redundant render in place because it sits among good ones."""
 
-[stages.filter-references.model]
-allow_user_default = false
-
-[[stages.filter-references.model.models]]
-provider = "openrouter"
-model = "anthropic/claude-opus-5"
-
-[stages.filter-references.context]
-reset = ["conversation"]
-hide = ["marketing", "model_preview"]
-
-[stages.filter-references.transitions.critique-references]
+[[graph.edges]]
+name = "critique-references"
+from = "filter-references"
+to = "critique-references"
 hint = "Once only good single views remain and the review region records what was kept."
-transform = "direct"
 
-# ── 3. Critique: compare each view to the source and log what is missing ─────
-
-[stages.critique-references]
-mode = "autonomous"
+# ─── 3. Critique: compare each view to the source and log what is missing ────
+[[graph.stages]]
+name = "critique-references"
 description = "Critically compare the views to the source and maintain the missing-details list"
+model = { models = [{ provider = "openrouter", model = "google/gemini-2.5-pro" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
 max_iterations = 8
 max_revisits = 4
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_delete"]
+reset = ["conversation"]
 system_prompt = """
 You are the critical reviewer. Compare the reference views in the references
 region against the source sprite - and against the marketing art in the marketing
@@ -367,39 +317,31 @@ generation pass fixes from:
   the source shows an arm cannon there").
 
 When the missing region reflects the true state of the views, hand off to
-assess-coverage. Do not generate or delete images here.
-"""
+assess-coverage. Do not generate or delete images here."""
 
-[stages.critique-references.model]
-allow_user_default = false
-
-[[stages.critique-references.model.models]]
-provider = "openrouter"
-model = "google/gemini-2.5-pro"
-
-[stages.critique-references.context]
-reset = ["conversation"]
-
-[stages.critique-references.transitions.assess-coverage]
+[[graph.edges]]
+name = "assess-coverage"
+from = "critique-references"
+to = "assess-coverage"
 hint = "Once the missing region reflects the true state of the reference views."
-transform = "direct"
 
-# ── 4. Assess: enough good, complete views to build, or generate more? ───────
-
-[stages.assess-coverage]
-mode = "autonomous"
+# ─── 4. Assess: enough good, complete views to build, or generate more? ──────
+[[graph.stages]]
+name = "assess-coverage"
 description = "Decide whether the views are complete enough to build, or more are needed"
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append"]
 max_iterations = 8
 max_revisits = 4
-available_tools = ["context_read", "context_list", "context_write", "context_append"]
+reset = ["conversation"]
+hide = ["marketing", "model_preview"]
 transition_prompt = """
 Decide what happens next with the reference views:
 - If the references region holds FOUR usable renders covering the four
   three-quarter angles, and the missing region lists no serious detail still
   absent or wrong, respond with: build-model
 - If it holds fewer than four renders, an angle is missing, or the missing
-  region still lists a serious detail to fix, respond with: generate-more
-"""
+  region still lists a serious detail to fix, respond with: generate-more"""
 system_prompt = """
 Look at the good views in the references region, the missing region's list, and
 the review notes.
@@ -431,39 +373,34 @@ Then choose one path:
 
 Do not generate or delete images here. Angles and fixes cannot be chased forever,
 so once the missing list holds only minor cosmetic notes and the angles are
-covered, prefer to build.
-"""
-
-[stages.assess-coverage.model]
-allow_user_default = false
-
-[[stages.assess-coverage.model.models]]
-provider = "openrouter"
-model = "anthropic/claude-opus-5"
-
-[stages.assess-coverage.context]
-reset = ["conversation"]
-hide = ["marketing", "model_preview"]
+covered, prefer to build."""
 
 # The build hints are the builder's only texturing steer, so writing them is a
 # condition of leaving, not a suggestion.
-[stages.assess-coverage.transitions.build-model]
+[[graph.edges]]
+name = "build-model"
+from = "assess-coverage"
+to = "build-model"
 hint = "If four usable views cover the angles and the missing region lists no serious detail."
-transform = "direct"
 gate = { require_region_updated = "build_spec", require_region_entries = { region = "references", at_least = 4 }, message = "Not ready to build: the references region must hold four usable renders (route to generate-more if it holds fewer), and the build hints must be written into the build_spec region (texture_prompt, negative_prompt, art_style) - the builder textures from nothing else.", max_attempts = 2 }
 
-[stages.assess-coverage.transitions.generate-more]
+[[graph.edges]]
+name = "generate-more"
+from = "assess-coverage"
+to = "generate-more"
 hint = "If an angle is missing or the missing region still lists a serious detail to fix."
-transform = "direct"
 
-# ── 5. Generate more: fix the missing details and fill the missing angles ────
-
-[stages.generate-more]
-mode = "autonomous"
+# ─── 5. Generate more: fix the missing details and fill the missing angles ───
+[[graph.stages]]
+name = "generate-more"
 description = "Draw views that fix the missing details and fill the missing angles"
+model = { models = [{ provider = "openrouter", model = "google/gemini-2.5-flash-image" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
 max_iterations = 10
 max_revisits = 4
-available_tools = ["context_read", "context_list", "context_write", "context_append", "context_attach", "context_export"]
+reset = ["conversation"]
+output_routing = { "image/*" = "references" }
+output = { format = "image/*" }
 system_prompt = """
 You draw images. Your only job here is to DRAW the corrected and missing views
 now - do not just describe them.
@@ -502,60 +439,53 @@ touch. Match the kept views' pose, style and likeness exactly - a corrected view
 that reads as a different character is worse than the one it replaces.
 
 Once you have drawn the fixes and the missing angles, stop; the run moves back to
-the filter.
-"""
+the filter."""
 
-[stages.generate-more.model]
-allow_user_default = false
+# Un-exhaustible escape: some defects an image model simply will not fix (it
+# keeps redrawing an invented detail however clearly the critique names it).
+# When the filter/critique/assess loop has spent its revisits, move on and
+# build with the best views in hand rather than dead-ending the run.
+[[graph.edges]]
+name = "build-model"
+from = "generate-more"
+to = "build-model"
+when = "dead_end"
+hint = "The reference loop is out of revisits; build with the best views in hand."
 
-[[stages.generate-more.model.models]]
-provider = "openrouter"
-model = "google/gemini-2.5-flash-image"
-
-[stages.generate-more.output]
-format = "image/*"
-
-[stages.generate-more.output_routing]
-"image/*" = "references"
-
-[stages.generate-more.context]
-reset = ["conversation"]
-
-[stages.generate-more.transitions.filter-references]
-hint = "Once the requested views are in the references region."
-transform = "direct"
 # Do not leave until the fixes have actually been drawn.
+[[graph.edges]]
+name = "filter-references"
+from = "generate-more"
+to = "filter-references"
+hint = "Once the requested views are in the references region."
 gate = { require_region_updated = "references", message = "You have not drawn any new render yet. Draw the corrected and missing views the missing region asks for, and let them land in the references region before moving on." }
 
-# Un-exhaustible escape: some defects an image model simply will not fix (it keeps
-# redrawing an invented detail however clearly the critique names it). When the
-# filter/critique/assess loop has spent its revisits, move on and build with the
-# best views in hand rather than dead-ending the run.
-[stages.generate-more.transitions.build-model]
-hint = "The reference loop is out of revisits; build with the best views in hand."
-condition = "dead_end"
-transform = "direct"
-
-# ── 6. Build the rigged, game-ready model with Meshy ─────────────────────────
-
-[stages.build-model]
-mode = "autonomous"
+# ─── 6. Build the rigged, game-ready model with Meshy ────────────────────────
+# A provider stage, not a tool loop. The meshy provider submits the
+# multi-image job, polls it to completion, and hands back the mesh - one
+# inference, no MCP, no offset replies, no download babysitting. A little
+# iteration headroom only.
+[[graph.stages]]
+name = "build-model"
 description = "Meshy turns the chosen reference views into one 3D model"
-# A provider stage, not a tool loop. The meshy provider submits the multi-image
-# job, polls it to completion, and hands back the mesh - one inference, no MCP,
-# no offset replies, no download babysitting. A little iteration headroom only.
 max_iterations = 3
 max_revisits = 2
+# Only the reference views may reach Meshy as input images. Hide every other
+# image region so the source sprite sheet (which would build a relief of the
+# whole sheet) and the marketing art are never fed to the builder, and hide the
+# critique text so only build_spec steers the texture prompt.
+reset = ["conversation"]
+hide = ["task", "source", "marketing", "model_preview", "review", "missing"]
+# The produced mesh goes to the model region; the preview render Meshy returns
+# beside it goes to model_preview, where verify can look at it.
+output_routing = { "model/*" = "model", "image/*" = "model_preview" }
 
-[stages.build-model.model]
+[graph.stages.model]
+models = [{ provider = "meshy", model = "multi-image-to-3d" }]
 allow_user_default = false
 # A Meshy job runs for minutes, and an ultra-mode one for longer; give the
 # provider room to poll to completion.
 request_timeout_secs = 1800
-
-[[stages.build-model.model.models]]
-provider = "meshy"
-model = "multi-image-to-3d"
 
 # The static build hints, tuned for a hero character. Ultra mode is Meshy's
 # high-fidelity geometry pass, and the biggest lever against torn thin parts
@@ -567,7 +497,7 @@ model = "multi-image-to-3d"
 # provider reads a visible text region as its texture prompt - so the palette
 # and materials the reference stages settled on steer the texturing. Only
 # fields Meshy documents for this endpoint are sent.
-[stages.build-model.model.parameters]
+[graph.stages.model.params.extra]
 ai_model = "meshy-7"
 ultra_mode = true
 should_remesh = true
@@ -577,56 +507,28 @@ pose_mode = "a-pose"
 enable_pbr = true
 texture_resolution = "2k"
 
-# Only the reference views may reach Meshy as input images. Hide every other
-# image region so the source sprite sheet (which would build a relief of the
-# whole sheet) and the marketing art are never fed to the builder, and hide the
-# critique text so only build_spec steers the texture prompt.
-[stages.build-model.context]
-reset = ["conversation"]
-hide = ["task", "source", "marketing", "model_preview", "review", "missing"]
-
-# The produced mesh goes to the model region; the preview render Meshy returns
-# beside it goes to model_preview, where verify can look at it.
-[stages.build-model.output_routing]
-"model/*" = "model"
-"image/*" = "model_preview"
-
-[stages.build-model.transitions.rig-model]
+# The build is deterministic, so this gate rarely holds; it catches a Meshy
+# failure that landed no mesh rather than moving on to rig nothing.
+[[graph.edges]]
+name = "rig-model"
+from = "build-model"
+to = "rig-model"
 hint = "Once the built mesh is in the model region."
-transform = "direct"
-# The build is deterministic, so this rarely holds; it catches a Meshy failure
-# that landed no mesh rather than moving on to rig nothing.
 gate = { require_region_updated = "model", message = "The model region is empty - the Meshy build landed no mesh.", max_attempts = 2 }
 
-# ── 6b. Rig the built mesh into an animation-ready model ───────────
-
-[stages.rig-model]
-mode = "autonomous"
+# ─── 6b. Rig the built mesh into an animation-ready model ────────────────────
+[[graph.stages]]
+name = "rig-model"
 description = "Meshy rigs the built mesh into an animation-ready model"
+model = { models = [{ provider = "meshy", model = "rig" }], allow_user_default = false, request_timeout_secs = 900 }
 max_iterations = 3
 max_revisits = 2
-
-[stages.rig-model.model]
-allow_user_default = false
-request_timeout_secs = 900
-
-[[stages.rig-model.model.models]]
-provider = "meshy"
-model = "rig"
-
 # The mesh in the model region is the only input. Hide the image and text
 # regions so nothing but that GLB reaches the rigger.
-[stages.rig-model.context]
 reset = ["conversation"]
 hide = ["task", "source", "marketing", "references", "model_preview", "review", "missing", "build_spec"]
-
 # The rigged mesh replaces the unrigged one in the model region (a window of one).
-[stages.rig-model.output_routing]
-"model/*" = "model"
-
-[stages.rig-model.transitions.verify-model]
-hint = "Once the rigged mesh is in the model region."
-transform = "direct"
+output_routing = { "model/*" = "model" }
 
 # Meshy's rigger refuses a mesh it cannot find a humanoid pose in (a 422,
 # "Pose estimation failed"): a waving arm, a prop merged into the body, a
@@ -635,26 +537,34 @@ transform = "direct"
 # ending the run with nothing after the build already succeeded. Verification
 # is skipped on this path: it judges the build against the references, which
 # the rig failing says nothing about, and the error edge cannot share the
-# verify-model target with the edge above.
-[stages.rig-model.transitions.finalize]
-condition = "error"
+# verify-model target with the edge below.
+[[graph.edges]]
+name = "finalize"
+from = "rig-model"
+to = "finalize"
+when = "error"
 hint = "Meshy refused to rig the mesh: finalize the unrigged model and say why."
-transform = "direct"
 
-# ── 7. Check the model against the references, and rebuild if it is off ───────
+[[graph.edges]]
+name = "verify-model"
+from = "rig-model"
+to = "verify-model"
+hint = "Once the rigged mesh is in the model region."
 
-[stages.verify-model]
-mode = "autonomous"
+# ─── 7. Check the model against the references, and rebuild if it is off ─────
+[[graph.stages]]
+name = "verify-model"
 description = "Compare the model against the reference views and decide to rebuild or finalize"
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir"]
 max_iterations = 10
 max_revisits = 2
-available_tools = ["context_read", "context_list", "context_write", "context_append", "read_file", "list_dir"]
+reset = ["conversation"]
 transition_prompt = """
 Decide what happens to the model you just judged:
 - If it has a serious, fixable gap you have written into the review region,
   respond with: generate-more
-- If it faithfully matches the reference views, respond with: finalize
-"""
+- If it faithfully matches the reference views, respond with: finalize"""
 system_prompt = """
 The model region holds the built GLB itself, which is binary - you cannot look at
 it directly. Judge the model from the RENDERED PREVIEW image in the model_preview
@@ -692,37 +602,37 @@ Then choose one path:
   fix, and remember the loop is limited.
 - If the model faithfully matches the references, transition to finalize.
 
-Do not try to rebuild the model yourself here; your job is to judge and route.
-"""
+Do not try to rebuild the model yourself here; your job is to judge and route."""
 
-[stages.verify-model.model]
-allow_user_default = false
-
-[[stages.verify-model.model.models]]
-provider = "openrouter"
-model = "anthropic/claude-opus-5"
-
-[stages.verify-model.context]
-reset = ["conversation"]
-
-# Back through the reference loop, not straight to the builder: the builder only
-# sees the four reference views, so a rebuild from the same views is a lottery.
-# A corrected view is what changes the model.
-[stages.verify-model.transitions.generate-more]
-hint = "If the model has a serious gap you have written into the review region: corrected views get drawn, filtered and critiqued, then the model is rebuilt from them."
-transform = "direct"
-
-[stages.verify-model.transitions.finalize]
+[[graph.edges]]
+name = "finalize"
+from = "verify-model"
+to = "finalize"
 hint = "If the model faithfully matches the reference views."
-transform = "direct"
 
-# ── 8. Finalize: submit the model as the run's artifact ──────────────────────
+# Back through the reference loop, not straight to the builder: the builder
+# only sees the four reference views, so a rebuild from the same views is a
+# lottery. A corrected view is what changes the model.
+[[graph.edges]]
+name = "generate-more"
+from = "verify-model"
+to = "generate-more"
+hint = "If the model has a serious gap you have written into the review region: corrected views get drawn, filtered and critiqued, then the model is rebuilt from them."
 
-[stages.finalize]
-mode = "output"
+# ─── 8. Finalize: submit the model as the run's artifact ─────────────────────
+# No outgoing edges: this stage ends the run by submitting the model.
+[[graph.stages]]
+name = "finalize"
 description = "Submit the finished model as the run's artifact"
+model = { models = [{ provider = "openrouter", model = "anthropic/claude-opus-5" }], allow_user_default = false }
+mode = "output"
+tools = ["context_read", "context_list", "read_file", "list_dir", "submit_output"]
 max_iterations = 6
-available_tools = ["context_read", "context_list", "read_file", "list_dir"]
+allow_complete = true
+require_output = true
+reset = ["conversation"]
+hide = ["marketing", "model_preview", "references", "source"]
+output = { artifacts = [{ name = "model", mime_type = "model/*", required = true }] }
 system_prompt = """
 The model region holds the finished, rigged model as a produced part - a .glb the
 Meshy provider made - and the review region holds the verifier's assessment.
@@ -737,24 +647,4 @@ they are getting. If the error_report region holds a rig failure, the model is
 the unrigged build: submit `model.glb`, say plainly that Meshy refused to rig
 it, quote the reason, and say what usually fixes it (an upright A-pose
 character with limbs apart and no props merged into the body, built from
-several views). The run ends when you submit.
-"""
-
-[stages.finalize.model]
-allow_user_default = false
-
-[[stages.finalize.model.models]]
-provider = "openrouter"
-model = "anthropic/claude-opus-5"
-
-[stages.finalize.context]
-reset = ["conversation"]
-hide = ["marketing", "model_preview", "references", "source"]
-
-# No outgoing transitions: this stage finalizes the run by submitting the model.
-[stages.finalize.transitions]
-
-[[stages.finalize.output.artifacts]]
-name = "model"
-type = "model/*"
-required = true
+several views). The run ends when you submit."""

@@ -192,28 +192,29 @@ fn every_token_rule_becomes_its_own_member() {
     }
 }
 
-/// The rows in a `[mime_types]` table come back sorted by mime type, carrying
-/// the name of whatever shipped them, and a row that will not deserialize is
-/// left out rather than reported as empty.
+/// The rows in a graph's `mime_types` table come back sorted by mime type,
+/// carrying the name of whatever shipped them.
 #[test]
-fn from_table_reads_every_row_that_parses_sorted_by_type() {
-    let table: toml::Table = toml::from_str(
-        "[\"model/gltf+json\"]\n\
+fn from_table_reads_every_row_sorted_by_type() {
+    #[derive(serde::Deserialize)]
+    struct Table {
+        mime_types: leviath_runtime::spec::graph::MimeRows,
+    }
+    let table: Table = toml::from_str(
+        "[mime_types.\"model/gltf+json\"]\n\
          family = \"model\"\n\
          text = true\n\
          extensions = [\"gltf\"]\n\
          magic = \"67 6c 54 46\"\n\
          stand_in = \"a 3D model\"\n\
-         check = \"checks/gltf.rhai\"\n\
+         check = { file = \"checks/gltf.rhai\" }\n\
          tokens = { fixed = 500 }\n\n\
-         [\"a/first\"]\n\
-         family = \"other\"\n\n\
-         [\"broken/thing\"]\n\
-         family = 7\n",
+         [mime_types.\"a/first\"]\n\
+         family = \"other\"\n",
     )
     .expect("the table parses");
-    let rows = MimeRow::from_table(&table, "sculptor");
-    assert_eq!(rows.len(), 2, "the row that will not read is left out");
+    let rows = MimeRow::from_table(&table.mime_types, "sculptor");
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].mime_type, "a/first", "sorted by mime type");
     let gltf = &rows[1];
     assert_eq!(gltf.mime_type, "model/gltf+json");

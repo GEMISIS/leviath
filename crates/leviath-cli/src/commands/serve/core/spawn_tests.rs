@@ -271,11 +271,7 @@ async fn a_blueprint_from_a_configured_directory_is_sent_as_that_directory() {
     for (root, name) in [(&agents, "inside"), (&elsewhere, "outside")] {
         let dir = root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(leviath_core::files::MANIFEST_FILENAME),
-            format!("[agent]\nname = \"{name}\"\n\n[stages.only]\nmode = \"autonomous\"\n"),
-        )
-        .unwrap();
+        crate::test_support::write_test_agent(&dir, crate::test_support::tiny_blueprint(name));
     }
     let sent_as = |name: &'static str| {
         let agents = agents.clone();

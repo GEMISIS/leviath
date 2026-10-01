@@ -477,18 +477,16 @@ pub(crate) mod test_support {
     use crate::insert::RunSpecC;
     use crate::spec::graph::StageDef;
 
-    /// The graph a blueprint manifest reads as.
-    pub(crate) fn graph_of(manifest: &str) -> RunGraph {
-        let bp = crate::spec::manifest::parse_manifest(manifest).expect("the manifest parses");
-        RunGraph::from_blueprint(&bp).expect("the manifest reads as a graph")
+    /// The graph `text` writes in TOML, as a blueprint's `[graph]` table
+    /// holds one.
+    pub(crate) fn graph_of(text: &str) -> RunGraph {
+        toml::from_str(text).expect("the graph reads")
     }
 
     /// A stage with every setting at its default.
     pub(crate) fn stage(name: &str) -> StageDef {
-        let graph = graph_of(&format!(
-            "[agent]\nname = \"t\"\n[stages.\"{name}\"]\nsystem_prompt = \"p\"\n"
-        ));
-        graph.stages.into_iter().next().expect("one stage")
+        toml::from_str(&format!("name = \"{name}\"\nsystem_prompt = \"p\"\n"))
+            .expect("the stage reads")
     }
 
     /// A spec named `name` over `graph`, with one plan per stage giving each

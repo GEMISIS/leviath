@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use leviath_providers::Tool;
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::pipeline::ModelDefaults;
-use leviath_runtime::spec::blueprint::Blueprint;
 use tokio::sync::Mutex;
 
 use crate::config::Config;
@@ -35,7 +34,7 @@ pub(crate) use tool_state::*;
 pub(crate) mod tests {
     use super::*;
     use crate::config::Config;
-    use leviath_runtime::spec::Blueprint;
+    use leviath_runtime::spec::graph::RunGraph;
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -117,7 +116,7 @@ pub(crate) mod tests {
                 "// @tool net_tool\n// @requires network\n1",
             )
             .unwrap();
-            let blueprint = agent_dir.path().join("agent.leviath");
+            let blueprint = agent_dir.path().join(leviath_blueprint::FILE_NAME);
 
             let builtins: HashSet<String> = ["read_file".to_string()].into_iter().collect();
             let mcp = vec![leviath_providers::Tool {
@@ -177,7 +176,7 @@ pub(crate) mod tests {
         let home = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(home.path().to_str().unwrap()), || {
             let agent_dir = tempfile::tempdir().unwrap();
-            let blueprint = agent_dir.path().join("agent.leviath");
+            let blueprint = agent_dir.path().join(leviath_blueprint::FILE_NAME);
             let dirs = script_dirs(&blueprint);
             let (set, names, defs) =
                 discover_script_tools_in(&dirs, &reserved_tool_names(&HashSet::new(), &[]));
@@ -185,358 +184,272 @@ pub(crate) mod tests {
         });
     }
 
-    // ─── resolve_region_scripts ──────────────────────────────────────────
-    /// Manifest with a global custom region and a per-stage one, both
-    /// pointing into `hooks/` next to the manifest.
+    // ─── check_graph_code ────────────────────────────────────────────────
+    /// A one-stage blueprint's graph: `graph_extra` lands in `[graph]` before
+    /// any table, `stage_extra` in its stage, and `regions_extra` in the
+    /// layout's region list.
+    fn graph_with(graph_extra: &str, stage_extra: &str, regions_extra: &str) -> RunGraph {
+        let text = format!(
+            r#"
+[blueprint]
+name = "fixture"
+version = "0.1.0"
+
+[graph]
+{graph_extra}
+
+[[graph.stages]]
+name = "main"
+model = {{ models = [{{ provider = "anthropic", model = "m" }}] }}
+{stage_extra}
+
+[graph.layout]
+total_budget_tokens = 4000
+regions = [
+    {regions_extra}
+    {{ name = "conversation", kind = {{ kind = "sliding_window", max_items = 20 }}, budget = 2000 }},
+]
+"#
+        );
+        leviath_blueprint::BlueprintFile::parse(&text)
+            .expect("the fixture parses")
+            .run_graph()
+    }
+
+    /// A graph whose only code is the hooks `hooks` names on its stage.
+    fn hooked(hooks: &str) -> RunGraph {
+        graph_with("", &format!("hooks = {{ {hooks} }}"), "")
+    }
+
+    /// The graph's output and its stage's, each with an optional validator.
+    fn validated(graph_script: Option<&str>, stage_script: Option<&str>) -> RunGraph {
+        let output = |script: &str| format!("output = {{ validator = {{ file = \"{script}\" }} }}");
+        graph_with(
+            &graph_script.map(output).unwrap_or_default(),
+            &stage_script.map(output).unwrap_or_default(),
+            "",
+        )
+    }
+
+    /// A blueprint whose graph layout and whose stage's own layout each hold
+    /// a custom region, with their scripts in `hooks/` beside the blueprint.
     pub(crate) fn custom_region_manifest() -> &'static str {
-        "[agent]\nname = \"cr\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [context.regions.brain]\nkind = \"custom\"\nscript = \"hooks/brain.rhai\"\nmax_tokens = 4000\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-         [stages.main.context.regions.stage_view]\nkind = \"custom\"\nscript = \"hooks/stage.rhai\"\nmax_tokens = 2000\n"
+        r#"
+[blueprint]
+name = "cr"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.stages.layout]
+total_budget_tokens = 2000
+regions = [{ name = "stage_view", kind = { kind = "custom", code = { file = "hooks/stage.rhai" } }, budget = 2000 }]
+
+[graph.layout]
+total_budget_tokens = 4000
+regions = [{ name = "brain", kind = { kind = "custom", code = { file = "hooks/brain.rhai" } }, budget = 4000 }]
+"#
     }
 
-    // ── output validators ──
-    fn validator_blueprint(agent_script: Option<&str>, stage_script: Option<&str>) -> Blueprint {
-        let mut bp = leviath_runtime::spec::manifest::parse_manifest(
-            "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
-        )
-        .unwrap();
-        let spec = |script: &str| leviath_core::output::OutputSpec {
-            validator: Some(script.to_string()),
-            ..leviath_core::output::OutputSpec::default()
-        };
-        bp.output = agent_script.map(spec);
-        bp.stages[0].output = stage_script.map(spec);
-        bp
+    fn custom_regions() -> RunGraph {
+        leviath_blueprint::BlueprintFile::parse(custom_region_manifest())
+            .expect("the fixture parses")
+            .run_graph()
     }
 
-    /// Compiled at spawn, so a broken validator stops the run before any tokens
-    /// are spent. The only other time the script is read is at the end, which is
-    /// the worst possible moment to learn the agent cannot hand back its work.
-    #[test]
-    fn resolve_output_validators_compiles_each_distinct_script_once() {
+    /// A blueprint directory with `files` written into it.
+    fn dir_with(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::create_dir(dir.path().join("validators")).unwrap();
-        std::fs::write(
-            dir.path().join("validators/shape.rhai"),
-            "fn validate(content) { () }",
-        )
-        .unwrap();
-
-        // The same script named by both the agent default and the stage: one
-        // compile, one entry.
-        let bp = validator_blueprint(Some("validators/shape.rhai"), Some("validators/shape.rhai"));
-        let compiled =
-            resolve_output_validators(&bp, &manifest.to_string_lossy()).expect("it compiles");
-
-        assert_eq!(compiled.len(), 1);
-        assert!(compiled.contains_key("validators/shape.rhai"));
+        for (path, text) in files {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        }
+        dir
     }
 
-    /// A stage can declare a shape without a validator, which is the common
-    /// case: a format label and some instructions, checked by nothing.
+    /// A graph that names no code has nothing to check.
     #[test]
-    fn resolve_output_validators_is_empty_without_any() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+    fn a_graph_with_no_code_checks_clean() {
+        let dir = dir_with(&[]);
+        check_graph_code(&graph_with("", "", ""), dir.path()).unwrap();
+    }
 
-        // No output block at all.
-        let bp = validator_blueprint(None, None);
-        assert!(
-            resolve_output_validators(&bp, &manifest.to_string_lossy())
-                .unwrap()
-                .is_empty()
+    /// Checked before a run starts, so a broken validator stops the run before
+    /// any tokens are spent. The same script named twice is read once.
+    #[test]
+    fn an_output_validator_is_compiled() {
+        let dir = dir_with(&[("validators/shape.rhai", "fn validate(content) { () }")]);
+        let graph = validated(Some("validators/shape.rhai"), Some("validators/shape.rhai"));
+        check_graph_code(&graph, dir.path()).expect("it compiles");
+
+        // A shape with no validator is checked by nothing.
+        let shaped = graph_with("", "output = { format = \"a2ui\" }", "");
+        check_graph_code(&shaped, dir.path()).unwrap();
+
+        // Inline code is compiled where it stands.
+        let inline = graph_with(
+            "output = { validator = { inline = \"fn validate(content) { () }\" } }",
+            "",
+            "",
         );
-
-        // An output block that names no validator.
-        let mut shaped = validator_blueprint(None, None);
-        shaped.stages[0].output = Some(leviath_core::output::OutputSpec {
-            format: Some("a2ui".to_string()),
-            ..leviath_core::output::OutputSpec::default()
-        });
-        assert!(
-            resolve_output_validators(&shaped, &manifest.to_string_lossy())
-                .unwrap()
-                .is_empty()
-        );
+        check_graph_code(&inline, dir.path()).unwrap();
     }
 
     #[test]
-    fn resolve_output_validators_reports_a_missing_script() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        let bp = validator_blueprint(None, Some("validators/gone.rhai"));
-
-        let err = resolve_output_validators(&bp, &manifest.to_string_lossy())
+    fn a_missing_or_broken_validator_is_refused() {
+        let dir = dir_with(&[("broken.rhai", "fn validate(a, b) { () }")]);
+        let err = check_graph_code(&validated(None, Some("validators/gone.rhai")), dir.path())
             .expect_err("a script that is not there");
-
         assert!(err.contains("cannot read output validator"), "{err}");
         assert!(err.contains("gone.rhai"), "{err}");
+
+        let err = check_graph_code(&validated(None, Some("broken.rhai")), dir.path())
+            .expect_err("wrong arity");
+        assert!(err.contains("output validator failed to compile"), "{err}");
     }
 
     #[test]
-    fn resolve_output_validators_reports_one_that_does_not_compile() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(dir.path().join("broken.rhai"), "fn validate(a, b) { () }").unwrap();
-        let bp = validator_blueprint(None, Some("broken.rhai"));
-
-        let err =
-            resolve_output_validators(&bp, &manifest.to_string_lossy()).expect_err("wrong arity");
-
-        assert!(err.contains("failed to compile"), "{err}");
-    }
-
-    // ─── resolve_stage_hook_scripts ──────────────────────────────────────
-    fn hooked_manifest(hooks: &str) -> leviath_runtime::spec::Blueprint {
-        leviath_runtime::spec::manifest::parse_manifest(&format!(
-            "[agent]\nname = \"h\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.main]\nmodel = {{ provider = \"anthropic\", model = \"m\" }}\n{hooks}"
-        ))
-        .expect("the fixture manifest parses")
-    }
-
-    #[test]
-    fn stage_hooks_are_empty_when_no_stage_declares_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        let bp = hooked_manifest("");
-        let got = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy()).unwrap();
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn a_declared_hook_is_compiled_and_keyed_by_its_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) { () }").unwrap();
-        let bp = hooked_manifest("[stages.main.hooks]\non_stage_enter = \"h.rhai\"\n");
-
-        let got = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy()).unwrap();
-        assert_eq!(got.len(), 1);
-        assert!(got["h.rhai"].defines("on_stage_enter"));
-    }
-
-    /// One file backing both hooks is read and compiled once, not twice.
-    #[test]
-    fn one_file_backing_two_hooks_is_compiled_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(
-            dir.path().join("h.rhai"),
-            "fn on_stage_enter(ctx) { () } fn on_stage_exit(ctx) { () }",
+    fn a_declared_hook_is_compiled() {
+        let dir = dir_with(&[("h.rhai", "fn on_stage_enter(ctx) { () }")]);
+        check_graph_code(
+            &hooked("on_stage_enter = { file = \"h.rhai\" }"),
+            dir.path(),
         )
         .unwrap();
-        let bp = hooked_manifest(
-            "[stages.main.hooks]\non_stage_enter = \"h.rhai\"\non_stage_exit = \"h.rhai\"\n",
-        );
-
-        let got = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy()).unwrap();
-        assert_eq!(got.len(), 1, "one entry, not one per hook");
-        assert!(got["h.rhai"].defines("on_stage_enter"));
-        assert!(got["h.rhai"].defines("on_stage_exit"));
     }
 
-    /// Fail-fast at spawn: a missing script must not become a runtime surprise
-    /// partway through a run.
+    /// One file backing two hooks is compiled once and must define both.
     #[test]
-    fn a_missing_hook_script_fails_the_spawn() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        let bp = hooked_manifest("[stages.main.hooks]\non_stage_enter = \"gone.rhai\"\n");
+    fn one_file_backing_two_hooks_must_define_both() {
+        let both = dir_with(&[(
+            "h.rhai",
+            "fn on_stage_enter(ctx) { () } fn on_stage_exit(ctx) { () }",
+        )]);
+        let graph =
+            hooked("on_stage_enter = { file = \"h.rhai\" }, on_stage_exit = { file = \"h.rhai\" }");
+        check_graph_code(&graph, both.path()).unwrap();
 
-        let err = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy())
-            .expect_err("a missing script is a spawn error");
-        assert!(err.contains("cannot read stage hook script"), "{err}");
-    }
-
-    #[test]
-    fn a_hook_script_that_does_not_compile_fails_the_spawn() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) {").unwrap();
-        let bp = hooked_manifest("[stages.main.hooks]\non_stage_enter = \"h.rhai\"\n");
-
-        let err = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy())
-            .expect_err("a broken script is a spawn error");
-        assert!(err.contains("failed to compile"), "{err}");
-    }
-
-    /// The blueprint named this file for a hook it does not implement. Letting
-    /// that spawn would give a hook that never runs, which looks exactly like
-    /// one that ran and allowed everything.
-    #[test]
-    fn a_file_that_lacks_the_hook_it_was_named_for_fails_the_spawn() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(dir.path().join("h.rhai"), "fn on_stage_exit(ctx) { () }").unwrap();
-        let bp = hooked_manifest("[stages.main.hooks]\non_stage_enter = \"h.rhai\"\n");
-
-        let err = resolve_stage_hook_scripts(&bp, &manifest.to_string_lossy())
-            .expect_err("a file missing its named hook is a spawn error");
+        // The blueprint named this file for a hook it does not implement. A
+        // hook that never runs looks exactly like one that ran and allowed
+        // everything, so it is refused.
+        let one = dir_with(&[("h.rhai", "fn on_stage_exit(ctx) { () }")]);
+        let err = check_graph_code(&graph, one.path()).expect_err("on_stage_enter is missing");
         assert!(err.contains("defines no"), "{err}");
     }
 
     #[test]
-    fn resolve_region_scripts_empty_without_custom_regions() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        let bp = leviath_runtime::spec::manifest::parse_manifest(
-            "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+    fn a_missing_or_broken_hook_script_is_refused() {
+        let dir = dir_with(&[("broken.rhai", "fn on_stage_enter(ctx) {")]);
+        let err = check_graph_code(
+            &hooked("on_stage_enter = { file = \"gone.rhai\" }"),
+            dir.path(),
         )
-        .unwrap();
-        let scripts = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap();
-        assert!(scripts.is_empty());
+        .expect_err("a missing script is a spawn error");
+        assert!(err.contains("cannot read stage hook script"), "{err}");
+
+        let err = check_graph_code(
+            &hooked("on_stage_enter = { file = \"broken.rhai\" }"),
+            dir.path(),
+        )
+        .expect_err("a broken script is a spawn error");
+        assert!(
+            err.contains("stage hook script 'broken.rhai' failed to compile"),
+            "{err}"
+        );
     }
 
     #[test]
-    fn resolve_region_scripts_collects_global_and_per_stage_layouts() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::create_dir(dir.path().join("hooks")).unwrap();
-        std::fs::write(
-            dir.path().join("hooks/brain.rhai"),
-            "fn render(ctx) { \"b\" }",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("hooks/stage.rhai"),
-            "fn render(ctx) { \"s\" }",
-        )
-        .unwrap();
-        let bp = leviath_runtime::spec::manifest::parse_manifest(custom_region_manifest()).unwrap();
-        let scripts = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap();
-        assert_eq!(scripts.len(), 2);
-        assert!(scripts.contains_key("hooks/brain.rhai"));
-        assert!(scripts.contains_key("hooks/stage.rhai"));
+    fn custom_region_scripts_in_every_layout_are_compiled() {
+        let dir = dir_with(&[
+            ("hooks/brain.rhai", "fn render(ctx) { \"b\" }"),
+            ("hooks/stage.rhai", "fn render(ctx) { \"s\" }"),
+        ]);
+        check_graph_code(&custom_regions(), dir.path()).unwrap();
+
+        // Two regions naming one script read it once.
+        let shared = graph_with(
+            "",
+            "",
+            "{ name = \"a\", kind = { kind = \"custom\", code = { file = \"hooks/brain.rhai\" } }, budget = 1000 },\
+             { name = \"b\", kind = { kind = \"custom\", code = { file = \"hooks/brain.rhai\" } }, budget = 1000 },",
+        );
+        check_graph_code(&shared, dir.path()).unwrap();
     }
 
     #[test]
-    fn resolve_region_scripts_reads_a_shared_path_once() {
-        // Two regions declaring the same script share one compiled Arc.
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::create_dir(dir.path().join("hooks")).unwrap();
-        std::fs::write(
-            dir.path().join("hooks/shared.rhai"),
-            "fn render(ctx) { \"x\" }",
-        )
-        .unwrap();
-        let bp = leviath_runtime::spec::manifest::parse_manifest(
-            "[agent]\nname = \"cr\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [context.regions.a]\nkind = \"custom\"\nscript = \"hooks/shared.rhai\"\nmax_tokens = 2000\n\n\
-             [context.regions.b]\nkind = \"custom\"\nscript = \"hooks/shared.rhai\"\nmax_tokens = 2000\n\n\
-             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
-        )
-        .unwrap();
-        let scripts = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap();
-        assert_eq!(scripts.len(), 1);
-    }
-
-    #[test]
-    fn resolve_region_scripts_missing_file_is_a_hard_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        let bp = leviath_runtime::spec::manifest::parse_manifest(custom_region_manifest()).unwrap();
-        let err = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap_err();
+    fn a_missing_or_broken_region_script_names_its_region() {
+        let missing = dir_with(&[]);
+        let err = check_graph_code(&custom_regions(), missing.path()).unwrap_err();
         assert!(err.contains("region 'brain'"), "{err}");
         assert!(err.contains("hooks/brain.rhai"), "{err}");
-    }
 
-    #[test]
-    fn resolve_region_scripts_uncompilable_script_is_a_hard_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::create_dir(dir.path().join("hooks")).unwrap();
-        std::fs::write(dir.path().join("hooks/brain.rhai"), "fn render(ctx) {").unwrap();
-        std::fs::write(
-            dir.path().join("hooks/stage.rhai"),
-            "fn render(ctx) { \"s\" }",
-        )
-        .unwrap();
-        let bp = leviath_runtime::spec::manifest::parse_manifest(custom_region_manifest()).unwrap();
-        let err = resolve_region_scripts(&bp, &manifest.to_string_lossy()).unwrap_err();
+        let broken = dir_with(&[
+            ("hooks/brain.rhai", "fn render(ctx) {"),
+            ("hooks/stage.rhai", "fn render(ctx) { \"s\" }"),
+        ]);
+        let err = check_graph_code(&custom_regions(), broken.path()).unwrap_err();
         assert!(err.contains("failed to compile"), "{err}");
         assert!(err.contains("region 'brain'"), "{err}");
     }
 
-    /// Where a blueprint at `manifest` finds its script tools: its own
-    /// `tools/`, then the global one.
-    fn script_dirs(manifest: &std::path::Path) -> Vec<std::path::PathBuf> {
-        manifest
-            .parent()
+    /// Code is something the blueprint ships, so it has no `read_paths` escape
+    /// at all: outside the blueprint's own directory is simply refused, before
+    /// the file is read.
+    #[test]
+    fn code_outside_the_blueprint_directory_is_refused() {
+        let root = dir_with(&[("outside.txt", "NOT RHAI")]);
+        let bp_dir = root.path().join("agents").join("evil");
+        std::fs::create_dir_all(&bp_dir).unwrap();
+        let escaping = [
+            hooked("on_stage_enter = { file = \"../../outside.txt\" }"),
+            validated(Some("../../outside.txt"), None),
+            graph_with(
+                "",
+                "",
+                "{ name = \"notes\", kind = { kind = \"custom\", code = { file = \"../../outside.txt\" } }, budget = 2000 },",
+            ),
+        ];
+        for graph in escaping {
+            let err = check_graph_code(&graph, &bp_dir).expect_err("an escaping path is refused");
+            assert!(err.contains("outside the blueprint's directory"), "{err}");
+            // Refused before the read: a compile failure here would mean the
+            // file had already been opened.
+            assert!(!err.contains("failed to compile"), "{err}");
+        }
+    }
+
+    /// Where a blueprint at `file` finds its script tools: its own `tools/`,
+    /// then the global one.
+    fn script_dirs(file: &std::path::Path) -> Vec<std::path::PathBuf> {
+        file.parent()
             .map(|d| d.join("tools"))
             .into_iter()
             .chain(leviath_core::tools_dir())
             .collect()
     }
 
-    fn model_cfg(models: Vec<(&str, &str)>) -> leviath_runtime::spec::blueprint::ModelConfig {
-        leviath_runtime::spec::blueprint::ModelConfig {
-            models: models
-                .into_iter()
-                .map(|(p, m)| leviath_runtime::spec::blueprint::ModelEntry {
-                    provider: p.to_string(),
-                    model: m.to_string(),
-                })
-                .collect(),
-            allow_user_default: true,
-            parameters: HashMap::new(),
-            request_timeout_secs: None,
-        }
-    }
-
-    fn blueprint_declaring(read_paths: &[&str]) -> Blueprint {
-        let stage =
-            leviath_runtime::spec::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
-        let layout = leviath_runtime::spec::layout::ContextLayout::new(vec![], 1000);
-        let mut bp = Blueprint::new("cto".to_string(), "d".to_string(), vec![stage], layout);
-        if !read_paths.is_empty() {
-            bp.read_paths = Some(leviath_runtime::spec::ReadPathsConfig {
-                allow: read_paths.iter().map(|s| s.to_string()).collect(),
-            });
-        }
-        bp
-    }
-
     #[test]
     fn read_path_policy_is_inactive_without_declarations() {
-        let bp = blueprint_declaring(&[]);
-        let (policy, warning) = compile_read_path_policy(
-            &bp.name,
-            bp.read_paths.as_ref(),
-            &Config::default(),
-            Path::new("/w"),
-        )
-        .unwrap();
+        let (policy, warning) =
+            compile_read_path_policy("cto", &[], &Config::default(), Path::new("/w")).unwrap();
         assert!(!policy.is_active());
         assert!(warning.is_none());
+    }
 
-        // An explicitly empty `[read_paths]` block is the same as none.
-        let mut bp = blueprint_declaring(&[]);
-        bp.read_paths = Some(leviath_runtime::spec::ReadPathsConfig { allow: vec![] });
-        let (policy, warning) = compile_read_path_policy(
-            &bp.name,
-            bp.read_paths.as_ref(),
-            &Config::default(),
-            Path::new("/w"),
-        )
-        .unwrap();
-        assert!(!policy.is_active());
-        assert!(warning.is_none());
+    fn declared(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|s| s.to_string()).collect()
     }
 
     /// Declared but ungranted: the agent still spawns, and the warning names
     /// the agent and shows both config stanzas that would grant the paths.
     #[test]
     fn read_path_policy_warns_when_nothing_grants() {
-        let bp = blueprint_declaring(&["/data/runs", "glob:/data/docs/**"]);
         let (policy, warning) = compile_read_path_policy(
-            &bp.name,
-            bp.read_paths.as_ref(),
+            "cto",
+            &declared(&["/data/runs", "glob:/data/docs/**"]),
             &Config::default(),
             Path::new("/w"),
         )
@@ -553,7 +466,6 @@ pub(crate) mod tests {
 
     #[test]
     fn read_path_policy_is_quiet_when_granted() {
-        let bp = blueprint_declaring(&["/data/runs"]);
         let mut config = Config::default();
         config.agent_read_paths.insert(
             "cto".to_string(),
@@ -562,7 +474,7 @@ pub(crate) mod tests {
             },
         );
         let (policy, warning) =
-            compile_read_path_policy(&bp.name, bp.read_paths.as_ref(), &config, Path::new("/w"))
+            compile_read_path_policy("cto", &declared(&["/data/runs"]), &config, Path::new("/w"))
                 .unwrap();
         assert!(policy.is_active());
         assert!(!policy.grants.is_empty());
@@ -571,35 +483,32 @@ pub(crate) mod tests {
 
     #[test]
     fn read_path_policy_is_quiet_under_the_override() {
-        let bp = blueprint_declaring(&["/data/runs"]);
         let mut config = Config::default();
         config.security.allow_blueprint_read_paths = true;
         let (policy, warning) =
-            compile_read_path_policy(&bp.name, bp.read_paths.as_ref(), &config, Path::new("/w"))
+            compile_read_path_policy("cto", &declared(&["/data/runs"]), &config, Path::new("/w"))
                 .unwrap();
         assert!(policy.allow_blueprint);
         assert!(warning.is_none());
     }
 
     /// A malformed entry is a hard spawn error naming its source - the
-    /// blueprint's section or the user's own grant list.
+    /// blueprint's list or the user's own grant list.
     #[test]
     fn read_path_policy_rejects_bad_entries_loudly() {
-        let bp = blueprint_declaring(&["glob:["]);
         let err = compile_read_path_policy(
-            &bp.name,
-            bp.read_paths.as_ref(),
+            "cto",
+            &declared(&["glob:["]),
             &Config::default(),
             Path::new("/w"),
         )
         .unwrap_err();
         assert!(err.contains("agent 'cto' [read_paths]"), "{err}");
 
-        let bp = blueprint_declaring(&["/data/runs"]);
         let mut config = Config::default();
         config.security.read_paths = vec!["regex:(".to_string()];
         let err =
-            compile_read_path_policy(&bp.name, bp.read_paths.as_ref(), &config, Path::new("/w"))
+            compile_read_path_policy("cto", &declared(&["/data/runs"]), &config, Path::new("/w"))
                 .unwrap_err();
         assert!(err.contains("config.toml"), "{err}");
     }
@@ -630,157 +539,32 @@ pub(crate) mod tests {
         assert_eq!(map, base(), "no grant, no change");
     }
 
-    // ─── resolve_seeds ────────────────────────────────────────────────────────
-    fn bp(regions_toml: &str) -> Blueprint {
-        // A region named `task` picks up the caller's task implicitly, which is
-        // how a real blueprint accepts one - and without it a supplied task is
-        // refused.
-        let implicit_task = "task = { kind = \"pinned\", max_tokens = 1000 }";
-        let toml = format!(
-            r#"
-    [agent]
-    name = "seedy"
-
-    [stages.main]
-    mode = "autonomous"
-
-    [stages.main.model]
-    provider = "anthropic"
-    model = "claude-sonnet-5"
-
-    [context.regions]
-    {regions_toml}
-    {implicit_task}
-    conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 10000 }}
-    "#
-        );
-        leviath_runtime::spec::manifest::parse_manifest(&toml).unwrap()
-    }
-
-    /// A script is code the blueprint ships, so it has no `[read_paths]` escape
-    /// at all: outside the blueprint's own directory is simply refused.
-    #[test]
-    fn a_hook_script_outside_the_blueprint_directory_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let bp_dir = root.path().join("agents").join("evil");
-        std::fs::create_dir_all(&bp_dir).expect("dirs");
-        std::fs::write(root.path().join("outside.txt"), "NOT RHAI").expect("write");
-
-        let mut stage = leviath_runtime::spec::Stage::new(
-            "main".to_string(),
-            leviath_runtime::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        stage.hooks.on_stage_enter = Some("../../outside.txt".to_string());
-        let blueprint = leviath_runtime::spec::Blueprint::new(
-            "evil".to_string(),
-            "d".to_string(),
-            vec![stage],
-            leviath_runtime::spec::layout::ContextLayout::new(vec![], 1000),
-        );
-
-        let bp_path = bp_dir.join("agent.leviath");
-        let err = resolve_stage_hook_scripts(&blueprint, bp_path.to_str().expect("utf8"))
-            .expect_err("an escaping script path is refused");
-        assert!(err.contains("outside the blueprint's directory"), "{err}");
-        // Refused before the read, so the file is never opened: a compile
-        // failure here would mean it had already been slurped.
-        assert!(!err.contains("failed to compile"), "{err}");
-    }
-
-    #[test]
-    fn a_custom_region_script_outside_the_blueprint_directory_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let bp_dir = root.path().join("agents").join("evil");
-        std::fs::create_dir_all(&bp_dir).expect("dirs");
-        std::fs::write(root.path().join("outside.txt"), "NOT RHAI").expect("write");
-
-        let blueprint =
-            bp(r#"notes = { kind = "custom", script = "../../outside.txt", max_tokens = 2000 }"#);
-        let bp_path = bp_dir.join("agent.leviath");
-        let err = resolve_region_scripts(&blueprint, bp_path.to_str().expect("utf8"))
-            .expect_err("an escaping script path is refused");
-        assert!(err.contains("outside the blueprint's directory"), "{err}");
-    }
-
-    #[test]
-    fn an_output_validator_outside_the_blueprint_directory_is_refused() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let bp_dir = root.path().join("agents").join("evil");
-        std::fs::create_dir_all(&bp_dir).expect("dirs");
-        std::fs::write(root.path().join("outside.txt"), "NOT RHAI").expect("write");
-
-        let mut blueprint = leviath_runtime::spec::Blueprint::new(
-            "evil".to_string(),
-            "d".to_string(),
-            vec![],
-            leviath_runtime::spec::layout::ContextLayout::new(vec![], 1000),
-        );
-        blueprint.output = Some(leviath_core::output::OutputSpec {
-            validator: Some("../../outside.txt".to_string()),
-            ..Default::default()
-        });
-        let bp_path = bp_dir.join("agent.leviath");
-        let err = resolve_output_validators(&blueprint, bp_path.to_str().expect("utf8"))
-            .expect_err("an escaping validator path is refused");
-        assert!(err.contains("outside the blueprint's directory"), "{err}");
-    }
-
-    /// The control: a script beside the blueprint compiles as before.
-    #[test]
-    fn a_hook_script_beside_the_blueprint_still_loads() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let bp_dir = root.path().join("agents").join("good");
-        std::fs::create_dir_all(&bp_dir).expect("dirs");
-        std::fs::write(bp_dir.join("h.rhai"), "fn on_stage_enter(ctx) { () }").expect("write");
-
-        let mut stage = leviath_runtime::spec::Stage::new(
-            "main".to_string(),
-            leviath_runtime::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        stage.hooks.on_stage_enter = Some("h.rhai".to_string());
-        let blueprint = leviath_runtime::spec::Blueprint::new(
-            "good".to_string(),
-            "d".to_string(),
-            vec![stage],
-            leviath_runtime::spec::layout::ContextLayout::new(vec![], 1000),
-        );
-
-        let bp_path = bp_dir.join("agent.leviath");
-        let scripts = resolve_stage_hook_scripts(&blueprint, bp_path.to_str().expect("utf8"))
-            .expect("a script beside the blueprint loads");
-        assert!(scripts.contains_key("h.rhai"));
-    }
-
-    /// Every bundled agent that tells the user to pass `--task` can hold one.
-    ///
-    /// The refusal above is only safe if no shipped agent trips it while being
-    /// driven the documented way. `reviewer` takes `--diff`, not `--task`, and
-    /// that is fine; what would not be fine is an agent whose own description
-    /// says `--task` while its blueprint has nowhere to put it.
+    /// Every bundled agent that tells the user to pass `--task` declares a
+    /// `task` input to hold one: a spawn handing a task to a graph that
+    /// declares no such input is refused.
     #[test]
     fn every_bundled_agent_that_documents_a_task_accepts_one() {
         for agent in crate::bundled::BUNDLED_AGENTS {
             let name = agent.name;
             // Static `expect` messages rather than an interpolated `panic!`:
-            // both facts already have their own named test (`bundled.rs` for
-            // the manifest's presence, `manifest_integration.rs` for its
-            // parse), so naming the agent here buys nothing and the closure
-            // would leave a region no test can reach.
+            // both facts already have their own named tests in `bundled.rs`,
+            // so naming the agent here buys nothing and the closure would
+            // leave a region no test can reach.
             let (_, content) = agent
                 .files
                 .iter()
-                .find(|(rel, _)| *rel == "agent.leviath")
-                .expect("every bundled agent ships an agent.leviath");
-            let bp = leviath_runtime::spec::manifest::parse_manifest(content)
-                .expect("every bundled agent's manifest parses");
-            // The question is `accepts_task`, not "did `resolve_seeds` error".
-            // Driving the whole resolver here reported `coder` as refusing a
-            // task on Windows only, because one of its *path* seeds failed
-            // against the fixture workdir - an unrelated error the proxy could
-            // not tell apart from the one under test.
+                .find(|(rel, _)| *rel == leviath_blueprint::FILE_NAME)
+                .expect("every bundled agent ships an agent.toml");
+            let file = leviath_blueprint::BlueprintFile::parse(content)
+                .expect("every bundled agent's blueprint parses");
+            let accepts_task = file
+                .graph
+                .inputs
+                .iter()
+                .any(|input| input.name.as_str() == "task");
             assert!(
-                !content.contains("--task") || bp.accepts_task(),
-                "{name} tells the user to pass --task but declares no region to hold one"
+                !content.contains("--task") || accepts_task,
+                "{name} tells the user to pass --task but declares no task input"
             );
         }
     }

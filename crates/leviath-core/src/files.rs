@@ -35,9 +35,6 @@ pub const ARCHIVE_FILE: &str = "run.lvr";
 /// is here.
 pub const RUN_FILE: &str = "run.lvr";
 
-/// The blueprint manifest inside an agent directory.
-pub const MANIFEST_FILENAME: &str = "agent.leviath";
-
 /// The blueprint a run actually executed, copied into the run directory at
 /// spawn.
 ///

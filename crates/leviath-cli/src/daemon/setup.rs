@@ -793,7 +793,7 @@ mod tests {
 
                 // Spawning through the wired host exercises the real setup end to end.
                 let dir = tempfile::tempdir().unwrap();
-                let manifest = dir.path().join("agent.leviath");
+                let manifest = dir.path().join("agent.toml");
                 std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
                 let run_id = spawn_through(&mut host, task_request(&manifest, "t"))
                     .await
@@ -879,7 +879,7 @@ mod tests {
                 .await
                 .expect("the daemon host builds in tests");
                 let agent = tempfile::tempdir().unwrap();
-                let manifest = agent.path().join("agent.leviath");
+                let manifest = agent.path().join("agent.toml");
                 std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
                 let run_id = spawn_through(&mut host, task_request(&manifest, "t"))
                     .await
@@ -930,7 +930,7 @@ mod tests {
                     "gone-1234-ab12".to_string(),
                     "gone".to_string(),
                     // A blueprint path that does not exist - the deleted-manifest case.
-                    "/no/such/dir/agent.leviath".to_string(),
+                    "/no/such/dir/agent.toml".to_string(),
                     "t".to_string(),
                     None,
                     std::env::temp_dir().to_string_lossy().to_string(),
@@ -1152,9 +1152,11 @@ mod tests {
                 drop(ctl_tx);
                 host.serve(ctl_rx).await;
                 assert!(reply_rx.await.unwrap().is_ok());
-                let servers = crate::daemon::mcp_pool::parse_blueprint_mcp_servers(
+                let file = leviath_blueprint::BlueprintFile::parse(
                     &std::fs::read_to_string(&manifest).unwrap(),
-                );
+                )
+                .unwrap();
+                let servers = crate::daemon::starter::mcp_configs(&file.graph);
                 let defs = pool.cached_defs_for(&servers);
                 assert_eq!(defs.len(), 1);
                 assert_eq!(defs[0].name, "search__stub_search");
@@ -1178,13 +1180,28 @@ mod tests {
 
     /// A one-stage blueprint naming `claude-opus-5` by bare name, in `dir`.
     fn story_manifest(dir: &std::path::Path) -> std::path::PathBuf {
-        let manifest = dir.join("agent.leviath");
+        let manifest = dir.join("agent.toml");
         std::fs::write(
             &manifest,
-            "[agent]\nname = \"storyteller\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [context.regions]\ntask = { kind = \"pinned\", max_tokens = 2000, seed = \"task\" }\n\n\
-             [stages.story]\nmode = \"autonomous\"\ndescription = \"d\"\n\
-             model = { models = [\"claude-opus-5\"] }\navailable_tools = []\n",
+            r#"[blueprint]
+name = "storyteller"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "story"
+description = "d"
+model = { models = [{ model = "claude-opus-5" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 2000 }]
+total_budget_tokens = 2000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
         )
         .unwrap();
         manifest
@@ -1461,23 +1478,33 @@ mod tests {
     /// A one-stage blueprint pinned to `provider`, with the user default
     /// refused: the only way it can run is if that provider is registered.
     fn blueprint_pinned_to(dir: &std::path::Path, provider: &str) -> std::path::PathBuf {
-        let manifest = dir.join("agent.leviath");
+        let manifest = dir.join("agent.toml");
         std::fs::write(
             &manifest,
             format!(
-                r#"
-[agent]
+                r#"[blueprint]
 name = "pinned"
-entry_stage = "work"
+version = "0.1.0"
 
-[stages.work]
-mode = "autonomous"
-model = {{ models = [{{ provider = "{provider}", model = "m" }}], allow_user_default = false }}
-available_tools = []
+[graph]
+entry = "work"
+
+[[graph.stages]]
+name = "work"
 system_prompt = "reply"
 
-[context.regions]
-task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
+[graph.stages.model]
+models = [{{ provider = "{provider}", model = "m" }}]
+allow_user_default = false
+
+[graph.layout]
+regions = [{{ name = "task", kind = "pinned", budget = 200 }}]
+total_budget_tokens = 200
+
+[[graph.inputs]]
+name = "task"
+type = {{ kind = "text", multiline = true }}
+binds = [{{ region = "task" }}]
 "#
             ),
         )
@@ -1595,7 +1622,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
             "build_host_spawns_agents_through_the_installed_starter",
             |_| async move {
                 let dir = tempfile::tempdir().unwrap();
-                let manifest = dir.path().join("agent.leviath");
+                let manifest = dir.path().join("agent.toml");
                 std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
 
                 let runs = tempfile::tempdir().unwrap();
@@ -1650,7 +1677,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
                 // A run recorded under the runs dir is resumed and registered by
                 // `build_host`.
                 let agent = tempfile::tempdir().unwrap();
-                let manifest = agent.path().join("agent.leviath");
+                let manifest = agent.path().join("agent.toml");
                 std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
                 let runs = tempfile::tempdir().unwrap();
                 let run_id =
@@ -1674,7 +1701,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         // must still be reachable: a control op targeting it fires the installed
         // reloader, which pages it into the world on demand.
         let agent = tempfile::tempdir().unwrap();
-        let manifest = agent.path().join("agent.leviath");
+        let manifest = agent.path().join("agent.toml");
         std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
 
         let runs = tempfile::tempdir().unwrap();
@@ -1856,7 +1883,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         save_config(&path, &after);
 
         let agent = tempfile::tempdir().unwrap();
-        let manifest = agent.path().join("agent.leviath");
+        let manifest = agent.path().join("agent.toml");
         std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
         spawn_ok(&mut host, &manifest).await;
 
@@ -1922,7 +1949,7 @@ task = {{ kind = "pinned", max_tokens = 200, seed = {{ caller = "task" }} }}
         save_config(&path, &after);
 
         let agent = tempfile::tempdir().unwrap();
-        let manifest = agent.path().join("agent.leviath");
+        let manifest = agent.path().join("agent.toml");
         std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
         spawn_ok(&mut host, &manifest).await;
 

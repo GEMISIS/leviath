@@ -125,9 +125,9 @@ pub(crate) struct BlueprintDependency {
     pub(crate) check: Option<String>,
 }
 
-impl From<&leviath_runtime::spec::blueprint::Dependency> for BlueprintDependency {
-    fn from(dependency: &leviath_runtime::spec::blueprint::Dependency) -> Self {
-        use leviath_runtime::spec::blueprint::DependencyKind as Core;
+impl From<&leviath_runtime::spec::graph::DependencyDef> for BlueprintDependency {
+    fn from(dependency: &leviath_runtime::spec::graph::DependencyDef) -> Self {
+        use leviath_runtime::spec::graph::Needs as Core;
         let mut mapped = Self {
             name: dependency.name.clone(),
             kind: DependencyKind::Binary,
@@ -141,31 +141,31 @@ impl From<&leviath_runtime::spec::blueprint::Dependency> for BlueprintDependency
             command: None,
             check: None,
         };
-        match &dependency.kind {
+        match &dependency.needs {
             Core::McpServer { server, env } => {
                 mapped.kind = DependencyKind::McpServer;
-                mapped.server = Some(server.clone());
+                mapped.server = Some(server.to_string());
                 mapped.env = env.clone();
             }
-            Core::Env { var } => {
+            Core::Env(var) => {
                 mapped.kind = DependencyKind::Env;
                 mapped.var = Some(var.clone());
             }
-            Core::Binary { command } => {
+            Core::Binary(command) => {
                 mapped.kind = DependencyKind::Binary;
                 mapped.command = Some(command.clone());
             }
-            Core::Script { check } => {
+            Core::Check(check) => {
                 mapped.kind = DependencyKind::Script;
-                mapped.check = Some(check.clone());
+                mapped.check = Some(super::code_text(check));
             }
         }
         mapped
     }
 }
 
-impl From<&leviath_runtime::spec::blueprint::DependencyInstall> for DependencyInstall {
-    fn from(install: &leviath_runtime::spec::blueprint::DependencyInstall) -> Self {
+impl From<&leviath_runtime::spec::graph::InstallDef> for DependencyInstall {
+    fn from(install: &leviath_runtime::spec::graph::InstallDef) -> Self {
         Self {
             command: install.command.clone(),
             commands: install
@@ -176,7 +176,7 @@ impl From<&leviath_runtime::spec::blueprint::DependencyInstall> for DependencyIn
                     command: command.clone(),
                 })
                 .collect(),
-            script: install.script.clone(),
+            script: install.script.as_ref().map(super::code_text),
             server: install.server.as_ref().map(McpServerTemplate::from),
         }
     }
@@ -192,8 +192,8 @@ fn entries(map: &std::collections::BTreeMap<String, String>) -> Vec<EnvEntry> {
         .collect()
 }
 
-impl From<&leviath_runtime::spec::blueprint::McpServerTemplate> for McpServerTemplate {
-    fn from(template: &leviath_runtime::spec::blueprint::McpServerTemplate) -> Self {
+impl From<&leviath_runtime::spec::graph::McpServerTemplate> for McpServerTemplate {
+    fn from(template: &leviath_runtime::spec::graph::McpServerTemplate) -> Self {
         Self {
             transport: template.transport.as_deref().and_then(|word| {
                 match word.trim().to_ascii_lowercase().as_str() {

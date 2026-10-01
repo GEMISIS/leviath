@@ -21,7 +21,7 @@ fn meta() -> RunMeta {
     let mut meta = RunMeta::new(
         "coder-1788924523-abc123".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "fix the parser".to_string(),
         Some("gpt-5.6".to_string()),
         "/work".to_string(),

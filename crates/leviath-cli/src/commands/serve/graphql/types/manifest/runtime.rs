@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_runtime::spec::Blueprint as CoreBlueprint;
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 use super::count;
 
@@ -54,8 +54,8 @@ pub(crate) struct NudgeConfig {
     pub(crate) text: Option<String>,
 }
 
-impl From<&leviath_runtime::spec::blueprint::NudgeConfig> for NudgeConfig {
-    fn from(nudge: &leviath_runtime::spec::blueprint::NudgeConfig) -> Self {
+impl From<&leviath_runtime::spec::graph::NudgeDef> for NudgeConfig {
+    fn from(nudge: &leviath_runtime::spec::graph::NudgeDef) -> Self {
         Self {
             policy: NudgePolicy::from(nudge.enabled),
             max: nudge.max.map(count),
@@ -86,14 +86,16 @@ pub(crate) struct BlueprintSecurity {
     pub(crate) taint_tracking: TaintTracking,
 }
 
-impl From<&leviath_core::taint::SecurityConfig> for BlueprintSecurity {
-    fn from(security: &leviath_core::taint::SecurityConfig) -> Self {
-        Self {
-            taint_tracking: match security.taint_tracking {
+impl BlueprintSecurity {
+    /// What a level's `taint_tracking` asks for. Null where the level leaves
+    /// it unset.
+    pub(crate) fn of(taint_tracking: Option<bool>) -> Option<Self> {
+        taint_tracking.map(|on| Self {
+            taint_tracking: match on {
                 true => TaintTracking::Track,
                 false => TaintTracking::Inherit,
             },
-        }
+        })
     }
 }
 
@@ -162,6 +164,27 @@ pub(crate) struct SandboxConfig {
     pub(crate) on_unavailable: SandboxUnavailable,
 }
 
+impl From<&leviath_runtime::spec::graph::SandboxDef> for SandboxConfig {
+    fn from(sandbox: &leviath_runtime::spec::graph::SandboxDef) -> Self {
+        Self::from(&tool_sandbox(sandbox))
+    }
+}
+
+/// A graph's sandbox setting, in the shape the sandbox cascade reads.
+pub(crate) fn tool_sandbox(
+    sandbox: &leviath_runtime::spec::graph::SandboxDef,
+) -> leviath_core::sandbox::ToolSandboxConfig {
+    leviath_core::sandbox::ToolSandboxConfig {
+        kind: sandbox.kind,
+        image: sandbox.image.clone(),
+        engine: sandbox.engine.clone(),
+        network: sandbox.network,
+        mounts: sandbox.mounts.clone(),
+        keep_warm: sandbox.keep_warm,
+        on_unavailable: sandbox.on_unavailable,
+    }
+}
+
 impl From<&leviath_core::sandbox::ToolSandboxConfig> for SandboxConfig {
     fn from(sandbox: &leviath_core::sandbox::ToolSandboxConfig) -> Self {
         Self {
@@ -178,7 +201,8 @@ impl From<&leviath_core::sandbox::ToolSandboxConfig> for SandboxConfig {
 
 /// The scripts a stage runs at points in its own lifecycle.
 ///
-/// Each names a Rhai file relative to the blueprint. The function a script has to
+/// Each names a Rhai file relative to the blueprint, or is the script itself
+/// when the blueprint writes it inline. The function a script has to
 /// define is named for the field it is given as, so one file may back several
 /// hooks. A stage that declares none costs nothing: no file is read and no
 /// engine is built.
@@ -202,16 +226,19 @@ pub(crate) struct StageHooks {
     pub(crate) on_error: Option<String>,
 }
 
-impl From<&leviath_runtime::spec::blueprint::StageHooks> for StageHooks {
-    fn from(hooks: &leviath_runtime::spec::blueprint::StageHooks) -> Self {
+impl From<&leviath_runtime::spec::graph::StageHooks> for StageHooks {
+    fn from(hooks: &leviath_runtime::spec::graph::StageHooks) -> Self {
+        let text = |code: &Option<leviath_runtime::spec::graph::CodeRef>| {
+            code.as_ref().map(super::code_text)
+        };
         Self {
-            on_stage_enter: hooks.on_stage_enter.clone(),
-            on_stage_exit: hooks.on_stage_exit.clone(),
-            before_inference: hooks.before_inference.clone(),
-            after_inference: hooks.after_inference.clone(),
-            on_tool_call: hooks.on_tool_call.clone(),
-            on_completion: hooks.on_completion.clone(),
-            on_error: hooks.on_error.clone(),
+            on_stage_enter: text(&hooks.on_stage_enter),
+            on_stage_exit: text(&hooks.on_stage_exit),
+            before_inference: text(&hooks.before_inference),
+            after_inference: text(&hooks.after_inference),
+            on_tool_call: text(&hooks.on_tool_call),
+            on_completion: text(&hooks.on_completion),
+            on_error: text(&hooks.on_error),
         }
     }
 }
@@ -232,12 +259,14 @@ pub(crate) struct SafeCommands {
     pub(crate) shell: Vec<String>,
 }
 
-impl From<&leviath_runtime::spec::blueprint::SafeCommandsConfig> for SafeCommands {
-    fn from(safe: &leviath_runtime::spec::blueprint::SafeCommandsConfig) -> Self {
-        Self {
-            tools: safe.tools.clone(),
+impl SafeCommands {
+    /// What a graph asks to run without approval. Null when it asks for
+    /// nothing.
+    pub(crate) fn of(safe: &leviath_runtime::spec::graph::SafeCommandsDef) -> Option<Self> {
+        (!safe.tools.is_empty() || !safe.shell.is_empty()).then(|| Self {
+            tools: super::texts(&safe.tools),
             shell: safe.shell.clone(),
-        }
+        })
     }
 }
 
@@ -258,8 +287,8 @@ pub(crate) struct RepetitionDetection {
     pub(crate) max_readonly_streak: Option<i32>,
 }
 
-impl From<&leviath_runtime::spec::blueprint::RepetitionDetectionConfig> for RepetitionDetection {
-    fn from(detection: &leviath_runtime::spec::blueprint::RepetitionDetectionConfig) -> Self {
+impl From<&leviath_runtime::spec::graph::RepetitionDef> for RepetitionDetection {
+    fn from(detection: &leviath_runtime::spec::graph::RepetitionDef) -> Self {
         Self {
             enabled: detection.enabled,
             max_repeat_calls: detection.max_repeat_calls.map(count),
@@ -271,9 +300,9 @@ impl From<&leviath_runtime::spec::blueprint::RepetitionDetectionConfig> for Repe
 /// The resolver state behind the `FileTrackingConfig` type.
 pub(crate) struct FileTrackingConfig {
     /// The blueprint the region name resolves in.
-    blueprint: Arc<CoreBlueprint>,
+    blueprint: Arc<ParsedBlueprint>,
     /// The tracking block as the blueprint wrote it.
-    tracking: leviath_runtime::spec::blueprint::FileTrackingConfig,
+    tracking: leviath_runtime::spec::graph::FileTrackingDef,
 }
 
 /// Keeping the files a run reads and writes in one region.
@@ -288,12 +317,12 @@ impl FileTrackingConfig {
     /// Null where no layout in this blueprint declares that name, which is file
     /// tracking with nowhere to write. `regionName` carries the name either way.
     async fn region(&self) -> Option<super::super::blueprint::Region> {
-        super::refs::region(&self.blueprint, &self.tracking.region)
+        super::refs::region(&self.blueprint, self.tracking.region.as_str())
     }
 
     /// The region name the blueprint wrote, verbatim.
     async fn region_name(&self) -> &str {
-        &self.tracking.region
+        self.tracking.region.as_str()
     }
 
     /// Whether a read updates it.
@@ -317,8 +346,8 @@ impl FileTrackingConfig {
 impl FileTrackingConfig {
     /// Describe the tracking block against the blueprint that holds it.
     pub(crate) fn of(
-        blueprint: &Arc<CoreBlueprint>,
-        tracking: &leviath_runtime::spec::blueprint::FileTrackingConfig,
+        blueprint: &Arc<ParsedBlueprint>,
+        tracking: &leviath_runtime::spec::graph::FileTrackingDef,
     ) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),
@@ -334,7 +363,8 @@ impl FileTrackingConfig {
 #[mirror]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct CompactionConfig {
-    /// The provider that serves the summarizer.
+    /// The provider that serves the summarizer. Empty when the blueprint
+    /// names the model alone and the machine's provider order picks one.
     pub(crate) provider: String,
     /// The model it runs on.
     pub(crate) model: String,
@@ -348,11 +378,16 @@ pub(crate) struct CompactionConfig {
     pub(crate) temperature: f64,
 }
 
-impl From<&leviath_core::lifecycle::CompactionConfig> for CompactionConfig {
-    fn from(compaction: &leviath_core::lifecycle::CompactionConfig) -> Self {
+impl From<&leviath_runtime::spec::graph::CompactionDef> for CompactionConfig {
+    fn from(compaction: &leviath_runtime::spec::graph::CompactionDef) -> Self {
         Self {
-            provider: compaction.provider.clone(),
-            model: compaction.model.clone(),
+            provider: compaction
+                .model
+                .provider
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            model: compaction.model.model.to_string(),
             system_prompt: compaction.system_prompt.clone(),
             user_prompt_template: compaction.user_prompt_template.clone(),
             max_summary_tokens: count(compaction.max_summary_tokens),
@@ -371,9 +406,9 @@ pub(crate) enum WorkerFailurePolicy {
     FailAll,
 }
 
-impl From<&leviath_runtime::spec::blueprint::WorkerFailurePolicy> for WorkerFailurePolicy {
-    fn from(policy: &leviath_runtime::spec::blueprint::WorkerFailurePolicy) -> Self {
-        use leviath_runtime::spec::blueprint::WorkerFailurePolicy as Core;
+impl From<&leviath_runtime::spec::graph::WorkerFailure> for WorkerFailurePolicy {
+    fn from(policy: &leviath_runtime::spec::graph::WorkerFailure) -> Self {
+        use leviath_runtime::spec::graph::WorkerFailure as Core;
         match policy {
             Core::Continue => Self::Continue,
             Core::FailAll => Self::FailAll,

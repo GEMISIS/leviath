@@ -48,7 +48,7 @@ fn execute_with(
 
     let manifest = create_manifest(&args.name, &args.template);
     write_file(
-        &blueprint_dir.join(leviath_core::files::MANIFEST_FILENAME),
+        &blueprint_dir.join(leviath_blueprint::FILE_NAME),
         manifest.as_bytes(),
     )?;
 
@@ -77,314 +77,328 @@ fn execute_with(
 }
 
 /// Escapes a string for embedding inside a TOML basic (double-quoted)
-/// string literal. Without this, a blueprint name containing a backslash
-/// (e.g. a Windows path like `C:\Users\...\my-agent`, which `lev create`
-/// accepts directly as the blueprint name/directory) breaks TOML parsing:
-/// `\U` is interpreted as the start of an 8-digit-hex unicode escape, not a
-/// literal backslash-U.
+/// string literal, so a name holding a backslash or a quote still writes a
+/// file that reads.
 fn toml_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// The blueprint name for a `lev create` argument: its last path component.
+///
+/// The argument is the directory to create, and may be a whole path (on
+/// Windows, `C:\Users\...\my-agent`). The blueprint is installed and run by
+/// the directory's own name, and an installed blueprint must call itself by
+/// the name of the directory it is in, so that is the name it is given.
+fn blueprint_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+}
+
+/// The `agent.toml` a template writes for a blueprint called `name`.
 fn create_manifest(name: &str, template: &str) -> String {
-    let name = &toml_escape(name);
-    match template {
-        "coder" => format!(
-            r#"[agent]
-name = "{name}"
+    let text = match template {
+        "coder" => CODER_TEMPLATE,
+        "researcher" => RESEARCHER_TEMPLATE,
+        _ => DEFAULT_TEMPLATE,
+    };
+    text.replace("__NAME__", &toml_escape(blueprint_name(name)))
+}
+
+const CODER_TEMPLATE: &str = r#"[blueprint]
+name = "__NAME__"
 version = "0.1.0"
 description = "A coding assistant blueprint"
 
-# Global tool permissions: write/exec require approval unless overridden.
-[tool_permissions]
-read_file = "allow"
-list_dir = "allow"
-write_file = "ask"
-edit_file = "ask"
-bash = "ask"
+# analyze -> implement
 
-[stages.analyze]
-mode = "autonomous"
-model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
+[graph]
+# Write and shell tools ask for approval unless the run is started with
+# `--yolo`.
+tool_permissions = { read_file = "allow", list_dir = "allow", write_file = "ask", edit_file = "ask", bash = "ask" }
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "task" }]
+
+# Region budgets are percentages of the model's context window (ceilings, may
+# sum past 100%), so a region scales with whatever model the stage runs. Every
+# blueprint needs a `conversation` sliding window: it holds the message stream
+# and is carried across stage edges.
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "task", kind = "pinned", budget = "2%", required = true, required_message = "Describe the coding task via --task." },
+    { name = "codebase", kind = "temporary", budget = "20%" },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 20, eviction = { bulk = 10 } }, budget = "15%" },
+    { name = "scratch", kind = "clearable", budget = "8%" },
+]
+
+[[graph.stages]]
+name = "analyze"
 description = "Understand the task and plan the implementation"
-available_tools = ["read_file", "list_dir"]
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+tools = ["read_file", "list_dir"]
 max_iterations = 15
+# Large file reads land in the `codebase` region (a short pointer stays in the
+# conversation); everything else stays inline. Never route to a sliding window
+# other than `conversation`.
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase" } }
 system_prompt = """
 Analyze the coding task in the `task` region and produce a concise implementation
 plan: which files to create/modify, what each does, and the key decisions.
 """
-# Large file reads persist in the `codebase` region (a short pointer stays in the
-# conversation); action-tool results stay inline. Never route to a sliding_window
-# other than `conversation`.
-[stages.analyze.tool_routing]
-default_region = "conversation"
-[stages.analyze.tool_routing.overrides]
-read_file = "codebase"
-list_dir = "codebase"
-[stages.analyze.transitions.implement]
-transform = "direct"
 
-[stages.implement]
-mode = "autonomous"
-model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
+[[graph.stages]]
+name = "implement"
 description = "Write code according to the plan"
-available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
 max_iterations = 50
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "codebase", list_dir = "codebase" } }
 system_prompt = """
 Implement the plan. Create all necessary files, then use bash to run tests and
 verify the build. Read existing code from the `codebase` region.
 """
-[stages.implement.tool_routing]
-default_region = "conversation"
-[stages.implement.tool_routing.overrides]
-read_file = "codebase"
-list_dir = "codebase"
 
-# Region budgets are percentages of the model's context window (ceilings, may sum
-# past 100%), so a region scales with whatever model the stage runs. Add an
-# absolute max_tokens only where a region genuinely must not grow: a cap below
-# the percentage wins on every large window, which is how a 1M-context model
-# ends up with a 40k region. Every blueprint needs an explicit `conversation`
-# sliding_window - it holds the message stream and is carried across stage
-# transitions.
-[context.regions]
-task         = {{ kind = "pinned",          budget = "2%", required = true, seed = "task", required_message = "Describe the coding task via --task." }}
-codebase     = {{ kind = "temporary",       budget = "20%" }}
-conversation = {{ kind = "sliding_window",  max_items = 20, budget = "15%", strategy = "bulk", overflow = 10 }}
-scratch      = {{ kind = "clearable",       budget = "8%" }}
-"#,
-            name = name
-        ),
+[[graph.edges]]
+name = "implement"
+from = "analyze"
+to = "implement"
+"#;
 
-        "researcher" => format!(
-            r#"[agent]
-name = "{name}"
+const RESEARCHER_TEMPLATE: &str = r#"[blueprint]
+name = "__NAME__"
 version = "0.1.0"
 description = "A research assistant blueprint"
 
-[tool_permissions]
-read_file = "allow"
-list_dir = "allow"
-bash = "ask"
+# gather -> synthesize
 
-[stages.gather]
-mode = "autonomous"
-model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
+[graph]
+tool_permissions = { read_file = "allow", list_dir = "allow", bash = "ask" }
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "query" }]
+
+# Region budgets are percentages of the model's context window (ceilings, may
+# sum past 100%), so a region scales with whatever model the stage runs. Every
+# blueprint needs a `conversation` sliding window: it holds the message stream
+# and is carried across stage edges. A `compacting` region needs a
+# `compact_history` region for its summaries.
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "query", kind = "pinned", budget = "2%", required = true, required_message = "State the research question via --task." },
+    { name = "sources", kind = "temporary", budget = "25%" },
+    { name = "findings", kind = "compacting", budget = "12%", compact_at = 0.8 },
+    { name = "findings_history", kind = { kind = "compact_history", source = "findings" }, budget = "3%" },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 15, eviction = { bulk = 10 } }, budget = "12%" },
+    { name = "scratch", kind = "clearable", budget = "6%" },
+]
+
+[[graph.stages]]
+name = "gather"
 description = "Gather relevant information"
-available_tools = ["read_file", "list_dir", "bash"]
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+# For real web research, drop web_search.rhai / web_fetch.rhai into a `tools/`
+# directory beside this file and add them here (see the bundled researcher).
+tools = ["read_file", "list_dir", "bash"]
 max_iterations = 20
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "sources", list_dir = "sources", bash = "sources" } }
 system_prompt = """
 Gather source material on the topic in the `query` region. Use read_file/list_dir
 for local material and bash for anything else; raw content lands in `sources`.
 Note where each item came from and the claims it supports.
 """
-# (Tip: drop web_search.rhai / web_fetch.rhai into a `tools/` dir beside this file
-# and add them to available_tools for real web research - see the researcher agent.)
-[stages.gather.tool_routing]
-default_region = "conversation"
-[stages.gather.tool_routing.overrides]
-read_file = "sources"
-list_dir = "sources"
-bash = "sources"
-[stages.gather.transitions.synthesize]
-transform = "compact"
 
-[stages.synthesize]
-mode = "interactive"
-model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
+[[graph.stages]]
+name = "synthesize"
 description = "Synthesize findings and discuss with user"
-available_tools = ["read_file", "list_dir"]
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+mode = "interactive"
+tools = ["read_file", "list_dir"]
 max_iterations = 15
 system_prompt = """
 Synthesize the `sources` into `findings`: themes, agreements/disagreements, and
 well-supported vs speculative claims. Cite specific sources.
 """
 
-# Region budgets are percentages of the model's context window (ceilings, may sum
-# past 100%), so a region scales with whatever model the stage runs. Add an
-# absolute max_tokens / threshold_tokens only where a region must not grow: a cap
-# below the percentage wins on every large window. A
-# `compacting` region needs a paired `compact_history` region for its summaries.
-[context.regions]
-query           = {{ kind = "pinned",          budget = "2%", required = true, seed = "task", required_message = "State the research question via --task." }}
-sources         = {{ kind = "temporary",       budget = "25%" }}
-findings        = {{ kind = "compacting",      budget = "12%", compact_at = "80%" }}
-findings_history = {{ kind = "compact_history", source_region = "findings", budget = "3%" }}
-conversation    = {{ kind = "sliding_window",  max_items = 15, budget = "12%", strategy = "bulk", overflow = 10 }}
-scratch         = {{ kind = "clearable",       budget = "6%" }}
-"#,
-            name = name
-        ),
+# The conversation is summarized on the way, so synthesis starts from what was
+# found rather than from every raw tool call.
+[[graph.edges]]
+name = "synthesize"
+from = "gather"
+to = "synthesize"
+carry = { compact = {} }
+"#;
 
-        _ => format!(
-            r#"[agent]
-name = "{name}"
+const DEFAULT_TEMPLATE: &str = r#"[blueprint]
+name = "__NAME__"
 version = "0.1.0"
 description = "A simple agent blueprint"
 
-[tool_permissions]
-read_file = "allow"
-list_dir = "allow"
-write_file = "ask"
-bash = "ask"
+[graph]
+tool_permissions = { read_file = "allow", list_dir = "allow", write_file = "ask", bash = "ask" }
 
-[stages.main]
-mode = "autonomous"
-model = {{ provider = "anthropic", model = "claude-sonnet-4-6" }}
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "task" }]
+
+# Region budgets are percentages of the model's context window (ceilings, may
+# sum past 100%), so a region scales with whatever model the stage runs. Every
+# blueprint needs a `conversation` sliding window: it holds the message stream
+# and is carried across stage edges.
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "task", kind = "pinned", budget = "2%", required = true, required_message = "Describe the task via --task." },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 10, eviction = { bulk = 10 } }, budget = "12%" },
+    { name = "scratch", kind = "clearable", budget = "6%" },
+]
+
+[[graph.stages]]
+name = "main"
 description = "Main execution stage"
-available_tools = ["read_file", "list_dir", "write_file", "bash"]
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+tools = ["read_file", "list_dir", "write_file", "bash"]
 max_iterations = 30
 system_prompt = """
 You are a helpful agent. Complete the task described in the `task` region
 thoroughly.
 """
-
-# Region budgets are percentages of the model's context window (ceilings, may sum
-# past 100%), so a region scales with whatever model the stage runs. Add an
-# absolute max_tokens only where a region must not grow: a cap below the
-# percentage wins on every large window. Every
-# blueprint needs an explicit `conversation` sliding_window region.
-[context.regions]
-task         = {{ kind = "pinned",         budget = "2%", required = true, seed = "task", required_message = "Describe the task via --task." }}
-conversation = {{ kind = "sliding_window", max_items = 10, budget = "12%", strategy = "bulk", overflow = 10 }}
-scratch      = {{ kind = "clearable",      budget = "6%" }}
-"#,
-            name = name
-        ),
-    }
-}
+"#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::with_tracing;
+    use leviath_blueprint::BlueprintFile;
+    use leviath_runtime::spec::graph::{Budget, RegionKind};
 
-    #[test]
-    fn default_template_is_valid_toml() {
-        let manifest = create_manifest("test-agent", "default");
-        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-        let agent = parsed.get("agent").expect("should have [agent] section");
-        assert_eq!(agent.get("name").unwrap().as_str().unwrap(), "test-agent");
-        assert_eq!(agent.get("version").unwrap().as_str().unwrap(), "0.1.0");
+    const TEMPLATES: [&str; 4] = ["default", "coder", "researcher", "other"];
+
+    /// A template's file, read.
+    fn read(name: &str, template: &str) -> BlueprintFile {
+        BlueprintFile::parse(&create_manifest(name, template)).expect("a template reads")
     }
 
     #[test]
-    fn name_with_windows_style_backslashes_produces_valid_toml() {
-        // Regression test: `lev create` accepts a full path as the blueprint
-        // name (used directly as the target directory), and on Windows that
-        // path contains backslashes - e.g. `C:\Users\RUNNER~1\...\my-agent`.
-        // Before escaping, `\U` in the raw TOML string was parsed as the
-        // start of an (invalid) 8-digit-hex unicode escape, breaking every
-        // template. Confirmed this exact failure on real Windows CI.
+    fn default_template_names_and_versions_the_blueprint() {
+        let file = read("test-agent", "default");
+        assert_eq!(file.blueprint.name.as_str(), "test-agent");
+        assert_eq!(file.blueprint.version, "0.1.0");
+    }
+
+    /// `lev create` takes the directory to create, which may be a whole path,
+    /// and on Windows one holding backslashes. The blueprint is named after
+    /// the directory itself, the name it is installed and run by.
+    #[test]
+    fn a_path_names_the_blueprint_after_its_last_component() {
         let name = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpmAlPt3\default-template-agent";
-        for template in ["default", "coder", "researcher"] {
-            let manifest = create_manifest(name, template);
-            let parsed: toml::Value =
-                toml::from_str(&manifest).expect("template produced invalid TOML");
-            let agent = parsed.get("agent").unwrap();
-            assert_eq!(agent.get("name").unwrap().as_str().unwrap(), name);
+        for template in TEMPLATES {
+            assert_eq!(
+                read(name, template).blueprint.name.as_str(),
+                "default-template-agent"
+            );
         }
+        assert_eq!(blueprint_name("/tmp/agents/coder/"), "coder");
+        assert_eq!(blueprint_name("plain"), "plain");
+        // Nothing but separators has no last component, and stands as written.
+        assert_eq!(blueprint_name("/"), "/");
     }
 
     #[test]
     fn name_with_embedded_quote_produces_valid_toml() {
         let name = r#"my"agent"#;
-        let manifest = create_manifest(name, "default");
-        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-        let agent = parsed.get("agent").unwrap();
-        assert_eq!(agent.get("name").unwrap().as_str().unwrap(), name);
+        assert_eq!(read(name, "default").blueprint.name.as_str(), name);
+        assert_eq!(toml_escape(r"a\b"), r"a\\b");
     }
 
+    /// Every template is a blueprint `lev validate` and a spawn accept: it
+    /// reads, and its graph holds together.
     #[test]
-    fn coder_template_is_valid_toml() {
-        let manifest = create_manifest("my-coder", "coder");
-        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-        let agent = parsed.get("agent").unwrap();
-        assert_eq!(agent.get("name").unwrap().as_str().unwrap(), "my-coder");
-        assert!(parsed.get("stages").is_some());
-    }
-
-    #[test]
-    fn researcher_template_is_valid_toml() {
-        let manifest = create_manifest("my-researcher", "researcher");
-        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-        let agent = parsed.get("agent").unwrap();
-        assert_eq!(
-            agent.get("name").unwrap().as_str().unwrap(),
-            "my-researcher"
-        );
-    }
-
-    #[test]
-    fn templates_use_percentage_budgets_and_parse_via_manifest() {
-        // Every generated template ships percentage budgets and must parse under
-        // the real manifest parser (which validates `budget`/`compact_at`).
-        for template in ["default", "coder", "researcher", "other"] {
-            let manifest = create_manifest("pct-agent", template);
-            assert!(
-                manifest.contains("budget = \""),
-                "{template} template should use percentage budgets"
+    fn every_template_validates() {
+        for template in TEMPLATES {
+            let dir = tempfile::tempdir().unwrap();
+            crate::test_support::write_test_agent(
+                dir.path(),
+                create_manifest("valid-agent", template),
             );
-            let bp = leviath_runtime::spec::manifest::parse_manifest(&manifest)
-                .expect("generated template should parse");
+            let loaded = leviath_blueprint::validate(dir.path()).expect("a template validates");
+            assert_eq!(loaded.reference.name.as_str(), "valid-agent");
+            // Budgets are shares of the window, so the template scales with
+            // whatever model it runs on.
             assert!(
-                bp.context_layout.has_percent_budgets(),
-                "{template} layout should have percentage budgets"
+                loaded
+                    .graph
+                    .layout
+                    .regions
+                    .iter()
+                    .all(|r| matches!(r.budget, Budget::Percent { .. })),
+                "{template} template should use percentage budgets"
             );
         }
     }
 
     #[test]
     fn every_template_satisfies_context_layout_invariants() {
-        use leviath_core::RegionKind;
-        for template in ["default", "coder", "researcher", "other"] {
-            let manifest = create_manifest("inv-agent", template);
-            let bp = leviath_runtime::spec::manifest::parse_manifest(&manifest).unwrap();
-            let regions = &bp.context_layout.regions;
+        for template in TEMPLATES {
+            let graph = read("inv-agent", template).run_graph();
+            let regions = &graph.layout.regions;
+            let sliding = |r: &&leviath_runtime::spec::graph::RegionDef| {
+                matches!(r.kind, RegionKind::SlidingWindow { .. })
+            };
 
-            // Explicit conversation sliding_window. (matches! is the FIRST operand
-            // so it's evaluated for every region - non-sliding regions exercise its
-            // false arm, the conversation region its true arm.)
-            let has_conv_sliding = regions.iter().any(|r| {
-                matches!(r.kind, RegionKind::SlidingWindow { .. }) && r.name == "conversation"
-            });
+            // An explicit conversation sliding window.
             assert!(
-                has_conv_sliding,
+                regions
+                    .iter()
+                    .filter(sliding)
+                    .any(|r| r.name.as_str() == "conversation"),
                 "{template} template needs an explicit conversation sliding_window"
             );
 
-            // No routing targets a non-conversation sliding_window.
-            let sliding: std::collections::HashSet<&str> = regions
+            // No routing targets a non-conversation sliding window.
+            let windows: std::collections::HashSet<&str> = regions
                 .iter()
-                .filter(|r| matches!(r.kind, RegionKind::SlidingWindow { .. }))
+                .filter(sliding)
                 .map(|r| r.name.as_str())
                 .collect();
-            for stage in &bp.stages {
-                if let Some(routing) = &stage.tool_result_routing {
-                    let mut targets = vec![routing.default_region.as_str()];
-                    targets.extend(routing.tool_overrides.values().map(String::as_str));
-                    for t in targets {
-                        assert!(
-                            t == "conversation" || !sliding.contains(t),
-                            "{template} stage '{}' routes to non-conversation sliding_window '{t}'",
-                            stage.name
-                        );
-                    }
+            for stage in &graph.stages {
+                let Some(routing) = &stage.tool_routing else {
+                    continue;
+                };
+                let targets = std::iter::once(&routing.default_region)
+                    .chain(routing.tool_regions.values())
+                    .map(|r| r.as_str());
+                for t in targets {
+                    assert!(
+                        t == "conversation" || !windows.contains(t),
+                        "{template} stage '{}' routes to non-conversation sliding_window '{t}'",
+                        stage.name
+                    );
                 }
             }
 
             // Every compacting region has a compact_history pair.
-            let hist: std::collections::HashSet<&str> = regions
+            let histories: Vec<&str> = regions
                 .iter()
                 .filter_map(|r| match &r.kind {
-                    RegionKind::CompactHistory { source_region } => Some(source_region.as_str()),
+                    RegionKind::CompactHistory { source } => source.as_ref().map(|s| s.as_str()),
                     _ => None,
                 })
                 .collect();
             for r in regions {
                 if matches!(r.kind, RegionKind::Compacting { .. }) {
                     assert!(
-                        hist.contains(r.name.as_str()),
+                        histories.contains(&r.name.as_str()),
                         "{template} compacting region '{}' has no compact_history pair",
                         r.name
                     );
@@ -393,61 +407,35 @@ mod tests {
         }
     }
 
+    /// The stage names of a template's graph.
+    fn stages(template: &str) -> Vec<String> {
+        read("x", template)
+            .graph
+            .stages
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect()
+    }
+
     #[test]
     fn unknown_template_falls_back_to_default() {
-        let manifest = create_manifest("x", "nonexistent-template");
-        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-        let stages = parsed.get("stages").unwrap().as_table().unwrap();
-        // Default template has a single "main" stage
-        assert!(stages.contains_key("main"));
+        assert_eq!(stages("nonexistent-template"), ["main"]);
     }
 
     #[test]
     fn coder_template_has_analyze_and_implement_stages() {
-        let manifest = create_manifest("x", "coder");
-        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-        let stages = parsed.get("stages").unwrap().as_table().unwrap();
-        assert!(stages.contains_key("analyze"));
-        assert!(stages.contains_key("implement"));
+        assert_eq!(stages("coder"), ["analyze", "implement"]);
     }
 
     #[test]
     fn researcher_template_has_gather_and_synthesize_stages() {
-        let manifest = create_manifest("x", "researcher");
-        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-        let stages = parsed.get("stages").unwrap().as_table().unwrap();
-        assert!(stages.contains_key("gather"));
-        assert!(stages.contains_key("synthesize"));
+        assert_eq!(stages("researcher"), ["gather", "synthesize"]);
     }
 
     #[test]
     fn template_embeds_agent_name() {
         let manifest = create_manifest("special-name-123", "coder");
         assert!(manifest.contains("special-name-123"));
-    }
-
-    fn assert_has_context(template: &str, parsed: &toml::Value) {
-        assert!(
-            parsed.get("context").is_some(),
-            "template '{}' missing [context]",
-            template
-        );
-    }
-
-    #[test]
-    fn all_templates_have_context_regions() {
-        for template in &["default", "coder", "researcher"] {
-            let manifest = create_manifest("test", template);
-            let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-            assert_has_context(template, &parsed);
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "template 'bogus' missing [context]")]
-    fn all_templates_have_context_regions_panics_when_missing() {
-        let parsed: toml::Value = toml::from_str("").unwrap();
-        assert_has_context("bogus", &parsed);
     }
 
     // ─── execute ─────────────────────────────────────────────────────────
@@ -466,16 +454,18 @@ mod tests {
 
         with_tracing(|| execute(args)).await.unwrap();
 
-        assert!(blueprint_path.join("agent.leviath").exists());
+        assert!(blueprint_path.join("agent.toml").exists());
         assert!(blueprint_path.join(".gitignore").exists());
         assert!(blueprint_path.join(".env.example").exists());
 
-        let manifest = fs::read_to_string(blueprint_path.join("agent.leviath")).unwrap();
+        let manifest = fs::read_to_string(blueprint_path.join("agent.toml")).unwrap();
         assert!(manifest.contains("analyze"));
     }
 
+    /// What `lev create` writes is what `lev add` installs and `lev run`
+    /// finds: the file names itself after its directory.
     #[tokio::test]
-    async fn execute_default_template_is_software_engineer_shape() {
+    async fn execute_names_the_blueprint_after_its_directory() {
         let dir = tempfile::tempdir().unwrap();
         let blueprint_path = dir.path().join("default-template-agent");
         let args = CreateArgs {
@@ -485,12 +475,8 @@ mod tests {
 
         with_tracing(|| execute(args)).await.unwrap();
 
-        let manifest = fs::read_to_string(blueprint_path.join("agent.leviath")).unwrap();
-        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-        assert_eq!(
-            parsed["agent"]["name"].as_str().unwrap(),
-            blueprint_path.to_str().unwrap()
-        );
+        let loaded = leviath_blueprint::validate(&blueprint_path).unwrap();
+        assert_eq!(loaded.reference.name.as_str(), "default-template-agent");
     }
 
     #[tokio::test]
@@ -547,21 +533,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = args_for(dir.path(), "manifest-write-fails");
 
-        // `agent.leviath` is unconditionally the *first* write `execute_with`
+        // `agent.toml` is unconditionally the *first* write `execute_with`
         // attempts, so failing on every call (rather than branching on the
         // path) is sufficient here and avoids an else-arm that could never
         // actually run: the `?` on this first failure returns before any
         // other path is ever passed to this closure.
         let result = execute_with(args, &|_path, _contents| {
-            Err(std::io::Error::other(
-                "injected agent.leviath write failure",
-            ))
+            Err(std::io::Error::other("injected agent.toml write failure"))
         });
 
         let err = result.unwrap_err();
         assert!(
             err.to_string()
-                .contains("injected agent.leviath write failure")
+                .contains("injected agent.toml write failure")
         );
     }
 
@@ -583,11 +567,11 @@ mod tests {
             err.to_string()
                 .contains("injected .gitignore write failure")
         );
-        // The manifest write before it genuinely happened.
+        // The blueprint write before it genuinely happened.
         assert!(
             dir.path()
                 .join("gitignore-write-fails")
-                .join("agent.leviath")
+                .join("agent.toml")
                 .exists()
         );
     }
@@ -612,7 +596,7 @@ mod tests {
         );
         // The two writes before it genuinely happened.
         let created = dir.path().join("env-example-write-fails");
-        assert!(created.join("agent.leviath").exists());
+        assert!(created.join("agent.toml").exists());
         assert!(created.join(".gitignore").exists());
     }
 }

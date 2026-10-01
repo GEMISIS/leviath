@@ -303,7 +303,7 @@ impl Default for SecurityConfig {
 /// stage → agent → global (default off when nothing is set).
 ///
 /// **A blueprint can only turn taint tracking on, never off.** The stage and
-/// agent configs come from `agent.leviath`, so if a manifest could set
+/// agent configs come from `agent.toml`, so if a manifest could set
 /// `taint_tracking = false` over a user's global `true`, installing an agent
 /// would be enough to disable the machine's data-flow enforcement. A manifest
 /// that wants tracking when the user has it off is still honored - that
@@ -1231,7 +1231,7 @@ mod tests {
     fn resolve_taint_enabled_agent_may_opt_in_but_not_out() {
         // Global off, agent opts in - honored, that only tightens.
         assert!(resolve_taint_enabled(false, Some(&sec(true)), None));
-        // Global on, agent tries to opt out - refused. `agent.leviath` is a
+        // Global on, agent tries to opt out - refused. `agent.toml` is a
         // downloaded file; letting it disable the machine's data-flow
         // enforcement made taint tracking opt-out-by-installing-an-agent.
         assert!(resolve_taint_enabled(true, Some(&sec(false)), None));

@@ -21,22 +21,28 @@ use tokio::sync::mpsc::UnboundedSender;
 
 /// A minimal single-stage manifest with a tiny task region and a `system_prompt`
 /// large enough to overflow it, so stage-0 setup fails in `spawn_agent`.
-const OVERSIZED_MANIFEST: &str = r#"
-[agent]
+const OVERSIZED_MANIFEST: &str = r#"[blueprint]
 name = "tiny"
 version = "0.1.0"
 description = "d"
-entry_stage = "main"
 
-[context.regions]
-task = { kind = "pinned", max_tokens = 20 }
+[graph]
+entry = "main"
 
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "m" }] }
+[[graph.stages]]
+name = "main"
 description = "d"
-available_tools = []
 system_prompt = "SYSTEM_PROMPT_PLACEHOLDER"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 20 }]
+total_budget_tokens = 20
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
 "#;
 
 const PROFILES_TOML: &str = "[careful]\ndefault = \"ask\"\nquestions = \"ask\"\n\
@@ -119,7 +125,7 @@ async fn build_agent_fails_fast_on_a_broken_custom_region_script() {
     // are spent - a hook that silently never ran would change every
     // inference with no signal.
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, custom_region_manifest()).unwrap();
 
     let (mut world, cli) = test_world();
@@ -149,12 +155,34 @@ async fn build_agent_fails_fast_on_a_broken_custom_region_script() {
 #[tokio::test]
 async fn build_agent_fails_fast_on_a_mime_check_it_cannot_load() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-         [mime_types.\"application/x-acme-scene\"]\ncheck = \"checks/gone.rhai\"\n",
+        r#"[blueprint]
+name = "v"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+
+[graph.mime_types]
+"application/x-acme-scene" = { check = { file = "checks/gone.rhai" } }
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -184,13 +212,34 @@ async fn build_agent_fails_fast_on_a_mime_check_it_cannot_load() {
 #[tokio::test]
 async fn build_agent_fails_fast_on_an_unmet_dependency() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-         [[dependencies]]\nname = \"key\"\nkind = \"env\"\n\
-         var = \"LEVIATH_DEPS_SPAWN_UNSET_XYZ\"\n",
+        r#"[blueprint]
+name = "v"
+version = "0.1.0"
+description = "d"
+
+[graph]
+dependencies = [{ name = "key", needs = { env = "LEVIATH_DEPS_SPAWN_UNSET_XYZ" } }]
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -222,7 +271,7 @@ async fn build_agent_fails_fast_on_an_unmet_dependency() {
 #[tokio::test]
 async fn build_agent_reports_a_part_for_a_region_the_agent_lacks() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, coder_manifest()).unwrap();
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
@@ -259,11 +308,31 @@ async fn build_agent_rejects_a_workdir_that_is_missing_or_not_a_directory() {
     // without this check a bogus workdir spawns a healthy-looking agent
     // whose every tool call then fails with ENOENT.
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"w\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "w"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let not_a_dir = dir.path().join("a-file");
@@ -314,15 +383,42 @@ async fn build_agent_rejects_a_workdir_that_is_missing_or_not_a_directory() {
 #[tokio::test(flavor = "multi_thread")]
 async fn build_agent_seeds_a_region_from_a_real_tool_call() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"seeded\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-         [context.regions]\n\
-         task = { kind = \"pinned\", max_tokens = 4000, seed = \"task_input\" }\n\
-         environment = { kind = \"pinned\", max_tokens = 1000, \
-         seed = { tools = [\"current_time\", \"locale_info\"] } }\n",
+        r#"[blueprint]
+name = "seeded"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 5000
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 4000
+
+[[graph.layout.regions]]
+name = "environment"
+kind = "pinned"
+budget = 1000
+
+[graph.layout.regions.seed.tools]
+calls = [
+    { tool = "current_time", args = {} },
+    { tool = "locale_info", args = {} },
+]
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -382,12 +478,34 @@ async fn build_agent_seeds_a_region_from_a_real_tool_call() {
 #[tokio::test]
 async fn build_agent_attaches_taint_gate_when_security_enabled() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"sec\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [security]\ntaint_tracking = true\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "sec"
+version = "0.1.0"
+description = "d"
+
+[graph]
+taint_tracking = true
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -449,13 +567,35 @@ async fn build_agent_attaches_taint_gate_when_security_enabled() {
 #[tokio::test]
 async fn build_agent_tool_permission_allow_does_not_waive_the_taint_gate() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"sec\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [security]\ntaint_tracking = true\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-         available_tools = [\"shell\"]\n",
+        r#"[blueprint]
+name = "sec"
+version = "0.1.0"
+description = "d"
+
+[graph]
+taint_tracking = true
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["shell"]
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let mut config = Config::default();
@@ -499,14 +639,29 @@ async fn build_agent_tool_permission_allow_does_not_waive_the_taint_gate() {
 #[tokio::test]
 async fn build_agent_marks_root_runs_for_titling_but_not_subagents() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
         // Titling is gated on a non-empty task, so this blueprint has to
         // accept one - a region named `task` picks it up implicitly.
-        "[agent]\nname = \"titler\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-         [context.regions]\ntask = { kind = \"pinned\", max_tokens = 1000 }\n",
+        r#"[blueprint]
+name = "titler"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 1000 }]
+total_budget_tokens = 1000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -598,12 +753,34 @@ async fn build_agent_marks_root_runs_for_titling_but_not_subagents() {
 #[tokio::test]
 async fn build_agent_applies_policy_mcp_overrides_to_the_gate() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"sec-ov\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [security]\ntaint_tracking = true\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "sec-ov"
+version = "0.1.0"
+description = "d"
+
+[graph]
+taint_tracking = true
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -659,14 +836,38 @@ async fn build_agent_errors_when_required_caller_region_missing() {
     // A required caller-input region that the request doesn't provide makes
     // build_agent fail (via resolve_seeds) before spawning - no inference.
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"needs\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-         [context.regions]\n\
-         spec = { kind = \"pinned\", max_tokens = 2000, seed = \"input\", required = true }\n\
-         conversation = { kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }\n",
+        r#"[blueprint]
+name = "needs"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 12000
+
+[[graph.layout.regions]]
+name = "spec"
+kind = "pinned"
+budget = 2000
+required = true
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = 10000
+
+[[graph.inputs]]
+name = "spec"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "spec" }]
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -696,12 +897,34 @@ async fn build_agent_attaches_sandbox_when_configured() {
     // platform without running any external command, so this deterministically
     // exercises the spawn-side sandbox wiring (manager built + attached).
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"sb\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [sandbox]\nkind = \"namespace\"\non_unavailable = \"warn\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "sb"
+version = "0.1.0"
+description = "d"
+
+[graph]
+sandbox = { kind = "namespace", on_unavailable = "warn" }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -734,11 +957,31 @@ async fn build_agent_attaches_sandbox_when_configured() {
 #[tokio::test]
 async fn build_agent_reserves_mcp_tool_names_for_install_tool() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"rs\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "rs"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -787,12 +1030,34 @@ async fn build_agent_errors_when_sandbox_runtime_unavailable() {
     // covers the `?` on `SandboxManager::build` uniformly across OSes,
     // independent of which container runtimes happen to be installed.
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"sb\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [sandbox]\nkind = \"container\"\nimage = \"x\"\nengine = \"leviath-no-such-engine\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "sb"
+version = "0.1.0"
+description = "d"
+
+[graph]
+sandbox = { kind = "container", image = "x", engine = "leviath-no-such-engine" }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -818,12 +1083,34 @@ async fn build_agent_errors_when_sandbox_runtime_unavailable() {
 #[tokio::test]
 async fn build_agent_yolo_attaches_gate_auto_approve_when_taint_on() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"sec\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [security]\ntaint_tracking = true\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "sec"
+version = "0.1.0"
+description = "d"
+
+[graph]
+taint_tracking = true
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -878,11 +1165,31 @@ async fn build_agent_yolo_attaches_gate_auto_approve_when_taint_on() {
 #[tokio::test]
 async fn build_agent_yolo_leaves_the_run_active_and_unattended() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"a\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "a"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -925,14 +1232,34 @@ async fn build_agent_yolo_leaves_the_run_active_and_unattended() {
 #[tokio::test]
 async fn build_agent_refuses_a_validator_that_does_not_compile() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(dir.path().join("shape.rhai"), "fn validate(a, b) { () }").unwrap();
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-         available_tools = [\"submit_output\"]\n\n\
-         [stages.main.output]\nformat = \"a2ui\"\nvalidator = \"shape.rhai\"\n",
+        r#"[blueprint]
+name = "v"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["submit_output"]
+output = { format = "a2ui", validator = { file = "shape.rhai" } }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -965,14 +1292,34 @@ async fn build_agent_refuses_a_validator_that_does_not_compile() {
 #[tokio::test]
 async fn build_agent_carries_output_validators_onto_the_entity() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(dir.path().join("shape.rhai"), "fn validate(content) { () }").unwrap();
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-         available_tools = [\"submit_output\"]\n\n\
-         [stages.main.output]\nformat = \"a2ui\"\nvalidator = \"shape.rhai\"\n",
+        r#"[blueprint]
+name = "v"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["submit_output"]
+output = { format = "a2ui", validator = { file = "shape.rhai" } }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -1007,11 +1354,31 @@ async fn build_agent_carries_output_validators_onto_the_entity() {
 #[tokio::test]
 async fn build_agent_carries_no_validators_when_none_are_named() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "v"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -1045,14 +1412,37 @@ async fn build_agent_carries_no_validators_when_none_are_named() {
 #[tokio::test]
 async fn build_agent_carries_required_tools_into_the_tool_state() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"asks\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-         available_tools = [\"read_file\", \"ask_user_text\"]\n\
-         required_tools = [\"ask_user_text\"]\n\
-         [stages.main.tool_accepts]\nread_file = [\"text/*\"]\n",
+        r#"[blueprint]
+name = "asks"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = [
+    "read_file",
+    "ask_user_text",
+]
+required_tools = ["ask_user_text"]
+tool_accepts = { read_file = ["text/*"] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -1093,11 +1483,31 @@ async fn build_agent_carries_required_tools_into_the_tool_state() {
 #[tokio::test]
 async fn build_agent_without_yolo_keeps_prompts_interactive() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "plain"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -1132,11 +1542,31 @@ async fn build_agent_without_yolo_keeps_prompts_interactive() {
 #[tokio::test]
 async fn the_capture_marker_lands_only_when_the_machine_or_the_spawn_asks() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "plain"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let path = manifest.to_string_lossy().to_string();
@@ -1185,11 +1615,31 @@ async fn build_agent_no_security_block_leaves_taint_off_by_default() {
     // `unwrap_or_default()` on the resolved security forces it on for
     // every agent.
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"plain\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "plain"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
     let (mut world, cli) = test_world();
@@ -1222,7 +1672,7 @@ async fn build_agent_no_security_block_leaves_taint_off_by_default() {
 /// The `no_output_tools` a freshly built agent carries.
 async fn spawned_no_output_tools(manifest_body: &str, task: &str) -> bool {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, manifest_body).unwrap();
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
@@ -1262,9 +1712,32 @@ async fn build_agent_records_whether_the_blueprint_can_write_at_all() {
     // grounds for.
     assert!(
         spawned_no_output_tools(
-            "[agent]\nname = \"router\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.triage]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-             available_tools = [\"read_file\", \"spawn_agent\"]\n",
+            r#"[blueprint]
+name = "router"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "triage"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = [
+    "read_file",
+    "spawn_agent",
+]
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
             "",
         )
         .await
@@ -1274,7 +1747,7 @@ async fn build_agent_records_whether_the_blueprint_can_write_at_all() {
 #[tokio::test]
 async fn build_agent_spawns_registers_and_wires_tools() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, coder_manifest()).unwrap();
 
     let (mut world, cli) = test_world();
@@ -1333,21 +1806,16 @@ async fn build_agent_spawns_registers_and_wires_tools() {
 #[tokio::test]
 async fn build_agent_tags_an_agent_with_the_rescan_it_asked_for() {
     use leviath_runtime::pipeline::{DynamicTools, RescanBeforeDispatch};
-    use leviath_runtime::spec::blueprint::ToolRescan;
-
-    for (value, polls, before_dispatch) in [
-        (ToolRescan::AtSpawn, false, false),
-        (ToolRescan::AfterWrites, true, false),
-        (ToolRescan::BeforeDispatch, true, true),
+    for (word, polls, before_dispatch) in [
+        ("at_spawn", false, false),
+        ("after_writes", true, false),
+        ("before_dispatch", true, true),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join("agent.toml");
         std::fs::write(
             &manifest,
-            coder_manifest().replace(
-                "[agent]",
-                &format!("[agent]\ntool_rescan = \"{}\"", value.wire()),
-            ),
+            coder_manifest().replace("[graph]\n", &format!("[graph]\ntool_rescan = \"{word}\"\n")),
         )
         .unwrap();
 
@@ -1369,7 +1837,6 @@ async fn build_agent_tags_an_agent_with_the_rescan_it_asked_for() {
         )
         .expect("spawn succeeds");
 
-        let word = value.wire();
         assert_eq!(
             world.world().get::<DynamicTools>(entity).is_some(),
             polls,
@@ -1391,52 +1858,9 @@ async fn build_agent_tags_an_agent_with_the_rescan_it_asked_for() {
 }
 
 #[tokio::test]
-async fn build_agent_tags_dynamic_tools_agent() {
-    // The flag `tool_rescan` grew out of still reads as `after_writes`, so a
-    // blueprint carrying it is polled between turns as it always was.
-    let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
-    std::fs::write(
-        &manifest,
-        coder_manifest().replace("[agent]", "[agent]\ndynamic_tools = true"),
-    )
-    .unwrap();
-
-    let (mut world, cli) = test_world();
-    let hub = InteractionHub::new();
-    let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
-    let entity = start_run(
-        world.world_mut(),
-        TestDeps {
-            tool_service: &cli,
-            config: &Config::default(),
-            shared_mcp: mcp,
-            mcp_tool_defs: &[],
-            mcp_tool_owners: &Default::default(),
-            hub: &hub,
-            subagent_tx: sub_tx(),
-        },
-        &tasked_args(&manifest.to_string_lossy()),
-    )
-    .expect("spawn succeeds");
-
-    assert!(
-        world
-            .world()
-            .get::<leviath_runtime::pipeline::DynamicTools>(entity)
-            .is_some(),
-        "dynamic_tools agent must carry the DynamicTools marker"
-    );
-    // The dynamic context is wired: refresh_tools returns Some for stage 0.
-    assert!(
-        leviath_runtime::pipeline::ToolService::refresh_tools(cli.as_ref(), entity, 0).is_some()
-    );
-}
-
-#[tokio::test]
 async fn build_agent_applies_yolo_allow_and_max_depth() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, coder_manifest()).unwrap();
 
     let (mut world, cli) = test_world();
@@ -1519,15 +1943,37 @@ async fn build_agent_applies_yolo_allow_and_max_depth() {
 #[tokio::test]
 async fn build_agent_honors_agent_level_tool_permissions() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     // A top-level `[tool_permissions]` block denying a builtin - no stage
     // perms, no launch overrides, no global config deny. Only the agent-level
     // layer can produce the deny, so this proves it is wired through.
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"perm\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [tool_permissions]\nread_file = \"deny\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "perm"
+version = "0.1.0"
+description = "d"
+
+[graph]
+tool_permissions = { read_file = "deny" }
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -1570,11 +2016,31 @@ async fn build_agent_honors_agent_level_tool_permissions() {
 #[tokio::test]
 async fn build_agent_script_host_honors_agent_level_grants() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"scriptperm\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "scriptperm"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -1623,14 +2089,40 @@ async fn build_agent_script_host_honors_agent_level_grants() {
 #[tokio::test]
 async fn build_agent_applies_default_max_iterations_only_when_stage_omits_it() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     // Two stages: one omits max_iterations, one sets it explicitly to 3.
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"iters\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-         [stages.capped]\nmax_iterations = 3\n\
-         model = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "iters"
+version = "0.1.0"
+description = "d"
+
+[graph]
+edges = [{ name = "next", from = "main", to = "capped" }]
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[[graph.stages]]
+name = "capped"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+max_iterations = 3
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -1682,11 +2174,31 @@ async fn build_agent_applies_default_max_iterations_only_when_stage_omits_it() {
 #[tokio::test]
 async fn build_agent_leaves_max_iterations_unset_when_config_default_is_none() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"nolimit\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        r#"[blueprint]
+name = "nolimit"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -1752,13 +2264,13 @@ async fn build_agent_read_error() {
         &spawn_args("/no/such/manifest.leviath"),
     )
     .unwrap_err();
-    assert!(err.contains("Could not find agent manifest"), "{err}");
+    assert!(err.contains("Could not find a blueprint"), "{err}");
 }
 
 #[tokio::test]
 async fn build_agent_propagates_spawn_error() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     // A huge prompt that cannot fit the 20-token "task" region.
     let content = OVERSIZED_MANIFEST.replace("SYSTEM_PROMPT_PLACEHOLDER", &"x ".repeat(5000));
     std::fs::write(&manifest, content).unwrap();
@@ -1788,24 +2300,33 @@ async fn build_agent_refuses_a_manifest_with_no_usable_provider() {
     // nothing answers to, and then sits at iteration 0 for the life of the
     // daemon.
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        r#"
-[agent]
+        r#"[blueprint]
 name = "ghostly"
 version = "0.1.0"
 description = "d"
-entry_stage = "main"
 
-[context.regions]
-task = { kind = "pinned", max_tokens = 4000 }
+[graph]
+entry = "main"
 
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "ghost", model = "m" }], allow_user_default = false }
+[[graph.stages]]
+name = "main"
 description = "d"
-available_tools = []
+
+[graph.stages.model]
+models = [{ provider = "ghost", model = "m" }]
+allow_user_default = false
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 4000 }]
+total_budget_tokens = 4000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
 "#,
     )
     .unwrap();
@@ -1833,25 +2354,32 @@ available_tools = []
 #[tokio::test]
 async fn build_agent_invalid_blueprint() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
-    // entry_stage names a stage that doesn't exist ⇒ validate() fails.
+    let manifest = dir.path().join("agent.toml");
+    // The entry names a stage that does not exist, so the graph does not
+    // hold together.
     std::fs::write(
         &manifest,
-        r#"
-[agent]
+        r#"[blueprint]
 name = "bad"
 version = "0.1.0"
 description = "d"
-entry_stage = "ghost"
 
-[context.regions]
-task = { kind = "pinned", max_tokens = 4000 }
+[graph]
+entry = "ghost"
 
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "m" }] }
+[[graph.stages]]
+name = "main"
 description = "d"
-available_tools = []
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 4000 }]
+total_budget_tokens = 4000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
 "#,
     )
     .unwrap();
@@ -1872,35 +2400,40 @@ available_tools = []
         &spawn_args(&manifest.to_string_lossy()),
     )
     .unwrap_err();
-    assert!(err.contains("invalid blueprint"));
+    assert!(err.contains("ghost"), "{err}");
 }
 
 #[tokio::test]
 async fn build_agent_without_entry_stage_and_with_compaction() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     // No entry_stage (falls back to the first stage) + a compaction section.
     std::fs::write(
         &manifest,
-        r#"
-[agent]
+        r#"[blueprint]
 name = "mini"
 version = "0.1.0"
 description = "d"
 
-[compaction]
-provider = "anthropic"
-model = "claude-x"
-
-[context.regions]
-task = { kind = "pinned", max_tokens = 4000 }
-
-[stages.main]
-mode = "autonomous"
-model = { models = [{ provider = "anthropic", model = "m" }] }
+[[graph.stages]]
+name = "main"
 description = "d"
-available_tools = []
 system_prompt = "be brief"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+regions = [{ name = "task", kind = "pinned", budget = 4000 }]
+total_budget_tokens = 4000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+
+[graph.compaction]
+model = { provider = "anthropic", model = "claude-x" }
+max_summary_tokens = 2000
+temperature = 0.20000000298023224
 "#,
     )
     .unwrap();
@@ -1929,31 +2462,24 @@ system_prompt = "be brief"
     assert!(world.world().get::<CompactionSettings>(entity).is_some());
 }
 
-/// A manifest that returns `[agent] name` and `write` a `read_paths.leviath`
-/// declaring an out-of-workdir read. Used by the wiring tests below.
+/// Write a blueprint declaring an out-of-workdir read. Used by the wiring
+/// tests below.
 fn write_read_paths_manifest(dir: &std::path::Path, allow: &str) -> std::path::PathBuf {
-    let manifest = dir.join("agent.leviath");
+    let manifest = dir.join("agent.toml");
     std::fs::write(
         &manifest,
         format!(
             r#"
-[agent]
+[blueprint]
 name = "reader"
 version = "0.1.0"
 description = "d"
 
-[read_paths]
-allow = [{allow}]
-
-[context.regions]
-task = {{ kind = "pinned", max_tokens = 4000 }}
-
-[stages.main]
-mode = "autonomous"
-model = {{ models = [{{ provider = "anthropic", model = "m" }}] }}
-description = "d"
-available_tools = []
-system_prompt = "be brief"
+[graph]
+read_paths = [{allow}]
+layout = {{ total_budget_tokens = 4000, regions = [{{ name = "task", kind = "pinned", budget = 4000 }}] }}
+inputs = [{{ name = "task", type = "text", binds = [{{ region = "task" }}] }}]
+stages = [{{ name = "main", description = "d", model = {{ models = [{{ provider = "anthropic", model = "m" }}] }}, system_prompt = "be brief" }}]
 "#
         ),
     )
@@ -1967,12 +2493,32 @@ system_prompt = "be brief"
 async fn build_agent_attaches_declared_stage_hooks() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) { () }").unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"h\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-         [stages.main.hooks]\non_stage_enter = \"h.rhai\"\n",
+        r#"[blueprint]
+name = "h"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+hooks = { on_stage_enter = { file = "h.rhai" } }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -2007,12 +2553,32 @@ async fn build_agent_attaches_declared_stage_hooks() {
 async fn build_agent_refuses_a_broken_stage_hook() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("h.rhai"), "fn on_stage_enter(ctx) {").unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(
         &manifest,
-        "[agent]\nname = \"h\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-         [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\
-         [stages.main.hooks]\non_stage_enter = \"h.rhai\"\n",
+        r#"[blueprint]
+name = "h"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+hooks = { on_stage_enter = { file = "h.rhai" } }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
     )
     .unwrap();
 
@@ -2128,7 +2694,7 @@ async fn build_agent_rejects_a_malformed_config_grant() {
 #[tokio::test]
 async fn build_agent_parse_error() {
     let dir = tempfile::tempdir().unwrap();
-    let manifest = dir.path().join("agent.leviath");
+    let manifest = dir.path().join("agent.toml");
     std::fs::write(&manifest, "this is not valid toml : : :").unwrap();
     let (mut world, cli) = test_world();
     let hub = InteractionHub::new();
@@ -2147,7 +2713,7 @@ async fn build_agent_parse_error() {
         &spawn_args(&manifest.to_string_lossy()),
     )
     .unwrap_err();
-    assert!(err.contains("parse manifest"));
+    assert!(err.contains("is not a valid blueprint"), "{err}");
 }
 
 /// A profile that keeps the human mechanisms leaves every marker off: the
@@ -2160,12 +2726,34 @@ async fn build_agent_under_a_profile_keeps_what_the_profile_keeps() {
         std::fs::write(cfg.join("yolo.toml"), PROFILES_TOML).unwrap();
         for (name, auto) in [("careful", false), ("loose", true)] {
             let dir = tempfile::tempdir().unwrap();
-            let manifest = dir.path().join("agent.leviath");
+            let manifest = dir.path().join("agent.toml");
             std::fs::write(
                 &manifest,
-                "[agent]\nname = \"sec\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-                 [security]\ntaint_tracking = true\n\n\
-                 [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+                r#"[blueprint]
+name = "sec"
+version = "0.1.0"
+description = "d"
+
+[graph]
+taint_tracking = true
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
             )
             .unwrap();
             let (mut world, cli) = test_world();
@@ -2231,11 +2819,31 @@ async fn build_agent_refuses_a_profile_the_file_does_not_have() {
     crate::config::with_isolated_config_path_async("spawn_profile_unknown", |cfg| async move {
         std::fs::write(cfg.join("yolo.toml"), PROFILES_TOML).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join("agent.toml");
         std::fs::write(
             &manifest,
-            "[agent]\nname = \"a\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+            r#"[blueprint]
+name = "a"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 18000
+
+[[graph.layout.regions]]
+name = "system"
+kind = "pinned"
+budget = 8000
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 10 }
+budget = 10000
+"#,
         )
         .unwrap();
         let (mut world, cli) = test_world();
@@ -2278,17 +2886,45 @@ async fn build_agent_refuses_a_profile_the_file_does_not_have() {
 async fn a_tool_seed_answers_to_the_yolo_profile() {
     crate::config::with_isolated_config_path_async("spawn_profile_seed", |cfg| async move {
         std::fs::write(cfg.join("yolo.toml"), PROFILES_TOML).unwrap();
-        for (profile, expect_ran) in [(None, true), (Some("careful"), false), (Some("loose"), true)] {
+        for (profile, expect_ran) in [
+            (None, true),
+            (Some("careful"), false),
+            (Some("loose"), true),
+        ] {
             let dir = tempfile::tempdir().unwrap();
-            let manifest = dir.path().join("agent.leviath");
+            let manifest = dir.path().join("agent.toml");
             std::fs::write(
                 &manifest,
-                "[agent]\nname = \"seeded\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
-                 [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
-                 [context.regions]\n\
-                 task = { kind = \"pinned\", max_tokens = 4000, seed = \"task_input\" }\n\
-                 environment = { kind = \"pinned\", max_tokens = 1000, \
-                 seed = { tools = [{ name = \"shell\", args = { command = \"echo seeded\" } }] } }\n",
+                r#"[blueprint]
+name = "seeded"
+version = "0.1.0"
+description = "d"
+
+[[graph.stages]]
+name = "main"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+
+[graph.layout]
+total_budget_tokens = 5000
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 4000
+
+[[graph.layout.regions]]
+name = "environment"
+kind = "pinned"
+budget = 1000
+
+[graph.layout.regions.seed]
+tools = { calls = [{ tool = "shell", args = { command = "echo seeded" } }] }
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#,
             )
             .unwrap();
             let (mut world, cli) = test_world();
@@ -2324,7 +2960,11 @@ async fn a_tool_seed_answers_to_the_yolo_profile() {
                 .map(|e| e.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert_eq!(content.contains("seeded"), expect_ran, "{profile:?}: {content}");
+            assert_eq!(
+                content.contains("seeded"),
+                expect_ran,
+                "{profile:?}: {content}"
+            );
         }
     })
     .await;

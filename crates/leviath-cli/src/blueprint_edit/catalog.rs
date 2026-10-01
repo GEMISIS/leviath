@@ -2,10 +2,12 @@
 //!
 //! The same catalog `lev list` and the dashboard's new-run picker show
 //! (installed under the agents directory, configured in `agent_paths`, the
-//! local `agent.leviath`, and the bundled ones not installed yet), with the
-//! manifest text alongside so an editor can open it without a second read.
+//! local `agent.toml`, and the bundled ones not installed yet), with the
+//! file's text alongside so an editor can open it without a second read.
 
 use std::path::{Path, PathBuf};
+
+use leviath_blueprint::{BlueprintFile, FILE_NAME};
 
 use crate::bundled::{
     AgentAction, BUNDLED_AGENTS, BundledAgent, install_bundled, plan_agent_actions,
@@ -20,7 +22,7 @@ pub(crate) enum Source {
     Installed,
     /// Under a directory named in the config's `agent_paths`.
     Configured,
-    /// The `agent.leviath` of the working directory.
+    /// The `agent.toml` of the working directory.
     Local,
     /// Embedded in this binary and not installed; editing it installs it.
     Bundled,
@@ -41,19 +43,20 @@ impl Source {
 /// One agent in the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CatalogEntry {
-    /// `[agent].name`.
+    /// `[blueprint] name`.
     pub name: String,
-    /// `[agent].version`.
+    /// `[blueprint] version`.
     pub version: String,
-    /// `[agent].description`.
+    /// `[blueprint] description`.
     pub description: String,
     /// Where it lives.
     pub source: Source,
     /// Its directory on disk; `None` for a bundled agent not installed.
     pub dir: Option<PathBuf>,
-    /// The manifest text, when it could be read (always, for a bundled one).
+    /// The `agent.toml` text, when it could be read (always, for a bundled
+    /// one).
     pub manifest: Option<String>,
-    /// Its stage names, in the runtime's order.
+    /// Its stage names, in the graph's order.
     pub stages: Vec<String>,
     /// This binary bundles an agent of the same name.
     pub bundled: bool,
@@ -82,10 +85,7 @@ pub(crate) fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<Ca
         .map(|a| {
             let path = PathBuf::from(&a.path);
             let (dir, manifest_path) = if path.is_dir() {
-                (
-                    path.clone(),
-                    path.join(leviath_core::files::MANIFEST_FILENAME),
-                )
+                (path.clone(), path.join(FILE_NAME))
             } else {
                 (
                     path.parent().map(Path::to_path_buf).unwrap_or_default(),
@@ -93,11 +93,7 @@ pub(crate) fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<Ca
                 )
             };
             let manifest = std::fs::read_to_string(&manifest_path).ok();
-            let stages = manifest
-                .as_deref()
-                .and_then(|m| leviath_runtime::spec::manifest::parse_manifest(m).ok())
-                .map(|bp| bp.stages.iter().map(|s| s.name.clone()).collect())
-                .unwrap_or_default();
+            let stages = manifest.as_deref().map(stage_names).unwrap_or_default();
             let source = match a.source {
                 "installed" => Source::Installed,
                 "configured" => Source::Configured,
@@ -124,15 +120,14 @@ pub(crate) fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<Ca
             entries.push(CatalogEntry {
                 name: agent.name.to_string(),
                 version: agent.version.to_string(),
-                description: leviath_runtime::spec::manifest::parse_manifest(manifest)
-                    .map(|bp| bp.description)
+                description: BlueprintFile::parse(manifest)
+                    .ok()
+                    .and_then(|file| file.blueprint.description)
                     .unwrap_or_default(),
                 source: Source::Bundled,
                 dir: None,
                 manifest: Some(manifest.to_string()),
-                stages: leviath_runtime::spec::manifest::parse_manifest(manifest)
-                    .map(|bp| bp.stages.iter().map(|s| s.name.clone()).collect())
-                    .unwrap_or_default(),
+                stages: stage_names(manifest),
                 bundled: true,
                 differs_from_bundled: false,
             });
@@ -142,22 +137,36 @@ pub(crate) fn discover(agents_dir: &Path, cwd: &Path, config: &Config) -> Vec<Ca
     entries
 }
 
+/// The stage names of an `agent.toml`, in the graph's order; none when it
+/// does not read.
+fn stage_names(text: &str) -> Vec<String> {
+    BlueprintFile::parse(text)
+        .map(|file| {
+            file.graph
+                .stages
+                .iter()
+                .map(|s| s.name.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The bundled agent of that name, when there is one.
 pub(crate) fn bundled(name: &str) -> Option<&'static BundledAgent> {
     BUNDLED_AGENTS.iter().find(|a| a.name == name)
 }
 
-/// The embedded `agent.leviath` of a bundled agent.
+/// The embedded `agent.toml` of a bundled agent.
 pub(crate) fn bundled_manifest(agent: &BundledAgent) -> &'static str {
     agent
         .files
         .iter()
-        .find(|(rel, _)| *rel == leviath_core::files::MANIFEST_FILENAME)
+        .find(|(rel, _)| *rel == FILE_NAME)
         .map(|(_, text)| *text)
         .expect("every bundled agent has a manifest")
 }
 
-/// Write an agent's manifest under the agents directory, creating its
+/// Write an agent's `agent.toml` under the agents directory, creating its
 /// directory. Returns the directory.
 #[cfg(test)]
 pub(crate) fn write_agent(
@@ -167,15 +176,11 @@ pub(crate) fn write_agent(
 ) -> std::io::Result<PathBuf> {
     let dir = agents_dir.join(name);
     std::fs::create_dir_all(&dir)?;
-    leviath_sys::write_atomic(
-        &dir.join(leviath_core::files::MANIFEST_FILENAME),
-        manifest.as_bytes(),
-        None,
-    )?;
+    leviath_sys::write_atomic(&dir.join(FILE_NAME), manifest.as_bytes(), None)?;
     Ok(dir)
 }
 
-/// Copy the files of a bundled agent other than its manifest (its `tools/`
+/// Copy the files of a bundled agent other than its `agent.toml` (its `tools/`
 /// scripts) into an agent's directory, for an agent cloned from it.
 pub(crate) fn copy_bundled_extras(
     agents_dir: &Path,
@@ -183,11 +188,7 @@ pub(crate) fn copy_bundled_extras(
     from: &BundledAgent,
 ) -> std::io::Result<()> {
     let dir = agents_dir.join(name);
-    for (rel, contents) in from
-        .files
-        .iter()
-        .filter(|(rel, _)| *rel != leviath_core::files::MANIFEST_FILENAME)
-    {
+    for (rel, contents) in from.files.iter().filter(|(rel, _)| *rel != FILE_NAME) {
         let path = dir.join(rel);
         // A joined path always has a parent.
         std::fs::create_dir_all(path.parent().unwrap_or(&dir))?;
@@ -197,8 +198,8 @@ pub(crate) fn copy_bundled_extras(
 }
 
 /// Rename an installed agent: its directory under the agents directory, and
-/// the `name` in its manifest (comments and all else kept). Refuses a name
-/// that will not do or is taken; an unreadable manifest is left as it is.
+/// the `name` in its `agent.toml` (comments and all else kept). Refuses a
+/// name that will not do or is taken; an unreadable file is left as it is.
 pub(crate) fn rename_agent(agents_dir: &Path, from: &str, to: &str) -> Result<PathBuf, String> {
     rename_agent_with(agents_dir, from, to, &mut |a, b| std::fs::rename(a, b))
 }
@@ -222,13 +223,13 @@ pub(crate) fn rename_agent_with(
     if new.exists() {
         return Err(format!("An agent named {to} already exists."));
     }
-    let manifest_path = old.join(leviath_core::files::MANIFEST_FILENAME);
+    let manifest_path = old.join(FILE_NAME);
     let text = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Could not read {}: {e}", manifest_path.display()))?;
     let mut doc = super::ManifestDoc::parse(&text).map_err(|e| e.to_string())?;
     doc.set_agent_name(to)
         .expect("the name passed the same check set_agent_name makes");
-    // The manifest first, in place: if the directory cannot move the agent
+    // The file first, in place: if the directory cannot move the agent
     // is still whole, only under its old name with the new one inside,
     // which the next open shows and the next save writes.
     leviath_sys::write_atomic(&manifest_path, doc.to_toml().as_bytes(), None)

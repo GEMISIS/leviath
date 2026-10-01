@@ -2,7 +2,7 @@
 //! budget, seed, and the tool-output routing that targets it.
 
 use super::*;
-use crate::spec::layout::SeedToolCall;
+use leviath_runtime::spec::layout::SeedToolCall;
 
 /// Parse a `[context.regions]` (or `[stages.<name>.context.regions]`) table into
 /// region definitions plus the summed absolute-budget total.
@@ -32,25 +32,27 @@ pub(super) fn parse_region_layout(
         // becomes the absolute cap and `min_tokens` the absolute floor. Without a
         // `budget`, `max_tokens` is the literal ceiling.
         let percent = match str_of(region_value, "budget") {
-            Some(s) => Some(crate::spec::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
+            Some(s) => {
+                Some(leviath_runtime::spec::BudgetSpec::parse_budget(s).map_err(Error::Other)?)
+            }
             None => None,
         };
         let max_tokens_opt = count("max_tokens")?;
         let min_tokens = count("min_tokens")?;
 
         let budget = match percent {
-            Some(percent) => crate::spec::BudgetSpec::Percent {
+            Some(percent) => leviath_runtime::spec::BudgetSpec::Percent {
                 percent,
                 min: min_tokens,
                 max: max_tokens_opt,
             },
-            None => crate::spec::BudgetSpec::Absolute(max_tokens_opt.unwrap_or(5000)),
+            None => leviath_runtime::spec::BudgetSpec::Absolute(max_tokens_opt.unwrap_or(5000)),
         };
         // Provisional resolved ceiling: the literal value for absolute regions,
         // the cap (or 0) for percentage regions until resolution overwrites it.
         let provisional_max_tokens = match &budget {
-            crate::spec::BudgetSpec::Absolute(n) => *n,
-            crate::spec::BudgetSpec::Percent { max, .. } => max.unwrap_or(0),
+            leviath_runtime::spec::BudgetSpec::Absolute(n) => *n,
+            leviath_runtime::spec::BudgetSpec::Percent { max, .. } => max.unwrap_or(0),
         };
 
         // Compacting regions carry a compaction trigger. Parse `compact_at` (a
@@ -59,7 +61,9 @@ pub(super) fn parse_region_layout(
         // stored on RegionKind::Compacting) per the resolution contract in
         // `ContextLayout::resolve_compacting_threshold`.
         let compact_at = match str_of(region_value, "compact_at") {
-            Some(s) => Some(crate::spec::BudgetSpec::parse_budget(s).map_err(Error::Other)?),
+            Some(s) => {
+                Some(leviath_runtime::spec::BudgetSpec::parse_budget(s).map_err(Error::Other)?)
+            }
             None => None,
         };
         let explicit_threshold = count("threshold_tokens")?;
@@ -363,9 +367,9 @@ pub(super) fn parse_region_seed(
 /// An unreadable value falls back to the default rather than failing the
 /// manifest, matching how the rest of this parser treats a key it cannot make
 /// sense of; `lev validate` is where a typo is reported.
-fn parse_seed_refresh(table: &toml::value::Table) -> crate::spec::layout::SeedRefresh {
+fn parse_seed_refresh(table: &toml::value::Table) -> leviath_runtime::spec::layout::SeedRefresh {
     str_of(table, "refresh")
-        .and_then(crate::spec::layout::SeedRefresh::from_str_loose)
+        .and_then(leviath_runtime::spec::layout::SeedRefresh::from_str_loose)
         .unwrap_or_default()
 }
 
@@ -396,12 +400,6 @@ fn parse_seed_tool_call(value: &toml::Value) -> Option<SeedToolCall> {
     }
 }
 
-/// Every key [`parse_region_layout`] reads off a region table. The parser
-/// does not refuse a key it does not know (a misspelled one has always
-/// loaded silently), so this list has one job: the schema guard in
-/// `tests.rs` holds the published schema to it, and a key read above that is
-/// missing here, or here that is not read above, is the drift it exists to
-/// catch.
 /// `accepts = ["text/*", "image/png"]`: each entry a mime type or a
 /// `type/*` pattern. Absent or empty means anything.
 pub(super) fn parse_accepts(region_name: &str, value: Option<&toml::Value>) -> Result<Vec<String>> {
@@ -449,7 +447,10 @@ pub(super) fn parse_pattern_list(
     Ok(out)
 }
 
-#[cfg(test)]
+/// Every key [`parse_region_layout`] reads off a region table. The parser
+/// does not refuse a key it does not know, so this list is what the schema
+/// guard in `tests.rs` holds the published schema to, and what `migrate`
+/// reports an unread key against.
 pub(super) const REGION_KEYS: &[&str] = &[
     "accepts",
     "admission",

@@ -160,25 +160,38 @@ impl Provider for WritesThenAnswers {
 /// Deliberately minimal: a multi-stage blueprint would make a failure ambiguous
 /// between "the tool never ran" and "the transition never resolved".
 fn one_stage_manifest() -> &'static str {
-    r#"[agent]
+    r#"[blueprint]
 name = "e2e"
 version = "0.0.0"
 description = "Writes one file, then finishes."
-entry_stage = "work"
 
-[stages.work]
-mode = "autonomous"
-model = { provider = "e2e", model = "m" }
+[graph]
+entry = "work"
+
+[[graph.stages]]
+name = "work"
 description = "Write the file"
-available_tools = ["write_file"]
 system_prompt = "Write the file you were asked for, then stop."
+model = { models = [{ provider = "e2e", model = "m" }] }
+tools = ["write_file"]
 
-# Without this the task text has nowhere to land, and the run would answer a
-# question it was never given. The provider below reads its target back out of
-# the prompt, so a missing region fails the test rather than passing it.
-[context.regions]
-task = { kind = "pinned", max_tokens = 500, seed = "task" }
-conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+[graph.layout]
+total_budget_tokens = 10500
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 500
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = 10000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
 "#
 }
 
@@ -191,7 +204,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 #[tokio::test]
 async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
     let agent_dir = tempfile::tempdir().expect("agent dir");
-    let manifest = agent_dir.path().join("agent.leviath");
+    let manifest = agent_dir.path().join("agent.toml");
     std::fs::write(&manifest, one_stage_manifest()).expect("write manifest");
 
     let workdir = tempfile::tempdir().expect("workdir");

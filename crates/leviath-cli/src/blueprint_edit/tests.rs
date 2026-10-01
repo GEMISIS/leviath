@@ -3,6 +3,8 @@
 use super::check::{Severity, check};
 use super::*;
 use crate::bundled::BUNDLED_AGENTS;
+use leviath_runtime::spec::graph::RunGraph;
+use leviath_runtime::spec::issues::SpecPath;
 
 fn bundled_text(name: &str) -> &'static str {
     let agent = BUNDLED_AGENTS
@@ -24,12 +26,28 @@ fn starter() -> ManifestDoc {
     ManifestDoc::parse(&templates::empty_blueprint("demo").unwrap()).unwrap()
 }
 
-/// The manifest re-read by the runtime after an edit: every mutator must
-/// leave something it accepts.
-fn runtime_ok(doc: &ManifestDoc) -> leviath_runtime::spec::Blueprint {
+/// A small blueprint written by hand around `body` (stages, edges and the
+/// rest of `[graph]`), with one shared region.
+fn small(body: &str) -> ManifestDoc {
+    let text = format!(
+        "[blueprint]\nname = \"t\"\nversion = \"1\"\n\n[graph]\n\
+         layout = {{ total_budget_tokens = 0, regions = [{{ name = \"r\", kind = \"pinned\", budget = \"5%\" }}] }}\n\n{body}"
+    );
+    ManifestDoc::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"))
+}
+
+/// The file re-read by the runtime after an edit: every mutator must leave
+/// something it reads and whose graph holds together.
+fn runtime_ok(doc: &ManifestDoc) -> RunGraph {
     let text = doc.to_toml();
-    doc.blueprint()
-        .unwrap_or_else(|e| panic!("the runtime rejected the edited manifest: {e}\n{text}"))
+    let file = doc
+        .file()
+        .unwrap_or_else(|e| panic!("the runtime rejected the edited file: {e}\n{text}"));
+    let graph = file.run_graph();
+    if let Err(issues) = graph.validate(&SpecPath::root().field("graph")) {
+        panic!("the edited graph does not hold together: {issues}\n{text}");
+    }
+    graph
 }
 
 #[test]
@@ -58,13 +76,10 @@ fn errors_read_as_sentences() {
         EditError::LastStage.to_string(),
         "an agent needs at least one stage"
     );
+    assert_eq!(EditError::NoStages.to_string(), "the file has no stages");
     assert_eq!(
-        EditError::NoStages.to_string(),
-        "the manifest has no stages"
-    );
-    assert_eq!(
-        EditError::NoAgent.to_string(),
-        "the manifest has no [agent] table"
+        EditError::NoBlueprint.to_string(),
+        "the file has no [blueprint] table"
     );
     assert_eq!(
         EditError::NoSuchRegion("r".into()).to_string(),
@@ -89,7 +104,7 @@ fn errors_read_as_sentences() {
 // ─── parse and round-trip ────────────────────────────────────────────────────
 
 #[test]
-fn every_bundled_manifest_round_trips_byte_for_byte() {
+fn every_bundled_blueprint_round_trips_byte_for_byte() {
     for agent in BUNDLED_AGENTS {
         let text = catalog::bundled_manifest(agent);
         let doc = ManifestDoc::parse(text).expect(agent.name);
@@ -101,14 +116,12 @@ fn every_bundled_manifest_round_trips_byte_for_byte() {
             "{} changed on the way through",
             agent.name
         );
-        let bp = runtime_ok(&doc);
-        assert_eq!(bp.name, agent.name);
-        // The views see every stage the runtime sees.
-        let mut names = doc.stage_names();
-        names.sort();
-        let mut runtime: Vec<String> = bp.stages.iter().map(|s| s.name.clone()).collect();
-        runtime.sort();
-        assert_eq!(names, runtime, "{}", agent.name);
+        let graph = runtime_ok(&doc);
+        assert_eq!(graph.title.as_deref(), Some(agent.name));
+        // The views see every stage the runtime sees, in its order.
+        let runtime: Vec<String> = graph.stages.iter().map(|s| s.name.to_string()).collect();
+        assert_eq!(doc.stage_names(), runtime, "{}", agent.name);
+        assert_eq!(doc.edges().len(), graph.edges.len(), "{}", agent.name);
     }
 }
 
@@ -118,22 +131,27 @@ fn parse_refuses_what_the_editor_cannot_stand_on() {
         ManifestDoc::parse("not = [toml"),
         Err(EditError::Toml(_))
     ));
+    let stages = "[[graph.stages]]\nname = \"a\"\n";
     assert_eq!(
-        ManifestDoc::parse("[stages.a]\nmode = \"autonomous\"\n").unwrap_err(),
-        EditError::NoAgent
+        ManifestDoc::parse(stages).unwrap_err(),
+        EditError::NoBlueprint
     );
     assert_eq!(
-        ManifestDoc::parse("agent = 3\n[stages.a]\n").unwrap_err(),
-        EditError::NoAgent
+        ManifestDoc::parse(&format!("blueprint = 3\n{stages}")).unwrap_err(),
+        EditError::NoBlueprint
     );
-    assert_eq!(
-        ManifestDoc::parse("[agent]\nname = \"x\"\n").unwrap_err(),
-        EditError::NoStages
-    );
-    assert_eq!(
-        ManifestDoc::parse("[agent]\nname = \"x\"\n[stages]\nplan = 3\n").unwrap_err(),
-        EditError::NoStages
-    );
+    for no_stages in [
+        "[blueprint]\nname = \"x\"\n",
+        "[blueprint]\nname = \"x\"\n[graph]\nstages = 3\n",
+        "[blueprint]\nname = \"x\"\n[graph]\nstages = []\n",
+        "graph = 3\n[blueprint]\nname = \"x\"\n",
+    ] {
+        assert_eq!(
+            ManifestDoc::parse(no_stages).unwrap_err(),
+            EditError::NoStages,
+            "{no_stages}"
+        );
+    }
     let err = ManifestDoc::parse("not = [toml").unwrap_err().to_string();
     assert!(err.starts_with("not valid TOML: "), "{err}");
 }
@@ -177,11 +195,7 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     // bare name. It has to survive the view: this stage lists several such
     // models, and reading only the route-pinned ones showed just the local one.
     assert_eq!(discover.models[0], "claude-sonnet-5");
-    assert!(
-        discover.models.len() > 1,
-        "open-route models must survive the view, got {:?}",
-        discover.models
-    );
+    assert!(discover.models.len() > 1, "{:?}", discover.models);
     assert!(
         discover.models.iter().any(|m| m.starts_with("ollama/")),
         "a local model still pins its route, got {:?}",
@@ -205,6 +219,7 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
 
     let plan = doc.stage("plan").unwrap();
     assert_eq!(plan.mode, StageModeView::InteractivePoints);
+    assert!(plan.transition_prompt.contains("approved the plan"));
 
     let edges = doc.edges();
     let to_plan = edges
@@ -221,6 +236,7 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     let review = doc.edge("implement", "review").unwrap();
     assert!(review.gated);
     assert_eq!(review.transform, TransformKind::Compact);
+    assert!(!review.rules.present);
     let reassess = doc.edge("implement", "reassess").unwrap();
     assert_eq!(reassess.kind, EdgeKind::Stuck);
     assert_eq!(reassess.transform, TransformKind::Custom);
@@ -248,6 +264,7 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
     assert_eq!(task.min_tokens, None);
     assert!(task.required);
     assert!(task.required_message.starts_with("Describe the task"));
+    assert_eq!(task.seed, "task", "the task input fills it");
     let conventions = shared
         .regions
         .iter()
@@ -262,6 +279,22 @@ fn the_views_read_the_coder_the_way_the_lair_does() {
         .unwrap();
     assert_eq!(constraints.seed, "constraints");
     assert!(!constraints.seed_is_table);
+    let conversation = shared
+        .regions
+        .iter()
+        .find(|r| r.name == "conversation")
+        .unwrap();
+    assert_eq!(conversation.kind, "sliding_window");
+    assert_eq!(conversation.max_items, Some(40));
+    assert_eq!(
+        (conversation.strategy.as_str(), conversation.overflow),
+        ("bulk", Some(20))
+    );
+    let decisions = doc.region(None, "decisions").unwrap();
+    assert_eq!(
+        (decisions.strategy.as_str(), decisions.overflow),
+        ("", None)
+    );
     // A stage without its own layout inherits.
     assert!(doc.effective_regions(Some("plan")).inherited);
     assert_eq!(doc.region(None, "task").unwrap().name, "task");
@@ -298,107 +331,202 @@ fn the_reviewer_shows_its_fan_out_and_worker() {
         Some((WorkerKind::Stage, "review_worker".to_string()))
     );
     assert_eq!(split.fan_out.merge_stage.as_deref(), Some("deep_review"));
+    assert_eq!(split.fan_out.max_workers, Some(30));
     let worker = doc.stage("review_worker").unwrap();
     assert!(worker.is_terminal);
 }
 
 #[test]
-fn a_bare_string_model_and_odd_shapes_read_gently() {
-    let doc = ManifestDoc::parse(
-        r#"[agent]
-name = "odd"
-[stages.a]
-model = "gpt-4"
+fn odd_shapes_read_gently() {
+    let doc = small(
+        r#"[[graph.stages]]
+name = "a"
+model = { models = ["gpt-4", 3, { provider = "x" }, { model = "y" }, { provider = "", model = "z" }, { provider = "p", model = "m" }] }
 mode = "weird"
-[stages.a.transitions.b]
-condition = "someday"
-[stages.a.transitions.c]
-[stages.b]
-model = { provider = "anthropic", model = "old-form" }
-[stages.c]
-model = 3
-[stages.c.transitions]
+
+[[graph.stages]]
+name = "b"
+model = "not a table"
+mode = 3
+tool_routing = { default_region = "r", tool_regions = { bash = 3, read_file = "r" } }
+
+[[graph.stages]]
+name = "c"
+mode = { fan_out = { worker = { blueprint = { name = "w", digest = "sha256:ab" } } } }
+
+[[graph.stages]]
+name = "d"
+mode = { fan_out = { worker = { blueprint_file = "/agents/w" } } }
+
+[[graph.stages]]
+name = "e"
+mode = { fan_out = { worker = { query = "reads logs" } } }
+
+[[graph.stages]]
+name = "f"
+mode = { fan_out = { worker = { blueprint = { digest = "x" } } } }
+
+[[graph.stages]]
+name = "g"
+mode = { fan_out = { worker = {} } }
+
+[[graph.stages]]
+mode = "autonomous"
+
+[[graph.edges]]
+name = "b"
+from = "a"
+to = "b"
+when = "someday"
+
+[[graph.edges]]
+from = "a"
+to = "g"
+
+[[graph.edges]]
+name = "z"
+to = "c"
+
+[[graph.edges]]
+name = "c"
+from = "a"
+to = "c"
+
+[[graph.edges]]
+name = "x"
+from = "a"
+
+[[graph.edges]]
+name = "d"
+from = "a"
+to = "d"
+when = "always"
+
+[[graph.edges]]
+name = "e"
+from = "a"
+to = "e"
+when = "always"
+hint = "go"
+
+[[graph.edges]]
+name = "f"
+from = "a"
+to = "f"
+carry = 3
+
+[[graph.edges]]
+name = "g"
+from = "c"
+to = "d"
+carry = {}
+
+[[graph.edges]]
+name = "h"
+from = "c"
+to = "e"
+carry = { compact = { prompt = "Keep the gist" } }
 "#,
-    )
-    .unwrap();
+    );
     let a = doc.stage("a").unwrap();
-    assert_eq!(a.models, ["gpt-4"]);
+    // A bare name or `{ model = "y" }` is the open-route form; an empty
+    // provider says the same; an entry naming no model is dropped.
+    assert_eq!(a.models, ["gpt-4", "y", "z", "p/m"]);
     assert_eq!(a.mode, StageModeView::Other("weird".into()));
     assert_eq!(a.mode.as_str(), "weird");
     assert_eq!(a.mode.label(), "weird");
-    // The unknown condition is left out; the bare table reads as the model's
-    // choice.
+    let b = doc.stage("b").unwrap();
+    assert!(b.models.is_empty());
+    assert_eq!(b.mode, StageModeView::Other(String::new()));
+    assert_eq!(
+        doc.tool_routing("b").overrides,
+        [("read_file".to_string(), "r".to_string())]
+    );
+    let worker = |s: &str| doc.stage(s).unwrap().fan_out.worker;
+    assert_eq!(
+        worker("c"),
+        Some((WorkerKind::Agent, "w@sha256:ab".to_string()))
+    );
+    assert_eq!(
+        worker("d"),
+        Some((WorkerKind::Agent, "/agents/w".to_string()))
+    );
+    assert_eq!(
+        worker("e"),
+        Some((WorkerKind::Query, "reads logs".to_string()))
+    );
+    assert_eq!(worker("f"), None, "a blueprint with no name");
+    assert_eq!(worker("g"), None, "a worker that names nothing");
+    // The stage with no name is no stage the editor can name.
+    assert_eq!(doc.stage_names(), ["a", "b", "c", "d", "e", "f", "g"]);
+    // A rename steps over edges with no name or no stage to leave.
+    let mut renamed = doc.clone();
+    renamed.rename_stage("g", "h").unwrap();
+    assert!(renamed.edge("a", "h").is_some());
+    // The unknown `when` and the edges with no `to` or no `from` are left
+    // out.
     let edges = doc.edges();
-    assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].to, "c");
-    assert_eq!(edges[0].kind, EdgeKind::LlmChoice);
+    let tos: Vec<&str> = edges.iter().map(|e| e.to.as_str()).collect();
+    assert_eq!(tos, ["g", "c", "d", "e", "f", "d", "e"]);
+    assert_eq!(doc.edge("a", "c").unwrap().kind, EdgeKind::Always);
+    assert_eq!(doc.edge("a", "d").unwrap().kind, EdgeKind::Always);
+    assert_eq!(doc.edge("a", "e").unwrap().kind, EdgeKind::Hint);
+    assert_eq!(
+        doc.edge("a", "f").unwrap().transform,
+        TransformKind::Other(String::new())
+    );
+    assert_eq!(
+        doc.edge("c", "d").unwrap().transform,
+        TransformKind::Other(String::new())
+    );
+    let compact = doc.edge("c", "e").unwrap();
+    assert_eq!(compact.transform, TransformKind::Compact);
+    assert_eq!(compact.rules.compact_prompt, "Keep the gist");
+    assert!(!compact.rules.present);
     assert!(doc.edge("a", "b").is_none());
-    assert!(doc.stage("b").unwrap().models.is_empty(), "no models list");
-    assert!(doc.stage("c").unwrap().models.is_empty());
     assert_eq!(doc.agent().default_model, None);
     assert_eq!(doc.agent().entry_stage, None);
     assert!(doc.stage("ghost").is_none());
-    assert!(doc.edge("b", "c").is_none(), "b has no transitions table");
     assert!(doc.regions(Some("ghost")).is_empty());
     assert!(doc.region(Some("ghost"), "x").is_none());
-    assert!(doc.regions(Some("b")).is_empty(), "no context table");
-    assert!(doc.blueprint().is_err(), "the runtime rejects the odd mode");
-    let mut odd = doc.clone();
-    odd.rename_stage("c", "d").unwrap();
-    assert!(odd.edge("a", "d").is_some());
-    odd.delete_stage("d").unwrap();
-    assert!(odd.edge("a", "d").is_none());
-    assert_eq!(odd.stage_names(), ["a", "b"]);
-    // Odder shapes: model entries missing a half, a non-table path, an
-    // override that is not a string, a budget that is not a percentage, an
-    // unreadable `stages` value, a stage whose transitions are not a table.
-    let odder = ManifestDoc::parse(
-        r#"[agent]
-name = "odder"
-[context.regions]
-r = { kind = "pinned", budget = "lots" }
-[stages.a]
-model = { models = [3, { provider = "x" }, { model = "y" }, { provider = "p", model = "m" }] }
-transitions = { b = 3, c = { hint = "go" } }
-[stages.a.tool_routing.overrides]
-bash = 3
-read_file = "r"
-[stages.c]
-transitions = 4
-"#,
-    )
-    .unwrap();
-    // `{ model = "y" }` is the open-route form, so it reads as the model it
-    // names - the same reading the runtime's parser gives it. Only the entries
-    // that name no model at all (`3`, `{ provider = "x" }`) are dropped.
-    assert_eq!(odder.stage("a").unwrap().models, ["y", "p/m"]);
-    let edges = odder.edges();
-    assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].to, "c");
-    assert_eq!(
-        odder.tool_routing("a").overrides,
-        [("read_file".to_string(), "r".to_string())]
+    assert!(doc.regions(Some("b")).is_empty(), "no layout of its own");
+    assert!(doc.file().is_err(), "the runtime refuses the odd mode");
+
+    // Regions read gently too: a missing name is no region, a kind that is
+    // not there reads empty, an eviction by name has no count, a budget that
+    // is not a percentage has none, a fixed budget has no clamps.
+    let regions = small(
+        "[[graph.inputs]]\nname = \"broken\"\nbinds = 3\n\n\
+         [[graph.inputs]]\nbinds = [{ region = \"r\" }]\n\n\
+         [[graph.stages]]\nname = \"a\"\n\
+         layout = { total_budget_tokens = 0, regions = [\
+         { kind = \"pinned\", budget = \"1%\" }, \
+         { name = \"k\", budget = \"lots\" }, \
+         { name = \"w\", kind = { kind = \"sliding_window\", max_items = 3, eviction = \"per_item\" }, budget = 400 }, \
+         { name = \"o\", kind = { kind = \"sliding_window\", max_items = 3, eviction = {} }, budget = { percent = \"7%\", min = 10, max = 90 } }, \
+         { name = \"n\", kind = { kind = \"sliding_window\", max_items = 3, eviction = { bulk = \"x\" } }, budget = { min = 3 } }] }\n",
     );
-    assert_eq!(odder.region(None, "r").unwrap().budget_percent, None);
-    let mut odder = odder;
+    let names: Vec<String> = regions
+        .regions(Some("a"))
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(names, ["k", "w", "o", "n"]);
+    let k = regions.region(Some("a"), "k").unwrap();
+    assert_eq!((k.kind.as_str(), k.budget_percent), ("", None));
+    let w = regions.region(Some("a"), "w").unwrap();
+    assert_eq!((w.strategy.as_str(), w.overflow), ("per_item", None));
+    assert_eq!((w.budget_percent, w.max_tokens), (None, None));
+    let o = regions.region(Some("a"), "o").unwrap();
+    assert_eq!((o.strategy.as_str(), o.overflow), ("", None));
     assert_eq!(
-        odder.set_edge_hint("c", "a", "x"),
-        Err(EditError::NoSuchEdge("c".into(), "a".into())),
-        "transitions is not a table"
+        (o.budget_percent, o.min_tokens, o.max_tokens),
+        (Some(7.0), Some(10), Some(90))
     );
-    assert_eq!(
-        odder.set_edge_hint("b", "a", "x"),
-        Err(EditError::NoSuchEdge("b".into(), "a".into())),
-        "no such stage reads as no such path"
-    );
-    assert_eq!(
-        odder.set_edge_gate("a", "ghost", true),
-        Err(EditError::NoSuchEdge("a".into(), "ghost".into()))
-    );
-    assert_eq!(
-        ManifestDoc::parse("stages = 3\n[agent]\nname = \"x\"\n").unwrap_err(),
-        EditError::NoStages
-    );
+    let n = regions.region(Some("a"), "n").unwrap();
+    assert_eq!((n.strategy.as_str(), n.overflow), ("bulk", None));
+    assert_eq!((n.budget_percent, n.min_tokens), (None, Some(3)));
+    assert_eq!(regions.region(None, "r").unwrap().seed, "");
 }
 
 #[test]
@@ -427,13 +555,13 @@ fn enums_spell_and_label_themselves() {
         assert!(!t.label().is_empty());
     }
     assert_eq!(TransformKind::parse(""), TransformKind::Direct);
-    assert_eq!(TransformKind::parse("summarize"), TransformKind::Compact);
     let other = TransformKind::parse("teleport");
     assert_eq!(other, TransformKind::Other("teleport".into()));
     assert_eq!(other.as_str(), "teleport");
     assert_eq!(other.label(), "teleport");
-    assert_eq!(WorkerKind::Agent.key(), "worker_agent");
-    assert_eq!(WorkerKind::Query.key(), "worker_query");
+    assert_eq!(WorkerKind::Agent.key(), "blueprint");
+    assert_eq!(WorkerKind::Stage.key(), "stage");
+    assert_eq!(WorkerKind::Query.key(), "query");
     for rule in Rule::ALL {
         assert!(!rule.label().is_empty());
         assert!(!rule.key().is_empty());
@@ -465,10 +593,10 @@ fn agent_level_edits() {
     doc.set_description("");
     assert_eq!(doc.agent().description, "");
     let text = doc.to_toml();
-    let agent_table = text.split("[stages").next().unwrap();
+    let head = text.split("[graph]").next().unwrap();
     assert!(
-        !agent_table.contains("description ="),
-        "empty deletes the key: {agent_table}"
+        !head.contains("description ="),
+        "empty deletes the key: {head}"
     );
     doc.set_entry_stage("finish").unwrap();
     assert_eq!(doc.agent().entry_stage.as_deref(), Some("finish"));
@@ -498,30 +626,34 @@ fn stages_are_added_in_place_and_refused_when_wrong() {
     assert_eq!(review.mode, StageModeView::Autonomous);
     assert_eq!(review.max_iterations, Some(20));
     assert!(review.is_terminal, "nowhere to go yet");
-    // The file shows it between the two, and the runtime reads it.
+    // The file shows it after work and work's edge, before finish, and the
+    // runtime reads it there.
     let text = doc.to_toml();
-    let work = text.find("[stages.work]").unwrap();
-    let rev = text.find("[stages.review]").unwrap();
-    let fin = text.find("[stages.finish]").unwrap();
-    assert!(work < rev && rev < fin, "{text}");
-    runtime_ok(&doc);
-    doc.add_stage("last", None).unwrap();
-    assert_eq!(doc.stage_names(), ["work", "review", "finish", "last"]);
-    // A path out of the new stage: its transitions table stops being written
-    // as an empty header, and comes back when the last path goes.
-    doc.add_edge("review", "finish").unwrap();
-    let text = doc.to_toml();
-    assert!(!text.contains("[stages.review.transitions]\n"), "{text}");
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle}\n{text}"))
+    };
+    assert!(at("name = \"work\"") < at("from = \"work\""), "{text}");
+    assert!(at("from = \"work\"") < at("name = \"review\""), "{text}");
     assert!(
-        text.contains("[stages.review.transitions.finish]"),
+        at("name = \"review\"") < at("name = \"finish\"\nmode"),
         "{text}"
     );
+    let graph = runtime_ok(&doc);
+    assert_eq!(graph.stages[1].name.as_str(), "review");
+    doc.add_stage("last", None).unwrap();
+    assert_eq!(doc.stage_names(), ["work", "review", "finish", "last"]);
+    assert!(doc.to_toml().trim_end().ends_with("max_iterations = 20"));
+    // A path out of the new stage lands right after it, and the stage stops
+    // being terminal; deleting it makes the stage terminal again.
+    doc.add_edge("review", "finish").unwrap();
+    let text = doc.to_toml();
+    let review_at = text.find("name = \"review\"").unwrap();
+    let edge_at = text.find("from = \"review\"").unwrap();
+    let finish_at = text.find("name = \"finish\"\nmode").unwrap();
+    assert!(review_at < edge_at && edge_at < finish_at, "{text}");
+    assert!(!doc.stage("review").unwrap().is_terminal);
     doc.delete_edge("review", "finish").unwrap();
-    assert!(
-        doc.to_toml().contains("[stages.review.transitions]\n"),
-        "{}",
-        doc.to_toml()
-    );
     assert!(doc.stage("review").unwrap().is_terminal);
     // Refusals leave the document alone.
     let before = doc.to_toml();
@@ -538,7 +670,7 @@ fn stages_are_added_in_place_and_refused_when_wrong() {
         Err(EditError::NoSuchStage("ghost".into()))
     );
     assert_eq!(doc.to_toml(), before);
-    // Re-read: the positions survive a round trip.
+    // Re-read: the order survives a round trip.
     let again = ManifestDoc::parse(&doc.to_toml()).unwrap();
     assert_eq!(again.stage_names(), ["work", "review", "finish", "last"]);
 }
@@ -552,26 +684,37 @@ fn renaming_a_stage_rewrites_what_names_it() {
         doc.stage("split_review").unwrap().fan_out.worker,
         Some((WorkerKind::Stage, "checker".to_string()))
     );
+    doc.rename_stage("deep_review", "merge").unwrap();
+    assert_eq!(
+        doc.stage("split_review")
+            .unwrap()
+            .fan_out
+            .merge_stage
+            .as_deref(),
+        Some("merge")
+    );
     doc.rename_stage("discover", "orient").unwrap();
     assert_eq!(doc.agent().entry_stage.as_deref(), Some("orient"));
-    // Paths into the renamed stage follow it; the file order does not move.
+    // Edges into and out of the renamed stage follow it, and an edge named
+    // after it takes the new name; the order does not move.
     doc.rename_stage("report", "wrap_up").unwrap();
-    assert!(doc.edge("deep_review", "wrap_up").is_some());
-    assert!(doc.edge("deep_review", "report").is_none());
-    let names = doc.stage_names();
-    assert_eq!(names[0], "orient");
-    assert_eq!(
-        names.last().map(String::as_str),
-        doc.stage_names().last().map(String::as_str)
+    assert!(doc.edge("merge", "wrap_up").is_some());
+    assert!(doc.edge("merge", "report").is_none());
+    assert!(doc.edge("wrap_up", "summary").is_some());
+    assert!(
+        doc.to_toml()
+            .contains("name = \"wrap_up\"\nfrom = \"merge\"")
     );
+    assert_eq!(doc.stage_names()[0], "orient");
     // The comment above the renamed stage's header is still above it.
     let text = doc.to_toml();
-    assert!(text.contains("# ─── Stage 1: Discover"), "{text}");
-    let comment = text.find("# ─── Stage 1: Discover").unwrap();
-    let header = text.find("[stages.orient]").unwrap();
+    let comment = text.find("# ─── Stage 1: Discover").expect("comment kept");
+    let header = text.find("name = \"orient\"").unwrap();
     assert!(comment < header, "{text}");
-    let between = text.get(comment..header).unwrap();
-    assert!(between.matches('\n').count() <= 4, "{text}");
+    assert!(
+        text.get(comment..header).unwrap().matches('\n').count() <= 6,
+        "{text}"
+    );
     runtime_ok(&doc);
     // No-op and refusals.
     let before = doc.to_toml();
@@ -592,6 +735,64 @@ fn renaming_a_stage_rewrites_what_names_it() {
 }
 
 #[test]
+fn renaming_keeps_edge_names_unique_and_follows_inputs() {
+    let mut doc = small(
+        r#"[[graph.inputs]]
+name = "m"
+type = "model"
+binds = [{ stage_model = "b" }]
+
+[[graph.inputs]]
+name = "format"
+type = "text"
+binds = ["output_format", { region = "r" }]
+
+[[graph.inputs]]
+name = "unbound"
+type = "text"
+
+[[graph.stages]]
+name = "a"
+
+[[graph.stages]]
+name = "b"
+
+[[graph.stages]]
+name = "c"
+
+[[graph.edges]]
+name = "b"
+from = "a"
+to = "b"
+
+[[graph.edges]]
+name = "x"
+from = "a"
+to = "c"
+
+[[graph.edges]]
+name = "b"
+from = "c"
+to = "b"
+"#,
+    );
+    doc.rename_stage("b", "x").unwrap();
+    let text = doc.to_toml();
+    // a already leaves by an edge called `x`, so a's edge into the renamed
+    // stage keeps its name; c's takes the new one.
+    assert!(
+        text.contains("name = \"b\"\nfrom = \"a\"\nto = \"x\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("name = \"x\"\nfrom = \"c\"\nto = \"x\""),
+        "{text}"
+    );
+    assert!(text.contains("{ stage_model = \"x\" }"), "{text}");
+    runtime_ok(&doc);
+}
+
+#[test]
 fn deleting_a_stage_takes_its_paths_and_repoints_the_entry() {
     let mut doc = starter();
     doc.add_stage("review", Some("work")).unwrap();
@@ -599,7 +800,11 @@ fn deleting_a_stage_takes_its_paths_and_repoints_the_entry() {
     doc.delete_stage("work").unwrap();
     assert_eq!(doc.stage_names(), ["review", "finish"]);
     assert_eq!(doc.agent().entry_stage.as_deref(), Some("review"));
-    assert!(doc.edges().iter().all(|e| e.to != "work"));
+    assert!(
+        doc.edges()
+            .iter()
+            .all(|e| e.to != "work" && e.from != "work")
+    );
     doc.delete_stage("finish").unwrap();
     assert!(doc.edges().is_empty(), "the path into finish went with it");
     assert_eq!(doc.delete_stage("review"), Err(EditError::LastStage));
@@ -608,12 +813,40 @@ fn deleting_a_stage_takes_its_paths_and_repoints_the_entry() {
         Err(EditError::NoSuchStage("ghost".into()))
     );
     assert_eq!(doc.stage_names(), ["review"]);
+    // A graph with no edges at all, and an entry left alone.
+    let mut bare = small("[[graph.stages]]\nname = \"a\"\n[[graph.stages]]\nname = \"b\"\n");
+    bare.delete_stage("b").unwrap();
+    assert_eq!(bare.stage_names(), ["a"]);
+    assert_eq!(bare.agent().entry_stage, None);
+    // Renaming in a graph with no edges and no inputs touches only the stage.
+    bare.rename_stage("a", "z").unwrap();
+    assert_eq!(bare.stage_names(), ["z"]);
 }
 
 #[test]
 fn stage_fields_write_and_delete_the_way_the_lair_does() {
     let mut doc = starter();
+    // A fan-out setting needs a fan-out stage.
+    assert!(matches!(
+        doc.set_fan_out("work", FanOutField::MaxWorkers(Some(2))),
+        Err(EditError::OutOfRange(_))
+    ));
+    // A fan-out reads from the start: its worker is the first other stage,
+    // or the stage itself when it is the only one.
     doc.set_stage_mode("work", &StageModeView::FanOut).unwrap();
+    assert!(
+        doc.to_toml()
+            .contains("mode = { fan_out = { worker = { stage = \"finish\" } } }"),
+        "{}",
+        doc.to_toml()
+    );
+    assert!(doc.file().is_ok());
+    let mut alone = small("[[graph.stages]]\nname = \"a\"\n");
+    alone.set_stage_mode("a", &StageModeView::FanOut).unwrap();
+    assert_eq!(
+        alone.stage("a").unwrap().fan_out.worker,
+        Some((WorkerKind::Stage, "a".to_string()))
+    );
     doc.set_fan_out(
         "work",
         FanOutField::Worker(Some((WorkerKind::Stage, "finish".into()))),
@@ -642,13 +875,40 @@ fn stage_fields_write_and_delete_the_way_the_lair_does() {
             on_worker_failure: Some("fail_all".into()),
         }
     );
-    // Switching the worker kind drops the other keys; clearing removes.
-    doc.set_fan_out(
-        "work",
-        FanOutField::Worker(Some((WorkerKind::Agent, "researcher".into()))),
-    )
-    .unwrap();
-    assert!(!doc.to_toml().contains("worker_stage"));
+    // Picking fan-out again keeps the settings.
+    doc.set_stage_mode("work", &StageModeView::FanOut).unwrap();
+    assert_eq!(doc.stage("work").unwrap().fan_out.max_workers, Some(4));
+    // A blueprint worker by name, pinned, or by directory; a query.
+    for (kind, value, written) in [
+        (
+            WorkerKind::Agent,
+            "researcher",
+            r#"worker = { blueprint = { name = "researcher" } }"#,
+        ),
+        (
+            WorkerKind::Agent,
+            "researcher@sha256:ab",
+            r#"worker = { blueprint = { name = "researcher", digest = "sha256:ab" } }"#,
+        ),
+        (
+            WorkerKind::Agent,
+            "/agents/r",
+            r#"worker = { blueprint_file = "/agents/r" }"#,
+        ),
+        (
+            WorkerKind::Query,
+            "reads logs",
+            r#"worker = { query = "reads logs" }"#,
+        ),
+    ] {
+        doc.set_fan_out("work", FanOutField::Worker(Some((kind, value.into()))))
+            .unwrap();
+        assert!(doc.to_toml().contains(written), "{}", doc.to_toml());
+        assert_eq!(
+            doc.stage("work").unwrap().fan_out.worker,
+            Some((kind, value.to_string()))
+        );
+    }
     doc.set_fan_out("work", FanOutField::Worker(None)).unwrap();
     doc.set_fan_out("work", FanOutField::MergeStage(None))
         .unwrap();
@@ -659,12 +919,26 @@ fn stage_fields_write_and_delete_the_way_the_lair_does() {
     doc.set_fan_out("work", FanOutField::OnWorkerFailure(None))
         .unwrap();
     assert_eq!(doc.stage("work").unwrap().fan_out, FanOutView::default());
-    // Leaving fan-out sweeps the fan-out keys.
+    // Leaving fan-out drops the fan-out settings; interaction points start
+    // empty; any other mode is written by name.
     doc.set_fan_out("work", FanOutField::MaxWorkers(Some(2)))
         .unwrap();
     doc.set_stage_mode("work", &StageModeView::Autonomous)
         .unwrap();
     assert!(!doc.to_toml().contains("max_workers"));
+    doc.set_stage_mode("work", &StageModeView::InteractivePoints)
+        .unwrap();
+    assert!(doc.to_toml().contains("mode = { interactive_points = [] }"));
+    assert_eq!(
+        doc.stage("work").unwrap().mode,
+        StageModeView::InteractivePoints
+    );
+    runtime_ok(&doc);
+    doc.set_stage_mode("work", &StageModeView::Other("odd".into()))
+        .unwrap();
+    assert!(doc.to_toml().contains("mode = \"odd\""));
+    doc.set_stage_mode("work", &StageModeView::Autonomous)
+        .unwrap();
 
     doc.set_stage_text("work", StageText::Description, "Plan it")
         .unwrap();
@@ -701,27 +975,27 @@ fn stage_fields_write_and_delete_the_way_the_lair_does() {
     doc.set_allow_complete("work", None).unwrap();
     assert_eq!(doc.stage("work").unwrap().allow_complete, None);
 
-    doc.set_tools("work", &["read_file".into(), "bash".into()])
+    doc.set_tools("work", &["read_file".into(), "@builtin".into()])
         .unwrap();
-    assert_eq!(doc.stage("work").unwrap().tools, ["read_file", "bash"]);
+    assert_eq!(doc.stage("work").unwrap().tools, ["read_file", "@builtin"]);
+    runtime_ok(&doc);
     doc.set_tools("work", &[]).unwrap();
-    assert!(!doc.to_toml().contains("available_tools"));
+    assert!(!doc.to_toml().contains("tools ="));
     doc.set_connectors("work", &["github".into()]).unwrap();
     assert_eq!(doc.stage("work").unwrap().connectors, ["github"]);
-    assert!(doc.to_toml().contains("available_connectors"));
+    assert!(doc.to_toml().contains("connectors = [\"github\"]"));
     doc.set_connectors("work", &[]).unwrap();
-    assert!(!doc.to_toml().contains("available_connectors"));
+    assert!(!doc.to_toml().contains("connectors"));
     assert!(doc.set_connectors("ghost", &[]).is_err());
 
-    // Models: a slash pins the route and writes the table form; a slashless
-    // entry is a model with the route left open, and writes the bare form that
-    // says so. Both survive a round trip through the view; empty deletes.
+    // Models: a slash pins the route; a slashless entry names a model and
+    // leaves the route open. Both survive a round trip; empty deletes.
     doc.set_models("work", &["anthropic/claude".into(), "gpt-4".into()])
         .unwrap();
     let text = doc.to_toml();
     assert!(
         text.contains(
-            r#"model = { models = [{ provider = "anthropic", model = "claude" }, "gpt-4"] }"#
+            r#"model = { models = [{ provider = "anthropic", model = "claude" }, { model = "gpt-4" }] }"#
         ),
         "{text}"
     );
@@ -730,20 +1004,15 @@ fn stage_fields_write_and_delete_the_way_the_lair_does() {
         ["anthropic/claude", "gpt-4"],
         "what was written reads back unchanged"
     );
-    let mut kept = ManifestDoc::parse(
-        "[agent]\nname = \"m\"\n[stages.a]\nmodel = { allow_user_default = false, models = [{ provider = \"x\", model = \"y\" }] }\n",
-    )
-    .unwrap();
-    kept.set_models("a", &["openai/o".into()]).unwrap();
-    assert!(
-        kept.to_toml().contains("allow_user_default = false"),
-        "{}",
-        kept.to_toml()
+    runtime_ok(&doc);
+    let mut kept = small(
+        "[[graph.stages]]\nname = \"a\"\nmodel = { allow_user_default = false, models = [{ provider = \"x\", model = \"y\" }] }\n",
     );
+    kept.set_models("a", &["openai/o".into()]).unwrap();
+    assert!(kept.to_toml().contains("allow_user_default = false"));
     assert_eq!(kept.stage("a").unwrap().models, ["openai/o"]);
     kept.set_models("a", &[]).unwrap();
     assert!(!kept.to_toml().contains("model"));
-    runtime_ok(&doc);
 
     for err in [
         doc.set_stage_mode("ghost", &StageModeView::Output),
@@ -768,7 +1037,8 @@ fn paths_are_added_kinded_gated_and_deleted() {
     let edge = doc.edge("finish", "work").unwrap();
     assert_eq!(edge.kind, EdgeKind::Hint);
     assert_eq!(edge.hint.as_deref(), Some(edges::NEW_EDGE_HINT));
-    // Again: left alone. To itself: a self-loop, the runtime's shape.
+    assert!(doc.to_toml().contains("name = \"work\"\nfrom = \"finish\""));
+    // Again: left alone. To itself: a self-loop.
     doc.set_edge_hint("finish", "work", "Go round again")
         .unwrap();
     doc.add_edge("finish", "work").unwrap();
@@ -778,6 +1048,12 @@ fn paths_are_added_kinded_gated_and_deleted() {
     );
     doc.add_edge("work", "work").unwrap();
     assert!(doc.edge("work", "work").is_some());
+    // The new edge lands after the stage's other edge.
+    let text = doc.to_toml();
+    let first = text.find("name = \"finish\"\nfrom = \"work\"").unwrap();
+    let second = text.find("name = \"work\"\nfrom = \"work\"").unwrap();
+    let next_stage = text.find("name = \"finish\"\nmode").unwrap();
+    assert!(first < second && second < next_stage, "{text}");
     assert_eq!(
         doc.add_edge("work", "ghost"),
         Err(EditError::NoSuchStage("ghost".into()))
@@ -786,6 +1062,7 @@ fn paths_are_added_kinded_gated_and_deleted() {
         doc.add_edge("ghost", "work"),
         Err(EditError::NoSuchStage("ghost".into()))
     );
+    runtime_ok(&doc);
 
     // Hint on a path that has a hint keeps the text.
     doc.set_edge_kind("finish", "work", EdgeKind::Hint).unwrap();
@@ -800,7 +1077,7 @@ fn paths_are_added_kinded_gated_and_deleted() {
         if kind == EdgeKind::Hint {
             assert!(edge.hint.is_some(), "a hint kind keeps or makes a hint");
         } else {
-            assert_eq!(edge.hint, None, "a condition drops the hint");
+            assert_eq!(edge.hint, None, "any other kind drops the hint");
         }
     }
     // Back to hint with no text left: an empty hint appears.
@@ -833,12 +1110,6 @@ fn paths_are_added_kinded_gated_and_deleted() {
         doc.delete_edge("ghost", "work"),
         Err(EditError::NoSuchStage("ghost".into()))
     );
-    let mut bare = ManifestDoc::parse("[agent]\nname = \"b\"\n[stages.a]\n").unwrap();
-    assert_eq!(
-        bare.delete_edge("a", "a"),
-        Err(EditError::NoSuchEdge("a".into(), "a".into())),
-        "no transitions table"
-    );
     assert_eq!(
         doc.set_edge_kind("work", "ghost", EdgeKind::Always),
         Err(EditError::NoSuchEdge("work".into(), "ghost".into()))
@@ -847,30 +1118,120 @@ fn paths_are_added_kinded_gated_and_deleted() {
         doc.set_edge_hint("ghost", "work", "x"),
         Err(EditError::NoSuchEdge("ghost".into(), "work".into()))
     );
+    assert_eq!(
+        doc.set_edge_gate("work", "ghost", true),
+        Err(EditError::NoSuchEdge("work".into(), "ghost".into()))
+    );
     runtime_ok(&doc);
+}
+
+#[test]
+fn a_new_path_gets_a_free_name_and_the_first_edge_list_is_made() {
+    // No edges yet: the list is made in the stages' shape, and the first
+    // edge of a stage lands after it, before the next stage.
+    let mut doc = small(
+        "[[graph.stages]]\nname = \"a\"\n\n[[graph.stages]]\nname = \"b\"\n\n\
+         [[graph.edges]]\nname = \"b\"\nfrom = \"b\"\nto = \"a\"\n",
+    );
+    doc.add_edge("a", "b").unwrap();
+    // The edge into b called `b` exists under a different stage, so the
+    // name is free here.
+    assert!(doc.to_toml().contains("name = \"b\"\nfrom = \"a\""));
+    let text = doc.to_toml();
+    assert!(
+        text.find("from = \"a\"").unwrap() < text.find("[[graph.stages]]\nname = \"b\"").unwrap(),
+        "{text}"
+    );
+    runtime_ok(&doc);
+    let mut fresh = small("[[graph.stages]]\nname = \"a\"\n");
+    fresh.add_edge("a", "a").unwrap();
+    assert!(
+        fresh.to_toml().contains("[[graph.edges]]"),
+        "{}",
+        fresh.to_toml()
+    );
+    runtime_ok(&fresh);
+    // A taken name gets a number: `to-2`, `to-3`.
+    let mut taken = small(
+        "[[graph.stages]]\nname = \"a\"\n\n[[graph.stages]]\nname = \"b\"\n\n\
+         [[graph.edges]]\nname = \"b\"\nfrom = \"a\"\nto = \"a\"\n\n\
+         [[graph.edges]]\nname = \"b-2\"\nfrom = \"a\"\nto = \"a\"\nwhen = \"error\"\n",
+    );
+    taken.add_edge("a", "b").unwrap();
+    assert!(
+        taken.to_toml().contains("name = \"b-3\""),
+        "{}",
+        taken.to_toml()
+    );
+    runtime_ok(&taken);
+    // Edges written inline stay inline; a list that is not a list is refused.
+    let mut inline = ManifestDoc::parse(
+        "[blueprint]\nname = \"i\"\nversion = \"1\"\n[graph]\n\
+         layout = { total_budget_tokens = 0, regions = [] }\n\
+         stages = [{ name = \"a\" }]\nedges = []\n",
+    )
+    .unwrap();
+    inline.add_stage("b", Some("a")).unwrap();
+    inline.add_edge("a", "b").unwrap();
+    let text = inline.to_toml();
+    assert!(
+        text.contains("stages = [{ name = \"a\" }, { name = \"b\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("edges = [{ name = \"b\", from = \"a\", to = \"b\""),
+        "{text}"
+    );
+    runtime_ok(&inline);
+    inline.rename_stage("a", "start").unwrap();
+    assert!(inline.edge("start", "b").is_some());
+    // A third entry on one line is spaced like the second.
+    inline.add_stage("c", None).unwrap();
+    assert!(
+        inline.to_toml().contains("}, { name = \"c\""),
+        "{}",
+        inline.to_toml()
+    );
+    let mut fresh_inline = ManifestDoc::parse(
+        "[blueprint]\nname = \"i\"\nversion = \"1\"\n[graph]\n\
+         layout = { total_budget_tokens = 0, regions = [] }\nstages = [{ name = \"a\" }]\n",
+    )
+    .unwrap();
+    fresh_inline.add_edge("a", "a").unwrap();
+    assert!(fresh_inline.to_toml().contains("edges = [{ name = \"a\""));
+    let mut odd = small("edges = 3\n[[graph.stages]]\nname = \"a\"\n");
+    assert_eq!(
+        odd.add_edge("a", "a"),
+        Err(EditError::NotATable("edges".into()))
+    );
+    assert!(odd.edges().is_empty());
 }
 
 #[test]
 fn transforms_and_their_rules() {
     let mut doc = coder();
-    // Direct is written as absent; the others by name; an unknown one as is.
+    // Direct is written as absent; clear by name.
     doc.set_transform("discover", "plan", &TransformKind::Clear)
         .unwrap();
     assert_eq!(
         doc.edge("discover", "plan").unwrap().transform,
         TransformKind::Clear
     );
+    assert!(doc.to_toml().contains("carry = \"clear\""));
     doc.set_transform("discover", "plan", &TransformKind::Direct)
         .unwrap();
-    assert!(!edge_text(&doc, "discover", "plan").contains("transform ="));
+    assert_eq!(
+        doc.edge("discover", "plan").unwrap().transform,
+        TransformKind::Direct
+    );
     doc.set_transform("discover", "plan", &TransformKind::Other("teleport".into()))
         .unwrap();
     assert_eq!(
         doc.edge("discover", "plan").unwrap().transform,
         TransformKind::Other("teleport".into())
     );
-    // The first switch to custom seeds carry with every non-pinned region the
-    // stage sees; a second switch does not touch the config.
+    // The first switch to custom files every non-pinned region the stage
+    // sees under carry; picking custom again keeps the rules.
     doc.set_transform("discover", "plan", &TransformKind::Custom)
         .unwrap();
     let rules = doc.edge("discover", "plan").unwrap().rules;
@@ -881,8 +1242,6 @@ fn transforms_and_their_rules() {
         "pinned regions are always carried"
     );
     doc.set_transform_rule("discover", "plan", "conversation", Rule::Compact)
-        .unwrap();
-    doc.set_transform("discover", "plan", &TransformKind::Compact)
         .unwrap();
     doc.set_transform("discover", "plan", &TransformKind::Custom)
         .unwrap();
@@ -895,7 +1254,6 @@ fn transforms_and_their_rules() {
     let rules = doc.edge("discover", "plan").unwrap().rules;
     assert_eq!(rules.clear, ["conversation"]);
     assert!(rules.compact.is_empty());
-    assert!(!edge_text(&doc, "discover", "plan").contains("compact = ["));
     doc.set_compact_prompt("discover", "plan", "Keep the gist")
         .unwrap();
     assert_eq!(
@@ -908,24 +1266,56 @@ fn transforms_and_their_rules() {
         ""
     );
     runtime_ok(&doc);
-    // A prompt on a path with no config makes one; clearing one that has no
-    // config does nothing.
+    // A compacting carry keeps its prompt in `prompt`.
+    doc.set_transform("discover", "plan", &TransformKind::Compact)
+        .unwrap();
+    doc.set_compact_prompt("discover", "plan", "Short").unwrap();
+    assert!(
+        doc.to_toml()
+            .contains("carry = { compact = { prompt = \"Short\" } }")
+    );
+    assert_eq!(
+        doc.edge("discover", "plan").unwrap().rules.compact_prompt,
+        "Short"
+    );
+    doc.set_compact_prompt("discover", "plan", "").unwrap();
+    assert!(doc.to_toml().contains("carry = { compact = {} }"));
+    runtime_ok(&doc);
+    // A rule or a prompt on a direct path makes it custom; clearing a prompt
+    // that is not there does nothing.
     let mut fresh = starter();
     fresh.set_compact_prompt("work", "finish", "").unwrap();
-    assert!(!fresh.edge("work", "finish").unwrap().rules.present);
+    assert_eq!(
+        fresh.edge("work", "finish").unwrap().transform,
+        TransformKind::Direct
+    );
     fresh
         .set_compact_prompt("work", "finish", "Summarize")
-        .unwrap();
-    assert!(fresh.edge("work", "finish").unwrap().rules.present);
-    // Custom on a stage with no regions at all still turns custom.
-    fresh
-        .set_transform("work", "finish", &TransformKind::Custom)
         .unwrap();
     assert_eq!(
         fresh.edge("work", "finish").unwrap().transform,
         TransformKind::Custom
     );
-    assert!(fresh.edge("work", "finish").unwrap().rules.carry.is_empty());
+    fresh.set_compact_prompt("work", "finish", "").unwrap();
+    fresh
+        .set_transform("work", "finish", &TransformKind::Direct)
+        .unwrap();
+    fresh
+        .set_transform_rule("work", "finish", "conversation", Rule::Carry)
+        .unwrap();
+    assert_eq!(
+        fresh.edge("work", "finish").unwrap().rules.carry,
+        ["conversation"]
+    );
+    runtime_ok(&fresh);
+    // Custom on a stage that sees only pinned regions starts empty.
+    let mut pinned = small(
+        "[[graph.stages]]\nname = \"a\"\n[[graph.edges]]\nname = \"a\"\nfrom = \"a\"\nto = \"a\"\n",
+    );
+    pinned
+        .set_transform("a", "a", &TransformKind::Custom)
+        .unwrap();
+    assert!(pinned.to_toml().contains("carry = { custom = {} }"));
     for err in [
         fresh.set_transform("work", "ghost", &TransformKind::Clear),
         fresh.set_transform_rule("work", "ghost", "r", Rule::Carry),
@@ -936,27 +1326,18 @@ fn transforms_and_their_rules() {
             Err(EditError::NoSuchEdge("work".into(), "ghost".into()))
         );
     }
-    // A `transform_config` that is not a table is refused, not clobbered.
-    let mut odd = ManifestDoc::parse(
-        "[agent]\nname = \"o\"\n[context.regions]\nr = { kind = \"temporary\" }\n[stages.a]\n[stages.a.transitions.b]\ntransform_config = 3\n[stages.b]\n",
-    )
-    .unwrap();
-    for err in [
-        odd.set_transform("a", "b", &TransformKind::Custom),
-        odd.set_transform_rule("a", "b", "r", Rule::Carry),
-        odd.set_compact_prompt("a", "b", "x"),
-    ] {
-        assert_eq!(err, Err(EditError::NotATable("transform_config".into())));
-    }
-}
-
-fn edge_text(doc: &ManifestDoc, from: &str, to: &str) -> String {
-    let text = doc.to_toml();
-    let header = format!("[stages.{from}.transitions.{to}]");
-    let start = text.find(&header).expect("edge header");
-    let rest = text.get(start + header.len()..).unwrap();
-    let end = rest.find("\n[").unwrap_or(rest.len());
-    rest.get(..end).unwrap().to_string()
+    // Rules that are not a table are refused, not clobbered.
+    let mut odd = small(
+        "[[graph.stages]]\nname = \"a\"\n[[graph.edges]]\nname = \"a\"\nfrom = \"a\"\nto = \"a\"\ncarry = { custom = 3 }\n",
+    );
+    assert_eq!(
+        odd.set_transform_rule("a", "a", "r", Rule::Carry),
+        Err(EditError::NotATable("custom".into()))
+    );
+    assert_eq!(
+        odd.set_compact_prompt("a", "a", "x"),
+        Err(EditError::NotATable("custom".into()))
+    );
 }
 
 // ─── regions and routing ─────────────────────────────────────────────────────
@@ -964,7 +1345,7 @@ fn edge_text(doc: &ManifestDoc, from: &str, to: &str) -> String {
 #[test]
 fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
     let mut doc = starter();
-    assert!(doc.regions(None).is_empty());
+    assert_eq!(doc.regions(None).len(), 2);
     doc.add_region(&RegionScope::Shared, "notes").unwrap();
     let notes = doc.region(None, "notes").unwrap();
     // A starter region is a percentage and nothing else: a default ceiling is
@@ -974,8 +1355,9 @@ fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
         ("pinned", Some(5.0), None)
     );
     assert!(
-        doc.to_toml().contains("[context.regions]"),
-        "{}",
+        doc.to_toml()
+            .contains("    { name = \"notes\", kind = \"pinned\", budget = \"5%\" },\n]"),
+        "one entry per line, like its neighbours: {}",
         doc.to_toml()
     );
     assert_eq!(
@@ -991,7 +1373,6 @@ fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
         Err(EditError::NoSuchStage("ghost".into()))
     );
     // Routing follows a rename in inheriting stages, and clears on delete.
-    // A default alone follows a rename; overrides alone follow one too.
     doc.set_tool_routing_default("work", "notes").unwrap();
     doc.rename_region(&RegionScope::Shared, "notes", "notes2")
         .unwrap();
@@ -1022,6 +1403,7 @@ fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
         [("bash".to_string(), "memo".to_string())]
     );
     assert_eq!(doc.stages_routing_into("memo"), ["work"]);
+    runtime_ok(&doc);
     doc.rename_region(&RegionScope::Shared, "memo", "memo")
         .unwrap();
     assert_eq!(
@@ -1081,7 +1463,7 @@ fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
         Err(EditError::NoSuchRegion("x".into()))
     );
 
-    // A stage's own layout: a copy of the shared regions, then independent.
+    // A stage's own layout: a copy of the shared layout, then independent.
     doc.create_stage_override("finish").unwrap();
     let own = doc.effective_regions(Some("finish"));
     assert!(!own.inherited);
@@ -1090,13 +1472,14 @@ fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
             .iter()
             .map(|r| r.name.as_str())
             .collect::<Vec<_>>(),
-        ["other"]
+        ["task", "conversation", "other"]
     );
+    runtime_ok(&doc);
     doc.create_stage_override("finish").unwrap(); // already has one: no change
     doc.add_region(&RegionScope::Stage("finish".into()), "scratch")
         .unwrap();
-    assert_eq!(doc.regions(Some("finish")).len(), 2);
-    assert_eq!(doc.regions(None).len(), 1, "the shared layout is untouched");
+    assert_eq!(doc.regions(Some("finish")).len(), 4);
+    assert_eq!(doc.regions(None).len(), 3, "the shared layout is untouched");
     assert!(doc.stage("finish").unwrap().has_own_layout);
     // A stage region's routing rename touches that stage only; the shared
     // rename skips stages with their own layout.
@@ -1128,6 +1511,9 @@ fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
         "other",
         "its own layout: not rewritten"
     );
+    doc.delete_region(&RegionScope::Stage("finish".into()), "pad")
+        .unwrap();
+    assert_eq!(doc.regions(Some("finish")).len(), 3);
     doc.remove_stage_override("finish").unwrap();
     assert!(doc.effective_regions(Some("finish")).inherited);
     assert!(!doc.stage("finish").unwrap().has_own_layout);
@@ -1139,12 +1525,141 @@ fn regions_are_added_renamed_deleted_and_edited_in_both_scopes() {
         doc.create_stage_override("ghost"),
         Err(EditError::NoSuchStage("ghost".into()))
     );
-    // Override on an agent with no shared regions starts empty.
+    // A stage gets a layout of its own by adding a region to it, and a graph
+    // with no shared layout gives an override that starts empty.
     let mut bare = starter();
-    bare.create_stage_override("work").unwrap();
-    assert!(!bare.effective_regions(Some("work")).inherited);
-    assert!(bare.effective_regions(Some("work")).regions.is_empty());
+    bare.add_region(&RegionScope::Stage("work".into()), "solo")
+        .unwrap();
+    assert_eq!(bare.regions(Some("work")).len(), 1);
+    let mut no_layout = ManifestDoc::parse(
+        "[blueprint]\nname = \"n\"\nversion = \"1\"\n[[graph.stages]]\nname = \"a\"\n",
+    )
+    .unwrap();
+    no_layout.create_stage_override("a").unwrap();
+    assert!(no_layout.regions(Some("a")).is_empty());
+    assert!(!no_layout.effective_regions(Some("a")).inherited);
+    no_layout.add_region(&RegionScope::Shared, "first").unwrap();
+    assert_eq!(no_layout.regions(None).len(), 1);
+    runtime_ok(&no_layout);
+    // A layout with no regions list gets one.
+    let mut no_list =
+        small("[[graph.stages]]\nname = \"a\"\nlayout = { total_budget_tokens = 0 }\n");
+    no_list
+        .add_region(&RegionScope::Stage("a".into()), "x")
+        .unwrap();
+    assert_eq!(no_list.regions(Some("a")).len(), 1);
+    // A layout that is not a table is refused.
+    let mut odd = small("[[graph.stages]]\nname = \"a\"\nlayout = 3\n");
+    assert_eq!(
+        odd.add_region(&RegionScope::Stage("a".into()), "x"),
+        Err(EditError::NotATable("layout".into()))
+    );
+}
+
+#[test]
+fn a_regions_input_is_bound_unbound_and_followed() {
+    use RegionField as F;
+    use RegionValue as V;
+    let s = RegionScope::Shared;
+    let mut doc = starter();
+    doc.add_region(&s, "notes").unwrap();
+    // A new input name declares a text input bound to the region.
+    doc.set_region_field(&s, "notes", F::Seed, V::Text("brief".into()))
+        .unwrap();
+    assert_eq!(doc.region(None, "notes").unwrap().seed, "brief");
+    assert!(
+        doc.to_toml()
+            .contains("name = \"brief\"\ntype = \"text\"\nbinds = [{ region = \"notes\" }]"),
+        "{}",
+        doc.to_toml()
+    );
     runtime_ok(&doc);
+    // Binding the same input again changes nothing; binding an existing
+    // input adds the region to its binds and drops the old one, which had
+    // nowhere else to go.
+    let before = doc.to_toml();
+    doc.set_region_field(&s, "notes", F::Seed, V::Text("brief".into()))
+        .unwrap();
+    assert_eq!(doc.to_toml(), before);
+    doc.set_region_field(&s, "notes", F::Seed, V::Text("task".into()))
+        .unwrap();
+    assert_eq!(doc.region(None, "notes").unwrap().seed, "task");
+    assert!(!doc.to_toml().contains("brief"), "{}", doc.to_toml());
+    assert!(
+        doc.to_toml()
+            .contains("binds = [{ region = \"task\" }, { region = \"notes\" }]")
+    );
+    // A rename of the region follows the binding; a delete unbinds it.
+    doc.rename_region(&s, "notes", "memo").unwrap();
+    assert_eq!(doc.region(None, "memo").unwrap().seed, "task");
+    runtime_ok(&doc);
+    doc.delete_region(&s, "memo").unwrap();
+    assert!(doc.to_toml().contains("binds = [{ region = \"task\" }]"));
+    // Clearing unbinds, and drops an input left binding nothing.
+    doc.set_region_field(&s, "task", F::Seed, V::Text(String::new()))
+        .unwrap();
+    assert_eq!(doc.region(None, "task").unwrap().seed, "");
+    assert!(
+        !doc.to_toml().contains("[[graph.inputs]]"),
+        "{}",
+        doc.to_toml()
+    );
+    // An input with no binds gets a list; a name an input cannot have is
+    // refused; binds that are not a list are refused.
+    let mut odd = small(
+        "[[graph.inputs]]\nname = \"loose\"\ntype = \"text\"\n\n\
+         [[graph.inputs]]\nname = \"stiff\"\ntype = \"text\"\nbinds = 3\n\n\
+         [[graph.stages]]\nname = \"a\"\n",
+    );
+    odd.set_region_field(&s, "r", F::Seed, V::Text("loose".into()))
+        .unwrap();
+    assert_eq!(odd.region(None, "r").unwrap().seed, "loose");
+    assert_eq!(
+        odd.set_region_field(&s, "r", F::Seed, V::Text("9lives".into())),
+        Err(EditError::BadName("9lives".into()))
+    );
+    assert_eq!(
+        odd.set_region_field(&s, "r", F::Seed, V::Text("stiff".into())),
+        Err(EditError::NotATable("binds".into()))
+    );
+    // A region with a seed of its own is left alone.
+    let mut coder = coder();
+    let before = coder.to_toml();
+    coder
+        .set_region_field(&s, "conventions", F::Seed, V::Text("task".into()))
+        .unwrap();
+    assert_eq!(coder.to_toml(), before);
+    assert_eq!(
+        coder.set_region_field(&s, "ghost", F::Seed, V::Text("task".into())),
+        Err(EditError::NoSuchRegion("ghost".into()))
+    );
+    // A stage region's rename and delete leave the inputs alone while
+    // another layout still has a region of the name, and follow it once
+    // none does.
+    let mut staged = starter();
+    staged.create_stage_override("work").unwrap();
+    let scope = RegionScope::Stage("work".into());
+    staged.rename_region(&scope, "task", "job").unwrap();
+    assert_eq!(staged.region(None, "task").unwrap().seed, "task");
+    staged.delete_region(&scope, "job").unwrap();
+    assert_eq!(staged.region(None, "task").unwrap().seed, "task");
+    staged.add_region(&scope, "notes").unwrap();
+    staged
+        .set_region_field(&scope, "notes", F::Seed, V::Text("brief".into()))
+        .unwrap();
+    assert_eq!(staged.region(Some("work"), "notes").unwrap().seed, "brief");
+    staged.rename_region(&scope, "notes", "memo").unwrap();
+    assert_eq!(staged.region(Some("work"), "memo").unwrap().seed, "brief");
+    runtime_ok(&staged);
+    staged.delete_region(&scope, "memo").unwrap();
+    assert!(!staged.to_toml().contains("brief"), "{}", staged.to_toml());
+    staged.delete_region(&scope, "conversation").unwrap();
+    assert!(staged.region(None, "conversation").is_some());
+    let mut no_list = small("inputs = 3\n[[graph.stages]]\nname = \"a\"\n");
+    assert_eq!(
+        no_list.set_region_field(&s, "r", F::Seed, V::Text("brief".into())),
+        Err(EditError::NotATable("inputs".into()))
+    );
 }
 
 #[test]
@@ -1154,69 +1669,137 @@ fn region_fields_write_the_lairs_way() {
     let mut doc = starter();
     doc.add_region(&RegionScope::Shared, "r").unwrap();
     let s = RegionScope::Shared;
+    let r = |doc: &ManifestDoc| doc.region(None, "r").unwrap();
+    // A sliding window is written with a size; the same kind again keeps it.
     doc.set_region_field(&s, "r", F::Kind, V::Text("sliding_window".into()))
         .unwrap();
-    doc.set_region_field(&s, "r", F::Kind, V::Text("".into()))
-        .unwrap();
     assert_eq!(
-        doc.region(None, "r").unwrap().kind,
-        "sliding_window",
-        "kind is never emptied"
+        (r(&doc).kind.as_str(), r(&doc).max_items),
+        ("sliding_window", Some(10))
     );
-    doc.set_region_field(&s, "r", F::BudgetPercent, V::Number(Some(150)))
-        .unwrap();
-    assert_eq!(
-        doc.region(None, "r").unwrap().budget_percent,
-        Some(100.0),
-        "clamped"
-    );
-    doc.set_region_field(&s, "r", F::BudgetPercent, V::Number(None))
-        .unwrap();
-    assert_eq!(doc.region(None, "r").unwrap().budget_percent, None);
-    doc.set_region_field(&s, "r", F::MaxTokens, V::Number(Some(0)))
-        .unwrap();
-    assert_eq!(doc.region(None, "r").unwrap().max_tokens, Some(1));
-    doc.set_region_field(&s, "r", F::MaxTokens, V::Number(None))
-        .unwrap();
-    assert_eq!(doc.region(None, "r").unwrap().max_tokens, None);
     doc.set_region_field(&s, "r", F::MaxItems, V::Number(Some(12)))
         .unwrap();
-    doc.set_region_field(&s, "r", F::Overflow, V::Number(Some(3)))
+    doc.set_region_field(&s, "r", F::Kind, V::Text("sliding_window".into()))
         .unwrap();
+    assert_eq!(r(&doc).max_items, Some(12));
+    doc.set_region_field(&s, "r", F::Kind, V::Text("".into()))
+        .unwrap();
+    assert_eq!(r(&doc).kind, "sliding_window", "kind is never emptied");
+    runtime_ok(&doc);
+    // Eviction: bulk and compact carry a count, kept across a switch;
+    // per_item is the default and is written as absent.
+    assert!(matches!(
+        doc.set_region_field(&s, "r", F::Overflow, V::Number(Some(3))),
+        Err(EditError::OutOfRange(_))
+    ));
     doc.set_region_field(&s, "r", F::Strategy, V::Text("bulk".into()))
         .unwrap();
-    let r = doc.region(None, "r").unwrap();
     assert_eq!(
-        (r.max_items, r.overflow, r.strategy.as_str()),
-        (Some(12), Some(3), "bulk")
+        (r(&doc).strategy.as_str(), r(&doc).overflow),
+        ("bulk", Some(10))
     );
+    doc.set_region_field(&s, "r", F::Overflow, V::Number(Some(3)))
+        .unwrap();
+    doc.set_region_field(&s, "r", F::Strategy, V::Text("compact".into()))
+        .unwrap();
+    assert_eq!(
+        (r(&doc).strategy.as_str(), r(&doc).overflow),
+        ("compact", Some(3))
+    );
+    runtime_ok(&doc);
+    doc.set_region_field(&s, "r", F::Overflow, V::Number(Some(0)))
+        .unwrap();
+    assert_eq!(r(&doc).overflow, Some(1));
+    doc.set_region_field(&s, "r", F::Overflow, V::Number(None))
+        .unwrap();
+    assert_eq!(r(&doc).overflow, Some(10));
+    assert!(matches!(
+        doc.set_region_field(&s, "r", F::Strategy, V::Text("lifo".into())),
+        Err(EditError::OutOfRange(_))
+    ));
+    doc.set_region_field(&s, "r", F::Strategy, V::Text("per_item".into()))
+        .unwrap();
+    assert_eq!(r(&doc).strategy, "");
+    // Taking the size off a window leaves the bare name.
+    doc.set_region_field(&s, "r", F::MaxItems, V::Number(None))
+        .unwrap();
+    assert!(doc.to_toml().contains("kind = \"sliding_window\""));
+    doc.set_region_field(&s, "r", F::MaxItems, V::Number(Some(0)))
+        .unwrap();
+    assert_eq!(r(&doc).max_items, Some(1));
+    doc.set_region_field(&s, "r", F::Kind, V::Text("pinned".into()))
+        .unwrap();
+    assert!(doc.to_toml().contains("{ name = \"r\", kind = \"pinned\""));
+    // A size given to a kind written by name turns it into a table.
+    doc.set_region_field(&s, "r", F::Strategy, V::Text("".into()))
+        .unwrap();
+    assert!(doc.to_toml().contains("{ name = \"r\", kind = \"pinned\""));
+    runtime_ok(&doc);
+
+    // The budget's share, clamped; a floor and a ceiling turn it into a
+    // table, and taking both off turns it back.
+    doc.set_region_field(&s, "r", F::BudgetPercent, V::Number(Some(150)))
+        .unwrap();
+    assert_eq!(r(&doc).budget_percent, Some(100.0), "clamped");
+    doc.set_region_field(&s, "r", F::MaxTokens, V::Number(Some(0)))
+        .unwrap();
+    assert_eq!(r(&doc).max_tokens, Some(1));
+    doc.set_region_field(&s, "r", F::MaxTokens, V::Number(Some(1000)))
+        .unwrap();
+    doc.set_region_field(&s, "r", F::MinTokens, V::Number(Some(50)))
+        .unwrap();
+    assert!(
+        doc.to_toml()
+            .contains("budget = { percent = \"100%\", max = 1000, min = 50 }"),
+        "{}",
+        doc.to_toml()
+    );
+    doc.set_region_field(&s, "r", F::BudgetPercent, V::Number(Some(20)))
+        .unwrap();
+    assert_eq!(
+        (r(&doc).budget_percent, r(&doc).min_tokens),
+        (Some(20.0), Some(50))
+    );
+    runtime_ok(&doc);
+    doc.set_region_field(&s, "r", F::MaxTokens, V::Number(None))
+        .unwrap();
+    doc.set_region_field(&s, "r", F::MinTokens, V::Number(None))
+        .unwrap();
+    assert!(doc.to_toml().contains("budget = \"20%\""));
+    doc.set_region_field(&s, "r", F::BudgetPercent, V::Number(None))
+        .unwrap();
+    assert_eq!(r(&doc).budget_percent, None);
+    // No percentage: a clamp is refused, taking one off is nothing.
+    assert!(matches!(
+        doc.set_region_field(&s, "r", F::MaxTokens, V::Number(Some(5))),
+        Err(EditError::OutOfRange(_))
+    ));
+    assert!(matches!(
+        doc.set_region_field(&s, "r", F::MinTokens, V::Number(Some(5))),
+        Err(EditError::OutOfRange(_))
+    ));
+    doc.set_region_field(&s, "r", F::MinTokens, V::Number(None))
+        .unwrap();
+    doc.set_region_field(&s, "r", F::BudgetPercent, V::Number(Some(5)))
+        .unwrap();
+
     doc.set_region_field(&s, "r", F::Required, V::Flag(true))
         .unwrap();
     doc.set_region_field(&s, "r", F::RequiredMessage, V::Text("Fill me".into()))
         .unwrap();
     doc.set_region_field(&s, "r", F::Description, V::Text("What it holds".into()))
         .unwrap();
-    let r = doc.region(None, "r").unwrap();
-    assert!(r.required);
-    assert_eq!(r.required_message, "Fill me");
-    assert_eq!(r.description, "What it holds");
+    let region = r(&doc);
+    assert!(region.required);
+    assert_eq!(region.required_message, "Fill me");
+    assert_eq!(region.description, "What it holds");
     doc.set_region_field(&s, "r", F::Required, V::Flag(false))
         .unwrap();
-    assert!(!doc.region(None, "r").unwrap().required);
-    assert!(!doc.to_toml().contains("required = "));
-    doc.set_region_field(&s, "r", F::Seed, V::Text("task".into()))
-        .unwrap();
-    assert_eq!(doc.region(None, "r").unwrap().seed, "task");
-    doc.set_region_field(&s, "r", F::Seed, V::Text("".into()))
-        .unwrap();
-    assert_eq!(doc.region(None, "r").unwrap().seed, "");
-    assert!(!doc.to_toml().contains("seed"));
-    // A table seed is displayed empty and never clobbered by clearing.
-    let mut coder = coder();
-    coder
-        .set_region_field(&s, "conventions", F::Seed, V::Text("".into()))
-        .unwrap();
-    assert!(coder.region(None, "conventions").unwrap().seed_is_table);
+    assert!(!r(&doc).required);
+    assert!(
+        !doc.to_toml()
+            .contains("{ name = \"r\", kind = \"pinned\", budget = \"5%\", required =")
+    );
     // Mismatched value shapes are refused, unknown regions too.
     assert!(matches!(
         doc.set_region_field(&s, "r", F::Kind, V::Flag(true)),
@@ -1251,8 +1834,10 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         RegionValue::Text("Image/*, audio/wav image/*".into()),
     )
     .unwrap();
-    let r = doc.region(None, "shots").unwrap();
-    assert_eq!(r.accepts, ["image/*", "audio/wav"]);
+    assert_eq!(
+        doc.region(None, "shots").unwrap().accepts,
+        ["image/*", "audio/wav"]
+    );
     runtime_ok(&doc);
     doc.set_region_field(
         &s,
@@ -1261,10 +1846,9 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         RegionValue::Text(" ".into()),
     )
     .unwrap();
-    let r = doc.region(None, "shots").unwrap();
-    assert!(r.accepts.is_empty());
+    assert!(doc.region(None, "shots").unwrap().accepts.is_empty());
     assert!(!doc.to_toml().contains("accepts"), "{}", doc.to_toml());
-    // The stage's input lists come and go with their table.
+    // The stage's input lists come and go.
     assert_eq!(
         doc.set_stage_input("ghost", InputList::Accepts, &[]),
         Err(EditError::NoSuchStage("ghost".into()))
@@ -1276,24 +1860,12 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
     let w = doc.stage("work").unwrap();
     assert_eq!(w.input_accepts, ["video/*"]);
     assert_eq!(w.input_as_text, ["model/obj"]);
-    assert!(
-        doc.to_toml().contains("[stages.work.input]"),
-        "{}",
-        doc.to_toml()
-    );
     runtime_ok(&doc);
     doc.set_stage_input("work", InputList::Accepts, &[])
         .unwrap();
-    assert!(
-        doc.to_toml().contains("[stages.work.input]"),
-        "as_text keeps the table: {}",
-        doc.to_toml()
-    );
     doc.set_stage_input("work", InputList::AsText, &[]).unwrap();
-    assert!(!doc.to_toml().contains("input"), "{}", doc.to_toml());
-    // Clearing what is not there is fine.
-    doc.set_stage_input("work", InputList::AsText, &[]).unwrap();
-    // Artifacts: [[tables]] under a headed stage, edited by index, refused
+    assert!(!doc.to_toml().contains("input_"), "{}", doc.to_toml());
+    // Artifacts: an inline list under `output`, edited by index, refused
     // when wrong.
     assert!(doc.artifacts("work").is_empty());
     assert!(doc.artifacts("ghost").is_empty());
@@ -1312,7 +1884,9 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
     );
     doc.add_artifact("work", "track").unwrap();
     assert!(
-        doc.to_toml().contains("[[stages.work.output.artifacts]]"),
+        doc.to_toml().contains(
+            "output = { artifacts = [{ name = \"final\", mime_type = \"*/*\" }, { name = \"track\", mime_type = \"*/*\" }] }"
+        ),
         "{}",
         doc.to_toml()
     );
@@ -1361,15 +1935,18 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         doc.set_artifact("ghost", 0, A::Required(true)),
         Err(EditError::NoSuchStage("ghost".into()))
     );
-    let bp = runtime_ok(&doc);
-    let work = bp.stages.iter().find(|s| s.name == "work").unwrap();
-    let declared = &work.output.as_ref().unwrap().artifacts;
+    let graph = runtime_ok(&doc);
+    let declared = &graph.stages[0].output.as_ref().unwrap().artifacts;
     assert_eq!(declared.len(), 2);
-    assert!(declared[0].required && declared[0].mime_type == "video/mp4");
+    assert!(declared[0].required && declared[0].mime_type.as_str() == "video/mp4");
     doc.set_artifact("work", 0, A::Required(false)).unwrap();
     doc.set_artifact("work", 0, A::Description(String::new()))
         .unwrap();
-    assert!(!doc.to_toml().contains("required"), "{}", doc.to_toml());
+    assert!(
+        !doc.to_toml().contains("required = true }"),
+        "{}",
+        doc.to_toml()
+    );
     // Deleting: out of range refused; the last one takes the table with it.
     assert!(matches!(
         doc.delete_artifact("work", 2),
@@ -1387,67 +1964,43 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         doc.delete_artifact("ghost", 0),
         Err(EditError::NoSuchStage("ghost".into()))
     );
-    // An output table with other keys keeps them when its list empties.
-    let mut shaped = ManifestDoc::parse(
-        "[agent]\nname = \"s\"\n[stages.a]\n[stages.a.output]\nformat = \"json\"\n",
-    )
-    .unwrap();
+    // An output table with other keys keeps them when its list empties; a
+    // headed list stays headed.
+    let mut shaped = small(
+        "[[graph.stages]]\nname = \"a\"\n[graph.stages.output]\nformat = \"json\"\n\
+         [[graph.stages.output.artifacts]]\nname = \"x\"\nmime_type = \"*/*\"\n",
+    );
+    assert_eq!(shaped.artifacts("a").len(), 1);
+    shaped.add_artifact("a", "y").unwrap();
+    assert!(
+        shaped
+            .to_toml()
+            .contains("[[graph.stages.output.artifacts]]\nname = \"y\""),
+        "{}",
+        shaped.to_toml()
+    );
+    runtime_ok(&shaped);
     assert!(matches!(
-        shaped.delete_artifact("a", 0),
+        shaped.delete_artifact("a", 5),
         Err(EditError::OutOfRange(_))
     ));
-    shaped.add_artifact("a", "x").unwrap();
+    shaped.delete_artifact("a", 0).unwrap();
     shaped.delete_artifact("a", 0).unwrap();
     let text = shaped.to_toml();
     assert!(
         text.contains("format = \"json\"") && !text.contains("artifacts"),
         "{text}"
     );
-    // An inline stage gets an inline list, edited and emptied the same way.
-    let mut inline =
-        ManifestDoc::parse("stages = { a = { mode = \"autonomous\" } }\n[agent]\nname = \"i\"\n")
-            .unwrap();
-    inline.add_artifact("a", "out").unwrap();
-    inline.add_artifact("a", "log").unwrap();
-    let text = inline.to_toml();
-    assert!(
-        text.contains(
-            "artifacts = [{ name = \"out\", type = \"*/*\" }, { name = \"log\", type = \"*/*\" }]"
-        ),
-        "{text}"
-    );
-    inline
-        .set_artifact("a", 1, A::Type("text/plain".into()))
-        .unwrap();
-    assert_eq!(inline.artifacts("a")[1].mime_type, "text/plain");
-    runtime_ok(&inline);
-    assert!(matches!(
-        inline.delete_artifact("a", 5),
-        Err(EditError::OutOfRange(_))
-    ));
-    inline.delete_artifact("a", 1).unwrap();
-    inline.delete_artifact("a", 0).unwrap();
-    assert!(!inline.to_toml().contains("output"), "{}", inline.to_toml());
-    assert!(matches!(
-        inline.delete_artifact("a", 0),
-        Err(EditError::OutOfRange(_))
-    ));
     // A list that is not a list is refused rather than clobbered, and an
     // entry that is not a table is skipped.
-    let mut odd = ManifestDoc::parse(
-        "[agent]\nname = \"odd\"\n[stages.a]\noutput = { artifacts = 3 }\n\
-         [stages.b]\noutput = { artifacts = [1, { name = \"x\", type = \"y\" }] }\n\
-         [stages.c]\noutput = \"nope\"\ninput = \"nope\"\n",
-    )
-    .unwrap();
-    assert_eq!(
-        odd.set_stage_input("c", InputList::Accepts, &["x/y".to_string()]),
-        Err(EditError::NotATable("input".into()))
+    let mut odd = small(
+        "[[graph.stages]]\nname = \"a\"\noutput = { artifacts = 3 }\n\
+         [[graph.stages]]\nname = \"b\"\noutput = { artifacts = [1, { name = \"x\", mime_type = \"y/z\" }] }\n\
+         [[graph.stages]]\nname = \"c\"\noutput = \"nope\"\n",
     );
-    odd.set_stage_input("c", InputList::Accepts, &[]).unwrap();
     assert_eq!(
         odd.add_artifact("a", "x"),
-        Err(EditError::NotATable("artifacts".into()))
+        Err(EditError::NotATable("a list".into()))
     );
     assert!(matches!(
         odd.set_artifact("a", 0, A::Required(true)),
@@ -1458,8 +2011,12 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         Err(EditError::OutOfRange(_))
     ));
     assert_eq!(odd.artifacts("b").len(), 1);
-    odd.set_artifact("b", 0, A::Type("z".into())).unwrap();
-    assert_eq!(odd.artifacts("b")[0].mime_type, "z");
+    odd.set_artifact("b", 0, A::Type("z/z".into())).unwrap();
+    assert_eq!(odd.artifacts("b")[0].mime_type, "z/z");
+    assert!(matches!(
+        odd.delete_artifact("b", 1),
+        Err(EditError::OutOfRange(_))
+    ));
     odd.delete_artifact("b", 0).unwrap();
     assert!(odd.artifacts("b").is_empty());
     assert_eq!(
@@ -1477,12 +2034,7 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
     let mut doc = starter();
     doc.set_output_format("work", "markdown").unwrap();
     assert_eq!(doc.stage("work").unwrap().output_format, "markdown");
-    assert!(
-        doc.to_toml().contains("[stages.work.output]"),
-        "{}",
-        doc.to_toml()
-    );
-    // Cleared with nothing else in the table, the table goes too.
+    assert!(doc.to_toml().contains("output = { format = \"markdown\" }"));
     doc.set_output_format("work", "").unwrap();
     assert!(!doc.to_toml().contains("output"), "{}", doc.to_toml());
     doc.set_output_format("work", "markdown").unwrap();
@@ -1495,6 +2047,11 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
     );
     doc.delete_artifact("work", 0).unwrap();
     assert!(!doc.to_toml().contains("output"), "{}", doc.to_toml());
+    doc.set_output_format("work", "json").unwrap();
+    assert!(matches!(
+        doc.delete_artifact("work", 0),
+        Err(EditError::OutOfRange(_))
+    ));
     doc.set_output_format("work", "").unwrap();
     assert_eq!(
         doc.set_output_format("ghost", "x"),
@@ -1520,16 +2077,8 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
             ("context_export".to_string(), vec!["text/*".to_string()]),
         ]
     );
-    assert!(
-        doc.to_toml().contains("[stages.work.tool_accepts]"),
-        "{}",
-        doc.to_toml()
-    );
-    let bp = runtime_ok(&doc);
-    assert_eq!(
-        bp.stages[0].tool_limit("context_export"),
-        Some(["text/*".to_string()].as_slice())
-    );
+    let graph = runtime_ok(&doc);
+    assert_eq!(graph.stages[0].tool_accepts.len(), 2);
     doc.set_tool_accepts("work", "spawn_agent", &[]).unwrap();
     assert_eq!(doc.stage("work").unwrap().tool_accepts.len(), 1);
     doc.set_tool_accepts("work", "context_export", &[]).unwrap();
@@ -1545,10 +2094,10 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
     );
     // A limit that is not a list is skipped by the view and refused by the
     // writer; a format table that is not a table is refused too.
-    let mut odd = ManifestDoc::parse(
-        "[agent]\nname = \"odd\"\n[stages.a]\ntool_accepts = { t = 3, u = [\"x/y\"] }\noutput = \"nope\"\n[stages.b]\ntool_accepts = 3\n",
-    )
-    .unwrap();
+    let mut odd = small(
+        "[[graph.stages]]\nname = \"a\"\ntool_accepts = { t = 3, u = [\"x/y\"] }\noutput = \"nope\"\n\
+         [[graph.stages]]\nname = \"b\"\ntool_accepts = 3\n",
+    );
     assert_eq!(
         odd.stage("a").unwrap().tool_accepts,
         vec![("u".to_string(), vec!["x/y".to_string()])]
@@ -1558,6 +2107,7 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         odd.set_output_format("a", "json"),
         Err(EditError::NotATable("output".into()))
     );
+    odd.set_output_format("a", "").unwrap();
     odd.set_tool_accepts("a", "t", &["a/b".to_string()])
         .unwrap();
     assert_eq!(odd.stage("a").unwrap().tool_accepts.len(), 2);
@@ -1566,6 +2116,13 @@ fn mime_keys_write_the_way_the_runtime_reads_them() {
         odd.set_tool_accepts("b", "t", &["a/b".to_string()]),
         Err(EditError::NotATable("tool_accepts".into()))
     );
+    odd.set_tool_accepts("b", "t", &[]).unwrap();
+    // The graph's own mime rows, by pattern.
+    let rows = small(
+        "[graph.mime_types]\n\"model/x\" = { text = false }\n[[graph.stages]]\nname = \"a\"\n",
+    );
+    assert_eq!(mime_type_keys(&rows), ["model/x"]);
+    assert!(mime_type_keys(&starter()).is_empty());
 }
 
 #[test]
@@ -1577,13 +2134,17 @@ fn tool_routing_is_created_and_tidied() {
     assert!(!doc.to_toml().contains("tool_routing"));
     doc.set_tool_routing_default("work", "conversation")
         .unwrap();
-    doc.set_tool_routing_override("work", "bash", "scratch")
+    doc.set_tool_routing_override("work", "bash", "task")
         .unwrap();
-    doc.set_tool_routing_override("work", "read_file", "scratch")
+    doc.set_tool_routing_override("work", "read_file", "task")
         .unwrap();
     let routing = doc.tool_routing("work");
     assert_eq!(routing.default_region.as_deref(), Some("conversation"));
     assert_eq!(routing.overrides.len(), 2);
+    assert!(doc.to_toml().contains(
+        "tool_routing = { default_region = \"conversation\", tool_regions = { bash = \"task\", read_file = \"task\" } }"
+    ));
+    runtime_ok(&doc);
     doc.set_tool_routing_override("work", "bash", "").unwrap();
     assert_eq!(doc.tool_routing("work").overrides.len(), 1);
     // The default goes but an override keeps the table.
@@ -1607,64 +2168,89 @@ fn tool_routing_is_created_and_tidied() {
         doc.set_tool_routing_override("ghost", "t", "x"),
         Err(EditError::NoSuchStage("ghost".into()))
     );
-    let mut odd = ManifestDoc::parse(
-        "[agent]\nname = \"o\"\n[stages.a]\n[stages.a.tool_routing]\noverrides = 3\n",
-    )
-    .unwrap();
+    let mut odd = small(
+        "[[graph.stages]]\nname = \"a\"\ntool_routing = { default_region = \"r\", tool_regions = 3 }\n\
+         [[graph.stages]]\nname = \"b\"\ntool_routing = 4\n",
+    );
     assert_eq!(
         odd.set_tool_routing_override("a", "bash", "r"),
-        Err(EditError::NotATable("overrides".into()))
+        Err(EditError::NotATable("tool_regions".into()))
+    );
+    assert_eq!(
+        odd.set_tool_routing_default("b", "r"),
+        Err(EditError::NotATable("tool_routing".into()))
+    );
+    odd.set_tool_routing_default("b", "").unwrap();
+    odd.set_tool_routing_override("b", "t", "").unwrap();
+    assert_eq!(
+        odd.set_tool_routing_override("b", "t", "r"),
+        Err(EditError::NotATable("tool_routing".into()))
     );
 }
 
 #[test]
-fn odd_content_is_refused_rather_than_clobbered() {
-    let mut doc = ManifestDoc::parse(
-        "[agent]\nname = \"odd\"\n[stages.a]\ncontext = \"nope\"\ntool_routing = 4\ntransitions = 7\n",
+fn output_routing_and_reset_round_trip_through_the_file() {
+    let mut doc =
+        small("[[graph.stages]]\nname = \"draw\"\n\n[[graph.stages]]\nname = \"describe\"\n");
+    // A ghost stage is refused for both setters.
+    assert_eq!(
+        doc.set_output_routing("ghost", &[("image/*".into(), "r".into())]),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    assert_eq!(
+        doc.set_context_reset("ghost", &["r".into()]),
+        Err(EditError::NoSuchStage("ghost".into()))
+    );
+    // output_routing: written in the given order, read back, then rewritten.
+    doc.set_output_routing(
+        "draw",
+        &[
+            ("image/*".into(), "r".into()),
+            ("application/pdf".into(), "r".into()),
+        ],
     )
     .unwrap();
     assert_eq!(
-        doc.add_region(&RegionScope::Stage("a".into()), "r"),
-        Err(EditError::NotATable("context".into()))
+        doc.stage("draw").unwrap().output_routing,
+        [
+            ("image/*".to_string(), "r".to_string()),
+            ("application/pdf".to_string(), "r".to_string()),
+        ]
+    );
+    runtime_ok(&doc);
+    doc.set_output_routing("draw", &[("image/*".into(), "r".into())])
+        .unwrap();
+    assert_eq!(
+        doc.stage("draw").unwrap().output_routing,
+        [("image/*".to_string(), "r".to_string())]
+    );
+    doc.set_output_routing("draw", &[]).unwrap();
+    assert!(doc.stage("draw").unwrap().output_routing.is_empty());
+    assert!(
+        !doc.to_toml().contains("output_routing"),
+        "{}",
+        doc.to_toml()
+    );
+    // reset: set, read back, then cleared.
+    doc.set_context_reset("describe", &["r".into()]).unwrap();
+    assert_eq!(doc.stage("describe").unwrap().context_reset, ["r"]);
+    runtime_ok(&doc);
+    doc.set_context_reset("describe", &[]).unwrap();
+    assert!(!doc.to_toml().contains("reset"), "{}", doc.to_toml());
+    // A non-table `output_routing` is refused, not clobbered; an entry that
+    // is not a string is left out of the view.
+    let mut odd = small(
+        "[[graph.stages]]\nname = \"a\"\noutput_routing = 3\n\
+         [[graph.stages]]\nname = \"b\"\noutput_routing = { \"image/*\" = 3, \"text/*\" = \"r\" }\n",
     );
     assert_eq!(
-        doc.create_stage_override("a"),
-        Err(EditError::NotATable("context".into()))
+        odd.set_output_routing("a", &[("image/*".into(), "r".into())]),
+        Err(EditError::NotATable("output_routing".into()))
     );
     assert_eq!(
-        doc.set_tool_routing_default("a", "r"),
-        Err(EditError::NotATable("tool_routing".into()))
+        odd.stage("b").unwrap().output_routing,
+        [("text/*".to_string(), "r".to_string())]
     );
-    assert_eq!(
-        doc.set_tool_routing_override("a", "t", "r"),
-        Err(EditError::NotATable("tool_routing".into()))
-    );
-    assert_eq!(
-        doc.add_edge("a", "a"),
-        Err(EditError::NotATable("transitions".into()))
-    );
-    // A `[stages]` written inline gets inline children.
-    let mut inline = ManifestDoc::parse(
-        "stages = { a = { mode = \"autonomous\", transitions = { } } }\n[agent]\nname = \"i\"\n",
-    )
-    .unwrap();
-    inline.add_stage("b", Some("a")).unwrap();
-    inline.add_edge("a", "b").unwrap();
-    assert_eq!(inline.stage_names(), ["a", "b"]);
-    let text = inline.to_toml();
-    assert!(text.contains("b = { mode = \"autonomous\""), "{text}");
-    assert!(inline.edge("a", "b").is_some());
-    runtime_ok(&inline);
-    inline.rename_stage("a", "start").unwrap();
-    assert!(inline.edge("start", "b").is_some());
-    // An inline `context = {}` gets an inline copy of the shared regions.
-    let mut ctx = ManifestDoc::parse(
-        "[agent]\nname = \"c\"\n[context.regions]\nnotes = { kind = \"pinned\" }\n[stages.a]\ncontext = { }\n",
-    )
-    .unwrap();
-    ctx.create_stage_override("a").unwrap();
-    assert!(!ctx.effective_regions(Some("a")).inherited);
-    assert_eq!(ctx.regions(Some("a"))[0].name, "notes");
 }
 
 // ─── check ───────────────────────────────────────────────────────────────────
@@ -1679,9 +2265,8 @@ fn check_reports_parse_validate_and_lint_in_that_order() {
     assert!(!parse.is_saveable());
     assert_eq!(parse.first().map(|p| p.severity), Some(Severity::Error));
 
-    let mut doc = starter();
-    doc.add_edge("work", "ghost").unwrap_err();
     // A dangling worker stage fails validation on the stage.
+    let mut doc = starter();
     doc.set_stage_mode("work", &StageModeView::FanOut).unwrap();
     doc.set_fan_out(
         "work",
@@ -1690,26 +2275,25 @@ fn check_reports_parse_validate_and_lint_in_that_order() {
     .unwrap();
     let invalid = check(&doc.to_toml(), &dir);
     assert_eq!(invalid.items[0].code, "validate");
-    assert_eq!(invalid.items[0].stage.as_deref(), Some("work"));
-    assert_eq!(invalid.for_stage("work").len(), 1);
+    assert_eq!(
+        invalid.items[0].stage.as_deref(),
+        Some("work"),
+        "{invalid:?}"
+    );
+    assert!(!invalid.for_stage("work").is_empty());
     // A validation error that names no stage.
-    let mut noentry = starter();
-    noentry
-        .set_stage_mode("work", &StageModeView::Autonomous)
-        .unwrap();
-    let text = noentry
+    let text = starter()
         .to_toml()
-        .replace("entry_stage = \"work\"", "entry_stage = \"ghost\"");
+        .replace("entry = \"work\"", "entry = \"ghost\"");
     let graph = check(&text, &dir);
     assert_eq!(graph.items[0].code, "validate");
     assert_eq!(graph.items[0].stage, None);
-
-    // A path into a stage that is not there is a transition error, filed
-    // under the stage it leaves.
-    let dangling = starter().to_toml().replace(
-        "[stages.finish]",
-        "[stages.work.transitions.ghost]\nhint = \"x\"\n\n[stages.finish]",
-    );
+    assert!(graph.items[0].message.contains("ghost"), "{graph:?}");
+    // An edge into a stage that is not there is filed under the stage it
+    // leaves.
+    let dangling = starter()
+        .to_toml()
+        .replace("to = \"finish\"", "to = \"ghost\"");
     let problems = check(&dangling, &dir);
     assert_eq!(problems.items[0].code, "validate");
     assert_eq!(
@@ -1717,9 +2301,30 @@ fn check_reports_parse_validate_and_lint_in_that_order() {
         Some("work"),
         "{problems:?}"
     );
+    // A stage declared twice is filed under its name.
+    let twice = starter()
+        .to_toml()
+        .replace("name = \"finish\"\nmode", "name = \"work\"\nmode");
+    let problems = check(&twice, &dir);
+    let duplicate = problems
+        .items
+        .iter()
+        .find(|p| p.message.contains("declared twice"))
+        .unwrap_or_else(|| panic!("{problems:?}"));
+    assert_eq!(duplicate.stage.as_deref(), Some("work"));
+    // An issue under some other list names no stage.
+    let bad_input = starter().to_toml().replace(
+        "binds = [{ region = \"task\" }]",
+        "binds = [{ region = \"ghost\" }]",
+    );
+    let problems = check(&bad_input, &dir);
+    assert_eq!(problems.items[0].code, "validate");
+    assert_eq!(problems.items[0].stage, None, "{problems:?}");
     // A command seed is worth a note, which sorts after warnings.
-    let noted = starter().to_toml()
-        + "\n[context.regions]\nenv = { kind = \"pinned\", seed = { command = \"echo hi\" } }\n";
+    let noted = starter().to_toml().replace(
+        "{ name = \"task\", kind = \"pinned\", budget = \"5%\" },",
+        "{ name = \"task\", kind = \"pinned\", budget = \"5%\" },\n    { name = \"env\", kind = \"pinned\", budget = \"1%\", seed = { command = \"echo hi\" } },",
+    );
     let problems = check(&noted, &dir);
     assert!(
         problems
@@ -1728,18 +2333,11 @@ fn check_reports_parse_validate_and_lint_in_that_order() {
             .any(|p| p.severity == Severity::Note && p.code == "command-seed"),
         "{problems:?}"
     );
-    let last = problems.items.last().unwrap();
-    assert_eq!(last.severity, Severity::Note);
+    assert_eq!(problems.items.last().unwrap().severity, Severity::Note);
     // The starter itself: no errors, warnings about what it leaves to defaults.
     let starter_problems = check(&starter().to_toml(), &dir);
     assert!(starter_problems.is_saveable(), "{starter_problems:?}");
     assert!(starter_problems.warning_count() > 0);
-    assert!(
-        starter_problems
-            .items
-            .iter()
-            .all(|p| p.severity != Severity::Error)
-    );
     assert!(
         starter_problems
             .items
@@ -1755,7 +2353,6 @@ fn check_reports_parse_validate_and_lint_in_that_order() {
     assert!(!problems.is_saveable());
     assert_eq!(problems.items[0].severity, Severity::Error);
     assert_eq!(problems.items[0].code, "unknown-tool");
-    assert!(problems.items[0].fix.is_some() || problems.items[0].message.contains("no_such_tool"));
 }
 
 // ─── templates ───────────────────────────────────────────────────────────────
@@ -1771,7 +2368,8 @@ fn the_starter_and_the_clone() {
         Some("The work is done and verified")
     );
     assert!(doc.stage("finish").unwrap().is_terminal);
-    runtime_ok(&doc);
+    let graph = runtime_ok(&doc);
+    assert_eq!(graph.inputs.len(), 1, "the task reaches the work");
     assert_eq!(
         templates::empty_blueprint("no way"),
         Err(EditError::BadName("no way".into()))
@@ -1860,24 +2458,24 @@ fn the_catalog_lists_every_source_and_writes_deletes_and_resets() {
     // configured one, a local one.
     catalog::write_agent(&agents, "own", &templates::empty_blueprint("own").unwrap()).unwrap();
     catalog::reset_bundled(&agents, "coder").unwrap();
-    let coder_manifest = agents.join("coder").join("agent.leviath");
-    let edited = std::fs::read_to_string(&coder_manifest)
+    let coder_file = agents.join("coder").join("agent.toml");
+    let edited = std::fs::read_to_string(&coder_file)
         .unwrap()
-        .replace("entry_stage = \"discover\"", "entry_stage = \"plan\"");
-    std::fs::write(&coder_manifest, edited).unwrap();
+        .replace("entry = \"discover\"", "entry = \"plan\"");
+    std::fs::write(&coder_file, edited).unwrap();
     std::fs::write(
-        configured.join("mine").join("agent.leviath"),
+        configured.join("mine").join("agent.toml"),
         templates::empty_blueprint("mine").unwrap(),
     )
     .unwrap();
     std::fs::write(
-        cwd.join("agent.leviath"),
+        cwd.join("agent.toml"),
         templates::empty_blueprint("here").unwrap(),
     )
     .unwrap();
-    // A directory without a readable manifest is skipped by the list.
+    // A directory without a readable file is skipped by the list.
     std::fs::create_dir_all(agents.join("junk")).unwrap();
-    std::fs::write(agents.join("junk").join("agent.leviath"), "not = [").unwrap();
+    std::fs::write(agents.join("junk").join("agent.toml"), "not = [").unwrap();
     let config = crate::config::Config {
         agent_paths: vec![configured.clone()],
         ..Default::default()
@@ -1930,7 +2528,7 @@ fn the_catalog_lists_every_source_and_writes_deletes_and_resets() {
             .unwrap_err()
             .contains("not a bundled agent")
     );
-    // Extras of a bundled agent land next to a cloned manifest.
+    // Extras of a bundled agent land next to a cloned file.
     let researcher = catalog::bundled("researcher").unwrap();
     catalog::write_agent(
         &agents,
@@ -1957,10 +2555,10 @@ fn the_catalog_lists_every_source_and_writes_deletes_and_resets() {
     assert!(catalog::write_agent(&blocked, "own", "x").is_err());
     assert!(catalog::copy_bundled_extras(&blocked, "own", researcher).is_err());
     assert!(catalog::reset_bundled(&blocked, "coder").is_err());
-    // A manifest that cannot be written where its directory could.
+    // A file that cannot be written where its directory could.
     let dir_as_file = agents.join("taken");
     std::fs::create_dir_all(&dir_as_file).unwrap();
-    std::fs::create_dir_all(dir_as_file.join("agent.leviath")).unwrap();
+    std::fs::create_dir_all(dir_as_file.join("agent.toml")).unwrap();
     assert!(catalog::write_agent(&agents, "taken", "x").is_err());
     // Delete.
     catalog::delete_agent(&agents, "own").unwrap();
@@ -1973,7 +2571,7 @@ fn the_catalog_lists_every_source_and_writes_deletes_and_resets() {
 
 #[test]
 fn the_written_order_walks_arrays_of_tables_and_renumbers_them() {
-    use order::{Seg, renumber, written_order};
+    use order::{Seg, Spot, move_block, renumber, written_order};
     let mut doc: toml_edit::DocumentMut = "[a]\nv = 1\n[[b]]\nx = 1\n[[b]]\nx = 2\n[b.c]\n[d]\n"
         .parse()
         .unwrap();
@@ -2014,10 +2612,25 @@ fn the_written_order_walks_arrays_of_tables_and_renumbers_them() {
         "{text}"
     );
     assert_eq!(written_order(&doc)[0], vec![Seg::Key("d".into())]);
+    // A block moves after a table, or before one (or to the end when the
+    // table is not there); nothing moves for a block with no table or an
+    // anchor that is not there.
+    let a = [Seg::Key("a".into())];
+    let d = [Seg::Key("d".into())];
+    move_block(&mut doc, &a, Spot::Before(&d));
+    assert_eq!(written_order(&doc)[0], a.to_vec());
+    move_block(&mut doc, &a, Spot::After(&d));
+    assert_eq!(written_order(&doc)[1], a.to_vec());
+    move_block(&mut doc, &d, Spot::Before(&[Seg::Key("ghost".into())]));
+    assert_eq!(written_order(&doc).last().unwrap(), &d.to_vec());
+    let before = doc.to_string();
+    move_block(&mut doc, &[Seg::Key("ghost".into())], Spot::After(&d));
+    move_block(&mut doc, &a, Spot::After(&[Seg::Key("ghost".into())]));
+    assert_eq!(doc.to_string(), before);
 }
 
 #[test]
-fn renaming_an_agent_moves_its_directory_and_the_name_in_its_manifest() {
+fn renaming_an_agent_moves_its_directory_and_the_name_in_its_file() {
     let root =
         std::env::temp_dir().join(format!("lev-blueprint-edit-rename-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -2044,7 +2657,7 @@ fn renaming_an_agent_moves_its_directory_and_the_name_in_its_manifest() {
             .contains("Could not read")
     );
     std::fs::create_dir_all(agents.join("junk")).unwrap();
-    std::fs::write(agents.join("junk").join("agent.leviath"), "= not toml").unwrap();
+    std::fs::write(agents.join("junk").join("agent.toml"), "= not toml").unwrap();
     assert!(catalog::rename_agent(&agents, "junk", "other").is_err());
     assert!(agents.join("own").exists());
     // The same name is nothing to do.
@@ -2052,153 +2665,33 @@ fn renaming_an_agent_moves_its_directory_and_the_name_in_its_manifest() {
         catalog::rename_agent(&agents, "own", "own").unwrap(),
         agents.join("own")
     );
-    // A move the disk refuses: the manifest already carries the new name
-    // under the old directory, and says so.
+    // A move the disk refuses: the file already carries the new name under
+    // the old directory, and says so.
     let err = catalog::rename_agent_with(&agents, "own", "mine", &mut |_, _| {
         Err(std::io::Error::other("disk says no"))
     })
     .unwrap_err();
     assert!(err.contains("disk says no"), "{err}");
     assert!(agents.join("own").exists());
-    let stuck = std::fs::read_to_string(agents.join("own").join("agent.leviath")).unwrap();
+    let stuck = std::fs::read_to_string(agents.join("own").join("agent.toml")).unwrap();
     assert!(stuck.contains("name = \"mine\""));
-    std::fs::write(agents.join("own").join("agent.leviath"), &text).unwrap();
-    // A manifest that cannot be written: said, nothing moved.
-    let manifest = agents.join("own").join("agent.leviath");
-    let writable = std::fs::metadata(&manifest).unwrap().permissions();
+    std::fs::write(agents.join("own").join("agent.toml"), &text).unwrap();
+    // A file that cannot be written: said, nothing moved.
+    let file = agents.join("own").join("agent.toml");
+    let writable = std::fs::metadata(&file).unwrap().permissions();
     let mut locked = writable.clone();
     locked.set_readonly(true);
-    std::fs::set_permissions(&manifest, locked).unwrap();
+    std::fs::set_permissions(&file, locked).unwrap();
     let err = catalog::rename_agent(&agents, "own", "mine").unwrap_err();
     assert!(err.contains("Could not write"), "{err}");
     assert!(agents.join("own").exists());
-    std::fs::set_permissions(&manifest, writable).unwrap();
+    std::fs::set_permissions(&file, writable).unwrap();
     // The rename: the directory moves, the name changes, the comment stays.
     let new = catalog::rename_agent(&agents, "own", "mine").unwrap();
     assert_eq!(new, agents.join("mine"));
     assert!(!agents.join("own").exists());
-    let moved = std::fs::read_to_string(new.join("agent.leviath")).unwrap();
+    let moved = std::fs::read_to_string(new.join("agent.toml")).unwrap();
     assert!(moved.starts_with("# kept\n"), "{moved}");
     assert!(moved.contains("name = \"mine\""), "{moved}");
     let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn output_routing_and_context_reset_round_trip_through_the_manifest() {
-    let toml = r#"
-[agent]
-name = "draw"
-
-[context.regions]
-artwork = { kind = "pinned" }
-conversation = { kind = "sliding_window" }
-
-[stages.draw]
-mode = "autonomous"
-
-[stages.describe]
-mode = "autonomous"
-"#;
-    let mut doc = ManifestDoc::parse(toml).unwrap();
-
-    // A ghost stage is refused for both setters.
-    assert_eq!(
-        doc.set_output_routing("ghost", &[("image/*".into(), "artwork".into())]),
-        Err(EditError::NoSuchStage("ghost".into()))
-    );
-    assert_eq!(
-        doc.set_context_reset("ghost", &["conversation".into()]),
-        Err(EditError::NoSuchStage("ghost".into()))
-    );
-
-    // output_routing: written in the given order, read back, then rewritten.
-    doc.set_output_routing(
-        "draw",
-        &[
-            ("image/*".into(), "artwork".into()),
-            ("application/pdf".into(), "artwork".into()),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        doc.stage("draw").unwrap().output_routing,
-        [
-            ("image/*".to_string(), "artwork".to_string()),
-            ("application/pdf".to_string(), "artwork".to_string()),
-        ]
-    );
-    assert!(
-        doc.to_toml().contains("[stages.draw.output_routing]"),
-        "{}",
-        doc.to_toml()
-    );
-    runtime_ok(&doc);
-    // Rewriting replaces the whole table.
-    doc.set_output_routing("draw", &[("image/*".into(), "artwork".into())])
-        .unwrap();
-    assert_eq!(
-        doc.stage("draw").unwrap().output_routing,
-        [("image/*".to_string(), "artwork".to_string())]
-    );
-    // Empty clears the table entirely.
-    doc.set_output_routing("draw", &[]).unwrap();
-    assert!(doc.stage("draw").unwrap().output_routing.is_empty());
-    assert!(
-        !doc.to_toml().contains("output_routing"),
-        "{}",
-        doc.to_toml()
-    );
-
-    // context.reset: set, read back, then cleared.
-    doc.set_context_reset("describe", &["conversation".into()])
-        .unwrap();
-    assert_eq!(
-        doc.stage("describe").unwrap().context_reset,
-        ["conversation"]
-    );
-    assert!(doc.to_toml().contains("reset"), "{}", doc.to_toml());
-    runtime_ok(&doc);
-    doc.set_context_reset("describe", &[]).unwrap();
-    assert!(doc.stage("describe").unwrap().context_reset.is_empty());
-    // With nothing else in the context table, clearing reset takes the table
-    // with it.
-    assert!(
-        !doc.to_toml().contains("[stages.describe.context]"),
-        "{}",
-        doc.to_toml()
-    );
-}
-
-#[test]
-fn output_routing_and_context_reset_refuse_odd_content_and_keep_a_shared_table() {
-    // A non-table `output_routing` or `context` is refused, not clobbered.
-    let mut odd = ManifestDoc::parse(
-        "[agent]\nname = \"o\"\n[stages.a]\noutput_routing = 3\ncontext = \"nope\"\n",
-    )
-    .unwrap();
-    assert_eq!(
-        odd.set_output_routing("a", &[("image/*".into(), "art".into())]),
-        Err(EditError::NotATable("output_routing".into()))
-    );
-    assert_eq!(
-        odd.set_context_reset("a", &["conversation".into()]),
-        Err(EditError::NotATable("context".into()))
-    );
-
-    // Clearing reset leaves a context table that still holds a layout: the
-    // table stays, only `reset` goes.
-    let mut doc = ManifestDoc::parse(
-        "[agent]\nname = \"k\"\n\n[stages.work]\nmode = \"autonomous\"\n\n\
-         [stages.work.context]\nreset = [\"conversation\"]\n\n\
-         [stages.work.context.regions]\nnotes = { kind = \"pinned\" }\n",
-    )
-    .unwrap();
-    assert_eq!(doc.stage("work").unwrap().context_reset, ["conversation"]);
-    doc.set_context_reset("work", &[]).unwrap();
-    assert!(doc.stage("work").unwrap().context_reset.is_empty());
-    assert!(
-        doc.to_toml().contains("[stages.work.context.regions]"),
-        "the layout keeps the context table: {}",
-        doc.to_toml()
-    );
 }

@@ -36,37 +36,56 @@ fn region_of(part: &Attachment) -> Option<&str> {
 fn write_manifest(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
-        dir.join("agent.leviath"),
+        dir.join("agent.toml"),
         crate::test_support::inline_coder_manifest(),
     )
     .unwrap();
-    dir.join("agent.leviath")
+    dir.join("agent.toml")
 }
 
-/// A blueprint in `dir` named `name` whose context holds `regions`.
-fn write_regions(dir: &Path, name: &str, regions: &str) -> PathBuf {
+/// A blueprint in `dir` named `name` whose context holds `regions`, each a
+/// pinned region taking the input of the same name: `(name, required,
+/// accepts)`.
+fn write_regions(dir: &Path, name: &str, regions: &[(&str, bool, &str)]) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
+    let layout: Vec<String> = regions
+        .iter()
+        .map(|(region, _, accepts)| {
+            format!(
+                "{{ name = \"{region}\", kind = \"pinned\", budget = 4000, accepts = [{accepts}] }}"
+            )
+        })
+        .collect();
+    let inputs: Vec<String> = regions
+        .iter()
+        .map(|(region, required, _)| {
+            format!(
+                "{{ name = \"{region}\", type = {{ kind = \"text\", multiline = true }}, required = {required}, binds = [{{ region = \"{region}\" }}] }}"
+            )
+        })
+        .collect();
     std::fs::write(
-        dir.join("agent.leviath"),
+        dir.join("agent.toml"),
         format!(
-            "[agent]\nname = \"{name}\"\n\n[stages.main]\nmode = \"autonomous\"\n\n\
-             [stages.main.model]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-5\"\n\n\
-             [context.regions]\n{regions}\n\
-             conversation = {{ kind = \"sliding_window\", max_items = 20, max_tokens = 10000 }}\n"
+            "[blueprint]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[graph]\n\
+             stages = [{{ name = \"main\", model = {{ models = [{{ provider = \"anthropic\", model = \"claude-sonnet-5\" }}] }} }}]\n\
+             inputs = [{}]\n\
+             layout = {{ total_budget_tokens = 18000, regions = [{}, \
+             {{ name = \"conversation\", kind = {{ kind = \"sliding_window\", max_items = 20 }}, budget = 10000 }}] }}\n",
+            inputs.join(", "),
+            layout.join(", ")
         ),
     )
     .unwrap();
-    dir.join("agent.leviath")
+    dir.join("agent.toml")
 }
 
 /// A blueprint driven by a named input, taking no task at all.
-const DIFF_ONLY: &str = "diff = { kind = \"pinned\", max_tokens = 4000, seed = \"diff\" }";
+const DIFF_ONLY: &[(&str, bool, &str)] = &[("diff", false, "")];
 /// A task it does not insist on, and a `diff` beside it.
-const DIFF_OR_TASK: &str = "task = { kind = \"pinned\", max_tokens = 4000, seed = \"task\" }\n\
-    diff = { kind = \"pinned\", max_tokens = 4000, seed = \"diff\" }";
+const DIFF_OR_TASK: &[(&str, bool, &str)] = &[("task", false, ""), ("diff", false, "")];
 /// A task and an `art` input whose region takes pictures.
-const TASK_AND_ART: &str = "task = { kind = \"pinned\", max_tokens = 4000, seed = \"task_input\" }\n\
-    art = { kind = \"pinned\", max_tokens = 4000, seed = \"input\", accepts = [\"image/*\"] }";
+const TASK_AND_ART: &[(&str, bool, &str)] = &[("task", false, ""), ("art", false, "\"image/*\"")];
 
 /// A command line naming `manifest`, working in `/work`, reading paths
 /// against `cwd`.
@@ -98,7 +117,7 @@ fn a_blueprint_and_its_task_make_the_request() {
         run.manifest,
         std::fs::canonicalize(dir.path().join("my-agent"))
             .unwrap()
-            .join("agent.leviath")
+            .join("agent.toml")
     );
     assert_eq!(run.workdir, "/work");
     assert_eq!(run.request.workdir.as_deref(), Some(Path::new("/work")));
@@ -106,7 +125,7 @@ fn a_blueprint_and_its_task_make_the_request() {
 
 /// The daemon has its own working directory, so a relative `PATH` has to be
 /// resolved before the request leaves: `lev run .` reaching the daemon as
-/// `./agent.leviath` fails there, and it is the very command `lev create`
+/// `./agent.toml` fails there, and it is the very command `lev create`
 /// prints as the next step.
 #[test]
 fn a_relative_blueprint_path_is_sent_absolute() {
@@ -149,7 +168,7 @@ fn an_installed_blueprint_is_named_by_its_name() {
             run.request.source
         );
         assert!(
-            run.manifest.ends_with("coder/agent.leviath"),
+            run.manifest.ends_with("coder/agent.toml"),
             "{:?}",
             run.manifest
         );
@@ -168,17 +187,16 @@ fn a_blueprint_that_is_not_there_or_does_not_load_is_refused() {
 
     let broken = dir.path().join("broken");
     std::fs::create_dir_all(&broken).unwrap();
-    std::fs::write(
-        broken.join("agent.leviath"),
-        "this is : not = valid toml [[[",
-    )
-    .unwrap();
+    std::fs::write(broken.join("agent.toml"), "this is : not = valid toml [[[").unwrap();
     let err = run_request(RunLine {
         task: Some("t"),
-        ..line(&broken.join("agent.leviath"), dir.path())
+        ..line(&broken.join("agent.toml"), dir.path())
     })
     .unwrap_err();
-    assert!(err.to_string().contains("parse manifest"), "{err}");
+    assert!(
+        err.to_string().contains("is not a valid blueprint"),
+        "{err}"
+    );
 }
 
 /// `--task <file>` reads the file, and no `--task` with no terminal is
@@ -231,10 +249,12 @@ fn a_task_is_asked_for_only_when_the_run_needs_one() {
     let err = run_request(line(&optional, dir.path())).unwrap_err();
     assert!(err.to_string().contains("No task provided"), "{err}");
 
-    let insisting = std::fs::read_to_string(&optional)
-        .unwrap()
-        .replace("seed = \"task\" }", "seed = \"task\", required = true }");
-    std::fs::write(&optional, insisting).unwrap();
+    let insisting = write_regions(
+        &dir.path().join("diff-or-task"),
+        "diff-or-task",
+        &[("task", true, ""), ("diff", false, "")],
+    );
+    assert_eq!(insisting, optional);
     let err = run_request(RunLine {
         named: diff(),
         ..line(&optional, dir.path())
@@ -458,9 +478,10 @@ fn every_file_becomes_an_attachment_once() {
 #[test]
 fn a_request_file_is_sent_with_the_flags_over_it() {
     let dir = tempfile::tempdir().unwrap();
-    let graph = leviath_blueprint::migrate_file(&crate::test_support::inline_coder_manifest())
-        .unwrap()
-        .graph;
+    let graph =
+        leviath_blueprint::BlueprintFile::parse(&crate::test_support::inline_coder_manifest())
+            .unwrap()
+            .graph;
     let mut request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph)));
     request.workdir = Some(PathBuf::from("/theirs"));
     let toml_file = dir.path().join("run.toml");

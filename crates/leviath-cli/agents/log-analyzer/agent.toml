@@ -1,0 +1,410 @@
+[blueprint]
+name = "log-analyzer"
+version = "0.3.0"
+description = "Analyzes log files - sweeps many files or time windows in parallel, then identifies anomalies, trends, and error patterns via a scripted analyze⇄script loop, maintaining a severity-ranked findings index"
+
+[graph]
+entry = "ingest"
+
+tool_permissions = { read_file = "allow", list_dir = "allow", bash = "ask", write_file = "ask" }
+
+compaction = { model = { provider = "anthropic", model = "claude-sonnet-5" }, max_summary_tokens = 2000, temperature = 0.2 }
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+required = true
+binds = [{ region = "task" }]
+
+# The two inputs below are what `split_logs` hands each `scan_worker`: the
+# slice it sweeps and the format its lines are in. A run started by a person
+# leaves them out.
+[[graph.inputs]]
+name = "slice"
+type = { kind = "text", multiline = true }
+description = "For a sweeper: the log file(s) it reads, and the time window when a file is split by time."
+binds = [{ region = "slice" }]
+
+[[graph.inputs]]
+name = "log_format"
+type = { kind = "text", multiline = true }
+description = "For a sweeper: the log format and its fields, as the ingest stage found them."
+binds = [{ region = "log_format" }]
+
+# ─── Context layout ───────────────────────────────────────────────────────────
+[graph.layout]
+total_budget_tokens = 0
+regions = [
+    { name = "task", kind = "pinned", budget = "2%", required = true, required_message = "Name the log file(s)/dir and what to look for via --task.", volatility = "stable" },
+    { name = "severity_index", kind = "pinned", budget = "2%" },
+    # A sweeper's own slice and the format of its lines, from its work item.
+    # Empty in the run that splits the work.
+    { name = "slice", kind = "pinned", budget = "1%", volatility = "stable" },
+    { name = "log_format", kind = "pinned", budget = "2%", volatility = "stable" },
+    { name = "findings", kind = { kind = "sliding_window", max_items = 30, eviction = { bulk = 10 } }, budget = "12%" },
+    # The sweepers' submitted findings, on the way into the analyze stage. Its
+    # budget is what each worker's share is divided from, so it matches the
+    # findings region it feeds. Clearable: once analyze has folded the findings
+    # in, the raw worker report is safe to drop.
+    { name = "worker_findings", kind = "clearable", budget = "12%" },
+
+    # Declared `grows` because it is appended to and never rewritten: tool
+    # results land here and earlier ones stay put. Undeclared it would default
+    # to `rewritten`, which assumes the whole region changes every turn and so
+    # caches none of it - measured at 4% cache hits on a run where this region
+    # held 280K tokens, every one of them re-sent and re-paid on every single
+    # inference.
+    # Sized by the percentage alone, with no absolute ceiling: a ceiling binds
+    # on every model above 200K, so the percentage - which is the whole
+    # mechanism for scaling with the model in front of you - would decide
+    # nothing across the range anyone runs on. The size is not the cost
+    # anyway. 280K tokens re-sent at 4% cached is expensive; the same 280K
+    # mostly cached is not, and the `volatility` above is what makes the
+    # difference.
+    { name = "logs", kind = "temporary", budget = "30%", volatility = "grows" },
+    { name = "scripts", kind = "compacting", budget = "20%", compact_at = 0.8, volatility = "grows" },
+    { name = "scripts_history", kind = { kind = "compact_history", source = "scripts" }, budget = "3%", volatility = "grows" },
+
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 30, eviction = { bulk = 10 } }, budget = "12%" },
+    { name = "scratch", kind = "clearable", budget = "6%" },
+
+    # Written by the RUNTIME on an abnormal stage ending: a failed inference
+    # call's error text, or a note that a stage hit its iteration cap. Pinned
+    # so it survives the edge into the stage that acts on it.
+    { name = "error_report", kind = "pinned", budget = "1%" },
+]
+
+# ─── Stage 1: Ingest ──────────────────────────────────────────────────────────
+[[graph.stages]]
+name = "ingest"
+description = "Read log files, identify format and structure"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "list_dir", "bash", "context_write", "context_read"]
+max_iterations = 15
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "logs", bash = "logs" }, keep_results = true }
+system_prompt = """
+Ingest the log files named in `task`. Determine:
+1. Log format (JSON, syslog, Apache, custom, etc.)
+2. Time range covered and total volume
+3. Available fields/columns
+4. Obvious structural issues (corrupted lines, encoding problems)
+
+Use bash to sample rather than reading whole huge files - the first N lines, a
+line count, a file type probe. Reach for whatever your shell actually provides
+(`head`/`wc`/`file` on Unix, `Get-Content -TotalCount` and `Measure-Object` on
+Windows). Write a short format/structure summary to `findings` (context_write) so
+the analyze stage starts oriented, and name every log file you found in it with
+its size and the time range it covers - that inventory is what the next stage
+divides the sweep over. Raw sampled content lands in `logs`."""
+
+[[graph.edges]]
+name = "error_recovery"
+from = "ingest"
+to = "error_recovery"
+when = "error"
+
+# Un-exhaustible escape (lint: dead-end-possible): when every looping target
+# has spent its max_revisits budget, the run can still move forward to the
+# deliverable instead of dead-ending.
+[[graph.edges]]
+name = "report"
+from = "ingest"
+to = "report"
+when = "dead_end"
+hint = "Analysis is out of revisits - report what ingestion established"
+carry = { compact = {} }
+
+[[graph.edges]]
+name = "split_logs"
+from = "ingest"
+to = "split_logs"
+hint = "Log format identified, ready to sweep the files"
+
+# ─── Stage 2: Split logs ──────────────────────────────────────────────────────
+# One worker per log file or time window, so a hundred rotated files get swept
+# at once instead of one after another - and each worker reads its own slice
+# into a context nothing else is competing for. The workers hand back findings;
+# the analyze stage takes them from there and digs into what they turned up.
+#
+# A file that will not parse is a gap in the sweep, not a reason to throw the
+# other workers' findings away. The failure is named in the results and the
+# analyze stage decides what to do about it.
+[[graph.stages]]
+name = "split_logs"
+description = "Split the logs into files or time windows, one sweeper each"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["fan_out"]
+max_iterations = 4
+# split_logs ↔ error_recovery is a cycle, so it needs a ceiling. One retry is
+# enough to route around a transient failure; a second means the logs cannot be
+# divided usefully and the run should analyze what it has rather than keep
+# splitting.
+max_revisits = 1
+
+[graph.stages.mode.fan_out]
+worker = { stage = "scan_worker" }
+merge_stage = "analyze"
+# Every slice at once rather than in waves; the daemon's inference pool paces
+# the requests. Set to 0 for no cap at all.
+max_workers = 30
+# Where the workers' findings land, and the budget their shares divide. A
+# region of its own rather than the conversation, which is carrying the message
+# history alongside them.
+results_region = "worker_findings"
+# A ceiling on slices, not just on concurrency. Thirty covers a large rotation
+# one file each while leaving every worker a usable share of the region for the
+# counts that make a finding evidence; the analyze stage is told when that
+# share had to be trimmed. Set to 0 for no ceiling.
+max_items = 30
+split_prompt = """
+Split the sweep into slices that can be read independently, one work item each.
+A slice is one log file, one service's files, or one time window of a single
+large file - whatever divides the data without two workers counting the same
+lines. Use the file inventory `findings` holds.
+
+Call `fan_out` with one entry in `items` per work item:
+
+  items: [{"id": "<short-slug>", "inputs": {"slice": "<the file path(s), and the time window if the file is split by time>", "log_format": "<the log format and its fields, verbatim from findings>", "task": "<what this run is trying to find, from the task>"}}]
+
+Those three are the only inputs a worker takes. Every item MUST carry the format
+and what the run is looking for: workers do not
+share this agent's context, so the work item is all they get. A worker that does
+not know the field layout can only grep for the word "error".
+
+One log file is ONE item. Split a single file by time only when it is too large
+to sweep in one pass, and give each window an explicit start and end.
+"""
+
+[[graph.edges]]
+name = "error_recovery"
+from = "split_logs"
+to = "error_recovery"
+when = "error"
+
+# ─── Worker: sweep one slice ─────────────────────────────────────────────────
+# Entered as a sub-agent, one per slice. It hands back findings, which the
+# analyze stage reads. `require_output` is what makes that a guarantee rather
+# than a hope. bash is the point of the worker: counting a million lines is a
+# shell job, and its whole output stays in the worker's own context rather than
+# this one's. No outgoing edges: a worker ends when it submits.
+[[graph.stages]]
+name = "scan_worker"
+description = "Sweep one log file or time window for errors, anomalies, and trends"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "bash", "submit_output"]
+max_iterations = 20
+allow_as_worker = true
+require_output = true
+system_prompt = """
+Sweep ONE slice of the logs. `slice` names the file (and time window),
+`log_format` the format its lines are in, and `task` what this run is looking
+for - it is all the context you get, so work from it.
+
+Count rather than skim. Aggregate with whatever your shell runs (awk/grep/sed or
+python via bash on Unix, PowerShell or python on Windows): error counts by type,
+rates per interval, status-code and latency distributions, the first and last
+occurrence of anything unusual. Read the surrounding lines of a spike before
+calling it one.
+
+Submit what you found with submit_output. Every finding carries its evidence -
+counts and timestamps from your own commands, never an impression. An hour you
+could not parse is itself a finding; say which lines defeated you.
+
+A quiet slice is a result: say so, with the volume you swept, rather than
+inflating routine noise into a finding. Only your submitted findings reach the
+merge - anything else you write is lost."""
+
+[graph.stages.output]
+format = "markdown"
+instructions = "One finding per line, as `<severity> | <finding> | <evidence: counts/timestamps>` with severity in {critical, warning, info}, most severe first. Start with a `info | swept <slice> | <line count>, <time range>` line so the merge knows what was covered."
+
+# ─── Stage 3: Analyze ─────────────────────────────────────────────────────────
+[[graph.stages]]
+name = "analyze"
+description = "Identify anomalies, trends, and error patterns"
+model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "bash", "context_write", "context_append", "context_read"]
+max_iterations = 25
+max_revisits = 3
+tool_routing = { default_region = "conversation", tool_regions = { read_file = "logs", bash = "scratch" }, keep_results = true }
+transition_prompt = """
+Decide what happens next:
+- If you need a script to parse/filter/aggregate the data more precisely, respond with: script
+- If you have enough findings to produce a report, respond with: report"""
+system_prompt = """
+The sweepers' findings are in the `worker_findings` region, one block per slice.
+Start there: fold each finding into `findings`, merge the ones that are the same
+error seen in two files, and treat a worker reported as FAILED as a slice nobody
+swept - say so, or sweep it here. What no single worker could see is yours: the
+same failure crossing files, and the order events happened in across them.
+
+Then analyze the log data for:
+1. Error patterns - recurring errors, error spikes, cascading failures
+2. Anomalies - unusual request rates, latency outliers, unexpected status codes
+3. Trends - gradual degradation, growing queue depths, memory creep
+4. Correlations - errors that co-occur, time-based patterns
+5. Security signals - auth failures, unusual access, injection attempts
+
+Quantify everything (timestamps, counts, rates). For each finding, append to
+`findings` (context_append): `<SEVERITY> | <finding> | <evidence: counts/timestamps>`
+with SEVERITY in {critical, warning, info}. Keep a running tally in `severity_index`
+(context_write), e.g. "critical: 2, warning: 5, info: 3". Use the `script` stage
+when you need precise parsing/aggregation you can't eyeball.
+
+If `error_report` says a previous stage hit its iteration cap, that stage was cut
+off before finishing - treat its output as incomplete and re-check what it missed."""
+
+[[graph.edges]]
+name = "error_recovery"
+from = "analyze"
+to = "error_recovery"
+when = "error"
+
+[[graph.edges]]
+name = "report"
+from = "analyze"
+to = "report"
+hint = "Analysis complete - ready to produce report"
+carry = { compact = {} }
+
+[[graph.edges]]
+name = "script"
+from = "analyze"
+to = "script"
+hint = "Need a script to parse/filter/aggregate log data"
+carry = { compact = {} }
+
+# ─── Stage 4: Script ──────────────────────────────────────────────────────────
+[[graph.stages]]
+name = "script"
+description = "Write and execute scripts to parse, filter, and aggregate log data"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "bash", "context_read"]
+max_iterations = 20
+max_revisits = 5
+tool_routing = { default_region = "scripts", tool_regions = { read_file = "logs" }, keep_results = true }
+transition_prompt = """
+Your script has produced results. Decide what happens next:
+- If you need to refine this script or write another, respond with: script
+- If the results answer the analysis questions, respond with: analyze"""
+system_prompt = """
+Write scripts to process the logs, in whatever your shell can run (awk/grep/sed
+or python via bash on Unix, PowerShell or python on Windows):
+- Parse structured fields, filter by time/severity/pattern
+- Aggregate counts, rates, percentiles
+- Detect anomalies via statistical thresholds
+- Correlate events across sources
+
+Write small, focused scripts; test each before building on it. Script code and
+output land in `scripts`. Iterate until the output answers the analysis questions,
+then return to analyze."""
+
+[[graph.edges]]
+name = "analyze"
+from = "script"
+to = "analyze"
+hint = "Script results ready - return to analysis"
+carry = { compact = {} }
+
+[[graph.edges]]
+name = "error_recovery"
+from = "script"
+to = "error_recovery"
+when = "error"
+
+# Un-exhaustible escape (lint: dead-end-possible): when every looping target
+# has spent its max_revisits budget, the run can still move forward to the
+# deliverable instead of dead-ending.
+[[graph.edges]]
+name = "report"
+from = "script"
+to = "report"
+when = "dead_end"
+hint = "Analysis is out of revisits - report the findings so far"
+carry = { compact = {} }
+
+[[graph.edges]]
+name = "script"
+from = "script"
+to = "script"
+hint = "Refine or write another script"
+
+# ─── Stage 5: Report ──────────────────────────────────────────────────────────
+[[graph.stages]]
+name = "report"
+description = "Produce a structured analysis report with findings"
+model = { models = [{ model = "claude-opus-5" }, { model = "gpt-5.5" }, { model = "gemini-3.1-pro-preview" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["write_file", "read_file"]
+max_iterations = 10
+# Generating the final report - don't inject mid-run user messages into it.
+accepts_messages = false
+system_prompt = """
+Write a structured log analysis report (write_file) from the `findings` region,
+structured by the `severity_index` tally. Include:
+- Executive summary (top findings in 3-5 bullets)
+- Log source overview (files, format, time range, volume)
+- Findings by severity (🔴 critical / 🟡 warning / 🔵 info)
+  - For each: description, evidence (counts/timestamps), impact
+- Trends and patterns observed
+- Recommendations (what to fix, what to monitor)
+- Appendix: key log excerpts and script outputs
+
+Be precise - timestamps, counts, percentages, specific log lines. The report's
+severity counts must match `severity_index`."""
+
+[[graph.edges]]
+name = "summary"
+from = "report"
+to = "summary"
+hint = "The report is written"
+
+# ─── Stage 6: Error recovery ──────────────────────────────────────────────────
+[[graph.stages]]
+name = "error_recovery"
+description = "Recover from a failed read or script execution"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+tools = ["read_file", "bash"]
+max_iterations = 10
+max_revisits = 1
+system_prompt = """
+A read or script execution failed. The `error_report` region holds the error
+text the runtime captured - read it first, diagnose it (a malformed log line, a
+script bug, a missing file), note a workaround, then return to analyze to
+continue with the data available."""
+
+[[graph.edges]]
+name = "analyze"
+from = "error_recovery"
+to = "analyze"
+hint = "Recovered - resume analysis"
+carry = { compact = {} }
+
+[[graph.edges]]
+name = "report"
+from = "error_recovery"
+to = "report"
+hint = "Recovery is not converging - report the findings so far"
+carry = { compact = {} }
+
+# ─── Final output ────────────────────────────────────────────────────────────
+# The last stage. An output stage hands back the run's answer with
+# `submit_output`, must call it, and may end the run. No file tools on
+# purpose: this stage reports, it does not work.
+[[graph.stages]]
+name = "summary"
+description = "Say what the logs showed"
+model = { models = [{ model = "claude-sonnet-5" }, { model = "gpt-5.4-mini" }, { model = "gemini-3.5-flash" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+mode = "output"
+tools = ["submit_output"]
+max_iterations = 8
+allow_complete = true
+require_output = true
+system_prompt = """
+Say what these logs showed, for whoever asked for it.
+
+Lead with the diagnosis: what went wrong, and how confident you are. Then the
+evidence that points at it, and anything you could not explain. Name the report
+file you wrote.
+
+If you found nothing conclusive, say that plainly rather than dressing up a
+guess."""

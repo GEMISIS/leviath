@@ -35,7 +35,7 @@ pub type ScriptRuleChecker = dyn Fn(&str, Option<&str>, TaintLevel) -> Option<St
 pub struct TaintGate {
     /// Security configuration.
     config: SecurityConfig,
-    /// Per-tool classification overrides (from agent.leviath or user policy).
+    /// Per-tool classification overrides (from agent.toml or user policy).
     tool_overrides: HashMap<String, ToolClassification>,
     /// Audit log of gate events.
     audit_log: Vec<GateEvent>,

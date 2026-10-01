@@ -2,7 +2,7 @@
 //! came from.
 //!
 //! One answer, two callers. The lint asks "is this name a tool" when it checks a
-//! blueprint's `available_tools`, and `GET /api/tools` asks "what may I pick"
+//! blueprint stage's `tools`, and `GET /api/tools` asks "what may I pick"
 //! on behalf of an editor. Those were the same four discovery rules - built-ins,
 //! sub-agent tools, the agent's own `tools/`, and the global drop-in directory -
 //! and a second copy of them would have drifted from the first the moment either
@@ -53,11 +53,11 @@ impl ToolSource {
         }
     }
 
-    /// The `available_tools` group a tool from this source answers to. Both
+    /// The `tools` group a tool from this source answers to. Both
     /// script directories are one group: `@scripts` grants a script wherever
     /// it lives, exactly as naming it would.
-    pub(crate) fn group(self) -> leviath_runtime::spec::blueprint::ToolGroup {
-        use leviath_runtime::spec::blueprint::ToolGroup;
+    pub(crate) fn group(self) -> leviath_runtime::spec::graph::ToolGroup {
+        use leviath_runtime::spec::graph::ToolGroup;
         match self {
             Self::Builtin => ToolGroup::Builtin,
             Self::Subagent => ToolGroup::Subagent,
@@ -66,7 +66,7 @@ impl ToolSource {
     }
 }
 
-/// One tool an agent may name in `available_tools`.
+/// One tool an agent may name in a stage's `tools`.
 #[derive(Debug, Clone)]
 pub(crate) struct ToolEntry {
     /// The name the model calls and a blueprint lists.
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(ToolSource::Subagent.describe(), "sub-agent tool");
         assert_eq!(ToolSource::Agent.describe(), "this agent's script");
         assert_eq!(ToolSource::Global.describe(), "global script");
-        use leviath_runtime::spec::blueprint::ToolGroup;
+        use leviath_runtime::spec::graph::ToolGroup;
         assert_eq!(ToolSource::Builtin.group(), ToolGroup::Builtin);
         assert_eq!(ToolSource::Subagent.group(), ToolGroup::Subagent);
         assert_eq!(ToolSource::Agent.group(), ToolGroup::Scripts);
@@ -407,7 +407,7 @@ mod tests {
         });
     }
 
-    /// The set the lint checks `available_tools` against carries every listed
+    /// The set the lint checks a stage's `tools` against carries every listed
     /// name and nothing that was skipped.
     #[test]
     fn names_carry_the_builtins_and_the_scripts_that_compiled() {

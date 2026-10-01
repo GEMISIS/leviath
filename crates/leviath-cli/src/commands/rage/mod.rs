@@ -78,7 +78,7 @@ pub struct RageArgs {
     #[arg(long, conflicts_with = "agent")]
     pub run: Option<String>,
 
-    /// The blueprint you were building: its directory or its `agent.leviath`.
+    /// The blueprint you were building: its directory or its `agent.toml`.
     /// Implies `--about agent`.
     #[arg(long)]
     pub agent: Option<PathBuf>,
@@ -218,7 +218,7 @@ pub(crate) fn selection_from_args(args: &RageArgs, env: &RageEnv) -> anyhow::Res
         _ => None,
     };
     if about == About::Agent && args.agent.is_none() {
-        anyhow::bail!("--about agent needs the blueprint: pass --agent <dir or agent.leviath>");
+        anyhow::bail!("--about agent needs the blueprint: pass --agent <dir or agent.toml>");
     }
     Ok(Selection {
         about,

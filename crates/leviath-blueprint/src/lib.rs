@@ -19,21 +19,18 @@
 //! - [`load`] and [`validate`] read one file; [`find`] finds an installed
 //!   blueprint by name, for a host's `ResolveEnv::blueprint`.
 //! - [`expand`] turns a blueprint reference and its inputs into a request.
-//! - [`migrate`] converts an `agent.leviath` into an `agent.toml`.
 //! - [`lint`] is what the checks beyond validation report in.
 
 mod expand;
 mod file;
 pub mod lint;
 mod load;
-mod migrate;
 mod write;
 
 pub use expand::expand;
-pub use file::{BlueprintFile, BlueprintMeta, FILE_NAME};
+pub use file::{BlueprintFile, BlueprintMeta, FILE_NAME, schema};
 pub use leviath_runtime::spec::env::LoadedBlueprint;
 pub use load::{BlueprintError, find, installed, load, validate};
-pub use migrate::{migrate, migrate_file};
 
 #[cfg(test)]
 mod tests;

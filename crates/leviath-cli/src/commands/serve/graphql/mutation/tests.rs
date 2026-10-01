@@ -1030,12 +1030,10 @@ async fn two_answers_at_once_are_not_a_request() {
 
 // ── blueprints ──
 
-/// A manifest exercising the blueprint writes.
+/// A blueprint exercising the blueprint writes, at `version`.
 fn manifest_text(name: &str, version: &str) -> String {
-    format!(
-        "[agent]\nname = \"{name}\"\nversion = \"{version}\"\ndescription = \"d\"\n\n\
-         [stages.only]\nmode = \"autonomous\"\n"
-    )
+    crate::test_support::tiny_blueprint(name)
+        .replace("version = \"1.0.0\"", &format!("version = \"{version}\""))
 }
 
 /// The manifest as a GraphQL string literal.
@@ -1143,11 +1141,22 @@ async fn the_blueprint_writes_refuse_what_they_should() {
             no_daemon_client(),
             &format!(
                 "mutation {{ updateBlueprint(request: {{ blueprint: {{ name: \"ghost\" }}, \
-                 manifest: \"{manifest}\" }}) {{ blueprint {{ name }} }} }}"
+                 manifest: \"{}\" }}) {{ blueprint {{ name }} }} }}",
+                quoted_manifest("ghost", "1.0.0")
             ),
         )
         .await;
         assert_eq!(code_of(&missing), "\"NOT_FOUND\"");
+
+        // A blueprint installed under a name other than its own could never
+        // be run by that name.
+        let misnamed = mutate(no_daemon_client(), &create("other")).await;
+        assert_eq!(code_of(&misnamed), "\"BAD_USER_INPUT\"");
+        assert!(
+            misnamed.errors[0].message.contains("calls itself"),
+            "{:?}",
+            misnamed.errors
+        );
 
         let unparseable = mutate(
             no_daemon_client(),
@@ -1156,7 +1165,7 @@ async fn the_blueprint_writes_refuse_what_they_should() {
         )
         .await;
         assert!(
-            unparseable.errors[0].message.contains("Invalid manifest"),
+            unparseable.errors[0].message.contains("Invalid blueprint"),
             "{:?}",
             unparseable.errors
         );

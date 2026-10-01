@@ -21,7 +21,7 @@ fn meta() -> RunMeta {
     let mut meta = RunMeta::new(
         "did-things".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "do two things".to_string(),
         None,
         "/tmp".to_string(),

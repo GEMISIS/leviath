@@ -57,12 +57,31 @@ pub(in crate::commands::dashboard) struct ToolChoice {
     pub(in crate::commands::dashboard) connector: bool,
 }
 
+/// The tool groups a stage's `tools` can name, as the file spells them, with
+/// what each covers, in the order the chooser lists them.
+pub(super) const TOOL_GROUPS: [(&str, &str); 5] = [
+    (
+        "@all",
+        "every tool this install has: built in, sub-agent, scripts, and MCP",
+    ),
+    ("@builtin", "every tool compiled into Leviath"),
+    (
+        "@subagent",
+        "the sub-agent tools: spawn, validate, check, wait for, message and kill a child, and read the spawn schema, a blueprint and a run's history",
+    ),
+    (
+        "@scripts",
+        "every Rhai script tool, the agent's own and the global ones",
+    ),
+    ("@mcp", "every tool every connected MCP server advertises"),
+];
+
 /// Everything the tools chooser offers for the agent at `dir`: the group
 /// tokens first, since "all the built-ins" is the usual answer, then each
 /// MCP server as a connector (every tool it advertises, now or later), then
 /// the tools this install has (built in, scripts under the agent and the
 /// global directory, and each MCP server's tools by their `server__tool`
-/// name once the server has answered), then whatever the manifest names
+/// name once the server has answered), then whatever the agent names
 /// that was not found.
 pub(super) fn tool_choices(
     dir: &std::path::Path,
@@ -70,13 +89,11 @@ pub(super) fn tool_choices(
     doc: &ManifestDoc,
     mcp: &McpCatalog,
 ) -> Vec<ToolChoice> {
-    use leviath_runtime::spec::blueprint::{ToolGroup, is_tool_group_token};
-
-    let mut choices: Vec<ToolChoice> = ToolGroup::ALL
+    let mut choices: Vec<ToolChoice> = TOOL_GROUPS
         .iter()
-        .map(|g| ToolChoice {
-            name: g.token().to_string(),
-            detail: g.describe().to_string(),
+        .map(|(token, detail)| ToolChoice {
+            name: token.to_string(),
+            detail: detail.to_string(),
             connector: false,
         })
         .collect();
@@ -125,7 +142,7 @@ pub(super) fn tool_choices(
         }
     }
     for tool in doc.known_tools() {
-        if !is_tool_group_token(&tool) && !named.iter().any(|t| t.name == tool) {
+        if !tool.starts_with('@') && !named.iter().any(|t| t.name == tool) {
             named.push(ToolChoice {
                 name: tool,
                 detail: "named by this agent, not found on this install".to_string(),

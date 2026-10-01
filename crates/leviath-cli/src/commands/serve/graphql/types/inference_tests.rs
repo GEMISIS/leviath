@@ -22,7 +22,7 @@ fn meta() -> RunMeta {
     let mut meta = RunMeta::new(
         "called-providers".to_string(),
         "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
+        "/agents/coder/agent.toml".to_string(),
         "call a provider a few times".to_string(),
         None,
         "/tmp".to_string(),

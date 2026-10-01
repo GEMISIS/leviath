@@ -126,7 +126,6 @@ impl Provider for FakeProvider {
 pub(crate) mod fixtures {
     use leviath_core::run_meta::RunMeta;
     use leviath_providers::{FinishReason, InferenceRequest, InferenceResponse, TokenUsage};
-    use leviath_runtime::spec::blueprint::{FanOutConfig, WorkerFailurePolicy};
 
     /// One prompt token, one completion token, nothing cached, no reported
     /// cost.
@@ -182,23 +181,6 @@ pub(crate) mod fixtures {
             1,
         )
     }
-
-    /// A single-worker fan-out with no worker source, whose split prompt is
-    /// `s` and whose failed workers are skipped.
-    pub(crate) fn fanout_config() -> FanOutConfig {
-        FanOutConfig {
-            worker_agent: None,
-            worker_stage: None,
-            worker_query: None,
-            merge_stage: None,
-            max_workers: 1,
-            on_worker_failure: WorkerFailurePolicy::Continue,
-            split_prompt: "s".to_string(),
-            results_region: None,
-            max_items: None,
-            max_attempts: None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -249,7 +231,6 @@ mod tests {
             (meta.run_id.as_str(), meta.agent_name.as_str()),
             ("r1", "a")
         );
-        assert_eq!(fixtures::fanout_config().max_workers, 1);
     }
 }
 

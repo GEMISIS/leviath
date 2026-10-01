@@ -64,47 +64,6 @@ pub struct LoadedBlueprint {
     pub base_dir: PathBuf,
 }
 
-impl LoadedBlueprint {
-    /// A blueprint from its manifest text: parsed, validated and read as a
-    /// graph, with the manifest's own `[[mcp_servers]]` and
-    /// `[tool_script_permissions]`. Named after its `[agent] name`, pinned to
-    /// the text's digest, and reading its files from `base_dir`.
-    pub fn from_manifest(content: &str, base_dir: PathBuf) -> Result<Self, String> {
-        let blueprint =
-            super::manifest::parse_manifest(content).map_err(|e| format!("parse manifest: {e}"))?;
-        Self::from_parsed(blueprint, Some(content), base_dir)
-    }
-
-    /// A blueprint already parsed. `manifest` is the text it was parsed from,
-    /// when there was one, for the tables the parsed form does not carry.
-    pub fn from_parsed(
-        blueprint: super::Blueprint,
-        manifest: Option<&str>,
-        base_dir: PathBuf,
-    ) -> Result<Self, String> {
-        blueprint
-            .validate()
-            .map_err(|e| format!("invalid blueprint: {e}"))?;
-        let mut graph = RunGraph::from_blueprint(&blueprint).map_err(|e| e.to_string())?;
-        if let Some(text) = manifest {
-            graph
-                .read_manifest_tables(text)
-                .map_err(|e| e.to_string())?;
-        }
-        let name = super::names::BlueprintName::new(blueprint.name.as_str())
-            .map_err(|e| format!("blueprint name '{}': {e}", blueprint.name))?;
-        Ok(Self {
-            graph,
-            reference: BlueprintRef {
-                name,
-                digest: manifest.map(|text| Digest::of(text.as_bytes())),
-            },
-            version: blueprint.version,
-            base_dir,
-        })
-    }
-}
-
 /// The operator's limits and defaults for spawning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnLimits {

@@ -1,10 +1,9 @@
 //! `lev pack` - Bundle an agent project for distribution.
 
 use clap::Args;
+use leviath_blueprint::FILE_NAME;
 use leviath_package::AgentBundler;
 use std::path::{Path, PathBuf};
-
-use leviath_runtime::spec::manifest::parse_manifest;
 
 /// Arguments for `lev pack`.
 #[derive(Args)]
@@ -43,17 +42,17 @@ async fn execute_with_bundle(
 
     tracing::info!("Packing agent");
 
-    // Find and parse agent.leviath to get name + version
+    // Read and check the agent.toml: a bundle of a blueprint that will not
+    // load would install an agent nothing can run. Its name and version name
+    // the bundle.
     let manifest_path = find_manifest(project_path)?;
-    let manifest_content = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
-    let blueprint = parse_manifest(&manifest_content)?;
+    let blueprint = leviath_blueprint::validate(&manifest_path)?;
+    let name = blueprint.reference.name.as_str();
 
-    println!("Packing agent: {} v{}", blueprint.name, blueprint.version);
+    println!("Packing agent: {} v{}", name, blueprint.version);
 
     // Determine output path
-    let output_path =
-        determine_output_path(args.output.as_deref(), &blueprint.name, &blueprint.version);
+    let output_path = determine_output_path(args.output.as_deref(), name, &blueprint.version);
 
     // Bundle the project
     let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
@@ -71,7 +70,7 @@ async fn execute_with_bundle(
     println!("\nContents:");
     let file_count = count_files(project_dir);
     println!("  {} files bundled", file_count);
-    println!("  Manifest: agent.leviath");
+    println!("  Blueprint: {FILE_NAME}");
 
     let scripts_dir = project_dir.join("scripts");
     if scripts_dir.exists() {
@@ -103,27 +102,24 @@ fn find_manifest(project_path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn find_manifest_with_cwd(project_path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
-    if project_path.is_file()
-        && project_path.file_name()
-            == Some(std::ffi::OsStr::new(leviath_core::files::MANIFEST_FILENAME))
-    {
+    if project_path.is_file() && project_path.file_name() == Some(std::ffi::OsStr::new(FILE_NAME)) {
         return Ok(project_path.to_path_buf());
     }
 
     if project_path.is_dir() {
-        let manifest = project_path.join(leviath_core::files::MANIFEST_FILENAME);
+        let manifest = project_path.join(FILE_NAME);
         if manifest.exists() {
             return Ok(manifest);
         }
     }
 
-    let current_manifest = cwd.join(leviath_core::files::MANIFEST_FILENAME);
+    let current_manifest = cwd.join(FILE_NAME);
     if current_manifest.exists() {
         return Ok(current_manifest);
     }
 
     anyhow::bail!(
-        "Could not find agent.leviath in {} or current directory",
+        "Could not find {FILE_NAME} in {} or current directory",
         project_path.display()
     )
 }
@@ -282,7 +278,7 @@ mod tests {
     #[test]
     fn find_manifest_in_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join("agent.toml");
         std::fs::write(&manifest, "name = \"test\"").unwrap();
         let result = find_manifest(dir.path());
         assert!(result.is_ok());
@@ -292,7 +288,7 @@ mod tests {
     #[test]
     fn find_manifest_direct_file() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join("agent.toml");
         std::fs::write(&manifest, "name = \"test\"").unwrap();
         let result = find_manifest(&manifest);
         assert!(result.is_ok());
@@ -304,7 +300,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = find_manifest(dir.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+        assert!(result.unwrap_err().to_string().contains("agent.toml"));
     }
 
     // ─── find_manifest_with_cwd ────────────────────────────────────────────
@@ -312,7 +308,7 @@ mod tests {
     #[test]
     fn find_manifest_with_cwd_finds_in_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join("agent.toml");
         std::fs::write(&manifest, "name = \"test\"").unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let result = find_manifest_with_cwd(dir.path(), cwd.path());
@@ -322,7 +318,7 @@ mod tests {
     #[test]
     fn find_manifest_with_cwd_finds_direct_file() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join("agent.toml");
         std::fs::write(&manifest, "name = \"test\"").unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let result = find_manifest_with_cwd(&manifest, cwd.path());
@@ -333,7 +329,7 @@ mod tests {
     fn find_manifest_with_cwd_falls_back_to_cwd() {
         let empty_dir = tempfile::tempdir().unwrap();
         let cwd_dir = tempfile::tempdir().unwrap();
-        let cwd_manifest = cwd_dir.path().join("agent.leviath");
+        let cwd_manifest = cwd_dir.path().join("agent.toml");
         std::fs::write(&cwd_manifest, "name = \"test\"").unwrap();
         let result = find_manifest_with_cwd(empty_dir.path(), cwd_dir.path());
         assert_eq!(result.unwrap(), cwd_manifest);
@@ -345,7 +341,7 @@ mod tests {
         let empty_cwd = tempfile::tempdir().unwrap();
         let result = find_manifest_with_cwd(empty_project.path(), empty_cwd.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+        assert!(result.unwrap_err().to_string().contains("agent.toml"));
     }
 
     // ─── output path determination ─────────────────────────────────────────
@@ -420,8 +416,8 @@ mod tests {
     fn make_project_dir(with_scripts: bool, with_tests: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("agent.leviath"),
-            "[agent]\nname = \"packed-agent\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
+            dir.path().join("agent.toml"),
+            crate::test_support::tiny_blueprint("packed-agent"),
         )
         .unwrap();
         if with_scripts {
@@ -475,7 +471,7 @@ mod tests {
             output: Some(output_path.to_str().unwrap().to_string()),
         };
         let err = execute(args).await.unwrap_err();
-        assert!(err.to_string().contains("Could not find agent.leviath"));
+        assert!(err.to_string().contains("Could not find agent.toml"));
     }
 
     #[tokio::test]
@@ -503,32 +499,15 @@ mod tests {
             output: None,
         };
         let err = execute(args).await.unwrap_err();
-        assert!(err.to_string().contains("agent.leviath"));
+        assert!(err.to_string().contains("agent.toml"));
     }
 
     #[tokio::test]
     async fn execute_invalid_manifest_toml_errors() {
-        // Manifest exists but is invalid TOML - covers parse_manifest ? on line 30.
+        // The file exists but is not TOML: the read refuses it.
         with_tracing(|| {});
         let project = tempfile::tempdir().unwrap();
-        std::fs::write(project.path().join("agent.leviath"), "not valid toml ][").unwrap();
-        let output_dir = tempfile::tempdir().unwrap();
-        let output_path = output_dir.path().join("out.leviath-bundle");
-        let args = PackArgs {
-            path: Some(project.path().to_str().unwrap().to_string()),
-            output: Some(output_path.to_str().unwrap().to_string()),
-        };
-        execute(args).await.unwrap_err();
-    }
-
-    #[tokio::test]
-    async fn execute_unreadable_manifest_errors() {
-        // `agent.leviath` exists but is a *directory*: `find_manifest` returns
-        // it (exists() passes), then `read_to_string` fails on every platform,
-        // covering the "Failed to read manifest" map_err arm.
-        with_tracing(|| {});
-        let project = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project.path().join("agent.leviath")).unwrap();
+        std::fs::write(project.path().join("agent.toml"), "not valid toml ][").unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let output_path = output_dir.path().join("out.leviath-bundle");
         let args = PackArgs {
@@ -536,7 +515,47 @@ mod tests {
             output: Some(output_path.to_str().unwrap().to_string()),
         };
         let e = execute(args).await.unwrap_err();
-        assert!(e.to_string().contains("Failed to read manifest"));
+        assert!(e.to_string().contains("is not a valid blueprint"), "{e}");
+    }
+
+    /// A blueprint whose graph does not hold together is not packed: the
+    /// bundle would install an agent no spawn accepts.
+    #[tokio::test]
+    async fn execute_refuses_a_graph_that_does_not_hold_together() {
+        with_tracing(|| {});
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("agent.toml"),
+            crate::test_support::tiny_blueprint("broken")
+                .replace("[{ region = \"task\" }]", "[{ region = \"nowhere\" }]"),
+        )
+        .unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("out.leviath-bundle");
+        let args = PackArgs {
+            path: Some(project.path().to_str().unwrap().to_string()),
+            output: Some(output_path.to_str().unwrap().to_string()),
+        };
+        let e = execute(args).await.unwrap_err();
+        assert!(e.to_string().contains("does not hold together"), "{e}");
+        assert!(!output_path.exists());
+    }
+
+    #[tokio::test]
+    async fn execute_unreadable_manifest_errors() {
+        // `agent.toml` exists but is a *directory*: `find_manifest` returns
+        // it (exists() passes), then reading it fails on every platform.
+        with_tracing(|| {});
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("agent.toml")).unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("out.leviath-bundle");
+        let args = PackArgs {
+            path: Some(project.path().to_str().unwrap().to_string()),
+            output: Some(output_path.to_str().unwrap().to_string()),
+        };
+        let e = execute(args).await.unwrap_err();
+        assert!(e.to_string().contains("cannot read"), "{e}");
     }
 
     #[tokio::test]

@@ -53,11 +53,12 @@ use std::path::{Path, PathBuf};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use leviath_runtime::spec::graph::{CodeRef, RegionKind, RunGraph};
 use serde::{Deserialize, Serialize};
 
 use super::core::error::ServeError;
 use super::scripts_address::{addressed_path, declared_address, relative_of};
-use super::scripts_mime::{collect_mime_checks, config_dir, row_checks};
+use super::scripts_mime::{collect_mime_checks, config_dir};
 use super::tools::agent_dir;
 use super::types::{ApiError, AppState};
 
@@ -542,56 +543,68 @@ pub(super) struct ValidateScriptResp {
 
 // ─── Listing ────────────────────────────────────────────────────────────────
 
-/// Every hook and validator the manifest declares, keyed by kind and declared
-/// path, carrying the stage-hook names each file was named for.
+/// Every hook, validator and check file the blueprint names, keyed by kind
+/// and declared path, carrying the stage-hook names each file was named for.
 ///
-/// This is the only way to know a `.rhai` beside a manifest is a region hook
+/// This is the only way to know a `.rhai` beside a blueprint is a region hook
 /// rather than a stage hook: nothing about the file says so, the declaration
 /// does. A file written but not yet declared is therefore not listed, which is
-/// the honest answer - nothing would load it either.
-fn declared_scripts(
-    bp: &leviath_runtime::spec::Blueprint,
-) -> BTreeMap<(ScriptKind, String), Vec<String>> {
+/// the honest answer - nothing would load it either. Code written inline in the
+/// blueprint has no file, so it is not listed either.
+fn declared_scripts(graph: &RunGraph) -> BTreeMap<(ScriptKind, String), Vec<String>> {
     let mut declared: BTreeMap<(ScriptKind, String), Vec<String>> = BTreeMap::new();
 
-    let layouts = std::iter::once(&bp.context_layout).chain(
-        bp.stages
+    let layouts = std::iter::once(&graph.layout).chain(
+        graph
+            .stages
             .iter()
-            .filter_map(|stage| stage.context_layout.as_ref()),
+            .filter_map(|stage| stage.layout.as_ref()),
     );
     for layout in layouts {
         for region in &layout.regions {
-            if let leviath_core::RegionKind::Custom { script, .. } = &region.kind {
+            if let RegionKind::Custom {
+                code: CodeRef::File(path),
+                ..
+            } = &region.kind
+            {
                 declared
-                    .entry((ScriptKind::RegionHook, script.clone()))
+                    .entry((ScriptKind::RegionHook, path.clone()))
                     .or_default();
             }
         }
     }
 
-    for stage in &bp.stages {
-        for (hook, path) in stage.hooks.declared() {
-            declared
-                .entry((ScriptKind::StageHook, path.to_string()))
-                .or_default()
-                .push(hook.to_string());
+    for stage in &graph.stages {
+        for (hook, code) in stage.hooks.iter() {
+            if let CodeRef::File(path) = code {
+                declared
+                    .entry((ScriptKind::StageHook, path.clone()))
+                    .or_default()
+                    .push(hook.to_string());
+            }
         }
     }
 
-    let outputs = bp
-        .output
-        .iter()
-        .chain(bp.stages.iter().filter_map(|stage| stage.output.as_ref()));
+    let outputs = graph.output.iter().chain(
+        graph
+            .stages
+            .iter()
+            .filter_map(|stage| stage.output.as_ref()),
+    );
     for spec in outputs {
-        if let Some(validator) = spec.validator.as_deref() {
+        if let Some(CodeRef::File(validator)) = &spec.validator {
             declared
-                .entry((ScriptKind::OutputValidator, validator.to_string()))
+                .entry((ScriptKind::OutputValidator, validator.clone()))
                 .or_default();
         }
     }
 
-    for (_, script) in row_checks(&bp.mime_types) {
-        declared.entry((ScriptKind::MimeCheck, script)).or_default();
+    for row in graph.mime_types.values() {
+        if let Some(CodeRef::File(check)) = &row.check {
+            declared
+                .entry((ScriptKind::MimeCheck, check.clone()))
+                .or_default();
+        }
     }
 
     declared
@@ -689,20 +702,20 @@ fn collect_providers(dir: &Path, out: &mut Vec<ScriptItem>) {
     }
 }
 
-/// List the hooks and validators the agent's manifest declares.
+/// List the hooks, validators and checks the agent's blueprint names.
 ///
-/// An agent with no manifest, or one that will not parse, contributes nothing:
-/// the blueprint routes are where a broken manifest is reported, and a script
-/// listing that failed outright would take the tools down with it.
+/// An agent with no `agent.toml`, or one that will not parse, contributes
+/// nothing: the blueprint routes are where a broken blueprint is reported, and
+/// a script listing that failed outright would take the tools down with it.
 fn collect_declared(dir: &Path, agent: &str, out: &mut Vec<ScriptItem>) {
-    let Ok(text) = std::fs::read_to_string(dir.join(leviath_core::files::MANIFEST_FILENAME)) else {
+    let Ok(text) = std::fs::read_to_string(dir.join(leviath_blueprint::FILE_NAME)) else {
         return;
     };
-    let Ok(bp) = leviath_runtime::spec::manifest::parse_manifest(&text) else {
+    let Ok(file) = leviath_blueprint::BlueprintFile::parse(&text) else {
         return;
     };
 
-    for ((kind, declared), hooks) in declared_scripts(&bp) {
+    for ((kind, declared), hooks) in declared_scripts(&file.graph) {
         let Some(addressed) = declared_address(&declared) else {
             continue;
         };

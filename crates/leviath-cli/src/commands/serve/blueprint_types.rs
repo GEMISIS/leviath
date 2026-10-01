@@ -3,6 +3,7 @@
 //! In a file of its own rather than beside the rest of the blueprint response
 //! types so `types.rs` stays under its production-line cap.
 
+use leviath_runtime::spec::graph::{CodeRef, Needs, RunGraph};
 use serde::Serialize;
 
 /// One mime pattern routed to a region, in a [`StageRoutingInfo`].
@@ -100,7 +101,8 @@ pub(super) struct DependencyInfo {
     /// kind=binary: the program that must be on PATH.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) command: Option<String>,
-    /// kind=script: the Rhai check script's path.
+    /// kind=script: the check's script, as the blueprint names it: a path
+    /// relative to the blueprint's directory, or the code itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) check: Option<String>,
     /// Whether the blueprint declares how to install it.
@@ -110,17 +112,14 @@ pub(super) struct DependencyInfo {
 /// The declared dependencies of a blueprint, in declaration order, so the
 /// detail route carries them structured. Empty for a blueprint that declares
 /// none.
-pub(super) fn dependency_infos(
-    blueprint: &leviath_runtime::spec::Blueprint,
-) -> Vec<DependencyInfo> {
-    use leviath_runtime::spec::blueprint::DependencyKind;
-    blueprint
+pub(super) fn dependency_infos(graph: &RunGraph) -> Vec<DependencyInfo> {
+    graph
         .dependencies
         .iter()
         .map(|dep| {
             let mut info = DependencyInfo {
                 name: dep.name.clone(),
-                kind: dep.kind.tag(),
+                kind: "",
                 required: dep.required,
                 remedy: dep.remedy.clone(),
                 description: dep.description.clone(),
@@ -131,15 +130,27 @@ pub(super) fn dependency_infos(
                 check: None,
                 installable: dep.install.is_some(),
             };
-            match &dep.kind {
-                DependencyKind::McpServer { server, env } => {
-                    info.server = Some(server.clone());
+            info.kind = match &dep.needs {
+                Needs::McpServer { server, env } => {
+                    info.server = Some(server.to_string());
                     info.env = env.clone();
+                    "mcp_server"
                 }
-                DependencyKind::Env { var } => info.var = Some(var.clone()),
-                DependencyKind::Binary { command } => info.command = Some(command.clone()),
-                DependencyKind::Script { check } => info.check = Some(check.clone()),
-            }
+                Needs::Env(var) => {
+                    info.var = Some(var.clone());
+                    "env"
+                }
+                Needs::Binary(command) => {
+                    info.command = Some(command.clone());
+                    "binary"
+                }
+                Needs::Check(code) => {
+                    info.check = Some(match code {
+                        CodeRef::File(path) | CodeRef::Inline(path) => path.clone(),
+                    });
+                    "script"
+                }
+            };
             info
         })
         .collect()
@@ -151,18 +162,43 @@ mod tests {
 
     #[test]
     fn dependency_infos_carries_every_kind() {
-        let bp = leviath_runtime::spec::manifest::parse_manifest(
-            "[agent]\nname = \"a\"\n\n\
-             [[dependencies]]\nname = \"m\"\nkind = \"mcp_server\"\nserver = \"meshy\"\n\
-             env = [\"K\"]\nremedy = \"r\"\ndescription = \"d\"\n\
-             [dependencies.install.server]\nurl = \"https://x\"\n\n\
-             [[dependencies]]\nname = \"e\"\nkind = \"env\"\nvar = \"V\"\n\n\
-             [[dependencies]]\nname = \"b\"\nkind = \"binary\"\ncommand = \"c\"\n\n\
-             [[dependencies]]\nname = \"s\"\nkind = \"script\"\ncheck = \"chk.rhai\"\n",
+        let file = leviath_blueprint::BlueprintFile::parse(
+            r#"[blueprint]
+name = "a"
+version = "1.0.0"
+
+[graph]
+stages = [{ name = "main" }]
+layout = { total_budget_tokens = 100, regions = [] }
+
+[[graph.dependencies]]
+name = "m"
+needs = { mcp_server = { server = "meshy", env = ["K"] } }
+remedy = "r"
+description = "d"
+install = { server = { url = "https://x" } }
+
+[[graph.dependencies]]
+name = "e"
+needs = { env = "V" }
+
+[[graph.dependencies]]
+name = "b"
+needs = { binary = "c" }
+
+[[graph.dependencies]]
+name = "s"
+needs = { check = { file = "chk.rhai" } }
+
+[[graph.dependencies]]
+name = "i"
+needs = { check = { inline = "true" } }
+required = false
+"#,
         )
         .unwrap();
-        let infos = dependency_infos(&bp);
-        assert_eq!(infos.len(), 4);
+        let infos = dependency_infos(&file.graph);
+        assert_eq!(infos.len(), 5);
         assert_eq!(infos[0].kind, "mcp_server");
         assert_eq!(infos[0].server.as_deref(), Some("meshy"));
         assert_eq!(infos[0].env, vec!["K".to_string()]);
@@ -170,17 +206,23 @@ mod tests {
         assert_eq!(infos[0].description.as_deref(), Some("d"));
         assert!(infos[0].required);
         assert!(infos[0].installable);
+        assert_eq!(infos[1].kind, "env");
         assert_eq!(infos[1].var.as_deref(), Some("V"));
+        assert_eq!(infos[2].kind, "binary");
         assert_eq!(infos[2].command.as_deref(), Some("c"));
+        assert_eq!(infos[3].kind, "script");
         assert_eq!(infos[3].check.as_deref(), Some("chk.rhai"));
         assert!(!infos[3].installable);
+        assert_eq!(infos[4].check.as_deref(), Some("true"));
+        assert!(!infos[4].required);
         // Exercise the wire serialization the detail route relies on.
         let json = serde_json::to_string(&infos).expect("serializes");
         assert!(json.contains("\"kind\":\"mcp_server\""), "{json}");
         assert!(json.contains("\"installable\":true"), "{json}");
         // An agent with no dependencies yields an empty list.
         let none =
-            leviath_runtime::spec::manifest::parse_manifest("[agent]\nname = \"n\"\n").unwrap();
-        assert!(dependency_infos(&none).is_empty());
+            leviath_blueprint::BlueprintFile::parse(&crate::test_support::tiny_blueprint("n"))
+                .unwrap();
+        assert!(dependency_infos(&none.graph).is_empty());
     }
 }

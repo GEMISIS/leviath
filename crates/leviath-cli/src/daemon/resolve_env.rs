@@ -36,8 +36,8 @@ use leviath_runtime::spec::inputs::PathKind;
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use leviath_runtime::spec::launch::Unattended;
 use leviath_runtime::spec::names::{
-    BlueprintName, BlueprintPath, BlueprintRef, Digest, McpServerName, MimePattern, ModelRef,
-    ProviderName, RunId, WorkdirPath,
+    BlueprintPath, BlueprintRef, Digest, McpServerName, MimePattern, ModelRef, ProviderName, RunId,
+    WorkdirPath,
 };
 use leviath_runtime::spec::run_spec::{AutoAnswers, SeededContent, ToolDef, ToolSource};
 use tokio::sync::mpsc::UnboundedSender;
@@ -214,133 +214,63 @@ fn script_def(meta: &leviath_scripting::ScriptToolMeta, digest: Digest) -> Optio
     host::tool_def(&tool, ToolSource::Script(digest))
 }
 
-/// The installed blueprints' names, for a refusal's `known` list.
-fn installed(agents_dir: Option<&Path>) -> Vec<String> {
-    let mut names: Vec<String> = agents_dir
-        .and_then(|d| std::fs::read_dir(d).ok())
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .join(leviath_core::files::MANIFEST_FILENAME)
-                .is_file()
-        })
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
-}
-
-/// Load an installed blueprint as a run graph: `<agents_dir>/<name>/agent.leviath`,
-/// parsed and validated as every spawn has done, with its `[[mcp_servers]]`
-/// and `[tool_script_permissions]` read into the graph too. The operator's
-/// defaults are not folded in here; resolution does that for every graph.
+/// Load an installed blueprint as a run graph: `<agents_dir>/<name>/agent.toml`,
+/// read by [`leviath_blueprint::find`]. The operator's defaults are not folded
+/// in here; resolution does that for every graph, and checks it.
+///
+/// An installed copy of a bundled blueprint that will not read, and differs
+/// from the one this build ships, is most likely out of date rather than
+/// wrong, and the issue says so.
 pub fn load_installed(
     agents_dir: Option<&Path>,
     reference: &BlueprintRef,
 ) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
-    // Relative to the source: the resolver puts `source.blueprint` in front.
-    let at = SpecPath::root();
-    let name = &reference.name;
-    let issue = |code: IssueCode, message: String| SpawnIssue::new(at.clone(), code, message);
-    let (manifest, content) = agents_dir
-        .and_then(|d| read_manifest_in(&d.join(name.as_str())))
-        .ok_or_else(|| {
-            issue(
-                IssueCode::Unresolvable,
-                format!("no blueprint named '{name}' is installed"),
-            )
-            .hint("install it with `lev add`, or name one of these")
-            .known(installed(agents_dir))
-        })?;
-    let digest = Digest::of(content.as_bytes());
-    if let Some(pinned) = reference.digest.as_ref().filter(|p| **p != digest) {
-        return Err(issue(
-            IssueCode::Unresolvable,
-            format!("blueprint '{name}' is installed at a different revision"),
-        )
-        .expected(format!("revision {pinned}"))
-        .got(format!("revision {digest}"))
-        .into());
-    }
-    let mut loaded = read_blueprint(&manifest, &content, name.as_str(), &at)?;
-    loaded.reference.name = name.clone();
-    Ok(loaded)
+    let dirs: Vec<PathBuf> = agents_dir.map(Path::to_path_buf).into_iter().collect();
+    leviath_blueprint::find(&dirs, reference).map_err(|mut issue| {
+        if issue.code == IssueCode::Invalid
+            && let Some(dir) = agents_dir
+        {
+            let file = dir
+                .join(reference.name.as_str())
+                .join(leviath_blueprint::FILE_NAME);
+            issue
+                .message
+                .push_str(&crate::bundled::stale_install_suffix(
+                    &file,
+                    crate::bundled::real_agents_dir_opt().as_deref(),
+                    ". ",
+                ));
+        }
+        issue.hint = issue.hint.or_else(|| {
+            (issue.code == IssueCode::Unresolvable && issue.path.0.is_empty())
+                .then(|| "install it with `lev add`, or name one of these".to_string())
+        });
+        issue
+    })
 }
 
 /// Load the blueprint in the directory `path` names, the way
-/// [`load_installed`] loads an installed one. Named after its `[agent]
+/// [`load_installed`] loads an installed one. Named after its `[blueprint]
 /// name`.
 pub fn load_file(path: &BlueprintPath) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
-    // Relative to the source: the resolver puts `source.blueprint` in front.
+    // Relative to the source: the resolver puts `source.blueprint_file` in
+    // front.
     let at = SpecPath::root();
-    let (manifest, content) = read_manifest_in(path.path()).ok_or_else(|| {
-        SpawnIssue::new(
-            at.clone(),
-            IssueCode::Unresolvable,
-            format!("no blueprint is in '{path}'"),
-        )
-        .hint("name the directory that holds the blueprint's agent.leviath")
-    })?;
-    read_blueprint(&manifest, &content, path.as_str(), &at)
-}
-
-/// The manifest in `dir`, with its path, when there is one to read.
-fn read_manifest_in(dir: &Path) -> Option<(PathBuf, String)> {
-    let path = dir.join(leviath_core::files::MANIFEST_FILENAME);
-    std::fs::read_to_string(&path).ok().map(|text| (path, text))
-}
-
-/// The blueprint `content` (read from `manifest`), parsed, validated and read
-/// as a graph, named after its `[agent] name` and pinned to the text's
-/// digest. `shown` is how problems name it.
-///
-/// The one place the blueprint format is read, so the file format can change
-/// behind it.
-fn read_blueprint(
-    manifest: &Path,
-    content: &str,
-    shown: &str,
-    at: &SpecPath,
-) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
-    let issue = |code: IssueCode, message: String| SpawnIssue::new(at.clone(), code, message);
-    let stale = crate::bundled::stale_install_suffix(
-        manifest,
-        crate::bundled::real_agents_dir_opt().as_deref(),
-        ". ",
-    );
-    let blueprint = leviath_runtime::spec::manifest::parse_manifest(content)
-        .map_err(|e| issue(IssueCode::Invalid, format!("parse manifest: {e}{stale}")))?;
-    blueprint
-        .validate()
-        .map_err(|e| issue(IssueCode::Invalid, format!("invalid blueprint: {e}{stale}")))?;
-    let graph = RunGraph::from_blueprint(&blueprint)
-        .and_then(|mut graph| graph.read_manifest_tables(content).map(|()| graph))
-        .map_err(|issues| {
-            let each: Vec<String> = issues.iter().map(ToString::to_string).collect();
-            issue(
-                IssueCode::Invalid,
-                format!(
-                    "blueprint '{shown}' does not read as a run graph: {}",
-                    each.join("; ")
-                ),
+    if !path.path().join(leviath_blueprint::FILE_NAME).is_file() {
+        return Err(Box::new(
+            SpawnIssue::new(
+                at,
+                IssueCode::Unresolvable,
+                format!("no blueprint is in '{path}'"),
             )
-        })?;
-    let name = BlueprintName::new(blueprint.name.as_str()).map_err(|e| {
-        issue(
-            IssueCode::Invalid,
-            format!("blueprint '{shown}' is named '{}': {e}", blueprint.name),
+            .hint("name the directory that holds the blueprint's agent.toml"),
+        ));
+    }
+    leviath_blueprint::load(path.path()).map_err(|e| {
+        Box::new(
+            SpawnIssue::new(at, IssueCode::Invalid, e.to_string())
+                .hint("run `lev validate` on it to see every problem"),
         )
-    })?;
-    Ok(LoadedBlueprint {
-        graph,
-        reference: BlueprintRef {
-            name,
-            digest: Some(Digest::of(content.as_bytes())),
-        },
-        version: blueprint.version,
-        base_dir: manifest.parent().map(Path::to_path_buf).unwrap_or_default(),
     })
 }
 
@@ -516,28 +446,16 @@ impl ResolveEnv for DaemonEnv {
         dependency: &DependencyDef,
         code: Option<&[u8]>,
     ) -> Result<(), String> {
-        use leviath_runtime::spec::blueprint::{Dependency, DependencyKind};
-        let kind = match &dependency.needs {
-            Needs::McpServer { server, env } => DependencyKind::McpServer {
-                server: server.to_string(),
-                env: env.clone(),
-            },
-            Needs::Env(var) => DependencyKind::Env { var: var.clone() },
-            Needs::Binary(command) => DependencyKind::Binary {
-                command: command.clone(),
-            },
-            Needs::Check(_) => return host::run_check(code),
-        };
-        let legacy = Dependency {
-            name: dependency.name.clone(),
-            kind,
+        if let Needs::Check(_) = &dependency.needs {
+            return host::run_check(code);
+        }
+        // Asked only about what must be in place, so judged as required.
+        let required = DependencyDef {
             required: true,
-            remedy: dependency.remedy.clone(),
-            description: None,
-            install: None,
+            ..dependency.clone()
         };
         let report = crate::dependencies::evaluate(
-            &[legacy],
+            std::slice::from_ref(&required),
             &self.config.mcp_servers,
             Path::new("."),
             &crate::dependencies::SystemProbe,

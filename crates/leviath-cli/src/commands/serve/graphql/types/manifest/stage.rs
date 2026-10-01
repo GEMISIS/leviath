@@ -1,6 +1,6 @@
 //! `Stage`: one step of a blueprint, as its author declared it.
 //!
-//! Every field is what the manifest says, not what a run resolved. A setting the
+//! Every field is what the blueprint says, not what a run resolved. A setting the
 //! stage leaves out is null here even where the daemon has a default for it, and
 //! `effective` is where the resolved answer lives.
 
@@ -9,7 +9,9 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_runtime::spec::Blueprint as CoreBlueprint;
+use leviath_runtime::spec::graph::{StageDef, StageMode as Mode, WorkerSource};
+
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 use super::super::blueprint::{Region, ToolUseGuidance};
 use super::count;
@@ -18,7 +20,7 @@ use super::model::StageModelConfig;
 use super::output::{OutputSpec, StageParts};
 use super::refs;
 use super::runtime::{
-    BlueprintSecurity, NudgeConfig, SandboxConfig, StageHooks, WorkerFailurePolicy,
+    BlueprintSecurity, NudgeConfig, SandboxConfig, StageHooks, WorkerFailurePolicy, tool_sandbox,
 };
 use super::tools::{OutputRoute, ToolAcceptRule, ToolPermissionRule, ToolRouting};
 use super::transition::TransitionEdge;
@@ -40,18 +42,21 @@ pub(crate) enum StageMode {
     Output,
 }
 
-impl From<&leviath_runtime::spec::blueprint::StageMode> for StageMode {
-    fn from(mode: &leviath_runtime::spec::blueprint::StageMode) -> Self {
-        use leviath_runtime::spec::blueprint::StageMode as Core;
+impl From<&Mode> for StageMode {
+    fn from(mode: &Mode) -> Self {
         match mode {
-            Core::Autonomous => Self::Autonomous,
-            Core::Interactive => Self::Interactive,
-            Core::InteractivePoints { .. } => Self::InteractivePoints,
-            Core::FanOut { .. } => Self::FanOut,
-            Core::Output => Self::Output,
+            Mode::Autonomous => Self::Autonomous,
+            Mode::Interactive => Self::Interactive,
+            Mode::InteractivePoints(_) => Self::InteractivePoints,
+            Mode::FanOut(_) => Self::FanOut,
+            Mode::Output => Self::Output,
         }
     }
 }
+
+/// How many times a stage that must hand back an output is asked again before
+/// it is let through without one: the run pipeline's own cap.
+const OUTPUT_REASKS: usize = 3;
 
 /// What a stage must produce before it may transition.
 #[mirror]
@@ -67,9 +72,9 @@ pub(crate) struct OutputRequirement {
 /// The resolver state behind the `FanOut` type.
 pub(crate) struct FanOut {
     /// The blueprint the stage and region names resolve in.
-    pub(crate) blueprint: Arc<CoreBlueprint>,
+    pub(crate) blueprint: Arc<ParsedBlueprint>,
     /// The fan-out block as the stage wrote it.
-    pub(crate) config: leviath_runtime::spec::blueprint::FanOutConfig,
+    pub(crate) config: leviath_runtime::spec::graph::FanOutDef,
 }
 
 /// What a stage's fan-out splits into, and how.
@@ -82,8 +87,12 @@ impl FanOut {
     /// A separate installed blueprint run as the worker, by name. It has to be
     /// installed when the fan-out runs, and it may not be installed now, so this
     /// is a name rather than a blueprint.
-    async fn worker_agent(&self) -> Option<&str> {
-        self.config.worker_agent.as_deref()
+    async fn worker_agent(&self) -> Option<String> {
+        match &self.config.worker {
+            WorkerSource::Blueprint(blueprint) => Some(blueprint.to_string()),
+            WorkerSource::BlueprintFile(path) => Some(path.to_string()),
+            WorkerSource::Stage(_) | WorkerSource::Query(_) => None,
+        }
     }
 
     /// A stage of this same blueprint run as the worker. That stage has to allow
@@ -94,19 +103,22 @@ impl FanOut {
     /// `lev validate` refuses and the daemon will not spawn.
     /// `workerStageName` tells those apart.
     async fn worker_stage(&self) -> Option<Stage> {
-        refs::stage(&self.blueprint, self.config.worker_stage.as_deref()?)
+        refs::stage(&self.blueprint, self.named_worker_stage()?)
     }
 
     /// The stage name the fan-out wrote for its worker, verbatim. Null when it
     /// names no stage of this blueprint.
     async fn worker_stage_name(&self) -> Option<&str> {
-        self.config.worker_stage.as_deref()
+        self.named_worker_stage()
     }
 
     /// A description matched against the installed blueprints, when the manifest
     /// would rather describe the worker than name it.
     async fn worker_query(&self) -> Option<&str> {
-        self.config.worker_query.as_deref()
+        match &self.config.worker {
+            WorkerSource::Query(query) => Some(query),
+            _ => None,
+        }
     }
 
     /// The stage that reconciles what the workers sent back.
@@ -114,12 +126,12 @@ impl FanOut {
     /// Null when the fan-out names none, and also when it names a stage this
     /// blueprint does not declare. `mergeStageName` tells those apart.
     async fn merge_stage(&self) -> Option<Stage> {
-        refs::stage(&self.blueprint, self.config.merge_stage.as_deref()?)
+        refs::stage(&self.blueprint, self.config.merge_stage.as_ref()?.as_str())
     }
 
     /// The merge stage's name, verbatim. Null when the fan-out names none.
     async fn merge_stage_name(&self) -> Option<&str> {
-        self.config.merge_stage.as_deref()
+        self.config.merge_stage.as_ref().map(|name| name.as_str())
     }
 
     /// The prompt that produces the work items.
@@ -159,19 +171,36 @@ impl FanOut {
     /// budget - and also where it names a region no layout declares.
     /// `resultsRegionName` tells those apart.
     async fn results_region(&self) -> Option<Region> {
-        refs::region(&self.blueprint, self.config.results_region.as_deref()?)
+        refs::region(
+            &self.blueprint,
+            self.config.results_region.as_ref()?.as_str(),
+        )
     }
 
     /// The results region's name, verbatim. Null when the fan-out names none.
     async fn results_region_name(&self) -> Option<&str> {
-        self.config.results_region.as_deref()
+        self.config
+            .results_region
+            .as_ref()
+            .map(|name| name.as_str())
+    }
+}
+
+impl FanOut {
+    /// The stage of this graph the workers run, when that is how the fan-out
+    /// picks its worker.
+    fn named_worker_stage(&self) -> Option<&str> {
+        match &self.config.worker {
+            WorkerSource::Stage(stage) => Some(stage.as_str()),
+            _ => None,
+        }
     }
 }
 
 /// The resolver state behind the `StageContext` type.
 pub(crate) struct StageContext {
     /// The stage this block belongs to.
-    pub(crate) blueprint: Arc<CoreBlueprint>,
+    pub(crate) blueprint: Arc<ParsedBlueprint>,
     /// Which stage, by declaration order.
     pub(crate) at: usize,
 }
@@ -185,7 +214,7 @@ impl StageContext {
     /// Every one is declared right here, so this list is always the whole of
     /// what the stage wrote.
     async fn regions(&self) -> Vec<Region> {
-        let declared = self.stage().context_layout.as_ref();
+        let declared = self.stage().layout.as_ref();
         let declared_count = declared.map_or(0, |layout| layout.regions.len());
         (0..declared_count)
             .map(|at| Region {
@@ -202,13 +231,13 @@ impl StageContext {
     /// Declared names only. `hideNames` carries every name the stage wrote,
     /// which is where a name with no declaration stays readable.
     async fn hide(&self) -> Vec<Region> {
-        refs::regions(&self.blueprint, &self.stage().context_hide)
+        refs::regions(&self.blueprint, &self.stage().hide)
     }
 
     /// Every name the stage wrote in `hide`, verbatim and in order, declared or
     /// not.
-    async fn hide_names(&self) -> &[String] {
-        &self.stage().context_hide
+    async fn hide_names(&self) -> Vec<String> {
+        super::texts(&self.stage().hide)
     }
 
     /// Regions emptied as this stage is entered.
@@ -218,27 +247,27 @@ impl StageContext {
     /// whatever a manifest says. `resetNames` carries every name the stage
     /// wrote.
     async fn reset(&self) -> Vec<Region> {
-        refs::regions(&self.blueprint, &self.stage().context_reset)
+        refs::regions(&self.blueprint, &self.stage().reset)
     }
 
     /// Every name the stage wrote in `reset`, verbatim and in order, declared or
     /// not.
-    async fn reset_names(&self) -> &[String] {
-        &self.stage().context_reset
+    async fn reset_names(&self) -> Vec<String> {
+        super::texts(&self.stage().reset)
     }
 }
 
 impl StageContext {
     /// The stage this block belongs to.
-    fn stage(&self) -> &leviath_runtime::spec::blueprint::Stage {
-        &self.blueprint.stages[self.at]
+    fn stage(&self) -> &StageDef {
+        &self.blueprint.graph.stages[self.at]
     }
 }
 
 /// The resolver state behind the `Stage` type.
 pub(crate) struct Stage {
     /// The blueprint this stage belongs to, shared rather than copied.
-    pub(crate) blueprint: Arc<CoreBlueprint>,
+    pub(crate) blueprint: Arc<ParsedBlueprint>,
     /// Which stage, by declaration order.
     pub(crate) at: usize,
 }
@@ -254,7 +283,7 @@ pub(crate) struct Stage {
 impl Stage {
     /// Stage name, unique within the blueprint.
     async fn name(&self) -> &str {
-        &self.stage().name
+        self.stage().name.as_str()
     }
 
     /// How the stage runs.
@@ -283,19 +312,28 @@ impl Stage {
     ///
     /// Names rather than tools: a blueprint may name a tool this machine does
     /// not have, and resolving would drop it. Read `tools` for what is here.
-    async fn available_tools(&self) -> &[String] {
-        &self.stage().available_tools
+    async fn available_tools(&self) -> Vec<String> {
+        self.stage()
+            .tools
+            .iter()
+            .map(|tool| match tool {
+                leviath_runtime::spec::graph::ToolSelector::Tool(name) => name.to_string(),
+                leviath_runtime::spec::graph::ToolSelector::Group(group) => {
+                    crate::commands::serve::graphql::query::catalog::group_token(*group).to_string()
+                }
+            })
+            .collect()
     }
 
     /// Tools this stage cannot work without. These survive an unattended run,
     /// where the blocking interaction tools are otherwise withheld.
-    async fn required_tools(&self) -> &[String] {
-        &self.stage().required_tools
+    async fn required_tools(&self) -> Vec<String> {
+        super::texts(&self.stage().required_tools)
     }
 
     /// MCP servers whose whole tool set this stage may use.
-    async fn available_connectors(&self) -> &[String] {
-        &self.stage().available_connectors
+    async fn available_connectors(&self) -> Vec<String> {
+        super::texts(&self.stage().connectors)
     }
 
     /// Inference-turn bound for one visit to this stage.
@@ -312,7 +350,7 @@ impl Stage {
     /// leave without producing anything.
     async fn output_requirement(&self) -> Option<OutputRequirement> {
         self.stage().require_output.then(|| OutputRequirement {
-            reasks: count(leviath_runtime::spec::blueprint::DEFAULT_OUTPUT_REENTRY_CAP),
+            reasks: count(OUTPUT_REASKS),
         })
     }
 
@@ -326,8 +364,8 @@ impl Stage {
     /// say.
     async fn input(&self) -> StageParts {
         StageParts {
-            accepts: self.stage().input_accepts.clone(),
-            as_text: self.stage().input_as_text.clone(),
+            accepts: super::texts(&self.stage().input_accepts),
+            as_text: super::texts(&self.stage().input_as_text),
         }
     }
 
@@ -383,8 +421,8 @@ impl Stage {
             .tool_accepts
             .iter()
             .map(|(tool, patterns)| ToolAcceptRule {
-                tool: tool.clone(),
-                patterns: patterns.clone(),
+                tool: tool.to_string(),
+                patterns: super::texts(patterns),
             })
             .collect()
     }
@@ -393,7 +431,7 @@ impl Stage {
     /// daemon's own routing.
     async fn tool_routing(&self) -> Option<ToolRouting> {
         self.stage()
-            .tool_result_routing
+            .tool_routing
             .as_ref()
             .map(|routing| ToolRouting::of(&self.blueprint, routing))
     }
@@ -403,7 +441,7 @@ impl Stage {
         self.stage()
             .output_routing
             .iter()
-            .map(|(pattern, region)| OutputRoute::of(&self.blueprint, pattern, region))
+            .map(|(pattern, region)| OutputRoute::of(&self.blueprint, pattern, region.as_str()))
             .collect()
     }
 
@@ -429,24 +467,21 @@ impl Stage {
     /// What this stage asks of the taint layer. Null inherits the blueprint's
     /// setting, which inherits the machine's.
     async fn security(&self) -> Option<BlueprintSecurity> {
-        self.stage().security.as_ref().map(BlueprintSecurity::from)
+        BlueprintSecurity::of(self.stage().taint_tracking)
     }
 
     /// The scripts this stage runs at points in its own lifecycle. Null when it
     /// declares none, which costs nothing at run time.
     async fn hooks(&self) -> Option<StageHooks> {
         let hooks = &self.stage().hooks;
-        match hooks.is_empty() {
-            true => None,
-            false => Some(StageHooks::from(hooks)),
-        }
+        (*hooks != Default::default()).then(|| StageHooks::from(hooks))
     }
 
     /// The checkpoints this stage raises, where the run waits for a person.
     /// Empty for every mode but `INTERACTIVE_POINTS`.
     async fn interaction_points(&self) -> Vec<InteractionPoint> {
         match &self.stage().mode {
-            leviath_runtime::spec::blueprint::StageMode::InteractivePoints { points } => points
+            Mode::InteractivePoints(points) => points
                 .iter()
                 .map(|point| InteractionPoint::of(&self.blueprint, point))
                 .collect(),
@@ -458,7 +493,7 @@ impl Stage {
     /// mode.
     async fn fan_out(&self) -> Option<FanOut> {
         match &self.stage().mode {
-            leviath_runtime::spec::blueprint::StageMode::FanOut { config } => Some(FanOut {
+            Mode::FanOut(config) => Some(FanOut {
                 blueprint: Arc::clone(&self.blueprint),
                 config: config.clone(),
             }),
@@ -478,23 +513,34 @@ impl Stage {
         let stage = self.stage();
         let reviewed = matches!(
             &stage.mode,
-            leviath_runtime::spec::blueprint::StageMode::InteractivePoints { points } if !points.is_empty()
+            Mode::InteractivePoints(points) if !points.is_empty()
         );
+        let graph = &self.blueprint.graph;
+        let nudge_config =
+            |def: &leviath_runtime::spec::graph::NudgeDef| leviath_runtime::spec::NudgeConfig {
+                enabled: def.enabled,
+                max: def.max.map(|max| max as usize),
+                text: def.text.clone(),
+            };
         let nudge = leviath_runtime::spec::resolve_nudge(
             Some(&config.nudge),
-            self.blueprint.nudge.as_ref(),
-            stage.nudge.as_ref(),
+            graph.nudge.as_ref().map(nudge_config).as_ref(),
+            stage.nudge.as_ref().map(nudge_config).as_ref(),
             reviewed,
         );
+        let security = |taint_tracking: Option<bool>| {
+            taint_tracking
+                .map(|taint_tracking| leviath_core::taint::SecurityConfig { taint_tracking })
+        };
         EffectiveStageSettings {
             includes_batch_hint: leviath_core::taint::resolve_batch_tool_hint(
                 config.batch_tool_hint,
-                self.blueprint.batch_tool_hint,
+                graph.batch_tool_hint,
                 stage.batch_tool_hint,
             ),
             shell_hint_eligible: leviath_core::taint::resolve_shell_hint(
                 config.shell_hint,
-                self.blueprint.shell_hint,
+                graph.shell_hint,
                 stage.shell_hint,
             ),
             nudge: EffectiveNudge {
@@ -504,13 +550,13 @@ impl Stage {
             },
             sandbox: SandboxConfig::from(&leviath_core::sandbox::resolve_sandbox(
                 config.sandbox.as_ref(),
-                self.blueprint.sandbox.as_ref(),
-                stage.sandbox.as_ref(),
+                graph.sandbox.as_ref().map(tool_sandbox).as_ref(),
+                stage.sandbox.as_ref().map(tool_sandbox).as_ref(),
             )),
             tracks_taint: leviath_core::taint::resolve_taint_enabled(
                 config.taint_tracking,
-                self.blueprint.security.as_ref(),
-                stage.security.as_ref(),
+                security(graph.taint_tracking).as_ref(),
+                security(stage.taint_tracking).as_ref(),
             ),
         }
     }
@@ -518,14 +564,13 @@ impl Stage {
     /// Outgoing edges. An empty list marks a terminal stage.
     async fn transitions(&self) -> Vec<TransitionEdge> {
         let mut edges: Vec<TransitionEdge> = self
-            .stage()
-            .transitions
-            .iter()
-            .flatten()
-            .map(|(target, edge)| TransitionEdge::of(&self.blueprint, target, edge))
+            .blueprint
+            .graph
+            .edges_from(self.stage().name.as_str())
+            .map(|edge| TransitionEdge::of(&self.blueprint, edge))
             .collect();
-        // The manifest holds these in a map, so a listing sorted by target is
-        // the only order two identical requests can both produce.
+        // Sorted by target, so the listing reads the same however the
+        // blueprint orders its edges.
         edges.sort_by(|a, b| a.target.cmp(&b.target));
         edges
     }
@@ -533,8 +578,8 @@ impl Stage {
 
 impl Stage {
     /// The stage this object stands for.
-    fn stage(&self) -> &leviath_runtime::spec::blueprint::Stage {
-        &self.blueprint.stages[self.at]
+    fn stage(&self) -> &StageDef {
+        &self.blueprint.graph.stages[self.at]
     }
 }
 

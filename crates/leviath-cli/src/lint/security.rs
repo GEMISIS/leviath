@@ -1,37 +1,50 @@
-//! The checks that read a manifest as a request for capability.
+//! The checks that read a blueprint as a request for capability.
 //!
 //! Tool policies, command seeds, pre-approved safe commands, read-path grants
 //! and held checkpoints: everything a blueprint can ask for that the user has
 //! to decide about. These are the findings `lev validate` exists to surface
 //! before a downloaded agent runs, not after.
 
+use std::collections::BTreeMap;
+
 use super::*;
+use leviath_core::policy::ToolPolicy;
+use leviath_runtime::spec::graph::{Seed, SeedRefresh, StageDef};
+use leviath_runtime::spec::names::ToolName;
+
+/// The graph-wide tool permissions, as every stage inherits them.
+type GraphPermissions = BTreeMap<ToolName, ToolPolicy>;
+
+/// How a policy is written in a blueprint.
+pub(super) fn policy_word(policy: ToolPolicy) -> &'static str {
+    match policy {
+        ToolPolicy::Allow => "allow",
+        ToolPolicy::Ask => "ask",
+        ToolPolicy::Deny => "deny",
+    }
+}
 
 /// Permissions that do not land on the tool they look like they land on, and
 /// shell grants left to the default.
 ///
 /// Policy is resolved against the name the *model* calls the tool by, which is
-/// always the canonical one. A permission written under an alias of a tool the
-/// stage granted canonically (or the reverse) is looked up under a key nothing
-/// ever asks for, so the entry has no effect at all: it reads as a decision and
-/// is not one.
+/// always the canonical one, and either spelling of a permission counts.
 pub(super) fn lint_tool_policies(
-    stage: &leviath_runtime::spec::Stage,
-    agent_permissions: &HashMap<String, String>,
+    stage: &StageDef,
+    graph_permissions: &GraphPermissions,
 ) -> Vec<LintFinding> {
     // Either spelling counts, because policy resolution accepts either: a stage
     // granting `bash` is covered by a `shell` permission and the reverse. A
     // mismatch between the two is not worth a warning for that reason.
     let has_policy = |name: &str| {
         leviath_tools::tool_name_spellings(name)
-            .any(|n| stage.tool_permissions.contains_key(n) || agent_permissions.contains_key(n))
+            .any(|n| stage.tool_permissions.contains_key(n) || graph_permissions.contains_key(n))
     };
 
     // Only worth saying for the shell, whose default is `ask` - and an `ask`
     // with nobody to answer waits rather than denying, so an unattended run
     // hangs on the first command instead of failing it.
-    let mut shells: Vec<String> = stage
-        .named_tools()
+    let mut shells: Vec<String> = named_tools(stage)
         .filter(|t| canonical_tool_name(t) == "shell")
         .filter(|t| !has_policy(t))
         .map(|t| format!("'{t}'"))
@@ -39,15 +52,14 @@ pub(super) fn lint_tool_policies(
     // A group reaching the built-ins grants the shell as surely as naming it,
     // and the policy still keys on the canonical name. Said once, and not at
     // all when the shell is also named: that finding already covers it.
-    let builtin_group = stage
-        .tool_groups()
+    let builtin_group = tool_groups(stage)
         .into_iter()
-        .find(|g| g.covers(leviath_runtime::spec::blueprint::ToolGroup::Builtin));
+        .find(|g| covers(*g, ToolGroup::Builtin));
     if shells.is_empty()
         && !has_policy("shell")
         && let Some(group) = builtin_group
     {
-        shells.push(format!("'shell' through '{group}'"));
+        shells.push(format!("'shell' through '{}'", group_token(group)));
     }
 
     shells
@@ -62,10 +74,10 @@ pub(super) fn lint_tool_policies(
                      prompt rather than being denied"
                 ),
             )
-            .in_stage(&stage.name)
+            .in_stage(stage.name.as_str())
             .with_fix(format!(
-                "set shell = \"allow\" or \"deny\" in [tool_permissions] or \
-                 [stages.{}.tool_permissions]",
+                "set shell = \"allow\" or \"deny\" in the graph's tool_permissions or \
+                 in the tool_permissions of the stage named '{}'",
                 stage.name
             ))
         })
@@ -83,27 +95,22 @@ pub(super) fn lint_tool_policies(
 /// line reads as a decision and is silently undone: the author sets `allow`,
 /// the `implicit-shell-policy` warning goes quiet, and the tool still asks.
 pub(super) fn lint_permission_clamp(
-    stage: &leviath_runtime::spec::Stage,
-    agent_permissions: &HashMap<String, String>,
+    stage: &StageDef,
+    graph_permissions: &GraphPermissions,
 ) -> Vec<LintFinding> {
-    use crate::tools::{
-        blueprint_loosenable, default_tool_policy, parse_policy_str, restrictiveness,
-    };
+    use crate::tools::{blueprint_loosenable, default_tool_policy, restrictiveness};
 
     // A permission on a tool the stage does not grant is already reported as an
     // orphan; whether a group grant reaches a tool depends on the install, so a
     // stage with a group is left to the runtime. Only a tool the stage names
     // itself is judged here.
     let names_it = |tool: &str| {
-        stage
-            .named_tools()
-            .any(|granted| canonical_tool_name(granted) == canonical_tool_name(tool))
+        named_tools(stage).any(|granted| canonical_tool_name(granted) == canonical_tool_name(tool))
     };
-    let clamped = |tool: &str, policy: &str| {
+    let clamped = |tool: &str, set: ToolPolicy| {
         if !names_it(tool) {
             return false;
         }
-        let set = parse_policy_str(policy);
         let is_builtin = leviath_tools::is_builtin_tool(canonical_tool_name(tool));
         let default = default_tool_policy(tool, is_builtin);
         // Loosening = the blueprint's policy is less restrictive than the
@@ -112,27 +119,26 @@ pub(super) fn lint_permission_clamp(
         restrictiveness(set) < restrictiveness(default) && !blueprint_loosenable(tool)
     };
 
-    // The stage's own permissions and the agent-level ones it inherits, each
+    // The stage's own permissions and the graph-wide ones it inherits, each
     // once, most specific first.
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut out = Vec::new();
-    for (scope, perms) in [
-        ("stages.", &stage.tool_permissions),
-        ("", agent_permissions),
-    ] {
+    for (own, perms) in [(true, &stage.tool_permissions), (false, graph_permissions)] {
         for (tool, policy) in perms {
+            let tool = tool.as_str();
             let canonical = canonical_tool_name(tool);
-            if !seen.insert(canonical.to_string()) || !clamped(tool, policy) {
+            if !seen.insert(canonical.to_string()) || !clamped(tool, *policy) {
                 continue;
             }
-            let where_ = match scope.is_empty() {
-                true => "[tool_permissions]".to_string(),
-                false => format!("[stages.{}.tool_permissions]", stage.name),
+            let where_ = match own {
+                true => format!("the tool_permissions of stage '{}'", stage.name),
+                false => "the graph's tool_permissions".to_string(),
             };
             let message = format!(
-                "sets {tool} = \"{policy}\" in {where_}, which a blueprint cannot \
+                "sets {tool} = \"{}\" in {where_}, which a blueprint cannot \
                  grant on its own, so the runtime clamps it back to its default \
-                 and the tool still asks"
+                 and the tool still asks",
+                policy_word(*policy)
             );
             let fix = "run it with --yolo, set [security] allow_blueprint_permissions = true, \
                        or have the operator set this tool in config.toml; otherwise drop the \
@@ -144,7 +150,7 @@ pub(super) fn lint_permission_clamp(
                     "blueprint-permission-clamped",
                     message,
                 )
-                .in_stage(&stage.name)
+                .in_stage(stage.name.as_str())
                 .with_fix(fix),
             );
         }
@@ -152,18 +158,30 @@ pub(super) fn lint_permission_clamp(
     out
 }
 
+/// Every region in the graph, once per name, with its seed: the graph's own
+/// layout first, then each stage layout's regions the graph's does not name.
+fn seeded_regions(graph: &RunGraph) -> Vec<(&str, &Seed)> {
+    let mut seen: Vec<(&str, &Seed)> = Vec::new();
+    for region in layouts(graph).flat_map(|l| l.regions.iter()) {
+        if let Some(seed) = &region.seed
+            && !seen.iter().any(|(name, _)| *name == region.name.as_str())
+        {
+            seen.push((region.name.as_str(), seed));
+        }
+    }
+    seen
+}
+
 /// Regions whose `seed = { command = "..." }` runs a shell command at spawn.
 ///
 /// This one is an audit line rather than a complaint: the commands run before
 /// the first inference and before any tool-approval prompt, so whoever is about
 /// to `lev add` a blueprint they did not write should see them first.
-pub(super) fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
-    let seeds: Vec<String> = blueprint
-        .context_layout
-        .regions
-        .iter()
-        .filter_map(|r| match &r.seed {
-            Some(leviath_runtime::spec::layout::RegionSeed::Command { command }) => {
+pub(super) fn lint_command_seeds(graph: &RunGraph) -> Vec<LintFinding> {
+    let seeds: Vec<String> = seeded_regions(graph)
+        .into_iter()
+        .filter_map(|(name, seed)| match seed {
+            Seed::Command(command) => {
                 // Whether it will actually run matters more than that it is
                 // declared. A seed runs before any prompt exists, so it only
                 // runs if the safe list already covers it - and finding that
@@ -173,7 +191,7 @@ pub(super) fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
                     true => "pre-approved",
                     false => "NOT pre-approved by the default safe list, so it will be refused",
                 };
-                Some(format!("{}: {command} ({verdict})", r.name))
+                Some(format!("{name}: {command} ({verdict})"))
             }
             _ => None,
         })
@@ -193,8 +211,8 @@ pub(super) fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
             ),
         )
         .with_fix(
-            "a refused seed needs its programs in `[safe_commands] shell`; disable seeds \
-             entirely with `--no-seed-commands`, or machine-wide via \
+            "a refused seed needs its programs in the graph's safe_commands shell list; \
+             disable seeds entirely with `--no-seed-commands`, or machine-wide via \
              `[security] allow_seed_commands = false`",
         ),
     ]
@@ -208,26 +226,22 @@ pub(super) fn lint_command_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
 /// write should see them first.
 ///
 /// Unlike a command seed there is no pre-approval to report. A seeded call
-/// resolves against the same `[tool_permissions]` a mid-run call does, so the
+/// resolves against the same tool permissions a mid-run call does, so the
 /// question "will this run" has the same answer as "may this agent call it",
 /// which the permission table already states.
-pub(super) fn lint_tool_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
-    let seeds: Vec<String> = blueprint
-        .context_layout
-        .regions
-        .iter()
-        .filter_map(|r| match &r.seed {
-            Some(leviath_runtime::spec::layout::RegionSeed::Tools { calls, refresh }) => {
-                let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+pub(super) fn lint_tool_seeds(graph: &RunGraph) -> Vec<LintFinding> {
+    let seeds: Vec<String> = seeded_regions(graph)
+        .into_iter()
+        .filter_map(|(name, seed)| match seed {
+            Seed::Tools { calls, refresh } => {
+                let names: Vec<&str> = calls.iter().map(|c| c.tool.as_str()).collect();
                 // A seed that re-runs on every stage entry is worth saying so:
                 // it is a tool call per stage for the life of the run, not one.
                 let when = match refresh {
-                    leviath_runtime::spec::layout::SeedRefresh::Once => "",
-                    leviath_runtime::spec::layout::SeedRefresh::EachStage => {
-                        " (on every stage entry)"
-                    }
+                    SeedRefresh::Once => "",
+                    SeedRefresh::EachStage => " (on every stage entry)",
                 };
-                Some(format!("{}: {}{when}", r.name, names.join(", ")))
+                Some(format!("{name}: {}{when}", names.join(", ")))
             }
             _ => None,
         })
@@ -247,7 +261,7 @@ pub(super) fn lint_tool_seeds(blueprint: &Blueprint) -> Vec<LintFinding> {
             ),
         )
         .with_fix(
-            "each call answers to `[tool_permissions]` exactly as a mid-run call would; \
+            "each call answers to the `tool_permissions` exactly as a mid-run call would; \
              a tool set to `ask` is refused at spawn because there is nobody to prompt",
         ),
     ]
@@ -275,12 +289,12 @@ pub(super) fn default_safe_keys_cover(command: &str) -> bool {
 /// saying because `--yolo` reads as "run without me", so a run that stops anyway
 /// looks like a hang, and `lev validate` is where an author or an operator finds
 /// out before the run rather than during it.
-pub(super) fn lint_held_checkpoints(blueprint: &Blueprint) -> Vec<LintFinding> {
-    let held = crate::held_checkpoints::held_points(blueprint)
+pub(super) fn lint_held_checkpoints(graph: &RunGraph) -> Vec<LintFinding> {
+    let held = crate::held_checkpoints::held_points(graph)
         .into_iter()
         .map(|h| (h, "an interaction point that declares unattended = \"ask\""))
         .chain(
-            crate::held_checkpoints::held_tools(blueprint)
+            crate::held_checkpoints::held_tools(graph)
                 .into_iter()
                 .map(|h| (h, "a blocking tool the stage keeps in required_tools")),
         );
@@ -304,12 +318,10 @@ pub(super) fn lint_held_checkpoints(blueprint: &Blueprint) -> Vec<LintFinding> {
     .collect()
 }
 
-/// A `[safe_commands]` block: entries that will never match, and whether the
+/// A `[graph.safe_commands]` block: entries that will never match, and whether the
 /// block counts at all on this install.
-pub(super) fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
-    let Some(sc) = blueprint.safe_commands.as_ref() else {
-        return Vec::new();
-    };
+pub(super) fn lint_safe_commands(graph: &RunGraph, agent: &str, env: &LintEnv) -> Vec<LintFinding> {
+    let sc = &graph.safe_commands;
     let mut findings = Vec::new();
 
     // An entry the key parser reads as anything other than itself can never
@@ -323,7 +335,7 @@ pub(super) fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<Li
                     LintSeverity::Error,
                     "unparseable-safe-command",
                     format!(
-                        "[safe_commands] shell entry '{entry}' is not a bare command prefix, so \
+                        "safe_commands shell entry '{entry}' is not a bare command prefix, so \
                          no call can ever match it"
                     ),
                 )
@@ -342,12 +354,12 @@ pub(super) fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<Li
         let message = match env.safe_commands_granted {
             Some(true) => None,
             Some(false) => Some(
-                "declares [safe_commands], and your config does not honour blueprint \
+                "declares safe_commands, and your config does not honour blueprint \
                  safe-commands, so none of it applies"
                     .to_string(),
             ),
             None => Some(
-                "declares [safe_commands]. Declaring is not granting: entries apply only \
+                "declares safe_commands. Declaring is not granting: entries apply only \
                  where the user opts in"
                     .to_string(),
             ),
@@ -359,7 +371,7 @@ pub(super) fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<Li
                         "set [agent_safe_commands.{}] allow_blueprint = true in your \
                          config.toml, or [security] allow_blueprint_safe_commands for every \
                          agent",
-                        blueprint.name
+                        agent
                     ),
                 ),
             );
@@ -369,7 +381,7 @@ pub(super) fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<Li
     findings
 }
 
-/// `[read_paths]` declarations: what the agent asks to read beyond its workdir,
+/// `read_paths` declarations: what the agent asks to read beyond its workdir,
 /// whether this machine's config actually grants each entry, and a sharper
 /// warning for an entry so broad it amounts to "my whole home directory" or
 /// "any absolute path".
@@ -380,14 +392,11 @@ pub(super) fn lint_safe_commands(blueprint: &Blueprint, env: &LintEnv) -> Vec<Li
 /// refused with nothing said earlier. When `env` has no answer - the daemon's
 /// offline lint, which has no user config to consult - the note falls back to
 /// stating the rule.
-pub(super) fn lint_read_paths(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintFinding> {
-    let Some(rp) = blueprint
-        .read_paths
-        .as_ref()
-        .filter(|rp| !rp.allow.is_empty())
-    else {
+pub(super) fn lint_read_paths(graph: &RunGraph, env: &LintEnv) -> Vec<LintFinding> {
+    let allow = &graph.read_paths;
+    if allow.is_empty() {
         return Vec::new();
-    };
+    }
     let mut findings = match &env.read_paths {
         Some(Ok(report)) => grant_findings(report),
         // A grant list of the user's own that will not compile is a hard spawn
@@ -401,15 +410,15 @@ pub(super) fn lint_read_paths(blueprint: &Blueprint, env: &LintEnv) -> Vec<LintF
                 LintSeverity::Note,
                 "read-paths-declared",
                 format!(
-                    "declares [read_paths] (reads outside the run workdir): {}",
-                    rp.allow.join(", ")
+                    "declares read_paths (reads outside the run workdir): {}",
+                    allow.join(", ")
                 ),
             )
             .with_fix("these are refused unless your own config grants them"),
         ],
     };
     findings.extend(
-        rp.allow
+        allow
             .iter()
             .filter(|e| read_path_entry_is_broad(e))
             .map(|entry| {
@@ -440,7 +449,7 @@ pub(super) fn grant_findings(report: &crate::read_path_report::GrantReport) -> V
             LintSeverity::Note,
             "read-paths-declared",
             format!(
-                "declares [read_paths] (reads outside the run workdir): {}",
+                "declares read_paths (reads outside the run workdir): {}",
                 report.summary()
             ),
         )
@@ -473,7 +482,7 @@ pub(super) fn grant_findings(report: &crate::read_path_report::GrantReport) -> V
     findings
 }
 
-/// Whether a `[read_paths]` entry grants effectively unlimited read access:
+/// Whether a `read_paths` entry grants effectively unlimited read access:
 /// the home directory itself, a filesystem root, or a pattern whose first
 /// component already matches anything.
 pub(super) fn read_path_entry_is_broad(entry: &str) -> bool {

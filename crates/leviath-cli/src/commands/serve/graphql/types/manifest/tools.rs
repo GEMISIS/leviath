@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_graphql::{Enum, Object, SimpleObject};
 use leviath_graphql_derive::mirror;
 
-use leviath_runtime::spec::Blueprint as CoreBlueprint;
+use crate::commands::serve::core::blueprints::ParsedBlueprint;
 
 use super::super::blueprint::Region;
 use super::count;
@@ -46,6 +46,17 @@ impl ToolPermissionPolicy {
     }
 }
 
+impl From<leviath_core::policy::ToolPolicy> for ToolPermissionPolicy {
+    fn from(policy: leviath_core::policy::ToolPolicy) -> Self {
+        use leviath_core::policy::ToolPolicy as Core;
+        match policy {
+            Core::Allow => Self::Allow,
+            Core::Ask => Self::Ask,
+            Core::Deny => Self::Deny,
+        }
+    }
+}
+
 /// One tool and what this level does with it.
 #[mirror(list)]
 #[derive(Debug, SimpleObject)]
@@ -59,30 +70,28 @@ pub(crate) struct ToolPermissionRule {
 }
 
 impl ToolPermissionRule {
-    /// Read a permission table, in a stable order.
-    ///
-    /// Sorted by tool name because the manifest's own table is a hash map: an
-    /// unsorted list would reorder between two reads of one blueprint, and a
-    /// client diffing two answers would see changes that are not there.
+    /// Read a permission table, sorted by tool name, so two reads of one
+    /// blueprint list the rules in the same order.
     pub(crate) fn from_table(
-        table: &std::collections::HashMap<String, String>,
+        table: &std::collections::BTreeMap<
+            leviath_runtime::spec::names::ToolName,
+            leviath_core::policy::ToolPolicy,
+        >,
     ) -> Vec<ToolPermissionRule> {
-        let mut rules: Vec<ToolPermissionRule> = table
+        table
             .iter()
             .map(|(tool, policy)| ToolPermissionRule {
-                tool: tool.clone(),
-                policy: ToolPermissionPolicy::of(policy),
+                tool: tool.to_string(),
+                policy: ToolPermissionPolicy::from(*policy),
             })
-            .collect();
-        rules.sort_by(|a, b| a.tool.cmp(&b.tool));
-        rules
+            .collect()
     }
 }
 
 /// The resolver state behind the `ToolRouteOverride` type.
 pub(crate) struct ToolRouteOverride {
     /// The blueprint the region name resolves in.
-    blueprint: Arc<CoreBlueprint>,
+    blueprint: Arc<ParsedBlueprint>,
     /// The tool this override is keyed by.
     tool: String,
     /// The region name it was written with.
@@ -132,9 +141,9 @@ pub(crate) struct ToolTokenCeiling {
 /// The resolver state behind the `ToolRouting` type.
 pub(crate) struct ToolRouting {
     /// The blueprint the region names resolve in.
-    blueprint: Arc<CoreBlueprint>,
+    blueprint: Arc<ParsedBlueprint>,
     /// The routing block as the stage wrote it.
-    routing: leviath_runtime::spec::blueprint::ToolResultRouting,
+    routing: leviath_runtime::spec::graph::ToolRoutingDef,
 }
 
 /// Where a stage's tool results land in its context.
@@ -147,29 +156,26 @@ impl ToolRouting {
     /// stage whose results land nowhere it can read. `defaultRegionName` carries
     /// the name either way.
     async fn default_region(&self) -> Option<Region> {
-        refs::region(&self.blueprint, &self.routing.default_region)
+        refs::region(&self.blueprint, self.routing.default_region.as_str())
     }
 
     /// The default region's name, verbatim.
     async fn default_region_name(&self) -> &str {
-        &self.routing.default_region
+        self.routing.default_region.as_str()
     }
 
     /// Tools whose results go somewhere else, sorted by tool name so two reads
     /// of one blueprint cannot disagree about the order.
     async fn overrides(&self) -> Vec<ToolRouteOverride> {
-        let mut overrides: Vec<ToolRouteOverride> = self
-            .routing
-            .tool_overrides
+        self.routing
+            .tool_regions
             .iter()
             .map(|(tool, region)| ToolRouteOverride {
                 blueprint: Arc::clone(&self.blueprint),
-                tool: tool.clone(),
-                region: region.clone(),
+                tool: tool.to_string(),
+                region: region.to_string(),
             })
-            .collect();
-        overrides.sort_by(|a, b| a.tool.cmp(&b.tool));
-        overrides
+            .collect()
     }
 
     /// Whether a tool's result stays in the region it was routed to, rather
@@ -185,25 +191,22 @@ impl ToolRouting {
 
     /// Tools with a ceiling of their own, sorted by tool name.
     async fn max_result_tokens_per_tool(&self) -> Vec<ToolTokenCeiling> {
-        let mut ceilings: Vec<ToolTokenCeiling> = self
-            .routing
+        self.routing
             .tool_max_result_tokens
             .iter()
             .map(|(tool, tokens)| ToolTokenCeiling {
-                tool: tool.clone(),
+                tool: tool.to_string(),
                 max_result_tokens: count(*tokens),
             })
-            .collect();
-        ceilings.sort_by(|a, b| a.tool.cmp(&b.tool));
-        ceilings
+            .collect()
     }
 }
 
 impl ToolRouting {
     /// Describe one stage's routing block against the blueprint that holds it.
     pub(crate) fn of(
-        blueprint: &Arc<CoreBlueprint>,
-        routing: &leviath_runtime::spec::blueprint::ToolResultRouting,
+        blueprint: &Arc<ParsedBlueprint>,
+        routing: &leviath_runtime::spec::graph::ToolRoutingDef,
     ) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),
@@ -215,7 +218,7 @@ impl ToolRouting {
 /// The resolver state behind the `OutputRoute` type.
 pub(crate) struct OutputRoute {
     /// The blueprint the region name resolves in.
-    blueprint: Arc<CoreBlueprint>,
+    blueprint: Arc<ParsedBlueprint>,
     /// The mime pattern this rule matches.
     pattern: String,
     /// The region name it was written with.
@@ -249,7 +252,7 @@ impl OutputRoute {
 
 impl OutputRoute {
     /// Describe one output route against the blueprint that holds it.
-    pub(crate) fn of(blueprint: &Arc<CoreBlueprint>, pattern: &str, region: &str) -> Self {
+    pub(crate) fn of(blueprint: &Arc<ParsedBlueprint>, pattern: &str, region: &str) -> Self {
         Self {
             blueprint: Arc::clone(blueprint),
             pattern: pattern.to_string(),

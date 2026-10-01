@@ -24,7 +24,7 @@ pub(crate) fn never_interactive() -> bool {
 pub struct LocalRun {
     /// The request.
     pub request: SpawnRequest,
-    /// The manifest the request names. Empty for a raw graph, which has none.
+    /// The blueprint file the request names. Empty for a raw graph, which has none.
     pub manifest: std::path::PathBuf,
     /// The working directory, as given.
     pub workdir: String,
@@ -42,10 +42,10 @@ pub struct LocalRun {
 /// The daemon already logs this at spawn, but into its own log, where the
 /// person who just typed `lev run` never sees it - so the first sign of a
 /// missing grant was a refused read partway through a run. Everything needed to
-/// say it here is local: `lev run` resolves the manifest itself, and the config
+/// say it here is local: `lev run` resolves the blueprint itself, and the config
 /// is the same file the daemon reads.
 ///
-/// Best-effort by design. An unreadable manifest or config is the daemon's to
+/// Best-effort by design. An unreadable blueprint or config is the daemon's to
 /// report, and it will: this must never be the reason a run does not start.
 fn warn_ungranted_read_paths(run: &LocalRun) {
     for line in read_path_warning_for_spawn(run) {
@@ -53,27 +53,33 @@ fn warn_ungranted_read_paths(run: &LocalRun) {
     }
 }
 
-/// The warning for a spawn request, read from the real manifest and config.
+/// The warning for a spawn request, read from the real blueprint and config.
 /// Empty when there is nothing to say, and empty when either file cannot be
 /// read: see [`warn_ungranted_read_paths`] for why that is not an error here.
 fn read_path_warning_for_spawn(run: &LocalRun) -> Vec<String> {
-    let Some(blueprint) = crate::commands::run::manifest::blueprint_at(&run.manifest) else {
+    let Some(loaded) = crate::commands::run::locate::loaded_at(&run.manifest) else {
         return Vec::new();
     };
     let Ok(config) = crate::config::Config::load() else {
         return Vec::new();
     };
-    spawn_warning_lines(&blueprint, &config, std::path::Path::new(&run.workdir))
+    spawn_warning_lines(
+        &loaded.graph,
+        loaded.reference.name.as_str(),
+        &config,
+        std::path::Path::new(&run.workdir),
+    )
 }
 
 /// The warning itself: one line saying what is refused, then the stanza that
 /// would grant it. Pure, so the wording is testable without a daemon.
 fn spawn_warning_lines(
-    blueprint: &leviath_runtime::spec::Blueprint,
+    graph: &leviath_runtime::spec::graph::RunGraph,
+    agent: &str,
     config: &crate::config::Config,
     workdir: &std::path::Path,
 ) -> Vec<String> {
-    let Some(Ok(report)) = crate::read_path_report::build(blueprint, config, workdir) else {
+    let Some(Ok(report)) = crate::read_path_report::build(graph, agent, config, workdir) else {
         return Vec::new();
     };
     let Some(warning) = report.warning_line() else {
@@ -153,7 +159,7 @@ pub(crate) fn yolo_profile_preflight(
 /// which the person typing the command never sees.
 ///
 /// Best-effort for the same reason as [`warn_ungranted_read_paths`]: an
-/// unreadable manifest or config is the daemon's to report, and this must never
+/// unreadable blueprint or config is the daemon's to report, and this must never
 /// be why a run does not start.
 fn warn_held_checkpoints(run: &LocalRun) {
     for line in held_checkpoint_warning_for_spawn(run) {
@@ -171,19 +177,24 @@ fn warn_held_checkpoints(run: &LocalRun) {
 /// using an old blueprint long after the fix had shipped.
 fn held_checkpoint_warning_for_spawn(run: &LocalRun) -> Vec<String> {
     let path = run.manifest.as_path();
-    let Some(blueprint) = crate::commands::run::manifest::blueprint_at(path) else {
+    let Some(loaded) = crate::commands::run::locate::loaded_at(path) else {
         return Vec::new();
     };
-    let mut lines: Vec<String> =
-        crate::bundled::stale_install_note(path, &blueprint, leviath_core::agents_dir().as_deref())
-            .into_iter()
-            .collect();
+    let mut lines: Vec<String> = crate::bundled::stale_install_note(
+        path,
+        loaded.reference.name.as_str(),
+        &loaded.version,
+        leviath_core::agents_dir().as_deref(),
+    )
+    .into_iter()
+    .collect();
     if run.yolo {
         let timeout = crate::config::Config::load()
             .ok()
             .and_then(|c| c.limits.interaction_timeout_secs);
         lines.extend(crate::held_checkpoints::preflight_lines(
-            &blueprint, timeout,
+            &loaded.graph,
+            timeout,
         ));
     }
     lines
@@ -203,11 +214,21 @@ fn warn_retired_output_checks(run: &LocalRun) {
     }
 }
 
-/// The retirement warning for a spawn request, read from the real manifest.
+/// The retirement warning for a spawn request, read from the real blueprint.
 /// Best-effort for the same reason as [`warn_ungranted_read_paths`].
 fn retired_check_warning_for_spawn(run: &LocalRun) -> Vec<String> {
-    crate::commands::run::manifest::retired_check_warnings_at(&run.manifest, run.output.as_ref())
+    match (
+        run.output.as_ref(),
+        crate::commands::run::locate::loaded_at(&run.manifest),
+    ) {
+        (Some(request), Some(loaded)) => {
+            retired_checks::retired_check_warnings(&loaded.graph, Some(request))
+        }
+        _ => Vec::new(),
+    }
 }
+
+mod retired_checks;
 
 /// What `lev run --json` prints on a successful spawn.
 ///
@@ -219,7 +240,7 @@ fn retired_check_warning_for_spawn(run: &LocalRun) -> Vec<String> {
 pub(crate) struct SpawnedRun {
     /// The run id to poll with `lev ps --json` and stop with `lev cancel`.
     pub run_id: String,
-    /// The manifest the run was resolved from.
+    /// The blueprint file the run was resolved from.
     pub blueprint_path: String,
     /// The directory the agent's file tools are confined to.
     pub workdir: String,
@@ -516,7 +537,7 @@ mod tests {
     fn spawned() -> SpawnedRun {
         SpawnedRun {
             run_id: "coder-1".to_string(),
-            blueprint_path: "/agents/coder/agent.leviath".to_string(),
+            blueprint_path: "/agents/coder/agent.toml".to_string(),
             workdir: "/work".to_string(),
             yolo: true,
         }
@@ -540,25 +561,22 @@ mod tests {
 
     /// A blueprint declaring one absolute read path, so the same entry
     /// compiles on every OS.
-    fn read_paths_blueprint() -> leviath_runtime::spec::Blueprint {
-        leviath_runtime::spec::manifest::parse_manifest(
+    fn read_paths_blueprint() -> leviath_runtime::spec::graph::RunGraph {
+        leviath_blueprint::BlueprintFile::parse(
             r#"
-[agent]
+[blueprint]
 name = "cto"
 version = "0.1.0"
 description = "test"
 
-[stages.main]
-mode = "autonomous"
-
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-
-[read_paths]
-allow = ["/data/runs"]
+[graph]
+read_paths = ["/data/runs"]
+stages = [{ name = "main" }]
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 "#,
         )
         .expect("blueprint parses")
+        .run_graph()
     }
 
     /// The point of warning here at all: the person who typed `lev run` learns
@@ -567,6 +585,7 @@ allow = ["/data/runs"]
     fn an_ungranted_declaration_warns_with_the_stanza_to_add() {
         let lines = spawn_warning_lines(
             &read_paths_blueprint(),
+            "cto",
             &crate::config::Config::default(),
             std::path::Path::new("/work"),
         );
@@ -631,6 +650,7 @@ allow = ["/data/runs"]
         assert!(
             spawn_warning_lines(
                 &read_paths_blueprint(),
+                "cto",
                 &config,
                 std::path::Path::new("/work")
             )
@@ -642,13 +662,14 @@ allow = ["/data/runs"]
     /// broken is the daemon's error to report, not a warning to guess at.
     #[test]
     fn nothing_to_warn_about_produces_no_lines() {
-        let plain = leviath_runtime::spec::manifest::parse_manifest(
-            &crate::test_support::inline_coder_manifest(),
-        )
-        .expect("blueprint parses");
+        let plain =
+            leviath_blueprint::BlueprintFile::parse(&crate::test_support::inline_coder_manifest())
+                .expect("blueprint parses")
+                .run_graph();
         assert!(
             spawn_warning_lines(
                 &plain,
+                "coder",
                 &crate::config::Config::default(),
                 std::path::Path::new("/work")
             )
@@ -660,6 +681,7 @@ allow = ["/data/runs"]
         assert!(
             spawn_warning_lines(
                 &read_paths_blueprint(),
+                "cto",
                 &broken,
                 std::path::Path::new("/work")
             )
@@ -667,18 +689,23 @@ allow = ["/data/runs"]
         );
     }
 
-    /// End to end over the real files: a manifest on disk plus an isolated
+    /// The coder blueprint, declaring `read_paths`, written to `dir`.
+    fn coder_reading(dir: &std::path::Path, read_paths: &[&str]) -> std::path::PathBuf {
+        let mut file =
+            leviath_blueprint::BlueprintFile::parse(&crate::test_support::inline_coder_manifest())
+                .expect("blueprint parses");
+        file.graph.read_paths = read_paths.iter().map(|p| p.to_string()).collect();
+        let path = dir.join(leviath_blueprint::FILE_NAME);
+        std::fs::write(&path, file.to_toml().expect("it writes")).unwrap();
+        path
+    }
+
+    /// End to end over the real files: a blueprint on disk plus an isolated
     /// config that grants nothing.
     #[tokio::test]
-    async fn the_warning_reads_the_manifest_and_the_active_config() {
+    async fn the_warning_reads_the_blueprint_and_the_active_config() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            crate::test_support::inline_coder_manifest()
-                + "\n[read_paths]\nallow = [\"/data/runs\"]\n",
-        )
-        .unwrap();
+        let manifest = coder_reading(dir.path(), &["/data/runs"]);
         let args = LocalRun {
             manifest: std::path::PathBuf::from(manifest.to_string_lossy().into_owned()),
             workdir: dir.path().to_string_lossy().into_owned(),
@@ -698,12 +725,12 @@ allow = ["/data/runs"]
         assert!(joined.contains("[agent_read_paths.coder]"), "{joined}");
     }
 
-    /// Every way the warning can decline to run: a manifest that will not
+    /// Every way the warning can decline to run: a blueprint that will not
     /// parse, and a config that will not load. Neither may stop a spawn.
     #[test]
-    fn the_warning_gives_up_quietly_on_a_broken_manifest_or_config() {
+    fn the_warning_gives_up_quietly_on_a_broken_blueprint_or_config() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("agent.leviath");
+        let manifest = dir.path().join(leviath_blueprint::FILE_NAME);
         std::fs::write(&manifest, "not valid toml [[[").unwrap();
         assert!(
             read_path_warning_for_spawn(&LocalRun {
@@ -726,34 +753,39 @@ allow = ["/data/runs"]
         });
     }
 
-    /// A manifest that declares a held checkpoint, written to disk, so the
+    /// A blueprint that declares a held checkpoint, written to disk, so the
     /// warning is exercised through the real read-and-parse path.
     fn manifest_with_a_held_checkpoint(dir: &std::path::Path) -> String {
-        let manifest = dir.join("agent.leviath");
+        let manifest = dir.join(leviath_blueprint::FILE_NAME);
         std::fs::write(
             &manifest,
             r#"
-[agent]
+[blueprint]
 name = "held"
 version = "0.1.0"
 description = "holds a checkpoint"
-entry_stage = "plan"
 
-[stages.plan]
-mode = "interactive_points"
+[graph]
+entry = "plan"
+
+[[graph.stages]]
+name = "plan"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
+tools = ["read_file"]
 max_iterations = 5
-available_tools = ["read_file"]
 
-[[stages.plan.interaction_points]]
+[[graph.stages.mode.interactive_points]]
 name = "plan_approval"
 prompt = "Review the plan"
 style = "confirm"
 unattended = "ask"
 
-[context.regions]
-system = { kind = "pinned", max_tokens = 1000 }
-conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
+[graph.layout]
+total_budget_tokens = 11000
+regions = [
+    { name = "system", kind = "pinned", budget = 1000 },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 50 }, budget = 10000 },
+]
 "#,
         )
         .unwrap();
@@ -789,13 +821,13 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         });
     }
 
-    /// The same three lenient arms as the read-path warning: a manifest that is
-    /// not there, one that will not parse, and a config that will not load.
+    /// The same three lenient arms as the read-path warning: a blueprint that
+    /// is not there, one that will not parse, and a config that will not load.
     /// None of them may stop a spawn.
     #[test]
     fn the_held_checkpoint_warning_gives_up_quietly() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("nope.leviath");
+        let missing = dir.path().join("nope.toml");
         assert!(
             held_checkpoint_warning_for_spawn(&LocalRun {
                 manifest: std::path::PathBuf::from(missing.to_string_lossy().into_owned()),
@@ -805,7 +837,8 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
             .is_empty()
         );
 
-        let unparseable = dir.path().join("agent.leviath");
+        let unparseable = dir.path().join("other").join(leviath_blueprint::FILE_NAME);
+        std::fs::create_dir_all(unparseable.parent().unwrap()).unwrap();
         std::fs::write(&unparseable, "not valid toml [[[").unwrap();
         assert!(
             held_checkpoint_warning_for_spawn(&LocalRun {
@@ -833,24 +866,25 @@ conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
         });
     }
 
-    /// A manifest declaring a Rhai validator for its output, written to disk,
+    /// A blueprint declaring a Rhai validator for its output, written to disk,
     /// so the retirement warning is exercised through the real read-and-parse
     /// path.
     fn manifest_with_a_validator(dir: &std::path::Path) -> String {
-        let manifest = dir.join("agent.leviath");
+        let manifest = dir.join(leviath_blueprint::FILE_NAME);
         std::fs::write(
             &manifest,
             r#"
-[agent]
+[blueprint]
 name = "checked"
 version = "0.1.0"
 description = "declares a validator"
 
-[agent.output]
-format = "markdown"
-validator = "checks/report.rhai"
+[graph]
+output = { format = "markdown", validator = { file = "checks/report.rhai" } }
+layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pinned", budget = 1000 }] }
 
-[stages.plan]
+[[graph.stages]]
+name = "plan"
 model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
 "#,
         )
@@ -905,21 +939,21 @@ model = { models = [{ provider = "anthropic", model = "claude-sonnet-5" }] }
         );
     }
 
-    /// The same lenient arms as every warning on this path: a manifest that is
-    /// not there or will not parse must stay quiet, never stop a spawn.
+    /// The same lenient arms as every warning on this path: a blueprint that
+    /// is not there or will not parse must stay quiet, never stop a spawn.
     #[test]
     fn the_retirement_warning_gives_up_quietly() {
         let dir = tempfile::tempdir().unwrap();
         assert!(
             retired_check_warning_for_spawn(&LocalRun {
-                manifest: dir.path().join("nope.leviath"),
+                manifest: dir.path().join("nope.toml"),
                 output: format_request("json"),
                 ..LocalRun::default()
             })
             .is_empty()
         );
 
-        let unparseable = dir.path().join("agent.leviath");
+        let unparseable = dir.path().join(leviath_blueprint::FILE_NAME);
         std::fs::write(&unparseable, "not valid toml [[[").unwrap();
         assert!(
             retired_check_warning_for_spawn(&LocalRun {

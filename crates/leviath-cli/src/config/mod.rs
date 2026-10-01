@@ -427,13 +427,13 @@ impl Config {
     /// The safe-command keys in effect for `agent_name`, and where each came
     /// from. Resolved once at spawn, mirroring [`Self::permissions_for_agent`].
     ///
-    /// `blueprint` is the manifest's own `[safe_commands]`, which contributes
+    /// `blueprint` is the graph's own `safe_commands`, which contributes
     /// only when the user opted in - see
     /// [`crate::approvals::resolve_safe_keys`].
     pub(crate) fn safe_keys_for_agent(
         &self,
         agent_name: &str,
-        blueprint: Option<&leviath_runtime::spec::blueprint::SafeCommandsConfig>,
+        blueprint: Option<&leviath_runtime::spec::graph::SafeCommandsDef>,
     ) -> std::collections::BTreeMap<String, crate::approvals::SafeSource> {
         crate::approvals::resolve_safe_keys(
             &self.safe_commands,

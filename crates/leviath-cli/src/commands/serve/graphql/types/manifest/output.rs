@@ -58,7 +58,8 @@ pub(crate) struct OutputSpec {
     pub(crate) example: Option<String>,
     /// A JSON Schema the answer must satisfy.
     pub(crate) schema: Option<Json>,
-    /// A script that checks the answer, beyond the schema.
+    /// A script that checks the answer, beyond the schema: a path beside the
+    /// blueprint, or the script itself when the blueprint writes it inline.
     pub(crate) validator: Option<String>,
     /// What happens when that script refuses an answer. Null leaves the default,
     /// which is to refuse the output and ask again.
@@ -70,14 +71,14 @@ pub(crate) struct OutputSpec {
     pub(crate) artifacts: Vec<OutputArtifact>,
 }
 
-impl From<&leviath_core::output::OutputSpec> for OutputSpec {
-    fn from(spec: &leviath_core::output::OutputSpec) -> Self {
+impl From<&leviath_runtime::spec::graph::OutputDef> for OutputSpec {
+    fn from(spec: &leviath_runtime::spec::graph::OutputDef) -> Self {
         Self {
             format: spec.format.clone(),
             instructions: spec.instructions.clone(),
             example: spec.example.clone(),
-            schema: spec.schema.clone().map(Json),
-            validator: spec.validator.clone(),
+            schema: spec.schema.as_ref().map(|doc| Json(doc.value().clone())),
+            validator: spec.validator.as_ref().map(super::code_text),
             on_validator_error: spec.on_validator_error.map(ValidatorErrorPolicy::from),
             overwrite_artifacts: spec.overwrite_artifacts,
             artifacts: spec
@@ -85,7 +86,7 @@ impl From<&leviath_core::output::OutputSpec> for OutputSpec {
                 .iter()
                 .map(|artifact| OutputArtifact {
                     name: artifact.name.clone(),
-                    mime_type: artifact.mime_type.clone(),
+                    mime_type: artifact.mime_type.to_string(),
                     required: artifact.required,
                     description: artifact.description.clone(),
                 })

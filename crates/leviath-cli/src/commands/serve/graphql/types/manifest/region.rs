@@ -80,21 +80,21 @@ pub(crate) struct RegionEviction {
     pub(crate) compact_count: Option<i32>,
 }
 
-impl From<leviath_core::region::EvictionStrategy> for RegionEviction {
-    fn from(strategy: leviath_core::region::EvictionStrategy) -> Self {
-        use leviath_core::region::EvictionStrategy as Core;
+impl From<leviath_runtime::spec::graph::Eviction> for RegionEviction {
+    fn from(strategy: leviath_runtime::spec::graph::Eviction) -> Self {
+        use leviath_runtime::spec::graph::Eviction as Core;
         match strategy {
             Core::PerItem => Self {
                 strategy: RegionStrategy::PerItem,
                 overflow: None,
                 compact_count: None,
             },
-            Core::Bulk { overflow } => Self {
+            Core::Bulk(overflow) => Self {
                 strategy: RegionStrategy::Bulk,
                 overflow: Some(count(overflow)),
                 compact_count: None,
             },
-            Core::Compact { compact_count } => Self {
+            Core::Compact(compact_count) => Self {
                 strategy: RegionStrategy::Compact,
                 overflow: None,
                 compact_count: Some(count(compact_count)),
@@ -114,9 +114,9 @@ pub(crate) enum SeedRefresh {
     EachStage,
 }
 
-impl From<leviath_runtime::spec::layout::SeedRefresh> for SeedRefresh {
-    fn from(refresh: leviath_runtime::spec::layout::SeedRefresh) -> Self {
-        use leviath_runtime::spec::layout::SeedRefresh as Core;
+impl From<leviath_runtime::spec::graph::SeedRefresh> for SeedRefresh {
+    fn from(refresh: leviath_runtime::spec::graph::SeedRefresh) -> Self {
+        use leviath_runtime::spec::graph::SeedRefresh as Core;
         match refresh {
             Core::Once => Self::Once,
             Core::EachStage => Self::EachStage,
@@ -233,30 +233,39 @@ pub(crate) enum RegionSeed {
     Tools(SeedFromTools),
 }
 
-impl From<&leviath_runtime::spec::layout::RegionSeed> for RegionSeed {
-    fn from(seed: &leviath_runtime::spec::layout::RegionSeed) -> Self {
-        use leviath_runtime::spec::layout::RegionSeed as Core;
+impl RegionSeed {
+    /// The seed of a region an input of the graph is bound to: the input,
+    /// filled by whoever starts the run.
+    pub(crate) fn caller(input: &str) -> Self {
+        Self::Caller(SeedFromCaller {
+            key: input.to_string(),
+        })
+    }
+}
+
+impl From<&leviath_runtime::spec::graph::Seed> for RegionSeed {
+    fn from(seed: &leviath_runtime::spec::graph::Seed) -> Self {
+        use leviath_runtime::spec::graph::Seed as Core;
         match seed {
-            Core::CallerInput { name } => Self::Caller(SeedFromCaller { key: name.clone() }),
-            Core::Glob { pattern } => Self::Glob(SeedFromGlob {
+            Core::Glob(pattern) => Self::Glob(SeedFromGlob {
                 pattern: pattern.clone(),
             }),
-            Core::Files { paths } => Self::Files(SeedFromFiles {
-                paths: paths.clone(),
+            Core::Files(paths) => Self::Files(SeedFromFiles {
+                paths: super::texts(paths),
             }),
-            Core::Literal { text } => Self::Literal(SeedFromLiteral { text: text.clone() }),
-            Core::Rhai { script } => Self::Script(SeedFromScript {
-                script: script.clone(),
+            Core::Literal(text) => Self::Literal(SeedFromLiteral { text: text.clone() }),
+            Core::Code(code) => Self::Script(SeedFromScript {
+                script: super::code_text(code),
             }),
-            Core::Command { command } => Self::Command(SeedFromCommand {
+            Core::Command(command) => Self::Command(SeedFromCommand {
                 command: command.clone(),
             }),
             Core::Tools { calls, refresh } => Self::Tools(SeedFromTools {
                 calls: calls
                     .iter()
                     .map(|call| SeedToolCall {
-                        tool: call.name.clone(),
-                        args: Json(call.args.clone()),
+                        tool: call.tool.to_string(),
+                        args: Json(call.args.value().clone()),
                     })
                     .collect(),
                 refresh: SeedRefresh::from(*refresh),
