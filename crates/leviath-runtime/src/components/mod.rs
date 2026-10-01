@@ -316,20 +316,13 @@ impl StageHookScripts {
     /// named for, so a miss here means the stage simply has no such hook.
     pub(crate) fn script_for(
         &self,
-        stage: &crate::spec::Stage,
+        stage: &crate::spec::graph::StageDef,
         hook: &str,
     ) -> Option<std::sync::Arc<leviath_scripting::stage_hook::HookScript>> {
-        let path = match hook {
-            "on_stage_enter" => stage.hooks.on_stage_enter.as_deref(),
-            "on_stage_exit" => stage.hooks.on_stage_exit.as_deref(),
-            "before_inference" => stage.hooks.before_inference.as_deref(),
-            "after_inference" => stage.hooks.after_inference.as_deref(),
-            "on_tool_call" => stage.hooks.on_tool_call.as_deref(),
-            "on_completion" => stage.hooks.on_completion.as_deref(),
-            "on_error" => stage.hooks.on_error.as_deref(),
-            _ => None,
-        }?;
-        self.0.get(path).cloned()
+        let (_, code) = stage.hooks.iter().find(|(name, _)| *name == hook)?;
+        self.0
+            .get(crate::pipeline::spec_view::code_key(code))
+            .cloned()
     }
 }
 
@@ -4026,13 +4019,11 @@ mod stage_hook_scripts_tests {
         StageHookScripts(m)
     }
 
-    fn stage_declaring(enter: Option<&str>, exit: Option<&str>) -> crate::spec::Stage {
-        let mut s = crate::spec::Stage::new(
-            "main".to_string(),
-            crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
-        );
-        s.hooks.on_stage_enter = enter.map(str::to_string);
-        s.hooks.on_stage_exit = exit.map(str::to_string);
+    fn stage_declaring(enter: Option<&str>, exit: Option<&str>) -> crate::spec::graph::StageDef {
+        use crate::spec::graph::CodeRef;
+        let mut s = crate::spec::graph::tests::stage("main");
+        s.hooks.on_stage_enter = enter.map(|p| CodeRef::File(p.to_string()));
+        s.hooks.on_stage_exit = exit.map(|p| CodeRef::File(p.to_string()));
         s
     }
 

@@ -56,122 +56,9 @@ pub(crate) fn context_window_tokens(world: &World, provider_name: &str, model: &
     }
 }
 
-/// Build a stage's [`StageSetup`] from its blueprint definition: inference config
-/// (from the model parameters), tool-result routing, accepts-messages, layout,
-/// and system prompt.
-///
-/// `global_hints` is the caller's config-level toggle for each system-prompt
-/// hint; `agent_hints` the blueprint's agent-level override of the same. Each
-/// one cascades stage → agent → global here.
-pub(crate) fn stage_setup_from(
-    stage: &crate::spec::Stage,
-    global_hints: leviath_core::config::PromptHints,
-    agent_hints: leviath_core::config::PromptHintOverrides,
-    output: Option<leviath_core::output::OutputSpec>,
-) -> StageSetup {
-    let temperature = stage
-        .model
-        .parameters
-        .get("temperature")
-        .and_then(|v| v.as_f64())
-        .map(|t| t as f32);
-    // Every other model parameter (top_p, stop, seed, frequency_penalty, …) is
-    // passed through to the provider verbatim; only temperature/max_output_tokens
-    // are consumed specially above.
-    let extra_params: serde_json::Map<String, serde_json::Value> = stage
-        .model
-        .parameters
-        .iter()
-        .filter(|(k, _)| k.as_str() != "temperature" && k.as_str() != "max_output_tokens")
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    // The manifest loader already refused a cap that does not parse, so an
-    // error here can only come from a `ModelConfig` built in code; it is
-    // treated as "no cap" the way an absent one is.
-    let max_output_tokens = stage.model.output_cap().ok().flatten();
-    let base_prompt = stage
-        .config
-        .get("system_prompt")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    // A fan-out stage's single inference IS the "split": fold its `split_prompt`
-    // (which asks for the JSON array of work items) onto any base instructions so
-    // the stage's normal inference produces the work items the split system parses.
-    let system_prompt = match &stage.mode {
-        crate::spec::blueprint::StageMode::FanOut { config }
-            if !config.split_prompt.trim().is_empty() =>
-        {
-            Some(match base_prompt {
-                Some(base) => format!("{base}\n\n{}", config.split_prompt),
-                None => config.split_prompt.clone(),
-            })
-        }
-        _ => base_prompt,
-    };
-    // A stage that must hand something back says so in its own instructions, on
-    // top of the `submit_output` tool description carrying the same shape. Both,
-    // because a format the model has no prior knowledge of - a2ui, a house
-    // schema - is exactly the case where one mention is easy to miss, and there
-    // is no parser downstream to catch a near miss.
-    let system_prompt = match (&output, stage.require_output) {
-        (Some(spec), true) => {
-            let described = leviath_core::describe_spec(spec);
-            let demand = match described.is_empty() {
-                true => format!(
-                    "Before this stage ends you must call `{tool}` with your final answer. It is \
-                     the only thing the caller receives.",
-                    tool = crate::spec::blueprint::SUBMIT_OUTPUT_TOOL
-                ),
-                false => format!(
-                    "Before this stage ends you must call `{tool}` with your final answer. It is \
-                     the only thing the caller receives.\n\n{described}",
-                    tool = crate::spec::blueprint::SUBMIT_OUTPUT_TOOL
-                ),
-            };
-            Some(match system_prompt {
-                Some(base) => format!("{base}\n\n{demand}"),
-                None => demand,
-            })
-        }
-        _ => system_prompt,
-    };
-    // Cascade each hint toggle: stage > agent > global (both default on).
-    let batch_tool_hint = leviath_core::taint::resolve_batch_tool_hint(
-        global_hints.batch_tool,
-        agent_hints.batch_tool,
-        stage.batch_tool_hint,
-    );
-    let shell_hint = leviath_core::taint::resolve_shell_hint(
-        global_hints.shell,
-        agent_hints.shell,
-        stage.shell_hint,
-    );
-    StageSetup {
-        inference_config: InferenceConfig {
-            temperature,
-            max_output_tokens,
-            extra_params,
-            as_text: stage.input_as_text.clone(),
-            batch_tool_hint,
-            shell_hint,
-            request_timeout_secs: stage.model.request_timeout_secs,
-        },
-        routing: stage.tool_result_routing.clone(),
-        accepts_messages: stage.accepts_messages,
-        context_layout: stage.context_layout.clone(),
-        context_hide: stage.context_hide.clone(),
-        context_reset: stage.context_reset.clone(),
-        system_prompt,
-    }
-}
-
 /// Spawn a fully-formed agent into `world` from its blueprint, task, and
-/// per-stage resolution, and return its entity. Builds every stage's
-/// `StageInference`/`StageSetup` up front (so transitions are pure component
-/// swaps), seeds the context window, applies the **first** stage's setup (its
-/// layout and system prompt), pre-counts the first stage's visit, and marks the
-/// agent `ReadyToInfer`. Returns `Err` if the first stage's system prompt doesn't fit
-/// its region (the same hard failure the imperative loop raises at stage 0).
+/// per-stage resolution, and return its entity: the task seeds the `task`
+/// region and everything else is as [`spawn_agent_seeded`] does it.
 ///
 /// `stages` must be aligned with `blueprint.stages` (one [`ResolvedStage`] each).
 ///
@@ -188,12 +75,6 @@ pub(crate) fn spawn_agent(
     global_hints: leviath_core::config::PromptHints,
 ) -> Result<Entity, String> {
     let seeds = std::collections::HashMap::from([("task".to_string(), task.to_string())]);
-    // No compiled custom-region scripts on this path: script-backed regions
-    // require the seeded spawn (the CLI resolves and compiles them). A custom
-    // region spawned through here renders its fallback shape. Global nudge
-    // defaults are likewise a seeded-spawn concern (the CLI reads them from
-    // config.toml); agents spawned through here cascade straight from the
-    // blueprint to the built-in defaults.
     spawn_agent_seeded(
         world,
         SeededSpawn {
@@ -243,19 +124,203 @@ pub struct SeededSpawn {
     pub mime_registry: Option<crate::blob_store::RunMimeRegistry>,
 }
 
-/// Like `spawn_agent`, but seeds the context window from a name→content map
-/// (caller-input regions filled by the CLI/ACP/API, plus blueprint-resolved
-/// seeds) rather than a single task string. `spawn_agent` is the thin wrapper
-/// that seeds only the `task` key.
+/// A run spec for a parsed blueprint and the inference each of its stages
+/// resolved to, for spawns that start from a blueprint and a stage list
+/// rather than a spawn request.
 ///
-/// `global_nudge` is the caller's config-level `[nudge]` defaults, captured on
-/// the agent as a `crate::pipeline::response::GlobalNudge` component; each
-/// field is resolved per stage against the blueprint's agent-level and
-/// per-stage nudge settings when an empty response is handled.
+/// The graph is the blueprint read as a [`RunGraph`](crate::spec::graph::RunGraph);
+/// each stage's plan is its [`StageInference`] with a zero context window and
+/// no region budgets, which the caller fills in when it knows them. The spec
+/// launches attended, from no workdir, with nothing seeded.
+pub fn run_spec_from_blueprint(
+    bp: &crate::spec::Blueprint,
+    agent_id: &str,
+    stages: &[StageInference],
+) -> Result<crate::spec::run_spec::RunSpec, String> {
+    use crate::spec::names::{BlueprintName, BlueprintRef};
+    use crate::spec::run_spec::{RunSpec, SpecOrigin};
+    let graph =
+        crate::spec::graph::RunGraph::from_blueprint(bp).map_err(|issues| issues.to_string())?;
+    let plans = graph
+        .stages
+        .iter()
+        .zip(stages)
+        .map(|(stage, si)| stage_plan(stage.name.clone(), si))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(RunSpec {
+        run_id: named(agent_id)?,
+        origin: match BlueprintName::new(bp.name.as_str()) {
+            Ok(name) => SpecOrigin::Blueprint {
+                blueprint: BlueprintRef { name, digest: None },
+                version: bp.version.clone(),
+            },
+            Err(_) => SpecOrigin::Raw,
+        },
+        graph,
+        inputs: Default::default(),
+        stages: plans,
+        seeded: Default::default(),
+        code: Vec::new(),
+        requested_output: None,
+        requested_model: None,
+        launch: crate::spec::launch::LaunchPolicy {
+            unattended: crate::spec::launch::Unattended::Off,
+            allow: Vec::new(),
+            max_depth: 0,
+            seed_commands: true,
+            capture_model_input: false,
+        },
+        placement: crate::spec::launch::Placement {
+            workdir: std::path::PathBuf::new(),
+            parent: None,
+            depth: 0,
+            worker_stage: None,
+        },
+        delivery: Default::default(),
+        env: Default::default(),
+        created_at: chrono::Utc::now().timestamp(),
+    })
+}
+
+/// A checked name, or why the text is not one.
+fn named<T: std::str::FromStr<Err = crate::spec::names::NameError>>(
+    text: &str,
+) -> Result<T, String> {
+    text.parse()
+        .map_err(|e: crate::spec::names::NameError| e.to_string())
+}
+
+/// A stage's plan from the inference it resolved to. A fallback with no
+/// provider leaves the provider to the operator's order.
+fn stage_plan(
+    stage: crate::spec::names::StageName,
+    si: &StageInference,
+) -> Result<crate::spec::run_spec::StagePlan, String> {
+    use crate::spec::names::ModelRef;
+    use crate::spec::run_spec::{StagePlan, ToolDef, ToolSource};
+    let fallbacks = si
+        .fallbacks
+        .iter()
+        .map(|f| {
+            let provider = (!f.provider.is_empty())
+                .then(|| named(&f.provider))
+                .transpose()?;
+            Ok(ModelRef {
+                provider,
+                model: named(&f.model)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let tools = si
+        .tools
+        .iter()
+        .map(|t| {
+            Ok(ToolDef {
+                name: named(&t.name)?,
+                description: t.description.clone(),
+                schema: leviath_core::JsonDoc::new(t.parameters.clone()),
+                source: ToolSource::Builtin,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(StagePlan {
+        stage,
+        provider: named(&si.provider_name)?,
+        model: named(&si.model)?,
+        context_window: 0,
+        max_output_tokens: None,
+        fallbacks,
+        tools,
+        output: si.output.as_ref().map(output_def).transpose()?,
+        region_budgets: Default::default(),
+        notes: Vec::new(),
+    })
+}
+
+/// An output shape as a run graph writes it.
+fn output_def(
+    spec: &leviath_core::output::OutputSpec,
+) -> Result<crate::spec::graph::OutputDef, String> {
+    use crate::spec::graph::{ArtifactDef, CodeRef, OutputDef};
+    Ok(OutputDef {
+        format: spec.format.clone(),
+        instructions: spec.instructions.clone(),
+        example: spec.example.clone(),
+        schema: spec.schema.clone().map(leviath_core::JsonDoc::new),
+        validator: spec.validator.clone().map(CodeRef::File),
+        on_validator_error: spec.on_validator_error,
+        overwrite_artifacts: spec.overwrite_artifacts,
+        artifacts: spec
+            .artifacts
+            .iter()
+            .map(|a| {
+                Ok(ArtifactDef {
+                    name: a.name.clone(),
+                    mime_type: named(&a.mime_type)?,
+
+                    required: a.required,
+                    description: a.description.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    })
+}
+
+/// The config-level defaults a blueprint spawn is resolved against, folded
+/// into the graph so the run's spec carries them: each hint and nudge setting
+/// the blueprint leaves open takes the operator's.
+fn fold_operator_defaults(
+    graph: &mut crate::spec::graph::RunGraph,
+    hints: leviath_core::config::PromptHints,
+    nudge: &crate::spec::NudgeConfig,
+) {
+    graph.batch_tool_hint = Some(graph.batch_tool_hint.unwrap_or(hints.batch_tool));
+    graph.shell_hint = Some(graph.shell_hint.unwrap_or(hints.shell));
+    let own = graph.nudge.clone().unwrap_or_default();
+    graph.nudge = Some(crate::spec::graph::NudgeDef {
+        enabled: own.enabled.or(nudge.enabled),
+        max: own
+            .max
+            .or_else(|| nudge.max.map(|m| u32::try_from(m).unwrap_or(u32::MAX))),
+        text: own.text.or_else(|| nudge.text.clone()),
+    });
+}
+
+/// The region a blueprint spawn's seed lands in: its own name, or for the
+/// `task` seed, the pinned region named `task` or else the first pinned region.
+fn seed_target(layout: &crate::spec::ContextLayout, key: &str) -> Option<String> {
+    let pinned = |r: &&crate::spec::layout::RegionDefinition| {
+        matches!(r.kind, leviath_core::RegionKind::Pinned)
+    };
+    let found = match key {
+        "task" => layout
+            .regions
+            .iter()
+            .filter(pinned)
+            .find(|r| r.name == "task")
+            .or_else(|| layout.regions.iter().find(pinned)),
+        _ => layout.regions.iter().find(|r| r.name == key),
+    };
+    found.map(|r| r.name.clone())
+}
+
+/// Spawn an agent from a blueprint, seeds and resolved stages: build the run's
+/// spec from them, lay out and seed its window, enter its first stage, and
+/// [`insert`](crate::insert::insert) it. Returns `Err` when the blueprint does
+/// not read as a run graph, when a layout does not fit its stage's window, or
+/// when the first stage's system prompt does not fit its region.
+///
+/// Every percentage region budget is resolved here against the model windows
+/// the providers report, and written into each stage's plan: a region of the
+/// graph's layout is sized against the smallest window among the stages that
+/// see it, and a stage's own layout against that stage's window.
+///
+/// `global_hints` and `global_nudge` are the caller's config-level defaults;
+/// each setting the blueprint leaves open takes them.
 pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entity, String> {
     let SeededSpawn {
         agent_id,
-        mut blueprint,
+        blueprint,
         seeds,
         parts,
         stages,
@@ -264,7 +329,6 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
         region_scripts,
         mime_registry,
     } = spawn;
-    let seeds = &seeds;
     // The registry this run types its bytes by: the host's, or the world's
     // rows with the blueprint's `[mime_types]` on top. A world without a
     // registry (one assembled by hand in a test) has no run registry either.
@@ -293,11 +357,9 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
         .get_resource::<crate::blob_store::MimeLimits>()
         .copied()
         .unwrap_or_default();
-    // Everything below indexes `blueprint.stages`, `stages` and the per-stage
-    // vectors built from them by position. `parse_manifest` guarantees at
-    // least one stage, but this is `pub` and an embedder can hand-build a
-    // `Blueprint`; refusing here turns two index panics into the `Err` the
-    // signature already promises.
+    // `parse_manifest` guarantees at least one stage, but this is `pub` and an
+    // embedder can hand-build a `Blueprint`; refusing here turns index panics
+    // into the `Err` the signature already promises.
     if blueprint.stages.is_empty() {
         return Err("blueprint declares no stages".to_string());
     }
@@ -308,90 +370,13 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
             blueprint.stages.len()
         ));
     }
-    // Resolve any percentage region budgets against a real model context window
-    // (the only place the model - and hence the window - is known). Absolute
-    // layouts resolve to themselves, so this is a no-op for legacy blueprints.
-    //
-    // The subtlety is *which* window sizes each region. A region's percentage
-    // budget is sized against the smallest context window among the stages that
-    // actually see it - not the entry stage's window, and not a stage that never
-    // reads the region. So the GLOBAL layout is resolved per region: for each
-    // region, the smallest window over the stages that use the global layout
-    // (declare no layout of their own) and can see the region. A per-stage
-    // layout's regions are private to that stage, so its own window is the only
-    // one that uses them.
     let stage_windows: Vec<usize> = stages
         .iter()
         .map(|rs| context_window_tokens(world, &rs.provider_name, &rs.model))
         .collect();
-    let resolved_global = {
-        let smallest_window_seeing = |region: &str| -> usize {
-            blueprint
-                .stages
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    s.context_layout.is_none() && blueprint.regions_visible_to(s).contains(region)
-                })
-                .map(|(i, _)| stage_windows[i])
-                .min()
-                // No stage uses the global layout for this region (every stage
-                // has its own, or all hide it); the entry window is a harmless
-                // default for a budget nothing at runtime consults.
-                .unwrap_or(stage_windows[0])
-        };
-        blueprint
-            .context_layout
-            .resolved_per_region(&smallest_window_seeing)
-    };
-    blueprint.context_layout = resolved_global;
-    for (i, stage) in blueprint.stages.iter_mut().enumerate() {
-        if let Some(layout) = &stage.context_layout {
-            stage.context_layout = Some(layout.resolved(stage_windows[i]));
-        }
-    }
-    // Structural validation (duplicate names, eviction order, custom scripts)
-    // once per distinct layout, now that percentages are concrete numbers.
-    blueprint
-        .context_layout
-        .validate()
-        .map_err(|e| e.to_string())?;
-    for stage in &blueprint.stages {
-        if let Some(layout) = &stage.context_layout {
-            layout.validate().map_err(|e| e.to_string())?;
-        }
-    }
-    // Then the working-room floor, per stage: each stage must keep enough
-    // evictable room after its fixed regions, judged against *its* model window
-    // over just the regions *it* sees. A region budgeted generously for a
-    // wide-window stage must not be counted against a narrow-window stage that
-    // never reads it - the check a single-window `validate()` cannot make, and
-    // the footgun that let a small entry-stage image model cap every later
-    // stage.
-    for (i, stage) in blueprint.stages.iter().enumerate() {
-        let layout = stage
-            .context_layout
-            .as_ref()
-            .unwrap_or(&blueprint.context_layout);
-        let visible = blueprint.regions_visible_to(stage);
-        layout
-            .retaining(|name| visible.contains(name))
-            .validate_working_room(stage_windows[i])
-            .map_err(|e| e.to_string())?;
-    }
+    let resolved = resolved_layouts(&blueprint, &stage_windows)?;
 
-    // Kept before `stages` is consumed, so each stage's setup can fold the same
-    // shape into its system prompt that its tool description already carries.
-    let stage_outputs: Vec<Option<leviath_core::output::OutputSpec>> =
-        stages.iter().map(|rs| rs.output.clone()).collect();
-    // Spawn-time notes ride each stage's operational log, tagged with the
-    // stage's index, so the substitution a user's model settings made is the
-    // first line anyone reading that stage's log sees.
-    let notes: Vec<(usize, String)> = stages
-        .iter()
-        .enumerate()
-        .flat_map(|(i, rs)| rs.notes.iter().cloned().map(move |line| (i, line)))
-        .collect();
+    let notes: Vec<Vec<String>> = stages.iter().map(|rs| rs.notes.clone()).collect();
     let stage_infs: Vec<StageInference> = stages
         .into_iter()
         .map(|rs| StageInference {
@@ -403,32 +388,41 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
             output: rs.output,
         })
         .collect();
-    let agent_hints = leviath_core::config::PromptHintOverrides {
-        batch_tool: blueprint.batch_tool_hint,
-        shell: blueprint.shell_hint,
-    };
-    let setups: Vec<StageSetup> = blueprint
-        .stages
-        .iter()
-        .zip(stage_outputs)
-        .map(|(s, output)| stage_setup_from(s, global_hints, agent_hints, output))
-        .collect();
+    let mut spec = run_spec_from_blueprint(&blueprint, &agent_id, &stage_infs)?;
+    fold_operator_defaults(&mut spec.graph, global_hints, &global_nudge);
+    for (i, plan) in spec.stages.iter_mut().enumerate() {
+        plan.context_window = u32::try_from(stage_windows[i]).unwrap_or(u32::MAX);
+        plan.notes = notes[i].clone();
+        plan.region_budgets = resolved.budgets(i);
+    }
+    for (key, content) in &seeds {
+        // Unknown names are rejected upstream; a seed that targets nothing is
+        // dropped here to keep this infallible for it.
+        let Some(target) = seed_target(&resolved.global, key)
+            .and_then(|t| crate::spec::names::RegionName::new(t).ok())
+        else {
+            continue;
+        };
+        spec.seeded.insert(
+            target,
+            crate::spec::run_spec::SeededContent {
+                text: content.clone(),
+                parts: Vec::new(),
+            },
+        );
+    }
+    let spec = std::sync::Arc::new(spec);
 
-    // Seed the window from the blueprint layout + task, then apply stage 0's
-    // context setup (layout swap + system-prompt injection) just as entering any
-    // later stage would.
-    let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
-    // Attach compiled custom-region scripts BEFORE seeding, so seed writes
-    // pass through each region's on_write hook like any other entry.
-    window.region_scripts = region_scripts;
-    crate::context_setup::init_window_seeded(&mut window, &blueprint, seeds);
+    let mut window = crate::insert::seeded_window(&spec, &region_scripts);
     if !parts.is_empty() {
         let Some((store, registry)) = mime_store else {
             return Err("this world has no blob store, so it cannot take an attached part".into());
         };
+        let mut layout_only = blueprint.clone();
+        layout_only.context_layout = resolved.global.clone();
         crate::context_setup::ingest_parts(
             &mut window,
-            &blueprint,
+            &layout_only,
             parts,
             &crate::context_setup::PartSink {
                 store: store.as_ref(),
@@ -439,102 +433,118 @@ pub fn spawn_agent_seeded(world: &mut World, spawn: SeededSpawn) -> Result<Entit
             },
         )?;
     }
-    // Before stage 0's prompt is injected, so it has somewhere of its own to go
-    // rather than being charged to whichever pinned region came first.
-    let prompts: Vec<Option<String>> = setups.iter().map(|s| s.system_prompt.clone()).collect();
-    crate::context_setup::ensure_stage_instructions_region(&mut window, &prompts);
-    apply_stage_context(&setups[0], &mut window)?;
-    // Now that the window is built, not before it: this is the one place both
-    // halves of a change record are in hand (the run id the archive is named
-    // after, and the lane every other record goes down), and the seeding above
-    // has to stay off the lane. An append is the one message that cannot create
-    // a run directory, so an append arriving ahead of the first snapshot stakes
-    // the run without establishing it - and the snapshot behind it then reads as
-    // a write to a run somebody deleted. A world that persists nothing leaves
-    // the window detached, and it records nothing.
-    window.attach_journal(&agent_id, world.get_resource::<PersistenceStage>());
+    crate::insert::enter_first_stage(&spec, &mut window)?;
+    let state = crate::insert::initial_state_from(&spec, &window);
 
-    let stage0_name = blueprint.stages[0].name.clone();
-    let stage0_inf = stage_infs[0].clone();
-    let setup0 = &setups[0];
-    let stage0_cfg = setup0.inference_config.clone();
-    let stage0_routing = setup0.routing.clone();
-    let accepts_messages = setup0.accepts_messages;
+    let mut bindings =
+        crate::spec::env::Bindings::new().with(crate::insert::RegionScripts(region_scripts));
+    if let Some(registry) = run_registry {
+        bindings = bindings.with(registry);
+    }
+    let entity = crate::insert::insert(world, spec.clone(), bindings, &state);
+    // The modules outside the pipeline that still read the parsed blueprint
+    // and the per-stage lists find them here.
+    let mut blueprint = blueprint;
+    blueprint.context_layout = resolved.global;
+    for (stage, own) in blueprint.stages.iter_mut().zip(resolved.per_stage) {
+        stage.context_layout = own;
+    }
+    let setups = (0..spec.graph.stages.len())
+        .map(|i| spec_view::stage_setup(&spec, i))
+        .collect();
+    world.entity_mut(entity).insert((
+        AgentBlueprint(blueprint),
+        StageInferences(stage_infs),
+        StageSetups(setups),
+    ));
+    Ok(entity)
+}
 
-    // Pre-count stage 0's visit: the imperative loop bumps a stage's visit after
-    // it runs and before resolving its transition, so stage 0 must read as
-    // visited once by the time its first transition resolves.
-    let mut visits = VisitCounts::default();
-    *visits.0.entry(stage0_name.clone()).or_insert(0) += 1;
+/// A blueprint's layouts with every percentage budget resolved to tokens.
+struct ResolvedLayouts {
+    /// The blueprint's own layout.
+    global: crate::spec::ContextLayout,
+    /// Each stage's own layout, when it has one.
+    per_stage: Vec<Option<crate::spec::ContextLayout>>,
+}
 
-    // Seed the per-stage ledger (names + Pending) so the dashboard shows every
-    // stage's real name from the first persist, not just the active one.
-    let mut ledger = StageLedger(
+impl ResolvedLayouts {
+    /// Each region's budget in stage `i`: the stage's own layout's, over the
+    /// blueprint layout's for every region the stage's layout does not name.
+    fn budgets(&self, i: usize) -> std::collections::BTreeMap<crate::spec::names::RegionName, u32> {
+        let own = self.per_stage[i].iter().flat_map(|l| l.regions.iter());
+        self.global
+            .regions
+            .iter()
+            .chain(own)
+            .filter_map(|r| {
+                let tokens = u32::try_from(r.max_tokens).unwrap_or(u32::MAX);
+                crate::spec::names::RegionName::new(r.name.as_str())
+                    .ok()
+                    .map(|name| (name, tokens))
+            })
+            .collect()
+    }
+}
+
+/// Resolve a blueprint's layouts against its stages' model windows and check
+/// each one, as [`spawn_agent_seeded`] describes.
+fn resolved_layouts(
+    blueprint: &crate::spec::Blueprint,
+    stage_windows: &[usize],
+) -> Result<ResolvedLayouts, String> {
+    // A region's percentage budget is sized against the smallest context window
+    // among the stages that actually see it - not the entry stage's window, and
+    // not a stage that never reads the region. A per-stage layout's regions are
+    // private to that stage, so its own window is the only one that uses them.
+    let smallest_window_seeing = |region: &str| -> usize {
         blueprint
             .stages
             .iter()
             .enumerate()
-            .map(|(i, s)| leviath_core::run_meta::StageRecord::new(s.name.clone(), i))
-            .collect(),
-    );
-    // Stage 0 is the one stage no transition enters, so its first visit is
-    // opened here for the same reason its `VisitCounts` entry is pre-counted
-    // above: without it the two disagree from the first tick.
-    let stage0_visit = leviath_core::execution::mint_visit_id();
-    ledger.0[0].begin_visit(chrono::Utc::now().timestamp(), stage0_visit.clone());
-
-    // Repetition detection is opt-in per blueprint.
-    let repetition = blueprint
-        .repetition_detection
-        .as_ref()
-        .map(crate::repetition::RepetitionDetector::from_detection_config);
-
-    let entity = world
-        .spawn((
-            AgentBlueprint(blueprint),
-            AgentState {
-                agent_id,
-                current_stage: stage0_name,
-                current_visit: stage0_visit,
-                iteration: 0,
-                status: AgentStatus::Active,
-                spawned_children_ids: vec![],
-                pending_wait: None,
-                accepts_messages,
-            },
-            MessageInbox::default(),
-            StageCursor { index: 0 },
-            StageProgress::default(),
-            StageInferences(stage_infs),
-            StageSetups(setups),
-            visits,
-            window,
-            stage0_inf,
-            stage0_cfg,
-            ReadyToInfer,
-        ))
-        .id();
-    // Inserted after spawn: the bundle above is already at bevy's 15-tuple limit.
-    world.entity_mut(entity).insert((
-        ledger,
-        StageIoBuffer {
-            output: Vec::new(),
-            logs: notes,
-        },
-        crate::pipeline::response::GlobalNudge(global_nudge),
-    ));
-    if let Some(detector) = repetition {
-        world.entity_mut(entity).insert(detector);
+            .filter(|(_, s)| {
+                s.context_layout.is_none() && blueprint.regions_visible_to(s).contains(region)
+            })
+            .map(|(i, _)| stage_windows[i])
+            .min()
+            // No stage uses the global layout for this region (every stage
+            // has its own, or all hide it); the first window is a harmless
+            // default for a budget nothing at runtime consults.
+            .unwrap_or(stage_windows[0])
+    };
+    let global = blueprint
+        .context_layout
+        .resolved_per_region(&smallest_window_seeing);
+    let per_stage: Vec<Option<crate::spec::ContextLayout>> = blueprint
+        .stages
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            s.context_layout
+                .as_ref()
+                .map(|l| l.resolved(stage_windows[i]))
+        })
+        .collect();
+    // Structural validation (duplicate names, eviction order, custom scripts)
+    // once per distinct layout, now that percentages are concrete numbers.
+    global.validate().map_err(|e| e.to_string())?;
+    for layout in per_stage.iter().flatten() {
+        layout.validate().map_err(|e| e.to_string())?;
     }
-    if let Some(registry) = run_registry {
-        world.entity_mut(entity).insert(registry);
+    // Then the working-room floor, per stage: each stage must keep enough
+    // evictable room after its fixed regions, judged against *its* model window
+    // over just the regions *it* sees - a region budgeted generously for a
+    // wide-window stage must not be counted against a narrow one that never
+    // reads it.
+    for (i, stage) in blueprint.stages.iter().enumerate() {
+        let layout = per_stage[i].as_ref().unwrap_or(&global);
+        let visible = blueprint.regions_visible_to(stage);
+        layout
+            .retaining(|name| visible.contains(name))
+            .validate_working_room(stage_windows[i])
+            .map_err(|e| e.to_string())?;
     }
-    if let Some(routing) = stage0_routing {
-        world
-            .entity_mut(entity)
-            .insert(crate::components::ToolResultRoutingComponent { routing });
-    }
-    Ok(entity)
+    Ok(ResolvedLayouts { global, per_stage })
 }
 
 #[cfg(test)]

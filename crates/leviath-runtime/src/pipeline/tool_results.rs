@@ -160,7 +160,7 @@ pub(crate) struct Reply<'a> {
     /// The stage this reply came from, when its `output_routing` should send
     /// some produced parts to regions of their own. `None` keeps every part
     /// in the conversation.
-    pub(crate) stage: Option<&'a crate::spec::blueprint::Stage>,
+    pub(crate) stage: Option<&'a crate::spec::graph::StageDef>,
     /// Where text over `[mime] inline_text_bytes` is stored, for the reply
     /// and for each tool result. `None` keeps every text inline: the restore
     /// path replays a batch with no store at hand.
@@ -563,26 +563,24 @@ pub(crate) fn apply_file_tracking(
 /// agents whose writes go through MCP or script tools). All canonical, so a
 /// `bash`-style alias in a gate's `tools` list still matches its real tool.
 pub(crate) fn stage_modifying_tools(
-    blueprint: Option<&AgentBlueprint>,
+    spec: Option<&crate::insert::RunSpecC>,
     cursor: Option<&StageCursor>,
 ) -> Vec<String> {
     let mut names: Vec<String> = crate::spec::blueprint::MODIFYING_TOOLS
         .iter()
         .map(|t| (*t).to_string())
         .collect();
-    let (Some(bp), Some(cursor)) = (blueprint, cursor) else {
+    let (Some(spec), Some(cursor)) = (spec, cursor) else {
         return names;
     };
-    let Some(stage) = bp.0.stages.get(cursor.index) else {
+    let graph = &spec.0.graph;
+    let Some(stage) = graph.stages.get(cursor.index) else {
         return names;
     };
-    let Some(transitions) = &stage.transitions else {
-        return names;
-    };
-    for edge in transitions.values() {
+    for edge in graph.edges_from(stage.name.as_str()) {
         let Some(gate) = &edge.gate else { continue };
         for tool in &gate.tools {
-            let canonical = leviath_tools::canonical_tool_name(tool).to_string();
+            let canonical = leviath_tools::canonical_tool_name(tool.as_str()).to_string();
             if !names.contains(&canonical) {
                 names.push(canonical);
             }
@@ -805,7 +803,7 @@ type ToolQuery = (
     Option<&'static ContextToolResults>,
     Option<&'static StageCursor>,
     Option<&'static mut StageIoBuffer>,
-    Option<&'static AgentBlueprint>,
+    Option<&'static crate::insert::RunSpecC>,
     Option<&'static mut crate::repetition::RepetitionDetector>,
     Option<&'static mut StageProgress>,
     Option<&'static mut crate::persistence::RunOutcomeFlags>,
@@ -953,9 +951,11 @@ pub(crate) fn collect_tools(
         annotate_path_errors(&window, &infer.tool_calls, &mut merged);
         // File tracking: sync read/write results into the configured HashMap
         // region and replace the inline result with a reference (de-dup context).
-        if let Some(ft) = blueprint.and_then(|bp| bp.0.file_tracking.as_ref()) {
-            apply_file_tracking(&mut window, ft, &infer.tool_calls, &mut merged);
+        if let Some(ft) = blueprint.and_then(|spec| spec.0.graph.file_tracking.as_ref()) {
+            let ft = super::spec_view::file_tracking(ft);
+            apply_file_tracking(&mut window, &ft, &infer.tool_calls, &mut merged);
         }
+
         // Buffer one readable `[tool] name: result` line per call for the stage's
         // logs (merged is in call order, so it zips with the calls by index).
         if let Some(mut buffer) = buffer {

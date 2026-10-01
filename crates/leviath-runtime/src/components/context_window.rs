@@ -19,10 +19,13 @@ mod journal;
 /// Typed parts as provider content blocks: stand-ins, mime blocks, and the
 /// lifted message a system region's stored parts ride in.
 mod mime;
+/// The window as a run's state records it, and back.
+mod state;
 /// Every path that puts something into a region, and the cause it states.
 mod writes;
 
 pub(crate) use journal::{ContextJournal, ContextTxn, Pushed};
+pub(crate) use state::part as part_from_state;
 pub(crate) use writes::TypedWrite;
 
 /// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.

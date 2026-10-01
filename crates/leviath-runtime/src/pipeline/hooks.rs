@@ -118,16 +118,16 @@ pub(crate) fn run_stage_enter_hooks(
     mut agents: Query<(
         Entity,
         &StageJustEntered,
-        &AgentBlueprint,
+        &crate::insert::RunSpecC,
         &StageHookScripts,
         &mut ContextWindow,
         &mut AgentState,
     )>,
 ) {
     crate::tick_scope::clear();
-    for (entity, entered, bp, scripts, mut window, mut state) in agents.iter_mut() {
+    for (entity, entered, spec, scripts, mut window, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        let Some(stage) = bp.0.stages.get(entered.index) else {
+        let Some(stage) = spec.0.graph.stages.get(entered.index) else {
             continue;
         };
         let Some(script) = scripts.script_for(stage, "on_stage_enter") else {
@@ -194,7 +194,7 @@ fn refuse(state: &mut AgentState, hook: &str, what: String) {
 type BeforeInferenceHookQuery = (
     Entity,
     &'static StageCursor,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageHookScripts,
     &'static mut ContextWindow,
     &'static mut AgentState,
@@ -215,16 +215,16 @@ pub(crate) fn run_before_inference_hooks(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, cursor, bp, scripts, mut window, mut state) in agents.iter_mut() {
+    for (entity, cursor, spec, scripts, mut window, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        let Some(stage) = bp.0.stages.get(cursor.index) else {
+        let Some(stage) = spec.0.graph.stages.get(cursor.index) else {
             continue;
         };
         let Some(script) = scripts.script_for(stage, "before_inference") else {
             continue;
         };
 
-        let ctx = stage_ctx(&stage.name, cursor.index, &window);
+        let ctx = stage_ctx(stage.name.as_str(), cursor.index, &window);
         match run(&script, "before_inference", ctx) {
             Err(e) => refuse(&mut state, "before_inference", format!("hook failed: {e}")),
             Ok(HookOutcome::Allow) => {}
@@ -262,7 +262,7 @@ pub(crate) fn run_before_inference_hooks(
 type AfterInferenceHookQuery = (
     Entity,
     &'static StageCursor,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageHookScripts,
     &'static mut crate::components::InferenceResult,
     &'static mut AgentState,
@@ -283,9 +283,9 @@ pub(crate) fn run_after_inference_hooks(
     mut agents: Query<AfterInferenceHookQuery, With<ProcessResponse>>,
 ) {
     crate::tick_scope::clear();
-    for (entity, cursor, bp, scripts, mut result, mut state) in agents.iter_mut() {
+    for (entity, cursor, spec, scripts, mut result, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        let Some(stage) = bp.0.stages.get(cursor.index) else {
+        let Some(stage) = spec.0.graph.stages.get(cursor.index) else {
             continue;
         };
         let Some(script) = scripts.script_for(stage, "after_inference") else {
@@ -381,7 +381,7 @@ fn tool_calls_from(value: &serde_json::Value) -> Result<Vec<crate::components::T
 type ToolCallHookQuery = (
     Entity,
     &'static StageCursor,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageHookScripts,
     &'static mut crate::components::InferenceResult,
     &'static mut AgentState,
@@ -407,9 +407,9 @@ type ToolCallHookQuery = (
 /// rewrites everything.
 pub(crate) fn run_tool_call_hooks(mut agents: Query<ToolCallHookQuery, With<ReadyForTools>>) {
     crate::tick_scope::clear();
-    for (entity, cursor, bp, scripts, mut result, mut state) in agents.iter_mut() {
+    for (entity, cursor, spec, scripts, mut result, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        let Some(stage) = bp.0.stages.get(cursor.index) else {
+        let Some(stage) = spec.0.graph.stages.get(cursor.index) else {
             continue;
         };
         let Some(script) = scripts.script_for(stage, "on_tool_call") else {
@@ -474,7 +474,7 @@ pub(crate) struct TerminalHookFired;
 type TerminalHookQuery = (
     Entity,
     &'static StageCursor,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageHookScripts,
     &'static mut AgentState,
     Option<&'static mut crate::persistence::FinalOutput>,
@@ -496,7 +496,7 @@ pub(crate) fn run_terminal_hooks(
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, cursor, bp, scripts, mut state, output) in agents.iter_mut() {
+    for (entity, cursor, spec, scripts, mut state, output) in agents.iter_mut() {
         // `Cancelled` is deliberately not here: see the doc comment.
         let (hook, subject) = match &state.status {
             AgentStatus::Complete => (
@@ -511,7 +511,7 @@ pub(crate) fn run_terminal_hooks(
         };
         crate::tick_scope::enter(entity);
 
-        let Some(stage) = bp.0.stages.get(cursor.index) else {
+        let Some(stage) = spec.0.graph.stages.get(cursor.index) else {
             // Still mark it fired: without a stage there is no hook to look up
             // and re-checking every tick would be pure work.
             commands.entity(entity).insert(TerminalHookFired);
@@ -592,7 +592,7 @@ pub(crate) fn run_terminal_hooks(
 type StageExitHookQuery = (
     Entity,
     &'static StageCursor,
-    &'static AgentBlueprint,
+    &'static crate::insert::RunSpecC,
     &'static StageHookScripts,
     &'static mut ContextWindow,
     &'static mut AgentState,
@@ -609,16 +609,16 @@ type StageExitHookQuery = (
 /// refuses to be left has nowhere to go, and wedging is worse than stopping.
 pub(crate) fn run_stage_exit_hooks(mut agents: Query<StageExitHookQuery, With<ResolveTransition>>) {
     crate::tick_scope::clear();
-    for (entity, cursor, bp, scripts, mut window, mut state) in agents.iter_mut() {
+    for (entity, cursor, spec, scripts, mut window, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        let Some(stage) = bp.0.stages.get(cursor.index) else {
+        let Some(stage) = spec.0.graph.stages.get(cursor.index) else {
             continue;
         };
         let Some(script) = scripts.script_for(stage, "on_stage_exit") else {
             continue;
         };
 
-        let ctx = stage_ctx(&stage.name, cursor.index, &window);
+        let ctx = stage_ctx(stage.name.as_str(), cursor.index, &window);
         match run(&script, "on_stage_exit", ctx) {
             Err(e) => refuse(&mut state, "on_stage_exit", format!("hook failed: {e}")),
             Ok(HookOutcome::Allow) => {}

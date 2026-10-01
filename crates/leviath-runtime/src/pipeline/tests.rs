@@ -4,6 +4,19 @@
 
 use super::*;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
+use crate::insert::RunSpecC;
+#[path = "tests_old_vocab.rs"]
+mod old_vocab;
+use old_vocab::{
+    apply_edge_transform, build_transition_prompt, detect_stuck, edges_of, find_conditioned_edge,
+    gate_blocks, match_transition_choice, spec_of, spec_with, stage_expected_media,
+    stage_setup_from, watched_region_digests,
+};
+
+/// The graph of a test run's spec, to change before the run is spawned.
+fn graph_mut(spec: &mut RunSpecC) -> &mut crate::spec::graph::RunGraph {
+    &mut std::sync::Arc::make_mut(&mut spec.0).graph
+}
 use crate::test_support::hints;
 use leviath_core::{Region, RegionKind};
 use leviath_providers::LimitsSource;
@@ -4710,7 +4723,7 @@ fn run_empty(world: &mut World) {
 
 /// A one-stage blueprint whose stage either presents its output for review
 /// or runs autonomously.
-fn nudge_bp(reviewed: bool) -> AgentBlueprint {
+fn nudge_bp(reviewed: bool) -> RunSpecC {
     let mut stage = stage_named("a", None, false, None);
     if reviewed {
         let point = crate::spec::blueprint::InteractionPoint {
@@ -4729,7 +4742,7 @@ fn nudge_bp(reviewed: bool) -> AgentBlueprint {
             points: vec![point],
         };
     }
-    AgentBlueprint(blueprint(vec![stage]))
+    spec_of(blueprint(vec![stage]))
 }
 
 #[test]
@@ -4953,7 +4966,7 @@ fn empty_response_nudges_and_loops_back_when_text_only() {
 fn empty_response_respects_a_stage_that_disables_its_nudge() {
     // The stage knows its deliverable is text and says so.
     let mut bp = nudge_bp(false);
-    bp.0.stages[0].nudge = Some(crate::spec::NudgeConfig {
+    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
         enabled: Some(false),
         ..Default::default()
     });
@@ -4980,12 +4993,12 @@ fn empty_response_respects_a_stage_that_disables_its_nudge() {
 /// A one-stage blueprint whose stage produces an image (declared through
 /// `output_routing`), so a text-only reply reads as a likely image-generation
 /// failure.
-fn image_bp() -> AgentBlueprint {
+fn image_bp() -> RunSpecC {
     let mut stage = stage_named("draw", None, false, None);
     stage
         .output_routing
         .insert("image/*".to_string(), "conversation".to_string());
-    AgentBlueprint(blueprint(vec![stage]))
+    spec_of(blueprint(vec![stage]))
 }
 
 /// A text-only reply that also carries one produced image part.
@@ -5098,7 +5111,7 @@ fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
     // end rather than loop. The stage's nudge is off, so the fall-through
     // resolves rather than nudging on text alone.
     let mut bp = image_bp();
-    bp.0.stages[0].nudge = Some(crate::spec::NudgeConfig {
+    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
         enabled: Some(false),
         ..Default::default()
     });
@@ -5130,7 +5143,7 @@ fn image_stage_lets_go_once_its_image_nudge_budget_is_spent() {
 fn empty_response_honors_an_agent_level_max() {
     // `[agent.nudge] max = 0`: the very first text-only response is final.
     let mut bp = nudge_bp(false);
-    bp.0.nudge = Some(crate::spec::NudgeConfig {
+    graph_mut(&mut bp).nudge = Some(crate::spec::graph::NudgeDef {
         max: Some(0),
         ..Default::default()
     });
@@ -5154,18 +5167,13 @@ fn empty_response_honors_an_agent_level_max() {
 fn empty_response_interpolates_custom_text_placeholders() {
     // A custom text names the stage and its required regions.
     let mut bp = nudge_bp(false);
-    bp.0.stages[0].nudge = Some(crate::spec::NudgeConfig {
+    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
         text: Some("Populate {regions} to finish stage {stage}.".to_string()),
         ..Default::default()
     });
-    bp.0.context_layout
-        .regions
-        .push(crate::spec::layout::RegionDefinition::new(
-            "plan".to_string(),
-            RegionKind::Pinned,
-            1_000,
-        ));
-    bp.0.context_layout.regions[1].required = true;
+    let mut plan = crate::spec::graph::tests::region("plan");
+    plan.required = true;
+    graph_mut(&mut bp).layout.regions.push(plan);
     let mut world = World::new();
     let e = world
         .spawn((
@@ -5191,7 +5199,7 @@ fn empty_response_explicit_enabled_overrides_review_suppression() {
     // _reviewed`: the suppression is only the default, and a stage author who
     // explicitly asks for nudging on a reviewed stage gets it.
     let mut bp = nudge_bp(true);
-    bp.0.stages[0].nudge = Some(crate::spec::NudgeConfig {
+    graph_mut(&mut bp).stages[0].nudge = Some(crate::spec::graph::NudgeDef {
         enabled: Some(true),
         ..Default::default()
     });
@@ -5436,6 +5444,27 @@ impl ToolService for StaleService {
     }
 }
 
+/// Tool lists looked up again since spawn, by stage position.
+fn overrides(stages: &[(usize, &[&str])]) -> super::spec_view::StageToolOverrides {
+    super::spec_view::StageToolOverrides(
+        stages
+            .iter()
+            .map(|(i, names)| (*i, stage_inf(names).tools))
+            .collect(),
+    )
+}
+
+/// The names of the tools recorded for stage `i`, or none.
+fn override_names(world: &World, entity: Entity, i: usize) -> Vec<String> {
+    world
+        .get::<super::spec_view::StageToolOverrides>(entity)
+        .unwrap()
+        .0
+        .get(&i)
+        .map(|tools| tools.iter().map(|t| t.name.clone()).collect())
+        .unwrap_or_default()
+}
+
 fn run_rescan(world: &mut World) {
     let mut schedule = Schedule::default();
     schedule.add_systems(rescan_before_dispatch);
@@ -5459,7 +5488,7 @@ fn a_stale_scan_is_re_advertised_before_the_batch() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"]), stage_inf(&["other"])]),
+            overrides(&[(1, &["other"])]),
             ReadyForTools,
             RescanBeforeDispatch,
         ))
@@ -5475,15 +5504,12 @@ fn a_stale_scan_is_re_advertised_before_the_batch() {
         .map(|t| t.name.clone())
         .collect();
     assert_eq!(live, vec!["just_written".to_string()]);
-    // The catalog too, or re-entering this stage would silently advertise the
-    // set the run started with.
+    // The overrides too, or re-entering this stage would silently advertise
+    // the set the run started with.
+    assert_eq!(override_names(&world, entity, 0), vec!["just_written"]);
     assert_eq!(
-        world.get::<StageInferences>(entity).unwrap().0[0].tools[0].name,
-        "just_written"
-    );
-    assert_eq!(
-        world.get::<StageInferences>(entity).unwrap().0[1].tools[0].name,
-        "other",
+        override_names(&world, entity, 1),
+        vec!["other"],
         "another stage is not touched"
     );
     // No marker is consumed: the agent looks again before its next batch too.
@@ -5504,7 +5530,7 @@ fn an_unchanged_scan_leaves_the_advertised_set_alone() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             ReadyForTools,
             RescanBeforeDispatch,
         ))
@@ -5534,7 +5560,7 @@ fn only_an_agent_that_asked_and_is_dispatching_is_looked_at() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             ReadyForTools,
         ))
         .id();
@@ -5543,7 +5569,7 @@ fn only_an_agent_that_asked_and_is_dispatching_is_looked_at() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             RescanBeforeDispatch,
         ))
         .id();
@@ -5577,7 +5603,7 @@ fn a_service_without_a_staleness_check_never_rescans() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             ReadyForTools,
             RescanBeforeDispatch,
         ))
@@ -5606,7 +5632,7 @@ fn refresh_advertised_tools_updates_live_and_catalog() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"]), stage_inf(&["other"])]),
+            overrides(&[(1, &["other"])]),
             ToolsNeedRefresh,
         ))
         .id();
@@ -5621,17 +5647,9 @@ fn refresh_advertised_tools_updates_live_and_catalog() {
         .map(|t| t.name.clone())
         .collect();
     assert_eq!(names, vec!["new_tool".to_string()]);
-    let cat0: Vec<String> = world.get::<StageInferences>(entity).unwrap().0[0]
-        .tools
-        .iter()
-        .map(|t| t.name.clone())
-        .collect();
-    assert_eq!(cat0, vec!["new_tool".to_string()]);
-    // Other stages in the catalog are untouched.
-    assert_eq!(
-        world.get::<StageInferences>(entity).unwrap().0[1].tools[0].name,
-        "other"
-    );
+    assert_eq!(override_names(&world, entity, 0), vec!["new_tool"]);
+    // Other stages' overrides are untouched.
+    assert_eq!(override_names(&world, entity, 1), vec!["other"]);
     // Marker consumed.
     assert!(world.get::<ToolsNeedRefresh>(entity).is_none());
 }
@@ -5646,7 +5664,7 @@ fn refresh_advertised_tools_none_leaves_tools_but_clears_marker() {
         .spawn((
             StageCursor { index: 0 },
             stage_inf(&["keep"]),
-            StageInferences(vec![stage_inf(&["keep"])]),
+            overrides(&[]),
             ToolsNeedRefresh,
         ))
         .id();
@@ -5719,16 +5737,15 @@ fn poll_leaves_dynamic_agent_untagged_when_no_refresh_wanted() {
 }
 
 #[test]
-fn refresh_advertised_tools_tolerates_cursor_past_catalog() {
-    // A cursor index beyond the catalog updates only the live component
-    // (the `get_mut(index)` None arm), never panicking.
+fn refresh_advertised_tools_records_the_cursor_stage_alone() {
+    // The refreshed set is recorded for the stage the run is in and no other.
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(RefreshService(vec!["fresh"]))));
     let entity = world
         .spawn((
             StageCursor { index: 5 },
             stage_inf(&["old"]),
-            StageInferences(vec![stage_inf(&["old"])]),
+            overrides(&[]),
             ToolsNeedRefresh,
         ))
         .id();
@@ -5737,11 +5754,8 @@ fn refresh_advertised_tools_tolerates_cursor_past_catalog() {
         world.get::<StageInference>(entity).unwrap().tools[0].name,
         "fresh"
     );
-    // The single catalog entry is untouched (index 5 doesn't exist).
-    assert_eq!(
-        world.get::<StageInferences>(entity).unwrap().0[0].tools[0].name,
-        "old"
-    );
+    assert_eq!(override_names(&world, entity, 5), vec!["fresh"]);
+    assert!(override_names(&world, entity, 0).is_empty());
 }
 
 #[tokio::test]
@@ -6578,7 +6592,7 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
         .spawn((
             agent_state(),
             metadata,
-            AgentBlueprint(blueprint(stages)),
+            spec_of(blueprint(stages)),
             offers,
             result,
             conv_window(),
@@ -6718,6 +6732,7 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
     let e = world
         .spawn((
             agent_state(),
+            spec_of(bp.clone()),
             AgentBlueprint(bp),
             window,
             StageJustEntered {
@@ -6865,7 +6880,7 @@ fn a_stage_entry_with_nothing_to_refresh_is_not_held() {
     let e = world
         .spawn((
             agent_state(),
-            AgentBlueprint(blueprint(vec![crate::spec::Stage::new(
+            spec_of(blueprint(vec![crate::spec::Stage::new(
                 "main".to_string(),
                 crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
             )])),
@@ -9021,7 +9036,7 @@ fn spawn_transition_agent(
     let n = stage_infs.len();
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &stage_infs),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress {
@@ -9030,7 +9045,6 @@ fn spawn_transition_agent(
                 iterations: 0,
                 ..Default::default()
             },
-            StageInferences(stage_infs),
             setups(n),
             conv_window(),
             visits,
@@ -9367,7 +9381,7 @@ fn a_stage_whose_routed_parts_satisfy_its_artifacts_needs_no_submit_output() {
     let mut world = World::new();
     let e = world
         .spawn((
-            AgentBlueprint(bp),
+            spec_of(bp),
             StageCursor { index: 0 },
             agent_state(),
             window,
@@ -9647,16 +9661,14 @@ fn pinned_window() -> ContextWindow {
 fn spawn_setup_agent(world: &mut World, dest_setup: StageSetup, window: ContextWindow) -> Entity {
     let bp = blueprint(vec![
         stage_named("a", None, false, None),
-        stage_named("b", None, false, None),
+        old_vocab::stage_from_setup("b", &dest_setup),
     ]);
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &[si("m0"), si("m1")]),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            StageInferences(vec![si("m0"), si("m1")]),
-            StageSetups(vec![setup(), dest_setup]),
             VisitCounts::default(),
             window,
             ResolveTransition,
@@ -9925,23 +9937,21 @@ fn enter_stage_without_target_region_skips_injection() {
 #[test]
 fn collect_choice_errors_when_system_prompt_overflows() {
     let (mut world, tx) = world_with_transition_results();
-    let bp = blueprint(vec![
-        stage_named("a", None, false, None),
-        stage_named("b", None, false, None),
-    ]);
     let mut dest = setup();
     dest.system_prompt = Some("x".repeat(100_000));
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        old_vocab::stage_from_setup("b", &dest),
+    ]);
     let e = world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &[si("m0"), si("m1")]),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            StageInferences(vec![si("m0"), si("m1")]),
-            StageSetups(vec![setup(), dest]),
             VisitCounts::default(),
             pinned_window(),
-            AwaitingTransitionResponse(vec![plain_edge("b")]),
+            AwaitingTransitionResponse(edges_of(&[plain_edge("b")])),
         ))
         .id();
     tx.send(InferenceOutcome {
@@ -11008,7 +11018,7 @@ fn spawn_ready_agent(
     let bp = blueprint(vec![s]);
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_of(bp),
             StageCursor { index: 0 },
             AgentState {
                 status,
@@ -11074,22 +11084,21 @@ fn enforce_max_iterations_leaves_a_fan_out_stage_alone() {
     let e = spawn_ready_agent(&mut world, Some(4), 4, AgentStatus::Active);
     // Same agent, same spent budget - only the mode differs.
     let capped = spawn_ready_agent(&mut world, Some(4), 4, AgentStatus::Active);
-    let mut bp = world.get::<AgentBlueprint>(e).unwrap().0.clone();
-    bp.stages[0].mode = crate::spec::blueprint::StageMode::FanOut {
-        config: crate::spec::blueprint::FanOutConfig {
-            worker_agent: Some("w".to_string()),
-            worker_stage: None,
-            worker_query: None,
+    let mut spec = world.get::<RunSpecC>(e).unwrap().clone();
+    graph_mut(&mut spec).stages[0].mode =
+        crate::spec::graph::StageMode::FanOut(crate::spec::graph::FanOutDef {
+            worker: crate::spec::graph::WorkerSource::Blueprint(
+                crate::spec::names::BlueprintRef::parse("w").unwrap(),
+            ),
             merge_stage: None,
             max_workers: 4,
-            on_worker_failure: crate::spec::blueprint::WorkerFailurePolicy::Continue,
+            on_worker_failure: crate::spec::graph::WorkerFailure::Continue,
             split_prompt: "split".to_string(),
             results_region: None,
             max_items: None,
             max_attempts: None,
-        },
-    };
-    world.entity_mut(e).insert(AgentBlueprint(bp));
+        });
+    world.entity_mut(e).insert(spec);
 
     run_enforce(&mut world);
 
@@ -11373,7 +11382,7 @@ fn spawn_stuck_agent(
     let b = stage_named("b", None, false, target_max_revisits);
     world
         .spawn((
-            AgentBlueprint(blueprint(vec![a, b])),
+            spec_of(blueprint(vec![a, b])),
             StageCursor { index: 0 },
             AgentState {
                 status,
@@ -11855,7 +11864,7 @@ fn resolve_transition_resumes_the_stage_when_the_stuck_edge_is_gone() {
 
 // ── required-region gating ───────
 
-fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> AgentBlueprint {
+fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> RunSpecC {
     let region =
         crate::spec::layout::RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
             .with_required(true, custom_msg.map(str::to_string));
@@ -11863,7 +11872,7 @@ fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> AgentBlueprint {
     let mut stage = stage_named("a", None, false, None);
     stage.available_tools = tools.iter().map(|s| s.to_string()).collect();
     stage.context_layout = Some(layout.clone());
-    AgentBlueprint(crate::spec::Blueprint::new(
+    spec_of(crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![stage],
@@ -11889,20 +11898,33 @@ fn window_with_plan(filled: bool) -> ContextWindow {
 fn unmet_required_regions_flags_empty_clears_when_filled_and_skips_without_tool() {
     let bp = required_bp(&["context_write"], None);
     assert_eq!(
-        unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).len(),
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(false))
+            .len(),
         1
     );
-    assert!(unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(true)).is_empty());
+    assert!(
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(true))
+            .is_empty()
+    );
     // No context-writing tool ⇒ never gated (would loop pointlessly).
     let no_tool = required_bp(&["read_file"], None);
     assert!(
-        unmet_required_regions(&no_tool.0, &no_tool.0.stages[0], &window_with_plan(false))
-            .is_empty()
+        super::unmet_required_regions(
+            &no_tool.0.graph,
+            &no_tool.0.graph.stages[0],
+            &window_with_plan(false)
+        )
+        .is_empty()
     );
     // A built-in group carries the writing tools without naming them.
     let grouped = required_bp(&["@builtin"], None);
     assert_eq!(
-        unmet_required_regions(&grouped.0, &grouped.0.stages[0], &window_with_plan(false)).len(),
+        super::unmet_required_regions(
+            &grouped.0.graph,
+            &grouped.0.graph.stages[0],
+            &window_with_plan(false)
+        )
+        .len(),
         1
     );
     // A required region absent from the window entirely counts as unmet.
@@ -11913,7 +11935,7 @@ fn unmet_required_regions_flags_empty_clears_when_filled_and_skips_without_tool(
         10_000,
     ));
     assert_eq!(
-        unmet_required_regions(&bp.0, &bp.0.stages[0], &bare).len(),
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &bare).len(),
         1
     );
 }
@@ -11933,14 +11955,15 @@ fn unmet_required_regions_skips_caller_input_seeded_regions() {
     let mut stage = stage_named("a", None, false, None);
     stage.available_tools = vec!["context_write".to_string()];
     stage.context_layout = Some(layout.clone());
-    let bp = AgentBlueprint(crate::spec::Blueprint::new(
+    let bp = spec_of(crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![stage],
         layout,
     ));
     assert!(
-        unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).is_empty(),
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(false))
+            .is_empty(),
         "caller-input region is validated at spawn, not gated here"
     );
 }
@@ -11949,9 +11972,10 @@ fn unmet_required_regions_skips_caller_input_seeded_regions() {
 fn unmet_required_regions_falls_back_to_blueprint_layout() {
     // The stage has no per-stage layout, so the blueprint's layout is used.
     let mut bp = required_bp(&["context_write"], None);
-    bp.0.stages[0].context_layout = None;
+    graph_mut(&mut bp).stages[0].layout = None;
     assert_eq!(
-        unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).len(),
+        super::unmet_required_regions(&bp.0.graph, &bp.0.graph.stages[0], &window_with_plan(false))
+            .len(),
         1
     );
 }
@@ -12202,7 +12226,7 @@ fn only_watched_regions_get_a_baseline() {
 
     // No transitions at all.
     let bare = stage_named("plan", None, false, None);
-    assert!(crate::pipeline::transition::watched_region_digests(&bare, &w).is_empty());
+    assert!(watched_region_digests(&bare, &w).is_empty());
 
     // An edge with no gate.
     let ungated = stage_named(
@@ -12211,13 +12235,13 @@ fn only_watched_regions_get_a_baseline() {
         false,
         None,
     );
-    assert!(crate::pipeline::transition::watched_region_digests(&ungated, &w).is_empty());
+    assert!(watched_region_digests(&ungated, &w).is_empty());
 
     // An edge whose gate watches a region the window holds.
     let mut watching_edge = edge("compute", TransitionCondition::Always);
     watching_edge.1.gate = Some(change_gate("plan"));
     let watching = stage_named("plan", Some(vec![watching_edge]), false, None);
-    let digests = crate::pipeline::transition::watched_region_digests(&watching, &w);
+    let digests = watched_region_digests(&watching, &w);
     assert_eq!(digests.len(), 1);
     assert!(digests.contains_key("plan"));
 
@@ -12226,7 +12250,7 @@ fn only_watched_regions_get_a_baseline() {
     let mut missing_edge = edge("compute", TransitionCondition::Always);
     missing_edge.1.gate = Some(change_gate("nope"));
     let missing = stage_named("plan", Some(vec![missing_edge]), false, None);
-    assert!(crate::pipeline::transition::watched_region_digests(&missing, &w).is_empty());
+    assert!(watched_region_digests(&missing, &w).is_empty());
 }
 
 // ── the runaway-context warning ─────────
@@ -13132,7 +13156,7 @@ fn collect_tools_applies_file_tracking_from_blueprint() {
                 serde_json::json!({"path": "a.rs"}),
             )]),
             AwaitingTools,
-            AgentBlueprint(bp),
+            spec_of(bp),
         ))
         .id();
     tx.send(ToolOutcome {
@@ -13184,7 +13208,7 @@ fn count_modifications(
                     .collect(),
             ),
             AwaitingTools,
-            AgentBlueprint(bp),
+            spec_of(bp),
             StageCursor { index: 0 },
             StageProgress::default(),
             crate::persistence::RunOutcomeFlags::default(),
@@ -13383,7 +13407,7 @@ fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
     // No blueprint / no cursor.
     assert_eq!(stage_modifying_tools(None, None), defaults);
     // A cursor pointing past the end of the blueprint's stages.
-    let bp = AgentBlueprint(blueprint(vec![stage_named("a", None, false, None)]));
+    let bp = spec_of(blueprint(vec![stage_named("a", None, false, None)]));
     assert_eq!(
         stage_modifying_tools(Some(&bp), Some(&StageCursor { index: 9 })),
         defaults
@@ -13394,7 +13418,7 @@ fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
         defaults
     );
     // An edge with no gate.
-    let ungated = AgentBlueprint(blueprint(vec![writing_stage(
+    let ungated = spec_of(blueprint(vec![writing_stage(
         "a",
         vec![gated_edge("b", None)],
     )]));
@@ -13405,7 +13429,7 @@ fn stage_modifying_tools_defaults_without_a_blueprint_or_stage() {
     // A gate that re-lists a built-in doesn't duplicate it.
     let mut dup = gate(None, None);
     dup.tools = vec!["write_file".to_string()];
-    let deduped = AgentBlueprint(blueprint(vec![writing_stage(
+    let deduped = spec_of(blueprint(vec![writing_stage(
         "a",
         vec![gated_edge("b", Some(dup))],
     )]));
@@ -13459,6 +13483,20 @@ fn workspace_check_fails_a_run_whose_directory_is_gone() {
             .workspace_lost
     );
     assert!(world.get::<ReadyToInfer>(e).is_none());
+}
+
+/// A run placed with no workdir (one spawned without a host, from a spec that
+/// names none) has no workspace to lose, so it is never failed for one.
+#[test]
+fn workspace_check_leaves_a_run_with_no_workdir_alone() {
+    let mut world = World::new();
+    let e = spawn_workspace_agent(&mut world, "", 0);
+    run_workspace_check(&mut world);
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Active
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
 }
 
 #[test]
@@ -13565,10 +13603,10 @@ fn state_with(status: AgentStatus) -> AgentState {
     }
 }
 
-fn requires_children_bp(req: bool) -> AgentBlueprint {
+fn requires_children_bp(req: bool) -> RunSpecC {
     let mut s = stage_named("a", None, false, None);
     s.requires_children = req;
-    AgentBlueprint(blueprint(vec![s]))
+    spec_of(blueprint(vec![s]))
 }
 
 fn children(entities: Vec<Entity>) -> SubAgentChildren {
@@ -14690,15 +14728,14 @@ fn spawn_choosing_agent(
 ) -> Entity {
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &stage_infs),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            StageInferences(stage_infs),
             VisitCounts::default(),
             conv_window(),
             stage_infs_head(),
-            AwaitingTransitionChoice(edges),
+            AwaitingTransitionChoice(edges_of(&edges)),
         ))
         .id()
 }
@@ -14871,15 +14908,14 @@ fn spawn_responding_agent(
     let n = stage_infs.len();
     world
         .spawn((
-            AgentBlueprint(bp),
+            spec_with(bp, &stage_infs),
             StageCursor { index: 0 },
             agent_state(),
             StageProgress::default(),
-            StageInferences(stage_infs),
             setups(n),
             VisitCounts::default(),
             conv_window(),
-            AwaitingTransitionResponse(edges),
+            AwaitingTransitionResponse(edges_of(&edges)),
         ))
         .id()
 }
@@ -16043,12 +16079,12 @@ fn stage_setup_from_demands_an_output_even_with_no_declared_shape() {
 // ── Required-output gate ─────────────────────────────────────────────────────
 
 /// A blueprint whose single stage owes a final output.
-fn owing_bp(max_revisits: Option<usize>) -> AgentBlueprint {
+fn owing_bp(max_revisits: Option<usize>) -> RunSpecC {
     let mut stage = stage_named("summary", None, true, max_revisits);
     stage.available_tools = vec![leviath_tools::SUBMIT_OUTPUT_TOOL.to_string()];
     stage.require_output = true;
     let layout = crate::spec::layout::ContextLayout::new(vec![], 10_000);
-    AgentBlueprint(crate::spec::Blueprint::new(
+    spec_of(crate::spec::Blueprint::new(
         "t".to_string(),
         "d".to_string(),
         vec![stage],
@@ -16082,12 +16118,12 @@ fn submitted_in(stage: &str) -> crate::persistence::FinalOutput {
 }
 
 /// A blueprint whose stage 0 is a fan-out, for `require_fan_out`.
-fn fanning_bp() -> AgentBlueprint {
+fn fanning_bp() -> RunSpecC {
     fanning_bp_with(None)
 }
 
 /// The same, with an explicit `max_attempts`.
-fn fanning_bp_with(max_attempts: Option<usize>) -> AgentBlueprint {
+fn fanning_bp_with(max_attempts: Option<usize>) -> RunSpecC {
     let mut stage = stage_named("investigate", None, false, None);
     stage.mode = crate::spec::blueprint::StageMode::FanOut {
         config: crate::spec::blueprint::FanOutConfig {
@@ -16103,7 +16139,7 @@ fn fanning_bp_with(max_attempts: Option<usize>) -> AgentBlueprint {
             max_attempts,
         },
     };
-    AgentBlueprint(blueprint(vec![stage]))
+    spec_of(blueprint(vec![stage]))
 }
 
 fn run_require_fan_out(world: &mut World) {
@@ -16414,7 +16450,7 @@ fn an_output_from_an_earlier_stage_does_not_satisfy_this_one() {
 fn a_stage_that_owes_nothing_is_never_held() {
     let mut world = World::new();
     let mut bp = owing_bp(None);
-    bp.0.stages[0].require_output = false;
+    graph_mut(&mut bp).stages[0].require_output = false;
     let e = world
         .spawn((
             bp,
@@ -16590,7 +16626,7 @@ fn an_errored_or_capped_stage_still_records_the_missing_output() {
 fn an_errored_stage_that_owes_nothing_is_not_flagged() {
     let mut world = World::new();
     let mut bp = owing_bp(None);
-    bp.0.stages[0].require_output = false;
+    graph_mut(&mut bp).stages[0].require_output = false;
     let e = world
         .spawn((
             bp,
@@ -16619,7 +16655,7 @@ fn an_errored_stage_that_owes_nothing_is_not_flagged() {
 fn entering_a_stage_clears_the_output_reentry_count() {
     let mut world = World::new();
     let bp = owing_bp(None);
-    let setup = stage_setup_from(&bp.0.stages[0], hints(true), Default::default(), None);
+    let setup = super::spec_view::stage_setup(&bp.0, 0);
     let e = world.spawn((OutputReentries(3),)).id();
     let inf = StageInference {
         provider_name: "p".to_string(),
@@ -16648,13 +16684,13 @@ fn hook_scripts(src: &str, wanted: &[&str]) -> crate::components::StageHookScrip
 }
 
 /// A one-stage blueprint whose stage names `h.rhai` for `on_stage_enter`.
-fn hooked_bp() -> AgentBlueprint {
+fn hooked_bp() -> RunSpecC {
     let mut stage = crate::spec::Stage::new(
         "main".to_string(),
         crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     stage.hooks.on_stage_enter = Some("h.rhai".to_string());
-    AgentBlueprint(blueprint(vec![stage]))
+    spec_of(blueprint(vec![stage]))
 }
 
 fn spawn_hooked(world: &mut World, src: &str) -> Entity {
@@ -16889,7 +16925,7 @@ fn a_stage_that_declares_no_hook_does_not_run_one() {
     );
     let e = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             conv_window(),
             StageJustEntered {
@@ -17000,15 +17036,13 @@ fn a_refusal_without_a_reason_still_says_it_was_refused() {
 
 // ─── before_inference / after_inference ──────────────────────────────────────
 
-fn stage_hooked(
-    field: impl FnOnce(&mut crate::spec::blueprint::StageHooks, String),
-) -> AgentBlueprint {
+fn stage_hooked(field: impl FnOnce(&mut crate::spec::blueprint::StageHooks, String)) -> RunSpecC {
     let mut stage = crate::spec::Stage::new(
         "main".to_string(),
         crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
     );
     field(&mut stage.hooks, "h.rhai".to_string());
-    AgentBlueprint(blueprint(vec![stage]))
+    spec_of(blueprint(vec![stage]))
 }
 
 fn run_before_hooks(world: &mut World) {
@@ -17179,7 +17213,7 @@ fn before_inference_skips_a_stage_that_declared_none() {
     );
     let e = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             conv_window(),
             StageCursor { index: 0 },
@@ -17389,7 +17423,7 @@ fn after_inference_skips_a_stage_that_declared_none() {
     );
     let e = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             StageCursor { index: 0 },
             ProcessResponse,
@@ -17766,7 +17800,7 @@ fn on_tool_call_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
     );
     let undeclared = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             StageCursor { index: 0 },
             ReadyForTools,
@@ -18062,7 +18096,7 @@ fn a_terminal_run_with_no_hook_is_marked_so_it_is_not_rechecked() {
     );
     let undeclared = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             state.clone(),
             StageCursor { index: 0 },
             hook_scripts("fn on_completion(ctx) { () }", &["on_completion"]),
@@ -18236,7 +18270,7 @@ fn on_stage_exit_skips_an_out_of_range_stage_and_a_stage_that_declared_none() {
     );
     let undeclared = world
         .spawn((
-            AgentBlueprint(blueprint(vec![stage])),
+            spec_of(blueprint(vec![stage])),
             agent_state(),
             conv_window(),
             StageCursor { index: 0 },
@@ -19431,7 +19465,7 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
             offering(&[crate::spec::blueprint::SUBMIT_OUTPUT_TOOL]),
             result,
             conv_window(),
-            AgentBlueprint(bp),
+            spec_of(bp),
             ReadyForTools,
         ))
         .id();
@@ -19465,7 +19499,7 @@ async fn dispatch_tools_records_a_real_submission_with_the_blueprint_present() {
             offering(&[crate::spec::blueprint::SUBMIT_OUTPUT_TOOL]),
             result,
             conv_window(),
-            AgentBlueprint(bp),
+            spec_of(bp),
             ReadyForTools,
         ))
         .id();
@@ -20866,7 +20900,7 @@ mod typed_tool_results {
         let limited = ready_for_tools(&mut world, vec![call]);
         world
             .entity_mut(limited)
-            .insert(AgentBlueprint(blueprint(vec![stage])));
+            .insert(spec_of(blueprint(vec![stage])));
         s.run(&mut world);
         assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
         let conv = world
@@ -21173,7 +21207,7 @@ mod model_parts {
             Reply {
                 text: "drawn",
                 parts: std::slice::from_ref(&stored),
-                stage: Some(&stage),
+                stage: Some(&old_vocab::stage_def(&stage)),
                 sink: None,
             },
             &[tc("c1", "render")],
@@ -21360,4 +21394,281 @@ fn collect_tools_merges_recovered_results() {
         .collect();
     assert!(text.contains("the file"), "{text}");
     assert!(text.contains("User answered: blue"), "{text}");
+}
+
+// ── moving a run from outside the transition systems ──
+
+/// A three-stage run whose middle stage routes its tool results, at `a`.
+fn spawn_forceable(world: &mut World, dest: StageSetup) -> Entity {
+    let bp = blueprint(vec![
+        stage_named("a", None, false, None),
+        old_vocab::stage_from_setup("b", &dest),
+        stage_named("c", None, false, None),
+    ]);
+    world
+        .spawn((
+            spec_with(bp, &[si("m0"), si("m1"), si("m2")]),
+            StageCursor { index: 0 },
+            agent_state(),
+            StageProgress::default(),
+            VisitCounts::default(),
+            pinned_window(),
+        ))
+        .id()
+}
+
+/// A forced move enters the stage it names, with that stage's inference and
+/// routing, and is recorded as forced along no declared edge.
+#[test]
+fn force_transition_enters_the_stage_and_records_a_forced_move() {
+    let mut routed = setup();
+    routed.routing = Some(crate::spec::ToolResultRouting::default());
+    let mut world = World::new();
+    let e = spawn_forceable(&mut world, routed);
+    let agent = crate::world::AgentId::in_world(&world, e);
+
+    force_transition(&mut world, agent, 1);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    assert_eq!(world.get::<StageInference>(e).unwrap().model, "m1");
+    assert!(
+        world
+            .get::<crate::components::ToolResultRoutingComponent>(e)
+            .is_some()
+    );
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    let moved = &world.get::<LastTransition>(e).unwrap().0;
+    assert_eq!((moved.to.as_str(), moved.edge.clone()), ("b", None));
+    assert_eq!(moved.reason, crate::state::TransitionReason::Forced);
+
+    // The next stage routes nothing, so the routing goes.
+    force_transition(&mut world, agent, 2);
+    assert_eq!(world.get::<StageCursor>(e).unwrap().index, 2);
+    assert!(
+        world
+            .get::<crate::components::ToolResultRoutingComponent>(e)
+            .is_none()
+    );
+    assert_eq!(world.get::<LastTransition>(e).unwrap().0.from.as_str(), "b");
+}
+
+/// A stage whose instructions cannot fit fails the run where it stands, and a
+/// run that is gone or carries no stage graph is left alone.
+#[test]
+fn force_transition_fails_an_overflowing_stage_and_skips_what_it_cannot_move() {
+    let mut huge = setup();
+    huge.system_prompt = Some("x".repeat(100_000));
+    let mut world = World::new();
+    let e = spawn_forceable(&mut world, huge);
+    let agent = crate::world::AgentId::in_world(&world, e);
+    force_transition(&mut world, agent, 1);
+    assert!(matches!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Error { .. }
+    ));
+    assert!(world.get::<LastTransition>(e).is_none());
+
+    let bare = world.spawn(agent_state()).id();
+    let agent = crate::world::AgentId::in_world(&world, bare);
+    force_transition(&mut world, agent, 1);
+    assert!(world.get::<StageCursor>(bare).is_none());
+    let gone = crate::world::AgentId::in_world(
+        &world,
+        Entity::from_raw_u32(9191).expect("a small literal index is always a valid entity id"),
+    );
+    force_transition(&mut world, gone, 1);
+}
+
+/// A move between names no graph could hold is not recorded: there is no edge
+/// of any graph it could have been.
+#[test]
+fn a_move_between_names_no_graph_could_hold_records_nothing() {
+    use crate::state::TransitionReason::Forced;
+    let mut state = agent_state();
+    state.current_stage = "b".to_string();
+    assert!(crate::pipeline::transition_record("", &state, None, Forced).is_none());
+    state.current_stage = String::new();
+    assert!(crate::pipeline::transition_record("a", &state, None, Forced).is_none());
+    state.current_stage = "b".to_string();
+    let record = crate::pipeline::transition_record("a", &state, None, Forced).unwrap();
+    assert_eq!((record.0.from.as_str(), record.0.to.as_str()), ("a", "b"));
+}
+
+/// A stage's required regions are re-run for as many revisits as the stage
+/// allows; one that allows none moves on at once.
+#[test]
+fn a_required_region_gate_takes_its_cap_from_the_stage_revisits() {
+    let mut spec = required_bp(&["context_write"], None);
+    graph_mut(&mut spec).stages[0].max_revisits = Some(0);
+    let mut world = World::new();
+    let e = world
+        .spawn((
+            spec,
+            StageCursor { index: 0 },
+            window_with_plan(false),
+            ResolveTransition,
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems(require_context_regions);
+    s.run(&mut world);
+    assert!(
+        world.get::<ResolveTransition>(e).is_some(),
+        "the stage moves on"
+    );
+    assert!(world.get::<RequiredReentries>(e).is_none());
+}
+
+fn resolved_on(provider: &str, model: &str) -> ResolvedStage {
+    ResolvedStage {
+        provider_name: provider.to_string(),
+        model: model.to_string(),
+        tools: vec![],
+        fallbacks: vec![],
+        output: None,
+        notes: vec![],
+    }
+}
+
+/// Every name a blueprint spawn carries is checked as the spec is built, and
+/// one that is not a name refuses the spawn and says which.
+#[test]
+fn a_blueprint_spawn_with_a_name_no_spec_can_hold_is_refused() {
+    use crate::spec::blueprint::ModelEntry;
+    use leviath_core::output::{ArtifactSpec, OutputSpec};
+    let bp = || blueprint(vec![stage_named("a", None, false, None)]);
+    let build = |bp: crate::spec::Blueprint, id: &str, inf: StageInference| {
+        crate::pipeline::run_spec_from_blueprint(&bp, id, &[inf])
+    };
+    let ok = si("m0");
+    let bad_stage = blueprint(vec![stage_named(" a", None, false, None)]);
+    assert!(build(bad_stage, "r", ok.clone()).is_err(), "a stage name");
+    assert!(build(bp(), "a/b", ok.clone()).is_err(), "a run id");
+    let with = |f: &dyn Fn(&mut StageInference)| {
+        let mut inf = ok.clone();
+        f(&mut inf);
+        build(bp(), "r", inf)
+    };
+    assert!(with(&|i| i.provider_name = String::new()).is_err());
+    assert!(with(&|i| i.model = String::new()).is_err());
+    assert!(with(&|i| i.fallbacks = vec![ModelEntry::new("a b".into(), "m".into())]).is_err());
+    assert!(with(&|i| i.fallbacks = vec![ModelEntry::new(String::new(), String::new())]).is_err());
+    assert!(
+        with(&|i| {
+            i.tools = vec![leviath_providers::Tool {
+                name: "a b".into(),
+                description: String::new(),
+                parameters: serde_json::Value::Null,
+            }]
+        })
+        .is_err()
+    );
+    let artifact = |mime: &str| ArtifactSpec {
+        name: "a".into(),
+        mime_type: mime.into(),
+        required: true,
+        description: Some("d".into()),
+    };
+    assert!(
+        with(&|i| {
+            i.output = Some(OutputSpec {
+                artifacts: vec![artifact("png")],
+                ..Default::default()
+            })
+        })
+        .is_err()
+    );
+
+    // What does read carries over whole.
+    let spec = with(&|i| {
+        i.fallbacks = vec![ModelEntry::new(String::new(), "spare".into())];
+        i.output = Some(OutputSpec {
+            format: Some("json".into()),
+            schema: Some(serde_json::json!({"type": "object"})),
+            validator: Some("v.rhai".into()),
+            artifacts: vec![artifact("image/png")],
+            ..Default::default()
+        });
+    })
+    .unwrap();
+    let plan = &spec.stages[0];
+    assert!(plan.fallbacks[0].provider.is_none());
+    let output = plan.output.as_ref().unwrap();
+    assert_eq!(output.artifacts[0].mime_type.as_str(), "image/png");
+    assert_eq!(
+        output.validator,
+        Some(crate::spec::graph::CodeRef::File("v.rhai".into()))
+    );
+    assert!(matches!(
+        spec.origin,
+        crate::spec::run_spec::SpecOrigin::Blueprint { .. }
+    ));
+
+    // A blueprint whose name is no blueprint name is run as a raw graph.
+    let mut raw = bp();
+    raw.name = " x".into();
+    let spec = build(raw, "r", ok.clone()).unwrap();
+    assert_eq!(spec.origin, crate::spec::run_spec::SpecOrigin::Raw);
+
+    // And the spawn itself refuses what the spec refuses.
+    let mut world = World::new();
+    let err = spawn_agent(
+        &mut world,
+        "r".to_string(),
+        blueprint(vec![stage_named(" a", None, false, None)]),
+        "task",
+        vec![resolved_on("p", "m")],
+        hints(true),
+    )
+    .unwrap_err();
+    assert!(err.contains("stage name"), "{err}");
+}
+
+/// A blueprint spawn seeds each region its seeds name, drops a seed that names
+/// none, and takes the operator's nudge settings where the blueprint has none.
+#[test]
+fn a_blueprint_spawn_seeds_by_region_and_takes_the_operators_nudge() {
+    let mut world = World::new();
+    let e = spawn_agent_seeded(
+        &mut world,
+        SeededSpawn {
+            agent_id: "r".to_string(),
+            blueprint: blueprint(vec![stage_named("a", None, false, None)]),
+            seeds: [
+                ("conversation".to_string(), "seeded".to_string()),
+                ("nowhere".to_string(), "dropped".to_string()),
+            ]
+            .into(),
+            parts: vec![],
+            stages: vec![resolved_on("p", "m")],
+            global_hints: hints(false),
+            global_nudge: crate::spec::NudgeConfig {
+                enabled: Some(false),
+                max: Some(2),
+                text: Some("go on".into()),
+            },
+            region_scripts: Default::default(),
+            mime_registry: None,
+        },
+    )
+    .unwrap();
+    let window = world.get::<ContextWindow>(e).unwrap();
+    assert_eq!(
+        window.get_region("conversation").unwrap().content[0]
+            .content
+            .as_str(),
+        "seeded"
+    );
+    let spec = &world.get::<RunSpecC>(e).unwrap().0;
+    assert_eq!(spec.seeded.len(), 1);
+    let nudge = spec.graph.nudge.clone().unwrap();
+    assert_eq!(
+        (nudge.enabled, nudge.max, nudge.text.as_deref()),
+        (Some(false), Some(2), Some("go on"))
+    );
+    assert_eq!(
+        (spec.graph.batch_tool_hint, spec.graph.shell_hint),
+        (Some(false), Some(false))
+    );
+    let config = world.get::<InferenceConfig>(e).unwrap();
+    assert!(!config.batch_tool_hint && !config.shell_hint);
 }

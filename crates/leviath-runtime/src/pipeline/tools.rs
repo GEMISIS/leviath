@@ -381,8 +381,8 @@ type DispatchToolsQuery = (
     ),
     Option<&'static crate::components::OutputValidators>,
     // For the submit_output guard: a submission that is exactly the name of a
-    // stage in this blueprint is a routing token, not an answer.
-    Option<&'static crate::pipeline::transition::AgentBlueprint>,
+    // stage in this graph is a routing token, not an answer.
+    Option<&'static crate::insert::RunSpecC>,
 );
 
 /// One dispatched batch, in the shape the journal records it.
@@ -568,7 +568,7 @@ pub(crate) fn dispatch_tools(
         // share it.
         let routing_stage = blueprint
             .zip(cursor)
-            .and_then(|(bp, cur)| bp.0.stages.get(cur.index));
+            .and_then(|(spec, cur)| spec.0.graph.stages.get(cur.index));
 
         // Apply context_* tools inline (they need world access); collect the rest
         // for the async lane. A taint-gated agent's outbound call that would leak
@@ -675,10 +675,9 @@ pub(crate) fn dispatch_tools(
             // stage, the iteration counts and the window occupancy it reports
             // live in the world, which the async lane cannot reach.
             if crate::runtime_info_tool::is_runtime_info_tool(&c.name) {
-                let stage_max = blueprint
-                    .zip(cursor)
-                    .and_then(|(bp, cur)| bp.0.stages.get(cur.index))
-                    .and_then(|s| s.max_iterations);
+                let stage_max = routing_stage
+                    .and_then(|s| s.max_iterations)
+                    .map(|n| n as usize);
                 let facts = crate::runtime_info_tool::RuntimeFacts {
                     version: env!("CARGO_PKG_VERSION"),
                     run_id: metadata.map(|m| m.run_id.as_str()),
@@ -702,6 +701,9 @@ pub(crate) fn dispatch_tools(
                 continue;
             }
             if crate::mime_tools::is_mime_tool(&c.name) {
+                let tool_limit: Option<Vec<String>> = routing_stage
+                    .and_then(|s| s.tool_accepts.iter().find(|(t, _)| t.as_str() == c.name))
+                    .map(|(_, list)| list.iter().map(ToString::to_string).collect());
                 let text = crate::mime_tools::handle_mime_tool(
                     &c.name,
                     &c.arguments,
@@ -711,10 +713,7 @@ pub(crate) fn dispatch_tools(
                         entity,
                         run_id: &state.agent_id,
                         workdir: metadata.map(|m| std::path::Path::new(&m.workdir)),
-                        tool_limit: blueprint
-                            .zip(cursor)
-                            .and_then(|(bp, cur)| bp.0.stages.get(cur.index))
-                            .and_then(|s| s.tool_limit(&c.name)),
+                        tool_limit: tool_limit.as_deref(),
                     },
                 );
                 context_results.push((c.tool_id.clone(), text));
@@ -822,8 +821,16 @@ pub(crate) fn dispatch_tools(
             // prompt however it was classified.
             if crate::output_tool::is_output_tool(&c.name) {
                 let stage_names: Vec<String> = blueprint
-                    .map(|bp| bp.0.stages.iter().map(|s| s.name.clone()).collect())
+                    .map(|spec| {
+                        spec.0
+                            .graph
+                            .stages
+                            .iter()
+                            .map(|s| s.name.to_string())
+                            .collect()
+                    })
                     .unwrap_or_default();
+
                 let (text, output) = crate::output_tool::handle_output_tool(
                     &c.arguments,
                     &crate::output_tool::OutputContext {

@@ -34,15 +34,18 @@ use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 // Sections of the former single-file pipeline, one per concern.
 mod gate_check;
 pub(crate) use gate_check::gate_blocks;
+pub(crate) mod spec_view;
 mod transition;
 #[cfg(test)]
 pub(crate) use transition::find_conditioned_edge;
-pub use transition::{AgentBlueprint, StageCursor, force_transition, is_terminal_status};
+pub use transition::{
+    AgentBlueprint, LastTransition, StageCursor, force_transition, is_terminal_status,
+};
 pub(crate) use transition::{
     AwaitingTransitionChoice, StageEntry, StageInferences, StageSetup, StageSetups, VisitCounts,
     WaitingForChildren, apply_stage_context, attach_stage_components, emit_stage_transition,
     enter_stage, fail_stage, fail_stage_world, find_conditioned_edge_ref, hold_for_gate,
-    region_digest, resolve_transition,
+    region_digest, resolve_transition, transition_record,
 };
 mod hooks;
 #[cfg(test)]
@@ -70,10 +73,10 @@ pub(crate) use requirements::{
 };
 mod spawn;
 #[cfg(test)]
-pub(crate) use spawn::spawn_agent;
+pub(crate) use spawn::DEFAULT_CONTEXT_WINDOW_TOKENS;
 #[cfg(test)]
-pub(crate) use spawn::{DEFAULT_CONTEXT_WINDOW_TOKENS, stage_setup_from};
-pub use spawn::{ResolvedStage, SeededSpawn, spawn_agent_seeded};
+pub(crate) use spawn::spawn_agent;
+pub use spawn::{ResolvedStage, SeededSpawn, run_spec_from_blueprint, spawn_agent_seeded};
 mod transition_choice;
 pub(crate) use transition_choice::{
     AwaitingTransitionResponse, TransitionResults, collect_transition_choice,
@@ -213,7 +216,7 @@ pub(crate) struct StageJustEntered {
 /// Resolved inference parameters for the agent's current stage, set when it
 /// enters that stage. Pure data - the dispatch system reads it to build the
 /// request.
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Default)]
 pub struct StageInference {
     /// Registered provider to call.
     pub provider_name: String,
