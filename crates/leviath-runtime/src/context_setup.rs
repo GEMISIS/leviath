@@ -9,9 +9,7 @@ use std::collections::HashMap;
 use leviath_core::{EvictionStrategy, Region, RegionKind, truncate_at_boundary};
 
 use crate::ContextWindow;
-use crate::spec::graph::{
-    Budget, CodeRef, Eviction, RegionDef, RegionKind as Kind, RegionLayoutDef,
-};
+use crate::spec::graph::{Budget, RegionDef, RegionKind as Kind, RegionLayoutDef};
 use crate::spec::run_spec::RunSpec;
 use crate::spec::{Blueprint, ContextLayout};
 
@@ -72,7 +70,11 @@ pub fn stage_region_budget(spec: &RunSpec, stage: usize, def: &RegionDef) -> usi
 
 /// The window's region for a declared one, holding `budget` tokens.
 pub fn region_from_def(def: &RegionDef, budget: usize) -> Region {
-    let mut region = Region::new(def.name.to_string(), core_kind(def, budget), budget);
+    let mut region = Region::new(
+        def.name.to_string(),
+        crate::pipeline::spec_view::region_kind(def, budget),
+        budget,
+    );
     region.summarizable = def.summarizable;
     region.admission = def.admission;
     region.volatility = def.volatility;
@@ -80,58 +82,6 @@ pub fn region_from_def(def: &RegionDef, budget: usize) -> Region {
     region.description = def.description.clone();
     region.describe_in_prompt = def.describe_in_prompt;
     region
-}
-
-/// How the window keeps a declared region's entries.
-fn core_kind(def: &RegionDef, budget: usize) -> RegionKind {
-    match &def.kind {
-        Kind::Pinned => RegionKind::Pinned,
-        Kind::SlidingWindow {
-            max_items,
-            eviction,
-        } => RegionKind::SlidingWindow {
-            max_items: *max_items as usize,
-            eviction_strategy: match eviction {
-                Eviction::PerItem => EvictionStrategy::PerItem,
-                Eviction::Bulk(n) => EvictionStrategy::Bulk {
-                    overflow: *n as usize,
-                },
-                Eviction::Compact(n) => EvictionStrategy::Compact {
-                    compact_count: *n as usize,
-                },
-            },
-        },
-        Kind::Temporary => RegionKind::Temporary,
-        Kind::Compacting { threshold_tokens } => RegionKind::Compacting {
-            threshold_tokens: compaction_threshold(*threshold_tokens, def.compact_at, budget),
-        },
-        Kind::Clearable => RegionKind::Clearable,
-        Kind::CompactHistory { source } => RegionKind::CompactHistory {
-            source_region: source.to_string(),
-        },
-        Kind::Keyed { max_entries } => RegionKind::HashMap {
-            max_entries: max_entries.map(|n| n as usize),
-        },
-        Kind::Checklist => RegionKind::Checklist,
-        Kind::Custom { code, pinned } => RegionKind::Custom {
-            script: match code {
-                CodeRef::File(path) => path.clone(),
-                CodeRef::Inline(source) => source.clone(),
-            },
-            pinned: *pinned,
-        },
-    }
-}
-
-/// Where a compacting region compacts: its `compact_at` share of the budget,
-/// under any fixed threshold; the fixed threshold alone; or never, when it
-/// names neither.
-fn compaction_threshold(threshold: Option<u32>, compact_at: Option<f64>, budget: usize) -> usize {
-    let fixed = threshold.map_or(usize::MAX, |t| t as usize);
-    match compact_at {
-        Some(fraction) => ((budget as f64 * fraction).round() as usize).min(fixed),
-        None => fixed,
-    }
 }
 
 /// The region the `task` text seeds: a pinned region named `task`, else the
@@ -1074,6 +1024,8 @@ mod tests {
         assert_eq!(budget_tokens(&pct(0.5, Some(900), Some(100)), 1000), 900);
     }
 
+    use crate::spec::graph::{CodeRef, Eviction};
+
     fn def(kind: crate::spec::graph::RegionKind) -> RegionDef {
         RegionDef {
             name: crate::spec::names::RegionName::new("r").unwrap(),
@@ -1142,7 +1094,7 @@ mod tests {
             (K::Clearable, RegionKind::Clearable),
             (
                 K::CompactHistory {
-                    source: RegionName::new("conversation").unwrap(),
+                    source: Some(RegionName::new("conversation").unwrap()),
                 },
                 RegionKind::CompactHistory {
                     source_region: "conversation".into(),
@@ -1190,10 +1142,21 @@ mod tests {
 
     #[test]
     fn a_compacting_region_compacts_at_its_share_under_its_threshold() {
-        assert_eq!(compaction_threshold(None, None, 1000), usize::MAX);
-        assert_eq!(compaction_threshold(Some(50), None, 1000), 50);
-        assert_eq!(compaction_threshold(None, Some(0.8), 1000), 800);
-        assert_eq!(compaction_threshold(Some(50), Some(0.8), 1000), 50);
+        let mut r = def(Kind::Compacting {
+            threshold_tokens: None,
+        });
+        assert_eq!(r.compaction_threshold(None, 1001), 800);
+        assert_eq!(r.compaction_threshold(Some(50), 1000), 50);
+        r.compact_at = Some(0.8);
+        assert_eq!(r.compaction_threshold(None, 1000), 800);
+        assert_eq!(r.compaction_threshold(Some(50), 1000), 50);
+        r.compact_at = None;
+        r.budget = Budget::Percent {
+            percent: 0.5,
+            min: None,
+            max: None,
+        };
+        assert_eq!(r.compaction_threshold(None, 1001), 801);
     }
 
     /// A region only per-stage layouts see, or one every global-layout stage

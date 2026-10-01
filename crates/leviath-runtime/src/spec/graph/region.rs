@@ -63,6 +63,27 @@ pub struct RegionDef {
     pub accepts: Vec<MimePattern>,
 }
 
+impl RegionDef {
+    /// The size, in tokens, at which this region is summarized when it is a
+    /// compacting region with `threshold_tokens` and holds `budget` tokens.
+    ///
+    /// - With `compact_at`, its share of the budget rounded to the nearest
+    ///   token, or `threshold_tokens` if that is lower.
+    /// - With `threshold_tokens` alone, that.
+    /// - With neither, 80% of the budget: rounded down for a fixed budget,
+    ///   to the nearest token for a share of the window.
+    pub fn compaction_threshold(&self, threshold_tokens: Option<u32>, budget: usize) -> usize {
+        let fixed = threshold_tokens.map(|t| t as usize);
+        let share = |f: f64| (budget as f64 * f).round() as usize;
+        match (self.compact_at, fixed, &self.budget) {
+            (Some(f), fixed, _) => share(f).min(fixed.unwrap_or(usize::MAX)),
+            (None, Some(t), _) => t,
+            (None, None, Budget::Tokens(_)) => budget.saturating_mul(8) / 10,
+            (None, None, Budget::Percent { .. }) => share(0.8),
+        }
+    }
+}
+
 /// How a region keeps and drops entries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(remote = "Self", rename_all = "snake_case")]
@@ -81,8 +102,8 @@ pub enum RegionKind {
     Temporary,
     /// Summarized once it passes a size.
     Compacting {
-        /// The size, in tokens. `None` takes the region's `compact_at`
-        /// fraction of its budget, or 80% of it.
+        /// The size, in tokens. See [`RegionDef::compaction_threshold`] for
+        /// how it and `compact_at` decide when the region is summarized.
         #[serde(default)]
         threshold_tokens: Option<u32>,
     },
@@ -90,8 +111,11 @@ pub enum RegionKind {
     Clearable,
     /// Summaries of another region's evicted entries.
     CompactHistory {
-        /// The region whose entries it summarizes.
-        source: RegionName,
+        /// The region whose entries it summarizes. `None` is a history that
+        /// nothing is compacted into: it keeps what lands in it for the whole
+        /// run, never evicted, and the model cannot write to it.
+        #[serde(default)]
+        source: Option<RegionName>,
     },
     /// Entries replaced by key.
     Keyed {

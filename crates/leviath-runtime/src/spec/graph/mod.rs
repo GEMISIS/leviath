@@ -19,7 +19,9 @@ pub mod region;
 pub mod stage;
 mod validate;
 
-pub use edge::{EdgeCarry, EdgeCondition, EdgeDef, GateDef, RegionCount, StuckDef};
+pub use edge::{
+    EdgeCarry, EdgeCondition, EdgeDef, FALL_THROUGH_EDGE, GateDef, RegionCount, StuckDef,
+};
 pub use policy::{
     ArtifactDef, CompactionDef, ContentTransform, ContextTransformDef, DependencyDef,
     FileTrackingDef, InstallDef, McpServerTemplate, MimeRowDef, MimeRows, Needs, NudgeDef,

@@ -65,19 +65,20 @@ impl fmt::Display for SpecPath {
         if self.0.is_empty() {
             return f.write_str("(request)");
         }
+        let mut out = String::new();
         for (i, seg) in self.0.iter().enumerate() {
             match seg {
                 PathSeg::Field(name) | PathSeg::Key(name) if is_plain(name) => {
                     if i > 0 {
-                        f.write_str(".")?;
+                        out.push('.');
                     }
-                    f.write_str(name)?;
+                    out.push_str(name);
                 }
-                PathSeg::Field(name) | PathSeg::Key(name) => write!(f, "[{name:?}]")?,
-                PathSeg::Index(n) => write!(f, "[{n}]")?,
+                PathSeg::Field(name) | PathSeg::Key(name) => out.push_str(&format!("[{name:?}]")),
+                PathSeg::Index(n) => out.push_str(&format!("[{n}]")),
             }
         }
-        Ok(())
+        f.write_str(&out)
     }
 }
 
@@ -207,20 +208,20 @@ impl fmt::Display for SpawnIssue {
     /// `stages.plan.model: unresolvable: no provider serves "gpt-9" (expected
     /// ...; got ...). Hint. Known: a, b.`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}: {}", self.path, self.code.label(), self.message)?;
+        let mut out = format!("{}: {}: {}", self.path, self.code.label(), self.message);
         match (&self.expected, &self.got) {
-            (Some(e), Some(g)) => write!(f, " (expected {e}; got {g})")?,
-            (Some(e), None) => write!(f, " (expected {e})")?,
-            (None, Some(g)) => write!(f, " (got {g})")?,
+            (Some(e), Some(g)) => out.push_str(&format!(" (expected {e}; got {g})")),
+            (Some(e), None) => out.push_str(&format!(" (expected {e})")),
+            (None, Some(g)) => out.push_str(&format!(" (got {g})")),
             (None, None) => {}
         }
         if let Some(hint) = &self.hint {
-            write!(f, ". {hint}")?;
+            out.push_str(&format!(". {hint}"));
         }
         if !self.known.is_empty() {
-            write!(f, ". Known: {}", self.known.join(", "))?;
+            out.push_str(&format!(". Known: {}", self.known.join(", ")));
         }
-        Ok(())
+        f.write_str(&out)
     }
 }
 
@@ -290,15 +291,14 @@ impl fmt::Display for SpawnIssues {
     /// A count, then one numbered line per issue.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let n = self.0.len();
-        write!(
-            f,
+        let mut out = format!(
             "{n} problem{} with this spawn:",
             if n == 1 { "" } else { "s" }
-        )?;
+        );
         for (i, issue) in self.0.iter().enumerate() {
-            write!(f, "\n{}. {issue}", i + 1)?;
+            out.push_str(&format!("\n{}. {issue}", i + 1));
         }
-        Ok(())
+        f.write_str(&out)
     }
 }
 
@@ -312,6 +312,8 @@ mod tests {
     fn paths_render_the_way_a_person_writes_them() {
         let p = SpecPath::root().field("stages").key("plan").field("model");
         assert_eq!(p.to_string(), "stages.plan.model");
+        let odd = SpecPath::root().field("a b").index(1);
+        assert_eq!(odd.to_string(), "[\"a b\"][1]");
         let q = SpecPath::root()
             .field("inputs")
             .key("items")

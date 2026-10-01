@@ -130,11 +130,29 @@ pub fn check_header(bytes: &[u8], fingerprint: &[u8; 32]) -> Result<(), CodecErr
 
 /// Encode one frame.
 pub fn encode<T: Serialize>(kind: FrameKind, payload: &T) -> Result<Vec<u8>, CodecError> {
+    encode_within(kind, payload, u32::MAX)
+}
+
+/// Encode one frame whose compressed body is at most `max_body` bytes, the
+/// most a frame's length field can say.
+fn encode_within<T: Serialize>(
+    kind: FrameKind,
+    payload: &T,
+    max_body: u32,
+) -> Result<Vec<u8>, CodecError> {
     let raw = postcard::to_stdvec(payload).map_err(|e| CodecError::Encode(e.to_string()))?;
-    let body =
-        zstd::bulk::compress(&raw, ZSTD_LEVEL).map_err(|e| CodecError::Encode(e.to_string()))?;
-    let len =
-        u32::try_from(body.len()).map_err(|_| CodecError::Encode("frame over 4 GiB".into()))?;
+    // Compressing bytes already in memory at a fixed, valid level only
+    // fails when allocation does.
+    let body = zstd::bulk::compress(&raw, ZSTD_LEVEL).expect("zstd compresses bytes in memory");
+    let len = u32::try_from(body.len())
+        .ok()
+        .filter(|len| *len <= max_body)
+        .ok_or_else(|| {
+            CodecError::Encode(format!(
+                "a frame body of {} bytes is over the {max_body}-byte limit",
+                body.len()
+            ))
+        })?;
     let mut out = Vec::with_capacity(body.len() + FRAME_OVERHEAD);
     out.push(kind as u8);
     out.extend_from_slice(&len.to_le_bytes());
@@ -178,8 +196,8 @@ impl FrameRef {
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<usize> {
-    let b: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
-    Some(u32::from_le_bytes(b) as usize)
+    let b = bytes.get(at..at + 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
 }
 
 /// Read the frame that starts at `offset`, checking its checksum.
@@ -188,11 +206,12 @@ pub fn frame_at(bytes: &[u8], offset: usize) -> Result<FrameRef, CodecError> {
     let kind_byte = *bytes.get(offset).ok_or(corrupt.clone())?;
     let len = u32_at(bytes, offset + 1).ok_or(corrupt.clone())?;
     let body = offset + 5;
+    let body_bytes = bytes.get(body..body + len).ok_or(corrupt.clone())?;
     let crc = u32_at(bytes, body + len).ok_or(corrupt.clone())?;
     let trailer = u32_at(bytes, body + len + 4).ok_or(corrupt.clone())?;
     let mut h = crc32fast::Hasher::new();
     h.update(&[kind_byte]);
-    h.update(bytes.get(body..body + len).ok_or(corrupt.clone())?);
+    h.update(body_bytes);
     if h.finalize() as usize != crc || trailer != len {
         return Err(corrupt);
     }
@@ -308,10 +327,79 @@ mod tests {
         let last = flipped.len() - 10;
         flipped[last] ^= 0xff;
         assert_eq!(frames(&flipped).0.len(), 0);
-        assert!(matches!(
+        assert_eq!(
             frame_at(&flipped, HEADER_LEN),
-            Err(CodecError::Corrupt(_))
-        ));
+            Err(CodecError::Corrupt(HEADER_LEN as u64))
+        );
+    }
+
+    /// A frame cut anywhere (in its kind, its body, its checksum or its
+    /// trailing length) reads as corrupt where it starts.
+    #[test]
+    fn a_frame_cut_short_anywhere_is_corrupt_where_it_starts() {
+        let f = file(&[(FrameKind::Spec, "a longer payload than most")]);
+        let corrupt = Err(CodecError::Corrupt(HEADER_LEN as u64));
+        for cut in [
+            f.len() - 2,
+            f.len() - 6,
+            f.len() - 10,
+            HEADER_LEN + 3,
+            HEADER_LEN,
+        ] {
+            assert_eq!(frame_at(&f[..cut], HEADER_LEN), corrupt, "cut at {cut}");
+        }
+    }
+
+    /// Walking backwards from a length that claims more than the file holds,
+    /// or from a corrupt frame, is refused.
+    #[test]
+    fn a_backward_walk_through_a_bad_length_is_refused() {
+        let mut f = file(&[(FrameKind::Spec, "spec")]);
+        let end = f.len();
+        f[end - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(frame_before(&f, end), Err(CodecError::Corrupt(end as u64)));
+        assert_eq!(
+            last_of(&f, end, FrameKind::State),
+            Err(CodecError::Corrupt(end as u64))
+        );
+    }
+
+    /// A payload that refuses to serialize, and a body over the limit, are
+    /// encode errors.
+    #[test]
+    fn a_payload_that_cannot_be_written_is_an_encode_error() {
+        struct Refuses;
+        impl Serialize for Refuses {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("no"))
+            }
+        }
+        assert_eq!(
+            encode(FrameKind::Spec, &Refuses),
+            Err(CodecError::Encode("Serde Serialization Error".into()))
+        );
+        let err = encode_within(FrameKind::Spec, &"payload".to_string(), 4).unwrap_err();
+        assert!(err.to_string().contains("over the 4-byte limit"));
+    }
+
+    /// A frame whose body is not where it says, or is not compressed, does
+    /// not decode.
+    #[test]
+    fn a_frame_body_that_is_missing_or_not_compressed_does_not_decode() {
+        let f = file(&[(FrameKind::Spec, "spec")]);
+        let mut frame = frames(&f).0[0];
+        frame.len = f.len();
+        assert_eq!(
+            frame.decode::<String>(&f),
+            Err(CodecError::Corrupt(HEADER_LEN as u64))
+        );
+        frame.body = 0;
+        frame.len = 4;
+        let err = frame.decode::<String>(&f).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("run file frame does not decode")
+        );
     }
 
     #[test]
@@ -356,6 +444,7 @@ mod tests {
                 .contains("does not encode")
         );
         assert!(frame_before(&f, HEADER_LEN + 2).is_err());
+        assert_eq!(frame_before(&f, 2), Err(CodecError::Corrupt(2)));
         let every = [
             FrameKind::Spec,
             FrameKind::Code,

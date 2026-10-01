@@ -132,11 +132,19 @@ pub(crate) fn budget_spec(budget: &Budget) -> BudgetSpec {
     }
 }
 
-/// A region's kind in the vocabulary the window keeps.
-pub(crate) fn region_kind(kind: &RegionKind) -> leviath_core::RegionKind {
+/// The source a history region names in the window's vocabulary. A history
+/// with no source names the empty text, which no region is called, so
+/// compaction never writes into it.
+pub(crate) fn history_source(source: Option<&crate::spec::names::RegionName>) -> String {
+    source.map(ToString::to_string).unwrap_or_default()
+}
+
+/// A region's kind in the vocabulary the window keeps, for a region holding
+/// `budget` tokens.
+pub(crate) fn region_kind(region: &RegionDef, budget: usize) -> leviath_core::RegionKind {
     use leviath_core::EvictionStrategy;
     use leviath_core::RegionKind as K;
-    match kind {
+    match &region.kind {
         RegionKind::Pinned => K::Pinned,
         RegionKind::SlidingWindow {
             max_items,
@@ -155,11 +163,11 @@ pub(crate) fn region_kind(kind: &RegionKind) -> leviath_core::RegionKind {
         },
         RegionKind::Temporary => K::Temporary,
         RegionKind::Compacting { threshold_tokens } => K::Compacting {
-            threshold_tokens: threshold_tokens.map_or(usize::MAX, |t| t as usize),
+            threshold_tokens: region.compaction_threshold(*threshold_tokens, budget),
         },
         RegionKind::Clearable => K::Clearable,
         RegionKind::CompactHistory { source } => K::CompactHistory {
-            source_region: source.to_string(),
+            source_region: history_source(source.as_ref()),
         },
         RegionKind::Keyed { max_entries } => K::HashMap {
             max_entries: max_entries.map(|m| m as usize),
@@ -173,20 +181,11 @@ pub(crate) fn region_kind(kind: &RegionKind) -> leviath_core::RegionKind {
 }
 
 /// A region as the window's layout vocabulary writes it, with its budget
-/// already a number of tokens.
+/// already a number of tokens and its compaction threshold worked out from
+/// that budget.
 pub(crate) fn region_definition(region: &RegionDef, max_tokens: usize) -> RegionDefinition {
-    // A compacting region summarized at a share of its budget is summarized
-    // at that share of this budget, or at its own threshold if that is lower.
-    let kind = match (&region.kind, region.compact_at) {
-        (RegionKind::Compacting { threshold_tokens }, Some(share)) => {
-            leviath_core::RegionKind::Compacting {
-                threshold_tokens: ((max_tokens as f64 * share).round() as usize)
-                    .min(threshold_tokens.map_or(usize::MAX, |t| t as usize)),
-            }
-        }
-        (kind, _) => region_kind(kind),
-    };
-    let mut def = RegionDefinition::new(region.name.to_string(), kind, 0);
+    let mut def =
+        RegionDefinition::new(region.name.to_string(), region_kind(region, max_tokens), 0);
     def.max_tokens = max_tokens;
     def.budget = BudgetSpec::Absolute(max_tokens);
     def.compact_at = region.compact_at;

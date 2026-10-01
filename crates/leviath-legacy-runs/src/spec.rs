@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 
 use leviath_core::JsonDoc;
 use leviath_core::output::OutputSpec;
-use leviath_core::region::RegionKind as CoreKind;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageModelUse, StageRecord as OldStage};
 use leviath_runtime::spec::Blueprint;
 use leviath_runtime::spec::graph::{
@@ -15,7 +14,7 @@ use leviath_runtime::spec::inputs::{InputValue, InputValues};
 use leviath_runtime::spec::launch::{
     Callback, Delivery, LaunchPolicy, Placement, Secret, Unattended,
 };
-use leviath_runtime::spec::layout::{ContextLayout, RegionSeed};
+use leviath_runtime::spec::layout::RegionSeed;
 use leviath_runtime::spec::manifest::parse_manifest;
 use leviath_runtime::spec::names::{
     BlueprintName, BlueprintRef, Digest, HttpUrl, MimePattern, ModelId, ModelRef, ProfileName,
@@ -56,18 +55,10 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
             path.clone()
         }
     };
-    let mut blueprint =
-        parse_manifest(&old.blueprint.text).map_err(|e| ConvertError::Unreadable {
-            path: blueprint_path,
-            why: e.to_string(),
-        })?;
-    let stage_layouts = blueprint
-        .stages
-        .iter_mut()
-        .flat_map(|s| &mut s.context_layout);
-    for layout in std::iter::once(&mut blueprint.context_layout).chain(stage_layouts) {
-        pin_sourceless_histories(layout, report);
-    }
+    let blueprint = parse_manifest(&old.blueprint.text).map_err(|e| ConvertError::Unreadable {
+        path: blueprint_path,
+        why: e.to_string(),
+    })?;
     let graph = RunGraph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
     let digest = match meta.blueprint_digest.as_deref().map(Digest::new) {
         Some(Ok(d)) => d,
@@ -130,23 +121,6 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
         spec,
         code: code_frames,
     })
-}
-
-/// A `compact_history` region that names no source region is one nothing
-/// compacts into, which is a pinned region in all but name. The run graph
-/// requires the source, so such a region is read as pinned.
-fn pin_sourceless_histories(layout: &mut ContextLayout, report: &mut Report) {
-    for r in &mut layout.regions {
-        if matches!(&r.kind, CoreKind::CompactHistory { source_region } if source_region.is_empty())
-        {
-            r.kind = CoreKind::Pinned;
-            report.fill(
-                format!("layout.regions.{}.kind", r.name),
-                "pinned",
-                "a compact_history region with no source region holds what it is seeded with and nothing more",
-            );
-        }
-    }
 }
 
 /// Each caller input of the blueprint and a region it seeds, as

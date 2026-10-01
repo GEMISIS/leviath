@@ -205,6 +205,8 @@ mod tests {
         assert_eq!(format!("{:?}", a.data), "Bytes(3 bytes)");
         let bad = serde_json::from_str::<Bytes>("\"!!\"").unwrap_err();
         assert!(bad.to_string().contains("base64"), "{bad}");
+        // Bytes written as anything but text are refused before decoding.
+        assert!(serde_json::from_str::<Bytes>("[1, 2]").is_err());
     }
 
     #[test]

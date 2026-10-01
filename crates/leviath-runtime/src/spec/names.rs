@@ -435,18 +435,34 @@ mod tests {
         );
         assert!(RegionName::new("a\tb").is_err());
         let long = StageName::new("x".repeat(129)).unwrap_err();
-        assert!(
-            matches!(
-                long,
-                NameError::TooLong {
-                    max: 128,
-                    len: 129,
-                    ..
-                }
-            ),
-            "{long}"
+        assert_eq!(
+            long,
+            NameError::TooLong {
+                what: "stage name",
+                max: 128,
+                len: 129,
+                got: "x".repeat(129),
+            }
         );
         assert!(long.to_string().contains("at most 128 bytes"));
+    }
+
+    /// Every kind of name refuses empty text before it looks at the shape.
+    #[test]
+    fn every_kind_of_name_refuses_empty_text() {
+        let empty = |what| Err(NameError::Empty { what });
+        assert_eq!(InputName::new("").map(|_| ()), empty("input name"));
+        assert_eq!(ToolName::new("").map(|_| ()), empty("tool name"));
+        assert_eq!(RunId::new("").map(|_| ()), empty("run id"));
+        assert_eq!(MimePattern::new("").map(|_| ()), empty("mime pattern"));
+        assert_eq!(WorkdirPath::new("").map(|_| ()), empty("workdir path"));
+        assert_eq!(HttpUrl::new("").map(|_| ()), empty("URL"));
+    }
+
+    #[test]
+    fn a_blueprint_ref_with_a_digest_still_checks_the_name() {
+        let digest = "a".repeat(64);
+        assert!(BlueprintRef::parse(&format!(" bad@{digest}")).is_err());
     }
 
     #[test]

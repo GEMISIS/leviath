@@ -285,6 +285,19 @@ fn a_growing_region_records_only_the_new_entries() {
 }
 
 #[test]
+fn a_region_whose_budget_alone_changed_keeps_its_entries() {
+    let a = base();
+    let mut b = a.clone();
+    b.context.regions[0].max_tokens += 1;
+    let d = ContextDiff::between(&a.context, &b.context);
+    assert_eq!(d.regions.len(), 1);
+    assert_eq!(d.regions[0].2, None);
+    let mut c = a.context.clone();
+    d.apply(&mut c);
+    assert_eq!(c, b.context);
+}
+
+#[test]
 fn regions_can_come_go_and_move() {
     let a = base();
     let mut b = a.clone();
