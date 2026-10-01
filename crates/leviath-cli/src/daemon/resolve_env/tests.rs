@@ -375,7 +375,7 @@ async fn the_catalog_holds_every_kind_of_tool_and_a_stage_gets_what_it_names() {
             ("LEVIATH_HOME", Some(home.path().to_str().unwrap())),
             ("HOME", Some(home.path().to_str().unwrap())),
         ],
-        || env.catalog(&code, None).defs,
+        || env.catalog(&code, None, None).defs,
     );
     let all = names(&catalog);
     for expected in [
@@ -412,7 +412,7 @@ async fn the_catalog_holds_every_kind_of_tool_and_a_stage_gets_what_it_names() {
         ToolSelector::Group(ToolGroup::Mcp),
     ];
     let graph = load_installed_graph();
-    let picked = env.tools(&graph, &stage, &code, None).await.unwrap();
+    let picked = env.tools(&graph, &stage, &code, None, None).await.unwrap();
     assert_eq!(names(&picked.tools), ["gh__search", "own_tool"]);
     assert!(picked.code.is_empty(), "the run already holds its own tool");
 }
@@ -435,7 +435,13 @@ async fn script_tools_found_on_disk_come_back_with_their_code() {
     let graph = load_installed_graph();
     let picked = temp_env::async_with_vars(
         [("LEVIATH_HOME", Some(home.path().to_str().unwrap()))],
-        env.tools(&graph, &stage, &CodeFiles::new(), Some(blueprint.path())),
+        env.tools(
+            &graph,
+            &stage,
+            &CodeFiles::new(),
+            Some(blueprint.path()),
+            None,
+        ),
     )
     .await
     .unwrap();
@@ -458,6 +464,40 @@ async fn script_tools_found_on_disk_come_back_with_their_code() {
         .find(|(path, _)| path.ends_with("global.rhai"))
         .unwrap();
     assert!(Path::new(global.0).is_absolute(), "{}", global.0);
+}
+
+/// A run that looks at its tools again during the run is given its
+/// workdir's `tools/` from the start; one that looks once, at spawn, is not.
+#[tokio::test]
+async fn a_rescanning_run_finds_its_workdir_tools_at_spawn() {
+    let home = tempfile::tempdir().unwrap();
+    let workdir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workdir.path().join("tools")).unwrap();
+    std::fs::write(
+        workdir.path().join("tools").join("made.rhai"),
+        "// @tool made_here\n3",
+    )
+    .unwrap();
+    let (env, _agents) = env();
+    let mut stage = load_installed_graph().stages[0].clone();
+    stage.tools = vec![ToolSelector::Group(ToolGroup::Scripts)];
+    let mut graph = load_installed_graph();
+    let picked = |graph: RunGraph| {
+        let (env, stage, workdir) = (&env, &stage, workdir.path());
+        temp_env::async_with_vars(
+            [("LEVIATH_HOME", Some(home.path().to_str().unwrap()))],
+            async move {
+                let tools = env
+                    .tools(&graph, stage, &CodeFiles::new(), None, Some(workdir))
+                    .await
+                    .unwrap();
+                names(&tools.tools)
+            },
+        )
+    };
+    assert!(picked(graph.clone()).await.is_empty(), "looked at once");
+    graph.tool_rescan = leviath_runtime::spec::graph::ToolRescan::AfterWrites;
+    assert_eq!(picked(graph).await, ["made_here"]);
 }
 
 fn dep(needs: Needs) -> DependencyDef {

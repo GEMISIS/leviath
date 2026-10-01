@@ -219,6 +219,7 @@ impl ResolveEnv for Fake {
         stage: &StageDef,
         _code: &CodeFiles,
         base: Option<&Path>,
+        _workdir: Option<&Path>,
     ) -> Result<StageTools, SpawnIssues> {
         self.tool_bases
             .lock()

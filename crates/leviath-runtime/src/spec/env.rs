@@ -161,6 +161,10 @@ pub struct SeedCx<'a> {
     pub launch: &'a LaunchPolicy,
     /// The run's workdir.
     pub workdir: &'a Path,
+    /// The directory of the blueprint the run came from, which a seed path
+    /// written `blueprint:<path>` reads from. `None` for a graph its caller
+    /// wrote.
+    pub blueprint_dir: Option<&'a Path>,
     /// Whether shell-command seeds may run.
     pub commands_allowed: bool,
     /// The code the run holds, by digest, already read.
@@ -256,14 +260,17 @@ pub trait ResolveEnv: Send + Sync {
         }
     }
     /// The tools a stage gets, each with its schema. `code` holds the run's
-    /// code already read, for script tools, and `base` is the blueprint's
-    /// directory, whose own script tools the stage may use.
+    /// code already read, for script tools, `base` is the blueprint's
+    /// directory, whose own script tools the stage may use, and `workdir` is
+    /// the run's, whose `tools/` a graph that looks at its tools again during
+    /// the run is given from the start.
     async fn tools(
         &self,
         graph: &RunGraph,
         stage: &StageDef,
         code: &CodeFiles,
         base: Option<&Path>,
+        workdir: Option<&Path>,
     ) -> Result<StageTools, SpawnIssues>;
     /// Read code the graph names. `base` is the blueprint's directory, when
     /// the graph came from one.

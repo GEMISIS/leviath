@@ -151,7 +151,10 @@ async fn models_tools_and_code_answer_through_the_shared_host() {
     let mut s = stage(&[]);
     s.tools = vec![ToolSelector::Tool(ToolName::new("read_file").unwrap())];
     let graph = crate::spec::graph::tests::minimal();
-    let tools = e.tools(&graph, &s, &CodeFiles::new(), None).await.unwrap();
+    let tools = e
+        .tools(&graph, &s, &CodeFiles::new(), None, None)
+        .await
+        .unwrap();
     assert_eq!(tools.tools.len(), 1);
     assert_eq!(tools.tools[0].name.as_str(), "read_file");
     assert!(tools.code.is_empty());
@@ -190,6 +193,7 @@ async fn only_literal_seeds_run_in_an_embedded_world() {
         graph: &spec.graph,
         launch: &spec.launch,
         workdir: dir.path(),
+        blueprint_dir: None,
         commands_allowed: true,
         code: &code,
         code_refs: &[],

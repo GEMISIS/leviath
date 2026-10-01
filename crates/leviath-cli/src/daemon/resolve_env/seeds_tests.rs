@@ -61,6 +61,7 @@ impl Run {
             graph: &self.graph,
             launch: &self.launch,
             workdir,
+            blueprint_dir: None,
             commands_allowed: commands,
             code: &self.code,
             code_refs: &self.refs,
@@ -124,6 +125,66 @@ fn literal_files_and_glob_seeds_read_inside_the_workdir_only() {
     );
     let bad = go(Seed::Glob("[".into())).unwrap_err();
     assert!(bad.contains("bad glob"), "{bad}");
+}
+
+/// A `blueprint:` path reads from the blueprint's own directory and never
+/// leaves it; a graph its caller wrote has no directory to read from.
+#[test]
+fn a_blueprint_path_reads_the_files_the_blueprint_ships() {
+    let (env, _agents) = env();
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let shipped = dir.path().join("blueprint");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(shipped.join("rubrics")).unwrap();
+    std::fs::write(shipped.join("style.md"), "house style").unwrap();
+    std::fs::write(shipped.join("rubrics/a.md"), "rubric a").unwrap();
+    std::fs::write(dir.path().join("secret.md"), "s").unwrap();
+    let run = Run::new(None);
+    let go = |seed: Seed, from: Option<&Path>| {
+        let cx = SeedCx {
+            blueprint_dir: from,
+            ..run.cx(&work, false)
+        };
+        run_seed(&env, &seed, cx)
+    };
+    let style = Seed::Files(vec![WorkdirPath::new("blueprint:style.md").unwrap()]);
+    let read = go(style.clone(), Some(&shipped)).unwrap();
+    assert!(read.contains("house style"), "{read}");
+    let rubric = go(Seed::Glob("blueprint:rubrics/*.md".into()), Some(&shipped)).unwrap();
+    assert!(rubric.contains("rubric a"), "{rubric}");
+    let escaped = go(Seed::Glob("blueprint:../*.md".into()), Some(&shipped)).unwrap_err();
+    assert!(escaped.contains("blueprint's directory"), "{escaped}");
+    let nowhere = go(style, None).unwrap_err();
+    assert!(nowhere.contains("has none"), "{nowhere}");
+}
+
+/// A workdir path may leave the workdir where the run's `[read_paths]` are
+/// granted, and only there; an entry that will not compile fails the seed.
+#[test]
+fn a_seed_reads_outside_the_workdir_where_read_paths_are_granted() {
+    let mut config = Config::default();
+    config.security.allow_blueprint_read_paths = true;
+    let (env, _agents) = env_with(config);
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(dir.path().join("shared")).unwrap();
+    std::fs::write(dir.path().join("shared/notes.md"), "shared notes").unwrap();
+    std::fs::write(dir.path().join("secret.md"), "s").unwrap();
+    let mut run = Run::new(None);
+    let shared = dir.path().join("shared").to_string_lossy().into_owned();
+    run.graph.read_paths = vec![shared];
+    let go = |seed: Seed| seed_in(&env, &run, &work, &seed, false);
+    let notes = go(Seed::Glob("../shared/*.md".into())).unwrap();
+    assert!(notes.contains("shared notes"), "{notes}");
+    let refused = go(Seed::Glob("../*.md".into())).unwrap_err();
+    assert!(refused.contains("no [read_paths] grant"), "{refused}");
+
+    let mut broken = Run::new(None);
+    broken.graph.read_paths = vec!["regex:relative".to_string()];
+    let err = seed_in(&env, &broken, &work, &Seed::Glob("*.md".into()), false).unwrap_err();
+    assert!(err.contains("[read_paths]"), "{err}");
 }
 
 #[test]

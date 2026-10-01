@@ -212,6 +212,7 @@ impl ResolveEnv for EmbedEnv {
         stage: &StageDef,
         _code: &CodeFiles,
         _base: Option<&Path>,
+        _workdir: Option<&Path>,
     ) -> Result<StageTools, SpawnIssues> {
         let catalog = host::builtin_defs(&BasicToolService::tool_defs(Path::new(".")));
         host::select_tools(&catalog, stage).map(StageTools::from)

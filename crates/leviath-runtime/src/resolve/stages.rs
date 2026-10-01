@@ -22,13 +22,14 @@ const WORKING_ROOM_MIN_WINDOW: u32 = 20_000;
 
 /// Plan every stage, in graph order. `None` when any stage's model could not
 /// be chosen: budgets are sized against every stage's window, so none can be
-/// finished without all of them.
+/// finished without all of them. Each stage's tools are looked for beside
+/// the graph's source and in the run's workdir.
 pub(super) async fn plan_all(
     graph: &RunGraph,
     request: &SpawnRequest,
     auto: &AutoAnswers,
     code: &CodeFiles,
-    src: &Source,
+    (src, workdir): (&Source, Option<&std::path::Path>),
     env: &dyn ResolveEnv,
     issues: &mut SpawnIssues,
 ) -> Option<(Vec<StagePlan>, Vec<(CodeRef, Vec<u8>)>)> {
@@ -48,7 +49,10 @@ pub(super) async fn plan_all(
                 None
             }
         };
-        let tools = match env.tools(graph, stage, code, src.base.as_deref()).await {
+        let tools = match env
+            .tools(graph, stage, code, src.base.as_deref(), workdir)
+            .await
+        {
             Ok(got) => {
                 found.extend(got.code);
                 got.tools

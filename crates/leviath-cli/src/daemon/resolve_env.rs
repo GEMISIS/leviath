@@ -148,14 +148,16 @@ impl DaemonEnv {
 
     /// Every tool a stage could be given: [`Self::static_defs`], then the
     /// script tools in the blueprint's own `tools/` (from `base`), then the
-    /// global ones in `~/.leviath/tools`, then any the run's own code holds.
+    /// global ones in `~/.leviath/tools`, then (for a run that looks at its
+    /// tools again) the run workdir's `tools/`, then any the run's own code
+    /// holds.
     /// The first of a name wins, and a script tool never shadows a tool that
     /// is not one.
     ///
     /// Each script tool found on disk comes back with its code, recorded
     /// under the path it was read from (blueprint-relative for the
     /// blueprint's own), so the run can carry it.
-    fn catalog(&self, code: &CodeFiles, base: Option<&Path>) -> Catalog {
+    fn catalog(&self, code: &CodeFiles, base: Option<&Path>, workdir: Option<&Path>) -> Catalog {
         let mut defs = self.static_defs();
         let mut taken: HashSet<String> = defs.iter().map(|d| d.name.to_string()).collect();
         let mut found = BTreeMap::new();
@@ -163,6 +165,7 @@ impl DaemonEnv {
             .map(|b| (b.join("tools"), Some(b)))
             .into_iter()
             .chain(leviath_core::tools_dir().map(|d| (d, None)))
+            .chain(workdir.map(|w| (w.join("tools"), None)))
             .collect();
         for (dir, under) in dirs {
             let (set, _, _) =
@@ -383,12 +386,16 @@ impl ResolveEnv for DaemonEnv {
 
     async fn tools(
         &self,
-        _graph: &RunGraph,
+        graph: &RunGraph,
         stage: &StageDef,
         code: &CodeFiles,
         base: Option<&Path>,
+        workdir: Option<&Path>,
     ) -> Result<StageTools, SpawnIssues> {
-        let mut catalog = self.catalog(code, base);
+        // A run that looks at its tools again scans its workdir's `tools/`
+        // then, so what is there at spawn is there from the first turn.
+        let rescans = graph.tool_rescan != leviath_runtime::spec::graph::ToolRescan::AtSpawn;
+        let mut catalog = self.catalog(code, base, workdir.filter(|_| rescans));
         let tools = host::select_tools(&catalog.defs, stage)?;
         let code = tools
             .iter()

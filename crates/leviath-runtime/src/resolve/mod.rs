@@ -158,7 +158,7 @@ pub async fn resolve(
         request,
         &auto_answers,
         &code.files,
-        &src,
+        (&src, workdir.as_deref()),
         env,
         &mut issues,
     )
@@ -186,6 +186,7 @@ pub async fn resolve(
                 graph: &graph,
                 at: &src.at,
                 workdir: dir,
+                blueprint_dir: src.base.as_deref(),
                 launch: &launch,
                 code: &code.files,
                 code_refs: &code.refs,
