@@ -412,153 +412,50 @@ fn unknown_keys_are_refused() {
     assert!(err.to_string().contains("unknown field `stagse`"), "{err}");
 }
 
+/// The `[graph]` table of each bundled blueprint's `agent.toml`, by
+/// directory name. The runtime does not read the blueprint file format, so
+/// this takes the one table it needs straight out of the TOML.
+fn bundled_graphs() -> Vec<(String, RunGraph)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../leviath-cli/agents");
+    let mut out: Vec<(String, RunGraph)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path().join("agent.toml");
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let mut file: toml::Table = toml::from_str(&text).unwrap();
+            let graph = file
+                .remove("graph")
+                .unwrap_or_else(|| panic!("{}: no [graph]", path.display()));
+            let graph: RunGraph = graph
+                .try_into()
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            (name, graph)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[test]
 fn every_bundled_blueprint_reads_as_a_valid_graph() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../leviath-cli/agents");
-    let mut seen = 0;
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let manifest = entry.unwrap().path().join("agent.leviath");
-        let Ok(text) = std::fs::read_to_string(&manifest) else {
-            continue;
-        };
-        let bp = crate::spec::manifest::parse_manifest(&text).unwrap();
-        let graph =
-            RunGraph::from_blueprint(&bp).unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
+    let all = bundled_graphs();
+    assert!(all.len() >= 11, "found {} bundled blueprints", all.len());
+    for (name, graph) in all {
         graph
             .validate(&SpecPath::root())
-            .unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         let bin = postcard::to_stdvec(&graph).unwrap();
-        assert_eq!(postcard::from_bytes::<RunGraph>(&bin).unwrap(), graph);
-        // Every stage leaves along exactly the edges it declares, or falls
-        // through to the next stage when it declares no table at all.
-        for (i, stage) in bp.stages.iter().enumerate() {
-            let mut got: Vec<(String, String)> = graph
-                .edges_from(&stage.name)
-                .map(|e| (e.name.to_string(), e.to.to_string()))
-                .collect();
-            got.sort();
-            let mut want: Vec<(String, String)> = match (&stage.transitions, bp.stages.get(i + 1)) {
-                (Some(t), _) => t
-                    .iter()
-                    .map(|(k, e)| (k.clone(), e.target.clone()))
-                    .collect(),
-                (None, Some(next)) => vec![(FALL_THROUGH_EDGE.to_string(), next.name.clone())],
-                (None, None) => Vec::new(),
-            };
-            want.sort();
-            assert_eq!(got, want, "{}: stage {}", manifest.display(), stage.name);
-        }
-        seen += 1;
+        assert_eq!(
+            postcard::from_bytes::<RunGraph>(&bin).unwrap(),
+            graph,
+            "{name}"
+        );
+        let text = toml::to_string(&graph).unwrap();
+        assert_eq!(toml::from_str::<RunGraph>(&text).unwrap(), graph, "{name}");
     }
-    assert!(seen >= 7, "found {seen} bundled blueprints");
-}
-
-#[test]
-fn caller_input_seeds_become_text_inputs() {
-    let bp = crate::spec::manifest::parse_manifest(
-        r#"
-[agent]
-name = "t"
-version = "1.0.0"
-description = "d"
-
-[context.regions]
-task = { kind = "pinned", max_tokens = 100, required = true, seed = "task" }
-notes = { kind = "pinned", max_tokens = 100, seed = "input" }
-
-[stages.main]
-system_prompt = "p"
-"#,
-    )
-    .unwrap();
-    let g = RunGraph::from_blueprint(&bp).unwrap();
-    let names: Vec<(&str, bool)> = g
-        .inputs
-        .iter()
-        .map(|i| (i.name.as_str(), i.required))
-        .collect();
-    assert_eq!(names, vec![("notes", false), ("task", true)]);
-    assert!(g.layout.regions.iter().all(|r| r.seed.is_none()));
-    assert_eq!(g.title.as_deref(), Some("t"));
-}
-
-#[test]
-fn a_blueprint_with_bad_names_reports_each_with_its_path() {
-    let mut bp = crate::spec::manifest::parse_manifest(
-        "[agent]\nname = \"t\"\nversion = \"1\"\ndescription = \"\"\n[stages.main]\nsystem_prompt = \"p\"\n",
-    )
-    .unwrap();
-    bp.stages[0].available_tools = vec!["bad tool".into(), "@all".into()];
-    bp.stages[0]
-        .tool_permissions
-        .insert("bash".into(), "sometimes".into());
-    bp.stages[0]
-        .model
-        .parameters
-        .insert("weird".into(), serde_json::json!({"a": 1}));
-    let issues = RunGraph::from_blueprint(&bp).unwrap_err();
-    let lines: Vec<String> = issues
-        .iter()
-        .map(|i| format!("{} {:?}", i.path, i.code))
-        .collect();
-    assert_eq!(
-        lines,
-        vec![
-            "stages.main.tools[0] Invalid",
-            "stages.main.model.params.weird Invalid",
-            "stages.main.tool_permissions.bash Invalid",
-        ]
-    );
-}
-
-#[test]
-fn a_manifests_own_mcp_servers_and_script_permissions_are_read_into_the_graph() {
-    let manifest = "[agent]\nname = \"t\"\nversion = \"1\"\n\
-        [stages.main]\nsystem_prompt = \"p\"\n\
-        [[mcp_servers]]\nname = \"srv\"\ncommand = \"python3\"\nargs = [\"-m\", \"srv\"]\n\
-        env = { TOKEN = \"x\" }\n\
-        [[mcp_servers]]\nname = \"web\"\ntransport = \"http\"\nurl = \"https://mcp.example\"\n\
-        [tool_script_permissions]\nshell = \"deny\"\nhttp_get = \"inherit\"\n";
-    let bp = crate::spec::manifest::parse_manifest(manifest).unwrap();
-    let mut g = RunGraph::from_blueprint(&bp).unwrap();
-    assert!(g.mcp_servers.is_empty());
-    g.read_manifest_tables(manifest).unwrap();
-    assert_eq!(g.mcp_servers.len(), 2);
-    assert_eq!(g.mcp_servers[0].name.as_str(), "srv");
-    assert_eq!(g.mcp_servers[0].args, ["-m", "srv"]);
-    assert_eq!(g.mcp_servers[0].env["TOKEN"], "x");
-    assert_eq!(g.mcp_servers[1].transport, Some(McpTransport::Http));
-    assert_eq!(
-        g.script_permissions,
-        ScriptPermissionsDef {
-            shell: Some(ScriptPermission::Deny),
-            http_get: Some(ScriptPermission::Inherit),
-            ..ScriptPermissionsDef::default()
-        }
-    );
-    let back: RunGraph = toml::from_str(&toml::to_string(&g).unwrap()).unwrap();
-    assert_eq!(back, g, "both read back from a blueprint file as written");
-
-    let mut plain = g.clone();
-    plain.mcp_servers.clear();
-    plain
-        .read_manifest_tables("[agent]\nname = \"t\"\n")
-        .unwrap();
-    assert!(
-        plain.mcp_servers.is_empty(),
-        "nothing declared, nothing read"
-    );
-
-    let bad = "[[mcp_servers]]\nname = \"bad name\"\n\
-        [tool_script_permissions]\nshell = \"sometimes\"\n";
-    let issues = g.clone().read_manifest_tables(bad).unwrap_err();
-    let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
-    assert_eq!(paths, ["mcp_servers", "script_permissions"]);
-    let unreadable = g.read_manifest_tables("not [ toml").unwrap_err();
-    assert_eq!(
-        unreadable.0[0].code,
-        crate::spec::issues::IssueCode::Invalid
-    );
 }
 
 /// A worker named by a path reads a blueprint's directory; anything else is

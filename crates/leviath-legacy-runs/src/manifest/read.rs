@@ -48,14 +48,14 @@ pub(super) fn bool_of(v: &impl Fields, key: &str) -> Option<bool> {
 ///
 /// Takes the rename itself rather than two strings, so the parser cannot read
 /// a pair the lint and `lev update` do not know about: all three ask
-/// [`crate::spec::manifest::renamed`] the same question.
+/// [`crate::manifest::renamed`] the same question.
 ///
 /// The new spelling wins where both are written, so a blueprint part-way
 /// through a rewrite reads as the author's newer intent rather than by table
 /// order.
 pub(super) fn renamed_bool_of(
     v: &impl Fields,
-    key: &crate::spec::manifest::renamed::RenamedKey,
+    key: &crate::manifest::renamed::RenamedKey,
 ) -> Option<bool> {
     bool_of(v, key.new).or_else(|| bool_of(v, key.old))
 }

@@ -170,14 +170,74 @@ fn placement(world: &World, e: Entity) -> String {
     )
 }
 
-/// A bundled blueprint spawned from its parsed form places exactly what
+/// A parsed blueprint shaped like a coding agent: an entry stage that maps
+/// the project with its tool results routed into their own region, two more
+/// stages after it (the last one writing files), caller inputs, and a
+/// compaction model.
+fn coding_blueprint() -> crate::spec::Blueprint {
+    use crate::spec::blueprint::{ModelConfig, Stage, ToolResultRouting};
+    use crate::spec::layout::{ContextLayout, RegionDefinition, RegionSeed};
+    use leviath_core::region::{EvictionStrategy, RegionKind};
+    let stage = |name: &str, prompt: &str| {
+        let mut s = Stage::new(
+            name.to_string(),
+            ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        s.available_tools = vec!["read_file".to_string()];
+        s.config.insert(
+            "system_prompt".to_string(),
+            serde_json::Value::String(prompt.to_string()),
+        );
+        s
+    };
+    let mut discover = stage("discover", "Before any planning, map the project.");
+    discover.tool_result_routing = Some(ToolResultRouting {
+        default_region: "conversation".to_string(),
+        tool_overrides: HashMap::from([("read_file".to_string(), "codebase".to_string())]),
+        ..ToolResultRouting::default()
+    });
+    let mut implement = stage("implement", "Make the change.");
+    implement
+        .available_tools
+        .extend(["write_file".to_string(), "edit_file".to_string()]);
+    let caller = |name: &str| {
+        let mut r = RegionDefinition::new(name.to_string(), RegionKind::Pinned, 2_000);
+        r.seed = Some(RegionSeed::CallerInput {
+            name: name.to_string(),
+        });
+        r
+    };
+    let regions = vec![
+        caller("task"),
+        caller("constraints"),
+        RegionDefinition::new("codebase".to_string(), RegionKind::Pinned, 20_000),
+        RegionDefinition::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 30,
+                eviction_strategy: EvictionStrategy::default(),
+            },
+            40_000,
+        ),
+    ];
+    let mut bp = crate::spec::Blueprint::new(
+        "coder".to_string(),
+        "Plans, writes and checks a change.".to_string(),
+        vec![discover, stage("plan", "Plan the change."), implement],
+        ContextLayout::new(regions, 64_000),
+    );
+    bp.entry_stage = Some("discover".to_string());
+    bp.compaction_config = Some(leviath_core::lifecycle::CompactionConfig::default());
+    bp
+}
+
+/// A parsed blueprint spawned through the test bridge places exactly what
 /// inserting its spec at its initial state places, and that is the run the
 /// blueprint describes: at its entry stage, visited once, with the stage's
 /// instructions, inference and routing in place.
 #[test]
-fn a_bundled_blueprint_lands_the_same_through_spawn_and_through_insert() {
-    let manifest = include_str!("../../leviath-cli/agents/coder/agent.leviath");
-    let blueprint = crate::spec::manifest::parse_manifest(manifest).expect("coder parses");
+fn a_blueprint_lands_the_same_through_spawn_and_through_insert() {
+    let blueprint = coding_blueprint();
     let stages = blueprint
         .stages
         .iter()
@@ -1130,9 +1190,13 @@ fn a_binding_edits_what_insertion_placed() {
 #[test]
 fn a_worker_starts_in_its_worker_stage() {
     let graph = crate::spec_bridge::test_support::graph_of(
-        "[agent]\nname = \"t\"\nentry_stage = \"a\"\n\
-         [stages.a]\nsystem_prompt = \"first\"\n\
-         [stages.b]\nsystem_prompt = \"second\"\nallow_as_worker = true\n",
+        "entry = \"a\"\n\
+         edges = [{ name = \"next\", from = \"a\", to = \"b\" }]\n\
+         layout = { total_budget_tokens = 1000, regions = [\
+           { name = \"conversation\", kind = { kind = \"sliding_window\", max_items = 10 }, budget = 1000 },\
+         ] }\n\
+         [[stages]]\nname = \"a\"\nsystem_prompt = \"first\"\n\
+         [[stages]]\nname = \"b\"\nsystem_prompt = \"second\"\nallow_as_worker = true\n",
     );
     let mut spec = crate::spec_bridge::test_support::spec_named("t", graph);
     assert_eq!(initial_state(&spec).cursor.stage.as_str(), "a");

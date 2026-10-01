@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::spec::names::{EdgeName, RegionName, StageName, ToolName};
 
-/// The name of the edge [`RunGraph::from_blueprint`](super::RunGraph::from_blueprint)
-/// writes for a blueprint stage with no `transitions` table: an `always`
+/// The name of the edge `RunGraph::from_blueprint` (behind the
+/// `legacy-blueprint` feature) writes for a blueprint stage with no `transitions` table: an `always`
 /// edge to the stage after it, with nothing carried differently and no gate.
 ///
 /// It cannot collide with a declared edge. A blueprint names each edge after

@@ -83,13 +83,14 @@ pub fn validate(path: &Path) -> Result<LoadedBlueprint, BlueprintError> {
 /// a digest only matches a file with those exact bytes.
 ///
 /// This is what a host's `ResolveEnv::blueprint` answers with, so every
-/// failure is a [`SpawnIssue`] at `source.blueprint` (boxed, since an issue
-/// is large beside a result's `Ok`).
+/// failure is a [`SpawnIssue`] placed relative to the reference: resolving
+/// puts `source.blueprint` in front of it. Boxed, since an issue is large
+/// beside a result's `Ok`.
 pub fn find(
     dirs: &[PathBuf],
     reference: &BlueprintRef,
 ) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
-    let at = SpecPath::root().field("source").field("blueprint");
+    let at = SpecPath::root();
     let Some(dir) = dirs
         .iter()
         .map(|d| d.join(reference.name.as_str()))

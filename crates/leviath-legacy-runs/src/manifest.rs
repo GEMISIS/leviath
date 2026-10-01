@@ -4,15 +4,15 @@
 //! dependencies. Filesystem-based manifest discovery (`find_manifest`) lives in
 //! `leviath-cli`, since it depends on cli-only path helpers.
 
-use crate::spec::blueprint::{
-    ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
-    StageMode, StuckConfig, ToolRescan, TransitionCondition, TransitionEdge,
-};
-use crate::spec::layout::{RegionDefinition, RegionSeed};
-use crate::spec::{Blueprint, ContextLayout, Stage};
 use leviath_core::error::{Error, Result};
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{EvictionStrategy, RegionKind};
+use leviath_runtime::spec::blueprint::{
+    ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
+    StageMode, StuckConfig, ToolRescan, TransitionCondition, TransitionEdge,
+};
+use leviath_runtime::spec::layout::{RegionDefinition, RegionSeed};
+use leviath_runtime::spec::{Blueprint, ContextLayout, Stage};
 
 /// Parse an agent.leviath TOML manifest into a Blueprint.
 pub fn parse_manifest(content: &str) -> Result<Blueprint> {
@@ -226,6 +226,9 @@ mod regions;
 pub mod renamed;
 mod sections;
 mod stage;
+mod tables;
+
+pub use tables::read_manifest_tables;
 
 // Glob re-exports, so this split is invisible to every caller and to the
 // test module, exactly as `pipeline/mod.rs` does it.
@@ -253,5 +256,7 @@ const AGENT_KEYS: &[&str] = &[
     "version",
 ];
 
+#[cfg(test)]
+mod graph_tests;
 #[cfg(test)]
 mod tests;

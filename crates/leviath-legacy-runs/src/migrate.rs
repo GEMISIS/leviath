@@ -1,14 +1,14 @@
 //! Converting an `agent.leviath` manifest into an `agent.toml` blueprint.
 //!
-//! The manifest is read by the same parser the daemon uses for it, then read
-//! as a run graph, so the new file describes exactly the run the old one did.
-//! What `lev blueprint migrate` writes is [`migrate`]'s output.
+//! The manifest is read by [`parse_manifest`], then read as a run graph, so
+//! the new file describes exactly the run the old one did. What
+//! `lev blueprint migrate` writes is [`migrate`]'s output.
 
+use leviath_blueprint::{BlueprintFile, BlueprintMeta};
 use leviath_runtime::spec::graph::RunGraph;
-use leviath_runtime::spec::manifest::parse_manifest;
 use leviath_runtime::spec::names::BlueprintName;
 
-use crate::file::{BlueprintFile, BlueprintMeta};
+use crate::manifest::{parse_manifest, read_manifest_tables};
 
 /// Convert the text of an `agent.leviath` into the text of an `agent.toml`.
 /// On failure, every problem found, one per line.
@@ -25,7 +25,7 @@ pub fn migrate(manifest: &str) -> Result<String, Vec<String>> {
 pub fn migrate_file(manifest: &str) -> Result<BlueprintFile, Vec<String>> {
     let blueprint = parse_manifest(manifest).map_err(|e| vec![e.to_string()])?;
     let graph = RunGraph::from_blueprint(&blueprint)
-        .and_then(|mut graph| graph.read_manifest_tables(manifest).map(|()| graph))
+        .and_then(|mut graph| read_manifest_tables(&mut graph, manifest).map(|()| graph))
         .map_err(|issues| issues.iter().map(ToString::to_string).collect::<Vec<_>>());
     let name =
         BlueprintName::new(blueprint.name.as_str()).map_err(|e| format!("[agent] name: {e}"));
@@ -50,3 +50,7 @@ pub fn migrate_file(manifest: &str) -> Result<BlueprintFile, Vec<String>> {
         graph,
     })
 }
+
+#[cfg(test)]
+#[path = "migrate_tests.rs"]
+mod tests;

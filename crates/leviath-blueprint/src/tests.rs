@@ -2,10 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use leviath_core::JsonDoc;
-use leviath_runtime::spec::graph::{OutputDef, RunGraph};
+use leviath_runtime::spec::graph::OutputDef;
 use leviath_runtime::spec::inputs::RawInput;
 use leviath_runtime::spec::issues::IssueCode;
-use leviath_runtime::spec::manifest::parse_manifest;
 use leviath_runtime::spec::names::{BlueprintRef, Digest};
 use leviath_runtime::spec::request::SpawnSource;
 
@@ -22,17 +21,15 @@ layout = { total_budget_tokens = 1000, regions = [
 ] }
 "#;
 
-/// Each bundled blueprint's `agent.leviath`, by directory name.
-fn bundled() -> Vec<(String, String)> {
+/// Each bundled blueprint's `agent.toml`, by directory name.
+fn bundled() -> Vec<(String, PathBuf)> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviath-cli/agents");
-    let mut out: Vec<(String, String)> = std::fs::read_dir(&dir)
+    let mut out: Vec<(String, PathBuf)> = std::fs::read_dir(&dir)
         .expect("the bundled agents are there")
         .flatten()
         .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            let text = std::fs::read_to_string(e.path().join("agent.leviath"))
-                .expect("every bundled agent has a manifest");
-            (name, text)
+            (name, e.path().join(FILE_NAME))
         })
         .collect();
     out.sort();
@@ -47,77 +44,22 @@ fn install(root: &Path, name: &str, text: &str) -> PathBuf {
     dir
 }
 
+/// Every bundled blueprint loads, holds together, and writes back as the
+/// same file: what `to_toml` writes reads back equal to what was read.
 #[test]
-fn every_bundled_blueprint_migrates_to_the_same_graph() {
-    let out = std::env::var("MIGRATE_OUT").unwrap_or_default();
+fn every_bundled_blueprint_validates_and_writes_back_stably() {
     let all = bundled();
     assert!(all.len() >= 11, "found {} bundled blueprints", all.len());
-    for (name, old) in all {
-        let expected = RunGraph::from_blueprint(&parse_manifest(&old).unwrap()).unwrap();
-        let text = migrate(&old).unwrap();
-        if !out.is_empty() {
-            std::fs::write(Path::new(&out).join(format!("{name}.toml")), &text).unwrap();
-        }
-        let file = BlueprintFile::parse(&text).unwrap();
-        assert_eq!(file.run_graph(), expected, "{name}");
-        assert_eq!(file.blueprint.name.as_str(), name);
-        // Writing it again gives the same text: the output is stable.
-        assert_eq!(file.to_toml().unwrap(), text, "{name}");
+    for (name, path) in all {
+        let loaded = validate(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(loaded.reference.name.as_str(), name);
+        let file = BlueprintFile::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let written = file.to_toml().unwrap();
+        let back = BlueprintFile::parse(&written).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(back, file, "{name}");
+        // And writing that again changes nothing.
+        assert_eq!(back.to_toml().unwrap(), written, "{name}");
     }
-}
-
-#[test]
-fn a_migrated_file_leaves_defaults_out_and_writes_short_tables_inline() {
-    let old = r#"
-[agent]
-name = "small"
-version = "0.3.0"
-
-[context.regions]
-task = { type = "pinned", max_tokens = 500, seed = "task" }
-
-[stages.main]
-system_prompt = "work"
-available_tools = ["read_file", "list_dir", "bash", "write_file", "edit_file", "context_read"]
-"#;
-    let text = migrate(old).unwrap();
-    assert!(text.starts_with("[blueprint]\nname = \"small\"\nversion = \"0.3.0\"\n"));
-    assert!(!text.contains("description"), "{text}");
-    assert!(!text.contains("title"), "{text}");
-    assert!(!text.contains("= false"), "{text}");
-    assert!(!text.contains("= []"), "{text}");
-    assert!(text.contains("budget = 500 }"), "{text}");
-    assert!(text.contains("tools = [\n    \"read_file\",\n"), "{text}");
-    assert!(text.contains("binds = [{ region = \"task\" }]"), "{text}");
-    assert!(
-        text.contains("type = { kind = \"text\", multiline = true }"),
-        "{text}"
-    );
-    let file = BlueprintFile::parse(&text).unwrap();
-    assert_eq!(file.run_graph().title.as_deref(), Some("small"));
-}
-
-#[test]
-fn a_manifest_that_does_not_parse_is_reported() {
-    let problems = migrate("[stages.main]\n").unwrap_err();
-    assert_eq!(problems.len(), 1);
-    assert!(problems[0].contains("[agent]"), "{problems:?}");
-}
-
-#[test]
-fn every_problem_with_a_manifest_is_reported_at_once() {
-    let old = r#"
-[agent]
-name = " padded"
-
-[stages.main]
-system_prompt = "work"
-available_tools = ["read file"]
-"#;
-    let problems = migrate_file(old).unwrap_err();
-    assert_eq!(problems.len(), 2, "{problems:?}");
-    assert!(problems[0].contains("tool name"), "{problems:?}");
-    assert!(problems[1].contains("[agent] name"), "{problems:?}");
 }
 
 #[test]
@@ -251,7 +193,7 @@ fn finding_an_installed_blueprint_checks_its_name_and_pin() {
     };
     let issue = find(&dirs, &stale).unwrap_err();
     assert_eq!(issue.code, IssueCode::Changed);
-    assert_eq!(issue.path.to_string(), "source.blueprint.digest");
+    assert_eq!(issue.path.to_string(), "digest");
 
     let missing = find(&dirs, &BlueprintRef::parse("absent").unwrap()).unwrap_err();
     assert_eq!(missing.code, IssueCode::Unresolvable);

@@ -159,22 +159,32 @@ mod tests {
         }
     }
 
-    /// A parsed blueprint whose agent-level output is `agent`, over stages
-    /// named and shaped by `stages`. Both take TOML output tables (or `None`),
-    /// because a manifest is where these declarations really come from.
+    /// A blueprint whose agent-level output is `agent`, over stages named and
+    /// shaped by `stages`. Both take the fields of a TOML output table (or
+    /// `None`), because an author writes these declarations as TOML.
     fn blueprint_with(agent: Option<&str>, stages: &[(&str, Option<&str>)]) -> Blueprint {
-        let mut manifest =
-            String::from("[agent]\nname = \"checked\"\nversion = \"1.0.0\"\ndescription = \"d\"\n");
-        if let Some(fields) = agent {
-            manifest.push_str(&format!("\n[agent.output]\n{fields}\n"));
-        }
-        for (name, output) in stages {
-            manifest.push_str(&format!("\n[stages.{name}]\nsystem_prompt = \"p\"\n"));
-            if let Some(fields) = output {
-                manifest.push_str(&format!("\n[stages.{name}.output]\n{fields}\n"));
-            }
-        }
-        crate::spec::manifest::parse_manifest(&manifest).expect("the test manifest parses")
+        let output = |fields: &str| -> OutputSpec {
+            toml::from_str(fields).expect("the test output table reads")
+        };
+        let stages = stages
+            .iter()
+            .map(|(name, fields)| {
+                let mut stage = crate::spec::blueprint::Stage::new(
+                    name.to_string(),
+                    crate::spec::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+                );
+                stage.output = fields.map(output);
+                stage
+            })
+            .collect();
+        let mut bp = Blueprint::new(
+            "checked".to_string(),
+            "d".to_string(),
+            stages,
+            crate::spec::layout::ContextLayout::new(Vec::new(), 0),
+        );
+        bp.output = agent.map(output);
+        bp
     }
 
     /// The headline: a differing format retires the declared validator, and

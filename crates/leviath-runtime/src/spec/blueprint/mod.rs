@@ -1126,61 +1126,61 @@ mod output_checks;
 pub use output_checks::retired_check_warnings;
 
 #[cfg(test)]
+mod checks_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::spec::layout::ContextLayout;
     use crate::spec::layout::RegionDefinition;
     use leviath_core::region::RegionKind;
 
-    /// Build a blueprint from a manifest, so these read as the TOML an author
-    /// would actually write rather than as hand-assembled structs.
-    fn bp_with_regions(regions_toml: &str) -> Blueprint {
-        crate::spec::manifest::parse_manifest(&format!(
-            r#"
-[agent]
-name = "asked"
+    /// A pinned region, seeded from the caller input `seed` when there is one.
+    fn caller_region(name: &str, seed: Option<&str>, required: bool) -> RegionDefinition {
+        let mut region = RegionDefinition::new(name.to_string(), RegionKind::Pinned, 10);
+        region.seed = seed.map(|name| crate::spec::layout::RegionSeed::CallerInput {
+            name: name.to_string(),
+        });
+        region.required = required;
+        region
+    }
 
-[stages.main]
-mode = "autonomous"
-model = {{ provider = "anthropic", model = "m" }}
-
-[context.regions]
-{regions_toml}
-"#
-        ))
-        .expect("fixture parses")
+    /// A one-stage blueprint named `asked` over `regions`.
+    fn bp_with_regions(regions: Vec<RegionDefinition>) -> Blueprint {
+        Blueprint::new(
+            "asked".to_string(),
+            String::new(),
+            vec![Stage::new(
+                "main".to_string(),
+                ModelConfig::new("anthropic".to_string(), "m".to_string()),
+            )],
+            ContextLayout::new(regions, 100),
+        )
     }
 
     #[test]
     fn a_blueprint_accepts_a_task_when_some_region_seeds_from_it() {
-        // Both spellings: the explicit seed and the region named `task`, which
-        // gets the same seed implicitly.
-        assert!(
-            bp_with_regions(r#"brief = { kind = "pinned", max_tokens = 10, seed = "task" }"#)
-                .accepts_task()
-        );
-        assert!(bp_with_regions(r#"task = { kind = "pinned", max_tokens = 10 }"#).accepts_task());
+        // Any region may take the task, whatever it is called.
+        assert!(bp_with_regions(vec![caller_region("brief", Some("task"), false)]).accepts_task());
+        assert!(bp_with_regions(vec![caller_region("task", Some("task"), false)]).accepts_task());
     }
 
     /// `requires_task` is the `required` flag on the task region, and nothing
     /// else: an optional task region takes one without insisting.
     #[test]
     fn a_blueprint_requires_a_task_only_when_its_task_region_is_required() {
-        assert!(
-            bp_with_regions(r#"task = { kind = "pinned", max_tokens = 10, required = true }"#)
-                .requires_task()
-        );
-        let optional = bp_with_regions(
-            r#"task = { kind = "pinned", max_tokens = 10 }
-diff = { kind = "pinned", max_tokens = 10, seed = "diff", required = true }"#,
-        );
+        assert!(bp_with_regions(vec![caller_region("task", Some("task"), true)]).requires_task());
+        let optional = bp_with_regions(vec![
+            caller_region("task", Some("task"), false),
+            caller_region("diff", Some("diff"), true),
+        ]);
         assert!(optional.accepts_task());
         assert!(!optional.requires_task());
     }
 
     #[test]
     fn a_blueprint_taking_other_caller_input_does_not_accept_a_task() {
-        let bp = bp_with_regions(r#"diff = { kind = "pinned", max_tokens = 10, seed = "diff" }"#);
+        let bp = bp_with_regions(vec![caller_region("diff", Some("diff"), false)]);
         assert!(!bp.accepts_task());
         assert_eq!(bp.caller_inputs(), ["diff"]);
         assert!(!bp.requires_task());
@@ -1188,10 +1188,10 @@ diff = { kind = "pinned", max_tokens = 10, seed = "diff", required = true }"#,
 
     #[test]
     fn the_refusal_names_what_the_agent_takes_instead() {
-        let bp = bp_with_regions(
-            r#"diff = { kind = "pinned", max_tokens = 10, seed = "diff" }
-criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
-        );
+        let bp = bp_with_regions(vec![
+            caller_region("diff", Some("diff"), false),
+            caller_region("criteria", Some("criteria"), false),
+        ]);
         let msg = bp.task_refusal();
         assert!(msg.contains("agent 'asked'"), "{msg}");
         assert!(msg.contains("it takes: diff, criteria"), "{msg}");
@@ -1199,7 +1199,7 @@ criteria = { kind = "pinned", max_tokens = 10, seed = "criteria" }"#,
 
     #[test]
     fn the_refusal_says_so_when_the_agent_takes_nothing() {
-        let bp = bp_with_regions(r#"notes = { kind = "pinned", max_tokens = 10 }"#);
+        let bp = bp_with_regions(vec![caller_region("notes", None, false)]);
         assert!(bp.caller_inputs().is_empty());
         // Bound rather than called inside the assert message: a message
         // expression only runs when the assert fails, so it would be an

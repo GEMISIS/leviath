@@ -11,7 +11,6 @@ pub mod inputs;
 pub mod issues;
 pub mod launch;
 pub mod layout;
-pub mod manifest;
 pub mod names;
 pub mod readable;
 pub mod request;

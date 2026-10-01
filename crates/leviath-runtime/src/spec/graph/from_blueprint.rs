@@ -5,6 +5,10 @@
 //! seed into a declared `text` input bound to that region. A blueprint that
 //! parsed can still fail here, and each failure is reported with the path of
 //! the field that caused it.
+//!
+//! Only the runtime's own tests and the `legacy-blueprint` feature compile
+//! this: a spawn reads a graph, never a parsed manifest, and the crate that
+//! converts old runs is the one caller outside the tests.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -24,42 +28,6 @@ use crate::spec::names::{
 };
 
 impl RunGraph {
-    /// Read the two tables of a blueprint manifest that its parsed form does
-    /// not carry, `[[mcp_servers]]` and `[tool_script_permissions]`, into
-    /// this graph. `manifest` is the text [`RunGraph::from_blueprint`]'s
-    /// blueprint was parsed from. Every entry that does not fit is reported,
-    /// each at its own path.
-    pub fn read_manifest_tables(&mut self, manifest: &str) -> Result<(), SpawnIssues> {
-        let mut issues = SpawnIssues::new();
-        let table: toml::Table = match toml::from_str(manifest) {
-            Ok(table) => table,
-            Err(e) => return Err(SpawnIssue::new(at(), IssueCode::Invalid, e.to_string()).into()),
-        };
-        if let Some(value) = table.get("mcp_servers") {
-            let servers: Result<Vec<McpServerDef>, _> = value.clone().try_into();
-            match servers {
-                Ok(servers) => self.mcp_servers = servers,
-                Err(e) => issues.push(SpawnIssue::new(
-                    at().field("mcp_servers"),
-                    IssueCode::Invalid,
-                    e.to_string(),
-                )),
-            }
-        }
-        if let Some(value) = table.get("tool_script_permissions") {
-            let perms: Result<ScriptPermissionsDef, _> = value.clone().try_into();
-            match perms {
-                Ok(perms) => self.script_permissions = perms,
-                Err(e) => issues.push(SpawnIssue::new(
-                    at().field("script_permissions"),
-                    IssueCode::Invalid,
-                    e.to_string(),
-                )),
-            }
-        }
-        issues.into_result(())
-    }
-
     /// Read a parsed blueprint as a run graph, reporting every field that
     /// does not fit.
     pub fn from_blueprint(blueprint: &Blueprint) -> Result<RunGraph, SpawnIssues> {
@@ -71,19 +39,6 @@ impl RunGraph {
         let mut graph = graph;
         graph.inputs = c.inputs.into_values().collect();
         c.issues.into_result(graph)
-    }
-}
-
-impl OutputDef {
-    /// The output shape `spec` describes, as a graph or a request carries it.
-    /// An artifact whose mime type does not read is an issue under `output`.
-    pub fn from_output_spec(spec: &leviath_core::output::OutputSpec) -> Result<Self, SpawnIssues> {
-        let mut c = Conv {
-            issues: SpawnIssues::new(),
-            inputs: BTreeMap::new(),
-        };
-        let def = c.output(spec, &at().field("output"));
-        c.issues.into_result(def)
     }
 }
 
@@ -795,28 +750,7 @@ impl Conv {
     }
 
     fn output(&mut self, o: &leviath_core::output::OutputSpec, p: &SpecPath) -> OutputDef {
-        OutputDef {
-            format: o.format.clone(),
-            instructions: o.instructions.clone(),
-            example: o.example.clone(),
-            schema: o.schema.clone().map(JsonDoc::new),
-            validator: o.validator.clone().map(CodeRef::File),
-            on_validator_error: o.on_validator_error,
-            overwrite_artifacts: o.overwrite_artifacts,
-            artifacts: o
-                .artifacts
-                .iter()
-                .enumerate()
-                .filter_map(|(i, a)| {
-                    Some(ArtifactDef {
-                        name: a.name.clone(),
-                        mime_type: self.name(p.field("artifacts").index(i), &a.mime_type)?,
-                        required: a.required,
-                        description: a.description.clone(),
-                    })
-                })
-                .collect(),
-        }
+        OutputDef::read(o, p, &mut self.issues)
     }
 
     fn compaction(&mut self, c: &leviath_core::lifecycle::CompactionConfig) -> CompactionDef {

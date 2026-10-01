@@ -95,9 +95,8 @@ impl AgentWorldBuilder {
 
     /// Offer a blueprint to the world's requests, under the name it carries
     /// (repeatable; a second blueprint of the same name replaces the first).
-    /// Load one from its `agent.toml` with `leviath_blueprint::load`, or from
-    /// manifest text with [`LoadedBlueprint::from_manifest`]. A request
-    /// names it with `SpawnSource::Blueprint`.
+    /// Load one from its `agent.toml` with `leviath_blueprint::load`. A
+    /// request names it with `SpawnSource::Blueprint`.
     pub fn blueprint(mut self, blueprint: LoadedBlueprint) -> Self {
         self.blueprints
             .insert(blueprint.reference.name.to_string(), blueprint);
@@ -645,49 +644,87 @@ mod tests {
             .expect("world builds inside the test runtime")
     }
 
-    const TWO_STAGE: &str = r#"[agent]
-name = "embedded"
-version = "0.0.0"
+    /// A two-stage graph, as the `[graph]` table of an `agent.toml` holds it.
+    const TWO_STAGE: &str = r#"title = "embedded"
 description = "Two stage embedded test agent."
-entry_stage = "work"
+entry = "work"
+edges = [{ name = "wrap", from = "work", to = "wrap" }]
 
-[stages.work]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
+[[stages]]
+name = "work"
 description = "Do the work"
-available_tools = ["read_file"]
 system_prompt = "Work."
-[stages.work.transitions.wrap]
-transform = "direct"
+model = { models = [{ provider = "mock", model = "m" }] }
+tools = ["read_file"]
 
-[stages.wrap]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
+[[stages]]
+name = "wrap"
 description = "Wrap up"
-allow_complete = true
 system_prompt = "Wrap."
+model = { models = [{ provider = "mock", model = "m" }] }
 
-[context.regions]
-conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
+[layout]
+total_budget_tokens = 20000
+
+[[layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 40 }
+budget = 20000
 "#;
 
-    const ASKER: &str = r#"[agent]
-name = "asker"
-version = "0.0.0"
+    const ASKER: &str = r#"title = "asker"
 description = "Asks one question then finishes."
-entry_stage = "chat"
+entry = "chat"
 
-[stages.chat]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
+[[stages]]
+name = "chat"
 description = "Chat"
-available_tools = ["ask_user_text"]
-allow_complete = true
 system_prompt = "Ask."
+model = { models = [{ provider = "mock", model = "m" }] }
+tools = ["ask_user_text"]
 
-[context.regions]
-conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
+[layout]
+total_budget_tokens = 20000
+
+[[layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 40 }
+budget = 20000
 "#;
+
+    /// `graph` (one of the graphs above, whose regions share 20000 tokens)
+    /// with one more pinned region of `budget` tokens, filled from a text
+    /// input of the same name.
+    fn with_input(graph: &str, name: &str, budget: u32, required: bool) -> String {
+        let total = 20_000 + budget;
+        format!(
+            "{}\n[[layout.regions]]\nname = \"{name}\"\nkind = \"pinned\"\nbudget = {budget}\n\
+             required = {required}\n\n[[inputs]]\nname = \"{name}\"\n\
+             type = {{ kind = \"text\", multiline = true }}\nrequired = {required}\n\
+             binds = [{{ region = \"{name}\" }}]\n",
+            graph.replace(
+                "total_budget_tokens = 20000",
+                &format!("total_budget_tokens = {total}"),
+            )
+        )
+    }
+
+    /// The blueprint `graph` describes, named after its title and pinned to
+    /// its text, reading its files from `dir`.
+    fn blueprint(graph: &str, dir: &Path) -> LoadedBlueprint {
+        let graph_def: crate::spec::graph::RunGraph =
+            toml::from_str(graph).expect("the test graph reads");
+        let name = graph_def.title.clone().expect("the test graph has a title");
+        LoadedBlueprint {
+            graph: graph_def,
+            reference: BlueprintRef {
+                name: crate::spec::names::BlueprintName::new(name).expect("a valid name"),
+                digest: Some(crate::spec::names::Digest::of(graph.as_bytes())),
+            },
+            version: "0.0.0".to_string(),
+            base_dir: dir.to_path_buf(),
+        }
+    }
 
     /// Drain events until `pred` matches (or the stream ends), collecting
     /// everything seen. Bounded by the caller's `tokio::time::timeout`.
@@ -706,11 +743,11 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         seen
     }
 
-    /// `manifest`, offered to `world` under its own name, and a request for
-    /// it working in `dir`, with `task` as its task when the blueprint takes
-    /// one.
-    fn request(world: &AgentWorld, manifest: &str, task: &str, dir: &Path) -> SpawnRequest {
-        let loaded = LoadedBlueprint::from_manifest(manifest, dir.to_path_buf()).unwrap();
+    /// The blueprint `graph` describes, offered to `world` under its own
+    /// name, and a request for it working in `dir`, with `task` as its task
+    /// when the blueprint takes one.
+    fn request(world: &AgentWorld, graph: &str, task: &str, dir: &Path) -> SpawnRequest {
+        let loaded = blueprint(graph, dir);
         let takes_task = loaded
             .graph
             .inputs
@@ -740,7 +777,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             }),
         );
         let blueprints: Blueprints = Default::default();
-        let loaded = LoadedBlueprint::from_manifest(TWO_STAGE, std::env::temp_dir()).unwrap();
+        let loaded = blueprint(TWO_STAGE, &std::env::temp_dir());
         leviath_core::sync::lock(&blueprints).insert("embedded".to_string(), loaded);
         let starter = EmbedStarter {
             registry,
@@ -767,7 +804,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
                 .is_err()
         );
         // A graph of the caller's own needs nothing registered.
-        let loaded = LoadedBlueprint::from_manifest(TWO_STAGE, std::env::temp_dir()).unwrap();
+        let loaded = blueprint(TWO_STAGE, &std::env::temp_dir());
         let raw = SpawnRequest::new(SpawnSource::Raw(Box::new(loaded.graph)));
         assert!(
             starter
@@ -782,12 +819,9 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
     async fn a_task_reaches_a_blueprint_with_a_task_region() {
         let dir = tempfile::tempdir().unwrap();
         let world = mock_world(vec![text("done"), text("done"), text("done")]);
-        let manifest = ASKER.replace(
-            "[context.regions]\n",
-            "[context.regions]\ntask = { kind = \"pinned\", max_tokens = 500 }\n",
-        );
+        let graph = with_input(ASKER, "task", 500, false);
         world
-            .spawn(request(&world, &manifest, "say hello", dir.path()))
+            .spawn(request(&world, &graph, "say hello", dir.path()))
             .await
             .expect("spawns");
         world.shutdown().await;
@@ -1057,9 +1091,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .workdir(dir.path())
             .build()
             .unwrap();
-        let graph = LoadedBlueprint::from_manifest(TWO_STAGE, dir.path().to_path_buf())
-            .unwrap()
-            .graph;
+        let graph = blueprint(TWO_STAGE, dir.path()).graph;
         let run_id = world
             .spawn(SpawnRequest::new(SpawnSource::Raw(Box::new(graph))))
             .await
@@ -1229,7 +1261,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
             .state_dir(state.path())
             .inference_pool(InferencePoolConfig::new())
             .tool_concurrency(2)
-            .blueprint(LoadedBlueprint::from_manifest(TWO_STAGE, dir.path().to_path_buf()).unwrap())
+            .blueprint(blueprint(TWO_STAGE, dir.path()))
             .workdir(dir.path())
             .build()
             .expect("all options compose");
@@ -1259,23 +1291,29 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
 
     /// The single-stage blueprint the hint tests drive, with a shell tool so the
     /// shell hint's tool guard is satisfied.
-    const SHELL_STAGE: &str = r#"[agent]
-name = "shelly"
-version = "0.0.0"
+    const SHELL_STAGE: &str = r#"title = "shelly"
 description = "One stage that can run commands."
-entry_stage = "work"
+entry = "work"
 
-[stages.work]
-mode = "autonomous"
-model = { provider = "mock", model = "m" }
+[[stages]]
+name = "work"
 description = "Do the work"
-available_tools = ["shell"]
-allow_complete = true
 system_prompt = "Work."
+model = { models = [{ provider = "mock", model = "m" }] }
+tools = ["shell"]
 
-[context.regions]
-instructions = { kind = "pinned", max_tokens = 2000 }
-conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
+[layout]
+total_budget_tokens = 22000
+
+[[layout.regions]]
+name = "instructions"
+kind = "pinned"
+budget = 2000
+
+[[layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 40 }
+budget = 20000
 "#;
 
     /// Run `SHELL_STAGE` once against a [`Recorder`] and hand back the system
@@ -1395,9 +1433,7 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
     async fn a_missing_required_input_fails_the_spawn() {
         let dir = tempfile::tempdir().unwrap();
         let world = mock_world(vec![]);
-        let demanding = format!(
-            "{TWO_STAGE}\nspec = {{ kind = \"pinned\", max_tokens = 2000, seed = \"input\", required = true }}\n"
-        );
+        let demanding = with_input(TWO_STAGE, "spec", 2000, true);
         let issues = world
             .spawn(request(&world, &demanding, "t", dir.path()))
             .await

@@ -32,7 +32,7 @@ pub(super) fn parse_compaction_config(table: &toml::value::Table) -> Result<Comp
 /// first out-of-workdir read.
 pub(super) fn parse_read_paths(
     table: &toml::value::Table,
-) -> Result<crate::spec::blueprint::ReadPathsConfig> {
+) -> Result<leviath_runtime::spec::blueprint::ReadPathsConfig> {
     let mut allow = Vec::new();
     if let Some(entries) = array_of(table, "allow") {
         for entry in entries {
@@ -45,7 +45,7 @@ pub(super) fn parse_read_paths(
             allow.push(raw.to_string());
         }
     }
-    Ok(crate::spec::blueprint::ReadPathsConfig { allow })
+    Ok(leviath_runtime::spec::blueprint::ReadPathsConfig { allow })
 }
 
 /// Parse `[safe_commands]`: what this agent would like to run unprompted.
@@ -55,7 +55,7 @@ pub(super) fn parse_read_paths(
 /// reads as a grant that was made.
 pub(super) fn parse_safe_commands(
     table: &toml::value::Table,
-) -> Result<crate::spec::blueprint::SafeCommandsConfig> {
+) -> Result<leviath_runtime::spec::blueprint::SafeCommandsConfig> {
     let strings = |field: &str| -> Result<Vec<String>> {
         let Some(entries) = table.get(field).and_then(|v| v.as_array()) else {
             return Ok(Vec::new());
@@ -71,7 +71,7 @@ pub(super) fn parse_safe_commands(
             })
             .collect()
     };
-    Ok(crate::spec::blueprint::SafeCommandsConfig {
+    Ok(leviath_runtime::spec::blueprint::SafeCommandsConfig {
         tools: strings("tools")?,
         shell: strings("shell")?,
     })
@@ -108,8 +108,8 @@ pub(super) fn tool_permission_metadata(
 /// region is the default because that is what the shipped layouts assume.
 pub(super) fn parse_file_tracking(
     table: &toml::value::Table,
-) -> Result<crate::spec::FileTrackingConfig> {
-    Ok(crate::spec::FileTrackingConfig {
+) -> Result<leviath_runtime::spec::FileTrackingConfig> {
+    Ok(leviath_runtime::spec::FileTrackingConfig {
         region: str_of(table, "region").unwrap_or("files").to_string(),
         track_reads: bool_of(table, "track_reads").unwrap_or(true),
         track_writes: bool_of(table, "track_writes").unwrap_or(true),
@@ -121,9 +121,9 @@ pub(super) fn parse_file_tracking(
 /// global config's value survives; there are no local defaults to apply here.
 pub(super) fn parse_repetition_detection(
     table: &toml::value::Table,
-) -> Result<crate::spec::RepetitionDetectionConfig> {
+) -> Result<leviath_runtime::spec::RepetitionDetectionConfig> {
     let where_ = "[repetition_detection]";
-    Ok(crate::spec::RepetitionDetectionConfig {
+    Ok(leviath_runtime::spec::RepetitionDetectionConfig {
         max_repeat_calls: count_of(table, where_, "max_repeat_calls")?,
         max_readonly_streak: count_of(table, where_, "max_readonly_streak")?,
         enabled: bool_of(table, "enabled"),
@@ -273,12 +273,12 @@ pub(super) const OUTPUT_KEYS: &[&str] = &[
 /// error so a broken declaration fails `lev validate` rather than at spawn.
 pub(super) fn parse_dependencies(
     items: &[toml::Value],
-) -> Result<Vec<crate::spec::blueprint::Dependency>> {
+) -> Result<Vec<leviath_runtime::spec::blueprint::Dependency>> {
     items.iter().map(parse_dependency).collect()
 }
 
-fn parse_dependency(item: &toml::Value) -> Result<crate::spec::blueprint::Dependency> {
-    use crate::spec::blueprint::{Dependency, DependencyKind};
+fn parse_dependency(item: &toml::Value) -> Result<leviath_runtime::spec::blueprint::Dependency> {
+    use leviath_runtime::spec::blueprint::{Dependency, DependencyKind};
     let table = item
         .as_table()
         .ok_or_else(|| Error::Other("each [[dependencies]] entry must be a table".to_string()))?;
@@ -357,8 +357,8 @@ fn parse_dependency(item: &toml::Value) -> Result<crate::spec::blueprint::Depend
 fn parse_dependency_install(
     dep: &str,
     value: &toml::Value,
-) -> Result<crate::spec::blueprint::DependencyInstall> {
-    use crate::spec::blueprint::{DependencyInstall, McpServerTemplate};
+) -> Result<leviath_runtime::spec::blueprint::DependencyInstall> {
+    use leviath_runtime::spec::blueprint::{DependencyInstall, McpServerTemplate};
     let table = value
         .as_table()
         .ok_or_else(|| Error::Other(format!("dependency '{dep}': install must be a table")))?;

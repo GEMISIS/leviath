@@ -182,7 +182,7 @@ fn parse_tool_override(
     stage_name: &str,
     tool_name: &str,
     value: &toml::Value,
-    routing: &mut crate::spec::blueprint::ToolResultRouting,
+    routing: &mut leviath_runtime::spec::blueprint::ToolResultRouting,
 ) -> Result<()> {
     let where_ = || format!("stage '{stage_name}': tool_routing.overrides.{tool_name}");
 
@@ -338,7 +338,7 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
             routing_table,
             TOOL_ROUTING_KEYS,
         )?;
-        let mut routing = crate::spec::blueprint::ToolResultRouting::default();
+        let mut routing = leviath_runtime::spec::blueprint::ToolResultRouting::default();
 
         if let Some(dr) = str_of(routing_table, "default_region") {
             routing.default_region = dr.to_string();
@@ -445,11 +445,11 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         if !stage
             .available_tools
             .iter()
-            .any(|t| t == crate::spec::blueprint::SUBMIT_OUTPUT_TOOL)
+            .any(|t| t == leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL)
         {
             stage
                 .available_tools
-                .push(crate::spec::blueprint::SUBMIT_OUTPUT_TOOL.to_string());
+                .push(leviath_runtime::spec::blueprint::SUBMIT_OUTPUT_TOOL.to_string());
         }
         // An output stage is normally the last thing a run does, so it
         // may end the run. An author who routes onward can say
@@ -472,11 +472,11 @@ pub(super) fn parse_stage(stage_name: &str, stage_value: &toml::Value) -> Result
         && !stage
             .available_tools
             .iter()
-            .any(|t| t == crate::spec::blueprint::FAN_OUT_TOOL)
+            .any(|t| t == leviath_runtime::spec::blueprint::FAN_OUT_TOOL)
     {
         stage
             .available_tools
-            .push(crate::spec::blueprint::FAN_OUT_TOOL.to_string());
+            .push(leviath_runtime::spec::blueprint::FAN_OUT_TOOL.to_string());
     }
 
     // Parse allow_blocking_tools flag: says this autonomous stage means
@@ -731,9 +731,9 @@ pub(super) fn apply_stage_mode(
                     // it is an error rather than a fallback.
                     let pt_unattended = match str_of(pt, "unattended") {
                         None | Some("auto_approve") => {
-                            crate::spec::blueprint::UnattendedPolicy::AutoApprove
+                            leviath_runtime::spec::blueprint::UnattendedPolicy::AutoApprove
                         }
-                        Some("ask") => crate::spec::blueprint::UnattendedPolicy::Ask,
+                        Some("ask") => leviath_runtime::spec::blueprint::UnattendedPolicy::Ask,
                         Some(other) => {
                             return Err(Error::Other(format!(
                                 "stage '{stage_name}': interaction point '{pt_name}' \
@@ -744,11 +744,13 @@ pub(super) fn apply_stage_mode(
                     };
                     let pt_style = match str_of(pt, "style") {
                         Some("multiple_choice") => {
-                            crate::spec::blueprint::InteractionStyle::MultipleChoice
+                            leviath_runtime::spec::blueprint::InteractionStyle::MultipleChoice
                         }
-                        Some("confirm") => crate::spec::blueprint::InteractionStyle::Confirm,
+                        Some("confirm") => {
+                            leviath_runtime::spec::blueprint::InteractionStyle::Confirm
+                        }
                         Some("free_text") | None => {
-                            crate::spec::blueprint::InteractionStyle::FreeText
+                            leviath_runtime::spec::blueprint::InteractionStyle::FreeText
                         }
                         // Its neighbour `unattended` has always rejected an
                         // unknown value; this arm quietly turned a mistyped
@@ -809,7 +811,7 @@ pub(super) fn apply_stage_mode(
                     // document: document_region = "plan"
                     let pt_document_region: Option<String> =
                         str_of(pt, "document_region").map(|s| s.to_string());
-                    points.push(crate::spec::blueprint::InteractionPoint {
+                    points.push(leviath_runtime::spec::blueprint::InteractionPoint {
                         name: pt_name,
                         prompt: pt_prompt,
                         required: pt_required,
@@ -833,8 +835,10 @@ pub(super) fn apply_stage_mode(
                     .map(|s| s.to_string())
             };
             let on_worker_failure = match str_of(stage_value, "on_worker_failure") {
-                Some("fail_all") => crate::spec::blueprint::WorkerFailurePolicy::FailAll,
-                Some("continue") | None => crate::spec::blueprint::WorkerFailurePolicy::Continue,
+                Some("fail_all") => leviath_runtime::spec::blueprint::WorkerFailurePolicy::FailAll,
+                Some("continue") | None => {
+                    leviath_runtime::spec::blueprint::WorkerFailurePolicy::Continue
+                }
                 // Refused rather than folded into continue: a misspelled
                 // `fail_all` would let a fan-out swallow every worker failure -
                 // the opposite of what was written, and invisible in a run that
@@ -846,13 +850,13 @@ pub(super) fn apply_stage_mode(
                     )));
                 }
             };
-            let config = crate::spec::blueprint::FanOutConfig {
+            let config = leviath_runtime::spec::blueprint::FanOutConfig {
                 worker_agent: str_field("worker_agent"),
                 worker_stage: str_field("worker_stage"),
                 worker_query: str_field("worker_query"),
                 merge_stage: str_field("merge_stage"),
                 max_workers: fan_out_number(stage_value, stage_name, "max_workers", "unlimited")?
-                    .unwrap_or(crate::spec::blueprint::DEFAULT_MAX_WORKERS),
+                    .unwrap_or(leviath_runtime::spec::blueprint::DEFAULT_MAX_WORKERS),
                 on_worker_failure,
                 split_prompt: str_field("split_prompt").unwrap_or_default(),
                 results_region: str_field("results_region"),
@@ -893,8 +897,8 @@ pub(super) fn apply_stage_mode(
 pub(super) fn parse_stage_hooks(
     stage_name: &str,
     table: &toml::value::Table,
-) -> Result<crate::spec::blueprint::StageHooks> {
-    let mut hooks = crate::spec::blueprint::StageHooks::default();
+) -> Result<leviath_runtime::spec::blueprint::StageHooks> {
+    let mut hooks = leviath_runtime::spec::blueprint::StageHooks::default();
     for (key, value) in table {
         let Some(path) = value.as_str() else {
             return Err(Error::Other(format!(
@@ -1076,8 +1080,8 @@ pub(super) fn parse_transitions(
 pub(super) fn parse_transition_gate(
     where_: &str,
     table: &toml::value::Table,
-) -> Result<crate::spec::blueprint::TransitionGate> {
-    let mut gate = crate::spec::blueprint::TransitionGate::default();
+) -> Result<leviath_runtime::spec::blueprint::TransitionGate> {
+    let mut gate = leviath_runtime::spec::blueprint::TransitionGate::default();
     if let Some(rm) = bool_of(table, "require_modifications") {
         gate.require_modifications = rm;
     }
@@ -1114,7 +1118,7 @@ pub(super) fn parse_transition_gate(
                 "{where_}: require_region_entries needs `at_least` of 1 or more"
             )));
         }
-        gate.require_region_entries = Some(crate::spec::blueprint::RegionCount {
+        gate.require_region_entries = Some(leviath_runtime::spec::blueprint::RegionCount {
             region: region.to_string(),
             at_least,
         });
@@ -1169,8 +1173,8 @@ pub(super) fn parse_context_transform(t: &toml::Value) -> ContextTransform {
 pub(super) fn parse_nudge_config(
     where_: &str,
     table: &toml::value::Table,
-) -> Result<crate::spec::blueprint::NudgeConfig> {
-    let mut nudge = crate::spec::blueprint::NudgeConfig::default();
+) -> Result<leviath_runtime::spec::blueprint::NudgeConfig> {
+    let mut nudge = leviath_runtime::spec::blueprint::NudgeConfig::default();
     if let Some(enabled) = bool_of(table, "enabled") {
         nudge.enabled = Some(enabled);
     }
