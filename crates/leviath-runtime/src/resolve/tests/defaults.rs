@@ -390,3 +390,55 @@ async fn a_seed_sees_the_run_it_seeds() {
     spawn(&raw(g), &env).await.unwrap();
     assert_eq!(*env.seed_sights.lock().unwrap(), ["run-1 raw Off 2"]);
 }
+
+/// A stage's mode grants what the mode cannot work without, whoever wrote the
+/// graph: an output stage hands its answer back with `submit_output`, must
+/// call it, and may end the run when no edge leaves it; a fan-out stage
+/// starts its workers with `fan_out`. A tool list that already names the
+/// tool is left as written.
+#[tokio::test]
+async fn a_stages_mode_grants_the_tool_it_works_through() {
+    use crate::spec::graph::{FanOutDef, StageMode, ToolSelector};
+    use crate::spec::names::{StageName, ToolName};
+    let tool = |name: &str| ToolSelector::Tool(ToolName::new(name).unwrap());
+    let names = |tools: &[ToolSelector]| -> Vec<String> {
+        tools
+            .iter()
+            .map(|t| match t {
+                ToolSelector::Tool(n) => n.to_string(),
+                ToolSelector::Group(g) => format!("{g:?}"),
+            })
+            .collect()
+    };
+
+    let mut g = graph();
+    g.stages[1].mode = StageMode::Output;
+    let spec = spawn(&raw(g.clone()), &Fake::default()).await.unwrap().spec;
+    let build = &spec.graph.stages[1];
+    assert_eq!(names(&build.tools), ["submit_output"]);
+    assert!(build.require_output);
+    assert!(
+        build.allow_complete,
+        "nothing leaves it, so it may end the run"
+    );
+
+    // Named already: not added twice. An edge leaving it: the author routes
+    // onward, and the stage does not get to end the run on its own.
+    g.stages[1].tools = vec![tool("read_file"), tool("submit_output")];
+    g.edges
+        .push(crate::spec::graph::tests::edge("back", "build", "plan"));
+    let spec = spawn(&raw(g.clone()), &Fake::default()).await.unwrap().spec;
+    let build = &spec.graph.stages[1];
+    assert_eq!(names(&build.tools), ["read_file", "submit_output"]);
+    assert!(!build.allow_complete);
+
+    let mut g = graph();
+    g.stages[1].allow_as_worker = true;
+    g.stages[0].mode = StageMode::FanOut(FanOutDef::same_graph(StageName::new("build").unwrap()));
+    let spec = spawn(&raw(g), &Fake::default()).await.unwrap().spec;
+    assert_eq!(names(&spec.graph.stages[0].tools), ["fan_out"]);
+    assert!(
+        spec.graph.stages[1].tools.is_empty(),
+        "other modes grant nothing"
+    );
+}

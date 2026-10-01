@@ -6,9 +6,45 @@
 //! carries every setting the run will use and nothing at run time goes back to
 //! the machine's config to finish the answer.
 
+use leviath_tools::{FAN_OUT_TOOL, SUBMIT_OUTPUT_TOOL};
+
 use crate::spec::env::{ResolveEnv, SpawnLimits};
-use crate::spec::graph::{NudgeDef, RunGraph};
+use crate::spec::graph::{NudgeDef, RunGraph, StageMode, ToolSelector};
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use crate::spec::names::ToolName;
+
+/// Give each stage what its mode cannot work without, whoever wrote the
+/// graph:
+///
+/// - An output stage hands its answer back with `submit_output`, so it gets
+///   the tool and must call it, and it may end the run when no edge leaves
+///   it.
+/// - A fan-out stage starts its workers with `fan_out`, so it gets that.
+///
+/// A tool list that already names the tool is left as it is.
+pub(super) fn grant_mode_tools(graph: &mut RunGraph) {
+    let leaves: Vec<bool> = graph
+        .stages
+        .iter()
+        .map(|s| graph.edges_from(s.name.as_str()).next().is_some())
+        .collect();
+    for (stage, leaves) in graph.stages.iter_mut().zip(leaves) {
+        let tool = match stage.mode {
+            StageMode::Output => {
+                stage.require_output = true;
+                stage.allow_complete |= !leaves;
+                SUBMIT_OUTPUT_TOOL
+            }
+            StageMode::FanOut(_) => FAN_OUT_TOOL,
+            _ => continue,
+        };
+        let tool = ToolName::new(tool).expect("a stage tool's name is a valid tool name");
+        let named = stage.tools.contains(&ToolSelector::Tool(tool.clone()));
+        if !named {
+            stage.tools.push(ToolSelector::Tool(tool));
+        }
+    }
+}
 
 /// Fill what `graph` leaves open from the operator's settings:
 ///

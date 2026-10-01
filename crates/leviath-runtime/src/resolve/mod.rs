@@ -131,6 +131,7 @@ pub async fn resolve(
 
     let mut graph = src.graph.clone();
     inputs::apply_slots(&mut graph, &checked.values);
+    defaults::grant_mode_tools(&mut graph);
     defaults::fold(&mut graph, &limits);
     let mut code = code::read_all(&graph, request, &src, env, &mut issues).await;
     let mut notes = Vec::new();

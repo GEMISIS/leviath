@@ -235,9 +235,12 @@ pub enum StageMode {
     Interactive,
     /// The model works on its own, stopping at declared points for a person.
     InteractivePoints(Vec<InteractionPointDef>),
-    /// The stage splits its work over worker runs.
+    /// The stage splits its work over worker runs. It is given the
+    /// `fan_out` tool it starts them with, whether or not its `tools` name it.
     FanOut(FanOutDef),
-    /// The stage only writes the run's final output.
+    /// The stage only writes the run's final output. It is given the
+    /// `submit_output` tool and must call it, whether or not its `tools` name
+    /// it, and it may end the run when no edge leaves it.
     Output,
 }
 
