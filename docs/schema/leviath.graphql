@@ -10944,6 +10944,13 @@ type RunFlagsOutput {
 	workspaceLost: Boolean!
 }
 
+"""
+A whole run graph, as the JSON object a blueprint's `[graph]` table reads
+as. Only an object is taken here; what it holds is read by the runtime's
+own graph reader, and every key it does not know comes back as an issue.
+"""
+scalar RunGraphDocument
+
 "One edge of a run's graph, and how often the run took it."
 type RunGraphEdgeOutput {
 	"The stage it leaves."
@@ -13687,7 +13694,7 @@ input SpawnSourceWrite @oneOf {
 	A whole run graph, in the JSON form a blueprint's `[graph]` table
 	reads as. Unknown keys are refused.
 	"""
-	graph: JSON
+	graph: RunGraphDocument
 }
 
 """

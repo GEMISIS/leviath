@@ -117,6 +117,12 @@ fn parts() -> Vec<PartState> {
             name: None,
             deliver: Some(leviath_core::mime::Delivery::Native),
         },
+        PartState {
+            mime_type: "application/pdf".into(),
+            body: PartBody::Inline("%PDF".into()),
+            name: None,
+            deliver: Some(leviath_core::mime::Delivery::StandIn),
+        },
     ]
 }
 

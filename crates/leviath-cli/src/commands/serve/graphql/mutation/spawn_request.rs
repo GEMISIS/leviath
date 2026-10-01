@@ -17,7 +17,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use async_graphql::{InputObject, OneofObject};
+use async_graphql::{
+    InputObject, InputValueError, InputValueResult, OneofObject, Scalar, ScalarType, Value,
+};
 use leviath_runtime::spec::graph::{ArtifactDef, CodeRef, OutputDef, RunGraph};
 use leviath_runtime::spec::inputs::RawInput;
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
@@ -38,6 +40,27 @@ use super::super::scalars::{BigInt, Json};
 use super::super::types::manifest::output::ValidatorErrorPolicy;
 use super::attachments::Delivery;
 
+/// A run graph as JSON. The schema description is on the impl below.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GraphDocument(pub(crate) serde_json::Value);
+
+/// A whole run graph, as the JSON object a blueprint's `[graph]` table reads
+/// as. Only an object is taken here; what it holds is read by the runtime's
+/// own graph reader, and every key it does not know comes back as an issue.
+#[Scalar(name = "RunGraphDocument")]
+impl ScalarType for GraphDocument {
+    fn parse(value: Value) -> InputValueResult<Self> {
+        match value {
+            Value::Object(_) => Ok(Self(value.into_json().expect("an object is JSON"))),
+            other => Err(InputValueError::expected_type(other)),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        Value::from_json(self.0.clone()).expect("a JSON value converts to a GraphQL one")
+    }
+}
+
 /// What a run runs: an installed blueprint, or a whole graph.
 #[derive(Debug, OneofObject)]
 pub(crate) enum SpawnSourceWrite {
@@ -47,7 +70,7 @@ pub(crate) enum SpawnSourceWrite {
     Blueprint(BlueprintRef),
     /// A whole run graph, in the JSON form a blueprint's `[graph]` table
     /// reads as. Unknown keys are refused.
-    Graph(Json),
+    Graph(GraphDocument),
 }
 
 /// One input value, as the request writes it. Exactly one member: the

@@ -799,8 +799,14 @@ async fn a_message_answers_with_the_run_it_reached() {
                 assert_eq!(agent_id, "run-a");
                 assert_eq!(content, "keep going");
                 assert_eq!(target_region.as_deref(), Some("plan"));
-                assert_eq!(parts.len(), 1);
-                assert_eq!(parts[0].name, "notes.txt");
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0].name, "the-notes");
+                assert_eq!(parts[1].name, "notes.txt");
+                assert_eq!(parts[1].mime_type, None, "left to be sniffed");
+                assert_eq!(
+                    parts[0].mime_type.as_ref().map(|t| t.as_str()),
+                    Some("text/plain")
+                );
                 ControlResponse::Ok { ok: true }
             }
             other => panic!("the message is what reaches the daemon: {other:?}"),
@@ -809,7 +815,8 @@ async fn a_message_answers_with_the_run_it_reached() {
         let answer = mutate(
             control,
             r#"mutation { sendMessage(request: { runId: "run-a", text: "keep going",
-                 region: { name: "plan" }, attachments: [{ path: "notes.txt" }] })
+                 region: { name: "plan" }, attachments: [{ path: "notes.txt",
+                 name: "the-notes", mimeType: "text/plain" }, { path: "notes.txt" }] })
                  { run { id status } } }"#,
         )
         .await;

@@ -280,6 +280,15 @@ async fn a_run_file_that_will_not_read_is_a_failure() {
         std::fs::create_dir_all(shut.join(leviath_core::files::RUN_FILE)).expect("a directory");
         let failure = read::spec("shut").await.expect_err("it does not open");
         assert_eq!(failure.code(), "INTERNAL");
+        let state: AppState = state_with_agent_paths(Vec::new());
+        let codes = [
+            read::state(&state, "shut", None).await.err(),
+            read::deltas("shut", None, None).await.err(),
+            read::graph("shut").await.err(),
+        ];
+        for failure in codes {
+            assert_eq!(failure.map(|f| f.code()), Some("INTERNAL"));
+        }
     })
     .await;
 }
@@ -306,6 +315,37 @@ async fn a_step_that_will_not_decode_fails_what_reads_it() {
         for failure in codes {
             assert_eq!(failure.map(|f| f.code()), Some("UNPROCESSABLE"));
         }
+    })
+    .await;
+}
+
+/// A step that will not decode behind a checkpoint that does still leaves the
+/// state readable, and fails the graph, which reads every step.
+#[tokio::test]
+async fn a_bad_step_behind_a_checkpoint_fails_only_what_reads_it() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-runfile-behind", |_base| async move {
+        let runs = crate::runstate::runs_dir();
+        let run_id = walked(&runs);
+        let path = file_of(&runs, &run_id);
+        let mut last = RunFileReader::open(&path)
+            .expect("the run file reads")
+            .latest_state()
+            .expect("a state");
+        last.seq = 4;
+        let mut bytes = std::fs::read(&path).expect("the file");
+        bytes.extend(encode(FrameKind::Delta, &(4u64,)).expect("a frame encodes"));
+        bytes.extend(encode(FrameKind::State, &last).expect("a frame encodes"));
+        std::fs::write(&path, bytes).expect("the file is rewritten");
+        let state: AppState = state_with_agent_paths(Vec::new());
+
+        let now = read::state(&state, &run_id, None)
+            .await
+            .expect("the state reads");
+        assert_eq!(now.map(|s| s.seq), Some(4));
+        let failure = read::graph(&run_id)
+            .await
+            .expect_err("a step does not decode");
+        assert_eq!(failure.code(), "UNPROCESSABLE");
     })
     .await;
 }

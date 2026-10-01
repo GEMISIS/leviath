@@ -10,9 +10,9 @@ use leviath_runtime::spec::request::SpawnSource;
 
 use super::super::Mutation;
 use super::super::spawn_request::{
-    AttachmentContentWrite, CallbackWrite, CodeRefWrite, DeliveryWrite, InputEntryWrite,
-    InputValueWrite, LaunchWrite, OutputArtifactWrite, OutputShapeWrite, SpawnAttachmentWrite,
-    SpawnRunRequest, SpawnSourceWrite, UnattendedWrite,
+    AttachmentContentWrite, CallbackWrite, CodeRefWrite, DeliveryWrite, GraphDocument,
+    InputEntryWrite, InputValueWrite, LaunchWrite, OutputArtifactWrite, OutputShapeWrite,
+    SpawnAttachmentWrite, SpawnRunRequest, SpawnSourceWrite, UnattendedWrite,
 };
 use super::SpawnIssueCode;
 use crate::commands::serve::graphql::filter::testkit::round_trip;
@@ -240,6 +240,17 @@ async fn a_raw_graph_is_sent_whole_and_a_run_not_yet_written_is_null() {
             assert_eq!(request.source, SpawnSource::Raw(Box::new(sent.clone())));
             assert_eq!(request.launch.unattended, Unattended::Off);
             assert!(request.launch.seed_commands, "seed commands default on");
+            let output = request.output.as_ref().expect("an output shape");
+            assert_eq!(
+                output.validator,
+                Some(leviath_runtime::spec::graph::CodeRef::File(
+                    "check.rhai".into()
+                ))
+            );
+            assert_eq!(
+                output.on_validator_error,
+                Some(leviath_core::output::OnValidatorError::Reject)
+            );
             ControlResponse::Spawned {
                 run_id: "raw-1".to_string(),
             }
@@ -250,6 +261,10 @@ async fn a_raw_graph_is_sent_whole_and_a_run_not_yet_written_is_null() {
             serde_json::json!({ "request": {
                 "source": { "graph": serde_json::to_value(&graph).expect("a graph is JSON") },
                 "launch": { "unattended": { "all": false } },
+                "output": {
+                    "validator": { "file": "check.rhai" },
+                    "onValidatorError": "REJECT",
+                },
             } }),
         )
         .await;
@@ -572,6 +587,17 @@ async fn a_dry_run_that_would_be_refused_says_why() {
         local["data"]["validateSpawn"]["issues"][0]["path"], "source.blueprint.name",
         "{local}"
     );
+
+    let pinned = run(
+        state(no_daemon_client(), ServeLimits::default()),
+        VALIDATE,
+        serde_json::json!({ "request": { "source": {
+            "blueprint": { "name": "coder", "digest": "not-hex" } } } }),
+    )
+    .await;
+    let issues = &pinned["data"]["validateSpawn"]["issues"];
+    assert_eq!(issues[0]["path"], "source.blueprint.digest", "{pinned}");
+    assert_eq!(issues.as_array().map(Vec::len), Some(1));
 }
 
 /// Every issue code the runtime has is one this schema can say.
@@ -600,8 +626,6 @@ fn every_issue_code_crosses_over() {
 /// the wrong type.
 #[test]
 fn every_spawn_write_shape_round_trips() {
-    use async_graphql::InputType;
-
     let text = |s: &str| InputValueWrite::Text(s.to_string());
     for value in [
         text("a"),
@@ -624,8 +648,9 @@ fn every_spawn_write_shape_round_trips() {
         name: "coder".to_string(),
         digest: Some("ab".repeat(32)),
     }));
-    let graph = SpawnSourceWrite::Graph(Json(serde_json::json!({ "stages": [] })));
-    assert!(SpawnSourceWrite::parse(Some(graph.to_value())).is_ok());
+    round_trip(&SpawnSourceWrite::Graph(GraphDocument(
+        serde_json::json!({ "stages": [] }),
+    )));
     for content in [
         AttachmentContentWrite::Path("a.png".to_string()),
         AttachmentContentWrite::Base64("aGk=".to_string()),
