@@ -47,6 +47,7 @@ leviath-telemetry = { workspace = true }
 leviath-providers = { workspace = true }
 leviath-mcp = { workspace = true }
 leviath-package = { workspace = true }
+leviath-blueprint = { workspace = true }
 leviath-scripting = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

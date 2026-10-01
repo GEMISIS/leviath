@@ -330,6 +330,7 @@ jobs:
           - leviath-alloc
           - leviath-agent-client
           - leviath-runtime
+          - leviath-blueprint
           - leviath-providers
           - leviath-mcp
           - leviath-scripting

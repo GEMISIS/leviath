@@ -80,6 +80,10 @@ pub use leviath_scripting as scripting;
 /// OpenTelemetry export for the telemetry event stream (`leviath-telemetry`).
 pub use leviath_telemetry as telemetry;
 
+/// Blueprints: the `agent.toml` format, finding an installed one, and
+/// converting an `agent.leviath` (`leviath-blueprint`).
+pub use leviath_blueprint as blueprint;
+
 /// Agent packaging, sharing, and installation (`leviath-package`).
 pub use leviath_package as package;
 

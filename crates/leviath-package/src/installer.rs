@@ -93,19 +93,46 @@ pub struct AgentInstaller {
     install_dir: PathBuf,
 }
 
-/// What an `agent.leviath` says about itself.
+/// What a blueprint says about itself.
 struct ManifestMeta {
-    /// The `[agent] name`, when the manifest declares a non-empty one.
+    /// The declared name, when the blueprint declares a non-empty one.
     name: Option<String>,
     version: String,
     description: String,
 }
 
+/// Whether `dir` holds a blueprint: an `agent.toml`, or an `agent.leviath`.
+fn has_blueprint(dir: &Path) -> bool {
+    dir.join(leviath_blueprint::FILE_NAME).exists()
+        || dir.join(leviath_core::files::MANIFEST_FILENAME).exists()
+}
+
+/// The name, version and description the blueprint in `dir` declares. An
+/// `agent.toml` is read for its `[blueprint]` table; without one, the
+/// `agent.leviath` is read for its `[agent]` table. A file that is missing,
+/// unreadable or not a blueprint gives the defaults the catalogue shows: no
+/// name, `0.0.0` and an empty description. Every listing reads a blueprint
+/// through here, so they cannot disagree about what a broken one means.
+fn blueprint_meta(dir: &Path) -> ManifestMeta {
+    match fs::read_to_string(dir.join(leviath_blueprint::FILE_NAME)) {
+        Ok(text) => match leviath_blueprint::BlueprintMeta::read(&text) {
+            Ok(meta) => ManifestMeta {
+                name: Some(meta.name.to_string()),
+                version: meta.version,
+                description: meta.description.unwrap_or_default(),
+            },
+            Err(_) => ManifestMeta {
+                name: None,
+                version: "0.0.0".to_string(),
+                description: String::new(),
+            },
+        },
+        Err(_) => manifest_meta(&dir.join(leviath_core::files::MANIFEST_FILENAME)),
+    }
+}
+
 /// The name, version and description an `agent.leviath` declares, with the
-/// defaults the catalogue shows when the file is missing, unreadable or not
-/// TOML: no name, `0.0.0` and an empty description. Every listing reads the
-/// manifest through here, so they cannot disagree about what a broken one
-/// means.
+/// same defaults as [`blueprint_meta`].
 fn manifest_meta(manifest_path: &Path) -> ManifestMeta {
     let content = fs::read_to_string(manifest_path).unwrap_or_default();
     let parsed: toml::Value =
@@ -152,8 +179,9 @@ impl AgentInstaller {
 
     /// Install an agent from a `.leviath-bundle` file.
     ///
-    /// The agent is installed under the name its `agent.leviath` declares,
-    /// which is the name `lev run`, `lev remove` and the API look it up by.
+    /// The agent is installed under the name its blueprint declares (the
+    /// `[blueprint] name` of an `agent.toml`, or the `[agent] name` of an
+    /// `agent.leviath`), which is the name `lev run`, `lev remove` and the API look it up by.
     /// The file's stem is only the fallback for a bundle whose manifest
     /// declares no name: `lev pack` writes `<name>-<version>.leviath-bundle`,
     /// so naming the install after the file put `coder-1.2.0` on disk for a
@@ -176,8 +204,8 @@ impl AgentInstaller {
 
     /// Install an agent from in-memory bytes.
     ///
-    /// The install directory is named by the bundle's own `agent.leviath`;
-    /// `fallback_name` is used only when that manifest declares no name.
+    /// The install directory is named by the bundle's own blueprint;
+    /// `fallback_name` is used only when it declares no name.
     /// Whichever wins becomes a directory under the install dir, so it must be
     /// a single safe path component: `Path::join` does not normalize, and an
     /// absolute name replaces the base entirely, so a manifest (or a caller)
@@ -312,7 +340,7 @@ impl AgentInstaller {
         // Every early return from here on goes through the cleanup below, so a
         // refused bundle leaves nothing behind.
         let installed = Self::unpack_into(&staging, data, classify).and_then(|()| {
-            let meta = manifest_meta(&staging.join(leviath_core::files::MANIFEST_FILENAME));
+            let meta = blueprint_meta(&staging);
             let name = meta.name.unwrap_or_else(|| fallback_name.to_string());
             if !leviath_core::is_safe_path_component(&name) {
                 anyhow::bail!(
@@ -376,24 +404,22 @@ impl AgentInstaller {
             let entry = entry.expect("read_dir entry should not fail");
             let path = entry.path();
 
-            if path.is_dir() {
-                let manifest_path = path.join(leviath_core::files::MANIFEST_FILENAME);
-                if manifest_path.exists() {
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
+            // A plain file holds no blueprint, so this also skips files.
+            if has_blueprint(&path) {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
 
-                    let meta = manifest_meta(&manifest_path);
+                let meta = blueprint_meta(&path);
 
-                    agents.push(InstalledAgent {
-                        name,
-                        version: meta.version,
-                        path,
-                        description: meta.description,
-                    });
-                }
+                agents.push(InstalledAgent {
+                    name,
+                    version: meta.version,
+                    path,
+                    description: meta.description,
+                });
             }
         }
 
@@ -417,12 +443,11 @@ impl AgentInstaller {
             return None;
         }
 
-        let manifest_path = agent_dir.join(leviath_core::files::MANIFEST_FILENAME);
-        if !manifest_path.exists() {
+        if !has_blueprint(&agent_dir) {
             return None;
         }
 
-        let meta = manifest_meta(&manifest_path);
+        let meta = blueprint_meta(&agent_dir);
 
         Some(InstalledAgent {
             name: name.to_string(),
@@ -461,20 +486,68 @@ description = "{}"
     /// A bundle carrying exactly this `agent.leviath`, for manifests that
     /// declare no name, or a name that is not a directory name.
     fn make_bundle_with_manifest(manifest: &str) -> Vec<u8> {
+        make_bundle_of(&[("agent.leviath", manifest)])
+    }
+
+    /// A bundle holding exactly these files.
+    fn make_bundle_of(files: &[(&str, &str)]) -> Vec<u8> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
         {
             let mut archive = tar::Builder::new(&mut encoder);
-            let manifest_bytes = manifest.as_bytes();
-            let mut header = tar::Header::new_gnu();
-            header.set_size(manifest_bytes.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            archive
-                .append_data(&mut header, "agent.leviath", manifest_bytes)
-                .unwrap();
+            for (name, text) in files {
+                let bytes = text.as_bytes();
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive.append_data(&mut header, name, bytes).unwrap();
+            }
             archive.finish().unwrap();
         }
         encoder.finish().unwrap()
+    }
+
+    const AGENT_TOML: &str = "[blueprint]\nname = \"planner\"\nversion = \"2.0.0\"\n\
+                              description = \"Plans\"\n\n[graph]\nstages = []\n";
+
+    /// A bundle with an `agent.toml` is named by its `[blueprint] name`, and
+    /// that file wins over an `agent.leviath` beside it.
+    #[test]
+    fn an_agent_toml_names_the_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let bundle = make_bundle_of(&[
+            ("agent.toml", AGENT_TOML),
+            ("agent.leviath", "[agent]\nname = \"other\"\n"),
+        ]);
+        let installed = installer.install_from_bytes("fallback", &bundle).unwrap();
+        assert_eq!(installed.name, "planner");
+        assert_eq!(installed.version, "2.0.0");
+        assert_eq!(installed.description, "Plans");
+
+        let only_toml = make_bundle_of(&[("agent.toml", AGENT_TOML)]);
+        let other = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(other.path().to_path_buf());
+        installer
+            .install_from_bytes("fallback", &only_toml)
+            .unwrap();
+        assert_eq!(installer.get_installed("planner").unwrap().version, "2.0.0");
+        let listed = installer.list_installed().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "planner");
+    }
+
+    /// An `agent.toml` whose `[blueprint]` table does not read gives no name,
+    /// so the fallback names the install, with the catalogue's defaults.
+    #[test]
+    fn a_broken_agent_toml_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let bundle = make_bundle_of(&[("agent.toml", "[blueprint]\nname = \"x\"\n")]);
+        let installed = installer.install_from_bytes("fallback", &bundle).unwrap();
+        assert_eq!(installed.name, "fallback");
+        assert_eq!(installed.version, "0.0.0");
+        assert_eq!(installed.description, "");
     }
 
     /// `install_from_bytes` is `pub` and joins the fallback name onto the

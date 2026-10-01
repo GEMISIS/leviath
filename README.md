@@ -319,6 +319,7 @@ graph TD
     CORE["leviath-core"]
     MCP["leviath-mcp"]
     ACP["leviath-agent-client"]
+    BP["leviath-blueprint"]
     PKG["leviath-package"]
     SCRIPT["leviath-scripting"]
     TELEM["leviath-telemetry"]
@@ -328,6 +329,7 @@ graph TD
     CLI --> RT
     CLI --> MCP
     CLI --> ACP
+    CLI --> BP
     CLI --> PKG
     CLI --> NET
     LIB --> RT
@@ -345,7 +347,8 @@ graph TD
     MCP --> CORE
     MCP --> SYS
     ACP --> CORE
-    PKG --> CORE
+    PKG --> BP
+    BP --> RT
     SCRIPT --> CORE
     TELEM --> CORE
 ```
@@ -360,6 +363,7 @@ graph TD
 | `leviath-providers` | Anthropic, OpenAI, Codex, Google, xAI, Grok, Meta, OpenRouter, Bedrock, Meshy, Ollama |
 | `leviath-mcp` | MCP tool servers over stdio and HTTP/SSE |
 | `leviath-agent-client` | Agent Client Protocol wire types (JSON-RPC over stdio) |
+| `leviath-blueprint` | The `agent.toml` blueprint format, migration and lint findings |
 | `leviath-package` | Agent bundling and install |
 | `leviath-scripting` | Rhai sandbox |
 | `leviath-telemetry` | OpenTelemetry export |
