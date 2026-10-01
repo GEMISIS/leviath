@@ -199,6 +199,10 @@ pub(crate) struct SpawnAgentArgs {
     /// A depth limit for the child's own children.
     #[serde(default)]
     pub(crate) max_child_depth: Option<i32>,
+    /// The tools the child may call without asking. Left out, the child
+    /// asked for the caller's own list.
+    #[serde(default)]
+    pub(crate) allow: Option<Vec<String>>,
     /// The output shape the child was asked for, over its graph's own.
     #[serde(default)]
     pub(crate) output: Option<AskedOutput>,

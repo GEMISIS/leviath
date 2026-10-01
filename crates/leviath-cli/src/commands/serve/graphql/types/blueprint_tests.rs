@@ -355,7 +355,7 @@ fn every_region_kind_maps_to_one_value() {
             Kind::CompactHistory { source: None },
             RegionKind::CompactHistory,
         ),
-        (Kind::Keyed { max_entries: None }, RegionKind::Hashmap),
+        (Kind::Keyed { max_entries: None }, RegionKind::Keyed),
         (Kind::Checklist, RegionKind::Checklist),
         (
             Kind::Custom {
@@ -404,7 +404,7 @@ fn a_snapshots_region_kind_reads_back_under_either_spelling() {
         ("compacting", RegionKind::Compacting),
         ("compact_history", RegionKind::CompactHistory),
         ("history", RegionKind::CompactHistory),
-        ("hashmap", RegionKind::Hashmap),
+        ("keyed", RegionKind::Keyed),
         ("checklist", RegionKind::Checklist),
         ("custom", RegionKind::Custom),
     ];

@@ -93,13 +93,12 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
     })
 }
 
-/// The edge the run last took.
-///
-/// The pipeline does not keep the edge on the entity: `resolve_transition`
-/// moves the cursor without recording which edge it followed. This is where
-/// the component that records it is read once the pipeline has one.
-fn last_transition_of(_world: &World, _entity: Entity) -> Option<TransitionRecord> {
-    None
+/// The edge the run last took, as every system that moves a run between
+/// stages records it.
+fn last_transition_of(world: &World, entity: Entity) -> Option<TransitionRecord> {
+    world
+        .get::<crate::pipeline::LastTransition>(entity)
+        .map(|t| t.0.clone())
 }
 
 fn status_of(status: &AgentStatus) -> RunStatus {

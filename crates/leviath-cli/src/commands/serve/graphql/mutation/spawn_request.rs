@@ -585,10 +585,12 @@ fn absolute(workdir: Option<String>) -> PathBuf {
 }
 
 impl SpawnRunRequest {
-    /// The runtime's request, or every issue with this one. This server's
-    /// own refusals (the workdir root, unattended runs, the callback policy)
-    /// are the service layer's, made on the request this answers with.
-    pub(crate) fn read(self, policy: &Policy) -> Result<SpawnRequest, SpawnIssues> {
+    /// The runtime's request with every value that did not read left out,
+    /// beside the issues with those values; or only the issues, when the
+    /// request names no source to check the rest against. This server's own
+    /// refusals (the workdir root, unattended runs, the callback policy) are
+    /// the service layer's, made on the request this answers with.
+    pub(crate) fn read(self, policy: &Policy) -> Result<(SpawnRequest, SpawnIssues), SpawnIssues> {
         let mut issues = SpawnIssues::new();
         let workdir = absolute(self.workdir);
         let source = source(self.source, &mut issues);
@@ -633,7 +635,7 @@ impl SpawnRunRequest {
         let Some(source) = source else {
             return Err(issues);
         };
-        issues.into_result(SpawnRequest {
+        let request = SpawnRequest {
             source,
             inputs,
             attachments,
@@ -642,6 +644,7 @@ impl SpawnRunRequest {
             workdir: Some(workdir),
             launch,
             delivery,
-        })
+        };
+        Ok((request, issues))
     }
 }

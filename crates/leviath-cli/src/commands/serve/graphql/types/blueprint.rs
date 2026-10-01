@@ -144,8 +144,7 @@ pub(crate) struct ToolUseGuidance {
 
 /// What a region does when it fills.
 ///
-/// One value per kind the daemon recognises. A blueprint writes the
-/// key-value kind as `keyed`, which is `HASHMAP` here.
+/// One value per kind the daemon recognises, named as a blueprint names it.
 #[mirror]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub(crate) enum RegionKind {
@@ -162,7 +161,7 @@ pub(crate) enum RegionKind {
     /// Keeps compacted summaries of its own past.
     CompactHistory,
     /// Key-value entries with admission control.
-    Hashmap,
+    Keyed,
     /// Open and done items a gate can require empty.
     Checklist,
     /// Behaviour defined by a Rhai script under `context_hooks/`.
@@ -184,7 +183,7 @@ impl RegionKind {
             "sliding_window" | "sliding" => Self::SlidingWindow,
             "compacting" => Self::Compacting,
             "compact_history" | "history" => Self::CompactHistory,
-            "hashmap" => Self::Hashmap,
+            "keyed" => Self::Keyed,
             "checklist" => Self::Checklist,
             "custom" => Self::Custom,
             _ => return None,
@@ -201,7 +200,7 @@ impl From<&Kind> for RegionKind {
             Kind::SlidingWindow { .. } => Self::SlidingWindow,
             Kind::Compacting { .. } => Self::Compacting,
             Kind::CompactHistory { .. } => Self::CompactHistory,
-            Kind::Keyed { .. } => Self::Hashmap,
+            Kind::Keyed { .. } => Self::Keyed,
             Kind::Checklist => Self::Checklist,
             Kind::Custom { .. } => Self::Custom,
         }

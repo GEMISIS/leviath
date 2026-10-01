@@ -70,6 +70,11 @@ fn spawn_args_schema() -> Value {
                 "maximum": 255,
                 "description": "How deep the sub-agent's own tree of children may grow. Never deeper than yours allows."
             },
+            "allow": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Tools the sub-agent may call without asking. Left out, it is the list this run was given; either way, never a tool this run was not given."
+            },
             "output": {
                 "type": "object",
                 "description": "The shape to ask the sub-agent's final answer in, over its blueprint's. Passed to the sub-agent as an instruction.",

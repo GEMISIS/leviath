@@ -53,6 +53,9 @@ pub(crate) struct SubAgentHandle {
     /// The parent run's yolo profile, inherited with `unattended`: a child of
     /// a `careful` run is a `careful` run, not a bare `--yolo` one.
     pub yolo_profile: Option<String>,
+    /// The tools the parent run may call without asking: what a child asks
+    /// for when its call names none, narrowed by the host as always.
+    pub allow: Vec<String>,
     /// The parent run's `--model` override, inherited by children.
     ///
     /// The docs call the override absolute - it "overrides everything" - and a

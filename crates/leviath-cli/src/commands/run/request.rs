@@ -229,12 +229,25 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
             .into_iter()
             .map(crate::daemon::requests::attachment),
     );
+    // What the run reports about itself is what the request asks for, which a
+    // `--request` file may have set and the flags only adjusted.
+    let request = source.request;
+    let workdir = request
+        .workdir
+        .as_deref()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (yolo, yolo_profile) = match &request.launch.unattended {
+        Unattended::Off => (false, None),
+        Unattended::All => (true, None),
+        Unattended::Profile(name) => (true, Some(name.to_string())),
+    };
     Ok(LocalRun {
-        request: source.request,
+        request,
         manifest: source.manifest,
-        workdir: line.workdir.to_string(),
-        yolo: line.yolo,
-        yolo_profile: line.yolo_profile,
+        workdir,
+        yolo,
+        yolo_profile,
         output: line.output_request,
     })
 }

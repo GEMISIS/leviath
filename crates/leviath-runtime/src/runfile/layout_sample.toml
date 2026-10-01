@@ -93,6 +93,7 @@ provider = "ollama"
 model = "qwen3.5:9b"
 
 [stages.model.params.extra]
+thinking = { type = "enabled", budget_tokens = 2000 }
 
 [stages.tool_permissions]
 

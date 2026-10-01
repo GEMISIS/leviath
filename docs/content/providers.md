@@ -723,13 +723,19 @@ themselves, and Bedrock refuses a budget on them. A stage that wants a plain ans
 sets `thinking = { type = "disabled" }`.
 
 ```toml
-[stages.plan.model]
-models = ["bedrock/us.anthropic.claude-sonnet-5"]
-parameters = { thinking = { type = "adaptive" } }
+[[graph.stages]]
+name = "plan"
 
-[stages.review.model]
+[graph.stages.model]
+models = ["bedrock/us.anthropic.claude-sonnet-5"]
+params = { extra = { thinking = { type = "adaptive" } } }
+
+[[graph.stages]]
+name = "review"
+
+[graph.stages.model]
 models = ["bedrock/us.anthropic.claude-sonnet-4-6"]
-parameters = { thinking = { type = "enabled", budget_tokens = 4096 } }
+params = { extra = { thinking = { type = "enabled", budget_tokens = 4096 } } }
 ```
 
 **Exact token counts.** Bedrock's CountTokens is called before a request large enough to be worth

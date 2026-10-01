@@ -93,7 +93,7 @@ pub struct RunArgs {
     /// It also waives the taint gate. An attended run asks before an outbound
     /// tool sends data more sensitive than its clearance, and `submit_output`
     /// counts: `lev serve` hands the answer to whoever reads
-    /// `GET /api/agents/{id}/result`. Unattended there is nobody to ask, so the
+    /// `GET /api/runs/{id}/result`. Unattended there is nobody to ask, so the
     /// call goes through and the override is recorded in the run's
     /// `stages/<n>/taint_audit.json` as `YoloAutoApprove`. Think twice before
     /// combining `--yolo` with an agent whose `[read_paths]` reach private

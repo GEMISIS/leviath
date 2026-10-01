@@ -93,6 +93,23 @@ fn a_bare_run_reads_as_ready_with_every_default() {
     assert_eq!(s.last_transition, None);
 }
 
+/// The edge a run last took is read from the component every move sets, so
+/// the persisted state records it.
+#[test]
+fn the_last_move_is_read_from_the_run() {
+    let mut world = World::new();
+    let e = spawn(&mut world, AgentStatus::Active);
+    let moved = TransitionRecord {
+        from: StageName::new("plan").unwrap(),
+        to: StageName::new("build").unwrap(),
+        edge: Some(EdgeName::new("go").unwrap()),
+        reason: super::super::TransitionReason::Condition,
+        visit: "v2".to_string(),
+    };
+    world.entity_mut(e).insert(p::LastTransition(moved.clone()));
+    assert_eq!(inspect(&world, e).unwrap().last_transition, Some(moved));
+}
+
 #[test]
 fn every_status_has_its_word_and_the_finished_ones_are_done() {
     let cases = [

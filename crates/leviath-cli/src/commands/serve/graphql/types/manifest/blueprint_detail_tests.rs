@@ -208,7 +208,7 @@ async fn a_region_carries_its_budget_and_policies() {
         .iter()
         .find(|region| region["name"] == "facts")
         .expect("the facts region");
-    assert_eq!(facts["kind"], "HASHMAP");
+    assert_eq!(facts["kind"], "KEYED");
     assert_eq!(facts["maxEntries"], 50);
 }
 

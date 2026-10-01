@@ -232,8 +232,8 @@ pub(crate) fn check_items(decls: &[InputDecl], items: &[WorkItem]) -> Result<(),
 /// The request and caller that start one worker of `parent`'s fan-out.
 ///
 /// `source` is what the worker runs, already resolved from the fan-out's
-/// [`WorkerSource`]. The worker inherits how unattended its parent is, runs
-/// no spawn-time shell seeds (its parent already scoped the work, so every
+/// [`WorkerSource`]. The worker inherits how unattended its parent is and the
+/// tools it may call without asking, runs no spawn-time shell seeds (its parent already scoped the work, so every
 /// worker re-running them is waste), and gets the parent's requested model
 /// and output shape.
 pub(crate) fn worker_request(
@@ -250,6 +250,7 @@ pub(crate) fn worker_request(
         workdir: Some(parent.placement.workdir.clone()),
         launch: LaunchRequest {
             unattended: parent.launch.unattended.clone(),
+            allow: parent.launch.allow.clone(),
             seed_commands: false,
             ..LaunchRequest::default()
         },
@@ -499,12 +500,13 @@ mod tests {
         assert_eq!(worker_cap(&stage), Some(3));
     }
 
-    /// A worker inherits its parent's unattended setting, model and output
-    /// request, runs no shell seeds, and names the stage it enters when it
-    /// runs the parent's own graph.
+    /// A worker inherits its parent's unattended setting, allowed tools,
+    /// model and output request, runs no shell seeds, and names the stage it
+    /// enters when it runs the parent's own graph.
     #[test]
     fn a_worker_request_carries_what_its_parent_decided() {
-        let parent = crate::spec::run_spec::tests::spec();
+        let mut parent = crate::spec::run_spec::tests::spec();
+        parent.launch.allow = vec![crate::spec::names::ToolName::new("shell").unwrap()];
         let work = item("a", &[("topic", RawInput::Text("t".into()))]);
         let (req, caller) = worker_request(
             &parent,
@@ -517,6 +519,7 @@ mod tests {
         assert_eq!(req.delivery.metadata[WORK_ITEM_LABEL], "a");
         assert_eq!(req.model, parent.requested_model);
         assert_eq!(req.launch.unattended, parent.launch.unattended);
+        assert_eq!(req.launch.allow, parent.launch.allow);
         assert!(!req.launch.seed_commands);
         assert_eq!(
             req.workdir.as_deref(),

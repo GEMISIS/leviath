@@ -34,6 +34,21 @@ pub(super) fn decide(
             let mut policy =
                 LaunchPolicy::top_level(&request.launch, depth, limits.seed_commands_allowed);
             policy.capture_model_input |= limits.defaults.capture_model_input;
+            if let (Some(asked), Some(cap)) = (request.launch.max_depth, graph.max_child_depth)
+                && asked > cap
+            {
+                issues.push(
+                    SpawnIssue::new(
+                        SpecPath::root().field("launch").field("max_depth"),
+                        IssueCode::OutOfRange,
+                        "the graph allows a shallower tree of child runs than this asks for",
+                    )
+                    .expected(format!("at most {cap}, the graph's max_child_depth"))
+                    .got(asked.to_string())
+                    .hint("ask for less, or raise the graph's max_child_depth"),
+                );
+                policy.max_depth = cap;
+            }
             return (policy, placement(None, 0, None));
         }
         Caller::Child {

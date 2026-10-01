@@ -1,14 +1,9 @@
 //! `lev result <run-id>` - print what an agent handed back.
 //!
-//! There was no way to read a finished run's answer from the command line. The
-//! run's logs were on disk and `lev ps` reported its status, but the thing the
-//! agent actually concluded lived nowhere a shell could reach it - the only
-//! surface serving it was `GET /api/agents/{id}/result`, which needed a running
-//! `lev serve`.
-//!
-//! Read-only and daemon-free: everything comes from the run's `meta.json`, so
-//! this answers for a run that finished last week as readily as one that
-//! finished a second ago.
+//! The same answer `GET /api/runs/{id}/result` serves, without a running
+//! `lev serve`. Read-only and daemon-free: everything comes from the run's
+//! own file, so this answers for a run that finished last week as readily as
+//! one that finished a second ago.
 
 use std::path::PathBuf;
 
@@ -50,8 +45,8 @@ pub struct ResultArgs {
 pub(crate) async fn execute(args: ResultArgs) -> anyhow::Result<()> {
     let meta = crate::runstate::read_meta(&args.run_id)
         .map_err(|e| anyhow::anyhow!("no run '{}': {e}", args.run_id))?;
-    // `meta.json` says whether there is an answer and how big; the bytes are in
-    // the sidecar beside it.
+    // The run's record says whether there is an answer; the answer itself is
+    // read from the run file.
     let output = crate::runstate::read_final_output(&args.run_id);
     // A missing answer is a failure exit rather than empty output, so
     // `lev result <id> > answer.txt` in a script does not silently write an

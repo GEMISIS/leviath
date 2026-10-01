@@ -271,7 +271,8 @@ pub(super) fn require_filled(
     for (layout, path) in layouts(graph, at) {
         for (i, region) in layout.regions.iter().enumerate() {
             let filled = contents.regions.contains_key(&region.name)
-                || contents.excused.contains(&region.name);
+                || contents.excused.contains(&region.name)
+                || input_reported(graph, checked, request, &region.name);
             // A required region nothing fills at spawn (no input, no seed) is
             // the run's to fill, and is judged when its stage is left.
             let at_spawn =
@@ -292,16 +293,37 @@ pub(super) fn require_filled(
     }
 }
 
+/// Whether the input check already speaks for `region`: some input failed,
+/// so no checked value reached any region, and an input bound to this one
+/// was given (its own issue says what is wrong with it) or is required (its
+/// own issue says it is missing).
+fn input_reported(
+    graph: &RunGraph,
+    checked: &Checked,
+    request: &SpawnRequest,
+    region: &RegionName,
+) -> bool {
+    !checked.ok
+        && graph
+            .inputs
+            .iter()
+            .filter(|d| bound_to(d, region))
+            .any(|d| d.required || request.inputs.contains_key(d.name.as_str()))
+}
+
+/// Whether `decl` places its value in `region`.
+fn bound_to(decl: &crate::spec::inputs::InputDecl, region: &RegionName) -> bool {
+    decl.binds
+        .iter()
+        .any(|s| matches!(s, InputSlot::Region(b) if b.region == *region))
+}
+
 /// The inputs whose values land in `region`.
 fn inputs_bound_to(graph: &RunGraph, region: &RegionName) -> Vec<String> {
     graph
         .inputs
         .iter()
-        .filter(|d| {
-            d.binds
-                .iter()
-                .any(|s| matches!(s, InputSlot::Region(b) if b.region == *region))
-        })
+        .filter(|d| bound_to(d, region))
         .map(|d| d.name.to_string())
         .collect()
 }

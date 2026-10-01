@@ -402,6 +402,7 @@ struct SeenSpawn {
     max_depth: Option<usize>,
     yolo: bool,
     yolo_profile: Option<String>,
+    allow: Vec<String>,
     parts: Vec<leviath_runtime::spec::request::Attachment>,
     model: Option<String>,
     output: Option<leviath_runtime::spec::graph::OutputDef>,
@@ -421,6 +422,12 @@ impl SeenSpawn {
                 Unattended::Profile(p) => Some(p.to_string()),
                 _ => None,
             },
+            allow: request
+                .launch
+                .allow
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             parts: request.attachments.clone(),
             inputs: request.inputs.clone(),
             model: request.model.as_ref().map(ToString::to_string),
@@ -445,6 +452,7 @@ fn handle_with(sender: UnboundedSender<SubAgentOp>) -> SubAgentHandle {
         no_seed_commands: false,
         unattended: false,
         yolo_profile: None,
+        allow: Vec::new(),
         model_override: None,
         agents_dir: None,
     }
@@ -1453,6 +1461,24 @@ async fn spawn_hands_the_parents_yolo_profile_to_the_child() {
     let seen = seen.lock().unwrap();
     assert!(seen[0].yolo);
     assert_eq!(seen[0].yolo_profile.as_deref(), Some("careful"));
+}
+
+/// A child asks for the tools its parent may call without asking, unless the
+/// call names its own list; the host narrows either against the parent.
+#[tokio::test]
+async fn spawn_asks_for_the_parents_allowed_tools_unless_it_names_its_own() {
+    let bp = temp_blueprint();
+    let (mut h, seen, _t) = fake_host(Ok("child-1".to_string()), vec![], false);
+    h.allow = vec!["write_file".to_string(), "shell".to_string()];
+    let out = handle(&h, &tc("spawn_agent", bp_args(&bp, "go"))).await;
+    assert!(out.contains("Spawned sub-agent"), "{out}");
+    let mut own = bp_args(&bp, "go");
+    own["allow"] = json!(["write_file"]);
+    let out = handle(&h, &tc("spawn_agent", own)).await;
+    assert!(out.contains("Spawned sub-agent"), "{out}");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0].allow, ["write_file", "shell"]);
+    assert_eq!(seen[1].allow, ["write_file"]);
 }
 
 /// `spawn_schema` hands out the request one part at a time: the top level

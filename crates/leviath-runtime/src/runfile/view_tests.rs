@@ -45,3 +45,18 @@ fn deltas_read_as_an_array_of_tables_with_nulls_named() {
     assert_eq!(deltas.len(), 2);
     assert!(text.contains("\"none\""));
 }
+
+/// A change that clears a field (`pending` back to nothing) says so: it is
+/// not an empty table that names no field at all.
+#[test]
+fn a_cleared_field_is_named_as_none() {
+    let delta = crate::state::StateDelta {
+        seq: 3,
+        at: 0,
+        changes: vec![crate::state::Change::Pending(None)],
+        events: vec![],
+    };
+    let table = parse(&deltas_toml(&[delta]));
+    let change = &table["delta"][0]["changes"][0];
+    assert_eq!(change["Pending"].as_str(), Some("none"), "{table}");
+}

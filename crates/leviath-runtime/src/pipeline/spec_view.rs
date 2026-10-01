@@ -13,9 +13,9 @@ use leviath_providers::Tool;
 use super::{StageInference, StageSetup};
 use crate::components::InferenceConfig;
 use crate::spec::graph::{
-    Budget, CodeRef, EdgeDef, Eviction, FileTrackingDef, NudgeDef, OutputCap, OutputDef,
-    ParamScalar, RegionDef, RegionKind, RegionLayoutDef, RunGraph, StageDef, StageMode, ToolGroup,
-    ToolRoutingDef, ToolSelector,
+    Budget, CodeRef, EdgeDef, Eviction, FileTrackingDef, NudgeDef, OutputCap, OutputDef, RegionDef,
+    RegionKind, RegionLayoutDef, RunGraph, StageDef, StageMode, ToolGroup, ToolRoutingDef,
+    ToolSelector,
 };
 use crate::spec::layout::{BudgetSpec, ContextLayout, RegionDefinition};
 use crate::spec::names::ModelRef;
@@ -383,17 +383,6 @@ pub(crate) fn tool(def: &ToolDef) -> Tool {
     }
 }
 
-/// A provider setting as the request carries it.
-fn param_value(p: &ParamScalar) -> serde_json::Value {
-    match p {
-        ParamScalar::Bool(b) => serde_json::Value::Bool(*b),
-        ParamScalar::Int(i) => serde_json::Value::from(*i),
-        ParamScalar::Float(f) => serde_json::Value::from(*f),
-        ParamScalar::Text(t) => serde_json::Value::String(t.clone()),
-        ParamScalar::TextList(items) => serde_json::Value::from(items.clone()),
-    }
-}
-
 /// An output cap in the vocabulary the request builder reads.
 fn output_cap(cap: &OutputCap) -> crate::spec::blueprint::OutputCap {
     use crate::spec::blueprint::OutputCap as Old;
@@ -461,7 +450,7 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
             extra_params: params
                 .extra
                 .iter()
-                .map(|(k, v)| (k.clone(), param_value(v)))
+                .map(|(k, v)| (k.clone(), v.to_json()))
                 .collect(),
             as_text: stage
                 .input_as_text

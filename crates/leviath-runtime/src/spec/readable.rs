@@ -10,7 +10,7 @@
 //! | Type | Short forms |
 //! |---|---|
 //! | `ToolSelector` | `"read_file"`, `"@all"` |
-//! | `ParamScalar` | `true`, `3`, `0.9`, `"high"`, `["a", "b"]` |
+//! | `ParamScalar` | `true`, `3`, `0.9`, `"high"`, `["a", "b"]`, `{ type = "enabled" }` |
 //! | `Budget` | `4000`, `"10%"`, `{ percent = "10%", min = 500, max = 8000 }` |
 //! | `OutputCap` | `8000`, `"40%"`, `"100% of claims"` |
 //! | `InputSlot` | `"output_format"`, `{ region = "task", template = "..." }`, `{ stage_model = "plan" }` |
@@ -206,7 +206,8 @@ readable!(ToolSelector, ToolSelectorText);
 
 // ── ParamScalar ─────────────────────────────────────────────────────────────
 
-/// A model setting as written: a boolean, a number, text, or a list of text.
+/// A model setting as written: a boolean, a number, text, a list of text, or
+/// a table of settings.
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub(crate) enum ParamText {
@@ -215,6 +216,7 @@ pub(crate) enum ParamText {
     Float(f64),
     Text(String),
     TextList(Vec<String>),
+    Table(std::collections::BTreeMap<String, ParamScalar>),
 }
 
 impl From<&ParamScalar> for ParamText {
@@ -225,6 +227,7 @@ impl From<&ParamScalar> for ParamText {
             ParamScalar::Float(x) => Self::Float(x),
             ParamScalar::Text(t) => Self::Text(t),
             ParamScalar::TextList(l) => Self::TextList(l),
+            ParamScalar::Table(t) => Self::Table(t),
         }
     }
 }
@@ -238,6 +241,7 @@ impl TryFrom<ParamText> for ParamScalar {
             ParamText::Float(x) => Self::Float(x),
             ParamText::Text(t) => Self::Text(t),
             ParamText::TextList(l) => Self::TextList(l),
+            ParamText::Table(t) => Self::Table(t),
         })
     }
 }

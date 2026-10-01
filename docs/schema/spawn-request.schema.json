@@ -1901,9 +1901,15 @@
             "type": "string"
           },
           "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/ParamScalar"
+          },
+          "type": "object"
         }
       ],
-      "description": "A model setting as written: a boolean, a number, text, or a list of text."
+      "description": "A model setting as written: a boolean, a number, text, a list of text, or\na table of settings."
     },
     "PathKind": {
       "description": "What kind of path a [`InputType::Path`] input names.",

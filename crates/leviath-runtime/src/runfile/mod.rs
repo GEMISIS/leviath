@@ -54,7 +54,7 @@ pub fn frame_schemas() -> serde_json::Value {
 /// encodes a fully populated sample of every frame and compares its bytes
 /// with a recorded hash: a change to the binary layout fails that test until
 /// this number is bumped.
-pub const LAYOUT_VERSION: u32 = 1;
+pub const LAYOUT_VERSION: u32 = 2;
 
 /// The hash of [`frame_schemas`] and [`LAYOUT_VERSION`]: two builds share it
 /// exactly when their run files have the same shape.

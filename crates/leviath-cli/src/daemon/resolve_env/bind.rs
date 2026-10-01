@@ -319,6 +319,7 @@ impl DaemonEnv {
             no_seed_commands: !spec.launch.seed_commands,
             unattended: profile.is_some(),
             yolo_profile: profile_name.clone(),
+            allow: spec.launch.allow.iter().map(ToString::to_string).collect(),
             model_override: spec.requested_model.as_ref().map(ToString::to_string),
             offered_parts: offered_parts.clone(),
             mime: Some(mime),

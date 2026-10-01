@@ -10010,8 +10010,7 @@ input RegionInput {
 """
 What a region does when it fills.
 
-One value per kind the daemon recognises. A blueprint writes the
-key-value kind as `keyed`, which is `HASHMAP` here.
+One value per kind the daemon recognises, named as a blueprint names it.
 """
 enum RegionKind {
 	"Stays in the prompt verbatim."
@@ -10027,14 +10026,14 @@ enum RegionKind {
 	"Keeps compacted summaries of its own past."
 	COMPACT_HISTORY
 	"Key-value entries with admission control."
-	HASHMAP
+	KEYED
 	"Open and done items a gate can require empty."
 	CHECKLIST
 	"Behaviour defined by a Rhai script under `context_hooks/`."
 	CUSTOM
 }
 
-"Exact and set tests on `RegionKind` (PINNED, TEMPORARY, CLEARABLE, SLIDING_WINDOW, COMPACTING, COMPACT_HISTORY, HASHMAP, CHECKLIST, CUSTOM)."
+"Exact and set tests on `RegionKind` (PINNED, TEMPORARY, CLEARABLE, SLIDING_WINDOW, COMPACTING, COMPACT_HISTORY, KEYED, CHECKLIST, CUSTOM)."
 input RegionKindFilter {
 	"Exactly this value."
 	eq: RegionKind
@@ -13802,6 +13801,11 @@ type SpawnAgentArgsOutput {
 	wait: Boolean
 	"A depth limit for the child's own children."
 	maxChildDepth: Int
+	"""
+	The tools the child may call without asking. Left out, the child
+	asked for the caller's own list.
+	"""
+	allow: [String!]
 	"The output shape the child was asked for, over its graph's own."
 	output: AskedOutputOutput
 	"""

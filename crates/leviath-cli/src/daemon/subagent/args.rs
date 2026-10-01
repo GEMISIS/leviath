@@ -42,6 +42,10 @@ pub(super) struct SpawnArgs {
     /// How deep the child's own tree may grow.
     #[serde(default)]
     max_child_depth: Option<u8>,
+    /// The tools the child may call without asking. `None` asks for the
+    /// parent's own list.
+    #[serde(default)]
+    allow: Option<Vec<String>>,
     /// The answer shape asked of the child.
     #[serde(default)]
     output: Option<OutputArgs>,
@@ -96,8 +100,9 @@ impl SpawnArgs {
 
     /// The request this call asks for, as a child of `h`'s run, handed
     /// `attachments`. The child inherits how unattended its parent is, its
-    /// parent's `--model`, its workdir and its seed-command opt-out; the host
-    /// narrows the rest against the parent's policy.
+    /// parent's model override, its workdir, its seed-command opt-out and,
+    /// unless the call names its own, its allowed tools; the host narrows the
+    /// rest against the parent's policy.
     pub(super) fn into_request(
         self,
         h: &SubAgentHandle,
@@ -111,6 +116,7 @@ impl SpawnArgs {
             unattended: h.unattended,
             profile: h.yolo_profile.clone(),
             max_depth: self.max_child_depth.map(usize::from),
+            allow: self.allow.unwrap_or_else(|| h.allow.clone()),
             no_seed_commands: h.no_seed_commands,
             ..Default::default()
         };

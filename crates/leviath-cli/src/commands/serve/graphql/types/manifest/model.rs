@@ -106,20 +106,10 @@ pub(crate) struct ModelParameters {
 
 impl From<&leviath_runtime::spec::graph::ModelParams> for ModelParameters {
     fn from(parameters: &leviath_runtime::spec::graph::ModelParams) -> Self {
-        use leviath_runtime::spec::graph::ParamScalar;
         let rest: serde_json::Map<String, serde_json::Value> = parameters
             .extra
             .iter()
-            .map(|(key, value)| {
-                let value = match value {
-                    ParamScalar::Bool(on) => serde_json::Value::from(*on),
-                    ParamScalar::Int(n) => serde_json::Value::from(*n),
-                    ParamScalar::Float(x) => serde_json::Value::from(*x),
-                    ParamScalar::Text(text) => serde_json::Value::from(text.clone()),
-                    ParamScalar::TextList(list) => serde_json::Value::from(list.clone()),
-                };
-                (key.clone(), value)
-            })
+            .map(|(key, value)| (key.clone(), value.to_json()))
             .collect();
         Self {
             // Through its shortest decimal form, so the `0.2` the blueprint

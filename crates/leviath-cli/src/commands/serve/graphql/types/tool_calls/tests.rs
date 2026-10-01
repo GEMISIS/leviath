@@ -470,8 +470,8 @@ impl ChildCalls {
                 "spawn_agent",
                 None,
                 r#"{"source":{"blueprint":"coder"},"inputs":{"task":"fix it"},
-                    "wait":true,"max_child_depth":1,"output":{"format":"json"},
-                    "parts":["a.png"]}"#,
+                    "wait":true,"max_child_depth":1,"allow":["shell"],
+                    "output":{"format":"json"},"parts":["a.png"]}"#,
             ),
             tool_call(
                 "spawn_agent",
@@ -504,7 +504,7 @@ async fn a_child_run_call_keeps_its_source_and_inputs() {
                         ... on SpawnAgentBlueprintSourceOutput { name digest }
                         ... on SpawnAgentGraphSourceOutput { graph }
                     }
-                    inputs wait maxChildDepth parts
+                    inputs wait maxChildDepth allow parts
                     output { format instructions example schema }
                 } }
                 ... on FanOutCallOutput { args { agent maxWorkers items { id inputs } } }
@@ -536,6 +536,7 @@ async fn a_child_run_call_keeps_its_source_and_inputs() {
         serde_json::Value::Null
     );
     assert_eq!(calls[0]["args"]["parts"][0], "a.png");
+    assert_eq!(calls[0]["args"]["allow"][0], "shell");
 }
 
 /// The three reading tools carry what they were asked.

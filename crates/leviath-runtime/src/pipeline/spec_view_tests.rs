@@ -411,11 +411,17 @@ fn model_settings_reach_the_request_as_written() {
     let params = &mut spec.graph.stages[0].model.params;
     params.temperature = Some(0.2);
     params.extra = [
-        ("a".to_string(), ParamScalar::Bool(true)),
-        ("b".to_string(), ParamScalar::Int(3)),
-        ("c".to_string(), ParamScalar::Float(0.5)),
-        ("d".to_string(), ParamScalar::Text("x".into())),
-        ("e".to_string(), ParamScalar::TextList(vec!["y".into()])),
+        ("a".to_string(), crate::spec::graph::ParamScalar::Bool(true)),
+        ("b".to_string(), crate::spec::graph::ParamScalar::Int(3)),
+        ("c".to_string(), crate::spec::graph::ParamScalar::Float(0.5)),
+        (
+            "d".to_string(),
+            crate::spec::graph::ParamScalar::Text("x".into()),
+        ),
+        (
+            "e".to_string(),
+            crate::spec::graph::ParamScalar::TextList(vec!["y".into()]),
+        ),
     ]
     .into();
     spec.graph.stages[0].input_as_text = vec![MimePattern::new("text/csv").unwrap()];

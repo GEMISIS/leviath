@@ -625,11 +625,7 @@ a filter.
 
 A region's `kind`, wherever one appears (`GET /api/runs/{id}/context`, its history, the blueprint
 detail route), is one word: `pinned`, `temporary`, `clearable`, `sliding_window`, `compacting`,
-`compact_history`, `hashmap`, `checklist`, `custom`. A region the blueprint declares as `keyed`
-reads `hashmap` here.
-
-Context snapshots written by an older daemon say `sliding` and `history` for the two multi-word
-kinds, and those files stay on disk, so accept both spellings wherever you render one.
+`compact_history`, `keyed`, `checklist`, `custom`. These are the words the blueprint itself uses.
 `context.region_kinds` says a server writes the words above.
 
 ## Listing and searching runs

@@ -3657,6 +3657,7 @@ mod tests {
             no_seed_commands: false,
             unattended: false,
             yolo_profile: None,
+            allow: Vec::new(),
             model_override: None,
             offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
             mime: None,

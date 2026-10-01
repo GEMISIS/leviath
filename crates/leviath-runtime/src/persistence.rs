@@ -309,7 +309,7 @@ pub fn region_kind_str(kind: &RegionKind) -> &'static str {
         RegionKind::SlidingWindow { .. } => "sliding_window",
         RegionKind::Compacting { .. } => "compacting",
         RegionKind::CompactHistory { .. } => "compact_history",
-        RegionKind::HashMap { .. } => "hashmap",
+        RegionKind::HashMap { .. } => "keyed",
         RegionKind::Checklist => "checklist",
         RegionKind::Custom { .. } => "custom",
     }
@@ -1284,7 +1284,7 @@ mod tests {
                 "sliding_window",
                 "compacting",
                 "compact_history",
-                "hashmap",
+                "keyed",
                 "custom",
                 "checklist",
                 "pinned"

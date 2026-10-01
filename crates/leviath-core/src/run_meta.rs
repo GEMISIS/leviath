@@ -1011,7 +1011,7 @@ pub struct RegionSnapshot {
     pub name: String,
     /// Stringified kind, spelled the way the blueprint spells it: `pinned`,
     /// `temporary`, `clearable`, `sliding_window`, `compacting`,
-    /// `compact_history`, `hashmap`, `checklist`, `custom`.
+    /// `compact_history`, `keyed`, `checklist`, `custom`.
     ///
     /// A snapshot written by an older build says `sliding` and `history` for
     /// those two, and those files stay on disk, so a reader that renders this

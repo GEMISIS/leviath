@@ -295,3 +295,180 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
         "run did not finish cleanly: {status:?}"
     );
 }
+
+/// A model that answers every turn with the same word and calls no tools.
+struct AlwaysDone;
+
+#[async_trait::async_trait]
+impl Provider for AlwaysDone {
+    async fn infer(
+        &self,
+        _request: &InferenceRequest,
+    ) -> leviath_providers::Result<InferenceResponse> {
+        Ok(InferenceResponse {
+            content: "done".to_string(),
+            tool_calls: Vec::new(),
+            tokens_used: TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+                total_tokens: 2,
+                reported_cost_usd: None,
+            },
+            finish_reason: FinishReason::Stop,
+            reasoning: None,
+            parts: Vec::new(),
+        })
+    }
+
+    async fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+        1
+    }
+
+    fn max_context_tokens(&self, _model: &str) -> usize {
+        100_000
+    }
+
+    fn name(&self) -> &str {
+        "e2e"
+    }
+
+    fn capabilities(&self, _model: &str) -> ModelCapabilities {
+        ModelCapabilities::default()
+    }
+}
+
+/// Two stages joined by one edge the run always takes.
+fn two_stage_manifest() -> &'static str {
+    r#"[blueprint]
+name = "e2e-two"
+version = "0.0.0"
+description = "Plans, then builds."
+
+[graph]
+entry = "plan"
+
+[[graph.stages]]
+name = "plan"
+description = "Plan"
+system_prompt = "Say done."
+model = { models = [{ provider = "e2e", model = "m" }] }
+
+[[graph.stages]]
+name = "build"
+description = "Build"
+system_prompt = "Say done."
+model = { models = [{ provider = "e2e", model = "m" }] }
+
+[[graph.edges]]
+name = "start-building"
+from = "plan"
+to = "build"
+
+[graph.layout]
+total_budget_tokens = 10500
+
+[[graph.layout.regions]]
+name = "task"
+kind = "pinned"
+budget = 500
+
+[[graph.layout.regions]]
+name = "conversation"
+kind = { kind = "sliding_window", max_items = 20 }
+budget = 10000
+
+[[graph.inputs]]
+name = "task"
+type = { kind = "text", multiline = true }
+binds = [{ region = "task" }]
+"#
+}
+
+/// A host over `runs`, answering every inference from [`AlwaysDone`].
+fn always_done_host(runs: &std::path::Path) -> leviath_runtime::host::WorldHost {
+    let mut providers = ProviderRegistry::new();
+    providers.register("e2e".to_string(), Arc::new(AlwaysDone));
+    let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+    leviath_cli::daemon::setup::build_host(leviath_cli::daemon::setup::HostParts {
+        config: leviath_cli::config::Config::default(),
+        providers,
+        runs_dir: runs.to_path_buf(),
+        shared_mcp: mcp,
+        mcp_tool_defs: vec![],
+        mcp_tool_owners: Default::default(),
+        mcp_pool: leviath_cli::daemon::mcp_pool::McpPool::for_daemon(
+            Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            &[],
+        ),
+        runtime: Handle::current(),
+        now_secs: || 1_700_000_000,
+        reloader: None,
+        provider_reload: None,
+    })
+}
+
+/// A run that takes an edge records the move in its run file, so every
+/// reader that counts edges from the file (the REST and GraphQL graphs, run
+/// history) sees it taken once.
+#[tokio::test]
+async fn a_run_that_takes_an_edge_records_the_move_in_its_run_file() {
+    let agent_dir = tempfile::tempdir().expect("agent dir");
+    std::fs::write(agent_dir.path().join("agent.toml"), two_stage_manifest())
+        .expect("write manifest");
+    let workdir = tempfile::tempdir().expect("workdir");
+    let runs = tempfile::tempdir().expect("runs dir");
+    let mut host = always_done_host(runs.path());
+    let blueprint =
+        BlueprintPath::new(agent_dir.path().to_string_lossy()).expect("an absolute directory");
+    let request = SpawnRequest {
+        workdir: Some(workdir.path().to_path_buf()),
+        ..SpawnRequest::new(SpawnSource::BlueprintFile(blueprint))
+    }
+    .input("task", RawInput::Text("plan then build".to_string()));
+    let (reply, spawned) = oneshot::channel();
+    host.handle(ControlOp::Spawn {
+        request: Box::new(request),
+        reply,
+    });
+    host.finish_starts().await;
+    let run_id = spawned
+        .await
+        .expect("spawn replied")
+        .expect("the run starts")
+        .to_string();
+    host.world_mut().run_until_idle(64).await;
+    // A closed control channel ends the serve loop, which writes every
+    // queued step to the run file before it returns.
+    let (control, control_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(control);
+    host.serve(control_rx).await;
+
+    let file = leviath_runtime::runfile::RunFileReader::open(
+        &runs
+            .path()
+            .join(&run_id)
+            .join(leviath_core::files::RUN_FILE),
+    )
+    .expect("the run file");
+    let moves: Vec<_> = file
+        .deltas(1, file.last_seq())
+        .expect("every step reads")
+        .into_iter()
+        .flat_map(|delta| delta.changes)
+        .filter_map(|change| match change {
+            leviath_runtime::state::Change::LastTransition(Some(record)) => Some(record),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moves.len(), 1, "one move recorded: {moves:?}");
+    assert_eq!(moves[0].from.as_str(), "plan");
+    assert_eq!(moves[0].to.as_str(), "build");
+    assert_eq!(
+        moves[0].edge.as_ref().map(|e| e.as_str()),
+        Some("start-building")
+    );
+    let last = file.latest_state().expect("the last state");
+    assert_eq!(last.last_transition.as_ref(), Some(&moves[0]));
+}

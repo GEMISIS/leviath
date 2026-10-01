@@ -138,9 +138,9 @@ impl ServeLimits {
     pub(super) fn check_callback_url(&self, url: &str) -> Result<(), String> {
         let parsed = url
             .parse::<url::Url>()
-            .map_err(|e| format!("callback_url is not a URL: {e}"))?;
+            .map_err(|e| format!("the callback URL is not a URL: {e}"))?;
         leviath_net::check_url(&parsed, self.allow_local_network)
-            .map_err(|e| format!("callback_url is not allowed: {e}"))
+            .map_err(|e| format!("the callback URL is not allowed: {e}"))
     }
 
     /// Check a requested agent workdir against `--workdir-root`.
@@ -308,9 +308,8 @@ pub(super) struct BlueprintInfo {
 
 /// One context region of a blueprint, as the API reports it.
 ///
-/// The console showed a blueprint's stages and nothing about its memory, so a
-/// person editing an agent could see what it *does* and not what it *keeps* -
-/// which is the half that decides whether it can do the job on a small window.
+/// Beside a blueprint's stages, what it *keeps*: the half that decides whether
+/// it can do the job on a small window.
 #[derive(Debug, Serialize)]
 pub(super) struct RegionInfo {
     /// The region's name - the one an agent passes to `context_write`.
@@ -637,8 +636,6 @@ fn is_zero(n: &u64) -> bool {
 ///
 /// Untagged, with the listing carrying a literal `kind` field, so a client
 /// discriminates on a value rather than by trying parses until one fits.
-/// `FileContentResp` is unchanged and still serializes exactly as before, so
-/// existing readers of `?path=<file>` see no difference at all.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(super) enum FileOrListing {
@@ -650,7 +647,7 @@ pub(super) enum FileOrListing {
 
 /// Response of `GET /api/runs/{id}/stages`: the run's per-stage ledger.
 ///
-/// Everything here is already on disk in `stages.json` and already read by
+/// Everything here is already in the run's file and already read by
 /// `lev stages`. Without this route a client over HTTP has to reconstruct the
 /// interesting part by diffing `context/history` snapshots, which is expensive
 /// and cannot see a stage that ran and wrote nothing.

@@ -196,6 +196,28 @@ pub enum ParamScalar {
     Text(String),
     /// A list of text, such as stop sequences.
     TextList(Vec<String>),
+    /// A table of settings, such as Bedrock's
+    /// `thinking = { type = "enabled", budget_tokens = 2000 }`.
+    Table(BTreeMap<String, ParamScalar>),
+}
+
+impl ParamScalar {
+    /// The setting as a provider's request carries it.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Bool(b) => serde_json::Value::Bool(*b),
+            Self::Int(i) => serde_json::Value::from(*i),
+            Self::Float(f) => serde_json::Value::from(*f),
+            Self::Text(t) => serde_json::Value::String(t.clone()),
+            Self::TextList(items) => serde_json::Value::from(items.clone()),
+            Self::Table(table) => serde_json::Value::Object(
+                table
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_json()))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// A tool a stage may call, or a whole group of them.

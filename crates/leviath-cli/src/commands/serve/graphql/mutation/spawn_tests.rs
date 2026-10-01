@@ -519,17 +519,15 @@ async fn a_daemon_that_does_not_answer_with_a_run_is_an_error() {
     }
 }
 
-/// A dry run answers with the run in brief, and the request it checks is the
-/// one a spawn would send.
-#[tokio::test]
-async fn a_dry_run_answers_with_the_run_in_brief() {
+/// A run in brief, as a dry run the daemon accepts answers with.
+fn brief() -> leviath_runtime::spec::summary::SpawnSummary {
     use leviath_runtime::spec::inputs::{InputValue, InputValues};
     use leviath_runtime::spec::launch::LaunchPolicy;
     use leviath_runtime::spec::names::{BlueprintName, ModelId, ProviderName, StageName, ToolName};
     use leviath_runtime::spec::run_spec::SpecOrigin;
     use leviath_runtime::spec::summary::{SpawnSummary, StageSummary};
 
-    let summary = SpawnSummary {
+    SpawnSummary {
         title: "coder".into(),
         origin: SpecOrigin::BlueprintFile {
             path: leviath_runtime::spec::names::BlueprintPath::new(
@@ -564,7 +562,14 @@ async fn a_dry_run_answers_with_the_run_in_brief() {
             capture_model_input: false,
         },
         workdir: "/work".into(),
-    };
+    }
+}
+
+/// A dry run answers with the run in brief, and the request it checks is the
+/// one a spawn would send.
+#[tokio::test]
+async fn a_dry_run_answers_with_the_run_in_brief() {
+    let summary = brief();
     let (control, _dir, _srv) = fake_daemon(move |request| {
         assert!(
             matches!(request, ControlRequest::ValidateSpawn { .. }),
@@ -765,4 +770,56 @@ fn every_spawn_write_shape_round_trips() {
         launch: None,
         delivery: None,
     });
+}
+
+/// A value that does not read (a depth past 255) is listed beside what the
+/// daemon finds in the rest of the request, for a spawn and a dry run alike,
+/// and stands alone when the rest is fine.
+#[tokio::test]
+async fn a_value_that_does_not_read_is_listed_beside_the_daemons_issues() {
+    let refused = SpawnIssues::from(SpawnIssue::new(
+        SpecPath::root().field("inputs").key("task"),
+        IssueCode::WrongType,
+        "the value has the wrong type",
+    ));
+    let request = serde_json::json!({ "request": {
+        "source": { "blueprint": { "name": "coder" } },
+        "launch": { "maxDepth": 999 },
+    } });
+    for (document, field) in [(SPAWN, "spawnRun"), (VALIDATE, "validateSpawn")] {
+        let refused = refused.clone();
+        let (control, _dir, _srv) = fake_daemon(move |request| {
+            assert!(
+                matches!(request, ControlRequest::ValidateSpawn { .. }),
+                "only ever checked, never started: {request:?}"
+            );
+            ControlResponse::Rejected {
+                issues: refused.clone(),
+            }
+        });
+        let answer = run(
+            state(control, ServeLimits::default()),
+            document,
+            request.clone(),
+        )
+        .await;
+        let paths: Vec<&str> = answer["data"][field]["issues"]
+            .as_array()
+            .expect("issues")
+            .iter()
+            .filter_map(|issue| issue["path"].as_str())
+            .collect();
+        assert_eq!(paths, ["launch.max_depth", "inputs.task"], "{answer}");
+    }
+    let (control, _dir, _srv) = fake_daemon(move |_| ControlResponse::Valid {
+        summary: Box::new(brief()),
+    });
+    let answer = run(state(control, ServeLimits::default()), SPAWN, request).await;
+    let paths: Vec<&str> = answer["data"]["spawnRun"]["issues"]
+        .as_array()
+        .expect("issues")
+        .iter()
+        .filter_map(|issue| issue["path"].as_str())
+        .collect();
+    assert_eq!(paths, ["launch.max_depth"], "{answer}");
 }

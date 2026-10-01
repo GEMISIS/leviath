@@ -144,6 +144,45 @@ async fn a_required_region_left_empty_is_refused() {
     assert_eq!(issues.0[1].message, "hand the reviewer a diff");
 }
 
+/// An input given for a required region that fails its own check is one
+/// issue, not two: the region is not also reported as unfilled. A required
+/// input left out is the input check's to report, so its region is not
+/// reported either; a region whose bound input was simply not given still is.
+#[tokio::test]
+async fn an_input_that_fails_its_check_is_not_also_an_unfilled_region() {
+    let mut g = graph();
+    g.layout.regions[0].required = true;
+    g.inputs.push(InputDecl {
+        ty: InputType::Text {
+            multiline: false,
+            min_len: None,
+            max_len: Some(2),
+        },
+        ..text_input("diff", "system")
+    });
+    let mut own = g.layout.clone();
+    own.regions.push(own.regions[0].clone());
+    own.regions[2].name = n("scratch");
+    own.regions.push(own.regions[0].clone());
+    own.regions[3].name = n("notes");
+    g.stages[1].layout = Some(own);
+    g.inputs.push(text_input("scratch", "scratch"));
+    g.inputs.push(InputDecl {
+        required: true,
+        ..text_input("notes", "notes")
+    });
+    let request = raw(g).input("diff", RawInput::Text("too long".into()));
+    let issues = spawn(&request, &Fake::default()).await.unwrap_err();
+    assert_eq!(
+        found(&issues),
+        [
+            "inputs.diff OutOfRange",
+            "inputs.notes Missing",
+            "source.raw.stages.build.layout.regions[2] Missing",
+        ]
+    );
+}
+
 /// A required region no input binds to and no seed fills is the run's to
 /// fill (the coder's `discovery`, written by its first stage), so a spawn
 /// leaves it empty; one with a seed that came up empty is still refused.

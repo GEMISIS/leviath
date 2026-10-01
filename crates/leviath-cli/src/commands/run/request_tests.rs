@@ -484,6 +484,9 @@ fn a_request_file_is_sent_with_the_flags_over_it() {
             .graph;
     let mut request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph)));
     request.workdir = Some(PathBuf::from("/theirs"));
+    request.launch.unattended = leviath_runtime::spec::launch::Unattended::Profile(
+        leviath_runtime::spec::names::ProfileName::new("careful").unwrap(),
+    );
     let toml_file = dir.path().join("run.toml");
     std::fs::write(&toml_file, toml::to_string(&request).unwrap()).unwrap();
     let json_file = dir.path().join("run.json");
@@ -497,6 +500,11 @@ fn a_request_file_is_sent_with_the_flags_over_it() {
     let run = run_request(from_toml).unwrap();
     assert_eq!(task_of(&run), "from a file");
     assert_eq!(run.request.workdir.as_deref(), Some(Path::new("/theirs")));
+    // What the run says about itself is what the file asked for, not the
+    // command line's own defaults.
+    assert_eq!(run.workdir, "/theirs");
+    assert!(run.yolo);
+    assert_eq!(run.yolo_profile.as_deref(), Some("careful"));
     assert_eq!(run.manifest, PathBuf::new(), "a raw graph has no manifest");
     let run = run_request(RunLine {
         request_file: Some(&json_file),
@@ -506,6 +514,18 @@ fn a_request_file_is_sent_with_the_flags_over_it() {
     })
     .unwrap();
     assert_eq!(run.request.workdir.as_deref(), Some(Path::new("/mine")));
+    assert_eq!(run.workdir, "/mine");
+    let run = run_request(RunLine {
+        request_file: Some(&json_file),
+        task: Some("t"),
+        yolo: true,
+        ..RunLine::new(None, "/mine", dir.path())
+    })
+    .unwrap();
+    assert!(
+        run.yolo && run.yolo_profile.is_none(),
+        "the bare flag is over it"
+    );
 
     // An untitled graph is "this run" where it is named.
     let mut untitled = request.clone();

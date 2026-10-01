@@ -94,15 +94,16 @@ pub struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     pub tls_key: Option<PathBuf>,
 
-    /// Refuse `"yolo": true` and `"allow": [...]` on spawn requests, so an API
-    /// caller cannot waive approval prompts for an agent running on the host.
+    /// Refuse `launch.unattended` and `launch.allow` on spawn requests, so an
+    /// API caller cannot waive approval prompts for an agent running on the
+    /// host.
     ///
-    /// Both fields, because they are one lever: `"allow": ["*"]` reaches the
-    /// same wildcard override `"yolo": true` writes.
+    /// Both fields, because they are one lever: an allow list approves tools
+    /// without a person just as an unattended run does.
     #[arg(long)]
     pub no_remote_yolo: bool,
 
-    /// Run every spawn as if it carried `"no_seed_commands": true`, so a
+    /// Run every spawn as if it carried `launch.seed_commands = false`, so a
     /// blueprint's `seed = { command = ... }` regions never execute for a
     /// remotely started run.
     ///

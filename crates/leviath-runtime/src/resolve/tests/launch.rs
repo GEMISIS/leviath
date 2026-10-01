@@ -33,6 +33,22 @@ async fn a_top_level_run_takes_the_graphs_depth_when_it_names_none() {
     assert_eq!(resolved.spec.launch.max_depth, 1);
 }
 
+/// A top-level run may not ask for a deeper tree than its graph allows: the
+/// request is refused at `launch.max_depth`, saying what the graph allows.
+#[tokio::test]
+async fn a_top_level_run_may_not_go_deeper_than_its_graph() {
+    let mut g = graph();
+    g.max_child_depth = Some(2);
+    let mut request = raw(g);
+    request.launch.max_depth = Some(9);
+    let issues = spawn(&request, &Fake::default()).await.unwrap_err();
+    assert_eq!(found(&issues), ["launch.max_depth OutOfRange"]);
+    assert_eq!(issues.0[0].got.as_deref(), Some("9"));
+    request.launch.max_depth = Some(2);
+    let resolved = spawn(&request, &Fake::default()).await.unwrap();
+    assert_eq!(resolved.spec.launch.max_depth, 2);
+}
+
 #[tokio::test]
 async fn a_child_is_narrowed_by_its_parent() {
     let mut request = raw(graph());

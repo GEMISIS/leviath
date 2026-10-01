@@ -361,6 +361,32 @@ fn a_stage_layout_and_interaction_points_are_checked_against_that_layout() {
     );
 }
 
+/// A provider setting can be a table, written as a plain TOML table, kept
+/// whole through every format, and sent to the provider as a JSON object.
+#[test]
+fn a_model_setting_can_be_a_table() {
+    let params: ModelParams = toml::from_str(
+        r#"extra = { thinking = { type = "enabled", budget_tokens = 2000, on = true, ratio = 0.5, stop = ["x"] } }"#,
+    )
+    .unwrap();
+    let thinking = &params.extra["thinking"];
+    assert!(matches!(thinking, ParamScalar::Table(t) if t.len() == 5));
+    assert_eq!(
+        thinking.to_json(),
+        serde_json::json!({
+            "type": "enabled", "budget_tokens": 2000, "on": true, "ratio": 0.5, "stop": ["x"],
+        })
+    );
+    let binary = postcard::to_stdvec(&params).unwrap();
+    assert_eq!(
+        postcard::from_bytes::<ModelParams>(&binary).unwrap(),
+        params
+    );
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json["extra"]["thinking"]["budget_tokens"], 2000);
+    assert_eq!(serde_json::from_value::<ModelParams>(json).unwrap(), params);
+}
+
 #[test]
 fn a_graph_round_trips_through_json_toml_and_postcard() {
     let mut g = minimal();
