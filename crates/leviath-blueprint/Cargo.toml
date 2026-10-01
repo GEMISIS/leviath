@@ -1,6 +1,6 @@
 [package]
-name = "leviath-package"
-description = "Agent packaging, sharing, and installation for Leviath"
+name = "leviath-blueprint"
+description = "Blueprints for Leviath: named, reusable run graphs written in TOML"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,15 +14,13 @@ readme = "README.md"
 
 [dependencies]
 leviath-core = { workspace = true }
-leviath-blueprint = { workspace = true }
+leviath-runtime = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
 toml = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-flate2 = { workspace = true }
-tar = { workspace = true }
+toml_edit = { workspace = true }
 
 [dev-dependencies]
-leviath-testkit = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

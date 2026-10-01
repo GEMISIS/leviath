@@ -32,94 +32,10 @@ use leviath_runtime::dynamic_interaction::BLOCKING_INTERACTION_TOOLS;
 use leviath_runtime::spec::Blueprint;
 use leviath_runtime::spec::blueprint::{StageMode, ToolGroup};
 use leviath_tools::canonical_tool_name;
-use serde::{Deserialize, Serialize};
-
-/// How much a finding matters. Only [`LintSeverity::Error`] fails
-/// `lev validate`; warnings are printed and the command still exits zero
-/// (unless `--deny-warnings` is passed); notes never fail anything.
-///
-/// Declared worst-first so sorting by it groups the report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum LintSeverity {
-    /// The manifest says something that cannot be what the author meant - a
-    /// tool name matching nothing, a permission for a tool the stage never
-    /// granted.
-    Error,
-    /// The manifest leaves a decision to a default the author may not know
-    /// about.
-    Warning,
-    /// Nothing is wrong; the blueprint is doing something worth knowing before
-    /// you run it, like reaching outside its workdir or running a shell command
-    /// at spawn. A note must never fail a build, so `--deny-warnings` skips it.
-    Note,
-}
-
-impl LintSeverity {
-    /// Fixed-width label for the report, so the messages line up.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Error => "ERR ",
-            Self::Warning => "WARN",
-            Self::Note => "NOTE",
-        }
-    }
-}
-
-/// One thing worth telling the author about.
-///
-/// Serialize only: `code` is a `&'static str` pointing at a literal in this
-/// file, which no deserializer can produce.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct LintFinding {
-    /// How much this matters, and therefore whether it fails the check.
-    pub severity: LintSeverity,
-    /// Stable slug (`"unknown-tool"`), so a finding can be referenced in an
-    /// issue or grepped for in daemon logs without quoting prose.
-    pub code: &'static str,
-    /// The stage it belongs to, when it belongs to one.
-    pub stage: Option<String>,
-    /// What is wrong.
-    pub message: String,
-    /// What to do about it. Rendered on its own indented line.
-    pub fix: Option<String>,
-}
-
-impl LintFinding {
-    fn new(severity: LintSeverity, code: &'static str, message: String) -> Self {
-        Self {
-            severity,
-            code,
-            stage: None,
-            message,
-            fix: None,
-        }
-    }
-
-    fn in_stage(mut self, stage: &str) -> Self {
-        self.stage = Some(stage.to_string());
-        self
-    }
-
-    fn with_fix(mut self, fix: impl Into<String>) -> Self {
-        self.fix = Some(fix.into());
-        self
-    }
-
-    /// Whether this finding should fail the command.
-    #[cfg(test)]
-    pub(crate) fn is_error(&self) -> bool {
-        self.severity == LintSeverity::Error
-    }
-
-    /// One-line rendering for a log record: `stage 'x': message`.
-    pub(crate) fn one_line(&self) -> String {
-        match &self.stage {
-            Some(stage) => format!("stage '{stage}': {}", self.message),
-            None => self.message.clone(),
-        }
-    }
-}
+// The findings every check reports in belong to the blueprint layer, so a
+// check written against a run graph there and one still reading a parsed
+// manifest here report the same way.
+pub(crate) use leviath_blueprint::lint::{LintFinding, LintSeverity};
 
 /// What one provider answered when asked what models it takes.
 #[derive(Debug, Clone, PartialEq, Eq)]

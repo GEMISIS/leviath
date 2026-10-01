@@ -2675,6 +2675,7 @@ name = "leviath"
 version = "0.6.4"
 dependencies = [
  "leviath-agent-client",
+ "leviath-blueprint",
  "leviath-core",
  "leviath-mcp",
  "leviath-package",
@@ -2706,6 +2707,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviath-blueprint"
+version = "0.6.4"
+dependencies = [
+ "leviath-core",
+ "leviath-runtime",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "toml",
+ "toml_edit",
+]
+
+[[package]]
 name = "leviath-cli"
 version = "0.6.4"
 dependencies = [
@@ -2729,6 +2743,7 @@ dependencies = [
  "keyring-core",
  "leviath-agent-client",
  "leviath-alloc",
+ "leviath-blueprint",
  "leviath-core",
  "leviath-graphql-derive",
  "leviath-mcp",
@@ -2856,6 +2871,7 @@ version = "0.6.4"
 dependencies = [
  "anyhow",
  "flate2",
+ "leviath-blueprint",
  "leviath-core",
  "leviath-testkit",
  "tar",
