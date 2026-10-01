@@ -229,17 +229,24 @@ model but executed by the engine's tool registry, since they act on the shared a
 
 | Tool | Purpose | Arguments |
 | --- | --- | --- |
-| `spawn_agent` | Spawn a sub-agent from a blueprint; returns its ID (blocks and returns the result when `wait` is true). | `blueprint`, `task`, `wait` (default false), `seed_context` (optional), `parts` (optional), `max_child_depth` (optional), `output_format` (optional), `output_instructions` (optional) |
+| `spawn_agent` | Start a sub-agent and return its ID, or its result when `wait` is true. | `source`, `inputs`, `wait`, `max_child_depth`, `output`, `parts`, all but `source` optional |
+| `validate_spawn` | Check `spawn_agent`'s arguments without starting anything. | as `spawn_agent` |
+| `describe_blueprint` | An installed blueprint's stages and declared inputs. | `blueprint` |
+| `spawn_schema` | One part of the spawn request's JSON Schema. | `part` (optional; the top level when left out) |
+| `run_history` | A run in the caller's tree: its summary, state, or edges taken. | `run_id`, `view` (optional), `at` (optional) |
 | `check_agent` | Non-blocking status check; returns the child's answer once it is done. | `agent_id` |
 | `wait_for_agent` | Block until a sub-agent completes, then return its answer. | `agent_id` |
 | `send_to_agent` | Send a message into a running sub-agent's context. | `agent_id`, `message`, `target_region` (optional; defaults to the conversation) |
 | `kill_agent` | Kill a sub-agent and all its descendants. | `agent_id` |
 
-`parts` names stored parts of this run to hand the child, by name or sha256 prefix.
+`source` is `{"blueprint": "<name>"}` or `{"graph": {...}}`, and `inputs` holds the values the
+blueprint or graph declares. A spawn of a whole graph also needs the `spawn_raw_graph` permission,
+which asks by default. `parts` names stored parts of this run to hand the child, by name or sha256
+prefix. See [Sub-agents](/docs/sub-agents) for every form `source` takes.
 
 A child reports whatever it submitted through [`submit_output`](/docs/outputs). A child that
-submitted nothing says so, rather than returning an empty result. `output_format` asks the child for
-a particular shape, overriding what its blueprint declares. A label that differs retires the
+submitted nothing says so, rather than returning an empty result. `output.format` asks the child
+for a particular shape, overriding what its blueprint declares. A label that differs retires the
 child's declared validator and schema, and the warning appears only in the daemon log.
 
 ## Environment

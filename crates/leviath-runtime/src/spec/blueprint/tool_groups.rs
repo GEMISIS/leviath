@@ -79,7 +79,9 @@ impl ToolGroup {
         match self {
             ToolGroup::All => "every tool this install has: built in, sub-agent, scripts, and MCP",
             ToolGroup::Builtin => "every tool compiled into Leviath",
-            ToolGroup::Subagent => "the sub-agent tools: spawn, check, wait, send, kill",
+            ToolGroup::Subagent => {
+                "the sub-agent tools: spawn, validate, check, wait for, message and kill a child, and read the spawn schema, a blueprint and a run's history"
+            }
             ToolGroup::Scripts => "every Rhai script tool, the agent's own and the global ones",
             ToolGroup::Mcp => "every tool every connected MCP server advertises",
         }

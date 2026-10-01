@@ -325,6 +325,30 @@ pub enum SubAgentOp {
         /// Reply: the child's run id, or every reason it was refused.
         reply: oneshot::Sender<Result<RunId, SpawnIssues>>,
     },
+    /// Resolve a child run of `parent_run_id` from `request` without starting
+    /// it: the same checks [`SubAgentOp::Spawn`] makes, as the same
+    /// [`Caller::Child`]. Reply is a summary of the run it would be.
+    Validate {
+        /// What the child would run. Boxed like [`SubAgentOp::Spawn`]'s.
+        request: Box<SpawnRequest>,
+        /// The run id of the agent asking.
+        parent_run_id: String,
+        /// Reply: what the child would be, or every reason it would be refused.
+        reply: oneshot::Sender<Result<SpawnSummary, SpawnIssues>>,
+    },
+    /// Read a run's history: what it was started as, where it is now (or was
+    /// at step `at`), and every edge it took. Only a run in the caller's own
+    /// tree (itself, its children, theirs) can be read.
+    History {
+        /// The run to read.
+        run_id: String,
+        /// The run asking.
+        caller_run_id: String,
+        /// The step to read the state at. `None` reads the current state.
+        at: Option<u64>,
+        /// Reply: the history, or why it cannot be read.
+        reply: oneshot::Sender<Result<RunHistory, String>>,
+    },
     /// Report a run's current status and answer (`None` if the host has no such
     /// live run).
     Check {
@@ -376,6 +400,20 @@ pub struct SubAgentReport {
     /// one whose blueprint never asks for an output, or one that finished
     /// without giving it.
     pub final_output: Option<leviath_core::output::FinalOutput>,
+}
+
+/// What `run_history` reads of a run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunHistory {
+    /// What the run was started as.
+    pub summary: SpawnSummary,
+    /// Its state: now when no step was asked for (live when the world holds
+    /// the run), else as of that step.
+    pub state: crate::state::RunState,
+    /// The last step its run file records.
+    pub last_seq: u64,
+    /// Every edge it took, oldest first, with the step that recorded it.
+    pub transitions: Vec<(u64, crate::state::TransitionRecord)>,
 }
 
 /// A control operation addressed to the host, each carrying a oneshot channel the

@@ -149,12 +149,20 @@ impl From<ArtifactWire> for SubmittedArtifact {
 pub(crate) struct FanOutItem {
     /// The item's own id, which names its child run.
     pub(crate) id: ID,
-    /// Everything the worker gets, which the blueprint's author defines.
+    /// Values for the worker graph's declared inputs, by name, as the model
+    /// wrote them. Checked against those declarations before any worker
+    /// starts. Null when the model gave the item none.
     ///
-    /// Raw JSON because the tool declares it as an object and nothing more: the
-    /// worker is seeded with whatever this holds, so its shape is a contract
-    /// between one blueprint's stages and nothing this schema can name.
-    pub(crate) context: Json,
+    /// JSON because the names and types are the worker graph's own, declared
+    /// by whoever wrote it, and this schema cannot name them.
+    #[serde(default, deserialize_with = "object")]
+    pub(crate) inputs: Option<Json>,
+}
+
+/// A JSON object, as the tools declare `inputs`: anything else does not fit.
+fn object<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Json>, D::Error> {
+    serde_json::Map::<String, serde_json::Value>::deserialize(d)
+        .map(|map| Some(Json(serde_json::Value::Object(map))))
 }
 
 /// Arguments for the `fan_out` tool.
@@ -173,34 +181,181 @@ pub(crate) struct FanOutArgs {
     pub(crate) max_workers: Option<i32>,
 }
 
-/// Arguments for the `spawn_agent` tool.
+/// Arguments for the `spawn_agent` tool, and for `validate_spawn`, which takes
+/// exactly the same.
 #[mirror(no_filter)]
 #[derive(Debug, Deserialize, SimpleObject)]
 pub(crate) struct SpawnAgentArgs {
-    /// The blueprint to run, by name.
-    pub(crate) blueprint: String,
-    /// The task handed to it.
-    pub(crate) task: String,
+    /// What the child runs: an installed blueprint, or a whole graph.
+    pub(crate) source: SpawnAgentSource,
+    /// Values for the child graph's declared inputs, by name, as the model
+    /// wrote them. JSON because the names and types are that graph's own.
+    #[serde(default, deserialize_with = "object")]
+    pub(crate) inputs: Option<Json>,
     /// Whether the caller blocked until it finished. Left out means no, which is
     /// also what the tool's own default says.
     #[serde(default)]
     pub(crate) wait: Option<bool>,
-    /// Context put in the child's first pinned region.
+    /// A depth limit for the child's own children.
     #[serde(default)]
-    pub(crate) seed_context: Option<String>,
+    pub(crate) max_child_depth: Option<i32>,
+    /// The output shape the child was asked for, over its graph's own.
+    #[serde(default)]
+    pub(crate) output: Option<AskedOutput>,
     /// Stored parts of this run handed to the child, each by name or by the
     /// start of its sha256.
     #[serde(default)]
     pub(crate) parts: Option<Vec<String>>,
-    /// A depth limit for the child's own children.
+}
+
+/// The output shape a `spawn_agent` call asked its child for.
+#[mirror(no_filter)]
+#[derive(Debug, Deserialize, SimpleObject)]
+pub(crate) struct AskedOutput {
+    /// The format label: markdown, json, a mime type, a house format.
     #[serde(default)]
-    pub(crate) max_child_depth: Option<i32>,
-    /// The shape the child was asked to answer in, overriding its blueprint's.
+    pub(crate) format: Option<String>,
+    /// Guidance about that shape.
     #[serde(default)]
-    pub(crate) output_format: Option<String>,
-    /// Extra guidance about that shape.
+    pub(crate) instructions: Option<String>,
+    /// An example answer.
     #[serde(default)]
-    pub(crate) output_instructions: Option<String>,
+    pub(crate) example: Option<String>,
+    /// A JSON Schema the answer must meet.
+    #[serde(default)]
+    pub(crate) schema: Option<Json>,
+}
+
+/// Arguments for the `spawn_schema` tool.
+#[mirror(no_filter)]
+#[derive(Debug, Deserialize, SimpleObject)]
+pub(crate) struct SpawnSchemaArgs {
+    /// The part of the spawn request's schema asked for. Null asked for the
+    /// top level.
+    #[serde(default)]
+    pub(crate) part: Option<String>,
+}
+
+/// Arguments for the `describe_blueprint` tool.
+#[mirror(no_filter)]
+#[derive(Debug, Deserialize, SimpleObject)]
+pub(crate) struct DescribeBlueprintArgs {
+    /// The installed blueprint asked about.
+    pub(crate) blueprint: SpawnAgentBlueprintSource,
+}
+
+/// What a `run_history` call asked to see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, async_graphql::Enum)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RunHistoryView {
+    /// The run in brief.
+    Summary,
+    /// Its whole state, now or at a step.
+    State,
+    /// Each edge it took.
+    Transitions,
+}
+
+/// Arguments for the `run_history` tool.
+#[mirror(no_filter)]
+#[derive(Debug, Deserialize, SimpleObject)]
+pub(crate) struct RunHistoryArgs {
+    /// The run read.
+    pub(crate) run_id: ID,
+    /// What it asked to see. Null asked for the summary.
+    #[serde(default)]
+    pub(crate) view: Option<RunHistoryView>,
+    /// The step the state was asked at. Null asked for now.
+    #[serde(default)]
+    pub(crate) at: Option<i32>,
+}
+
+/// What a `spawn_agent` call asked the child to run.
+///
+/// The tool takes either an installed blueprint or a whole graph, and which
+/// one the model chose is part of what it asked for, so it is a union here
+/// rather than a reading that flattens the two.
+#[derive(Debug, Deserialize, async_graphql::Union)]
+#[serde(from = "SourceWire")]
+pub(crate) enum SpawnAgentSource {
+    /// An installed blueprint.
+    Blueprint(SpawnAgentBlueprintSource),
+    /// A graph the model wrote.
+    Graph(SpawnAgentGraphSource),
+}
+
+/// An installed blueprint a `spawn_agent` or `describe_blueprint` call named.
+#[mirror(no_filter)]
+#[derive(Debug, Deserialize, SimpleObject)]
+#[serde(from = "BlueprintWire")]
+pub(crate) struct SpawnAgentBlueprintSource {
+    /// The blueprint's name.
+    pub(crate) name: String,
+    /// The revision the model pinned it to. Null when it named the blueprint
+    /// alone.
+    pub(crate) digest: Option<String>,
+}
+
+/// A whole graph a `spawn_agent` call wrote for its child.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct SpawnAgentGraphSource {
+    /// The graph, as the model wrote it, in the JSON form a spawn request's
+    /// raw graph takes.
+    pub(crate) graph: Json,
+}
+
+impl From<BlueprintWire> for SpawnAgentBlueprintSource {
+    fn from(wire: BlueprintWire) -> Self {
+        match wire {
+            BlueprintWire::Name(name) => Self { name, digest: None },
+            BlueprintWire::Pinned { name, digest } => Self { name, digest },
+        }
+    }
+}
+
+/// The two shapes the tool's `source` takes, before either is a type.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum SourceWire {
+    /// `{ "blueprint": "coder" }` or `{ "blueprint": { "name": "coder" } }`.
+    Blueprint {
+        /// The blueprint, by name or by name and digest.
+        blueprint: SpawnAgentBlueprintSource,
+    },
+    /// `{ "graph": { ... } }`.
+    Graph {
+        /// The graph.
+        graph: serde_json::Value,
+    },
+}
+
+/// A blueprint as the tool takes it: a name, or a name and a digest.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum BlueprintWire {
+    /// `"coder"`, or the absolute directory of a blueprint that is not
+    /// installed.
+    Name(String),
+    /// `{ "name": "coder", "digest": "..." }`.
+    Pinned {
+        /// The name.
+        name: String,
+        /// The revision.
+        #[serde(default)]
+        digest: Option<String>,
+    },
+}
+
+impl From<SourceWire> for SpawnAgentSource {
+    fn from(wire: SourceWire) -> Self {
+        match wire {
+            SourceWire::Blueprint { blueprint } => Self::Blueprint(blueprint),
+            SourceWire::Graph { graph } => {
+                Self::Graph(SpawnAgentGraphSource { graph: Json(graph) })
+            }
+        }
+    }
 }
 
 /// Arguments for the `check_agent` tool.

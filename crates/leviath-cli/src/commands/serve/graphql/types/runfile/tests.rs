@@ -755,6 +755,12 @@ impl Probe {
                 WorkerFailure::Continue,
             ),
             (WorkerSource::Query("fast".into()), WorkerFailure::FailAll),
+            (
+                WorkerSource::BlueprintFile(
+                    BlueprintPath::new(std::env::temp_dir().to_string_lossy()).expect("a path"),
+                ),
+                WorkerFailure::Continue,
+            ),
         ] {
             let mut s = state();
             s.fan_out = Some(fan_out(worker, failure));
@@ -930,7 +936,7 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(full["answer"]["content"], "done");
     assert_eq!(full["lastTransition"]["fromStage"], "analyze");
     assert_eq!(full["totals"]["spend"]["pricedUsd"], "0.25");
-    let wedged = &json["states"][11];
+    let wedged = &json["states"][12];
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];

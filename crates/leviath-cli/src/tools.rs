@@ -275,6 +275,17 @@ pub(crate) fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPoli
         "spawn_agent" | "check_agent" | "wait_for_agent" | "send_to_agent" | "kill_agent" => {
             ToolPolicy::Allow
         }
+        // These read and start nothing: the request schema, an installed
+        // blueprint's declared inputs, a dry run of a spawn, and the history
+        // of a run in the caller's own tree.
+        "spawn_schema" | "describe_blueprint" | "validate_spawn" | "run_history" => {
+            ToolPolicy::Allow
+        }
+        // A graph the model wrote itself can declare its own seed commands
+        // and MCP servers, which run on the host when the child starts. An
+        // installed blueprint is one a person chose; a raw graph is not, so a
+        // person is asked unless they said otherwise.
+        leviath_tools::SPAWN_RAW_GRAPH_PERMISSION => ToolPolicy::Ask,
         // These tools ARE the human-in-the-loop mechanism - gating them behind
         // a separate tool-approval prompt would mean asking the user "may I
         // ask you something?" before actually asking them.
@@ -345,6 +356,33 @@ pub(crate) fn clamp_by_effect(
         return stricter(policy, write_policy());
     }
     policy
+}
+
+/// Whether a call is a `spawn_agent` that carries a whole graph of its own.
+pub(crate) fn spawns_a_raw_graph(tool_name: &str, arguments: &serde_json::Value) -> bool {
+    tool_name == "spawn_agent"
+        && arguments
+            .get("source")
+            .and_then(|s| s.get("graph"))
+            .is_some()
+}
+
+/// Clamp a `spawn_agent` call that carries a whole graph by the
+/// `spawn_raw_graph` permission as well as its own, the way a writing shell
+/// call is clamped by `write_file`'s: it can only come out stricter.
+///
+/// `raw_policy` resolves `spawn_raw_graph` through the same layers as any
+/// tool, and is asked only for a call that needs it.
+pub(crate) fn clamp_raw_graph(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    policy: ToolPolicy,
+    raw_policy: &dyn Fn() -> ToolPolicy,
+) -> ToolPolicy {
+    match spawns_a_raw_graph(tool_name, arguments) {
+        true => stricter(policy, raw_policy()),
+        false => policy,
+    }
 }
 
 /// Refuse a shell call whose redirect writes outside the working directory, or
@@ -839,6 +877,11 @@ pub(crate) fn resolve_policy(
 /// Non-shell tools keep keying on the tool name: their arguments do not widen
 /// what the tool can reach the way a command string does.
 pub(crate) fn session_approval_keys(tool_name: &str, arguments: &serde_json::Value) -> Vec<String> {
+    // Approving one raw graph for the run approves raw graphs, not every
+    // later `spawn_agent`, and approving a plain spawn never covers a raw one.
+    if spawns_a_raw_graph(tool_name, arguments) {
+        return vec![leviath_tools::SPAWN_RAW_GRAPH_PERMISSION.to_string()];
+    }
     if leviath_tools::canonical_tool_name(tool_name) != "shell" {
         return vec![tool_name.to_string()];
     }
@@ -1171,6 +1214,52 @@ for line in sys.stdin:
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    // ─── spawn_raw_graph ──────────────────────────────────────────────────
+
+    /// A spawn that carries a graph answers to `spawn_raw_graph` too, which
+    /// asks by default and can only make the call stricter; a spawn of an
+    /// installed blueprint, and every other tool, is untouched. Approving one
+    /// raw graph is remembered as approving raw graphs, never as approving
+    /// `spawn_agent`.
+    #[test]
+    fn a_raw_graph_spawn_answers_to_its_own_permission() {
+        let raw = serde_json::json!({"source": {"graph": {}}});
+        let named = serde_json::json!({"source": {"blueprint": "coder"}});
+        assert_eq!(
+            default_tool_policy(leviath_tools::SPAWN_RAW_GRAPH_PERMISSION, false),
+            ToolPolicy::Ask
+        );
+        assert!(spawns_a_raw_graph("spawn_agent", &raw));
+        assert!(!spawns_a_raw_graph("spawn_agent", &named));
+        assert!(!spawns_a_raw_graph("validate_spawn", &raw));
+        assert!(!spawns_a_raw_graph("spawn_agent", &serde_json::json!({})));
+        let ask = || ToolPolicy::Ask;
+        assert_eq!(
+            clamp_raw_graph("spawn_agent", &raw, ToolPolicy::Allow, &ask),
+            ToolPolicy::Ask
+        );
+        assert_eq!(
+            clamp_raw_graph("spawn_agent", &raw, ToolPolicy::Allow, &deny),
+            ToolPolicy::Deny
+        );
+        assert_eq!(
+            clamp_raw_graph("spawn_agent", &raw, ToolPolicy::Deny, &ask),
+            ToolPolicy::Deny
+        );
+        assert_eq!(
+            clamp_raw_graph("spawn_agent", &named, ToolPolicy::Allow, &deny),
+            ToolPolicy::Allow
+        );
+        assert_eq!(
+            session_approval_keys("spawn_agent", &raw),
+            vec![leviath_tools::SPAWN_RAW_GRAPH_PERMISSION.to_string()]
+        );
+        assert_eq!(
+            session_approval_keys("spawn_agent", &named),
+            vec!["spawn_agent".to_string()]
+        );
+    }
 
     // ─── clamp_by_effect ──────────────────────────────────────────────────
 
@@ -2721,6 +2810,13 @@ mod policy_tests {
         "wait_for_agent",
         "send_to_agent",
         "kill_agent",
+        // These read and start nothing: the request schema, an installed
+        // blueprint's inputs, a dry run that resolves without starting, and
+        // the history of a run in the caller's own tree.
+        "spawn_schema",
+        "describe_blueprint",
+        "validate_spawn",
+        "run_history",
         "ask_user_text",
         "ask_user_choice",
         "ask_user_confirm",

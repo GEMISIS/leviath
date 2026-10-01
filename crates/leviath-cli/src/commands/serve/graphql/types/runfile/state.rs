@@ -462,6 +462,8 @@ pub(crate) struct FanOutItemOutcome {
 pub(crate) enum FanOutWorkerKind {
     /// An installed blueprint.
     Blueprint,
+    /// A blueprint read from its directory on the daemon's machine.
+    BlueprintFile,
     /// A stage of this run's own graph.
     Stage,
     /// A blueprint chosen by a query.
@@ -512,6 +514,9 @@ impl From<&FanOutState> for FanOutProgress {
         let (worker_kind, worker) = match &f.config.worker {
             WorkerSource::Blueprint(blueprint) => {
                 (FanOutWorkerKind::Blueprint, blueprint.to_string())
+            }
+            WorkerSource::BlueprintFile(path) => {
+                (FanOutWorkerKind::BlueprintFile, path.to_string())
             }
             WorkerSource::Stage(stage) => (FanOutWorkerKind::Stage, stage.to_string()),
             WorkerSource::Query(query) => (FanOutWorkerKind::Query, query.clone()),

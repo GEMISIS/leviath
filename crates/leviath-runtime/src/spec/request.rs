@@ -82,15 +82,39 @@ impl SpawnRequest {
     /// the request on; one on this machine (the CLI, the control socket, an
     /// embedding program) does not need to.
     pub fn check_remote(&self) -> Result<(), SpawnIssues> {
-        match &self.source {
-            SpawnSource::BlueprintFile(_) => Err(SpawnIssue::new(
-                SpecPath::root().field("source").field("blueprint_file"),
+        let local_only = |path: SpecPath| {
+            SpawnIssue::new(
+                path,
                 IssueCode::NotAllowed,
                 "a blueprint is read from a directory only for a caller on this machine",
             )
             .hint("name an installed blueprint, or send the graph itself")
-            .into()),
-            SpawnSource::Blueprint(_) | SpawnSource::Raw(_) => Ok(()),
+        };
+        let source = SpecPath::root().field("source");
+        match &self.source {
+            SpawnSource::BlueprintFile(_) => Err(local_only(source.field("blueprint_file")).into()),
+            SpawnSource::Blueprint(_) => Ok(()),
+            // A raw graph's fan-out may name its workers' blueprint by
+            // directory too, which is the same read.
+            SpawnSource::Raw(graph) => {
+                let mut issues = SpawnIssues::new();
+                for stage in &graph.stages {
+                    if let super::graph::StageMode::FanOut(fan) = &stage.mode
+                        && let super::graph::WorkerSource::BlueprintFile(_) = fan.worker
+                    {
+                        issues.push(local_only(
+                            source
+                                .field("raw")
+                                .field("stages")
+                                .key(stage.name.as_str())
+                                .field("mode")
+                                .field("fan_out")
+                                .field("worker"),
+                        ));
+                    }
+                }
+                issues.into_result(())
+            }
         }
     }
 }
@@ -239,6 +263,30 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: SpawnRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.source, SpawnSource::Raw(Box::new(graph)));
+    }
+
+    /// A raw graph whose fan-out reads its worker from a directory asks for
+    /// the same local read a `blueprint_file` source does.
+    #[test]
+    fn a_remote_raw_graph_may_not_name_a_worker_by_directory() {
+        use crate::spec::graph::{FanOutDef, StageMode, WorkerSource};
+        let mut graph = crate::spec::graph::tests::minimal();
+        let dir = std::env::temp_dir().join("w");
+        let mut fan = FanOutDef::same_graph(crate::spec::names::StageName::new("build").unwrap());
+        graph.stages[0].mode = StageMode::FanOut(fan.clone());
+        let request = SpawnRequest::new(SpawnSource::Raw(Box::new(graph.clone())));
+        assert!(request.check_remote().is_ok());
+        fan.worker =
+            WorkerSource::BlueprintFile(BlueprintPath::new(dir.to_string_lossy()).unwrap());
+        graph.stages[0].mode = StageMode::FanOut(fan);
+        let issues = SpawnRequest::new(SpawnSource::Raw(Box::new(graph)))
+            .check_remote()
+            .unwrap_err();
+        assert_eq!(
+            issues.0[0].path.to_string(),
+            "source.raw.stages.plan.mode.fan_out.worker"
+        );
+        assert_eq!(issues.0[0].code, IssueCode::NotAllowed);
     }
 
     #[test]

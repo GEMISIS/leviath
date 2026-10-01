@@ -6274,7 +6274,7 @@ fn a_fan_out_call_is_read_inline_and_never_reaches_the_lane() {
     let mut call = tc("c1", "fan_out");
     call.arguments = serde_json::json!({
         "agent": "researcher",
-        "items": [{"id": "a", "context": {"question": "q"}}]
+        "items": [{"id": "a", "inputs": {"task": "q"}}]
     });
     let e = ready_for_tools(&mut world, vec![call]);
 
@@ -6309,7 +6309,7 @@ fn parking_on_a_fan_out_writes_no_result_for_it_yet() {
     let mut fan = tc("c1", "fan_out");
     fan.arguments = serde_json::json!({
         "agent": "researcher",
-        "items": [{"id": "a", "context": {"question": "q"}}]
+        "items": [{"id": "a", "inputs": {"task": "q"}}]
     });
     // A context tool in the same turn: it lands now, proving the filter removes
     // only the fan-out's entry rather than suppressing the whole batch.

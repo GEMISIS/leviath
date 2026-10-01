@@ -475,7 +475,8 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
                 call_id: call_id.clone(),
             },
         };
-        let mut config = match config_for(&request, stage_config.as_ref()) {
+        let workdir = spec.as_ref().map(|s| s.placement.workdir.clone());
+        let mut config = match config_for(&request, stage_config.as_ref(), workdir.as_deref()) {
             Ok(config) => config,
             Err(why) => {
                 answer_call(world, entity, &call_id, format!("[error] {why}"));
@@ -980,6 +981,7 @@ fn start_worker(
         .ok_or_else(|| "no fan-out spawner installed".to_string())?;
     let source = match &config.worker {
         WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
+        WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),
         WorkerSource::Stage(_) => spec.same_graph_source(),
         WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
     };
@@ -1199,6 +1201,7 @@ mod tests {
     fn legacy(def: &FanOutDef) -> FanOutConfig {
         let (agent, stage, query) = match &def.worker {
             WorkerSource::Blueprint(b) => (Some(b.to_string()), None, None),
+            WorkerSource::BlueprintFile(p) => (Some(p.to_string()), None, None),
             WorkerSource::Stage(s) => (None, Some(s.to_string()), None),
             WorkerSource::Query(q) => (None, None, Some(q.clone())),
         };
@@ -1230,6 +1233,12 @@ mod tests {
         def.worker = WorkerSource::Query("tests".into());
         assert_eq!(legacy(&def).worker_query.as_deref(), Some("tests"));
         assert_eq!(legacy(&def).on_worker_failure, WorkerFailurePolicy::FailAll);
+        let dir = std::env::temp_dir()
+            .join("fixer")
+            .to_string_lossy()
+            .into_owned();
+        def.worker = WorkerSource::named(&dir).unwrap();
+        assert_eq!(legacy(&def).worker_agent, Some(dir));
     }
 
     fn window() -> ContextWindow {
@@ -1622,8 +1631,8 @@ mod tests {
             "agent": "researcher",
             "max_workers": 4,
             "items": [
-                {"id": "a", "context": {"question": "q1"}},
-                {"id": "b", "context": {"question": "q2"}}
+                {"id": "a", "inputs": {"task": "q1"}},
+                {"id": "b", "inputs": {"task": "q2"}}
             ]
         }))
         .expect("parses");
@@ -1632,9 +1641,7 @@ mod tests {
         assert_eq!(request.items.len(), 2);
         assert_eq!(
             request.items[1].inputs["task"],
-            crate::spec::inputs::RawInput::Text(
-                "Work item id: b\nContext: {\"question\":\"q2\"}".into()
-            )
+            crate::spec::inputs::RawInput::Text("q2".into())
         );
     }
 
@@ -1770,7 +1777,7 @@ mod tests {
             call_id: "call-1".to_string(),
             request: parse_fan_out_call(&serde_json::json!({
                 "agent": "researcher",
-                "items": [{"id": "a", "context": {}}]
+                "items": [{"id": "a"}]
             }))
             .unwrap(),
         });
@@ -1822,7 +1829,7 @@ mod tests {
         world.entity_mut(e).insert(PendingFanOut {
             call_id: "call-1".to_string(),
             request: parse_fan_out_call(&serde_json::json!({
-                "items": [{"id": "a", "context": {}}]
+                "items": [{"id": "a"}]
             }))
             .unwrap(),
         });
@@ -1872,7 +1879,7 @@ mod tests {
         world.entity_mut(e).insert(PendingFanOut {
             call_id: "call-1".to_string(),
             request: parse_fan_out_call(&serde_json::json!({
-                "items": [{"id": "a", "context": {}}]
+                "items": [{"id": "a"}]
             }))
             .unwrap(),
         });
@@ -1910,7 +1917,7 @@ mod tests {
             request: parse_fan_out_call(&serde_json::json!({
                 "agent": "researcher",
                 "max_workers": 3,
-                "items": [{"id": "a", "context": {}}]
+                "items": [{"id": "a"}]
             }))
             .unwrap(),
         });
@@ -3730,6 +3737,11 @@ mod tests {
         assert!(start_worker(&mut world, parent, &config, &item("a")).is_ok());
         config.worker = WorkerSource::Query("tests".into());
         assert!(start_worker(&mut world, parent, &config, &item("b")).is_ok());
+        let dir = std::env::temp_dir().join("fixer");
+        config.worker = WorkerSource::BlueprintFile(
+            crate::spec::names::BlueprintPath::new(dir.to_string_lossy()).unwrap(),
+        );
+        assert!(start_worker(&mut world, parent, &config, &item("e")).is_ok());
         config.worker = WorkerSource::Query("nobody".into());
         let err = start_worker(&mut world, parent, &config, &item("c")).unwrap_err();
         assert!(err.contains("no installed agent"), "{err}");

@@ -297,6 +297,18 @@ type AskUserTextCallOutput implements ToolCall {
 	args: AskUserTextArgsOutput!
 }
 
+"The output shape a `spawn_agent` call asked its child for."
+type AskedOutputOutput {
+	"The format label: markdown, json, a mime type, a house format."
+	format: String
+	"Guidance about that shape."
+	instructions: String
+	"An example answer."
+	example: String
+	"A JSON Schema the answer must meet."
+	schema: JSON
+}
+
 "Where an attachment's bytes come from."
 input AttachmentContentWrite @oneOf {
 	"A file inside the run's working directory, by its path relative to it."
@@ -3409,6 +3421,27 @@ input DependencyKindFilter {
 	isNull: Boolean
 }
 
+"Arguments for the `describe_blueprint` tool."
+type DescribeBlueprintArgsOutput {
+	"The installed blueprint asked about."
+	blueprint: SpawnAgentBlueprintSourceOutput!
+}
+
+"One `describe_blueprint` call."
+type DescribeBlueprintCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: DescribeBlueprintArgsOutput!
+}
+
 """
 Filter on `DirectiveEntryOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -3964,13 +3997,14 @@ type FanOutItemOutput {
 	"The item's own id, which names its child run."
 	id: ID!
 	"""
-	Everything the worker gets, which the blueprint's author defines.
+	Values for the worker graph's declared inputs, by name, as the model
+	wrote them. Checked against those declarations before any worker
+	starts. Null when the model gave the item none.
 	
-	Raw JSON because the tool declares it as an object and nothing more: the
-	worker is seeded with whatever this holds, so its shape is a contract
-	between one blueprint's stages and nothing this schema can name.
+	JSON because the names and types are the worker graph's own, declared
+	by whoever wrote it, and this schema cannot name them.
 	"""
-	context: JSON!
+	inputs: JSON
 }
 
 "One fan-out item waiting for a worker."
@@ -4087,6 +4121,8 @@ type FanOutProgressOutput {
 enum FanOutWorkerKind {
 	"An installed blueprint."
 	BLUEPRINT
+	"A blueprint read from its directory on the daemon's machine."
+	BLUEPRINT_FILE
 	"A stage of this run's own graph."
 	STAGE
 	"A blueprint chosen by a query."
@@ -11009,6 +11045,41 @@ type RunHighlightOutput {
 	stageIndex: Int
 }
 
+"Arguments for the `run_history` tool."
+type RunHistoryArgsOutput {
+	"The run read."
+	runId: ID!
+	"What it asked to see. Null asked for the summary."
+	view: RunHistoryView
+	"The step the state was asked at. Null asked for now."
+	at: Int
+}
+
+"One `run_history` call."
+type RunHistoryCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: RunHistoryArgsOutput!
+}
+
+"What a `run_history` call asked to see."
+enum RunHistoryView {
+	"The run in brief."
+	SUMMARY
+	"Its whole state, now or at a step."
+	STATE
+	"Each edge it took."
+	TRANSITIONS
+}
+
 """
 Filter on `RunOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -13512,30 +13583,43 @@ type SkippedToolOutput {
 	reason: String!
 }
 
-"Arguments for the `spawn_agent` tool."
+"""
+Arguments for the `spawn_agent` tool, and for `validate_spawn`, which takes
+exactly the same.
+"""
 type SpawnAgentArgsOutput {
-	"The blueprint to run, by name."
-	blueprint: String!
-	"The task handed to it."
-	task: String!
+	"What the child runs: an installed blueprint, or a whole graph."
+	source: SpawnAgentSource!
+	"""
+	Values for the child graph's declared inputs, by name, as the model
+	wrote them. JSON because the names and types are that graph's own.
+	"""
+	inputs: JSON
 	"""
 	Whether the caller blocked until it finished. Left out means no, which is
 	also what the tool's own default says.
 	"""
 	wait: Boolean
-	"Context put in the child's first pinned region."
-	seedContext: String
+	"A depth limit for the child's own children."
+	maxChildDepth: Int
+	"The output shape the child was asked for, over its graph's own."
+	output: AskedOutputOutput
 	"""
 	Stored parts of this run handed to the child, each by name or by the
 	start of its sha256.
 	"""
 	parts: [String!]
-	"A depth limit for the child's own children."
-	maxChildDepth: Int
-	"The shape the child was asked to answer in, overriding its blueprint's."
-	outputFormat: String
-	"Extra guidance about that shape."
-	outputInstructions: String
+}
+
+"An installed blueprint a `spawn_agent` or `describe_blueprint` call named."
+type SpawnAgentBlueprintSourceOutput {
+	"The blueprint's name."
+	name: String!
+	"""
+	The revision the model pinned it to. Null when it named the blueprint
+	alone.
+	"""
+	digest: String
 }
 
 "One `spawn_agent` call."
@@ -13552,6 +13636,24 @@ type SpawnAgentCallOutput implements ToolCall {
 	"The call's arguments."
 	args: SpawnAgentArgsOutput!
 }
+
+"A whole graph a `spawn_agent` call wrote for its child."
+type SpawnAgentGraphSourceOutput {
+	"""
+	The graph, as the model wrote it, in the JSON form a spawn request's
+	raw graph takes.
+	"""
+	graph: JSON!
+}
+
+"""
+What a `spawn_agent` call asked the child to run.
+
+The tool takes either an installed blueprint or a whole graph, and which
+one the model chose is part of what it asked for, so it is a union here
+rather than a reading that flattens the two.
+"""
+union SpawnAgentSource = SpawnAgentBlueprintSourceOutput | SpawnAgentGraphSourceOutput
 
 """
 A file sent with a spawn: for a `file` input to name, or placed straight
@@ -13681,6 +13783,30 @@ What `spawnRun` answers with: the run it started, or every reason it did
 not.
 """
 union SpawnRunResult = SpawnedOutput | SpawnRejectedOutput
+
+"Arguments for the `spawn_schema` tool."
+type SpawnSchemaArgsOutput {
+	"""
+	The part of the spawn request's schema asked for. Null asked for the
+	top level.
+	"""
+	part: String
+}
+
+"One `spawn_schema` call."
+type SpawnSchemaCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: SpawnSchemaArgsOutput!
+}
 
 "What a run runs: an installed blueprint, or a whole graph."
 input SpawnSourceWrite @oneOf {
@@ -18141,6 +18267,21 @@ type UrlValueOutput {
 	url: String!
 	"The value as a region shows it."
 	asText: String!
+}
+
+"One `validate_spawn` call: a spawn checked and not started."
+type ValidateSpawnCallOutput implements ToolCall {
+	"Tool name, exactly as the model called it."
+	toolName: String!
+	"What the tool does, as this build describes it."
+	toolDescription: String
+	"""
+	The arguments as the model sent them, untouched. The typed
+	form beside this is a reading of it, not a replacement.
+	"""
+	rawArguments: JSON!
+	"The call's arguments."
+	args: SpawnAgentArgsOutput!
 }
 
 """
