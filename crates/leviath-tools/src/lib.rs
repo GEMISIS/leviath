@@ -18,6 +18,7 @@ mod context;
 mod defs;
 mod env;
 mod exec;
+mod subagent_defs;
 pub use exec::is_null_device;
 pub use exec::resolve_within;
 mod install;
@@ -27,8 +28,8 @@ mod platform;
 pub mod validate;
 pub use context::*;
 pub use defs::{
-    BUILTIN_TOOL_NAMES, STAGE_CONTROL_TOOLS, SUBAGENT_TOOLS, is_builtin_tool, is_subagent_tool,
-    submit_output_description,
+    BUILTIN_TOOL_NAMES, SPAWN_RAW_GRAPH_PERMISSION, STAGE_CONTROL_TOOLS, SUBAGENT_TOOLS,
+    is_builtin_tool, is_subagent_tool, submit_output_description,
 };
 pub use install::{
     InstallProbes, InstalledFor, InstalledTool, MAX_TOOL_SOURCE_BYTES, install_script_tool,
@@ -190,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_predicate_covers_the_five_names_and_nothing_else() {
+    fn subagent_predicate_covers_every_subagent_name_and_nothing_else() {
         for name in SUBAGENT_TOOLS {
             assert!(is_subagent_tool(name));
         }
@@ -570,20 +571,50 @@ mod tests {
     // ── Sub-agent tool definitions ────────────────────────────────────────
 
     #[test]
-    fn subagent_tool_defs_returns_five_tools() {
-        let defs = BuiltinTools::subagent_tool_defs();
-        assert_eq!(defs.len(), 5);
+    fn subagent_tool_names_are_the_nine_tools() {
+        let names = BuiltinTools::subagent_tool_names();
+        assert_eq!(
+            names,
+            [
+                "spawn_agent",
+                "check_agent",
+                "wait_for_agent",
+                "send_to_agent",
+                "kill_agent",
+                "spawn_schema",
+                "describe_blueprint",
+                "validate_spawn",
+                "run_history",
+            ]
+        );
     }
 
+    /// Every sub-agent schema is a JSON Schema a validator compiles, so a
+    /// provider that checks the schema it is handed never refuses the
+    /// catalog, and `validate_spawn` takes exactly what `spawn_agent` does.
     #[test]
-    fn subagent_tool_names_returns_five_names() {
-        let names = BuiltinTools::subagent_tool_names();
-        assert_eq!(names.len(), 5);
-        assert!(names.contains(&"spawn_agent".to_string()));
-        assert!(names.contains(&"check_agent".to_string()));
-        assert!(names.contains(&"wait_for_agent".to_string()));
-        assert!(names.contains(&"send_to_agent".to_string()));
-        assert!(names.contains(&"kill_agent".to_string()));
+    fn every_subagent_schema_compiles_and_validate_spawn_mirrors_spawn_agent() {
+        let defs = BuiltinTools::subagent_tool_defs();
+        for def in &defs {
+            assert!(
+                jsonschema::validator_for(&def.parameters).is_ok(),
+                "{} has a schema that does not compile",
+                def.name
+            );
+        }
+        let by = |name: &str| defs.iter().find(|d| d.name == name).unwrap();
+        assert_eq!(
+            by("validate_spawn").parameters,
+            by("spawn_agent").parameters
+        );
+        let spawn = jsonschema::validator_for(&by("spawn_agent").parameters).unwrap();
+        assert!(spawn.is_valid(&json!({"source": {"blueprint": "coder"}})));
+        assert!(spawn.is_valid(&json!({"source": {"graph": {}}, "inputs": {"task": "go"}})));
+        assert!(!spawn.is_valid(&json!({"source": {"blueprint": "c", "graph": {}}})));
+        assert!(!spawn.is_valid(&json!({"blueprint": "c", "task": "go"})));
+        let history = jsonschema::validator_for(&by("run_history").parameters).unwrap();
+        assert!(history.is_valid(&json!({"run_id": "r", "view": "state", "at": 3})));
+        assert!(!history.is_valid(&json!({"run_id": "r", "view": "everything"})));
     }
 
     #[test]

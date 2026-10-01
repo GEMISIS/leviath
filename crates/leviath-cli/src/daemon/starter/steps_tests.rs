@@ -130,8 +130,8 @@ async fn a_requests_graph_is_its_blueprints_or_its_own() {
 }
 
 /// The MCP servers of the blueprints a graph's fan-outs start, whether named
-/// by path or found by a query. A same-graph worker, a query nothing matches
-/// and a worker blueprint that will not load add nothing.
+/// by directory or by name, or found by a query. A same-graph worker, a query
+/// nothing matches and a worker blueprint that will not load add nothing.
 #[tokio::test]
 async fn a_fan_outs_worker_servers_are_found_by_path_or_query() {
     let (_stub_dir, stub) = stub_server_py();
@@ -155,6 +155,7 @@ async fn a_fan_outs_worker_servers_are_found_by_path_or_query() {
     };
     let by_path = format!("worker_agent = '{}'", worker.display());
     assert_eq!(names(&by_path), ["search"]);
+    assert_eq!(names("worker_agent = \"searcher\""), ["search"]);
     assert_eq!(names("worker_query = \"searcher\""), ["search"]);
     assert!(names("worker_query = \"nothing-matches\"").is_empty());
     assert!(names("worker_stage = \"w\"").is_empty());

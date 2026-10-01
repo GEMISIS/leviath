@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use super::policy::{NudgeDef, SandboxDef};
 use super::region::RegionLayoutDef;
 use crate::spec::names::{
-    BlueprintRef, McpServerName, MimePattern, ModelRef, RegionName, StageName, ToolName,
+    BlueprintPath, BlueprintRef, McpServerName, MimePattern, ModelRef, NameError, RegionName,
+    StageName, ToolName,
 };
 
 /// One stage.
@@ -362,6 +363,29 @@ pub enum WorkerSource {
     Stage(StageName),
     /// An installed blueprint picked at run time by a query the model answers.
     Query(String),
+    /// A blueprint that is not installed, read from its directory on this
+    /// machine. A request from a remote caller may not name one; see
+    /// [`SpawnRequest::check_remote`](crate::spec::request::SpawnRequest::check_remote).
+    BlueprintFile(BlueprintPath),
+}
+
+impl WorkerSource {
+    /// The worker a blueprint or a `fan_out` call names as text. A path
+    /// (see [`looks_like_a_path`]) names a blueprint's directory, which must
+    /// be absolute; anything else names an installed blueprint, as `name` or
+    /// `name@digest`.
+    pub fn named(text: &str) -> Result<Self, NameError> {
+        match looks_like_a_path(text) {
+            true => BlueprintPath::new(text).map(Self::BlueprintFile),
+            false => BlueprintRef::parse(text).map(Self::Blueprint),
+        }
+    }
+}
+
+/// Whether text naming a blueprint is a path rather than a name: it holds a
+/// slash or a backslash, or starts with `.` or `~`.
+pub fn looks_like_a_path(text: &str) -> bool {
+    text.contains(['/', '\\']) || text.starts_with(['.', '~'])
 }
 
 /// What one fan-out worker's failure does to the rest.

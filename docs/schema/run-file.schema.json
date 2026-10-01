@@ -2420,6 +2420,20 @@
               "query"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A blueprint that is not installed, read from its directory on this\nmachine. A request from a remote caller may not name one; see\n[`SpawnRequest::check_remote`](crate::spec::request::SpawnRequest::check_remote).",
+            "properties": {
+              "blueprint_file": {
+                "description": "A blueprint path.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "blueprint_file"
+            ],
+            "type": "object"
           }
         ]
       }
@@ -6611,6 +6625,20 @@
               "query"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A blueprint that is not installed, read from its directory on this\nmachine. A request from a remote caller may not name one; see\n[`SpawnRequest::check_remote`](crate::spec::request::SpawnRequest::check_remote).",
+            "properties": {
+              "blueprint_file": {
+                "description": "A blueprint path.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "blueprint_file"
+            ],
+            "type": "object"
           }
         ]
       }
@@ -8513,6 +8541,20 @@
             },
             "required": [
               "query"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A blueprint that is not installed, read from its directory on this\nmachine. A request from a remote caller may not name one; see\n[`SpawnRequest::check_remote`](crate::spec::request::SpawnRequest::check_remote).",
+            "properties": {
+              "blueprint_file": {
+                "description": "A blueprint path.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "blueprint_file"
             ],
             "type": "object"
           }

@@ -137,20 +137,30 @@ impl DaemonStarter {
             .stages
             .iter()
             .filter_map(|s| match &s.mode {
-                StageMode::FanOut(fan) => match &fan.worker {
-                    WorkerSource::Blueprint(reference) => Some(reference.clone()),
+                StageMode::FanOut(fan) => Some(&fan.worker),
+                _ => None,
+            })
+            .filter_map(|worker| {
+                let installed = |reference: &_| {
+                    crate::daemon::resolve_env::load_installed(
+                        self.agents_dir.as_deref(),
+                        reference,
+                    )
+                    .ok()
+                };
+                match worker {
+                    WorkerSource::Blueprint(reference) => installed(reference),
+                    WorkerSource::BlueprintFile(path) => {
+                        crate::daemon::resolve_env::load_file(path).ok()
+                    }
                     WorkerSource::Query(query) => crate::daemon::fanout_spawner::find_installed(
                         self.agents_dir.as_deref(),
                         query,
                     )
-                    .ok(),
-                    WorkerSource::Stage(_) => None,
-                },
-                _ => None,
-            })
-            .filter_map(|reference| {
-                crate::daemon::resolve_env::load_installed(self.agents_dir.as_deref(), &reference)
                     .ok()
+                    .and_then(|reference| installed(&reference)),
+                    WorkerSource::Stage(_) => None,
+                }
             })
             .flat_map(|loaded| mcp_configs(&loaded.graph))
             .collect()

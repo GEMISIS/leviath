@@ -388,6 +388,25 @@ fn every_setting_a_blueprint_holds_converts() {
     g.validate(&SpecPath::root()).unwrap();
 }
 
+/// A `worker_agent` that is a directory names a blueprint read from there,
+/// not an installed one with a slash in its name.
+#[test]
+fn a_worker_agent_path_reads_as_a_blueprint_file() {
+    let dir = std::env::temp_dir().join("my-worker");
+    let mut fan = stage("fan");
+    fan.mode = fan_out(Some(&dir.to_string_lossy()), None, None);
+    let g = RunGraph::from_blueprint(&blueprint(vec![fan], vec![])).unwrap();
+    let StageMode::FanOut(def) = &g.stages[0].mode else {
+        panic!("a fan-out stage");
+    };
+    assert_eq!(
+        def.worker,
+        WorkerSource::BlueprintFile(
+            crate::spec::names::BlueprintPath::new(dir.to_string_lossy()).unwrap()
+        )
+    );
+}
+
 #[test]
 fn every_tool_rescan_converts() {
     let mut b = blueprint(vec![stage("main")], vec![]);

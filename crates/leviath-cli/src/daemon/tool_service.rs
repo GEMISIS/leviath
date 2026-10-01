@@ -791,6 +791,19 @@ pub(crate) async fn dispatch_tools(
                 state.blueprint_may_loosen(),
             )
         });
+        // A spawn that carries a graph the model wrote answers to
+        // `spawn_raw_graph` as well, the same layers resolving it.
+        let policy = crate::tools::clamp_raw_graph(&tc.name, &tc.arguments, policy, &|| {
+            resolve_policy(
+                leviath_tools::SPAWN_RAW_GRAPH_PERMISSION,
+                false,
+                &state.launch_overrides,
+                &stage_snap,
+                &state.agent_perms,
+                &state.global_perms.get(),
+                state.blueprint_may_loosen(),
+            )
+        });
         // The yolo profile, when this is a yolo run. It sees the policy the
         // config layers settled on and says what runs unprompted, what still
         // asks, and what is refused; it never lifts a configured deny.
@@ -3651,6 +3664,7 @@ mod tests {
             model_override: None,
             offered_parts: Arc::new(std::sync::Mutex::new(Vec::new())),
             mime: None,
+            agents_dir: None,
         };
         let builtins = Arc::new(leviath_tools::BuiltinTools::new(
             leviath_tools::ToolContext::new(std::env::temp_dir()),
@@ -3850,6 +3864,59 @@ mod tests {
         .await;
         assert_eq!(out[0].0, "c1");
         assert!(state.run_allows.lock().await.contains("read_file"));
+    }
+
+    /// A `spawn_agent` that carries a graph the model wrote stops for a
+    /// person, though `spawn_agent` itself runs unprompted; a configured
+    /// `spawn_raw_graph = "deny"` refuses it, and `allow` lets it through to
+    /// the handler, as any tool permission does. Spawning an installed
+    /// blueprint never asks.
+    #[tokio::test]
+    async fn a_raw_graph_spawn_asks_unless_the_operator_said_otherwise() {
+        let raw = serde_json::json!({"source": {"graph": {}}});
+        let hub = InteractionHub::new();
+        let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        let out = dispatch_answering(
+            state,
+            vec![call("c1", "spawn_agent", raw.clone())],
+            |req| {
+                let shown = format!("{req:?}");
+                assert!(shown.contains("spawn_agent"), "{shown}");
+                InteractionResponse::approval(&req.id, false, ApprovalScope::Once)
+            },
+            hub,
+        )
+        .await;
+        assert!(out[0].1.contains("User declined"));
+
+        for (setting, says) in [
+            (ToolPolicy::Deny, "is not permitted"),
+            (ToolPolicy::Allow, "sub-agent tools are unavailable"),
+        ] {
+            let hub = InteractionHub::new();
+            let global = HashMap::from([(
+                leviath_tools::SPAWN_RAW_GRAPH_PERMISSION.to_string(),
+                setting,
+            )]);
+            let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), global);
+            let out = dispatch_tools(
+                state,
+                vec![call("c1", "spawn_agent", raw.clone())],
+                noop_progress(),
+            )
+            .await;
+            assert!(out[0].1.contains(says));
+        }
+        let hub = InteractionHub::new();
+        let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        let named = serde_json::json!({"source": {"blueprint": "coder"}});
+        let out = dispatch_tools(
+            state,
+            vec![call("c1", "spawn_agent", named)],
+            noop_progress(),
+        )
+        .await;
+        assert!(out[0].1.contains("sub-agent tools are unavailable"));
     }
 
     #[tokio::test]

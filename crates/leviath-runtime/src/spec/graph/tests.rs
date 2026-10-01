@@ -560,3 +560,25 @@ fn a_manifests_own_mcp_servers_and_script_permissions_are_read_into_the_graph() 
         crate::spec::issues::IssueCode::Invalid
     );
 }
+
+/// A worker named by a path reads a blueprint's directory; anything else is
+/// an installed blueprint, and a path that is not absolute is refused.
+#[test]
+fn a_worker_named_by_a_path_is_a_blueprint_file() {
+    let dir = std::env::temp_dir().join("agents").join("fixer");
+    let text = dir.to_string_lossy();
+    assert_eq!(
+        WorkerSource::named(&text).unwrap(),
+        WorkerSource::BlueprintFile(crate::spec::names::BlueprintPath::new(&*text).unwrap())
+    );
+    assert_eq!(
+        WorkerSource::named("fixer").unwrap(),
+        WorkerSource::Blueprint(crate::spec::names::BlueprintRef::parse("fixer").unwrap())
+    );
+    for relative in ["./fixer", "agents/fixer", "~/fixer", "..\\fixer"] {
+        assert!(stage::looks_like_a_path(relative), "{relative}");
+        assert!(WorkerSource::named(relative).is_err(), "{relative}");
+    }
+    let json = serde_json::to_string(&WorkerSource::named(&text).unwrap()).unwrap();
+    assert!(json.starts_with("{\"blueprint_file\":"), "{json}");
+}

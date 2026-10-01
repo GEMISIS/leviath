@@ -327,6 +327,7 @@ impl DaemonEnv {
             model_override: spec.requested_model.as_ref().map(ToString::to_string),
             offered_parts: offered_parts.clone(),
             mime: Some(mime),
+            agents_dir: self.agents_dir.clone(),
         };
         let safe = layers::blueprint_safe(graph);
         let Layers {
