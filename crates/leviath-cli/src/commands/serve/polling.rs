@@ -26,7 +26,7 @@ pub(super) async fn event_loop(state: AppState, backoff: Duration) {
     // forever. The shared factory supplies a connect+total timeout floor and
     // caps redirects.
     // `checked_client`, not `client`: the webhook URL comes from a request body,
-    // and it was checked once at `POST /api/agents` and then never again. A
+    // and it was checked once at `POST /api/runs` and then never again. A
     // caller registered a public endpoint that answered `307 Location:
     // http://169.254.169.254/…`, and since 307 preserves the method *and* the
     // body, that was a repeatable POST primitive against the internal network -
@@ -1519,7 +1519,7 @@ mod tests {
     }
 
     /// The answer rides the payload, so a receiver learns what the run
-    /// concluded without a second round trip to `/api/agents/{id}/result`.
+    /// concluded without a second round trip to `/api/runs/{id}/result`.
     #[test]
     fn the_completion_payload_carries_the_agents_answer() {
         let answer = leviath_core::output::FinalOutput::new(

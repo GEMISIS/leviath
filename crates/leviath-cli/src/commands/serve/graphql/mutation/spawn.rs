@@ -7,12 +7,11 @@
 
 use async_graphql::{Context, Enum, ID, Object, SimpleObject, Union};
 use leviath_graphql_derive::mirror;
-use leviath_runtime::control_socket::ControlResponse;
 use leviath_runtime::spec::issues::{
     IssueCode, PathSeg, SpawnIssue as CoreIssue, SpawnIssues, SpecPath,
 };
 
-use super::super::super::core::error::ServeError;
+use super::super::super::core::spawn::{self as spawn_core, Verdict};
 use super::super::super::types::AppState;
 use super::super::error::IntoGraphql;
 use super::super::types::run::Run;
@@ -223,24 +222,18 @@ pub(crate) enum ValidateSpawnResult {
     Rejected(SpawnRejected),
 }
 
-/// The checks a request has to pass on this server, from its state.
-fn policy(state: &AppState) -> Policy<'_> {
+/// What a request is read with on this server.
+fn policy(state: &AppState) -> Policy {
     Policy {
-        limits: &state.limits,
         max_bytes: state.limits.request_limits.max_upload_bytes,
     }
 }
 
-/// A daemon answer that is neither a run, a summary nor a refusal.
-fn unexpected(reply: std::io::Result<ControlResponse>) -> ServeError {
-    match reply {
-        Ok(ControlResponse::Error { message }) => ServeError::DaemonUnavailable(message),
-        Ok(other) => ServeError::unexpected_reply(&other),
-        Err(e) => ServeError::from_daemon_io(&e),
-    }
-}
-
 /// Start a run, or say every reason it cannot start.
+///
+/// The request is read here; the service layer adds this server's own
+/// refusals and asks the daemon, so the issues are the same ones REST answers
+/// with.
 pub(crate) async fn spawn_run(
     ctx: &Context<'_>,
     request: SpawnRunRequest,
@@ -250,16 +243,10 @@ pub(crate) async fn spawn_run(
         Ok(request) => request,
         Err(issues) => return Ok(SpawnRunResult::Rejected(SpawnRejected::from(&issues))),
     };
-    match state.control.spawn(request).await {
-        Ok(ControlResponse::Spawned { run_id }) => {
-            tracing::info!(run_id = %run_id, "spawned a run over GraphQL");
-            Ok(SpawnRunResult::Spawned(Spawned { run_id }))
-        }
-        Ok(ControlResponse::Rejected { issues }) => {
-            Ok(SpawnRunResult::Rejected(SpawnRejected::from(&issues)))
-        }
-        other => Err(unexpected(other)).gql(),
-    }
+    Ok(match spawn_core::start(state, request).await.gql()? {
+        Verdict::Accepted(run_id) => SpawnRunResult::Spawned(Spawned { run_id }),
+        Verdict::Rejected(issues) => SpawnRunResult::Rejected(SpawnRejected::from(&issues)),
+    })
 }
 
 /// Check a request the whole way without starting anything.
@@ -272,15 +259,12 @@ pub(crate) async fn validate_spawn(
         Ok(request) => request,
         Err(issues) => return Ok(ValidateSpawnResult::Rejected(SpawnRejected::from(&issues))),
     };
-    match state.control.validate_spawn(request).await {
-        Ok(ControlResponse::Valid { summary }) => Ok(ValidateSpawnResult::Valid(Box::new(
-            SpawnSummary::from(&*summary),
-        ))),
-        Ok(ControlResponse::Rejected { issues }) => {
-            Ok(ValidateSpawnResult::Rejected(SpawnRejected::from(&issues)))
+    Ok(match spawn_core::validate(state, request).await.gql()? {
+        Verdict::Accepted(summary) => {
+            ValidateSpawnResult::Valid(Box::new(SpawnSummary::from(&summary)))
         }
-        other => Err(unexpected(other)).gql(),
-    }
+        Verdict::Rejected(issues) => ValidateSpawnResult::Rejected(SpawnRejected::from(&issues)),
+    })
 }
 
 #[cfg(test)]

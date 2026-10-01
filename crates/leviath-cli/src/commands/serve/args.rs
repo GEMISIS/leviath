@@ -71,7 +71,7 @@ pub struct ServeArgs {
 
     /// Restrict agent working directories to this root.
     ///
-    /// Without it, `POST /api/agents` accepts any `workdir` - including `/` -
+    /// Without it, `POST /api/runs` accepts any `workdir` - including `/` -
     /// so a token holder can point a tool-executing agent at the whole
     /// filesystem. Set this to the directory the API is meant to work in.
     #[arg(long)]

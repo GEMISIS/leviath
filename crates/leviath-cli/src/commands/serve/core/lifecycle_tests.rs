@@ -128,7 +128,7 @@ async fn a_conflict_names_the_act_it_refused() {
 /// A run that finishes while the control request is in flight is a conflict,
 /// not an act that landed.
 ///
-/// Both surfaces read this: `POST /api/agents/{id}/cancel` answers 409 and the
+/// Both surfaces read this: `POST /api/runs/{id}/cancel` answers 409 and the
 /// GraphQL sweep reports `ALREADY_FINISHED`. The record is read on each side of
 /// the request, because a run over in the daemon's world has not had its record
 /// written yet when the first read happens, and the daemon's cancel is

@@ -7,7 +7,7 @@ use leviath_core::interaction::{ApprovalScope, InteractionResponse};
 
 use super::types::*;
 
-/// `GET /api/agents/{id}/interaction`: the open interaction the daemon has for
+/// `GET /api/runs/{id}/interaction`: the open interaction the daemon has for
 /// this agent, if any (from the in-memory interaction hub).
 pub(super) async fn get_interaction(
     State(state): State<AppState>,
@@ -41,7 +41,7 @@ fn approval_scope_from_wire(s: &str) -> ApprovalScope {
     }
 }
 
-/// `POST /api/agents/{id}/interaction`: answer an open interaction. The request
+/// `POST /api/runs/{id}/interaction`: answer an open interaction. The request
 /// id in the body selects the interaction (globally unique in the daemon);
 /// the run in the path is where a `parts` list or a `@path` in the answer
 /// finds its files.
@@ -119,7 +119,7 @@ fn workdir_parts(
     }
 }
 
-/// `POST /api/agents/{id}/message`: deliver a message to a running agent.
+/// `POST /api/runs/{id}/message`: deliver a message to a running agent.
 pub(super) async fn send_message(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -171,10 +171,10 @@ mod tests {
         };
         Router::new()
             .route(
-                "/api/agents/{id}/interaction",
+                "/api/runs/{id}/interaction",
                 get(get_interaction).post(submit_interaction),
             )
-            .route("/api/agents/{id}/message", post(send_message))
+            .route("/api/runs/{id}/message", post(send_message))
             .with_state(state)
     }
 
@@ -231,7 +231,7 @@ mod tests {
         let control = ControlClient::for_home(id, dir.path()).with_build("this-build");
         let req = Request::builder()
             .method("GET")
-            .uri("/api/agents/a1/interaction")
+            .uri("/api/runs/a1/interaction")
             .body(Body::empty())
             .unwrap();
         let response = app_with(control).oneshot(req).await.unwrap();
@@ -258,7 +258,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "GET",
-                "/api/agents/a1/interaction",
+                "/api/runs/a1/interaction",
                 Body::empty()
             )
             .await,
@@ -275,7 +275,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "GET",
-                "/api/agents/none/interaction",
+                "/api/runs/none/interaction",
                 Body::empty()
             )
             .await,
@@ -290,7 +290,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "GET",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::empty()
             )
             .await,
@@ -304,7 +304,7 @@ mod tests {
             status_of(
                 app_with(no_daemon()),
                 "GET",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::empty()
             )
             .await,
@@ -331,7 +331,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::from(r#"{"request_id":"q1","scope":"once","value":"hi"}"#),
             )
             .await,
@@ -353,7 +353,7 @@ mod tests {
         let status = status_of(
             app_with(control),
             "POST",
-            "/api/agents/a/interaction",
+            "/api/runs/a/interaction",
             Body::from(body),
         )
         .await;
@@ -394,7 +394,7 @@ mod tests {
         // No daemon: the refusal happens before one would be asked.
         let req = Request::builder()
             .method("POST")
-            .uri("/api/agents/a/interaction")
+            .uri("/api/runs/a/interaction")
             .header("content-type", "application/json")
             .body(Body::from(
                 r#"{"request_id":"q1","approved":true,"feedback":"why"}"#,
@@ -414,7 +414,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::from(r#"{"request_id":"q1","scope":"session","approved":true}"#),
             )
             .await,
@@ -431,7 +431,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::from(r#"{"request_id":"q1"}"#),
             )
             .await,
@@ -445,7 +445,7 @@ mod tests {
             status_of(
                 app_with(no_daemon()),
                 "POST",
-                "/api/agents/a/interaction",
+                "/api/runs/a/interaction",
                 Body::from(r#"{"request_id":"q1"}"#),
             )
             .await,
@@ -461,7 +461,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/message",
+                "/api/runs/a/message",
                 Body::from(r#"{"message":"hi"}"#),
             )
             .await,
@@ -483,7 +483,7 @@ mod tests {
         });
         let req = Request::builder()
             .method("POST")
-            .uri(format!("/api/agents/{run_id}/message"))
+            .uri(format!("/api/runs/{run_id}/message"))
             .header("content-type", content_type)
             .body(Body::from(body))
             .unwrap();
@@ -583,7 +583,7 @@ mod tests {
         });
         let req = Request::builder()
             .method("POST")
-            .uri(format!("/api/agents/{run_id}/interaction"))
+            .uri(format!("/api/runs/{run_id}/interaction"))
             .header("content-type", content_type)
             .body(Body::from(body))
             .unwrap();
@@ -689,7 +689,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/message",
+                "/api/runs/a/message",
                 Body::from(r#"{"message":"hi","target_region":"conversation"}"#),
             )
             .await,
@@ -708,7 +708,7 @@ mod tests {
             status_of(
                 app_with(control),
                 "POST",
-                "/api/agents/a/message",
+                "/api/runs/a/message",
                 Body::from(r#"{"message":"hi"}"#),
             )
             .await,
@@ -722,7 +722,7 @@ mod tests {
             status_of(
                 app_with(no_daemon()),
                 "POST",
-                "/api/agents/a/message",
+                "/api/runs/a/message",
                 Body::from(r#"{"message":"hi"}"#),
             )
             .await,

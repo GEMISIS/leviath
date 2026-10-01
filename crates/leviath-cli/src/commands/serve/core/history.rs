@@ -1,17 +1,19 @@
 //! How a run's context window changed over the run, one page at a time.
 //!
-//! Each point carries a whole window, so this is paged harder than the run
-//! listing is. The journal is walked in one streamed pass rather than read
-//! whole: a mature run's journal is tens of megabytes on disk and several times
-//! that as parsed structs, and materializing it per request was this API's
-//! largest transient allocation.
+//! A point is the state the run started in, then every step of its run file
+//! that changed the window. Each point carries a whole window, so this is
+//! paged harder than the run listing is, and a window is built only for the
+//! points a page asks for: the walk replays every step's delta, which is
+//! cheap, and turns a state into a window only where one is wanted.
 
 use std::ops::ControlFlow;
 
 use leviath_core::run_archive::RunPoint;
+use leviath_runtime::spec::run_spec::RunSpec;
+use leviath_runtime::state::{Change, RunState};
 
 use super::error::ServeError;
-use crate::runstate;
+use super::run_file;
 
 /// Default page size for the history.
 pub(crate) const HISTORY_DEFAULT_LIMIT: usize = 50;
@@ -29,7 +31,7 @@ pub(crate) struct HistorySpec {
     pub(crate) limit: usize,
     /// Chronological, or newest first.
     pub(crate) ascending: bool,
-    /// Where the previous page left off, as an index into the journal.
+    /// Where the previous page left off, as an index into the history.
     pub(crate) after: Option<usize>,
     /// The digest the cursor was minted against, for the next one.
     pub(crate) digest: String,
@@ -88,11 +90,6 @@ impl HistorySpec {
             digest,
         })
     }
-
-    /// Whether this spec is resuming a page rather than starting one.
-    fn resuming(&self) -> bool {
-        self.after.is_some()
-    }
 }
 
 /// The word an order goes on the wire as, which the cursor is bound to.
@@ -110,14 +107,56 @@ pub(crate) struct HistoryPage {
     pub(crate) points: Vec<RunPoint>,
     /// Where the next page starts. Nothing when this page reached the end.
     pub(crate) next_cursor: Option<String>,
-    /// How many points the journal holds altogether.
+    /// How many points the history holds altogether.
     pub(crate) total: usize,
+}
+
+/// Hand `visit` each point of a run's history in order: its index, when it was
+/// recorded, the run's spec and its state there. `None` when the run has no
+/// run file this server can read.
+///
+/// The first point is the state the run started in, recorded when the run was
+/// resolved; every later one is a step that changed the window.
+fn visit_points(
+    run_id: &str,
+    visit: &mut dyn FnMut(usize, i64, &RunSpec, &RunState) -> ControlFlow<()>,
+) -> Option<()> {
+    let reader = run_file::open(run_id).ok().flatten()?;
+    let spec = reader.spec();
+    let start = run_file::initial(run_id, &reader).ok()?;
+    if visit(0, spec.created_at, spec, &start).is_break() {
+        return Some(());
+    }
+    let mut index = 0usize;
+    run_file::walk(run_id, &reader, &mut |step| {
+        let moved = step
+            .delta
+            .changes
+            .iter()
+            .any(|change| matches!(change, Change::Context(_)));
+        if !moved {
+            return ControlFlow::Continue(());
+        }
+        index += 1;
+        visit(index, step.delta.at, spec, step.after)
+    })
+    .ok()
+}
+
+/// One point, window and all. Its record is redacted: a run's record names
+/// its webhook's secret, and nothing that shows a history has any use for it.
+fn point(spec: &RunSpec, state: &RunState, at: i64) -> RunPoint {
+    RunPoint {
+        meta: leviath_runtime::runfile::summary_of(spec, state, at).redacted(),
+        context: leviath_runtime::runfile::context_snapshot(spec, state),
+        at,
+    }
 }
 
 /// The point at which this run held the window named by `revision`.
 ///
 /// Immutable by construction, and that is the property the whole debugger rests
-/// on. A revision is derived from a window's contents, and the journal it is
+/// on. A revision is derived from a window's contents, and the run file it is
 /// looked up in is append-only, so a revision resolves to the content it was
 /// minted from and to nothing else: no later write can change what it means, and
 /// a read of one can never come back with what the run holds now. A run that never
@@ -127,21 +166,15 @@ pub(crate) struct HistoryPage {
 /// The content is the same either way - that is what content addressing means -
 /// and the first time it appeared is the answer to "where did this come from".
 ///
-/// Streamed, so the whole journal is never materialized, and stopped at the
-/// match.
+/// Stopped at the match.
 pub(crate) fn at_revision(run_id: &str, revision: &str) -> Option<RunPoint> {
     let mut found = None;
-    runstate::visit_run_archive(run_id, &mut |point| {
-        if leviath_core::run_meta::revision::context_revision(point.context) != revision {
+    visit_points(run_id, &mut |_, at, spec, state| {
+        let held = point(spec, state, at);
+        if leviath_core::run_meta::revision::context_revision(&held.context) != revision {
             return ControlFlow::Continue(());
         }
-        found = Some(RunPoint {
-            // Redacted for the same reason the paged read redacts: the journal
-            // stores the run's record whole, secret and all.
-            meta: point.meta.redacted(),
-            context: point.context.clone(),
-            at: point.at,
-        });
+        found = Some(held);
         ControlFlow::Break(())
     })?;
     found
@@ -179,13 +212,13 @@ fn noted(run_id: &str) {
 }
 
 /// How many points a run's history holds, or nothing where it has no readable
-/// archive.
+/// run file.
 ///
-/// One streamed pass that folds the deltas and materializes none of them, so a
-/// listing knows how far it can walk before it decides what to read.
+/// One pass that replays the deltas and builds no window, so a listing knows
+/// how far it can walk before it decides what to read.
 pub(crate) fn point_count(run_id: &str) -> Option<usize> {
     let mut total = 0usize;
-    runstate::visit_run_archive(run_id, &mut |_| {
+    visit_points(run_id, &mut |_, _, _, _| {
         total += 1;
         ControlFlow::Continue(())
     })?;
@@ -196,27 +229,17 @@ pub(crate) fn point_count(run_id: &str) -> Option<usize> {
 ///
 /// The one place a window is materialized for a listing, so a page reads its
 /// own items and nothing else. The replay stops at the last index asked for
-/// rather than running to the end of the journal.
+/// rather than running to the end of the run.
 pub(crate) fn windows_at(run_id: &str, wanted: &[usize]) -> Vec<(usize, RunPoint)> {
     let stop_at = wanted.iter().copied().max();
     let mut collected: Vec<(usize, RunPoint)> = Vec::new();
-    runstate::visit_run_archive(run_id, &mut |point| {
-        if wanted.contains(&point.index) {
+    visit_points(run_id, &mut |index, at, spec, state| {
+        if wanted.contains(&index) {
             noted(run_id);
-            collected.push((
-                point.index,
-                RunPoint {
-                    // Redacted for the same reason `runstate::context_history`
-                    // redacts: the journal stores the run's record whole, secret
-                    // and all.
-                    meta: point.meta.redacted(),
-                    context: point.context.clone(),
-                    at: point.at,
-                },
-            ));
+            collected.push((index, point(spec, state, at)));
         }
         match stop_at {
-            Some(last) if point.index >= last => ControlFlow::Break(()),
+            Some(last) if index >= last => ControlFlow::Break(()),
             _ => ControlFlow::Continue(()),
         }
     });
@@ -229,24 +252,25 @@ pub(crate) fn windows_at(run_id: &str, wanted: &[usize]) -> Vec<(usize, RunPoint
 /// which points match without reading each one. Everything else pages over
 /// [`point_count`] and reads through [`windows_at`].
 pub(crate) fn every_window(run_id: &str) -> Vec<RunPoint> {
-    let points = runstate::context_history(run_id);
-    for _ in &points {
+    let mut points = Vec::new();
+    visit_points(run_id, &mut |_, at, spec, state| {
         noted(run_id);
-    }
+        points.push(point(spec, state, at));
+        ControlFlow::Continue(())
+    });
     points
 }
 
 /// Read one page of a run's history.
 pub(crate) fn page(run_id: &str, spec: &HistorySpec) -> Result<HistoryPage, ServeError> {
-    // One streamed pass to count, so `total` is honest and a descending window
-    // knows where to start. Counting folds the deltas but materializes nothing.
-    let counted = point_count(run_id);
-    let total = counted.unwrap_or_default();
-    if counted.is_none() || (total == 0 && !spec.resuming()) {
+    // One pass to count, so `total` is honest and a descending window knows
+    // where to start. Counting replays the deltas but builds no window. A run
+    // file always holds its start, so a run that has one has a history.
+    let Some(total) = point_count(run_id) else {
         return Err(ServeError::NotFound(format!(
             "No context history for run '{run_id}'"
         )));
-    }
+    };
 
     // Which indices this page wants, given the direction and where the cursor
     // left off. Computed up front so the replay can skip everything else.
@@ -360,3 +384,7 @@ mod tests {
         assert_eq!(refused.code(), "BAD_USER_INPUT");
     }
 }
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod run_tests;

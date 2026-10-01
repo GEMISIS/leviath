@@ -103,13 +103,13 @@ pub(super) fn build_tree_status(
         .collect()
 }
 
-pub(super) async fn agents_tree(State(state): State<AppState>) -> Json<Vec<AgentTreeNode>> {
+pub(super) async fn runs_tree(State(state): State<AppState>) -> Json<Vec<AgentTreeNode>> {
     let snapshot = state.caches.run_index.snapshot().await;
     let tree = build_tree(&snapshot, None);
     Json(tree)
 }
 
-pub(super) async fn agent_tree_status(
+pub(super) async fn run_tree_status(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<TreeStatusNode>, ApiError> {
@@ -117,7 +117,7 @@ pub(super) async fn agent_tree_status(
     let root = snapshot.get(&id).ok_or((
         StatusCode::NOT_FOUND,
         Json(ErrorResponse {
-            error: format!("Agent run '{}' not found", id),
+            error: format!("Run '{}' not found", id),
         }),
     ))?;
 
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(subtree.len(), 2);
     }
 
-    // ─── agents_tree / agent_tree_status (real runstate, unique run ids) ────
+    // ─── runs_tree / run_tree_status (real runstate, unique run ids) ────
     //
     // These read a runs directory the test isolates, with unique run ids and
     // assertions only on their own entries, and clean up afterward.
@@ -332,7 +332,7 @@ mod tests {
                 let meta = make_meta(run_id, "agent-tree-test", None);
                 runstate::create_run(&meta).unwrap();
 
-                let Json(tree) = agents_tree(State(test_state())).await;
+                let Json(tree) = runs_tree(State(test_state())).await;
                 assert!(tree.iter().any(|n| n.run_id == run_id));
             },
         )
@@ -341,7 +341,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_tree_status_returns_not_found_for_missing_id() {
-        let (status, Json(body)) = agent_tree_status(
+        let (status, Json(body)) = run_tree_status(
             State(test_state()),
             AxumPath("definitely-not-a-real-run-id".to_string()),
         )
@@ -370,10 +370,9 @@ mod tests {
                 child.completion_tokens = 3;
                 runstate::create_run(&child).unwrap();
 
-                let Json(node) =
-                    agent_tree_status(State(test_state()), AxumPath(run_id.to_string()))
-                        .await
-                        .unwrap();
+                let Json(node) = run_tree_status(State(test_state()), AxumPath(run_id.to_string()))
+                    .await
+                    .unwrap();
                 assert_eq!(node.run_id, run_id);
                 assert_eq!(node.subtree_prompt_tokens, 30);
                 assert_eq!(node.subtree_completion_tokens, 5);

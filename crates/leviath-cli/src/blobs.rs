@@ -97,6 +97,15 @@ pub(crate) fn blob_path(run_id: &str, sha256: &str) -> PathBuf {
 /// `None` when the run has no context snapshot to read.
 pub(crate) fn list(run_id: &str) -> Option<Vec<BlobEntry>> {
     let snapshot = runstate::read_context_snapshot(run_id)?;
+    Some(list_from(run_id, &snapshot))
+}
+
+/// The stored parts `snapshot` holds, by hash, first appearance first, with
+/// whether the run `run_id` keeps each one's bytes in its blob directory.
+pub(crate) fn list_from(
+    run_id: &str,
+    snapshot: &leviath_core::run_meta::ContextSnapshot,
+) -> Vec<BlobEntry> {
     let mut order: Vec<String> = Vec::new();
     let mut found: BTreeMap<String, BlobEntry> = BTreeMap::new();
     for region in &snapshot.regions {
@@ -137,12 +146,10 @@ pub(crate) fn list(run_id: &str) -> Option<Vec<BlobEntry>> {
             }
         }
     }
-    Some(
-        order
-            .into_iter()
-            .filter_map(|sha| found.remove(&sha))
-            .collect(),
-    )
+    order
+        .into_iter()
+        .filter_map(|sha| found.remove(&sha))
+        .collect()
 }
 
 /// What a region charges the part: its one-line stand-in, the same figure

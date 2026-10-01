@@ -3,7 +3,6 @@
 //! Exposes agent management, blueprint CRUD, and live event streaming over
 //! HTTP. No web UI - the frontend lives in a separate repo.
 
-mod agents;
 mod args;
 mod artifact_types;
 mod auth;
@@ -31,6 +30,8 @@ mod quota_cache;
 mod refreshing;
 mod request_limits;
 mod run_index;
+mod run_reads;
+mod run_spawn;
 mod runs;
 mod scripts;
 mod scripts_address;
@@ -133,9 +134,8 @@ pub fn graphql_schema() -> String {
 }
 
 /// Every API route with its production handlers - the single route table,
-/// shared by [`execute_with_shutdown`] and the tests. A hand-copied test
-/// router drifted seven routes behind production, which meant a route could
-/// be added, typo'd, and never exercised. Admin routes, the auth middleware,
+/// shared by [`execute_with_shutdown`] and the tests, so a route cannot be
+/// added, typo'd, and never exercised. Admin routes, the auth middleware,
 /// CORS, and `with_state` are layered on by the caller.
 fn api_router() -> Router<AppState> {
     Router::new()
@@ -154,42 +154,58 @@ fn api_router() -> Router<AppState> {
                 .put(blueprints::update_blueprint)
                 .delete(blueprints::delete_blueprint),
         )
-        // Runs - the paginated, searchable listing. Supersedes the GET half of
-        // /api/agents, which stays as it is for existing clients.
-        .route("/api/runs", get(runs::list_runs).delete(runs::delete_runs))
-        .route("/api/runs/{id}", delete(runs::delete_run))
-        // Agents
         .route(
-            "/api/agents",
-            get(agents::list_agents).post(agents::spawn_agent),
+            "/api/blueprints/{name}/inputs",
+            get(run_spawn::blueprint_inputs),
         )
-        .route("/api/agents/tree", get(tree::agents_tree))
+        // The published JSON Schema of the request `POST /api/runs` takes.
         .route(
-            "/api/agents/{id}",
-            get(agents::get_agent).delete(agents::kill_agent),
+            "/api/schema/spawn-request",
+            get(run_spawn::spawn_request_schema),
         )
-        .route("/api/agents/{id}/children", get(agents::agent_children))
-        .route("/api/agents/{id}/context", get(agents::agent_context))
+        // Runs: the paginated, searchable listing, starting one from a spawn
+        // request, and a dry run of one.
         .route(
-            "/api/agents/{id}/context/history",
-            get(agents::agent_context_history),
+            "/api/runs",
+            get(runs::list_runs)
+                .post(run_spawn::spawn_run)
+                .delete(runs::delete_runs),
         )
-        .route("/api/agents/{id}/files", get(agents::agent_file))
-        .route("/api/agents/{id}/files/raw", get(blobs::raw_file))
-        .route("/api/agents/{id}/blobs", get(blobs::list_blobs))
-        .route("/api/agents/{id}/blobs/{sha256}", get(blobs::get_blob))
-        .route("/api/agents/{id}/artifacts/{name}", get(blobs::artifact))
-        .route("/api/agents/{id}/logs", get(agents::agent_logs))
-        .route("/api/agents/{id}/result", get(agents::agent_result))
-        .route("/api/agents/{id}/stages", get(agents::agent_stages))
-        .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
-        .route("/api/agents/{id}/pause", post(agents::pause_agent))
-        .route("/api/agents/{id}/resume", post(agents::resume_agent))
+        .route("/api/runs/validate", post(run_spawn::validate_run))
+        .route("/api/runs/tree", get(tree::runs_tree))
+        // One run: its record, its file read every way, and the writes that
+        // steer it.
+        .route(
+            "/api/runs/{id}",
+            get(run_reads::get_run).delete(runs::delete_run),
+        )
+        .route("/api/runs/{id}/spec", get(run_reads::run_spec))
+        .route("/api/runs/{id}/state", get(run_reads::run_state))
+        .route("/api/runs/{id}/deltas", get(run_reads::run_deltas))
+        .route("/api/runs/{id}/graph", get(run_reads::run_graph))
+        .route("/api/runs/{id}/children", get(run_reads::run_children))
+        .route("/api/runs/{id}/context", get(run_reads::run_context))
+        .route(
+            "/api/runs/{id}/context/history",
+            get(run_reads::run_context_history),
+        )
+        .route("/api/runs/{id}/files", get(run_reads::run_file))
+        .route("/api/runs/{id}/files/raw", get(blobs::raw_file))
+        .route("/api/runs/{id}/blobs", get(blobs::list_blobs))
+        .route("/api/runs/{id}/blobs/{sha256}", get(blobs::get_blob))
+        .route("/api/runs/{id}/artifacts/{name}", get(blobs::artifact))
+        .route("/api/runs/{id}/logs", get(run_reads::run_logs))
+        .route("/api/runs/{id}/result", get(run_reads::run_result))
+        .route("/api/runs/{id}/stages", get(run_reads::run_stages))
+        .route("/api/runs/{id}/tree-status", get(tree::run_tree_status))
+        .route("/api/runs/{id}/pause", post(run_reads::pause_run))
+        .route("/api/runs/{id}/resume", post(run_reads::resume_run))
+        .route("/api/runs/{id}/cancel", post(run_reads::cancel_run))
         // Messages
-        .route("/api/agents/{id}/message", post(interactions::send_message))
+        .route("/api/runs/{id}/message", post(interactions::send_message))
         // Interactions
         .route(
-            "/api/agents/{id}/interaction",
+            "/api/runs/{id}/interaction",
             get(interactions::get_interaction).post(interactions::submit_interaction),
         )
         // MCP servers - read-only surface. Everything that connects to one or
@@ -957,7 +973,8 @@ mod tests {
 
     /// The production half of every module that owns a handler, by name.
     const HANDLER_SOURCES: &[(&str, &str)] = &[
-        ("agents", include_str!("agents.rs")),
+        ("run_reads", include_str!("run_reads.rs")),
+        ("run_spawn", include_str!("run_spawn.rs")),
         ("blobs", include_str!("blobs.rs")),
         ("blueprints", include_str!("blueprints.rs")),
         ("config", include_str!("config.rs")),
@@ -992,8 +1009,10 @@ mod tests {
         ("METHOD_NOT_ALLOWED", 405),
         ("REQUEST_TIMEOUT", 408),
         ("CONFLICT", 409),
+        ("PAYLOAD_TOO_LARGE", 413),
         ("UNSUPPORTED_MEDIA_TYPE", 415),
         ("RANGE_NOT_SATISFIABLE", 416),
+        ("UNPROCESSABLE_ENTITY", 422),
         ("INTERNAL_SERVER_ERROR", 500),
         ("BAD_GATEWAY", 502),
         ("SERVICE_UNAVAILABLE", 503),
@@ -1008,6 +1027,7 @@ mod tests {
     /// such route as answering nothing and the spec could quietly list a
     /// status no longer reachable, or miss one that is.
     const CORE_SOURCES: &[(&str, &str)] = &[
+        ("inspect", include_str!("core/inspect.rs")),
         ("lifecycle", include_str!("core/lifecycle.rs")),
         ("spawn_core", include_str!("core/spawn.rs")),
         ("run_core", include_str!("core/runs.rs")),
@@ -1288,7 +1308,7 @@ mod tests {
     /// statuses read, through the core function it calls.
     #[test]
     fn the_scan_follows_a_handler_into_the_service_layer() {
-        let codes = handler_status_codes("agents", "pause_agent");
+        let codes = handler_status_codes("run_reads", "pause_run");
         assert!(codes.contains(&204), "the handler's own status: {codes:?}");
         assert!(codes.contains(&409), "a finished run conflicts: {codes:?}");
         assert!(codes.contains(&404), "the daemon's refusal: {codes:?}");
@@ -1353,8 +1373,8 @@ mod tests {
         // comparing two empty lists passes.
         let declared = declared_routes();
         assert!(declared.len() > 25);
-        assert!(declared.contains(&("/api/agents".to_string(), "POST".to_string())));
-        assert!(declared.contains(&("/api/agents/{id}".to_string(), "DELETE".to_string())));
+        assert!(declared.contains(&("/api/runs".to_string(), "POST".to_string())));
+        assert!(declared.contains(&("/api/runs/{id}".to_string(), "DELETE".to_string())));
         assert!(declared.contains(&("/ws".to_string(), "GET".to_string())));
     }
 
@@ -1740,7 +1760,7 @@ mod tests {
             let now = leviath_core::duration::now_secs();
             let url = signed_url::signed_path(
                 &state.signer,
-                "/api/agents/run-signed/files/raw",
+                "/api/runs/run-signed/files/raw",
                 &[("path", "out.txt")],
                 now,
             );
@@ -1767,7 +1787,7 @@ mod tests {
 
             // And without any grant at all: refused.
             let bare = Request::builder()
-                .uri("/api/agents/run-signed/files/raw?path=out.txt")
+                .uri("/api/runs/run-signed/files/raw?path=out.txt")
                 .body(Body::empty())
                 .expect("a request");
             let resp = app.oneshot(bare).await.expect("a response");
@@ -1932,7 +1952,7 @@ mod tests {
             let app = test_app();
             let req = Request::builder()
                 .method("POST")
-                .uri(format!("/api/agents/some-run/{action}"))
+                .uri(format!("/api/runs/some-run/{action}"))
                 .body(Body::empty())
                 .unwrap();
             let resp = app.oneshot(req).await.unwrap();
@@ -1946,13 +1966,13 @@ mod tests {
         // run does not exist either way - so the status alone proves nothing.
         // What separates them is the body: the handler explains itself, and
         // the router's own catch-all has nothing to say. (The handler's real
-        // behavior is covered in agents.rs.)
+        // behavior is covered in run_reads_tests.rs.)
         //
         // The status cannot carry the proof: `path` is optional, so a bare
         // call lists rather than refusing.
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/some-run/files")
+            .uri("/api/runs/some-run/files")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2047,10 +2067,10 @@ model = "claude-sonnet-4-6"
     }
 
     #[tokio::test]
-    async fn test_list_agents() {
+    async fn test_list_runs() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents")
+            .uri("/api/runs")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2058,10 +2078,10 @@ model = "claude-sonnet-4-6"
     }
 
     #[tokio::test]
-    async fn test_agents_tree() {
+    async fn test_runs_tree() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/tree")
+            .uri("/api/runs/tree")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2072,7 +2092,7 @@ model = "claude-sonnet-4-6"
     async fn test_get_agent_not_found() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/nonexistent-run-id-xyz")
+            .uri("/api/runs/nonexistent-run-id-xyz")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2083,7 +2103,7 @@ model = "claude-sonnet-4-6"
     async fn test_agent_children_empty() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/nonexistent/children")
+            .uri("/api/runs/nonexistent/children")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2095,7 +2115,7 @@ model = "claude-sonnet-4-6"
     async fn test_agent_context_not_found() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/nonexistent/context")
+            .uri("/api/runs/nonexistent/context")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2106,7 +2126,7 @@ model = "claude-sonnet-4-6"
     async fn test_agent_logs_not_found() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/nonexistent/logs")
+            .uri("/api/runs/nonexistent/logs")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2117,7 +2137,7 @@ model = "claude-sonnet-4-6"
     async fn test_agent_result_not_found() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/nonexistent/result")
+            .uri("/api/runs/nonexistent/result")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2128,7 +2148,7 @@ model = "claude-sonnet-4-6"
     async fn test_agent_tree_status_not_found() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/nonexistent/tree-status")
+            .uri("/api/runs/nonexistent/tree-status")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2141,7 +2161,7 @@ model = "claude-sonnet-4-6"
         // reports the daemon unreachable - proving the request reached it.
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents/nonexistent/interaction")
+            .uri("/api/runs/nonexistent/interaction")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2291,11 +2311,11 @@ system_prompt = "Run"
     }
 
     #[tokio::test]
-    async fn test_full_router_kill_agent_reaches_daemon() {
+    async fn test_full_router_cancel_run_reaches_daemon() {
         let app = test_app();
         let req = Request::builder()
-            .method("DELETE")
-            .uri("/api/agents/nonexistent-kill-id-xyz")
+            .method("POST")
+            .uri("/api/runs/nonexistent-kill-id-xyz/cancel")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2308,7 +2328,7 @@ system_prompt = "Run"
         let body = serde_json::json!({"message": "hello"});
         let req = Request::builder()
             .method("POST")
-            .uri("/api/agents/nonexistent-msg-id-xyz/message")
+            .uri("/api/runs/nonexistent-msg-id-xyz/message")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
@@ -2328,20 +2348,20 @@ system_prompt = "Run"
     }
 
     #[tokio::test]
-    async fn test_full_router_spawn_agent_blueprint_not_found() {
+    async fn test_full_router_spawn_reaches_daemon() {
         let app = test_app();
         let body = serde_json::json!({
-            "blueprint": "nonexistent-blueprint-xyz",
-            "task": "do something"
+            "source": {"blueprint": {"name": "nonexistent-blueprint-xyz"}},
+            "inputs": {"task": "do something"}
         });
         let req = Request::builder()
             .method("POST")
-            .uri("/api/agents")
+            .uri("/api/runs")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
@@ -2409,7 +2429,7 @@ system_prompt = "Run"
         let body = serde_json::json!({"request_id": "req-1", "value": "do it", "scope": "once"});
         let req = Request::builder()
             .method("POST")
-            .uri("/api/agents/any/interaction")
+            .uri("/api/runs/any/interaction")
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
@@ -2979,10 +2999,10 @@ system_prompt = "Run"
     }
 
     #[tokio::test]
-    async fn test_agent_list_with_status_filter_full_router() {
+    async fn test_run_list_with_status_filter_full_router() {
         let app = test_app();
         let req = Request::builder()
-            .uri("/api/agents?status=running,complete")
+            .uri("/api/runs?status=running,complete")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

@@ -34,7 +34,6 @@ use leviath_runtime::spec::request::{Attachment, Bytes, SpawnRequest, SpawnSourc
 
 use super::super::super::core::attachments;
 use super::super::super::core::error::ServeError;
-use super::super::super::types::ServeLimits;
 use super::super::inputs::{BlueprintRef, KeyValueWrite, RegionRef};
 use super::super::scalars::{BigInt, Json};
 use super::super::types::manifest::output::ValidatorErrorPolicy;
@@ -264,11 +263,9 @@ pub(crate) struct SpawnRunRequest {
     pub(crate) delivery: Option<DeliveryWrite>,
 }
 
-/// What a request is checked against before it leaves this server.
-pub(crate) struct Policy<'a> {
-    /// The operator's refusals.
-    pub(crate) limits: &'a ServeLimits,
-    /// The largest attachment this server reads.
+/// What a request is read with: the largest attachment this server reads.
+pub(crate) struct Policy {
+    /// The largest attachment, in bytes.
     pub(crate) max_bytes: u64,
 }
 
@@ -341,7 +338,7 @@ fn attachment(
     write: SpawnAttachmentWrite,
     at: &SpecPath,
     workdir: &Path,
-    policy: &Policy<'_>,
+    policy: &Policy,
     issues: &mut SpawnIssues,
 ) -> Option<Attachment> {
     let (default_name, data) = match write.content {
@@ -500,10 +497,9 @@ fn output(write: OutputShapeWrite, issues: &mut SpawnIssues) -> OutputDef {
     }
 }
 
-/// The launch settings, read and checked against this server's refusals.
-fn launch(write: LaunchWrite, policy: &Policy<'_>, issues: &mut SpawnIssues) -> LaunchRequest {
+/// The launch settings, read.
+fn launch(write: LaunchWrite, issues: &mut SpawnIssues) -> LaunchRequest {
     let at = SpecPath::root().field("launch");
-    let waived = !matches!(write.unattended, None | Some(UnattendedWrite::All(false)));
     let unattended = match write.unattended {
         None | Some(UnattendedWrite::All(false)) => Unattended::Off,
         Some(UnattendedWrite::All(true)) => Unattended::All,
@@ -516,12 +512,6 @@ fn launch(write: LaunchWrite, policy: &Policy<'_>, issues: &mut SpawnIssues) -> 
         .map_or(Unattended::Off, Unattended::Profile),
     };
     let allow_text = write.allow.unwrap_or_default();
-    if let Err(refusal) = policy.limits.check_launch_overrides(waived, &allow_text) {
-        issues.push(
-            SpawnIssue::new(at.field("unattended"), IssueCode::NotAllowed, refusal)
-                .hint("ask the operator for a per-agent grant in their own config"),
-        );
-    }
     let allow = allow_text
         .iter()
         .enumerate()
@@ -553,19 +543,16 @@ fn launch(write: LaunchWrite, policy: &Policy<'_>, issues: &mut SpawnIssues) -> 
         unattended,
         allow,
         max_depth,
-        seed_commands: write.seed_commands && !policy.limits.no_remote_seed_commands,
+        seed_commands: write.seed_commands,
         capture_model_input: write.capture_model_input,
     }
 }
 
-/// The delivery settings, read and checked against the outbound policy.
-fn delivery(write: DeliveryWrite, policy: &Policy<'_>, issues: &mut SpawnIssues) -> RunDelivery {
+/// The delivery settings, read.
+fn delivery(write: DeliveryWrite, issues: &mut SpawnIssues) -> RunDelivery {
     let at = SpecPath::root().field("delivery");
     let callback = write.callback.and_then(|callback| {
         let at = at.field("callback").field("url");
-        if let Err(refusal) = policy.limits.check_callback_url(&callback.url) {
-            issues.push(SpawnIssue::new(at.clone(), IssueCode::NotAllowed, refusal));
-        }
         let url = name(
             issues,
             at,
@@ -598,20 +585,12 @@ fn absolute(workdir: Option<String>) -> PathBuf {
 }
 
 impl SpawnRunRequest {
-    /// The runtime's request, or every issue with this one.
-    pub(crate) fn read(self, policy: &Policy<'_>) -> Result<SpawnRequest, SpawnIssues> {
+    /// The runtime's request, or every issue with this one. This server's
+    /// own refusals (the workdir root, unattended runs, the callback policy)
+    /// are the service layer's, made on the request this answers with.
+    pub(crate) fn read(self, policy: &Policy) -> Result<SpawnRequest, SpawnIssues> {
         let mut issues = SpawnIssues::new();
         let workdir = absolute(self.workdir);
-        if let Err(refusal) = policy.limits.check_workdir(&workdir) {
-            issues.push(
-                SpawnIssue::new(
-                    SpecPath::root().field("workdir"),
-                    IssueCode::NotAllowed,
-                    refusal,
-                )
-                .got(workdir.display().to_string()),
-            );
-        }
         let source = source(self.source, &mut issues);
         let inputs = entries(
             self.inputs.unwrap_or_default(),
@@ -645,12 +624,11 @@ impl SpawnRunRequest {
                 seed_commands: true,
                 capture_model_input: false,
             }),
-            policy,
             &mut issues,
         );
         let delivery = self
             .delivery
-            .map(|write| delivery(write, policy, &mut issues))
+            .map(|write| delivery(write, &mut issues))
             .unwrap_or_default();
         let Some(source) = source else {
             return Err(issues);

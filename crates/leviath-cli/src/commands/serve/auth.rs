@@ -123,7 +123,7 @@ mod tests {
     use axum::http::Request as HttpRequest;
 
     fn req(auth: Option<&str>, query: Option<&str>) -> Request {
-        req_to("/api/agents", auth, query)
+        req_to("/api/runs", auth, query)
     }
 
     /// The `?token=` escape hatch is scoped to the WebSocket routes, so tests
@@ -206,7 +206,7 @@ mod tests {
     /// a header, so it has no reason to put the credential there.
     #[test]
     fn the_query_token_is_refused_on_ordinary_routes() {
-        for path in ["/api/agents", "/api/config", "/wsomething", "/"] {
+        for path in ["/api/runs", "/api/config", "/wsomething", "/"] {
             assert!(
                 presented_token(&req_to(path, None, Some("token=qtok"))).is_none(),
                 "{path} must not accept a query token"
@@ -225,7 +225,7 @@ mod tests {
             signer: Default::default(),
         };
         let app: Router = Router::new()
-            .route("/api/agents", get(|| async { "ok" }))
+            .route("/api/runs", get(|| async { "ok" }))
             .layer(middleware::from_fn_with_state(auth, require_auth));
 
         // Valid bearer token ⇒ 200.

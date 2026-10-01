@@ -106,9 +106,8 @@ pub(super) struct RedactedConfig {
     pub(super) api_version: String,
     /// What this server can do, so a client can light up features in one call.
     ///
-    /// Before this, the console feature-detected by calling a route and reading
-    /// a 404 as "unsupported" - fragile, because a 404 also means "no such run",
-    /// and one round trip per feature.
+    /// Calling a route and reading a 404 as "unsupported" is fragile, because
+    /// a 404 also means "no such run", and it costs one round trip per feature.
     pub(super) capabilities: Vec<String>,
     pub(super) limits: ApiLimits,
     /// Why the config file on disk is not the config being served, when it is
@@ -212,17 +211,17 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // a console knows the call is cheap, and that `X-Leviath-Catalog-Age`,
     // `X-Leviath-Catalog-Complete` and `?refresh=1` are there.
     "models.cached",
-    // `parts` and `multipart/form-data` on `POST /api/agents` and
-    // `POST /api/agents/{id}/message`, and `@path` tokens in a task or
-    // message resolved inside the run's working directory: a caller can send
-    // files with a run. An older daemon reads `parts` as nothing at all.
+    // `attachments`, and `multipart/form-data` file parts named after them, on
+    // `POST /api/runs`; `parts`, `multipart/form-data` and `@path` tokens
+    // resolved inside the run's working directory on
+    // `POST /api/runs/{id}/message`: a caller can send files with a run.
     "spawn.parts",
     "messages.parts",
-    // `GET /api/agents/{id}/blobs` and `.../blobs/{sha256}`: the stored parts
+    // `GET /api/runs/{id}/blobs` and `.../blobs/{sha256}`: the stored parts
     // a run holds and their bytes, so a console can show an image the run
     // produced without reaching into the workdir.
     "runs.blobs",
-    // `GET /api/agents/{id}/files/raw?path=`: a workdir file's bytes under
+    // `GET /api/runs/{id}/files/raw?path=`: a workdir file's bytes under
     // their own content type, where the JSON files route wraps text.
     "runs.files.raw",
     "runs.artifacts",
@@ -306,7 +305,7 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // `agent_completed` carry the same word a run carries - `running`,
     // `waiting_input` - instead of the engine's own `idle`/`active`/`waiting`,
     // and the three routes that rendered a status through `Display`
-    // (`GET /api/agents/{id}/result` and the two tree routes) spell it the way
+    // (`GET /api/runs/{id}/result` and the two tree routes) spell it the way
     // every other route does.
     //
     // Breaking for a client matching on the old words, which is why it is
@@ -424,7 +423,7 @@ pub(super) const API_CAPABILITIES: &[&str] = &[
     // says the call is cheap: the reading is kept, so a providers page can ask
     // every time it opens.
     "providers.quota",
-    // `feedback` on `POST /api/agents/{id}/interaction` beside
+    // `feedback` on `POST /api/runs/{id}/interaction` beside
     // `approved: false`, and the "Deny with feedback" option on a tool
     // approval request. Announced because an older daemon drops the field
     // without a word: a console that offered the box against one would send
@@ -539,7 +538,7 @@ impl ApiLimits {
         Self {
             max_limit: super::core::runs::MAX_LIMIT,
             max_ids: super::core::runs::MAX_IDS,
-            max_file_bytes: super::agents::MAX_FILE_READ_BYTES,
+            max_file_bytes: super::run_reads::MAX_FILE_READ_BYTES,
             max_listing_entries: super::core::files::MAX_LISTING_ENTRIES,
             max_search_scan: super::core::runs::MAX_SEARCH_SCAN,
             search_log_tail_bytes: super::core::runs::SEARCH_LOG_TAIL_BYTES,

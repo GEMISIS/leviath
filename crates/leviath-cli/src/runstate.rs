@@ -240,7 +240,7 @@ impl<T> StatCache<T> {
 /// records, or `None` if the archive is missing or unreadable.
 ///
 /// Materializes the whole journal. For anything that only walks the timeline
-/// (the history API, journal search highlights), prefer [`visit_run_archive`]:
+/// (the history API, journal search highlights), prefer a streamed walk:
 /// a mature run's journal is tens of MB, and parsing it whole per request was
 /// the API's single largest transient allocation.
 pub(crate) fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::RunRecord>> {
@@ -274,7 +274,7 @@ pub(crate) fn archive_stamp(run_id: &str) -> Option<FileStamp> {
 
 /// Stream a run's raw journal records through `visit`, one at a time, without
 /// materializing the archive. Same lenient tail handling as
-/// [`visit_run_archive`]. For consumers that inspect records rather than
+/// a streamed walk. For consumers that inspect records rather than
 /// replayed points (journal search).
 pub(crate) fn visit_run_records(
     run_id: &str,
@@ -304,6 +304,7 @@ pub(crate) fn visit_run_records(
 /// walk with the points already visited.
 ///
 /// [`visit_points`]: leviath_core::run_archive::visit_points
+#[cfg(test)]
 pub(crate) fn visit_run_archive(
     run_id: &str,
     visit: &mut dyn FnMut(leviath_core::run_archive::PointRef<'_>) -> std::ops::ControlFlow<()>,

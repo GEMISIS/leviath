@@ -1,232 +1,198 @@
-//! Tests for reading why a run's regions changed back out of its journal.
+//! Reading why a run's window changed back out of its run file.
 
-use leviath_core::ContextCause;
-use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+use leviath_core::context_cause::ContextCause;
+use leviath_runtime::spec::names::{ModelRef, RegionName};
+use leviath_runtime::state::{
+    EntryKind, EntryMeta, EntryState, MessageState, RegionState, RunEvent, RunState,
+    ToolResultState, TransitionReason, TransitionRecord,
+};
 
-use super::read;
-use crate::runstate::{RunMeta, create_run};
+use super::super::run_file::tests::{garbage, recorded, step};
+use super::{by_execution, read};
 
-/// A run to hang a journal off.
-fn meta(run_id: &str) -> RunMeta {
-    RunMeta::new(
-        run_id.to_string(),
-        "coder".to_string(),
-        "/agents/coder/agent.leviath".to_string(),
-        "move a few regions".to_string(),
-        None,
-        "/tmp".to_string(),
-        1,
-    )
-}
-
-/// One region change record.
-fn changed(region: &str, cause: ContextCause, added: usize, removed: usize, at: i64) -> RunRecord {
-    RunRecord::ContextChange {
-        region: region.to_string(),
-        cause,
-        entries_added: added,
-        entries_removed: removed,
-        token_delta: 40,
-        at,
+/// A plain entry of `tokens` tokens.
+fn entry(text: &str, tokens: u32) -> EntryState {
+    EntryState {
+        text: text.to_string(),
+        parts: Vec::new(),
+        tokens,
+        timestamp: 0,
+        kind: EntryKind::Text,
+        meta: EntryMeta::None,
+        key: None,
+        reasoning: None,
     }
 }
 
-/// Write a journal of `records` for the run.
-fn write_journal(run_id: &str, records: Vec<RunRecord>) {
-    let meta = meta(run_id);
-    let mut buf = Vec::new();
-    run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-        .expect("a preamble");
-    run_archive::write_record(
-        &mut buf,
-        &RunRecord::Header {
-            identity: RunIdentity {
-                run_id: meta.run_id.clone(),
-                machine_id: "m".to_string(),
-                world_id: "w".to_string(),
-                created_at: 0,
-            },
-            meta: Box::new(meta.clone()),
+/// Append `text` to the run's first region, counting its tokens.
+fn append(state: &mut RunState, text: &str) {
+    let region = &mut state.context.regions[0];
+    region.entries.push(entry(text, 5));
+    region.current_tokens += 5;
+}
+
+fn message() -> RunEvent {
+    RunEvent::Message(MessageState {
+        from: "user".into(),
+        text: "hello".into(),
+        region: None,
+    })
+}
+
+fn finished(call_id: &str) -> RunEvent {
+    RunEvent::ToolFinished {
+        call_id: call_id.to_string(),
+        result: ToolResultState {
+            text: "ok".into(),
+            is_error: false,
         },
-    )
-    .expect("a header");
-    for record in &records {
-        run_archive::write_record(&mut buf, record).expect("a record");
+        millis: 0,
     }
-    std::fs::write(
-        crate::runstate::run_dir(run_id).join(leviath_core::files::ARCHIVE_FILE),
-        &buf,
-    )
-    .expect("the journal");
 }
 
-/// Every change comes back in the order it landed, carrying the cause the
-/// journal recorded.
-#[test]
-fn the_changes_read_back_in_recorded_order() {
-    crate::runstate::with_isolated_runs_dir("context-changes-order", |_dir| {
-        create_run(&meta("did-change")).expect("run written");
-        write_journal(
-            "did-change",
+fn inference() -> RunEvent {
+    RunEvent::Inference {
+        attempt: "a1".into(),
+        model: ModelRef::parse("anthropic/m").unwrap(),
+        spend: Default::default(),
+        finish_reason: None,
+    }
+}
+
+#[tokio::test]
+async fn each_change_is_named_by_the_one_cause_its_step_records() {
+    crate::runstate::with_isolated_runs_dir_async("context-changes-read", |_d| async move {
+        let run_id = recorded();
+        // 1: a message lands.
+        step(
+            &run_id,
+            10,
+            vec![message(), RunEvent::Log("l".into())],
+            |s| {
+                append(s, "hello");
+            },
+        );
+        // 2: a tool's result lands.
+        step(&run_id, 20, vec![finished("c1")], |s| append(s, "ok"));
+        // 3: a reply and a result in one step: no one cause.
+        step(&run_id, 30, vec![inference(), finished("c2")], |s| {
+            append(s, "both");
+        });
+        // 4: nothing names a cause.
+        step(&run_id, 40, Vec::new(), |s| append(s, "quiet"));
+        // 5: a message whose step changed only a region's budget.
+        step(&run_id, 50, vec![message()], |s| {
+            s.context.regions[0].max_tokens += 1;
+        });
+        // 6: a message whose step left the window alone.
+        step(&run_id, 60, vec![message()], |s| s.cursor.iteration += 1);
+        // 7: a move to another stage rewrites the region, keeping its first
+        // entry, and adds a region of its own.
+        step(&run_id, 70, Vec::new(), |s| {
+            let region = &mut s.context.regions[0];
+            region.entries.truncate(1);
+            region.entries.push(entry("carried", 2));
+            region.current_tokens = 7;
+            s.context.regions.push(RegionState {
+                name: RegionName::new("notes").unwrap(),
+                max_tokens: 100,
+                current_tokens: 3,
+                needs_message_compaction: false,
+                taint: None,
+                entries: vec![entry("a note", 3)],
+            });
+            s.last_transition = Some(TransitionRecord {
+                from: s.cursor.stage.clone(),
+                to: s.cursor.stage.clone(),
+                edge: None,
+                reason: TransitionReason::Forced,
+                visit: "v2".into(),
+            });
+        });
+        // 8: an answer, and the region the move added goes away.
+        step(
+            &run_id,
+            80,
+            vec![RunEvent::Answered {
+                id: "q".into(),
+                answer: "yes".into(),
+            }],
+            |s| {
+                s.context.regions.pop();
+            },
+        );
+        // 9: two results in one step land, with no one execution to name.
+        step(&run_id, 90, vec![finished("c3"), finished("c4")], |s| {
+            append(s, "two");
+        });
+
+        let changes = read(&run_id).unwrap();
+        let causes: Vec<(u64, ContextCause)> = changes
+            .iter()
+            .map(|c| (c.position, c.record.cause))
+            .collect();
+        assert_eq!(
+            causes,
             vec![
-                changed("plan", ContextCause::Seed, 1, 0, 20),
-                changed("conversation", ContextCause::ToolResult, 2, 0, 25),
-                changed("plan", ContextCause::Compaction, 0, 3, 30),
-            ],
+                (1, ContextCause::Message),
+                (2, ContextCause::ToolResult),
+                (7, ContextCause::Transform),
+                (8, ContextCause::Interaction),
+                (9, ContextCause::ToolResult),
+            ]
         );
 
-        let changes = read("did-change").expect("the journal reads");
-        assert_eq!(changes.len(), 3);
         let first = &changes[0].record;
-        assert_eq!(first.regions[0].region, "plan");
-        assert_eq!(first.cause, ContextCause::Seed);
-        assert_eq!(changes[1].record.cause, ContextCause::ToolResult);
-        let last = &changes[2].record;
-        assert_eq!(last.regions[0].entries_removed, 3);
-        assert_eq!(last.at, 30);
-        // Positions climb with the journal, which is what names a change for as
-        // long as the run exists.
-        assert!(changes[0].position < changes[2].position);
-    });
+        assert_eq!(first.at, 10);
+        assert_ne!(first.revision_before, first.revision_after);
+        assert!(first.execution_id.is_none());
+        let grew = &first.regions[0];
+        assert_eq!(grew.entries_added, 1);
+        assert_eq!(grew.entries_removed, 0);
+        assert_eq!(grew.token_delta, 5);
+
+        assert_eq!(changes[1].record.execution_id.as_deref(), Some("c1"));
+        assert!(changes[4].record.execution_id.is_none());
+
+        let moved = &changes[2].record.regions;
+        assert_eq!(moved.len(), 2);
+        let rewritten = &moved[0];
+        assert_eq!(
+            rewritten.entries_added, 1,
+            "the kept first entry is not new"
+        );
+        assert_eq!(rewritten.entries_after, Some(2));
+        assert_eq!(
+            rewritten.entries_removed,
+            rewritten.entries_before.unwrap() - 1
+        );
+        let added = &moved[1];
+        assert_eq!(added.region, "notes");
+        assert_eq!(added.tokens_before, Some(0));
+        assert_eq!(added.entries_added, 1);
+
+        let gone = &changes[3].record.regions[0];
+        assert_eq!(gone.region, "notes");
+        assert_eq!(gone.tokens_after, Some(0));
+        assert_eq!(gone.token_delta, -3);
+        assert_eq!(gone.entries_removed, 1);
+
+        assert_eq!(by_execution(&run_id, "c1").unwrap().len(), 1);
+        assert!(by_execution(&run_id, "c9").unwrap().is_empty());
+        assert!(by_execution(&run_id, "").unwrap().is_empty());
+    })
+    .await;
 }
 
-/// A run whose writes named no cause has no changes, and says so with an
-/// empty list rather than an error.
-#[test]
-fn a_run_with_no_recorded_causes_has_no_changes() {
-    crate::runstate::with_isolated_runs_dir("context-changes-empty", |_dir| {
-        create_run(&meta("quiet-run")).expect("run written");
-        assert!(
-            read("quiet-run")
-                .expect("no journal is not a failure")
-                .is_empty()
-        );
-    });
-}
-
-/// A journal that cannot be read is reported rather than read as a run whose
-/// regions never moved.
-#[test]
-fn an_unreadable_journal_is_an_error() {
-    crate::runstate::with_isolated_runs_dir("context-changes-corrupt", |_dir| {
-        let dir = crate::runstate::run_dir("broken");
-        std::fs::create_dir_all(&dir).expect("a run dir");
-        std::fs::write(
-            dir.join(leviath_core::files::ARCHIVE_FILE),
-            b"not an archive",
-        )
-        .expect("a corrupt journal");
-        let failed = read("broken").expect_err("an unreadable journal");
-        assert_eq!(failed.code(), "INTERNAL");
-        assert!(
-            failed.to_string().contains("unreadable journal"),
-            "{failed}"
-        );
-    });
-}
-
-/// One transaction that touched two regions reads back as one change naming
-/// both, with the window it started from and the window it produced.
-///
-/// This is the shape that made the record a transaction: recorded region by
-/// region, a compaction reads as two events that happen to share a second.
-#[test]
-fn a_transaction_reads_back_with_every_region_it_touched() {
-    crate::runstate::with_isolated_runs_dir("context-changes-txn", |_dir| {
-        create_run(&meta("compacted")).expect("run written");
-        write_journal(
-            "compacted",
-            vec![RunRecord::ContextTransaction {
-                revision_before: "cw1-before".to_string(),
-                revision_after: "cw1-after".to_string(),
-                cause: ContextCause::Compaction,
-                regions: vec![
-                    run_archive::RegionCommit {
-                        region: "plan".to_string(),
-                        digest_before: "rg1-full".to_string(),
-                        digest_after: "rg1-empty".to_string(),
-                        tokens_before: 400,
-                        tokens_after: 0,
-                        entries_before: 4,
-                        entries_after: 0,
-                        entries_added: 0,
-                    },
-                    run_archive::RegionCommit {
-                        region: "plan_history".to_string(),
-                        digest_before: "rg1-empty".to_string(),
-                        digest_after: "rg1-summary".to_string(),
-                        tokens_before: 0,
-                        tokens_after: 30,
-                        entries_before: 0,
-                        entries_after: 1,
-                        entries_added: 1,
-                    },
-                ],
-                execution_id: String::new(),
-                at: 90,
-            }],
-        );
-
-        let changes = read("compacted").expect("the journal reads");
-        assert_eq!(changes.len(), 1, "one transaction, one change");
-        let record = &changes[0].record;
-        assert_eq!(record.revision_before.as_deref(), Some("cw1-before"));
-        assert_eq!(record.revision_after.as_deref(), Some("cw1-after"));
-        assert_eq!(record.regions.len(), 2);
-        assert_eq!(record.regions[0].token_delta, -400);
-        assert_eq!(record.regions[0].entries_removed, 4);
-        assert_eq!(record.regions[1].region, "plan_history");
-        assert_eq!(record.regions[1].token_delta, 30);
-    });
-}
-
-/// The changes one execution committed, and nothing else's.
-#[test]
-fn the_changes_one_execution_committed_are_its_own() {
-    crate::runstate::with_isolated_runs_dir("context-changes-by-exec", |_dir| {
-        create_run(&meta("attributed")).expect("run written");
-        let committed = |execution_id: &str, at: i64| RunRecord::ContextTransaction {
-            revision_before: format!("cw1-{at}"),
-            revision_after: format!("cw1-{}", at + 1),
-            cause: ContextCause::ContextTool,
-            regions: vec![run_archive::RegionCommit {
-                region: "plan".to_string(),
-                digest_before: "rg1-a".to_string(),
-                digest_after: "rg1-b".to_string(),
-                tokens_before: 0,
-                tokens_after: 10,
-                entries_before: 0,
-                entries_after: 1,
-                entries_added: 1,
-            }],
-            execution_id: execution_id.to_string(),
-            at,
-        };
-        write_journal(
-            "attributed",
-            vec![
-                committed("x-one", 10),
-                committed("x-two", 11),
-                committed("", 12),
-                committed("x-one", 13),
-            ],
-        );
-
-        let mine = super::by_execution("attributed", "x-one").expect("the journal reads");
-        let times: Vec<i64> = mine.iter().map(|held| held.record.at).collect();
-        assert_eq!(times, vec![10, 13]);
-
-        // An id nothing recorded matches nothing, and an empty one does not
-        // collect every change that named no execution.
-        assert!(
-            super::by_execution("attributed", "x-nine")
-                .expect("reads")
-                .is_empty()
-        );
-        assert!(
-            super::by_execution("attributed", "")
-                .expect("reads")
-                .is_empty()
-        );
-    });
+#[tokio::test]
+async fn a_run_with_no_file_changed_nothing_and_an_unreadable_one_is_an_error() {
+    crate::runstate::with_isolated_runs_dir_async("context-changes-none", |_d| async move {
+        assert!(read("ghost").unwrap().is_empty());
+        garbage("broken", b"not a run file");
+        let stepped = recorded();
+        super::super::run_file::tests::bad_step(&stepped, 1);
+        assert_eq!(read(&stepped).unwrap_err().code(), "INTERNAL");
+        assert_eq!(read("broken").unwrap_err().code(), "INTERNAL");
+    })
+    .await;
 }

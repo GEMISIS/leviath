@@ -159,7 +159,7 @@ pub(crate) enum ParentFilter {
     /// and what makes `total` a count of the rows a client will actually draw.
     Roots,
     /// `parent=<run_id>`: that run's direct children. `GET
-    /// /api/agents/{id}/children` answers the same question in one unpaged,
+    /// /api/runs/{id}/children` answers the same question in one unpaged,
     /// unsorted array, which a fan-out of two hundred workers has no windowed
     /// form of.
     Of(String),

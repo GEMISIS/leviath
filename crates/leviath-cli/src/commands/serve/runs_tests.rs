@@ -853,13 +853,13 @@ async fn every_run_carries_the_computed_age_and_working_spans() {
     .await;
 }
 
-/// `/api/agents` and `/api/runs` describe the same run the same way.
+/// `/api/runs/{id}` and `/api/runs` describe the same run the same way.
 ///
-/// They are separate routes with separate handlers, and `/api/agents` used to
-/// serialize a bare `RunMeta` - so the same run came back timed on one and
-/// untimed on the other, which is the drift this shares one function to prevent.
+/// They are separate routes with separate handlers, and a bare `RunMeta` on
+/// one would come back untimed beside the other's timed run: the drift that
+/// sharing one function prevents.
 #[tokio::test]
-async fn the_agents_route_times_a_run_the_same_way_the_runs_route_does() {
+async fn the_run_route_times_a_run_the_same_way_the_listing_does() {
     crate::runstate::with_isolated_runs_dir_async("runs-handler-agents-agree", |_d| async move {
         let mut m = meta_at("run-both", 100);
         m.started_at = chrono::Utc::now().timestamp() - 1_800;
@@ -871,7 +871,7 @@ async fn the_agents_route_times_a_run_the_same_way_the_runs_route_does() {
 
         let from_runs = page_of(&[]).await.items[0].meta.clone();
         let from_agents =
-            super::super::agents::get_agent(axum::extract::Path("run-both".to_string()))
+            super::super::run_reads::get_run(axum::extract::Path("run-both".to_string()))
                 .await
                 .expect("the run is there")
                 .0;
@@ -925,7 +925,7 @@ async fn parent_none_lists_only_the_runs_nobody_started() {
 }
 
 /// The other direction: one run's workers, through the same paging, sorting and
-/// filtering as everything else. `GET /api/agents/{id}/children` answers this
+/// filtering as everything else. `GET /api/runs/{id}/children` answers this
 /// too, in one unpaged array, which a fan-out of two hundred has no windowed
 /// form of.
 #[tokio::test]
@@ -1046,7 +1046,7 @@ async fn every_status_is_selectable_by_the_word_the_api_returns() {
     .await;
 }
 
-/// The batch fetch that replaces N separate `GET /api/agents/{id}` calls.
+/// The batch fetch that replaces N separate `GET /api/runs/{id}` calls.
 #[tokio::test]
 async fn ids_fetches_exactly_those_runs_and_reports_the_ones_that_are_gone() {
     crate::runstate::with_isolated_runs_dir_async("runs-handler-ids", |_d| async move {

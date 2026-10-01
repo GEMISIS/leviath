@@ -321,12 +321,9 @@ async fn a_spawn_the_daemon_refuses_answers_with_its_issues() {
 /// and the daemon is never asked.
 #[tokio::test]
 async fn every_problem_this_server_finds_is_answered_at_once() {
-    let root = tempfile::tempdir().expect("a workdir root");
-    let workdir = tempfile::tempdir().expect("a workdir outside it");
+    let workdir = tempfile::tempdir().expect("a workdir");
     std::fs::write(workdir.path().join("big.bin"), [7u8; 32]).expect("a big file");
     let limits = ServeLimits {
-        workdir_root: Some(root.path().to_path_buf()),
-        no_remote_yolo: true,
         request_limits: crate::commands::serve::request_limits::RequestLimits {
             max_upload_bytes: 8,
             ..Default::default()
@@ -363,7 +360,7 @@ async fn every_problem_this_server_finds_is_answered_at_once() {
                 "allow": ["bad tool"],
                 "maxDepth": 300,
             },
-            "delivery": { "callback": { "url": "http://127.0.0.1/hook" } },
+            "delivery": { "callback": { "url": "not a url" } },
         } }),
     )
     .await;
@@ -381,7 +378,6 @@ async fn every_problem_this_server_finds_is_answered_at_once() {
         })
         .collect();
     let wanted = [
-        ("workdir", "NOT_ALLOWED"),
         ("source.blueprint.name", "INVALID"),
         ("source.blueprint.digest", "INVALID"),
         ("inputs.task", "DUPLICATE"),
@@ -397,10 +393,9 @@ async fn every_problem_this_server_finds_is_answered_at_once() {
         ("model", "INVALID"),
         ("output.artifacts[0].mime_type", "INVALID"),
         ("launch.unattended.profile", "INVALID"),
-        ("launch.unattended", "NOT_ALLOWED"),
         ("launch.allow[0]", "INVALID"),
         ("launch.max_depth", "OUT_OF_RANGE"),
-        ("delivery.callback.url", "NOT_ALLOWED"),
+        ("delivery.callback.url", "INVALID"),
     ];
     for (path, code) in wanted {
         assert!(
@@ -434,9 +429,55 @@ async fn a_graph_that_does_not_read_is_an_issue() {
         "{answer}"
     );
     assert_eq!(issues[1]["path"], "delivery.callback.url");
-    assert_eq!(issues[1]["code"], "NOT_ALLOWED");
-    assert_eq!(issues[2]["path"], "delivery.callback.url");
-    assert_eq!(issues[2]["code"], "INVALID");
+    assert_eq!(issues[1]["code"], "INVALID");
+}
+
+/// This server's own refusals come from the service layer REST shares, beside
+/// whatever the daemon finds, as issues rather than as an error.
+#[tokio::test]
+async fn this_servers_refusals_are_issues_beside_the_daemons() {
+    let root = tempfile::tempdir().expect("a workdir root");
+    let outside = tempfile::tempdir().expect("a workdir outside it");
+    let limits = ServeLimits {
+        workdir_root: Some(root.path().to_path_buf()),
+        no_remote_yolo: true,
+        ..Default::default()
+    };
+    let refused = SpawnIssues::from(SpawnIssue::new(
+        SpecPath::root().field("inputs").key("task"),
+        IssueCode::Missing,
+        "the task is required",
+    ));
+    let (control, _dir, _srv) = fake_daemon(move |_| ControlResponse::Rejected {
+        issues: refused.clone(),
+    });
+    let answer = run(
+        state(control, limits),
+        SPAWN,
+        serde_json::json!({ "request": {
+            "source": { "blueprint": { "name": "coder" } },
+            "workdir": outside.path().to_string_lossy(),
+            "launch": { "unattended": { "all": true } },
+            "delivery": { "callback": { "url": "http://127.0.0.1/hook" } },
+        } }),
+    )
+    .await;
+    let issues = answer["data"]["spawnRun"]["issues"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let paths: Vec<&str> = issues
+        .iter()
+        .filter_map(|issue| issue["path"].as_str())
+        .collect();
+    for path in [
+        "workdir",
+        "launch.unattended",
+        "delivery.callback.url",
+        "inputs.task",
+    ] {
+        assert!(paths.contains(&path), "{path} missing: {answer}");
+    }
 }
 
 /// A daemon that answers with something that is neither a run nor a refusal,

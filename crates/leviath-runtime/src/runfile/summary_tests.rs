@@ -67,3 +67,33 @@ fn a_run_file_whose_state_does_not_decode_is_an_error() {
     let reader = read(&[spec_frame(), state]).unwrap();
     assert!(summary(&reader).is_err());
 }
+
+/// The record at any step is the one the last step would give for that
+/// state, and the window and ledger read as the live run would show them.
+#[test]
+fn any_step_reads_as_its_record_window_and_ledger() {
+    let spec = spec();
+    let states = crate::runfile::reader_tests::scripted_run(3);
+    let last = states.last().unwrap();
+    let meta = summary_of(&spec, last, 99);
+    assert_eq!(meta.updated_at, 99);
+    assert_eq!(meta.run_id, spec.run_id.as_str());
+
+    let window = context_snapshot(&spec, last);
+    assert_eq!(window.stage_name, last.cursor.stage.as_str());
+    let names: Vec<&str> = window.regions.iter().map(|r| r.name.as_str()).collect();
+    assert!(names.contains(&"conversation"), "{names:?}");
+    let conversation = window
+        .regions
+        .iter()
+        .find(|r| r.name == "conversation")
+        .unwrap();
+    assert_eq!(
+        conversation.entries.len(),
+        last.context.region("conversation").unwrap().entries.len()
+    );
+
+    let ledger = stage_records(last);
+    assert_eq!(ledger.len(), last.ledger.len());
+    assert_eq!(ledger[0].name, "plan");
+}
