@@ -1,0 +1,428 @@
+//! Answers every host gives the same way.
+//!
+//! The daemon and an embedder know different things about their machine, but
+//! several of the questions [`ResolveEnv`] asks have one right answer given
+//! what they know: which model a stage runs on over a provider registry, which
+//! of a catalog's tools a stage gets, whether some code compiles for its use,
+//! what type some bytes are, and how a provider's configuration or a tool list
+//! is fingerprinted. Both hosts call these so they cannot drift apart.
+//!
+//! [`ResolveEnv`]: crate::spec::env::ResolveEnv
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use leviath_core::JsonDoc;
+use leviath_providers::Tool;
+
+use crate::pipeline::{
+    ModelDefaults, ToolCatalog, ToolOwners, expand_connector_grants, filter_tools_for_stage,
+    resolve_stages,
+};
+use crate::provider_creds::ProviderCreds;
+use crate::providers::ProviderRegistry;
+use crate::spec::blueprint::{Blueprint, ModelConfig, ModelEntry, Stage};
+use crate::spec::env::{CodeUse, ModelPlan};
+use crate::spec::graph::{CodeRef, StageDef, ToolSelector};
+use crate::spec::inputs::PathKind;
+use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use crate::spec::layout::ContextLayout;
+use crate::spec::names::{
+    Digest, McpServerName, MimePattern, ModelId, ModelRef, ProviderName, ToolName, WorkdirPath,
+};
+use crate::spec::run_spec::{ToolDef, ToolSource};
+
+/// The window assumed for a model whose provider cannot say, matching the
+/// pipeline's own fallback for percentage budgets.
+const FALLBACK_WINDOW: u32 = 8192;
+
+/// Read the code a graph names. A file is read from `base`, the directory of
+/// the blueprint that named it, and never from outside it: code is logic a
+/// blueprint ships, so a path that climbs out is refused rather than read.
+pub fn read_code(code: &CodeRef, base: Option<&Path>) -> Result<Vec<u8>, String> {
+    match code {
+        CodeRef::Inline(source) => Ok(source.clone().into_bytes()),
+        CodeRef::File(file) => {
+            let base = base.ok_or_else(|| {
+                format!(
+                    "'{file}' names a file, and only a blueprint has a directory to read \
+                     one from; put the code inline instead"
+                )
+            })?;
+            let full = base.join(file);
+            if !leviath_core::resolves_within(&full, base) {
+                return Err(format!(
+                    "'{file}' resolves outside the blueprint's directory ({}); code must \
+                     live beside the blueprint that names it",
+                    base.display()
+                ));
+            }
+            std::fs::read(&full).map_err(|e| format!("cannot read '{}': {e}", full.display()))
+        }
+    }
+}
+
+/// Check that some code compiles and has the entry points `used_as` calls.
+///
+/// A seed is only checked for being text here: running it is the check, and
+/// the host that runs it compiles it first.
+pub fn check_code(code: &[u8], used_as: CodeUse) -> Result<(), String> {
+    let source =
+        std::str::from_utf8(code).map_err(|e| format!("the code is not UTF-8 text: {e}"))?;
+    let label = "code";
+    let checked = match used_as {
+        CodeUse::Hook => leviath_scripting::stage_hook::compile(label, source, &[]).map(drop),
+        CodeUse::Validator => leviath_scripting::output_validator::compile(label, source).map(drop),
+        CodeUse::Region => leviath_scripting::region_hook::compile(label, source).map(drop),
+        CodeUse::MimeCheck => leviath_scripting::mime_check::compile(label, source).map(drop),
+        CodeUse::DependencyCheck => {
+            leviath_scripting::dependency_check::compile(label, source).map(drop)
+        }
+        CodeUse::Tool => leviath_scripting::tool::check_source(label, source).map(drop),
+        CodeUse::Seed => Ok(()),
+    };
+    checked.map_err(|e| e.to_string())
+}
+
+/// The path of a stage's model choice, where a model issue is reported.
+fn model_path(stage: &StageDef) -> SpecPath {
+    SpecPath::root()
+        .field("stages")
+        .key(stage.name.as_str())
+        .field("model")
+}
+
+/// Choose a stage's provider and model over `registry`, the way every spawn
+/// has chosen one: the stage's own models, then the operator's override and
+/// fallback models and failover chain, over the providers they prefer.
+///
+/// The choice is made by the same stage resolver a run has always used, over
+/// a one-stage stand-in for the stage, so a gateway's unread model list, a
+/// provider that refuses the model and a model that cannot run with zero data
+/// retention are refused here exactly as they were.
+pub fn choose_model(
+    stage: &StageDef,
+    requested: Option<&ModelRef>,
+    defaults: &ModelDefaults,
+    registry: &ProviderRegistry,
+) -> Result<ModelPlan, Box<SpawnIssue>> {
+    let config = ModelConfig {
+        models: stage
+            .model
+            .models
+            .iter()
+            .map(|m| {
+                ModelEntry::new(
+                    m.provider
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    m.model.to_string(),
+                )
+            })
+            .collect(),
+        allow_user_default: stage.model.allow_user_default,
+        parameters: HashMap::new(),
+        request_timeout_secs: stage.model.request_timeout_secs,
+    };
+    let mut legacy = Stage::new(stage.name.to_string(), config);
+    legacy.input_accepts = stage
+        .input_accepts
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let blueprint = Blueprint::new(
+        stage.name.to_string(),
+        String::new(),
+        vec![legacy],
+        ContextLayout::new(Vec::new(), 0),
+    );
+    let owners = ToolOwners::new();
+    let requested_text = requested.map(ToString::to_string);
+    let unresolvable = |message: String| {
+        SpawnIssue::new(model_path(stage), IssueCode::Unresolvable, message)
+            .known(registry.resolvable_names())
+    };
+    let resolved = resolve_stages(
+        &blueprint,
+        requested_text.as_deref(),
+        defaults,
+        registry,
+        ToolCatalog {
+            defs: &[],
+            owners: &owners,
+        },
+        false,
+        None,
+    )
+    .map_err(unresolvable)?
+    .remove(0);
+    let provider = ProviderName::new(&resolved.provider_name)
+        .map_err(|e| unresolvable(format!("the chosen provider: {e}")))?;
+    let model = ModelId::new(&resolved.model)
+        .map_err(|e| unresolvable(format!("the chosen model: {e}")))?;
+    let context_window = registry
+        .get(provider.as_str())
+        .map(|p| u32::try_from(p.max_context_tokens(model.as_str())).unwrap_or(u32::MAX))
+        .unwrap_or(FALLBACK_WINDOW);
+    let fallbacks = resolved
+        .fallbacks
+        .iter()
+        .filter_map(|f| ModelRef::parse(&format!("{}/{}", f.provider, f.model)).ok())
+        .collect();
+    Ok(ModelPlan {
+        provider,
+        model,
+        context_window,
+        fallbacks,
+        notes: resolved.notes,
+    })
+}
+
+/// A tool as the model is offered it, with where it comes from.
+///
+/// `None` for a tool whose name is not one a provider accepts, which a
+/// catalog leaves out rather than offering something no model could call.
+pub fn tool_def(tool: &Tool, source: ToolSource) -> Option<ToolDef> {
+    let name = ToolName::new(&tool.name).ok()?;
+    Some(ToolDef {
+        name,
+        description: tool.description.clone(),
+        schema: JsonDoc::new(tool.parameters.clone()),
+        source,
+    })
+}
+
+/// Built-in tool definitions, with the stage-control tools marked as such.
+pub fn builtin_defs(tools: &[Tool]) -> Vec<ToolDef> {
+    tools
+        .iter()
+        .filter_map(|t| {
+            let source = match leviath_tools::STAGE_CONTROL_TOOLS.contains(&t.name.as_str()) {
+                true => ToolSource::StageControl,
+                false => ToolSource::Builtin,
+            };
+            tool_def(t, source)
+        })
+        .collect()
+}
+
+/// An MCP server's advertised tools, as the model is offered them. The tool's
+/// own name on the server is the advertised name with the server's prefix
+/// taken off.
+pub fn mcp_defs(server: &McpServerName, tools: &[Tool]) -> Vec<ToolDef> {
+    let prefix = format!("{server}__");
+    tools
+        .iter()
+        .filter_map(|t| {
+            let tool = t.name.strip_prefix(&prefix).unwrap_or(&t.name).to_string();
+            tool_def(
+                t,
+                ToolSource::Mcp {
+                    server: server.clone(),
+                    tool,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The tools of `catalog` a stage gets: the ones it names (an MCP tool may be
+/// named without its server when only one server offers it), every tool of
+/// each group it names, and every tool of each MCP server it connects to.
+///
+/// A named tool the catalog lacks is left out, since a blueprint may name
+/// tools of servers this machine does not have. A tool the stage requires is
+/// different: without it the stage cannot do its job, so it is an issue.
+pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef>, SpawnIssues> {
+    let defs: Vec<Tool> = catalog
+        .iter()
+        .map(|d| Tool {
+            name: d.name.to_string(),
+            description: d.description.clone(),
+            parameters: d.schema.value().clone(),
+        })
+        .collect();
+    let owners: ToolOwners = catalog
+        .iter()
+        .filter_map(|d| match &d.source {
+            ToolSource::Mcp { server, .. } => Some((d.name.to_string(), server.to_string())),
+            _ => None,
+        })
+        .collect();
+    let available: Vec<String> = stage
+        .tools
+        .iter()
+        .map(|s| match s {
+            ToolSelector::Tool(name) => name.to_string(),
+            ToolSelector::Group(group) => group_token(*group).to_string(),
+        })
+        .collect();
+    let connectors: Vec<String> = stage.connectors.iter().map(ToString::to_string).collect();
+    let required: Vec<String> = stage
+        .required_tools
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let granted = expand_connector_grants(&available, &connectors, &owners);
+    let picked = filter_tools_for_stage(
+        ToolCatalog {
+            defs: &defs,
+            owners: &owners,
+        },
+        &granted,
+        &required,
+        false,
+    );
+    let chosen: Vec<ToolDef> = catalog
+        .iter()
+        .filter(|d| picked.iter().any(|t| t.name == d.name.as_str()))
+        .cloned()
+        .collect();
+    let mut issues = SpawnIssues::new();
+    for (i, name) in stage.required_tools.iter().enumerate() {
+        let canonical = leviath_tools::canonical_tool_name(name.as_str());
+        if !chosen.iter().any(|d| d.name.as_str() == canonical) {
+            issues.push(
+                SpawnIssue::new(
+                    SpecPath::root()
+                        .field("stages")
+                        .key(stage.name.as_str())
+                        .field("required_tools")
+                        .index(i),
+                    IssueCode::Unresolvable,
+                    format!("the stage requires '{name}', and it is not available to it here"),
+                )
+                .hint("grant it in the stage's tools, or install what provides it")
+                .known(catalog.iter().map(|d| d.name.to_string())),
+            );
+        }
+    }
+    issues.into_result(chosen)
+}
+
+/// The token a group is written as in a stage's tool list.
+fn group_token(group: crate::spec::graph::ToolGroup) -> &'static str {
+    use crate::spec::blueprint::ToolGroup as Legacy;
+    use crate::spec::graph::ToolGroup;
+    match group {
+        ToolGroup::All => Legacy::All,
+        ToolGroup::Builtin => Legacy::Builtin,
+        ToolGroup::Subagent => Legacy::Subagent,
+        ToolGroup::Scripts => Legacy::Scripts,
+        ToolGroup::Mcp => Legacy::Mcp,
+    }
+    .token()
+}
+
+/// The type of attached bytes, by `registry`.
+///
+/// A declared type is kept when the bytes do not contradict it (their magic
+/// says something else) and the registry's check for it passes. A declared
+/// pattern (`image/*`) is a constraint rather than a type: the type is found
+/// from the bytes and the name, and must match it. With nothing declared, the
+/// type is found from the bytes and the name.
+pub fn sniff(
+    registry: &leviath_core::mime::MimeRegistry,
+    name: &str,
+    bytes: &[u8],
+    declared: Option<&MimePattern>,
+) -> Result<String, String> {
+    let found = || registry.resolve(None, Some(name), bytes);
+    let Some(declared) = declared else {
+        return Ok(found().as_str().to_string());
+    };
+    let exact = (!declared.as_str().contains('*'))
+        .then(|| leviath_core::mime::MimeType::parse(declared.as_str()).ok())
+        .flatten();
+    let Some(t) = exact else {
+        let t = found();
+        return match t.matches(declared.as_str()) {
+            true => Ok(t.as_str().to_string()),
+            false => Err(format!(
+                "'{name}' is {}, which is not {declared}",
+                t.as_str()
+            )),
+        };
+    };
+    if let Some(magic) = registry.sniff(bytes)
+        && magic != t
+    {
+        return Err(format!(
+            "'{name}' was declared {declared}, and its bytes are {}",
+            magic.as_str()
+        ));
+    }
+    registry
+        .verify(&t, bytes)
+        .map_err(|e| format!("'{name}' is not a valid {declared}: {e}"))?;
+    Ok(t.as_str().to_string())
+}
+
+/// Whether `path` names something of `kind` inside `workdir`, following
+/// links only as far as they stay inside it.
+pub fn path_exists(workdir: &Path, path: &WorkdirPath, kind: PathKind) -> bool {
+    let full = workdir.join(path.as_str());
+    leviath_core::resolves_within(&full, workdir)
+        && std::fs::metadata(&full).is_ok_and(|m| match kind {
+            PathKind::File => m.is_file(),
+            PathKind::Dir => m.is_dir(),
+            PathKind::Any => true,
+        })
+}
+
+/// Run a dependency check written inline: `Ok` when it is satisfied, the
+/// check's own remedy or failure otherwise.
+pub fn run_inline_check(source: &str) -> Result<(), String> {
+    use leviath_scripting::dependency_check::{Verdict, compile, run};
+    let check = compile("check", source).map_err(|e| e.to_string())?;
+    match run(&check) {
+        Verdict::Satisfied => Ok(()),
+        Verdict::Unmet(why) | Verdict::Unusable(why) => Err(why),
+    }
+}
+
+/// A digest of a provider's configuration, credentials left out.
+///
+/// It covers what decides where requests go and what they may ask for: the
+/// provider's name, its base URL and its options (its kind, its model list,
+/// its region, which headers it sends). Header values are left out with the
+/// key, because a header is where a gateway's token travels.
+pub fn provider_fingerprint(creds: &ProviderCreds) -> Digest {
+    let mut lines = vec![
+        format!("name={}", creds.name),
+        format!("base_url={}", creds.base_url.as_deref().unwrap_or("")),
+    ];
+    let mut options: Vec<String> = creds
+        .options
+        .iter()
+        .map(|(k, v)| match k.starts_with("header:") {
+            true => format!("option:{k}"),
+            false => format!("option:{k}={v}"),
+        })
+        .collect();
+    options.sort();
+    lines.extend(options);
+    Digest::of(lines.join("\n").as_bytes())
+}
+
+/// A digest of a provider registered without configuration (an embedder's
+/// own implementation, or a script provider): it stands only for the name.
+pub fn registered_fingerprint(provider: &str) -> Digest {
+    Digest::of(format!("registered={provider}").as_bytes())
+}
+
+/// A digest of a tool list: every tool's name, description and schema, in
+/// name order, so the same tools in another order digest the same.
+pub fn tools_fingerprint(tools: &[ToolDef]) -> Digest {
+    let mut lines: Vec<String> = tools
+        .iter()
+        .map(|t| format!("{}\n{}\n{}", t.name, t.description, t.schema.to_text()))
+        .collect();
+    lines.sort();
+    Digest::of(lines.join("\n\n").as_bytes())
+}
+
+#[cfg(test)]
+#[path = "host_tests.rs"]
+pub(crate) mod tests;

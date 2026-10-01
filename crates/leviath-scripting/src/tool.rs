@@ -489,6 +489,24 @@ impl ScriptToolSet {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    /// Compile a tool from source held in memory (a run file's copy, say)
+    /// and add it under the name its annotations give, unless the set
+    /// already has a tool of that name. `label` stands in for a path in
+    /// messages. Returns the tool's name.
+    pub fn add_source(&mut self, label: &str, source: &str) -> Result<String> {
+        let meta = parse_annotations(source)?;
+        let ast = Engine::new()
+            .compile(source)
+            .map_err(|e| Error::CompilationFailed(format!("{label}: {e}")))?;
+        let name = meta.name.clone();
+        self.tools.entry(name.clone()).or_insert(ScriptTool {
+            meta,
+            ast,
+            source_path: PathBuf::from(label),
+        });
+        Ok(name)
+    }
 }
 
 /// Answer "would this text become a tool" for source that has no file yet.
@@ -1580,6 +1598,18 @@ schema = { type = "string", enum = ["json", "yaml"], description = "Output forma
     fn check_source_rejects_a_script_rhai_will_not_compile() {
         let err = check_source("draft", "// @tool draft\nlet").unwrap_err();
         assert!(err.to_string().contains("draft"), "{err}");
+    }
+
+    #[test]
+    fn a_tool_is_added_from_source_once_by_name() {
+        let mut set = ScriptToolSet::default();
+        assert_eq!(set.add_source("run:a", "// @tool a\n1").unwrap(), "a");
+        assert_eq!(set.add_source("run:b", "// @tool a\n2").unwrap(), "a");
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.get("a").unwrap().source_path, PathBuf::from("run:a"));
+        assert!(set.add_source("run:c", "1").is_err());
+        let err = set.add_source("run:d", "// @tool d\nlet").unwrap_err();
+        assert!(err.to_string().contains("run:d"), "{err}");
     }
 
     #[test]

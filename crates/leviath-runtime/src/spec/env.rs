@@ -182,6 +182,12 @@ pub trait BindEnv: Send + Sync {
     fn provider_fingerprint(&self, provider: &ProviderName) -> Option<Digest>;
     /// A digest of an MCP server's tool list now.
     fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest>;
+    /// The tools an MCP server offers now, when the host can list them, so a
+    /// changed tool list can be reported tool by tool. `None` (the default)
+    /// reports the change for the server as a whole.
+    fn mcp_tools(&self, _server: &McpServerName) -> Option<Vec<ToolDef>> {
+        None
+    }
     /// Build the host's own live components for the run (compiled code, tool
     /// service state, connections).
     async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues>;

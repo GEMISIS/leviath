@@ -229,7 +229,7 @@ pub(crate) fn resolve_region_scripts(
 
 /// Names already claimed by a built-in, sub-agent, or MCP tool - a discovered
 /// script tool colliding with one of these is dropped (never shadows a core tool).
-pub(super) fn reserved_tool_names(
+pub(crate) fn reserved_tool_names(
     builtin_names: &HashSet<String>,
     mcp_tool_defs: &[Tool],
 ) -> HashSet<String> {

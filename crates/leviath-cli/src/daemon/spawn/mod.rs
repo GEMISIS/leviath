@@ -35,7 +35,7 @@ use crate::daemon::subagent::SubAgentHandle;
 use crate::daemon::tool_service::{AgentToolState, CliToolService};
 
 /// Default max sub-agent tree depth when a blueprint doesn't set one.
-const DEFAULT_SUBAGENT_DEPTH: usize = 3;
+pub(crate) const DEFAULT_SUBAGENT_DEPTH: usize = 3;
 
 // Sections of the former single-file spawn path, one per question it answers.
 // The first two are re-exported because the daemon reaches them directly
@@ -48,7 +48,7 @@ pub(crate) use scripts::*;
 mod seeds;
 pub(crate) use seeds::*;
 mod tool_state;
-use tool_state::*;
+pub(crate) use tool_state::*;
 
 /// Everything a spawn needs that is not the request itself.
 ///

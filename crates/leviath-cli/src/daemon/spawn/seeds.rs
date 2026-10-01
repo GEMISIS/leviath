@@ -404,7 +404,7 @@ pub(super) fn resolve_seeds(
 /// Read each file and concatenate with `--- <path> ---` headers. Returns
 /// `Ok(None)` when the list is empty; a missing/unreadable file is an error only
 /// when `required`, else it is skipped.
-pub(super) fn read_and_concat(
+pub(crate) fn read_and_concat(
     region: &str,
     paths: impl Iterator<Item = std::path::PathBuf>,
     required: bool,
