@@ -35,6 +35,7 @@ mod manifest;
 mod migrate;
 mod old;
 mod plan;
+mod recorded;
 mod report;
 mod spec;
 mod state;
@@ -120,7 +121,7 @@ pub fn meta(run_dir: &Path) -> Option<leviath_core::run_meta::RunMeta> {
 /// stages connect to) before converting it.
 pub fn graph(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<RunGraph, ConvertError> {
     let old = legacy::LegacyRun::read(run_dir, env)?;
-    spec::graph(&old, &mut report::Report::default()).map(|(_, graph)| graph)
+    Ok(spec::graph(&old, &mut report::Report::default()).1)
 }
 
 /// Convert the run in `run_dir` into a single run file at

@@ -31,6 +31,14 @@ pub enum BlueprintSource {
     /// The installed blueprint at this path, because the run kept no copy.
     /// It may have been edited since the run started.
     Installed(PathBuf),
+    /// Neither: the graph is what the run recorded, and the run never
+    /// resumes.
+    Recorded {
+        /// Every place a blueprint was looked for.
+        tried: Vec<PathBuf>,
+        /// Why none was read.
+        why: String,
+    },
 }
 
 /// What a conversion produced.

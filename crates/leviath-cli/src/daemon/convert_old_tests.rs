@@ -73,13 +73,13 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
         .replying("ok")
         .source();
     std::fs::write(&stub, source).unwrap();
-    let runs = tempfile::tempdir().unwrap();
-    let old = runs.path().join("old");
+    let runs = home.path().join("runs");
+    let old = runs.join("old");
     copy_dir(&fixture("mid-tool-batch"), &old);
     std::fs::write(old.join("blueprint.leviath"), probe_with_server(&stub)).unwrap();
-    let done = runs.path().join("done");
+    let done = runs.join("done");
     copy_dir(&fixture("finished"), &done);
-    std::fs::create_dir_all(runs.path().join("junk")).unwrap();
+    std::fs::create_dir_all(runs.join("junk")).unwrap();
 
     let mut registry = leviath_runtime::ProviderRegistry::new();
     registry.register("openai".into(), Arc::new(FakeProvider::new()));
@@ -94,7 +94,7 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
     let home_path = home.path().to_str().unwrap().to_string();
     temp_env::async_with_vars([("LEVIATH_HOME", Some(home_path))], async {
         convert_at_start(
-            runs.path(),
+            &runs,
             AtStart {
                 config: &config,
                 registry,
@@ -127,19 +127,17 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
 #[cfg(feature = "legacy-runs")]
 #[tokio::test]
 async fn an_old_run_found_on_resume_converts_against_the_daemon() {
-    let runs = tempfile::tempdir().unwrap();
-    let old = runs.path().join("old");
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    let old = runs.join("old");
     copy_dir(&fixture("mid-tool-batch"), &old);
     let mut registry = leviath_runtime::ProviderRegistry::new();
     registry.register(
         "openai".into(),
         Arc::new(FakeProvider::new().context_window(64_000)),
     );
-    let starter = crate::daemon::starter::testing::starter(
-        crate::config::Config::default(),
-        registry,
-        runs.path(),
-    );
+    let starter =
+        crate::daemon::starter::testing::starter(crate::config::Config::default(), registry, &runs);
     let mut world = leviath_runtime::world::PipelineWorld::new(
         starter.providers.registry(),
         starter.tool_service.clone(),
@@ -148,7 +146,7 @@ async fn an_old_run_found_on_resume_converts_against_the_daemon() {
         Some(starter.runs_dir.clone()),
         tokio::runtime::Handle::current(),
     );
-    crate::daemon::recovery::resume_all(&mut world, &starter, runs.path());
+    crate::daemon::recovery::resume_all(&mut world, &starter, &runs);
     let run =
         leviath_runtime::runfile::RunFileReader::open(&old.join(leviath_core::files::RUN_FILE))
             .unwrap();
@@ -210,4 +208,81 @@ fn nothing_to_convert_is_left_alone() {
     convert_one(runs.path(), None, None);
     assert!(std::fs::read_dir(runs.path()).unwrap().next().is_none());
     assert!(servers_of_unfinished(&runs.path().join("gone"), None).is_empty());
+    assert!(Unconverted::path_for(Path::new("/")).ends_with("runs.unconverted"));
+}
+
+/// The list of runs that did not convert, as `convert_all` left it.
+fn unconverted(runs: &Path) -> Option<serde_json::Value> {
+    let bytes = std::fs::read(Unconverted::path_for(runs)).ok()?;
+    Some(serde_json::from_slice(&bytes).unwrap())
+}
+
+/// A run that does not convert is left as it was and listed, and later
+/// starts leave it alone rather than trying it again; a new release tries it
+/// again, and the list goes once nothing is on it.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_run_that_does_not_convert_is_tried_once_per_release() {
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    let run = runs.join("old");
+    copy_dir(&fixture("finished"), &run);
+    let meta = std::fs::read(run.join("meta.json")).unwrap();
+    std::fs::write(run.join("meta.json"), "not json").unwrap();
+
+    crate::test_support::with_tracing(|| convert_all(&runs, None, None));
+    let listed = unconverted(&runs).expect("the run is listed");
+    assert_eq!(listed["version"], env!("CARGO_PKG_VERSION"));
+    let why = listed["runs"]["old"].as_str().unwrap();
+    assert!(why.contains("does not parse"), "{why}");
+    assert!(leviath_legacy_runs::is_legacy(&run));
+
+    // Mended, it is still left alone by this release.
+    std::fs::write(run.join("meta.json"), &meta).unwrap();
+    convert_all(&runs, None, None);
+    assert!(leviath_legacy_runs::is_legacy(&run));
+    assert!(unconverted(&runs).is_some());
+
+    // A list another release wrote is tried again, and goes once empty.
+    let mut older = listed;
+    older["version"] = "0.0.1".into();
+    std::fs::write(Unconverted::path_for(&runs), older.to_string()).unwrap();
+    convert_one(&run, None, None);
+    assert!(!leviath_legacy_runs::is_legacy(&run));
+    assert!(unconverted(&runs).is_none());
+    // A list from another release with nothing left to try is removed too.
+    std::fs::write(Unconverted::path_for(&runs), older.to_string()).unwrap();
+    convert_all(&runs, None, None);
+    assert!(unconverted(&runs).is_none());
+}
+
+/// A run that cannot be backed up first is not converted, and is not listed
+/// as one that does not convert: the next start tries again.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_run_that_cannot_be_backed_up_is_not_converted() {
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    let run = runs.join("old");
+    copy_dir(&fixture("finished"), &run);
+    std::fs::write(home.path().join(crate::home_backup::BACKUPS_DIR), "a file").unwrap();
+    crate::test_support::with_tracing(|| convert_all(&runs, None, None));
+    assert!(leviath_legacy_runs::is_legacy(&run));
+    assert!(unconverted(&runs).is_none());
+}
+
+/// A list that cannot be written is said so in the log, and changes nothing
+/// else.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_list_that_cannot_be_written_is_said_so() {
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    let run = runs.join("old");
+    copy_dir(&fixture("finished"), &run);
+    std::fs::write(run.join("meta.json"), "not json").unwrap();
+    std::fs::create_dir_all(Unconverted::path_for(&runs)).unwrap();
+    crate::test_support::with_tracing(|| convert_all(&runs, None, None));
+    assert!(Unconverted::path_for(&runs).is_dir());
+    assert!(leviath_legacy_runs::is_legacy(&run));
 }

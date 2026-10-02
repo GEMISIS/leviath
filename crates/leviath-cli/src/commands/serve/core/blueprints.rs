@@ -65,7 +65,8 @@ impl ParsedBlueprint {
             | leviath_runtime::spec::run_spec::SpecOrigin::BlueprintFile { version, .. } => {
                 version.clone()
             }
-            leviath_runtime::spec::run_spec::SpecOrigin::Raw => String::new(),
+            leviath_runtime::spec::run_spec::SpecOrigin::Raw
+            | leviath_runtime::spec::run_spec::SpecOrigin::Recorded { .. } => String::new(),
         };
         let name = spec
             .origin

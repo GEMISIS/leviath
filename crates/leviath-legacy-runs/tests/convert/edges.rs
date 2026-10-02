@@ -314,9 +314,9 @@ fn the_stage_ledger_reads_every_status_and_skips_what_does_not_check() {
 }
 
 #[test]
-fn a_run_in_a_stage_its_graph_lacks_resumes_at_the_entry() {
+fn a_run_in_no_stage_it_names_resumes_at_the_entry() {
     let run = Run::fixture("finished");
-    run.meta(|m| m.current_stage = "gone".into());
+    run.meta(|m| m.current_stage = String::new());
     let (report, file) = run.converted();
     assert_eq!(file.last.cursor.stage.as_str(), "main");
     assert!(report.defaulted("cursor.stage").is_some());
@@ -496,7 +496,7 @@ fn broken_directories_are_refused_by_name() {
     assert!(err.to_string().contains("has no meta.json"));
 
     type BreakIt = fn(&Run);
-    let cases: [(&str, BreakIt, &str); 14] = [
+    let cases: [(&str, BreakIt, &str); 10] = [
         ("bad meta", |r| r.write("meta.json", "{"), "does not parse"),
         (
             "bad stages",
@@ -535,41 +535,6 @@ fn broken_directories_are_refused_by_name() {
             "headless journal",
             |r| r.set_records(&[]),
             "does not start with its header",
-        ),
-        (
-            "no blueprint",
-            |r| {
-                r.remove("blueprint.leviath");
-                r.meta(|m| m.agent_name = "nobody".into());
-            },
-            "not in the run and not installed",
-        ),
-        (
-            "bad blueprint",
-            |r| r.write("blueprint.leviath", "[agent"),
-            "does not parse",
-        ),
-        (
-            "bad graph",
-            |r| {
-                let text = std::fs::read_to_string(r.path("blueprint.leviath")).unwrap();
-                r.write(
-                    "blueprint.leviath",
-                    &text.replace("\"shell\"", "\"bad tool\""),
-                );
-            },
-            "not a valid run graph",
-        ),
-        (
-            "bad server table",
-            |r| {
-                let text = std::fs::read_to_string(r.path("blueprint.leviath")).unwrap();
-                r.write(
-                    "blueprint.leviath",
-                    &format!("{text}\n[[mcp_servers]]\nname = \"bad name\"\n"),
-                );
-            },
-            "not a valid run graph",
         ),
         (
             "bad run id",

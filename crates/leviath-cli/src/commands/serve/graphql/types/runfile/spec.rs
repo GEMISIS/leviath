@@ -30,13 +30,16 @@ pub(crate) enum SpecOriginKind {
     BlueprintFile,
     /// A graph the caller wrote.
     Raw,
+    /// The graph a run from an earlier release recorded, its blueprint gone
+    /// when it was converted. Such a run never resumes.
+    Recorded,
 }
 
 /// Where a run's graph came from, and which revision of it ran.
 #[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RunOrigin {
-    /// Which of the three it was.
+    /// Which of the four it was.
     pub(crate) kind: SpecOriginKind,
     /// The blueprint's name. Null for a graph the caller wrote.
     pub(crate) blueprint_name: Option<String>,
@@ -66,6 +69,13 @@ impl From<&SpecOrigin> for RunOrigin {
                 digest,
                 version: Some(version.clone()),
                 path: Some(path.to_string()),
+            },
+            SpecOrigin::Recorded { .. } => Self {
+                kind: SpecOriginKind::Recorded,
+                blueprint_name,
+                digest,
+                version: None,
+                path: None,
             },
             SpecOrigin::Raw => Self {
                 kind: SpecOriginKind::Raw,

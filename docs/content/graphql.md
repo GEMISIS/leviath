@@ -937,7 +937,9 @@ it started with.
 
 Compare `blueprintDigest` with the installed blueprint's `digest` to tell whether a run executed
 what is installed now. A run started from a raw graph has no blueprint: its `spec.origin.kind` is
-`RAW` and its digest is null.
+`RAW` and its digest is null. A run from an earlier release whose blueprint was gone when it was
+converted is `RECORDED`: its graph is what the run recorded, its digest is null, and it never
+resumes.
 
 The id is `<name>@<digest prefix>`, not the bare name. Two revisions of one name are two different
 objects, so a client that caches by type and id never merges two revisions into one.

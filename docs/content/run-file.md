@@ -194,9 +194,15 @@ asks for the run:
 - the state it was last in becomes the last checkpoint.
 
 The old files move into `legacy/` inside the run's directory rather than being deleted, and a
-directory that already holds a run file is never converted twice. An old run did not record
-everything a run file holds. Each value the conversion had to fill in goes to `daemon.log` and to
-the run's own log, with the value used and why.
+directory that already holds a run file is never converted twice. The whole directory is saved in
+the home's backup first. See [upgrading from an earlier release](/docs/daemon#upgrading-from-an-earlier-release).
+An old run did not record everything a run file holds. Each value the conversion had to fill in goes
+to the run's own log, with the value used and why, and `daemon.log` gets one line for the whole pass.
+
+A run whose blueprint is gone, or no longer reads, is converted from what it recorded. Its spec's
+origin is `recorded`, and its graph holds the stages it entered, the models they ran on, the edges
+it took and its regions. That is enough for `lev ps`, `lev run show`, `lev stages`, `lev timeline`
+and `lev result`, but not to run it, so it never resumes.
 
 An old run never recorded a machine fingerprint, so its resume does not compare one. It comes back
 on whatever providers this machine has under the same names.

@@ -157,16 +157,30 @@ fn the_request_names_what_ran() {
             digest: Some(Digest::of(b"rev")),
         },
         version: "1".into(),
+        manifest: String::new(),
     };
     let SpawnSource::Blueprint(named) = request_of(&spec).source else {
         panic!("an installed blueprint is named")
     };
     assert_eq!((named.name.as_str(), named.digest), ("coder", None));
     spec.origin = SpecOrigin::BlueprintFile {
-        path: leviath_runtime::spec::names::BlueprintPath::new("/somewhere/coder").unwrap(),
-        name,
+        path: leviath_runtime::spec::names::BlueprintPath::new(
+            std::env::temp_dir().join("coder").to_string_lossy(),
+        )
+        .unwrap(),
+        name: name.clone(),
         digest: None,
         version: "1".into(),
+    };
+    assert!(matches!(
+        request_of(&spec).source,
+        SpawnSource::Blueprint(_)
+    ));
+    // A run converted from what it recorded names the blueprint it ran.
+    spec.origin = SpecOrigin::Recorded {
+        name,
+        manifest: String::new(),
+        why: "not installed".into(),
     };
     assert!(matches!(
         request_of(&spec).source,

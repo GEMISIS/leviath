@@ -7,6 +7,11 @@ fn old_probe() -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
+/// The backup of the home at `home`.
+fn backup(home: &Path) -> crate::home_backup::Backup {
+    crate::home_backup::Backup::of_home(home)
+}
+
 /// An old blueprint directory at `dir`, holding `manifest` and a script.
 fn old_blueprint(dir: &Path, manifest: &[u8]) {
     std::fs::create_dir_all(dir.join("tools")).unwrap();
@@ -25,7 +30,7 @@ fn an_old_blueprint_is_migrated_beside_its_files() {
     let probe = agents.join("probe");
     old_blueprint(&probe, old_probe().as_bytes());
 
-    let done = upgrade_all(Some(&agents), &[]);
+    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].name(), "probe");
     assert_eq!(done[0].outcome, Outcome::Migrated);
@@ -33,7 +38,36 @@ fn an_old_blueprint_is_migrated_beside_its_files() {
     assert!(probe.join("legacy/agent.leviath").is_file());
     assert!(!probe.join(OLD_MANIFEST).exists());
     assert!(probe.join("tools/x.rhai").is_file());
-    assert!(upgrade_all(Some(&agents), &[]).is_empty());
+    // The directory as it was is in the home's backup.
+    let saved = backup(home.path()).dir().join("agents/probe");
+    assert_eq!(
+        std::fs::read_to_string(saved.join(OLD_MANIFEST)).unwrap(),
+        old_probe()
+    );
+    assert!(saved.join("tools/x.rhai").is_file());
+    assert!(!saved.join(leviath_blueprint::FILE_NAME).exists());
+    assert!(upgrade_all(Some(&agents), &[], &backup(home.path())).is_empty());
+}
+
+/// A blueprint that cannot be backed up first is not changed.
+#[test]
+fn a_blueprint_that_cannot_be_backed_up_is_left_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let agents = home.path().join("agents");
+    let dir = agents.join(crate::bundled::BUNDLED_AGENTS[0].name);
+    old_blueprint(&dir, b"old");
+    std::fs::write(home.path().join(crate::home_backup::BACKUPS_DIR), "a file").unwrap();
+
+    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
+    let Outcome::Failed(problems) = &done[0].outcome else {
+        panic!("{:?}", done[0].outcome);
+    };
+    assert!(
+        problems[0].contains("could not be backed up"),
+        "{problems:?}"
+    );
+    assert_eq!(std::fs::read(dir.join(OLD_MANIFEST)).unwrap(), b"old");
+    assert!(!dir.join(LEGACY_DIR).exists());
 }
 
 /// An old install of a blueprint this build ships is replaced by the bundled
@@ -46,7 +80,7 @@ fn an_old_install_of_a_bundled_blueprint_is_replaced() {
     let dir = agents.join(bundled.name);
     old_blueprint(&dir, b"[agent]\nname = \"whatever\"\n");
 
-    let done = upgrade_all(Some(&agents), &[]);
+    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
     assert_eq!(done[0].outcome, Outcome::Reinstalled);
     assert!(dir.join("legacy/agent.leviath").is_file());
     assert!(dir.join("legacy/tools/x.rhai").is_file());
@@ -73,7 +107,7 @@ fn a_bundled_blueprint_that_cannot_be_replaced_is_left_alone() {
     let staging = format!(".{}.upgrading-{}", bundled.name, std::process::id());
     std::fs::write(agents.join(staging), b"x").unwrap();
 
-    let done = upgrade_all(Some(&agents), &[]);
+    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
     let Outcome::Failed(problems) = &done[0].outcome else {
         panic!("the replacement could not be staged");
     };
@@ -106,7 +140,7 @@ fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
     let lone = home.path().join("lone");
     old_blueprint(&lone, old_probe().as_bytes());
 
-    let done = upgrade_all(None, &[mine.clone(), lone.clone()]);
+    let done = upgrade_all(None, &[mine.clone(), lone.clone()], &backup(home.path()));
     let outcome = |dir: &Path| {
         done.iter()
             .find(|d| d.dir == dir)
@@ -137,7 +171,7 @@ fn the_daemon_upgrades_and_a_command_only_says_so() {
     old_blueprint(&agents.join(crate::bundled::BUNDLED_AGENTS[0].name), b"old");
     old_blueprint(&agents.join("broken"), b"not toml [");
     old_blueprint(&agents.join("probe"), old_probe().as_bytes());
-    crate::test_support::with_tracing(|| upgrade_logged(Some(&agents), &[]));
+    crate::test_support::with_tracing(|| upgrade_logged(Some(&agents), &[], &backup(home.path())));
 
     let waiting = agents.join("waiting");
     old_blueprint(&waiting, b"not toml [");

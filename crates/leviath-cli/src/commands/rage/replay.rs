@@ -107,7 +107,7 @@ pub(super) fn request_of(spec: &RunSpec) -> SpawnRequest {
                 digest: None,
             })
         }
-        SpecOrigin::BlueprintFile { name, .. } => {
+        SpecOrigin::BlueprintFile { name, .. } | SpecOrigin::Recorded { name, .. } => {
             SpawnSource::Blueprint(leviath_runtime::spec::names::BlueprintRef {
                 name: name.clone(),
                 digest: None,

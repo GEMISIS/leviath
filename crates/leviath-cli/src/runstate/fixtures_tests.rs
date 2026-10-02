@@ -67,7 +67,8 @@ fn graph_of(meta: &RunMeta, title: Option<String>, regions: Vec<RegionDef>) -> R
 
 /// What a record says the run started from: the blueprint directory its
 /// `agent_path` names when it names one, an installed blueprint by its name
-/// when the name is one, else a graph titled with it.
+/// (read from the file `agent_path` names) when the name is one, else a graph
+/// titled with it.
 fn origin_of(meta: &RunMeta) -> (SpecOrigin, Option<String>) {
     let file = std::path::Path::new(&meta.agent_path);
     let dir = match file.file_name().and_then(|n| n.to_str()) {
@@ -103,6 +104,7 @@ fn origin_of(meta: &RunMeta) -> (SpecOrigin, Option<String>) {
                         .and_then(|d| Digest::new(d).ok()),
                 },
                 version: "0.0.0".to_string(),
+                manifest: meta.agent_path.clone(),
             },
             None,
         ),

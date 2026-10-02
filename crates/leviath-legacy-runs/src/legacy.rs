@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use leviath_core::files::{BLOBS_DIR, RUN_FILE};
-use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
+use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus, StageRecord};
 use leviath_runtime::runfile::codec::MAGIC;
 use leviath_runtime::spec::names::Digest;
 use serde::Deserialize;
@@ -38,8 +38,17 @@ pub(crate) const BLUEPRINT_SNAPSHOT_FILE: &str = "blueprint.leviath";
 const ARCHIVE_FILE: &str = RUN_FILE;
 
 pub(crate) fn is_legacy(run_dir: &Path) -> bool {
-    let journal = std::fs::read(run_dir.join(ARCHIVE_FILE)).unwrap_or_default();
-    run_dir.join(META_FILE).is_file() && !journal.starts_with(MAGIC)
+    run_dir.join(META_FILE).is_file() && !is_run_file(&run_dir.join(ARCHIVE_FILE))
+}
+
+/// Whether the file at `path` starts as a run file does, read no further
+/// than that.
+pub(crate) fn is_run_file(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; MAGIC.len()];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| head == *MAGIC)
 }
 
 /// The metadata an old run directory holds, when it holds any that reads.
@@ -109,6 +118,12 @@ pub(crate) struct LegacyRun {
     pub(crate) point: Option<PointFile>,
     pub(crate) final_output: Option<String>,
     pub(crate) blueprint: BlueprintFile,
+    /// Whether the run's record says it was not empty where a listing now
+    /// would call it so: every earlier release showed what the record said.
+    pub(crate) not_empty: bool,
+    /// The run's metadata as `meta.json` holds it: what every earlier
+    /// release listed it as.
+    pub(crate) listed: RunMeta,
     pub(crate) blobs: Vec<(Digest, Vec<u8>)>,
     /// Stored parts whose file names are not a digest, which are left out.
     pub(crate) stray_blobs: Vec<String>,
@@ -141,10 +156,14 @@ impl LegacyRun {
             path: dir.to_path_buf(),
             why: format!("it has no {META_FILE}"),
         })?;
-        let records = match journal {
+        let not_empty = said_not_empty(&meta);
+        let mut records = match journal {
             Some(bytes) => journal_records(&journal_path, &bytes)?,
             None => records_without_journal(dir, meta.clone())?,
         };
+        if not_empty {
+            kept_not_empty(&mut records);
+        }
         let Some(JournalRecord::Header { meta: header, .. }) = records.first() else {
             return Err(ConvertError::Unreadable {
                 path: journal_path,
@@ -159,7 +178,9 @@ impl LegacyRun {
             fanout: json_file(&dir.join(FANOUT_FILE))?,
             point: json_file(&dir.join(INTERACTIONS_FILE))?,
             final_output: std::fs::read_to_string(dir.join(leviath_core::FINAL_OUTPUT_FILE)).ok(),
-            blueprint: blueprint(dir, &meta, env)?,
+            blueprint: blueprint(dir, &meta, env),
+            not_empty,
+            listed: meta,
             dir: dir.to_path_buf(),
             header,
             records,
@@ -167,6 +188,41 @@ impl LegacyRun {
             blobs,
             stray_blobs,
         })
+    }
+}
+
+/// Whether `meta` says its run was not empty where a listing now would call
+/// it so: it stopped having changed no file and handed back no answer, and
+/// still says otherwise. A record from before runs kept their flags says so
+/// too, having none.
+fn said_not_empty(meta: &RunMeta) -> bool {
+    let f = &meta.flags;
+    let stopped = matches!(
+        meta.status,
+        RunStatus::Complete
+            | RunStatus::CompleteInteractive
+            | RunStatus::Error
+            | RunStatus::Cancelled
+    );
+    stopped
+        && !f.empty_output
+        && f.modified_file_count == 0
+        && !f.no_output_tools
+        && meta.final_output.is_none()
+}
+
+/// Mark every record of a run whose record says it was not empty as one
+/// that could not have changed a file, so it is not called empty for
+/// changing none: what it can change was not always recorded, and every
+/// earlier release went by what the record said.
+fn kept_not_empty(records: &mut [JournalRecord]) {
+    for r in records {
+        if let JournalRecord::Header { meta, .. }
+        | JournalRecord::Progress { meta, .. }
+        | JournalRecord::Checkpoint { meta, .. } = r
+        {
+            meta.flags.no_output_tools = true;
+        }
     }
 }
 
@@ -269,11 +325,9 @@ fn manifests_in(dir: &Path) -> [PathBuf; 2] {
     ]
 }
 
-fn blueprint(
-    dir: &Path,
-    meta: &RunMeta,
-    env: &ConvertEnv<'_>,
-) -> Result<BlueprintFile, ConvertError> {
+/// The blueprint the run ran: its own copy, else the installed one, else
+/// none, and the run is read from what it recorded.
+fn blueprint(dir: &Path, meta: &RunMeta, env: &ConvertEnv<'_>) -> BlueprintFile {
     let dirs = installed(meta, env);
     let found = dirs.iter().find_map(|d| {
         manifests_in(d)
@@ -287,24 +341,33 @@ fn blueprint(
         .find_map(|d| std::fs::read(d.join(leviath_blueprint::FILE_NAME)).ok());
     let snapshot = dir.join(BLUEPRINT_SNAPSHOT_FILE);
     if let Ok(text) = std::fs::read_to_string(&snapshot) {
-        return Ok(BlueprintFile {
+        return BlueprintFile {
             text,
             source: BlueprintSource::Snapshot,
             script_dir,
             migrated,
-        });
+        };
     }
     if let Some((_, path)) = &found
         && let Ok(text) = std::fs::read_to_string(path)
     {
-        return Ok(BlueprintFile {
+        return BlueprintFile {
             text,
             source: BlueprintSource::Installed(path.clone()),
             script_dir,
             migrated,
-        });
+        };
     }
     let mut tried = vec![snapshot];
     tried.extend(dirs.iter().flat_map(|d| manifests_in(d)));
-    Err(ConvertError::NoBlueprint { tried })
+    let why = ConvertError::NoBlueprint {
+        tried: tried.clone(),
+    }
+    .to_string();
+    BlueprintFile {
+        text: String::new(),
+        source: BlueprintSource::Recorded { tried, why },
+        script_dir: None,
+        migrated: None,
+    }
 }

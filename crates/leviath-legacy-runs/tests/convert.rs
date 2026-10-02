@@ -14,6 +14,8 @@ mod edges;
 mod journal;
 #[path = "convert/lookup.rs"]
 mod lookup;
+#[path = "convert/recorded.rs"]
+mod recorded;
 
 use common::{FIXTURES, Run, RunFile};
 use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy, meta};
@@ -100,7 +102,10 @@ fn a_finished_run_keeps_its_answer_and_its_blueprint_pin() {
     let answer = file.last.final_output.as_ref().unwrap();
     assert!(answer.content.contains("atoms"));
     assert_eq!(answer.stage.as_str(), "engine");
-    let SpecOrigin::Blueprint { blueprint, version } = &file.spec.origin else {
+    let SpecOrigin::Blueprint {
+        blueprint, version, ..
+    } = &file.spec.origin
+    else {
         panic!("a converted run comes from a blueprint");
     };
     assert_eq!(blueprint.name.as_str(), "McQueen");

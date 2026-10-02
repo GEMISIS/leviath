@@ -350,17 +350,10 @@ pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
         agent_name: blueprint
             .or_else(|| spec.graph.title.clone())
             .unwrap_or_default(),
-        // A blueprint read from its directory is the file there; an installed
-        // one is found by its name, and a graph its caller wrote has none.
-        agent_path: match &spec.origin {
-            crate::spec::run_spec::SpecOrigin::BlueprintFile { path, .. } => {
-                std::path::Path::new(path.as_str())
-                    .join(leviath_core::files::BLUEPRINT_MANIFEST)
-                    .to_string_lossy()
-                    .into_owned()
-            }
-            _ => String::new(),
-        },
+        // The blueprint file the run was read from: the manifest in a
+        // directory a run named, the file an installed blueprint was loaded
+        // from, or the one an old run recorded.
+        agent_path: spec.origin.manifest(),
         task,
         model: spec
             .stages

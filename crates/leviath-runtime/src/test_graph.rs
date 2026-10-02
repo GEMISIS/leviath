@@ -225,6 +225,7 @@ pub(crate) fn spec_named(name: &str, graph: RunGraph) -> RunSpec {
         origin: SpecOrigin::Blueprint {
             blueprint: BlueprintRef::parse(name).expect("a valid name"),
             version: "1".into(),
+            manifest: String::new(),
         },
         graph,
         stages,
@@ -318,6 +319,7 @@ fn spec_from(
             digest: None,
         },
         version: "0.1.0".into(),
+        manifest: String::new(),
     };
     RunSpec {
         run_id: RunId::new(agent_id).expect("a test run id"),

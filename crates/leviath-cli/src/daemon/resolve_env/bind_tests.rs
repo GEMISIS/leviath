@@ -41,6 +41,7 @@ fn spec(workdir: &Path) -> RunSpec {
         origin: SpecOrigin::Blueprint {
             blueprint: BlueprintRef::parse("helper").unwrap(),
             version: "1.2.3".into(),
+            manifest: String::new(),
         },
         graph,
         inputs: Default::default(),

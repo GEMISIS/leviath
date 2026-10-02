@@ -596,17 +596,18 @@ impl McpPool {
     /// so a run resumed on restart can still call its own servers' tools. A
     /// run file that cannot be read is skipped here; resuming it reports why.
     pub(crate) async fn warm_recovered(&self, runs_dir: &std::path::Path) {
-        let Ok(entries) = std::fs::read_dir(runs_dir) else {
-            return;
-        };
-        let mut servers: Vec<MCPServerConfig> = Vec::new();
-        for entry in entries.flatten() {
-            if let Ok(Some(run)) = leviath_runtime::restore::read_for_resume(&entry.path()) {
-                for run in leviath_runtime::restore::triage(vec![run], |r| r) {
-                    servers.extend(crate::daemon::starter::mcp_configs(&run.spec.graph));
-                }
-            }
-        }
+        // Only a run that has not finished is read, found through the run
+        // index.
+        let servers: Vec<MCPServerConfig> = crate::run_index::unfinished(runs_dir)
+            .iter()
+            .filter_map(|dir| {
+                leviath_runtime::restore::read_for_resume(dir)
+                    .ok()
+                    .flatten()
+            })
+            .flat_map(|run| leviath_runtime::restore::triage(vec![run], |r| r))
+            .flat_map(|run| crate::daemon::starter::mcp_configs(&run.spec.graph))
+            .collect();
         for server in servers {
             self.ensure(&server).await;
         }

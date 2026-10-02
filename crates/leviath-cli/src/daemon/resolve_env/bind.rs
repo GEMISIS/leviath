@@ -148,7 +148,7 @@ impl DaemonEnv {
                 .as_ref()
                 .map(|d| d.join(blueprint.name.as_str())),
             SpecOrigin::BlueprintFile { path, .. } => Some(path.path().to_path_buf()),
-            SpecOrigin::Raw => None,
+            SpecOrigin::Raw | SpecOrigin::Recorded { .. } => None,
         }
     }
 

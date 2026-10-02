@@ -182,7 +182,8 @@ pub struct Artifact {
     /// routed parts alone never wrote a file, and carries the part's name here
     /// instead; its bytes are reachable only through `sha256`.
     pub path: String,
-    /// The file's type.
+    /// The file's type. Some answers recorded it as `media_type`.
+    #[serde(alias = "media_type")]
     pub mime_type: crate::mime::MimeType,
     /// Size in bytes.
     #[serde(default)]
@@ -584,6 +585,12 @@ mod tests {
         );
         assert_eq!(old.artifacts[1].name, "final");
         assert_eq!(old.artifacts[1].size, 9);
+        // Some answers named the type `media_type`.
+        let named: FinalOutputDescriptor = serde_json::from_str(
+            "{\"stage\":\"s\",\"submitted_at\":1,\"artifacts\":[{\"name\":\"chart\",\"path\":\"chart.png\",\"media_type\":\"image/png\",\"size\":3}]}",
+        )
+        .unwrap();
+        assert_eq!(named.artifacts[0].mime_type.as_str(), "image/png");
         assert_eq!(Artifact::from_path("").name, "");
         assert!(
             serde_json::from_str::<FinalOutputDescriptor>(

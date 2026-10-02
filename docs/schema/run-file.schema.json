@@ -6775,6 +6775,11 @@
                     "$ref": "#/$defs/BlueprintRef",
                     "description": "The blueprint, pinned to the revision that ran."
                   },
+                  "manifest": {
+                    "default": "",
+                    "description": "The blueprint file it was read from, as the run's record shows\nit. Empty when that is not known.",
+                    "type": "string"
+                  },
                   "version": {
                     "description": "Its declared version.",
                     "type": "string"
@@ -6835,6 +6840,38 @@
             "const": "Raw",
             "description": "A graph the caller wrote.",
             "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A run from an earlier release whose blueprint could not be read when\nit was converted. Its graph is what the run recorded (the stages it\nentered, the models they ran on, the edges it took, its regions):\nenough to read the run back, not to run it, so it never resumes.",
+            "properties": {
+              "Recorded": {
+                "properties": {
+                  "manifest": {
+                    "description": "The blueprint file the run recorded.",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "The blueprint the run ran.",
+                    "type": "string"
+                  },
+                  "why": {
+                    "description": "Why the blueprint could not be read.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "manifest",
+                  "why"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Recorded"
+            ],
+            "type": "object"
           }
         ]
       },

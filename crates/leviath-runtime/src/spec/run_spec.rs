@@ -69,13 +69,16 @@ impl RunSpec {
     /// What a fan-out worker of this run's own graph runs: the blueprint this
     /// run ran (an installed one at the revision it ran), so the files beside
     /// it (hooks, validators, scripts) are there for the worker too, or for a
-    /// run whose caller wrote its graph, that graph.
+    /// run whose caller wrote its graph (or whose graph was recorded from an
+    /// old run), that graph.
     pub fn same_graph_source(&self) -> crate::spec::request::SpawnSource {
         use crate::spec::request::SpawnSource;
         match &self.origin {
             SpecOrigin::Blueprint { blueprint, .. } => SpawnSource::Blueprint(blueprint.clone()),
             SpecOrigin::BlueprintFile { path, .. } => SpawnSource::BlueprintFile(path.clone()),
-            SpecOrigin::Raw => SpawnSource::Raw(Box::new(self.graph.clone())),
+            SpecOrigin::Raw | SpecOrigin::Recorded { .. } => {
+                SpawnSource::Raw(Box::new(self.graph.clone()))
+            }
         }
     }
 
@@ -119,6 +122,10 @@ pub enum SpecOrigin {
         blueprint: BlueprintRef,
         /// Its declared version.
         version: String,
+        /// The blueprint file it was read from, as the run's record shows
+        /// it. Empty when that is not known.
+        #[serde(default)]
+        manifest: String,
     },
     /// A blueprint read from its directory.
     BlueprintFile {
@@ -133,6 +140,18 @@ pub enum SpecOrigin {
     },
     /// A graph the caller wrote.
     Raw,
+    /// A run from an earlier release whose blueprint could not be read when
+    /// it was converted. Its graph is what the run recorded (the stages it
+    /// entered, the models they ran on, the edges it took, its regions):
+    /// enough to read the run back, not to run it, so it never resumes.
+    Recorded {
+        /// The blueprint the run ran.
+        name: BlueprintName,
+        /// The blueprint file the run recorded.
+        manifest: String,
+        /// Why the blueprint could not be read.
+        why: String,
+    },
 }
 
 impl SpecOrigin {
@@ -143,7 +162,7 @@ impl SpecOrigin {
     pub fn blueprint_name(&self) -> Option<&str> {
         match self {
             Self::Blueprint { blueprint, .. } => Some(blueprint.name.as_str()),
-            Self::BlueprintFile { name, .. } => Some(name.as_str()),
+            Self::BlueprintFile { name, .. } | Self::Recorded { name, .. } => Some(name.as_str()),
             Self::Raw => None,
         }
     }
@@ -153,7 +172,31 @@ impl SpecOrigin {
         match self {
             Self::Blueprint { blueprint, .. } => blueprint.digest.as_ref(),
             Self::BlueprintFile { digest, .. } => digest.as_ref(),
-            Self::Raw => None,
+            Self::Raw | Self::Recorded { .. } => None,
+        }
+    }
+
+    /// The blueprint file the run was read from, as its record shows it:
+    /// the manifest in a directory a run named, or the file an installed or
+    /// recorded one names. Empty for a graph its caller wrote, and for an
+    /// installed blueprint whose file is not known.
+    pub fn manifest(&self) -> String {
+        match self {
+            Self::Blueprint { manifest, .. } | Self::Recorded { manifest, .. } => manifest.clone(),
+            Self::BlueprintFile { path, .. } => path
+                .path()
+                .join(leviath_core::files::BLUEPRINT_MANIFEST)
+                .to_string_lossy()
+                .into_owned(),
+            Self::Raw => String::new(),
+        }
+    }
+
+    /// Why a run from this origin can never be resumed, when it cannot.
+    pub fn never_resumes(&self) -> Option<&str> {
+        match self {
+            Self::Recorded { why, .. } => Some(why),
+            _ => None,
         }
     }
 }
@@ -252,6 +295,7 @@ pub(crate) mod tests {
             origin: SpecOrigin::Blueprint {
                 blueprint: BlueprintRef::parse(&format!("coder@{d}")).unwrap(),
                 version: "1.0.0".into(),
+                manifest: String::new(),
             },
             stages: vec![StagePlan {
                 stage: StageName::new("plan").unwrap(),
@@ -349,6 +393,28 @@ pub(crate) mod tests {
         assert_eq!(
             postcard::from_bytes::<RunSpec>(&postcard::to_stdvec(&raw).unwrap()).unwrap(),
             raw
+        );
+    }
+
+    #[test]
+    fn an_origin_names_its_blueprint_file_and_whether_it_resumes() {
+        let name = BlueprintName::new("coder").unwrap();
+        let recorded = SpecOrigin::Recorded {
+            name: name.clone(),
+            manifest: "agents/coder/agent.leviath".into(),
+            why: "gone".into(),
+        };
+        assert_eq!(recorded.blueprint_name(), Some("coder"));
+        assert_eq!(recorded.digest(), None);
+        assert_eq!(recorded.manifest(), "agents/coder/agent.leviath");
+        assert_eq!(recorded.never_resumes(), Some("gone"));
+        assert_eq!(SpecOrigin::Raw.manifest(), "");
+        assert_eq!(SpecOrigin::Raw.never_resumes(), None);
+        let mut spec = spec();
+        spec.origin = recorded;
+        assert_eq!(
+            spec.same_graph_source(),
+            crate::spec::request::SpawnSource::Raw(Box::new(spec.graph.clone()))
         );
     }
 }
