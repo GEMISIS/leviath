@@ -338,6 +338,28 @@ fn relink_tree(world: &mut PipelineWorld, placed: &[Placed]) {
             });
         }
     }
+    // A child whose run file was written but whose parent stopped before
+    // recording it. When it is a fan-out worker, its parent's fan-out decides
+    // whether it is the worker for its item or is cancelled, so the item
+    // runs once.
+    for Placed { spec, entity } in placed {
+        let Some(&parent) = spec
+            .placement
+            .parent
+            .as_ref()
+            .and_then(|p| by_run_id.get(p.as_str()))
+        else {
+            continue;
+        };
+        let recorded = w.get::<AgentState>(parent).is_some_and(|s| {
+            s.spawned_children_ids
+                .iter()
+                .any(|c| c == spec.run_id.as_str())
+        });
+        if !recorded {
+            leviath_runtime::fanout::settle_unrecorded_worker(w, parent, *entity);
+        }
+    }
 }
 
 #[cfg(test)]

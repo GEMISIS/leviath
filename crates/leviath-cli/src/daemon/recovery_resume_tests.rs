@@ -500,3 +500,102 @@ async fn grants_and_writes_come_back_after_a_restart() {
     assert_eq!(state.written, 4096);
     assert_eq!(state.grants.run, ["cargo test"]);
 }
+
+/// Record a fan-out worker of `parent` for `item` the way a fan-out start
+/// does, and stop there: its run file is written and it is never placed, as
+/// when the daemon stops before the parent records it. Returns its run id.
+async fn worker_on_disk(starter: &DaemonStarter, parent: &str, item: &str) -> String {
+    use leviath_runtime::spec::env::Caller;
+    let spec = leviath_runtime::runfile::RunFileReader::open(&run_file(&starter.runs_dir, parent))
+        .unwrap()
+        .spec()
+        .clone();
+    let mut request = leviath_runtime::spec::request::SpawnRequest::new(spec.same_graph_source());
+    request.inputs.insert(
+        "task".to_string(),
+        leviath_runtime::spec::inputs::RawInput::Text(format!("do {item}")),
+    );
+    request.workdir = Some(spec.placement.workdir.clone());
+    request.delivery.metadata.insert(
+        leviath_runtime::fanout::WORK_ITEM_LABEL.to_string(),
+        item.to_string(),
+    );
+    let caller = Caller::Worker {
+        parent: spec.run_id.clone(),
+        policy: spec.launch.clone(),
+        depth: 0,
+        stage: Some(leviath_runtime::spec::names::StageName::new("work").unwrap()),
+    };
+    let env = starter.env_for(&request, starter.config.current());
+    let prepared = starter
+        .start_with(env, request, caller)
+        .await
+        .expect("the worker starts");
+    prepared.spec.run_id.to_string()
+}
+
+/// A worker whose run file was written before the daemon stopped, and which
+/// its parent never recorded, is adopted as its item's worker when the
+/// parent still has the item queued, so the item is not started a second
+/// time. One for an item the parent is not waiting on is cancelled.
+#[tokio::test]
+async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
+    use leviath_runtime::spec::graph::StageMode;
+    use leviath_runtime::state::{FanOutState, WorkItemState};
+    let agent = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let manifest = manifest_in(agent.path(), SPLITTER);
+    let parent = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
+    let starter = starter(Config::default(), registry(), runs.path());
+    let started = worker_on_disk(&starter, &parent, "w1").await;
+    let stray = worker_on_disk(&starter, &parent, "gone").await;
+    let config = {
+        let reader =
+            leviath_runtime::runfile::RunFileReader::open(&run_file(runs.path(), &parent)).unwrap();
+        match &reader.spec().graph.stages[0].mode {
+            StageMode::FanOut(def) => def.clone(),
+            other => panic!("the split stage fans out: {other:?}"),
+        }
+    };
+    let queued = |id: &str| WorkItemState {
+        id: id.to_string(),
+        inputs: Default::default(),
+    };
+    change(runs.path(), &parent, |s| {
+        s.status = RunStatus::Waiting;
+        s.phase = PipelinePhase::FanOut;
+        s.wait_reason = Some(WaitState::FanOutWorkers(2));
+        s.fan_out = Some(FanOutState {
+            stage: s.cursor.stage.clone(),
+            config,
+            max_workers: Some(4),
+            queued: vec![queued("w1"), queued("w2")],
+            active: Vec::new(),
+            done: Vec::new(),
+            failed: Vec::new(),
+            paused: false,
+            origin: Default::default(),
+            parts: Vec::new(),
+        });
+    });
+
+    let mut world = world_for(&starter);
+    resume_all(&mut world, &starter, runs.path());
+
+    let now = live(&mut world, &parent);
+    let fan_out = now.fan_out.expect("still fanning out");
+    let id = |run: &str| leviath_runtime::spec::names::RunId::new(run).unwrap();
+    assert_eq!(fan_out.active, [("w1".to_string(), id(&started))]);
+    assert_eq!(
+        fan_out
+            .queued
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect::<Vec<_>>(),
+        ["w2"],
+        "w1 is not queued to start again"
+    );
+    assert_eq!(now.children, [id(&started)]);
+    assert_eq!(live(&mut world, &stray).status, RunStatus::Cancelled);
+    assert_ne!(live(&mut world, &started).status, RunStatus::Cancelled);
+}

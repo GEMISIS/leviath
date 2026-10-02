@@ -32,11 +32,13 @@
 //! A single sub-agent is `spawn_agent`, not a fan-out of one.
 //!
 //! [`FAN_OUT_TOOL`]: leviath_core::stage_tools::FAN_OUT_TOOL
+mod adopt;
 mod io;
 mod items;
 mod report;
 mod starts;
 mod worker_sources;
+pub use adopt::{UnrecordedWorker, settle_unrecorded_worker};
 pub(crate) use io::{FanOutIo, ReadingWorkerInputs};
 pub(crate) use items::{FanOutRequest, config_for, is_fan_out_tool, parse_fan_out_call};
 pub use items::{WORK_ITEM_LABEL, WorkItem};
@@ -3750,3 +3752,7 @@ mod starts_tests;
 #[cfg(test)]
 #[path = "fanout/io_tests.rs"]
 mod io_tests;
+
+#[cfg(test)]
+#[path = "fanout/adopt_tests.rs"]
+mod adopt_tests;
