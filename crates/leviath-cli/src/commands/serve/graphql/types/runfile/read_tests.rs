@@ -124,7 +124,7 @@ async fn a_recorded_run_reads_back_whole() {
                                   events {{ ... on LogStepOutput {{ line }} }} }}
                     some: deltas(from: 2, to: 3) {{ seq }}
                     graph {{ nodes {{ stage visits current }}
-                             edges {{ from to name condition taken }} }}
+                             edges {{ from to name condition reason taken }} }}
                 }} }}"#
             ),
         )
@@ -155,7 +155,17 @@ async fn a_recorded_run_reads_back_whole() {
         };
         assert_eq!(taken("analyze"), 1, "{edges:?}");
         assert_eq!(taken("implement"), 1, "{edges:?}");
-        assert_eq!(taken("review"), 0, "the forced move joins no edge");
+        // The move out of `review` joins no declared edge, so it is shown as
+        // one of its own: no name, no condition, the reason it was made.
+        let forced: Vec<&serde_json::Value> = edges
+            .iter()
+            .filter(|edge| edge["from"] == "review")
+            .collect();
+        assert_eq!(forced.len(), 1, "{edges:?}");
+        assert_eq!(forced[0]["taken"], 1);
+        assert_eq!(forced[0]["name"], serde_json::Value::Null);
+        assert_eq!(forced[0]["condition"], serde_json::Value::Null);
+        assert_eq!(forced[0]["reason"], "CONDITION");
         let current: Vec<&serde_json::Value> = run["graph"]["nodes"]
             .as_array()
             .map(|nodes| nodes.iter().filter(|node| node["current"] == true).collect())

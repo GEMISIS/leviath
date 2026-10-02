@@ -62,6 +62,17 @@ fn nothing_found_says_what_to_pass() {
     .to_string();
     assert!(err.contains(FILE_NAME), "{err}");
     assert!(err.contains("lev list"), "{err}");
+
+    // One holding only the older manifest says how to convert it.
+    std::fs::write(empty.path().join("agent.leviath"), "old").unwrap();
+    let err = find_blueprint_in(
+        empty.path().to_str().unwrap(),
+        Some(empty.path()),
+        empty.path(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("lev blueprint migrate"), "{err}");
 }
 
 #[test]

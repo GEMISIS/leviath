@@ -7,9 +7,10 @@
 //! `--yolo`, `--allow`, `--max-depth`, `--workdir`, the `--output-*` flags)
 //! land on the request too, over whatever a `--request` file said.
 //!
-//! Everything a person could have typed wrong is found here, before the
-//! daemon is asked and before an editor opens for a task: every input that
-//! does not read, each with its path, all at once.
+//! Everything a person could have typed wrong is found here, before an editor
+//! opens for a task: every input that does not read, each with its path. The
+//! request still goes to the daemon without those values, so its own problems
+//! are reported beside them, all at once (`merged_issues`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -205,8 +206,9 @@ pub(crate) fn issues_report(issues: &SpawnIssues) -> String {
 ///
 /// Inputs are read before the task on purpose: a value that does not read has
 /// to fail before the person is dropped into an editor and types a paragraph
-/// they are about to lose. Whether the run as a whole holds together is the
-/// daemon's to say, with every other problem with the request.
+/// they are about to lose. What did not read is kept in the run's `issues`,
+/// and the run must not be spawned while there are any; whether the rest of
+/// it holds together is the daemon's to say.
 pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
     let mut source = source(line.path, line.request_file)?;
     let mut typed: Vec<Typed> = Vec::with_capacity(line.inputs.len() + line.named.len());
@@ -228,13 +230,8 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
             .into_iter()
             .map(|(name, text)| Typed::from_named_flag(name, text)),
     );
-    let read = match read_inputs(&source.decls, &typed, line.cwd) {
-        Ok(read) => Some(read),
-        Err(found) => {
-            issues.absorb(found);
-            None
-        }
-    };
+    let mut read = read_inputs(&source.decls, &typed, line.cwd);
+    issues.absorb(std::mem::take(&mut read.issues));
     let launch_issues = apply_flags(&mut source.request, &line);
     issues.absorb(launch_issues);
     let task_decl = source.decls.iter().find(|d| d.name.as_str() == TASK_INPUT);
@@ -250,9 +247,10 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
             .known(source.decls.iter().map(|d| &d.name)),
         );
     }
-    let Some(read) = read.filter(|_| issues.is_empty()) else {
-        anyhow::bail!(issues_report(&issues));
-    };
+    // With problems already found, nobody is asked for a task: the run is
+    // refused whatever they type, so the request goes on without it and the
+    // daemon says what else is wrong.
+    let ask_for_task = !line.check && issues.is_empty();
     let mut parts = line.parts;
     parts.extend(read.parts);
     let mut unresolved = read.unresolved;
@@ -262,11 +260,13 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
     // A run that takes a task is asked for one, unless it was given another
     // way, or it does not insist and the caller gave it something else to
     // work on: `lev run reviewer --diff @x.patch` is a complete command line.
+    let mut task_unasked = false;
     if let Some(decl) = task_decl
         && !source.request.inputs.contains_key(TASK_INPUT)
     {
         let handed_in = !source.request.inputs.is_empty() || !parts.is_empty();
-        let waived = (handed_in && !decl.required) || line.check;
+        task_unasked = !line.check && !ask_for_task && given_task.is_none();
+        let waived = (handed_in && !decl.required) || !ask_for_task;
         let task = match (given_task, waived) {
             (None, true) => String::new(),
             _ => resolve_task(
@@ -314,7 +314,30 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
         yolo_profile,
         output: line.output_request,
         check: line.check,
+        issues,
+        task_unasked,
     })
+}
+
+/// Every problem with a run: what the command line found itself, then what
+/// the daemon found in the rest of the request.
+///
+/// A value the command line could not read never reached the daemon, so
+/// whatever the daemon says at that path (usually that the input is missing)
+/// is left out; so is a missing task nobody was asked for, since a person
+/// would have been asked for it had nothing else been wrong.
+pub(crate) fn merged_issues(run: &LocalRun, daemon: SpawnIssues) -> SpawnIssues {
+    let task = SpecPath::root().field("inputs").key(TASK_INPUT);
+    let mut all = run.issues.clone();
+    all.absorb(SpawnIssues(
+        daemon
+            .0
+            .into_iter()
+            .filter(|d| !run.issues.iter().any(|c| c.path == d.path))
+            .filter(|d| !(run.task_unasked && d.path == task && d.code == IssueCode::Missing))
+            .collect(),
+    ));
+    all
 }
 
 /// Drop an exact repeat of a part (same region, name and bytes), which no

@@ -22,14 +22,17 @@
 //! 1. The source: an installed blueprint, or the caller's own graph.
 //! 2. The graph's own consistency ([`RunGraph::validate`]). A graph that fails
 //!    it is not resolved further, since every later step walks its names; the
-//!    request-level checks below still run so their issues come back too.
+//!    request-level checks below and each stage's model still run, so their
+//!    issues come back too.
 //! 3. The attachments: unique names, the size limit, their types by the
 //!    run's own mime registry (the machine's rows with the graph's on top).
 //! 4. The inputs, checked against the graph's declarations, then the checks
 //!    that need the attachments or the workdir.
 //! 5. The launch policy, where the run sits, and what its unattended setting
 //!    answers without a person.
-//! 6. The inputs' slots applied to the graph, then the operator's defaults
+//! 6. Each fan-out's installed worker blueprint pinned to the revision
+//!    installed now, the inputs' slots applied to the graph, then the
+//!    operator's defaults
 //!    for whatever the graph leaves open (iteration ceilings, prompt hints,
 //!    the nudge, taint tracking).
 //! 7. Every piece of code the graph names, read and checked once.
@@ -126,10 +129,12 @@ pub async fn resolve(
     let (launch, placement) = launch::decide(request, caller, &src.graph, &limits, &mut issues);
     let auto_answers = launch::auto_answers(&launch, env, &mut issues);
     if !graph_ok {
+        stages::check_models(&src.graph, request, &src.at, env, &mut issues).await;
         return Err(issues);
     }
 
     let mut graph = src.graph.clone();
+    source::pin_workers(&mut graph, env).await;
     inputs::apply_slots(&mut graph, &checked.values);
     defaults::grant_mode_tools(&mut graph);
     defaults::fold(&mut graph, &limits);

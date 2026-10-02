@@ -354,13 +354,18 @@ pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
             .map(|s| s.expose().to_string()),
         title: state.title.clone(),
         blueprint_digest: digest,
-        title_error: None,
+        title_error: state.title_error.clone(),
         unattended: spec.launch.unattended != Unattended::Off,
         yolo_profile: match &spec.launch.unattended {
             Unattended::Profile(name) => Some(name.to_string()),
             _ => None,
         },
-        read_paths: None,
+        read_paths: state
+            .read_paths
+            .map(|r| leviath_core::run_meta::ReadPathGrantCounts {
+                declared: r.declared as usize,
+                granted: r.granted as usize,
+            }),
         output_request: spec.requested_output.as_ref().map(spec_view::output_spec),
         model_override: spec.requested_model.as_ref().map(ToString::to_string),
     }

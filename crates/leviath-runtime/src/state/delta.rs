@@ -76,6 +76,10 @@ pub enum Change {
     WaitReason(Option<WaitState>),
     /// `last_transition`.
     LastTransition(Option<TransitionRecord>),
+    /// `title_error`.
+    TitleError(Option<String>),
+    /// `read_paths`.
+    ReadPaths(Option<ReadPathCounts>),
 }
 
 /// An edge a run took, and why.
@@ -243,6 +247,8 @@ impl StateDelta {
             final_output => FinalOutput,
             wait_reason => WaitReason,
             last_transition => LastTransition,
+            title_error => TitleError,
+            read_paths => ReadPaths,
         );
         Self {
             seq: prev.seq + 1,
@@ -285,6 +291,8 @@ impl StateDelta {
                 Change::FinalOutput(v) => state.final_output = v,
                 Change::WaitReason(v) => state.wait_reason = v,
                 Change::LastTransition(v) => state.last_transition = v,
+                Change::TitleError(v) => state.title_error = v,
+                Change::ReadPaths(v) => state.read_paths = v,
             }
         }
         state.seq = self.seq;

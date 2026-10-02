@@ -620,6 +620,8 @@ fn state() -> CoreState {
         final_output: Some(answer()),
         wait_reason: Some(leviath_runtime::state::WaitState::UserPrompt),
         last_transition: Some(transition(TransitionReason::Condition)),
+        title_error: None,
+        read_paths: None,
     }
 }
 
@@ -677,6 +679,11 @@ fn delta() -> CoreDelta {
             Change::WaitReason(None),
             Change::WaitReason(Some(leviath_runtime::state::WaitState::UserPrompt)),
             Change::LastTransition(Some(transition(TransitionReason::Gate))),
+            Change::TitleError(Some("no provider".into())),
+            Change::ReadPaths(Some(leviath_runtime::state::ReadPathCounts {
+                declared: 2,
+                granted: 1,
+            })),
         ],
         events: vec![
             RunEvent::Inference {
@@ -1091,7 +1098,7 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];
-    assert_eq!(step["changes"].as_array().map(Vec::len), Some(22));
+    assert_eq!(step["changes"].as_array().map(Vec::len), Some(24));
     assert_eq!(
         step["events"].as_array().map(Vec::len),
         Some(7 + 8 + 6 + 5 + 13)
@@ -1227,7 +1234,25 @@ fn each_move_counts_against_the_edge_it_took() {
         &steps,
     ));
     assert_eq!(graph.edges[0].taken, 2);
-    assert!(graph.edges.iter().skip(1).all(|edge| edge.taken == 0));
+    let declared = edges.len();
+    assert!(
+        graph.edges[1..declared].iter().all(|edge| edge.taken == 0),
+        "{:?}",
+        graph.edges
+    );
+    // A move no edge joins is shown as an edge of its own, with no name and
+    // the reason it was made, and counted.
+    assert_eq!(graph.edges.len(), declared + 1, "{:?}", graph.edges);
+    let forced = &graph.edges[declared];
+    assert_eq!(
+        (forced.from.as_str(), forced.to.as_str()),
+        (first.to.as_str(), first.from.as_str())
+    );
+    assert_eq!(forced.name, None);
+    assert_eq!(forced.condition, None);
+    assert_eq!(forced.reason, Some(super::state::TransitionReason::Forced));
+    assert_eq!(forced.taken, 1);
+    assert!(graph.edges[0].reason.is_none());
     let current: Vec<&str> = graph
         .nodes
         .iter()

@@ -5311,11 +5311,13 @@
             "type": "array",
             "items": {
               "type": "object",
+              "description": "A declared edge, or a move the run made that no declared edge joins, such as a fan-out stage sent to its merge stage. Those come after the declared edges.",
               "required": [
                 "from",
                 "to",
                 "name",
                 "condition",
+                "reason",
                 "taken"
               ],
               "properties": {
@@ -5326,11 +5328,25 @@
                   "type": "string"
                 },
                 "name": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The edge's name. Null for a move no edge joins."
                 },
                 "condition": {
-                  "type": "string",
-                  "description": "When the run takes the edge, as the graph declares it."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "When the run takes the edge, as the graph declares it. Null for a move no edge joins."
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why the run made a move no edge joins: Forced, Router, Worker and the like. Null for a declared edge."
                 },
                 "taken": {
                   "type": "integer",

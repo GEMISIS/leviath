@@ -38,6 +38,9 @@ pub(crate) struct ReadInputs {
     pub(crate) parts: Vec<InboundPart>,
     /// `@path` tokens in text that named no file.
     pub(crate) unresolved: Vec<String>,
+    /// Every input that did not read. Each is left out of `values`, and the
+    /// rest are kept so the daemon can say what it makes of them too.
+    pub(crate) issues: SpawnIssues,
 }
 
 /// One input as it was typed: its name, its text, and how it was given.
@@ -82,13 +85,9 @@ fn at(name: &str) -> SpecPath {
 }
 
 /// Read every typed input against `decls`, collecting every problem: a name
-/// nothing declares, a name given twice, and a value that does not read as
-/// its type. Files are read against `cwd`.
-pub(crate) fn read_inputs(
-    decls: &[InputDecl],
-    typed: &[Typed],
-    cwd: &Path,
-) -> Result<ReadInputs, SpawnIssues> {
+/// nothing declares, a name given twice, a value that does not read as its
+/// type, and a file that is not there. Files are read against `cwd`.
+pub(crate) fn read_inputs(decls: &[InputDecl], typed: &[Typed], cwd: &Path) -> ReadInputs {
     let registry = attach::cli_registry();
     let mut out = ReadInputs::default();
     let mut issues = SpawnIssues::new();
@@ -117,14 +116,28 @@ pub(crate) fn read_inputs(
                 out.values.insert(given.name.clone(), value);
             }
             Ok(None) => {}
-            Err(message) => issues.push(
+            Err(Unread::Type(message)) => issues.push(
                 SpawnIssue::new(at(&given.name), IssueCode::WrongType, message)
                     .expected(decl.ty.describe())
                     .got(format!("{:?}", given.text)),
             ),
+            Err(Unread::File(message)) => issues.push(
+                SpawnIssue::new(at(&given.name), IssueCode::Unresolvable, message)
+                    .got(format!("{:?}", given.text))
+                    .hint("name a file that exists, relative to where the command runs"),
+            ),
         }
     }
-    issues.into_result(out)
+    out.issues = issues;
+    out
+}
+
+/// Why a value did not read.
+enum Unread {
+    /// It is not a value of the input's type.
+    Type(String),
+    /// A file it names could not be read.
+    File(String),
 }
 
 /// The region a text input's files go to: the first region it fills, or
@@ -148,11 +161,11 @@ fn read_value(
     cwd: &Path,
     registry: &MimeRegistry,
     out: &mut ReadInputs,
-) -> Result<Option<RawInput>, String> {
+) -> Result<Option<RawInput>, Unread> {
     match &decl.ty {
         InputType::Text { .. } => {
             let read = attach::read_region_input(&region_of(decl), text, cwd, registry)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Unread::File(e.to_string()))?;
             out.parts.extend(read.parts);
             out.unresolved.extend(read.unresolved);
             Ok((!read.text.is_empty()).then_some(RawInput::Text(read.text)))
@@ -163,15 +176,15 @@ fn read_value(
             .map(|path| attach_file(path, cwd, out))
             .collect::<Result<_, _>>()
             .map(|files| Some(RawInput::List(files))),
-        ty => typed_value(ty, text).map(Some),
+        ty => typed_value(ty, text).map(Some).map_err(Unread::Type),
     }
 }
 
 /// Attach the file `text` names (`@path` or a bare path) and name it.
-fn attach_file(text: &str, cwd: &Path, out: &mut ReadInputs) -> Result<RawInput, String> {
+fn attach_file(text: &str, cwd: &Path, out: &mut ReadInputs) -> Result<RawInput, Unread> {
     let path = text.trim();
     let path = path.strip_prefix('@').unwrap_or(path);
-    let part = attach::read_part(path, cwd).map_err(|e| e.to_string())?;
+    let part = attach::read_part(path, cwd).map_err(|e| Unread::File(e.to_string()))?;
     let name = part.name.clone();
     out.parts.push(part);
     Ok(RawInput::Text(name))

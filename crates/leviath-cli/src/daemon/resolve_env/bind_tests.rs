@@ -353,3 +353,27 @@ fn the_daemon_lists_an_mcp_servers_tools_for_a_changed_fingerprint() {
         Some(host::registered_fingerprint("mock"))
     );
 }
+
+/// What `lev validate` would warn about a run's blueprint is logged against
+/// the run; a run with no blueprint, or one that will not read, logs nothing.
+#[test]
+fn a_blueprints_lint_findings_are_logged_against_the_run() {
+    assert!(lint_lines(None).is_empty());
+    let empty = tempfile::tempdir().unwrap();
+    assert!(lint_lines(Some(empty.path())).is_empty());
+    let (env, agents) = env();
+    let manifest = install(
+        &agents,
+        "helper",
+        &MANIFEST.replace("tools = [\"read_file\"]", "tools = [\"raed_file\"]"),
+    );
+    let lines = lint_lines(manifest.parent());
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("blueprint 'helper': stage 'plan'")
+                && l.ends_with("[unknown-tool]")),
+        "{lines:#?}"
+    );
+    env.log_lint(&spec(empty.path()));
+}

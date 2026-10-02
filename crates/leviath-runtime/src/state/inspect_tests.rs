@@ -606,6 +606,11 @@ async fn a_busy_run_reads_every_field_from_its_components() {
             }),
             crate::persistence::RunMetadata {
                 title: Some("Fix it".into()),
+                title_error: Some("an earlier try failed".into()),
+                read_paths: Some(leviath_core::run_meta::ReadPathGrantCounts {
+                    declared: 2,
+                    granted: 1,
+                }),
                 ..metadata()
             },
             SubAgentChildren {
@@ -688,6 +693,14 @@ async fn a_busy_run_reads_every_field_from_its_components() {
     assert!(s.flags.produced_output);
     assert!(!s.flags.empty_output);
     assert_eq!(s.title.as_deref(), Some("Fix it"));
+    assert_eq!(s.title_error.as_deref(), Some("an earlier try failed"));
+    assert_eq!(
+        s.read_paths,
+        Some(super::super::ReadPathCounts {
+            declared: 2,
+            granted: 1
+        })
+    );
     let out = s.final_output.unwrap();
     assert_eq!(
         (out.content.as_str(), out.stage.as_str()),

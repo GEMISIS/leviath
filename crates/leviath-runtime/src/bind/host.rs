@@ -82,14 +82,6 @@ pub fn check_code(code: &[u8], used_as: CodeUse) -> Result<(), String> {
     checked.map_err(|e| e.to_string())
 }
 
-/// The path of a stage's model choice, where a model issue is reported.
-fn model_path(stage: &StageDef) -> SpecPath {
-    SpecPath::root()
-        .field("stages")
-        .key(stage.name.as_str())
-        .field("model")
-}
-
 /// Choose a stage's provider and model over `registry`, the way every spawn
 /// has chosen one: the stage's own models, then the operator's override and
 /// fallback models and failover chain, over the providers they prefer.
@@ -97,7 +89,9 @@ fn model_path(stage: &StageDef) -> SpecPath {
 /// The choice is made by the stage resolver every spawn uses, so a gateway's
 /// unread model list, a provider that refuses the model and a model that
 /// cannot run with zero data retention are refused here. The model is chosen
-/// for the mime types the stage's own `input_accepts` names.
+/// for the mime types the stage's own `input_accepts` names. An issue sits at
+/// the root, which is the stage's model: the resolver puts the stage's path
+/// in front of it.
 pub fn choose_model(
     stage: &StageDef,
     requested: Option<&ModelRef>,
@@ -106,7 +100,7 @@ pub fn choose_model(
 ) -> Result<ModelPlan, Box<SpawnIssue>> {
     let requested_text = requested.map(ToString::to_string);
     let unresolvable = |message: String| {
-        SpawnIssue::new(model_path(stage), IssueCode::Unresolvable, message)
+        SpawnIssue::new(SpecPath::root(), IssueCode::Unresolvable, message)
             .known(registry.resolvable_names())
     };
     let needs: Vec<String> = stage
@@ -269,9 +263,12 @@ pub fn mcp_defs(server: &McpServerName, tools: &[Tool]) -> Vec<ToolDef> {
 /// named without its server when only one server offers it), every tool of
 /// each group it names, and every tool of each MCP server it connects to.
 ///
-/// A named tool the catalog lacks is left out, since a blueprint may name
-/// tools of servers this machine does not have. A tool the stage requires is
-/// different: without it the stage cannot do its job, so it is an issue.
+/// A named MCP tool (`server__tool`) the catalog lacks is left out, since a
+/// blueprint may name tools of servers this machine does not have. Any other
+/// name the catalog lacks is an issue: it is a typo, or a tool the blueprint
+/// expected to ship and does not. So is a tool the stage requires and cannot
+/// have, since without it the stage cannot do its job. Each issue's path is
+/// relative to the stage.
 pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef>, SpawnIssues> {
     let defs: Vec<Tool> = catalog
         .iter()
@@ -309,16 +306,32 @@ pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef
         .cloned()
         .collect();
     let mut issues = SpawnIssues::new();
+    for (i, selector) in stage.tools.iter().enumerate() {
+        let ToolSelector::Tool(name) = selector else {
+            continue;
+        };
+        if name.as_str().contains("__") || offers(catalog, name.as_str()) {
+            continue;
+        }
+        issues.push(
+            SpawnIssue::new(
+                SpecPath::root().field("tools").index(i),
+                IssueCode::Unknown,
+                format!("no tool is named '{name}' here"),
+            )
+            .hint(
+                "check the spelling, or ship the tool in the blueprint's tools/ directory; \
+                 an MCP tool is named server__tool",
+            )
+            .known(catalog.iter().map(|d| d.name.to_string())),
+        );
+    }
     for (i, name) in stage.required_tools.iter().enumerate() {
         let canonical = leviath_tools::canonical_tool_name(name.as_str());
         if !chosen.iter().any(|d| d.name.as_str() == canonical) {
             issues.push(
                 SpawnIssue::new(
-                    SpecPath::root()
-                        .field("stages")
-                        .key(stage.name.as_str())
-                        .field("required_tools")
-                        .index(i),
+                    SpecPath::root().field("required_tools").index(i),
                     IssueCode::Unresolvable,
                     format!("the stage requires '{name}', and it is not available to it here"),
                 )
@@ -328,6 +341,15 @@ pub fn select_tools(catalog: &[ToolDef], stage: &StageDef) -> Result<Vec<ToolDef
         }
     }
     issues.into_result(chosen)
+}
+
+/// Whether `catalog` has a tool `name` refers to: by any spelling of the
+/// name, or as an MCP tool's own name on its server.
+fn offers(catalog: &[ToolDef], name: &str) -> bool {
+    catalog.iter().any(|d| {
+        leviath_tools::tool_name_spellings(name).any(|n| n == d.name.as_str())
+            || matches!(&d.source, ToolSource::Mcp { tool, .. } if tool == name)
+    })
 }
 
 /// What a stage's tool list grants, as the tool filter reads it: each named
@@ -376,13 +398,21 @@ pub fn sniff(
             )),
         };
     };
-    if let Some(magic) = registry.sniff(bytes)
-        && magic != t
-    {
-        return Err(format!(
-            "'{name}' was declared {declared}, and its bytes are {}",
-            magic.as_str()
-        ));
+    match registry.sniff(bytes) {
+        Some(magic) if magic != t => {
+            return Err(format!(
+                "'{name}' was declared {declared}, and its bytes are {}",
+                magic.as_str()
+            ));
+        }
+        // A type the registry knows the opening bytes of must open with them.
+        None if registry.row(t.as_str()).is_some_and(|r| r.magic.is_some()) => {
+            return Err(format!(
+                "'{name}' was declared {declared}, and its bytes do not begin the way \
+                 {declared} files do"
+            ));
+        }
+        _ => {}
     }
     registry
         .verify(&t, bytes)

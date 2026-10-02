@@ -946,6 +946,7 @@ pub fn providers_tried(
                 .models
                 .iter()
                 .map(|e| e.provider_or_empty().to_string())
+                .filter(|p| !p.is_empty()) // a bare model name pins no provider
                 .collect();
             if model_cfg.allow_user_default && !defaults.provider.is_empty() {
                 listed.push(defaults.provider.clone());
@@ -2115,6 +2116,11 @@ mod tests {
             providers_tried(&cfg, Some("m"), &defaults),
             "one, two, fallback"
         );
+
+        // A bare model name pins no provider, so it adds no empty name.
+        let mut open = model_cfg_open(vec!["bare"]);
+        open.models.push(entry("one", "m"));
+        assert_eq!(providers_tried(&open, None, &defaults), "one, fallback");
     }
 
     #[test]

@@ -114,6 +114,31 @@ async fn worker_writes_the_sidecar_even_when_the_first_snapshot_is_coalesced_awa
     assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "the answer");
 }
 
+/// A snapshot superseded in its batch is not written, but the stage lines it
+/// carried are, before the newer snapshot's, so a fast run's output reaches
+/// its stage log (which is what an ACP host streams from).
+#[tokio::test]
+async fn a_superseded_snapshots_stage_lines_still_reach_the_stage_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines = |out: &str, log: &str| {
+        PersistMsg::Snapshot(Box::new(PersistJob {
+            output_appends: vec![(0, out.to_string())],
+            log_appends: vec![(0, log.to_string())],
+            ..job("run-fast")
+        }))
+    };
+    run_lane(
+        dir.path(),
+        vec![lines("first", "[a]"), lines("second", "[b]")],
+    )
+    .await;
+    let stage = dir.path().join("run-fast").join("stages").join("0");
+    let output = std::fs::read_to_string(stage.join("output.log")).unwrap();
+    assert_eq!(output.lines().collect::<Vec<_>>(), ["first", "second"]);
+    let logs = std::fs::read_to_string(stage.join("logs.log")).unwrap();
+    assert_eq!(logs.lines().collect::<Vec<_>>(), ["[a]", "[b]"]);
+}
+
 /// A snapshot writes its run's step into the run file and nothing in the
 /// older layout: no `meta.json`, no `context.json`, no LVR1 journal.
 #[tokio::test]

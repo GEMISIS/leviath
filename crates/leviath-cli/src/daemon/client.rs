@@ -38,6 +38,12 @@ pub struct LocalRun {
     pub output: Option<leviath_core::output::OutputSpec>,
     /// `--check`: ask the daemon what the run would be instead of starting it.
     pub check: bool,
+    /// What the command line itself found wrong. A run with any is never
+    /// spawned: the daemon is asked only to check the rest, and every problem
+    /// is reported together.
+    pub issues: leviath_runtime::spec::issues::SpawnIssues,
+    /// Whether the run's task was left unasked because of those problems.
+    pub task_unasked: bool,
 }
 
 /// Warn, on stderr, when the agent about to run declares `[read_paths]` the
@@ -331,6 +337,11 @@ pub async fn send_spawn_batch(
     if count == 0 {
         bail!("--count must be at least 1");
     }
+    // The command line's own problems refuse the run; the daemon only checks
+    // the rest, so they are all reported at once.
+    if !run.issues.is_empty() {
+        return crate::commands::run::check::send_check(client, &run, json).await;
+    }
     if count == 1 {
         return send_spawn(client, run, json).await;
     }
@@ -385,6 +396,8 @@ impl Default for LocalRun {
             yolo_profile: None,
             output: None,
             check: false,
+            issues: Default::default(),
+            task_unasked: false,
         }
     }
 }

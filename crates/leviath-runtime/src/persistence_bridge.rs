@@ -55,6 +55,10 @@ pub(crate) struct PersistJob {
     pub run_file: Option<Box<crate::runfile::lane::RunFileStep>>,
 }
 
+/// Output lines and log lines for a run's stage logs, each tagged with its
+/// stage index.
+type StageLineSet = (Vec<(usize, String)>, Vec<(usize, String)>);
+
 /// What became of one append.
 ///
 /// The three states are different facts about the run: one says where the record
@@ -185,11 +189,25 @@ pub(crate) async fn persistence_worker(
                 newest_snapshot.insert(job.run_id.clone(), i);
             }
         }
+        // The stage lines of a superseded snapshot, kept for the newest one of
+        // its run, which writes them first: the state is replaced, the lines
+        // are not.
+        let mut carried: std::collections::HashMap<String, StageLineSet> =
+            std::collections::HashMap::new();
         for (i, msg) in batch.into_iter().enumerate() {
             match msg {
                 PersistMsg::Snapshot(mut job) => {
                     if newest_snapshot.get(job.run_id.as_str()) != Some(&i) {
-                        continue; // superseded by a newer snapshot in this batch
+                        // Superseded by a newer snapshot in this batch.
+                        let kept = carried.entry(job.run_id.clone()).or_default();
+                        kept.0.append(&mut job.output_appends);
+                        kept.1.append(&mut job.log_appends);
+                        continue;
+                    }
+                    if let Some((mut output, mut logs)) = carried.remove(&job.run_id) {
+                        output.append(&mut job.output_appends);
+                        logs.append(&mut job.log_appends);
+                        (job.output_appends, job.log_appends) = (output, logs);
                     }
                     if !may_write(&runs_dir, &job.run_id, &mut staked, true) {
                         // Deleted. Forget what was kept about it too, so the

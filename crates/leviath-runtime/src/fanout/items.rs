@@ -210,6 +210,10 @@ pub(crate) fn worker_cap(config: &FanOutDef) -> Option<usize> {
 pub(crate) fn check_items(decls: &[InputDecl], items: &[WorkItem]) -> Result<(), SpawnIssues> {
     let mut issues = SpawnIssues::new();
     let cx = CheckCtx::default();
+    let mut known: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+    if !known.contains(&TASK_INPUT) {
+        known.push(TASK_INPUT);
+    }
     for (i, item) in items.iter().enumerate() {
         let at = SpecPath::root().field("items").index(i).field("inputs");
         for (name, raw) in &item.inputs {
@@ -225,7 +229,7 @@ pub(crate) fn check_items(decls: &[InputDecl], items: &[WorkItem]) -> Result<(),
                         IssueCode::Unknown,
                         "the worker declares no such input",
                     )
-                    .known(decls.iter().map(|d| d.name.as_str()).chain([TASK_INPUT])),
+                    .known(known.iter()),
                 ),
             }
         }
@@ -466,6 +470,22 @@ mod tests {
             vec!["topic", "depth", "task"]
         );
         assert!(check_items(&decls, &items[..2]).is_ok());
+
+        // A worker that declares `task` itself has it listed once.
+        let mut with_task = decls.clone();
+        with_task.push(decl(
+            "task",
+            InputType::Text {
+                multiline: false,
+                min_len: None,
+                max_len: None,
+            },
+        ));
+        let issues = check_items(&with_task, &items[2..]).unwrap_err();
+        assert_eq!(
+            issues.iter().next().unwrap().known,
+            vec!["topic", "depth", "task"]
+        );
     }
 
     #[test]

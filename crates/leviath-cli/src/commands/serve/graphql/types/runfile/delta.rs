@@ -169,6 +169,23 @@ change_member!(
     }
 );
 change_member!(
+    /// Titling the run gave up, or a title came after all.
+    TitleErrorChange {
+        /// Why the run has no title now. Null when nothing went wrong.
+        title_error: Option<String>
+    }
+);
+/// The run's read-path grants were fixed.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct ReadPathsChange {
+    /// How many `read_paths` its blueprint declares. Null when it declares
+    /// none.
+    pub(crate) declared: Option<i32>,
+    /// How many of them this machine grants. Null when it declares none.
+    pub(crate) granted: Option<i32>,
+}
+change_member!(
     /// The run submitted its answer.
     AnswerChange {
         /// The answer now.
@@ -235,6 +252,10 @@ pub(crate) enum StateChange {
     WaitReason(WaitReasonChange),
     /// The last move between stages.
     Transition(TransitionChange),
+    /// Why the run has no title.
+    TitleError(TitleErrorChange),
+    /// The run's read-path grants.
+    ReadPaths(ReadPathsChange),
 }
 
 impl From<&Change> for StateChange {
@@ -306,6 +327,13 @@ impl From<&Change> for StateChange {
             }),
             Change::LastTransition(transition) => Self::Transition(TransitionChange {
                 transition: transition.as_ref().map(StageTransition::from),
+            }),
+            Change::TitleError(error) => Self::TitleError(TitleErrorChange {
+                title_error: error.clone(),
+            }),
+            Change::ReadPaths(counts) => Self::ReadPaths(ReadPathsChange {
+                declared: counts.map(|c| super::saturating(c.declared)),
+                granted: counts.map(|c| super::saturating(c.granted)),
             }),
         }
     }

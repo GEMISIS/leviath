@@ -732,6 +732,42 @@
               "LastTransition"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`title_error`.",
+            "properties": {
+              "TitleError": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "TitleError"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`read_paths`.",
+            "properties": {
+              "ReadPaths": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReadPathCounts"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "ReadPaths"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1941,6 +1977,28 @@
             "type": "string"
           }
         ]
+      },
+      "ReadPathCounts": {
+        "description": "How many `read_paths` a run's blueprint declares, and how many of them\nthis machine's config grants.",
+        "properties": {
+          "declared": {
+            "description": "Entries the blueprint declares.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "granted": {
+            "description": "Entries the config grants.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "declared",
+          "granted"
+        ],
+        "type": "object"
       },
       "RegionChange": {
         "description": "How one region changed.",
@@ -3594,9 +3652,12 @@
       "Budget": {
         "anyOf": [
           {
+            "maximum": 4294967295,
+            "minimum": 0,
             "type": "integer"
           },
           {
+            "pattern": "^\\s*[-+]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*%\\s*$",
             "type": "string"
           },
           {
@@ -4393,9 +4454,10 @@
       "InputSlot": {
         "anyOf": [
           {
-            "type": "integer"
-          },
-          {
+            "enum": [
+              "output_format",
+              "output_instructions"
+            ],
             "type": "string"
           },
           {
@@ -4406,9 +4468,18 @@
       "InputType": {
         "anyOf": [
           {
-            "type": "integer"
-          },
-          {
+            "enum": [
+              "text",
+              "bool",
+              "int",
+              "float",
+              "file",
+              "path",
+              "model",
+              "blueprint",
+              "duration",
+              "url"
+            ],
             "type": "string"
           },
           {
@@ -4755,6 +4826,17 @@
             ]
           },
           "kind": {
+            "enum": [
+              "pinned",
+              "sliding_window",
+              "temporary",
+              "compacting",
+              "clearable",
+              "compact_history",
+              "keyed",
+              "checklist",
+              "custom"
+            ],
             "type": "string"
           },
           "max_entries": {
@@ -5218,10 +5300,6 @@
           }
         ]
       },
-      "NoTable": {
-        "description": "The table half of a [`Short`] for a type that has no table form.",
-        "not": {}
-      },
       "NudgeDef": {
         "additionalProperties": false,
         "description": "The nudge sent when the model answers with nothing.",
@@ -5288,13 +5366,13 @@
       "OutputCap": {
         "anyOf": [
           {
+            "maximum": 4294967295,
+            "minimum": 0,
             "type": "integer"
           },
           {
+            "pattern": "^\\s*[-+]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*%\\s*( of .+)?$",
             "type": "string"
-          },
-          {
-            "$ref": "#/$defs/NoTable"
           }
         ]
       },
@@ -5645,9 +5723,15 @@
       "RegionKind": {
         "anyOf": [
           {
-            "type": "integer"
-          },
-          {
+            "enum": [
+              "pinned",
+              "temporary",
+              "compacting",
+              "clearable",
+              "compact_history",
+              "keyed",
+              "checklist"
+            ],
             "type": "string"
           },
           {
@@ -7343,6 +7427,21 @@
             ]
           },
           "kind": {
+            "enum": [
+              "text",
+              "bool",
+              "int",
+              "float",
+              "choice",
+              "list",
+              "record",
+              "file",
+              "path",
+              "model",
+              "blueprint",
+              "duration",
+              "url"
+            ],
             "type": "string"
           },
           "max": {
@@ -8797,6 +8896,28 @@
           }
         ]
       },
+      "ReadPathCounts": {
+        "description": "How many `read_paths` a run's blueprint declares, and how many of them\nthis machine's config grants.",
+        "properties": {
+          "declared": {
+            "description": "Entries the blueprint declares.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "granted": {
+            "description": "Entries the config grants.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "declared",
+          "granted"
+        ],
+        "type": "object"
+      },
       "RegionState": {
         "description": "One region's live state.",
         "properties": {
@@ -9744,6 +9865,17 @@
         "$ref": "#/$defs/StageProgress",
         "description": "The current stage's counters."
       },
+      "read_paths": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ReadPathCounts"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "How many of its blueprint's `read_paths` this machine grants, as\nfixed when it was placed. `None` for a blueprint that declares none."
+      },
       "seq": {
         "description": "The number of deltas applied to reach this state. The initial state\nis 0.",
         "format": "uint64",
@@ -9756,6 +9888,13 @@
       },
       "title": {
         "description": "Its title, once one is made.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "title_error": {
+        "description": "Why it has no title, once titling gave up: the provider it could not\nreach, or what came back instead of a title.",
         "type": [
           "string",
           "null"

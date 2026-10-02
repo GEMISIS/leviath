@@ -750,7 +750,18 @@ async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
         Ok(run) => run,
         Err(e) => return failed(format!("Could not start '{}': {e}", cmd.agent_path)),
     };
-    match control.spawn(run.request).await {
+    // A value the form could not read refuses the run; the daemon only
+    // checks the rest, so every problem comes back at once.
+    let response = match run.issues.is_empty() {
+        true => control.spawn(run.request).await,
+        false => match crate::commands::run::check::validate(control, &run).await {
+            Ok(checked) => Ok(ControlResponse::Rejected {
+                issues: checked.err().unwrap_or_default(),
+            }),
+            Err(e) => return failed(format!("Could not check the run: {e}")),
+        },
+    };
+    match response {
         Ok(ControlResponse::Spawned { run_id }) => SpawnOutcome {
             message: format!("Started {run_id}"),
             ok: true,
@@ -1784,6 +1795,46 @@ binds = [{{ region = "task" }}]
             "{}",
             broken.message
         );
+    }
+
+    /// A form value that does not read refuses the run with the daemon's own
+    /// problems beside it; the run is only checked, never spawned.
+    #[tokio::test]
+    async fn a_value_that_does_not_read_is_refused_with_the_daemons_problems() {
+        for (reply, expected) in [
+            (
+                Some(crate::test_support::rejected_reply("no task given")),
+                "no task given",
+            ),
+            (None, "Could not check the run"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            write_agent(&dir.path().join("alpha"), "alpha", "first");
+            let (control, server) = replying_daemon(dir.path(), reply);
+            let outcome = run_spawn(
+                &control,
+                SpawnCommand {
+                    agent_path: dir.path().join("alpha").display().to_string(),
+                    task: "ship it".to_string(),
+                    workdir: dir.path().display().to_string(),
+                    yolo: true,
+                    yolo_profile: Some("bad\nname".to_string()),
+                    parts: Vec::new(),
+                    values: Default::default(),
+                },
+            )
+            .await;
+            let _ = server.await;
+            assert!(!outcome.ok);
+            assert!(outcome.message.contains(expected), "{}", outcome.message);
+            if reply.is_some() {
+                assert!(
+                    outcome.message.contains("launch.unattended"),
+                    "{}",
+                    outcome.message
+                );
+            }
+        }
     }
 
     #[tokio::test]

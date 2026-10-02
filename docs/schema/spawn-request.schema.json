@@ -157,9 +157,12 @@
     "Budget": {
       "anyOf": [
         {
+          "maximum": 4294967295,
+          "minimum": 0,
           "type": "integer"
         },
         {
+          "pattern": "^\\s*[-+]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*%\\s*$",
           "type": "string"
         },
         {
@@ -905,9 +908,10 @@
     "InputSlot": {
       "anyOf": [
         {
-          "type": "integer"
-        },
-        {
+          "enum": [
+            "output_format",
+            "output_instructions"
+          ],
           "type": "string"
         },
         {
@@ -918,9 +922,18 @@
     "InputType": {
       "anyOf": [
         {
-          "type": "integer"
-        },
-        {
+          "enum": [
+            "text",
+            "bool",
+            "int",
+            "float",
+            "file",
+            "path",
+            "model",
+            "blueprint",
+            "duration",
+            "url"
+          ],
           "type": "string"
         },
         {
@@ -1260,6 +1273,17 @@
           ]
         },
         "kind": {
+          "enum": [
+            "pinned",
+            "sliding_window",
+            "temporary",
+            "compacting",
+            "clearable",
+            "compact_history",
+            "keyed",
+            "checklist",
+            "custom"
+          ],
           "type": "string"
         },
         "max_entries": {
@@ -1725,10 +1749,6 @@
         }
       ]
     },
-    "NoTable": {
-      "description": "The table half of a [`Short`] for a type that has no table form.",
-      "not": {}
-    },
     "NudgeDef": {
       "additionalProperties": false,
       "description": "The nudge sent when the model answers with nothing.",
@@ -1795,13 +1815,13 @@
     "OutputCap": {
       "anyOf": [
         {
+          "maximum": 4294967295,
+          "minimum": 0,
           "type": "integer"
         },
         {
+          "pattern": "^\\s*[-+]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+)?\\s*%\\s*( of .+)?$",
           "type": "string"
-        },
-        {
-          "$ref": "#/$defs/NoTable"
         }
       ]
     },
@@ -2087,9 +2107,15 @@
     "RegionKind": {
       "anyOf": [
         {
-          "type": "integer"
-        },
-        {
+          "enum": [
+            "pinned",
+            "temporary",
+            "compacting",
+            "clearable",
+            "compact_history",
+            "keyed",
+            "checklist"
+          ],
           "type": "string"
         },
         {
@@ -3561,6 +3587,21 @@
           ]
         },
         "kind": {
+          "enum": [
+            "text",
+            "bool",
+            "int",
+            "float",
+            "choice",
+            "list",
+            "record",
+            "file",
+            "path",
+            "model",
+            "blueprint",
+            "duration",
+            "url"
+          ],
           "type": "string"
         },
         "max": {

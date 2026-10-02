@@ -142,11 +142,37 @@ fn segments(path: &SpecPath) -> Vec<PathSegment> {
     path.0.iter().map(segment).collect()
 }
 
+/// `path` with the runtime's field names that this schema spells differently
+/// put in this schema's words: a raw graph is `source.graph` here, and an
+/// attachment's bytes are its `content`.
+fn graphql_path(path: &SpecPath) -> SpecPath {
+    let field = |name: &str| PathSeg::Field(name.to_string());
+    let mut segs = path.0.clone();
+    match segs.as_mut_slice() {
+        [PathSeg::Field(source), raw @ PathSeg::Field(_), ..]
+            if source == "source" && *raw == field("raw") =>
+        {
+            *raw = field("graph");
+        }
+        [
+            PathSeg::Field(list),
+            PathSeg::Index(_),
+            data @ PathSeg::Field(_),
+            ..,
+        ] if list == "attachments" && *data == field("data") => {
+            *data = field("content");
+        }
+        _ => {}
+    }
+    SpecPath(segs)
+}
+
 impl From<&CoreIssue> for SpawnIssue {
     fn from(issue: &CoreIssue) -> Self {
+        let path = graphql_path(&issue.path);
         Self {
-            path: issue.path.to_string(),
-            segments: segments(&issue.path),
+            path: path.to_string(),
+            segments: segments(&path),
             code: SpawnIssueCode::from(issue.code),
             message: issue.message.clone(),
             expected: issue.expected.clone(),

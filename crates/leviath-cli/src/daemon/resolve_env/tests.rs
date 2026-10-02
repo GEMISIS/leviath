@@ -316,7 +316,8 @@ async fn paths_models_code_and_bytes_answer_through_the_shared_host() {
     nowhere.model.models = vec![ModelRef::parse("gone/x").unwrap()];
     nowhere.model.allow_user_default = false;
     let issue = env.model(&nowhere, None).await.unwrap_err();
-    assert_eq!(issue.path.to_string(), "stages.plan.model");
+    // Relative to the stage's model; the resolver adds the stage's path.
+    assert_eq!(issue.path.to_string(), "(request)");
 
     assert_eq!(
         env.code(&CodeRef::Inline("x".into()), None).await.unwrap(),
@@ -626,4 +627,112 @@ budget = 10000
         leviath_runtime::spec::names::BlueprintPath::new(dir.path().to_string_lossy()).unwrap();
     let issue = load_file(&path).unwrap_err();
     assert!(issue.message.contains(&long), "{}", issue.message);
+}
+
+/// A directory with no blueprint says so; one holding only the older
+/// manifest says how to convert it.
+#[test]
+fn a_directory_with_only_the_older_manifest_points_at_the_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path =
+        leviath_runtime::spec::names::BlueprintPath::new(dir.path().to_string_lossy()).unwrap();
+    let empty = load_file(&path).unwrap_err();
+    assert!(
+        empty.hint.as_deref().unwrap().contains("agent.toml"),
+        "{empty}"
+    );
+    std::fs::write(dir.path().join("agent.leviath"), "old").unwrap();
+    let old = load_file(&path).unwrap_err();
+    let hint = old.hint.unwrap();
+    assert!(hint.contains("lev blueprint migrate"), "{hint}");
+    assert!(hint.contains("agent.leviath"), "{hint}");
+}
+
+/// Resolve `manifest`, installed as `helper`, in a real workdir: every issue.
+async fn issues_of(manifest: &str) -> Vec<SpawnIssue> {
+    let (env, agents) = env();
+    install(&agents, "helper", manifest);
+    let work = tempfile::tempdir().unwrap();
+    let mut request = leviath_runtime::spec::request::SpawnRequest::new(
+        leviath_runtime::spec::request::SpawnSource::Blueprint(reference("helper")),
+    );
+    request.workdir = Some(work.path().to_path_buf());
+    leviath_runtime::resolve::resolve(
+        &request,
+        &leviath_runtime::spec::env::Caller::TopLevel,
+        &env,
+        leviath_runtime::resolve::ResolveMode::Check,
+    )
+    .await
+    .unwrap_err()
+    .0
+}
+
+/// A stage's model and tool issues read from the request's root once, never
+/// with the stage's path written twice.
+#[tokio::test]
+async fn a_stages_model_and_tool_issues_have_one_path_each() {
+    let manifest = MANIFEST.replace(
+        "model = { models = [{ provider = \"mock\", model = \"m\" }] }\ntools = [\"read_file\"]",
+        "model = { models = [{ provider = \"nosuch\", model = \"m\" }], allow_user_default = false }\n\
+         tools = [\"read_file\", \"raed_file\", \"gone__tool\"]\n\
+         required_tools = [\"read_file\", \"never_heard_of\"]",
+    );
+    let issues = issues_of(&manifest).await;
+    let at = |path: &str| -> Vec<&SpawnIssue> {
+        issues
+            .iter()
+            .filter(|i| i.path.to_string() == path)
+            .collect()
+    };
+    let shown: Vec<String> = issues.iter().map(ToString::to_string).collect();
+    let model = at("source.blueprint.stages.plan.model");
+    assert_eq!(model.len(), 1, "{shown:#?}");
+    assert!(!model[0].to_string().contains(".."), "{}", model[0]);
+    let typo = at("source.blueprint.stages.plan.tools[1]");
+    assert_eq!(typo.len(), 1, "an unknown tool is an issue: {shown:#?}");
+    assert_eq!(typo[0].code, IssueCode::Unknown);
+    assert!(typo[0].known.contains(&"read_file".to_string()));
+    assert!(
+        at("source.blueprint.stages.plan.tools[2]").is_empty(),
+        "an MCP tool of a server this machine lacks is left to the server: {shown:#?}"
+    );
+    assert_eq!(
+        at("source.blueprint.stages.plan.required_tools[1]").len(),
+        1,
+        "{shown:#?}"
+    );
+    assert!(
+        at("source.blueprint.stages.plan.required_tools[0]").is_empty(),
+        "{shown:#?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .all(|s| !s.contains("model.stages") && !s.contains("tools.stages")),
+        "{shown:#?}"
+    );
+}
+
+/// A graph that does not hold together still has its stages' models
+/// checked, so a broken edge does not hide a missing provider.
+#[tokio::test]
+async fn a_broken_graph_still_reports_its_stages_models() {
+    let manifest = MANIFEST
+        .replace("to = \"work\" }", "to = \"wrok\" }")
+        .replacen(
+            "model = { models = [{ provider = \"mock\", model = \"m\" }] }",
+            "model = { models = [{ provider = \"nosuch\", model = \"m\" }], allow_user_default = false }",
+            1,
+        );
+    let issues = issues_of(&manifest).await;
+    let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+    assert!(
+        paths.contains(&"source.blueprint.edges[0].to".to_string()),
+        "{paths:?}"
+    );
+    assert!(
+        paths.contains(&"source.blueprint.stages.plan.model".to_string()),
+        "{paths:?}"
+    );
 }

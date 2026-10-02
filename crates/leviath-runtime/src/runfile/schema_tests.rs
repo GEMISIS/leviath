@@ -30,7 +30,7 @@ fn the_published_schemas_match_this_build() {
 /// The hash of the binary samples below as this build encodes them. When it
 /// changes, the binary layout changed: bump `LAYOUT_VERSION`, then record
 /// the new hash here.
-const LAYOUT_HASH: &str = "44d91edb0a34461b08a827319c09bb6253f6e6bd1de890af1adb28f9e17c97d2";
+const LAYOUT_HASH: &str = "c16ec663a0b95a794bcb6aa62f4a6eb382c3dd420d4c9fe935fb583052f6abb4";
 
 /// A fully populated sample of every frame type, so a change to any type's
 /// binary encoding changes the bytes.
@@ -93,7 +93,12 @@ fn layout_samples() -> Vec<u8> {
         });
     }
     let base = crate::state::tests::base();
-    let busy = crate::state::tests::busy();
+    let mut busy = crate::state::tests::busy();
+    busy.title_error = Some("no title".into());
+    busy.read_paths = Some(crate::state::ReadPathCounts {
+        declared: 2,
+        granted: 1,
+    });
     let delta = crate::state::StateDelta::between(
         &base,
         &busy,

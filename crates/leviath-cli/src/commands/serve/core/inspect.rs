@@ -14,7 +14,7 @@ use leviath_runtime::spec::graph::EdgeCondition;
 use leviath_runtime::spec::launch::Secret;
 use leviath_runtime::spec::names::Digest;
 use leviath_runtime::spec::run_spec::RunSpec;
-use leviath_runtime::state::{Change, RunState, StateDelta};
+use leviath_runtime::state::{Change, RunState, StateDelta, TransitionReason, TransitionRecord};
 use serde::Serialize;
 
 use super::super::types::AppState;
@@ -92,7 +92,8 @@ pub(crate) fn deltas(
 pub(crate) struct RunGraphView {
     /// The stages, in the graph's order.
     pub(crate) nodes: Vec<GraphNode>,
-    /// The edges, in the graph's order.
+    /// The edges, in the graph's order, then each move the run made that no
+    /// edge joins, in the order it first made it.
     pub(crate) edges: Vec<GraphEdge>,
 }
 
@@ -108,17 +109,22 @@ pub(crate) struct GraphNode {
     pub(crate) current: bool,
 }
 
-/// One edge of a run's graph.
+/// One edge of a run's graph: a declared one, or a move the run made that no
+/// declared edge joins (a fan-out stage sent to its merge stage, a person
+/// moving the run).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct GraphEdge {
     /// The stage it leaves.
     pub(crate) from: String,
     /// The stage it enters.
     pub(crate) to: String,
-    /// Its name, unique among the edges leaving `from`.
-    pub(crate) name: String,
-    /// When the run takes it.
-    pub(crate) condition: EdgeCondition,
+    /// Its name, unique among the edges leaving `from`. Absent for a move no
+    /// edge joins.
+    pub(crate) name: Option<String>,
+    /// When the run takes it. Absent for a move no edge joins.
+    pub(crate) condition: Option<EdgeCondition>,
+    /// Why the run made a move no edge joins. Absent for a declared edge.
+    pub(crate) reason: Option<TransitionReason>,
     /// How many times the run took it, counted from the transitions its run
     /// file records.
     pub(crate) taken: u32,
@@ -139,10 +145,12 @@ pub(crate) fn graph(run_id: &str) -> Result<RunGraphView, ServeError> {
 ///
 /// A move names the edge it took when it took a named one. One that names
 /// none (a forced move, a router's choice) counts against the first edge
-/// between the same two stages, and a move no edge joins is not counted.
+/// between the same two stages, and a move no edge joins is an edge of its
+/// own after the declared ones, one per pair of stages and reason.
 pub(crate) fn graph_of(spec: &RunSpec, state: &RunState, deltas: &[StateDelta]) -> RunGraphView {
     let graph = &spec.graph;
     let mut taken = vec![0u32; graph.edges.len()];
+    let mut unjoined: Vec<GraphEdge> = Vec::new();
     let moves = deltas
         .iter()
         .flat_map(|delta| delta.changes.iter())
@@ -158,8 +166,9 @@ pub(crate) fn graph_of(spec: &RunSpec, state: &RunState, deltas: &[StateDelta]) 
                     None => edge.to == record.to,
                 }
         });
-        if let Some(at) = found {
-            taken[at] += 1;
+        match found {
+            Some(at) => taken[at] += 1,
+            None => count_unjoined(&mut unjoined, record),
         }
     }
     RunGraphView {
@@ -179,11 +188,34 @@ pub(crate) fn graph_of(spec: &RunSpec, state: &RunState, deltas: &[StateDelta]) 
             .map(|(edge, taken)| GraphEdge {
                 from: edge.from.to_string(),
                 to: edge.to.to_string(),
-                name: edge.name.to_string(),
-                condition: edge.when,
+                name: Some(edge.name.to_string()),
+                condition: Some(edge.when),
+                reason: None,
                 taken,
             })
+            .chain(unjoined)
             .collect(),
+    }
+}
+
+/// Count `record`, a move no declared edge joins, on the edge already shown
+/// for its two stages and reason, or as a new one.
+fn count_unjoined(unjoined: &mut Vec<GraphEdge>, record: &TransitionRecord) {
+    let (from, to) = (record.from.as_str(), record.to.as_str());
+    let reason = Some(record.reason);
+    match unjoined
+        .iter_mut()
+        .find(|e| e.from == from && e.to == to && e.reason == reason)
+    {
+        Some(edge) => edge.taken += 1,
+        None => unjoined.push(GraphEdge {
+            from: from.to_string(),
+            to: to.to_string(),
+            name: None,
+            condition: None,
+            reason,
+            taken: 1,
+        }),
     }
 }
 

@@ -58,10 +58,20 @@ pub(crate) fn find_blueprint_in(
         .flatten()
         .find(|c| c.is_file())
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not find a blueprint for '{path}'. Pass a path to a directory \
-                 containing {FILE_NAME}, or an installed agent name (see `lev list`)."
-            )
+            // A directory holding only the manifest an earlier release wrote
+            // is one command from runnable, so say which.
+            let old = p.join("agent.leviath");
+            match old.is_file() {
+                true => anyhow::anyhow!(
+                    "'{path}' holds an agent.leviath from an earlier release, and no \
+                     {FILE_NAME}. Convert it with `lev blueprint migrate {path} -o {}`.",
+                    p.join(FILE_NAME).display()
+                ),
+                false => anyhow::anyhow!(
+                    "Could not find a blueprint for '{path}'. Pass a path to a directory \
+                     containing {FILE_NAME}, or an installed agent name (see `lev list`)."
+                ),
+            }
         })
 }
 

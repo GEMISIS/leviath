@@ -256,17 +256,30 @@ pub fn load_installed(
 /// [`load_installed`] loads an installed one. Named after its `[blueprint]
 /// name`.
 pub fn load_file(path: &BlueprintPath) -> Result<LoadedBlueprint, Box<SpawnIssue>> {
+    /// The manifest an earlier release wrote, which `lev blueprint migrate`
+    /// converts.
+    const OLD_MANIFEST: &str = "agent.leviath";
     // Relative to the source: the resolver puts `source.blueprint_file` in
     // front.
     let at = SpecPath::root();
     if !path.path().join(leviath_blueprint::FILE_NAME).is_file() {
+        // A directory holding only the older manifest is one command from
+        // runnable, so say which.
+        let hint = match path.path().join(OLD_MANIFEST).is_file() {
+            true => format!(
+                "it holds an {OLD_MANIFEST} from an earlier release; convert it with \
+                 `lev blueprint migrate {path} -o {}`",
+                path.path().join(leviath_blueprint::FILE_NAME).display()
+            ),
+            false => "name the directory that holds the blueprint's agent.toml".to_string(),
+        };
         return Err(Box::new(
             SpawnIssue::new(
                 at,
                 IssueCode::Unresolvable,
                 format!("no blueprint is in '{path}'"),
             )
-            .hint("name the directory that holds the blueprint's agent.toml"),
+            .hint(hint),
         ));
     }
     leviath_blueprint::load(path.path()).map_err(|e| {

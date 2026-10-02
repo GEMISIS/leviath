@@ -1,6 +1,6 @@
 ---
 title: Agent catalog
-description: The seven pre-built agents Leviath ships, what each is for, how to install them, and the lev run command for each.
+description: The eleven pre-built agents Leviath ships, what each is for, how to install them, and the lev run command for each.
 group: Get started
 group_order: 1
 order: 4
@@ -8,7 +8,7 @@ order: 4
 
 # Agent catalog
 
-Leviath ships with seven pre-built agents. `lev setup` installs them into `~/.leviath/agents/`
+Leviath ships with eleven pre-built agents. `lev setup` installs them into `~/.leviath/agents/`
 (scripting it? pass `--install-agents`), one directory per agent, each holding an `agent.toml`
 [blueprint](/docs/agents). Run any of them by name:
 

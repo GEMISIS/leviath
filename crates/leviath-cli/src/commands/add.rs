@@ -119,10 +119,14 @@ async fn execute_with(
 /// its own and which has nothing to inventory. `read_paths` is the grant
 /// report for this package under the active config, when one could be built;
 /// without it the read-paths line falls back to stating the rule.
+/// `may_loosen` is the operator's `[security] allow_blueprint_permissions`:
+/// without it, a tool the blueprint pre-approves past its default is listed
+/// as asked for rather than granted, since the runtime clamps it back.
 pub(crate) fn describe_capabilities(
     graph: Option<&RunGraph>,
     script_tools: &[String],
     read_paths: Option<&crate::read_path_report::GrantReport>,
+    may_loosen: bool,
 ) -> Vec<String> {
     let mut findings = Vec::new();
     let Some(graph) = graph else {
@@ -146,10 +150,23 @@ pub(crate) fn describe_capabilities(
         .collect();
     granted.sort();
     granted.dedup();
-    if !granted.is_empty() {
+    // A blueprint may not loosen most tools past their default on its own:
+    // the runtime clamps such a line back, so the tool still asks.
+    let (clamped, effective): (Vec<String>, Vec<String>) = granted
+        .into_iter()
+        .partition(|tool| !may_loosen && clamped_by_default(tool));
+    if !effective.is_empty() {
         findings.push(format!(
             "pre-approves these tools (no prompt at run time): {}",
-            granted.join(", ")
+            effective.join(", ")
+        ));
+    }
+    if !clamped.is_empty() {
+        findings.push(format!(
+            "asks to pre-approve {}, which a blueprint cannot grant itself, so they still \
+             ask at run time unless you allow them in config.toml or set [security] \
+             allow_blueprint_permissions = true",
+            clamped.join(", ")
         ));
     }
 
@@ -218,6 +235,21 @@ pub(crate) fn describe_capabilities(
     findings
 }
 
+/// Whether the runtime clamps a blueprint's `allow` for `tool` back to the
+/// tool's stricter default, the way [`crate::tools::resolve_policy`] does
+/// when the operator has said nothing. The stage-control tools (`fan_out`,
+/// `submit_output`) are carried out by the run itself and never ask, so they
+/// are never clamped.
+fn clamped_by_default(tool: &str) -> bool {
+    use crate::tools::{blueprint_loosenable, default_tool_policy, restrictiveness};
+    let canonical = leviath_tools::canonical_tool_name(tool);
+    if leviath_tools::STAGE_CONTROL_TOOLS.contains(&canonical) {
+        return false;
+    }
+    let default = default_tool_policy(tool, leviath_tools::is_builtin_tool(canonical));
+    restrictiveness(default) > restrictiveness(ToolPolicy::Allow) && !blueprint_loosenable(tool)
+}
+
 /// Every `seed = { command = "..." }` in a graph, from the graph's layout and
 /// every stage's own layout alike.
 fn seed_commands(graph: &RunGraph) -> Vec<&str> {
@@ -237,7 +269,8 @@ fn print_capabilities(name: &str, install_dir: &Path, config: Option<&crate::con
     let graph = blueprint.as_ref().map(|b| &b.graph);
     let scripts = script_tool_names(install_dir);
     let report = graph.and_then(|g| read_path_report(g, name, config));
-    let findings = describe_capabilities(graph, &scripts, report.as_ref());
+    let may_loosen = config.is_some_and(|c| c.security.allow_blueprint_permissions);
+    let findings = describe_capabilities(graph, &scripts, report.as_ref(), may_loosen);
     if findings.is_empty() {
         return;
     }
@@ -456,7 +489,7 @@ mod capability_tests {
     /// The inventory with no config to judge read paths against - the
     /// fallback wording. The grant-aware tests below pass a real report.
     fn describe_capabilities(graph_toml: &str, script_tools: &[String]) -> Vec<String> {
-        super::describe_capabilities(Some(&graph(graph_toml)), script_tools, None)
+        super::describe_capabilities(Some(&graph(graph_toml)), script_tools, None, false)
     }
 
     /// A plain agent declares nothing unusual, so the inventory stays quiet -
@@ -478,19 +511,34 @@ mod capability_tests {
     }
 
     /// The case that matters most: a package that pre-approves its own shell.
-    /// Under the permission floor a user's explicit config still wins, but where
-    /// the user has said nothing this is a real grant they should see.
+    /// The runtime clamps that back unless the operator lets blueprints
+    /// loosen, so it is reported as asked for, not granted; a tool a
+    /// blueprint may pre-approve (or one already allowed) is a real grant.
     #[test]
     fn self_granted_tool_permissions_are_reported() {
-        let findings = describe_capabilities(
-            &format!("{PLAIN}tool_permissions = {{ shell = \"allow\", read_file = \"ask\" }}\n"),
-            &[],
+        let toml = format!(
+            "{PLAIN}tool_permissions = {{ shell = \"allow\", web_fetch = \"allow\", \
+             fan_out = \"allow\", read_file = \"ask\" }}\n"
         );
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].contains("pre-approves"));
-        assert!(findings[0].contains("shell"));
-        // `ask` is the default posture, not a grant.
-        assert!(!findings[0].contains("read_file"));
+        let findings = describe_capabilities(&toml, &[]);
+        // The run carries out a fan-out itself; it never asks. `ask` is the
+        // default posture, not a grant, so `read_file` is not listed.
+        assert_eq!(
+            findings,
+            [
+                "pre-approves these tools (no prompt at run time): fan_out, web_fetch",
+                "asks to pre-approve shell, which a blueprint cannot grant itself, so they \
+                 still ask at run time unless you allow them in config.toml or set \
+                 [security] allow_blueprint_permissions = true",
+            ]
+        );
+
+        // An operator who lets blueprints loosen makes it a real grant.
+        let loosened = super::describe_capabilities(Some(&graph(&toml)), &[], None, true);
+        assert_eq!(
+            loosened,
+            ["pre-approves these tools (no prompt at run time): fan_out, shell, web_fetch"]
+        );
     }
 
     /// Script permissions that only *tighten* are not a grant, so they must
@@ -619,7 +667,7 @@ mod capability_tests {
         let partial = crate::read_path_report::build(&graph, "cto", &config, Path::new("/work"))
             .expect("declares read paths")
             .expect("grants compile");
-        let findings = super::describe_capabilities(Some(&graph), &[], Some(&partial));
+        let findings = super::describe_capabilities(Some(&graph), &[], Some(&partial), false);
         assert!(
             findings[0].contains("2 declared, 1 granted"),
             "{findings:?}"
@@ -633,7 +681,7 @@ mod capability_tests {
         let full = crate::read_path_report::build(&graph, "cto", &config, Path::new("/work"))
             .expect("declares read paths")
             .expect("grants compile");
-        let findings = super::describe_capabilities(Some(&graph), &[], Some(&full));
+        let findings = super::describe_capabilities(Some(&graph), &[], Some(&full), false);
         assert!(findings[0].contains("all granted"), "{findings:?}");
     }
 
@@ -726,7 +774,9 @@ mod capability_tests {
     /// even with script tools beside it: the installer reports the file.
     #[test]
     fn an_unreadable_blueprint_reports_nothing() {
-        assert!(super::describe_capabilities(None, &["t.rhai".to_string()], None).is_empty());
+        assert!(
+            super::describe_capabilities(None, &["t.rhai".to_string()], None, false).is_empty()
+        );
     }
 }
 

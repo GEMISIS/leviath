@@ -16,8 +16,9 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use leviath_runtime::fanout::FanOutSpawner;
 use leviath_runtime::spec::env::Caller;
+use leviath_runtime::spec::inputs::InputDecl;
 use leviath_runtime::spec::names::BlueprintRef;
-use leviath_runtime::spec::request::SpawnRequest;
+use leviath_runtime::spec::request::{SpawnRequest, SpawnSource};
 
 use crate::daemon::starter::DaemonStarter;
 
@@ -72,6 +73,12 @@ impl FanOutSpawner for DaemonFanOutSpawner {
 
     fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
         find_installed(self.agents_dir.as_deref(), query)
+    }
+
+    fn worker_inputs(&self, source: &SpawnSource) -> Option<Vec<InputDecl>> {
+        self.starter
+            .graph_of(&SpawnRequest::new(source.clone()))
+            .map(|graph| graph.inputs)
     }
 }
 
@@ -303,6 +310,23 @@ binds = [{ region = "task" }]
     ) -> Result<Entity, String> {
         let (request, caller) = worker_of(world, parent, stage, agent);
         spawner.spawn_worker(world.world_mut(), parent, request, caller)
+    }
+
+    /// A worker blueprint's inputs are read so a fan-out's items are checked
+    /// against them before any worker starts; one that does not load has none.
+    #[test]
+    fn a_worker_blueprints_inputs_are_read_for_its_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let spawner = spawner_with(Arc::new(CliToolService::new()), dir.path());
+        two_stage_in(dir.path());
+        let path =
+            leviath_runtime::spec::names::BlueprintPath::new(dir.path().to_string_lossy()).unwrap();
+        let inputs = spawner
+            .worker_inputs(&SpawnSource::BlueprintFile(path))
+            .expect("the blueprint loads");
+        assert_eq!(inputs[0].name.as_str(), "task");
+        let gone = SpawnSource::Blueprint(BlueprintRef::parse("gone").unwrap());
+        assert!(spawner.worker_inputs(&gone).is_none());
     }
 
     #[test]
