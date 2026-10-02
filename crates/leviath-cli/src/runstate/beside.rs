@@ -80,11 +80,16 @@ pub(crate) fn final_output_path(dir: &Path) -> Option<PathBuf> {
     path_of(dir, files.final_output.as_ref()?)
 }
 
-/// Where the run in `dir` keeps the file `which` of the stage at `index`,
-/// when its run file names one.
-pub(crate) fn stage_file_path(dir: &Path, index: usize, which: StageFile) -> Option<PathBuf> {
+/// Where the run in `dir` keeps the file `which` of the stage at `index`:
+/// where its run file names it, or else where the run writes it once the
+/// stage has something to write.
+pub(crate) fn stage_file_path(dir: &Path, index: usize, which: StageFile) -> PathBuf {
+    let index = u32::try_from(index).unwrap_or(u32::MAX);
     let files = named_files(dir);
-    path_of(dir, files.stage_file(u32::try_from(index).ok()?, which)?)
+    files
+        .stage_file(index, which)
+        .and_then(|named| path_of(dir, named))
+        .unwrap_or(dir.join(which.path(index)))
 }
 
 /// The last `max_bytes` of the log `which` of the stage at `index` of the run

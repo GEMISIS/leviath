@@ -6122,6 +6122,15 @@ type KillAgentCallOutput implements ToolCall {
 	args: KillAgentArgsOutput!
 }
 
+"""
+When the run last made progress, as its record keeps that apart from
+its last step, changed.
+"""
+type LastProgressAtChangeOutput {
+	"When it last made progress. Null when that is its last step."
+	lastProgressAt: Timestamp
+}
+
 "What a run is trusted with, once decided."
 type LaunchPolicyOutput {
 	"How much goes ahead without a person."
@@ -12467,6 +12476,12 @@ type RunStateOutput {
 	grants: StateGrantsOutput!
 	"The bytes it has written, against its write ceilings."
 	writtenBytes: BigInt!
+	"""
+	When it last made progress, when its record keeps that apart from
+	its last step (a run converted from an earlier release). Null when
+	its last step is its progress.
+	"""
+	lastProgressAt: Timestamp
 }
 
 "Where a run is in its life."
@@ -15686,7 +15701,7 @@ type StateBlobOutput {
 }
 
 "One part of a run's state that a step changed, with its new value."
-union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput | GrantsChangeOutput | WrittenChangeOutput
+union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput | GrantsChangeOutput | WrittenChangeOutput | LastProgressAtChangeOutput
 
 "Working time: seconds banked, and when the running clock started."
 type StateClockOutput {

@@ -92,6 +92,8 @@ pub enum Change {
     Grants(Grants),
     /// `written`.
     Written(u64),
+    /// `last_progress_at`.
+    LastProgressAt(Option<i64>),
 }
 
 /// An edge a run took, and why.
@@ -278,6 +280,7 @@ impl StateDelta {
             blobs => Blobs,
             grants => Grants,
             written => Written,
+            last_progress_at => LastProgressAt,
         );
         Self {
             seq: prev.seq + 1,
@@ -343,6 +346,7 @@ impl StateDelta {
                 Change::Blobs(v) => state.blobs = v,
                 Change::Grants(v) => state.grants = v,
                 Change::Written(v) => state.written = v,
+                Change::LastProgressAt(v) => state.last_progress_at = v,
             }
         }
         state.seq = self.seq;

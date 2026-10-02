@@ -271,6 +271,7 @@ pub(crate) fn busy() -> RunState {
         cleared: vec!["http_get".into()],
     };
     s.written = 600;
+    s.last_progress_at = Some(1_700);
     s
 }
 

@@ -164,6 +164,35 @@ async fn pause_refused() {
     assert!(r.unwrap_err().to_string().contains("not pausable"));
 }
 
+/// A run that is paused already is said to be, rather than "not pausable";
+/// one in any other state keeps the daemon's refusal.
+#[tokio::test]
+async fn pausing_a_paused_run_says_it_is_already_paused() {
+    let pause = |c: ControlClient| async move {
+        pause_run(
+            &c,
+            &PauseArgs {
+                run_id: "r".to_string(),
+            },
+        )
+        .await
+    };
+    let refused = r#"{"result":"ok","ok":false}"#.to_string();
+    let paused = serde_json::to_string(&ControlResponse::Status {
+        status: Some(leviath_runtime::components::AgentStatus::Paused),
+    })
+    .unwrap();
+    let (r, requests) = served(vec![refused.clone(), paused], pause).await;
+    let said = r.unwrap_err().to_string();
+    assert!(said.contains("already paused"), "{said}");
+    assert!(said.contains("lev resume r"), "{said}");
+    assert_eq!(requests.len(), 2, "the status is asked after the refusal");
+
+    let gone = serde_json::to_string(&ControlResponse::Status { status: None }).unwrap();
+    let (r, _) = served(vec![refused, gone], pause).await;
+    assert!(r.unwrap_err().to_string().contains("not pausable"));
+}
+
 #[tokio::test]
 async fn resume_applied() {
     let r = with_daemon(r#"{"result":"ok","ok":true}"#, |c| async move {

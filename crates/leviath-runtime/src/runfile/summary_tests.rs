@@ -167,3 +167,20 @@ fn any_step_reads_as_its_record_window_and_ledger() {
     assert_eq!(ledger.len(), last.ledger.len());
     assert_eq!(ledger[0].name, "plan");
 }
+
+/// A run is listed as last moving at its last step unless its state keeps
+/// that apart, and a run that never entered a stage names no stage.
+#[test]
+fn a_kept_progress_time_and_an_unentered_stage_are_listed_as_kept() {
+    let mut state = initial();
+    state.visits.clear();
+    let meta = summary_of(&spec(), &state, 9);
+    assert_eq!(meta.last_progress_at, Some(9));
+    assert_eq!(meta.current_stage, "", "no stage was ever entered");
+
+    state.last_progress_at = Some(4);
+    state.visits.insert(state.cursor.stage.clone(), 1);
+    let meta = summary_of(&spec(), &state, 9);
+    assert_eq!((meta.last_progress_at, meta.updated_at), (Some(4), 9));
+    assert_eq!(meta.current_stage, state.cursor.stage.as_str());
+}

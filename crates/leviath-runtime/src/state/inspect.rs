@@ -121,6 +121,8 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
         written: world
             .get::<crate::pipeline::WriteLedger>(entity)
             .map_or(0, |l| l.written),
+        // A run in the world moves step by step: its last step is its progress.
+        last_progress_at: None,
     })
 }
 

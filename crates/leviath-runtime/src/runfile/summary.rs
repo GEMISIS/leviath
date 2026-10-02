@@ -41,12 +41,17 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
         RunPosition {
             stage_index: place::stage_index(spec, state),
             now_secs: updated_at,
-            last_progress_at: Some(updated_at),
+            last_progress_at: Some(state.last_progress_at.unwrap_or(updated_at)),
             depth: usize::from(spec.placement.depth),
             max_child_depth: usize::from(spec.launch.max_depth),
             active: Some(place::run_clock(state).0),
         },
     );
+    // A run that never entered a stage has no stage to name, though its
+    // cursor has to point at one.
+    if state.visits.is_empty() {
+        meta.current_stage.clear();
+    }
     // The answer's content is in a file beside the run file; its size is in
     // the state.
     if let (Some(described), Some(answer)) = (meta.final_output.as_mut(), &state.final_output) {

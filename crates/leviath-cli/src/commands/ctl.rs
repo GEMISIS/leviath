@@ -226,9 +226,10 @@ fn with_named_parts(
 }
 
 /// `lev pause`: park a run. The daemon refuses (`ok: false`) when the run does
-/// not exist or is not in a pausable state (waiting on input, or finished).
+/// not exist or is not in a pausable state (waiting on its sub-agents, or
+/// finished); a run that is paused already is said to be.
 pub async fn pause_run(client: &ControlClient, args: &PauseArgs) -> anyhow::Result<()> {
-    send_bool(
+    let refused = send_bool(
         client,
         ControlRequest::Pause {
             run_id: args.run_id.clone(),
@@ -236,7 +237,20 @@ pub async fn pause_run(client: &ControlClient, args: &PauseArgs) -> anyhow::Resu
         "paused",
         "no such run, or it is not pausable in its current state",
     )
-    .await
+    .await;
+    let Err(refusal) = refused else {
+        return Ok(());
+    };
+    match client.status(&args.run_id).await {
+        Ok(ControlResponse::Status {
+            status: Some(leviath_runtime::components::AgentStatus::Paused),
+        }) => bail!(
+            "run '{}' is already paused; `lev resume {}` carries it on",
+            args.run_id,
+            args.run_id
+        ),
+        _ => Err(refusal),
+    }
 }
 
 /// `lev resume`: un-pause a run.

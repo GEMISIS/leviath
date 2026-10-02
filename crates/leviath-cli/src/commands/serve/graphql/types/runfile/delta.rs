@@ -254,6 +254,14 @@ change_member!(
         written_bytes: BigInt
     }
 );
+change_member!(
+    /// When the run last made progress, as its record keeps that apart from
+    /// its last step, changed.
+    LastProgressAtChange {
+        /// When it last made progress. Null when that is its last step.
+        last_progress_at: Option<Timestamp>
+    }
+);
 
 /// One part of a run's state that a step changed, with its new value.
 #[derive(Debug, Union)]
@@ -316,6 +324,8 @@ pub(crate) enum StateChange {
     Grants(GrantsChange),
     /// What the run has written.
     Written(WrittenChange),
+    /// When the run last made progress, apart from its last step.
+    LastProgressAt(LastProgressAtChange),
 }
 
 impl From<&Change> for StateChange {
@@ -412,6 +422,9 @@ impl From<&Change> for StateChange {
             }),
             Change::Written(written) => Self::Written(WrittenChange {
                 written_bytes: big(*written),
+            }),
+            Change::LastProgressAt(at) => Self::LastProgressAt(LastProgressAtChange {
+                last_progress_at: at.map(Timestamp),
             }),
         }
     }

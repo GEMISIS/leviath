@@ -171,6 +171,9 @@ pub(crate) fn from_meta(state: &mut RunState, meta: &RunMeta, graph: &RunGraph) 
         tool_calls: meta.tool_calls as u64,
     };
     state.clock = clock(meta.active, Some(meta.started_at), meta.updated_at);
+    // Kept only when it says something the step's own time does not: a
+    // worker's record is touched again when its parent reaps it.
+    state.last_progress_at = meta.last_progress_at.filter(|at| *at < meta.updated_at);
     state.flags = flags(&meta.flags);
     state.children = meta
         .children
@@ -218,6 +221,12 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
     }
     state.ledger = old.stages.iter().filter_map(|r| ledger(r, meta)).collect();
     state.visits = visits(&old.stages);
+    // A run whose record names its stage was in it, whether or not it kept a
+    // ledger to count the visits by. One whose record names none entered no
+    // stage, and is listed with none.
+    if stage_of(graph, meta).is_some() {
+        state.visits.entry(stage.name.clone()).or_insert(1);
+    }
     state.cursor.visit = old
         .stages
         .iter()
