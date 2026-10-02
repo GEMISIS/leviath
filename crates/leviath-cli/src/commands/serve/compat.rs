@@ -10,9 +10,12 @@
 //! and goes through the same checks as one sent to `POST /api/runs`. Its
 //! `task` is the `task` input. Each of its `regions` is the input the
 //! blueprint declares for that region: the input of that name, or else the
-//! one input that seeds that region with its value alone. A region the
-//! blueprint declares no input for is sent under its own name, so the refusal
-//! names it the way any unknown input is named.
+//! one input that seeds that region with its value alone. A region no input
+//! fills at all is left out, as older servers left it, and the answer's
+//! `warnings` say so. Any other region (one only a template fills, or one
+//! several inputs fill) is sent under its own name, so the refusal names it
+//! the way any unknown input is named. `POST /api/runs` takes inputs by name
+//! and refuses one the blueprint does not declare.
 //!
 //! These routes are kept for older clients and will be removed.
 
@@ -128,12 +131,22 @@ pub(super) async fn spawn_agent(
     body.task = task;
     parts.extend(named);
     let mut regions = HashMap::new();
+    let mut left_out = Vec::new();
     for (region, text) in std::mem::take(&mut body.regions) {
+        let Some(input) = input_for_region(&declared, &region) else {
+            left_out.push(format!(
+                "regions.{region}: no input of blueprint '{}' fills region '{region}', so its \
+                 text was left out",
+                body.blueprint
+            ));
+            continue;
+        };
         let (kept, named) =
             super::upload::inline_parts(&text, Some(&region), &workdir, max_upload)?;
         parts.extend(named);
-        regions.insert(input_for_region(&declared, &region), kept);
+        regions.insert(input, kept);
     }
+    left_out.sort();
     let request = launch_of(body, regions, parts)
         .into_request_for(source)
         .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
@@ -141,7 +154,10 @@ pub(super) async fn spawn_agent(
         Ok(Verdict::Accepted(started)) => Ok(Json(SpawnAgentResp {
             agent_id: started.run_id.clone(),
             run_id: started.run_id,
-            warnings: started.warnings.iter().map(ToString::to_string).collect(),
+            warnings: left_out
+                .into_iter()
+                .chain(started.warnings.iter().map(ToString::to_string))
+                .collect(),
         })),
         Ok(Verdict::Rejected(issues)) => Err(refusal(&issues)),
         Err(e) => Err(as_api_error(&e)),
@@ -186,24 +202,28 @@ fn launch_of(
 
 /// The input that takes an old request's text for `region`: the input of
 /// that name, or else the one input that seeds the region with its value
-/// alone. Anything else keeps the region's name, which validation then names
-/// as an input the blueprint does not declare.
-fn input_for_region(declared: &[InputDecl], region: &str) -> String {
+/// alone. `None` when no input fills the region at all, so the text has
+/// nowhere to go. Anything else keeps the region's name, which validation
+/// then names as an input the blueprint does not declare.
+fn input_for_region(declared: &[InputDecl], region: &str) -> Option<String> {
     if declared.iter().any(|input| input.name.as_str() == region) {
-        return region.to_string();
+        return Some(region.to_string());
     }
-    let seeding: Vec<&InputDecl> = declared
+    let filling: Vec<(&InputDecl, bool)> = declared
         .iter()
-        .filter(|input| {
-            input.binds.iter().any(|slot| {
-                matches!(slot, InputSlot::Region(binding)
-                    if binding.region.as_str() == region && binding.template.is_none())
+        .flat_map(|input| {
+            input.binds.iter().filter_map(move |slot| match slot {
+                InputSlot::Region(binding) if binding.region.as_str() == region => {
+                    Some((input, binding.template.is_none()))
+                }
+                _ => None,
             })
         })
         .collect();
-    match seeding.as_slice() {
-        [one] => one.name.to_string(),
-        _ => region.to_string(),
+    match filling.as_slice() {
+        [] => None,
+        [(one, true)] => Some(one.name.to_string()),
+        _ => Some(region.to_string()),
     }
 }
 

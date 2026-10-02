@@ -230,6 +230,36 @@ async fn a_refusal_is_one_message_under_the_old_statuses() {
     );
 }
 
+/// A region no input of the blueprint fills is left out, as older servers
+/// left it, and the answer says so; the rest of the body still starts the
+/// run. A file named in that text is not read.
+#[tokio::test]
+async fn a_region_no_input_fills_is_left_out_with_a_warning() {
+    let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
+        run_id: "compat-probe-2".into(),
+        warnings: Default::default(),
+    }));
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(work.path().join("notes.txt"), "a note").unwrap();
+    let body = serde_json::json!({
+        "blueprint": "compat-probe",
+        "task": "go",
+        "workdir": work.path(),
+        "regions": {"query": "what to look up", "scratch": "see @notes.txt"},
+    });
+    let (status, answer) = send(state, spawn(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["run_id"], "compat-probe-2");
+    let warnings = answer["warnings"].as_array().expect("a warning");
+    assert_eq!(warnings.len(), 1, "{answer}");
+    let said = warnings[0].as_str().unwrap();
+    assert!(said.contains("regions.scratch"), "{said}");
+    let request = spawned(&seen);
+    let names: Vec<&str> = request.inputs.keys().map(String::as_str).collect();
+    assert_eq!(names, ["subject", "task"]);
+    assert!(request.attachments.is_empty());
+}
+
 #[tokio::test]
 async fn a_body_that_cannot_be_a_run_is_refused_before_the_daemon() {
     let cases = [
@@ -314,15 +344,27 @@ fn a_region_is_named_as_the_input_that_fills_it() {
         .unwrap()
         .run_graph()
         .inputs;
-    assert_eq!(super::input_for_region(&inputs, "task"), "task");
-    assert_eq!(super::input_for_region(&inputs, "query"), "subject");
-    assert_eq!(super::input_for_region(&inputs, "notes"), "notes");
-    assert_eq!(super::input_for_region(&inputs, "nowhere"), "nowhere");
+    assert_eq!(
+        super::input_for_region(&inputs, "task").as_deref(),
+        Some("task")
+    );
+    assert_eq!(
+        super::input_for_region(&inputs, "query").as_deref(),
+        Some("subject")
+    );
+    assert_eq!(
+        super::input_for_region(&inputs, "notes").as_deref(),
+        Some("notes")
+    );
+    assert_eq!(super::input_for_region(&inputs, "nowhere"), None);
     // Two inputs filling one region: neither is the region's.
     let mut twice = inputs.clone();
     twice.push(inputs[1].clone());
     twice[3].name = leviath_runtime::spec::names::InputName::new("other").unwrap();
-    assert_eq!(super::input_for_region(&twice, "query"), "query");
+    assert_eq!(
+        super::input_for_region(&twice, "query").as_deref(),
+        Some("query")
+    );
 }
 
 #[tokio::test]

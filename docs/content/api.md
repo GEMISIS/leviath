@@ -313,7 +313,8 @@ keeps working. They are kept for older clients only and will be removed, so writ
 
 The old body names a blueprint, a `task`, and text for `regions`. It becomes a spawn request and is
 checked like one. The task is the `task` input. Each region's text goes to the input of that name,
-or else to the one input that fills that region. Refusals answer `400` with every problem in one
+or else to the one input that fills that region. Text for a region no input fills is left out, and
+the answer's `warnings` list names it. Refusals answer `400` with every problem in one
 message, `403` for something this server does not allow, and `404` for a blueprint that is not
 installed.
 
