@@ -538,7 +538,13 @@ pub fn restore_interaction_point(
     }
 
     // Re-open the request in the hub and await it, exactly as a live dispatch would.
-    runtime.spawn(run_interaction_point(
+    let lane = PromptLane {
+        hub,
+        outcomes,
+        wake,
+    };
+    let lost = (lane.outcomes.clone(), lane.wake.clone());
+    let prompt = run_interaction_point(
         PointAsk {
             entity,
             agent_id,
@@ -547,12 +553,31 @@ pub fn restore_interaction_point(
             body: state.body,
             round: state.round,
         },
-        PromptLane {
-            hub,
-            outcomes,
-            wake,
-        },
-    ));
+        lane,
+    );
+    supervise(&runtime, lost, entity, Box::pin(prompt));
+}
+
+/// Where a lost prompt's answer is reported, and the loop to wake.
+type LostLane = (UnboundedSender<InteractionPointOutcome>, Arc<Notify>);
+
+/// Run `entity`'s point prompt on `runtime`, supervised: a prompt task that
+/// dies without reporting is read as a prompt closed unanswered, the neutral
+/// answer a cancelled one gives, so the agent is not left parked on it.
+fn supervise(
+    runtime: &Handle,
+    lost: LostLane,
+    entity: Entity,
+    prompt: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) {
+    let (outcomes, wake) = lost;
+    crate::lane_supervisor::spawn_supervised(runtime, "interaction point", prompt, move |_| {
+        let _ = outcomes.send(InteractionPointOutcome {
+            entity,
+            reply: PointReply::Answer(InteractionResponse::text("", "")),
+        });
+        wake.notify_one();
+    });
 }
 
 // ─── Systems ─────────────────────────────────────────────────────────────────
@@ -709,7 +734,7 @@ pub(crate) fn dispatch_interaction_point(
                 .insert((AwaitingInteractionPoint, PointBody(body)));
             continue;
         }
-        stage.runtime.spawn(run_interaction_point(
+        let prompt = run_interaction_point(
             PointAsk {
                 entity,
                 agent_id: state.agent_id.clone(),
@@ -723,7 +748,13 @@ pub(crate) fn dispatch_interaction_point(
                 outcomes: stage.outcomes.clone(),
                 wake: stage.wake.clone(),
             },
-        ));
+        );
+        supervise(
+            &stage.runtime,
+            (stage.outcomes.clone(), stage.wake.clone()),
+            entity,
+            Box::pin(prompt),
+        );
         commands
             .entity(entity)
             .remove::<ReadyForInteractionPoint>()
@@ -804,7 +835,7 @@ pub(crate) fn collect_interaction_point(
                 // world without a hub) the point is put again as it was.
                 Err(user_text) => match (&lane, &hub) {
                     (Some(lane), Some(hub)) => {
-                        lane.runtime.spawn(run_point_edit(
+                        let prompt = run_point_edit(
                             PointEditAsk {
                                 entity: out.entity,
                                 agent_id: state.agent_id.clone(),
@@ -820,7 +851,13 @@ pub(crate) fn collect_interaction_point(
                                 outcomes: lane.outcomes.clone(),
                                 wake: lane.wake.clone(),
                             },
-                        ));
+                        );
+                        supervise(
+                            &lane.runtime,
+                            (lane.outcomes.clone(), lane.wake.clone()),
+                            out.entity,
+                            Box::pin(prompt),
+                        );
                         commands
                             .entity(out.entity)
                             .insert(PendingPointEdit(user_text));
@@ -2226,6 +2263,30 @@ mod tests {
         assert!(world.get::<PendingPointEdit>(e).is_none());
         assert_eq!(world.get::<PlanBodyOverride>(e).unwrap().0, "edited body");
         assert!(world.get::<ReadyForInteractionPoint>(e).is_some());
+    }
+
+    /// A point prompt whose task dies before it reports is read as a prompt
+    /// closed unanswered, so the agent is not left parked on it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_point_prompt_that_panics_does_not_park_the_agent() {
+        let silent = crate::test_support::SilentPanics::install();
+        let (mut world, tx) = collect_world();
+        let e = spawn_awaiting(&mut world, vec![plan_point()]);
+        supervise(
+            &Handle::current(),
+            (tx, Arc::new(Notify::new())),
+            e,
+            Box::pin(async { panic!("the point prompt blew up") }),
+        );
+        for _ in 0..500 {
+            run_collect(&mut world);
+            if world.get::<AwaitingInteractionPoint>(e).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        drop(silent);
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_none());
     }
 
     /// With no hub to ask on, an edit option puts the point again unchanged.

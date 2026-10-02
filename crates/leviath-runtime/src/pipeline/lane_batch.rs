@@ -113,6 +113,12 @@ impl PendingBatch {
         self.decided.insert(call_id, decision);
     }
 
+    /// What was decided for the call `call_id`, once it is.
+    #[cfg(test)]
+    pub(crate) fn decision(&self, call_id: &str) -> Option<&Decision> {
+        self.decided.get(call_id)
+    }
+
     /// The lane call with id `call_id`, when the batch has one.
     pub(crate) fn call(&self, call_id: &str) -> Option<&leviath_providers::ToolCall> {
         self.lane_calls.iter().find(|c| c.id == call_id)

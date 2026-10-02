@@ -953,23 +953,18 @@ pub(crate) fn dispatch_tools(
         if let (false, Some((hub, gate_stage))) = (pending_prompts.is_empty(), interactive) {
             let n = pending_prompts.len();
             for (tool_id, name, taint, clearance) in pending_prompts {
-                gate_stage
-                    .runtime
-                    .spawn(crate::gate_prompt::run_gate_prompt(
-                        crate::gate_prompt::GatedCall {
-                            entity,
-                            agent_id: state.agent_id.clone(),
-                            tool_id,
-                            tool_name: name,
-                            taint,
-                            clearance,
-                        },
-                        crate::interaction_hub::PromptLane {
-                            hub: (*hub).clone(),
-                            outcomes: gate_stage.outcomes.clone(),
-                            wake: gate_stage.wake.clone(),
-                        },
-                    ));
+                crate::gate_prompt::ask(
+                    gate_stage,
+                    hub,
+                    crate::gate_prompt::GatedCall {
+                        entity,
+                        agent_id: state.agent_id.clone(),
+                        tool_id,
+                        tool_name: name,
+                        taint,
+                        clearance,
+                    },
+                );
             }
             commands
                 .entity(entity)

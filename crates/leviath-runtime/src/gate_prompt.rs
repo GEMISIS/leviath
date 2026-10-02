@@ -28,7 +28,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::dynamic_interaction::InteractionBackend;
-use crate::interaction_hub::PromptLane;
+use crate::interaction_hub::{InteractionHub, PromptLane};
 use crate::taint::GateResolution;
 
 /// Marks an agent holding its tool batch while `n` gate prompts are outstanding.
@@ -109,8 +109,6 @@ fn build_gate_request(
     )
 }
 
-/// Ask the user how to resolve a blocked outbound call, then report the
-/// resolution on the lane and wake the tick loop.
 /// The call being gated: who is asking, for what, and how the taint levels
 /// compare.
 ///
@@ -132,6 +130,44 @@ pub(crate) struct GatedCall {
     pub clearance: TaintLevel,
 }
 
+/// Put the blocked `call` to a person on `hub`, on a task of its own.
+pub(crate) fn ask(stage: &GatePromptStage, hub: &InteractionHub, call: GatedCall) {
+    let lost = GatePromptOutcome {
+        entity: call.entity,
+        tool_id: call.tool_id.clone(),
+        tool_name: call.tool_name.clone(),
+        taint: call.taint,
+        clearance: call.clearance,
+        resolution: GateResolution::Deny,
+    };
+    let prompt = run_gate_prompt(
+        call,
+        PromptLane {
+            hub: hub.clone(),
+            outcomes: stage.outcomes.clone(),
+            wake: stage.wake.clone(),
+        },
+    );
+    supervise(stage, lost, Box::pin(prompt));
+}
+
+/// Run a gate prompt on the lane's runtime, supervised: a prompt task that
+/// dies without reporting resolves as `lost`, a deny, so the batch it holds
+/// is not held for good and nothing over-cleared leaves on a crash.
+fn supervise(
+    stage: &GatePromptStage,
+    lost: GatePromptOutcome,
+    prompt: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) {
+    let (outcomes, wake) = (stage.outcomes.clone(), stage.wake.clone());
+    crate::lane_supervisor::spawn_supervised(&stage.runtime, "gate prompt", prompt, move |_| {
+        let _ = outcomes.send(lost);
+        wake.notify_one();
+    });
+}
+
+/// Ask the user how to resolve a blocked outbound call, then report the
+/// resolution on the lane and wake the tick loop.
 pub(crate) async fn run_gate_prompt(call: GatedCall, lane: PromptLane<GatePromptOutcome>) {
     let GatedCall {
         entity,
@@ -213,10 +249,7 @@ pub(crate) fn collect_gate_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Production reaches the hub only through `PromptLane`, so the type itself
-    // is named here rather than imported above and left unused there.
     use crate::components::AgentState;
-    use crate::interaction_hub::InteractionHub;
     use crate::pipeline::ReadyForTools;
     use crate::taint::TaintGate;
     use leviath_core::SecurityConfig;
@@ -393,6 +426,81 @@ mod tests {
         let mut s = Schedule::default();
         s.add_systems(collect_gate_prompt);
         s.run(world);
+    }
+
+    /// A gate prompt task that dies before it reports denies its call, the
+    /// gate's safe default, and the batch is re-armed rather than held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gate_prompt_that_panics_denies_instead_of_hanging() {
+        let silent = crate::test_support::SilentPanics::install();
+        let (mut world, _tx) = collect_world();
+        let (outcomes, results) = unbounded_channel();
+        world.insert_resource(GatePromptResults(results));
+        world.insert_resource(GatePromptStage {
+            outcomes,
+            wake: Arc::new(Notify::new()),
+            runtime: Handle::current(),
+        });
+        let e = world
+            .spawn((
+                state(),
+                AwaitingGatePrompt(1),
+                GateResolved::default(),
+                gate(),
+            ))
+            .id();
+        let lost = GatePromptOutcome {
+            entity: e,
+            tool_id: "c1".to_string(),
+            tool_name: "shell".to_string(),
+            taint: TaintLevel::Private,
+            clearance: TaintLevel::Public,
+            resolution: GateResolution::Deny,
+        };
+        supervise(
+            world.resource::<GatePromptStage>(),
+            lost,
+            Box::pin(async { panic!("the gate prompt blew up") }),
+        );
+        for _ in 0..500 {
+            run_collect(&mut world);
+            if world.get::<AwaitingGatePrompt>(e).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        drop(silent);
+        assert!(world.get::<AwaitingGatePrompt>(e).is_none(), "not held");
+        assert!(world.get::<ReadyForTools>(e).is_some(), "re-armed");
+        let resolved = world.get::<GateResolved>(e).unwrap();
+        assert!(resolved.denied.contains_key("c1"), "{resolved:?}");
+        assert!(resolved.approved.is_empty());
+    }
+
+    /// `ask` puts the call on the hub; answering it reports the resolution.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ask_puts_the_call_to_a_person() {
+        let hub = InteractionHub::new();
+        let (outcomes, mut results) = unbounded_channel();
+        let stage = GatePromptStage {
+            outcomes,
+            wake: Arc::new(Notify::new()),
+            runtime: Handle::current(),
+        };
+        ask(&stage, &hub, gated_call());
+        let mut open = Vec::new();
+        for _ in 0..500 {
+            open = hub.pending();
+            if !open.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        let mut answer = InteractionResponse::text(&open[0].1.id, "");
+        answer.choice_index = Some(0);
+        hub.answer(answer);
+        let out = results.recv().await.expect("reported");
+        assert_eq!(out.resolution, GateResolution::AllowOnce);
     }
 
     #[test]

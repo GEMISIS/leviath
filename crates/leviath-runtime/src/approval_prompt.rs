@@ -44,8 +44,9 @@ pub(crate) struct ApprovalOutcome {
     pub entity: Entity,
     /// The call's id.
     pub call_id: String,
-    /// The answer.
-    pub response: InteractionResponse,
+    /// The answer, or why the prompt ended without one: its task died
+    /// before it reported.
+    pub answer: Result<InteractionResponse, String>,
     /// The hub's prompt timeout, when one is configured: the prompt that
     /// closed unanswered says so.
     pub timeout_secs: Option<u64>,
@@ -80,14 +81,42 @@ pub(crate) fn install(world: &mut World, runtime: Handle, wake: Arc<Notify>) {
 /// Put `ask` to a person, on a task of its own.
 pub(crate) fn ask(lane: (&InteractionHub, &ApprovalStage), ask: ApprovalAsk) {
     let (hub, stage) = lane;
-    stage.runtime.spawn(run_approval_prompt(
+    let (entity, call_id) = (ask.entity, ask.call.id.clone());
+    let prompt = run_approval_prompt(
         ask,
         PromptLane {
             hub: hub.clone(),
             outcomes: stage.outcomes.clone(),
             wake: stage.wake.clone(),
         },
-    ));
+    );
+    supervise(stage, entity, call_id, Box::pin(prompt));
+}
+
+/// Run the prompt for `entity`'s call `call_id` on the lane's runtime,
+/// supervised: a prompt task that dies without reporting still settles the
+/// call, or its batch would wait on it for good.
+fn supervise(
+    stage: &ApprovalStage,
+    entity: Entity,
+    call_id: String,
+    prompt: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) {
+    let (outcomes, wake) = (stage.outcomes.clone(), stage.wake.clone());
+    crate::lane_supervisor::spawn_supervised(
+        &stage.runtime,
+        "approval prompt",
+        prompt,
+        move |why| {
+            let _ = outcomes.send(ApprovalOutcome {
+                entity,
+                call_id,
+                answer: Err(why),
+                timeout_secs: None,
+            });
+            wake.notify_one();
+        },
+    );
 }
 
 /// Ask a person to approve a call and report the answer as given.
@@ -111,7 +140,7 @@ async fn run_approval_prompt(ask: ApprovalAsk, lane: PromptLane<ApprovalOutcome>
     let _ = lane.outcomes.send(ApprovalOutcome {
         entity,
         call_id: call.id,
-        response,
+        answer: Ok(response),
         timeout_secs: backend.timeout_secs(),
     });
     lane.wake.notify_one();
@@ -136,6 +165,14 @@ pub fn unanswered_approval_result(tool: &str, timeout_secs: Option<u64>) -> Stri
              to \"allow\" for the stage."
         ),
     }
+}
+
+/// The tool result an approval prompt whose task died gives: nobody was
+/// asked, so nothing ran, and `why` says what went wrong.
+pub fn lost_approval_result(tool: &str, why: &str) -> String {
+    format!(
+        "[denied] the approval prompt for '{tool}' failed before anyone answered it ({why}); the call did not run."
+    )
 }
 
 /// The tool result a declined approval gives the model.
@@ -185,17 +222,28 @@ pub(crate) fn collect_approvals(
             .call(&out.call_id)
             .map(|c| c.name.clone())
             .unwrap_or_default();
-        let decision = match out.response.approved {
+        let response = match out.answer {
+            Ok(response) => response,
+            Err(why) => {
+                batch.decide(
+                    out.call_id,
+                    Decision::Refuse(lost_approval_result(&tool, &why)),
+                );
+                commands.entity(out.entity).remove::<AwaitingApproval>();
+                continue;
+            }
+        };
+        let decision = match response.approved {
             Some(true) => {
                 if let Some(mut grants) = grants {
-                    grants.grant(out.response.scope, &asked.keys);
+                    grants.grant(response.scope, &asked.keys);
                 }
                 if let Some(mut ledger) = ledger {
                     ledger.written = ledger.written.saturating_add(asked.charge);
                 }
                 Decision::Run
             }
-            Some(false) => Decision::Refuse(declined_result(&tool, out.response.deny_feedback())),
+            Some(false) => Decision::Refuse(declined_result(&tool, response.deny_feedback())),
             // The hub's neutral answer: the prompt was cancelled, or (only when
             // a timeout is configured) nobody answered it in time. Saying
             // "declined" here would blame a person who never saw the prompt.
