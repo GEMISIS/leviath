@@ -73,6 +73,23 @@ fn nothing_found_says_what_to_pass() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("lev blueprint migrate"), "{err}");
+
+    // An installed name still in the older format says the same, and the
+    // lookup leaves the install exactly as it was.
+    let agents = tempfile::tempdir().unwrap();
+    let installed = agents.path().join("helper");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(installed.join("agent.leviath"), "old").unwrap();
+    let err = find_blueprint_in("helper", Some(agents.path()), Path::new(""))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("lev daemon restart"), "{err}");
+    assert!(err.contains(&installed.display().to_string()), "{err}");
+    assert_eq!(
+        std::fs::read(installed.join("agent.leviath")).unwrap(),
+        b"old"
+    );
+    assert!(!installed.join(FILE_NAME).exists());
 }
 
 #[test]

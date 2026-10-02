@@ -26,9 +26,6 @@ pub(crate) fn loaded_at(path: &Path) -> Option<LoadedBlueprint> {
 /// <name>` finds what `lev add` wrote when the override is set.
 pub(crate) fn find_blueprint(path: &str) -> anyhow::Result<PathBuf> {
     let agents_dir = leviath_core::paths::agents_dir();
-    // Blueprints a previous release installed are upgraded first, so a
-    // machine with no daemon running finds them under their names.
-    crate::blueprint_upgrade::upgrade_reported(agents_dir.as_deref(), &[]);
     find_blueprint_in(path, agents_dir.as_deref(), Path::new(""))
 }
 
@@ -58,16 +55,22 @@ pub(crate) fn find_blueprint_in(
         .flatten()
         .find(|c| c.is_file())
         .ok_or_else(|| {
-            // A directory holding only the manifest an earlier release wrote
-            // is one command from runnable, so say which.
-            let old = p.join("agent.leviath");
-            match old.is_file() {
-                true => anyhow::anyhow!(
-                    "'{path}' holds an agent.leviath from an earlier release, and no \
-                     {FILE_NAME}. Convert it with `lev blueprint migrate {path} -o {}`.",
-                    p.join(FILE_NAME).display()
+            // A directory, or an install, holding only the manifest an earlier
+            // release wrote is one command from runnable, so say which.
+            let old = [Some(p.to_path_buf()), agents_dir.map(|d| d.join(path))]
+                .into_iter()
+                .flatten()
+                .find(|d| d.join("agent.leviath").is_file());
+            match old {
+                Some(dir) => anyhow::anyhow!(
+                    "'{path}' is an agent.leviath from an earlier release, at {}, with no \
+                     {FILE_NAME}. The daemon upgrades installed blueprints when it starts \
+                     (`lev daemon restart`), or convert it with `lev blueprint migrate {} -o {}`.",
+                    dir.display(),
+                    dir.display(),
+                    dir.join(FILE_NAME).display()
                 ),
-                false => anyhow::anyhow!(
+                None => anyhow::anyhow!(
                     "Could not find a blueprint for '{path}'. Pass a path to a directory \
                      containing {FILE_NAME}, or an installed agent name (see `lev list`)."
                 ),

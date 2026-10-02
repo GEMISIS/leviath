@@ -173,9 +173,11 @@ pub(crate) async fn execute(args: ListArgs) -> anyhow::Result<()> {
     // agent directories with no hint why (a missing file loads as defaults).
     let config = Config::load()?;
     let agents_dir = get_agents_dir()?;
-    // Blueprints a previous release installed are upgraded first, so they
-    // are listed under their names.
-    crate::blueprint_upgrade::upgrade_reported(Some(&agents_dir), &config.agent_paths);
+    // Blueprints a previous release installed are not read until the daemon
+    // upgrades them, so each is named with the way to do it.
+    for line in crate::blueprint_upgrade::pending_lines(Some(&agents_dir), &config.agent_paths) {
+        eprintln!("{line}");
+    }
     let cwd = resolve_cwd().unwrap_or_default();
     let exe_dir = std::env::current_exe()
         .ok()

@@ -228,7 +228,12 @@ pub(crate) async fn setup_daemon_host_with(
     let agents_dir = leviath_core::paths::agents_dir();
     // Blueprints a previous release installed become `agent.toml` first, so
     // they are found by name and an old run's workers are pinned to them.
-    crate::blueprint_upgrade::upgrade_logged(agents_dir.as_deref(), &config.agent_paths);
+    crate::blueprint_upgrade::upgrade_at_start(
+        &runs_dir,
+        &crate::runstate::runs_dir(),
+        agents_dir.as_deref(),
+        &config.agent_paths,
+    );
     crate::daemon::convert_old::convert_at_start(
         &runs_dir,
         crate::daemon::convert_old::AtStart {

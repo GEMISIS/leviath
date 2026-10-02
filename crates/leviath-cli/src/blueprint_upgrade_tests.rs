@@ -53,7 +53,12 @@ fn an_old_install_of_a_bundled_blueprint_is_replaced() {
     let plan = crate::bundled::plan_agent_actions(&agents);
     let action = plan.iter().find(|(a, _)| a.name == bundled.name).unwrap();
     assert_eq!(action.1, crate::bundled::AgentAction::UpToDate);
-    assert!(!agents.join(format!(".{}.upgrading", bundled.name)).exists());
+    let leftovers: Vec<_> = std::fs::read_dir(&agents)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
 /// A bundled blueprint whose replacement cannot be written is left as it was.
@@ -65,7 +70,8 @@ fn a_bundled_blueprint_that_cannot_be_replaced_is_left_alone() {
     let dir = agents.join(bundled.name);
     old_blueprint(&dir, b"old");
     // Where the replacement is staged is taken by a file.
-    std::fs::write(agents.join(format!(".{}.upgrading", bundled.name)), b"x").unwrap();
+    let staging = format!(".{}.upgrading-{}", bundled.name, std::process::id());
+    std::fs::write(agents.join(staging), b"x").unwrap();
 
     let done = upgrade_all(Some(&agents), &[]);
     let Outcome::Failed(problems) = &done[0].outcome else {
@@ -118,45 +124,117 @@ fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
     assert_eq!(outcome(&named), Outcome::Migrated);
     assert_eq!(outcome(&lone), Outcome::Migrated);
 
-    let lines = report_lines(&done);
-    assert!(lines.iter().any(|l| l.contains("mystery")));
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("migrated blueprint 'lone'"))
-    );
+    let unread_outcome = format!("{:?}", outcome(&unread));
+    assert!(unread_outcome.contains("mystery"), "{unread_outcome}");
 }
 
-/// What a command and the daemon say about each upgrade.
+/// The daemon logs every outcome, and a command only names what is waiting,
+/// leaving every directory as it was.
 #[test]
-fn every_outcome_is_said() {
-    let done = vec![
-        Upgraded {
-            dir: PathBuf::from("/a/one"),
-            outcome: Outcome::Migrated,
-        },
-        Upgraded {
-            dir: PathBuf::from("/a/two"),
-            outcome: Outcome::Reinstalled,
-        },
-        Upgraded {
-            dir: PathBuf::from("/"),
-            outcome: Outcome::Failed(vec!["bad key".into()]),
-        },
-    ];
-    let lines = report_lines(&done);
-    assert!(lines[0].starts_with("migrated blueprint 'one'"));
-    assert!(lines[1].contains("bundled blueprint 'two'"));
-    assert!(lines[2].contains("blueprint ''"));
-    assert_eq!(lines[3], "  - bad key");
-
+fn the_daemon_upgrades_and_a_command_only_says_so() {
     let home = tempfile::tempdir().unwrap();
     let agents = home.path().join("agents");
     old_blueprint(&agents.join(crate::bundled::BUNDLED_AGENTS[0].name), b"old");
     old_blueprint(&agents.join("broken"), b"not toml [");
     old_blueprint(&agents.join("probe"), old_probe().as_bytes());
     crate::test_support::with_tracing(|| upgrade_logged(Some(&agents), &[]));
-    old_blueprint(&agents.join("broken2"), b"not toml [");
-    upgrade_reported(Some(&agents), &[]);
-    assert!(agents.join("broken2").join(OLD_MANIFEST).is_file());
+
+    let waiting = agents.join("waiting");
+    old_blueprint(&waiting, b"not toml [");
+    let lines = pending_lines(Some(&agents), &[]);
+    let line = lines
+        .iter()
+        .find(|l| l.contains("'waiting'"))
+        .expect("the waiting blueprint is named");
+    assert!(line.contains("lev daemon restart"), "{line}");
+    assert!(line.contains("lev blueprint migrate"), "{line}");
+    assert_eq!(
+        std::fs::read(waiting.join(OLD_MANIFEST)).unwrap(),
+        b"not toml ["
+    );
+    assert!(!waiting.join(leviath_blueprint::FILE_NAME).exists());
+    assert_eq!(name_of(Path::new("/")), "");
+}
+
+/// A daemon over its home's own runs upgrades; one over any other runs
+/// directory (a test's) leaves the blueprints alone.
+#[test]
+fn only_a_daemon_over_its_homes_runs_upgrades() {
+    let home = tempfile::tempdir().unwrap();
+    let agents = home.path().join("agents");
+    let runs = home.path().join("runs");
+    let probe = agents.join(crate::bundled::BUNDLED_AGENTS[0].name);
+    old_blueprint(&probe, b"old");
+
+    upgrade_at_start(&home.path().join("elsewhere"), &runs, Some(&agents), &[]);
+    assert!(probe.join(OLD_MANIFEST).is_file());
+
+    upgrade_at_start(&runs, &runs, Some(&agents), &[]);
+    assert!(probe.join("legacy").join(OLD_MANIFEST).is_file());
+}
+
+/// A rename stand-in that fails on the calls whose numbers (from 1) are in
+/// `fail_on`, and does the others for real.
+fn renames(fail_on: &'static [usize]) -> impl Fn(&Path, &Path) -> std::io::Result<()> {
+    let calls = std::cell::Cell::new(0);
+    move |from, to| {
+        calls.set(calls.get() + 1);
+        match fail_on.contains(&calls.get()) {
+            true => Err(std::io::Error::other(format!(
+                "rename {} failed",
+                calls.get()
+            ))),
+            false => std::fs::rename(from, to),
+        }
+    }
+}
+
+/// Whatever step of a reinstall fails, the user's old files are never
+/// deleted: they are back where they were, or named where they are.
+#[test]
+fn a_failed_reinstall_never_loses_the_old_files() {
+    let bundled = &crate::bundled::BUNDLED_AGENTS[0];
+    let setup = || {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("agents");
+        let dir = agents.join(bundled.name);
+        old_blueprint(&dir, b"mine");
+        (home, agents, dir)
+    };
+    let failed = |r: Result<Outcome, Vec<String>>| r.unwrap_err().join("; ");
+
+    // Moving the old one aside fails: it is untouched.
+    let (_home, agents, dir) = setup();
+    let e = failed(reinstall_with(&agents, &dir, bundled, &renames(&[1])));
+    assert!(e.contains("rename 1 failed"), "{e}");
+    assert_eq!(std::fs::read(dir.join(OLD_MANIFEST)).unwrap(), b"mine");
+
+    // Putting the bundled one in place fails: the old one is put back.
+    let (_home, agents, dir) = setup();
+    let e = failed(reinstall_with(&agents, &dir, bundled, &renames(&[2])));
+    assert!(e.contains("rename 2 failed"), "{e}");
+    assert_eq!(std::fs::read(dir.join(OLD_MANIFEST)).unwrap(), b"mine");
+
+    // ... and if putting it back fails too, the error says where it is.
+    let (_home, agents, dir) = setup();
+    let e = failed(reinstall_with(&agents, &dir, bundled, &renames(&[2, 3])));
+    let aside = aside_of(&agents, bundled);
+    assert!(e.contains(&aside.display().to_string()), "{e}");
+    assert_eq!(std::fs::read(aside.join(OLD_MANIFEST)).unwrap(), b"mine");
+
+    // Filing the old one under legacy/ fails: the bundled one is in place
+    // and the old files are named where they are.
+    let (_home, agents, dir) = setup();
+    let e = failed(reinstall_with(&agents, &dir, bundled, &renames(&[3])));
+    assert!(e.contains("the bundled one is in place"), "{e}");
+    assert!(dir.join(leviath_blueprint::FILE_NAME).is_file());
+    assert_eq!(
+        std::fs::read(aside_of(&agents, bundled).join(OLD_MANIFEST)).unwrap(),
+        b"mine"
+    );
+}
+
+/// Where a reinstall in this process moves an old directory aside.
+fn aside_of(agents: &Path, bundled: &crate::bundled::BundledAgent) -> PathBuf {
+    agents.join(format!(".{}.old-{}", bundled.name, std::process::id()))
 }
