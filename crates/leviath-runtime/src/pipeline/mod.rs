@@ -23,7 +23,7 @@ use crate::components::{
     MessageInbox,
 };
 use crate::fanout::FanOutWaiting;
-use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
+use crate::inference_bridge::{InferenceJob, InferenceOutcome};
 use crate::inference_pool::InferencePools;
 use crate::interaction_hub::InteractionHub;
 use crate::persistence::{RunMetadata, TokenTotals, build_run_meta};

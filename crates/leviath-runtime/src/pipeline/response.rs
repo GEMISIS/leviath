@@ -153,6 +153,15 @@ type InferenceQuery = (
     Option<&'static mut crate::pipeline::PromptCalibration>,
 );
 
+/// The provider circuit breaker, as the collect system reads and feeds it.
+#[derive(bevy_ecs::system::SystemParam)]
+pub(crate) struct Breaker<'w> {
+    /// Which providers' circuits are open, and their failure counts.
+    circuits: Option<ResMut<'w, ProviderCircuits>>,
+    /// When a circuit opens and how long it stays open.
+    policy: Option<Res<'w, CircuitPolicy>>,
+}
+
 /// Inference-collect system: drain completed inferences and apply them. A
 /// success is stored on the agent (bumping its iteration) and the agent advances
 /// to `ProcessResponse`; an error marks the agent `Error`. An outcome for an
@@ -161,16 +170,20 @@ type InferenceQuery = (
 pub(crate) fn collect_inference(
     mut results: ResMut<InferenceResults>,
     mut agents: Query<InferenceQuery, With<AwaitingInference>>,
-    mut circuits: Option<ResMut<ProviderCircuits>>,
-    policy: Option<Res<CircuitPolicy>>,
+    mut calls: crate::inference_call::CallParams,
+    breaker: Breaker,
     persist: Option<Res<crate::pipeline::persist::PersistenceStage>>,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
+    let Breaker {
+        mut circuits,
+        policy,
+    } = breaker;
     crate::tick_scope::clear();
     let policy = policy.map(|p| *p).unwrap_or_default();
     let now = chrono::Utc::now().timestamp();
-    while let Ok(outcome) = results.0.try_recv() {
+    while let Ok(mut outcome) = results.0.try_recv() {
         let Ok((
             mut state,
             md,
@@ -195,7 +208,13 @@ pub(crate) fn collect_inference(
             commands
                 .entity(outcome.entity)
                 .remove::<AwaitingInference>()
-                .remove::<InFlightWork>();
+                .remove::<InFlightWork>()
+                .remove::<crate::inference_call::InferenceCall>();
+            continue;
+        }
+        // A failed trip the call will make again: the agent keeps waiting,
+        // and `fire_due_calls` sends the next trip when its backoff is over.
+        if calls.settle(&mut outcome, &mut commands) != crate::inference_call::Next::Done {
             continue;
         }
         // The user paused the run while this inference was in flight. Pause is

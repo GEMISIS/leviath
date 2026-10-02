@@ -1426,6 +1426,7 @@ async fn a_paused_run_holding_a_landed_response_is_not_parked() {
                 attempt_id: String::new(),
                 result: Err(leviath_providers::ProviderError::Other("held".to_string())),
                 pricing: None,
+                attempt: None,
             },
             lane: crate::pipeline::HeldLane::Stage,
         },

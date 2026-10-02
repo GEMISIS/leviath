@@ -1108,6 +1108,113 @@ async fn dispatch_uses_the_configured_retry_schedule() {
     assert!(outcome.result.is_ok());
 }
 
+/// A failed trip is decided on in the world: collect leaves the agent waiting
+/// with its call held, and once the backoff is over the next trip answers and
+/// the turn is applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_waits_on_a_retried_trip_and_applies_the_answer() {
+    let (mut world, rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    world.resource_mut::<Providers>().0.register(
+        "cfg".to_string(),
+        Arc::new(crate::inference_call::tests::Flaky::failing(1)),
+    );
+    world.insert_resource(InferenceRetryTuning {
+        max_attempts: 3,
+        base_delay_ms: 1,
+    });
+    world.insert_resource(InferenceResults(rx));
+    let e = world
+        .spawn((
+            agent_state(),
+            window(),
+            stage("m", vec![], None),
+            ReadyToInfer,
+        ))
+        .id();
+    run(&mut world);
+    let mut schedule = Schedule::default();
+    schedule.add_systems((crate::inference_call::fire_due_calls, collect_inference).chain());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut waited = false;
+    while world.get::<ProcessResponse>(e).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn never landed"
+        );
+        schedule.run(&mut world);
+        waited |= world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_some_and(|c| c.waiting());
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(waited, "the failed trip waited in the world");
+    assert!(
+        world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_none()
+    );
+    assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 1);
+}
+
+/// The routing lane's collect waits on a failed trip the same way: the agent
+/// stays mid-route with its call held rather than failing the stage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_choice_waits_on_a_retried_trip() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    world.resource_mut::<Providers>().0.register(
+        "cfg".to_string(),
+        Arc::new(crate::inference_call::tests::Flaky::failing(1)),
+    );
+    let (ttx, trx) = mpsc::unbounded_channel();
+    world.resource_mut::<InferenceStage>().transition_outcomes = ttx;
+    world.insert_resource(TransitionResults(trx));
+    let bp = blueprint(vec![stage_named("a", None, false, None)]);
+    let e = spawn_choosing_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+    let mut schedule = Schedule::default();
+    schedule.add_systems(dispatch_transition_choice);
+    schedule.run(&mut world);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        run_collect_transition(&mut world);
+        if world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_some_and(|c| c.waiting())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the trip never came back"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(world.get::<AwaitingTransitionResponse>(e).is_some());
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Active
+    );
+}
+
+/// Settle `outcome` against the call its agent holds, as the collect systems
+/// do, for a test that reads the lane directly and still wants what the world
+/// records when a trip comes back.
+fn settle(world: &mut World, outcome: &mut InferenceOutcome) -> crate::inference_call::Next {
+    let mut state = bevy_ecs::system::SystemState::<(
+        Query<&mut crate::inference_call::InferenceCall>,
+        Option<Res<InferenceStage>>,
+        Commands,
+    )>::new(world);
+    let (mut calls, stage, mut commands) = state.get_mut(world).expect("the params");
+    let next = crate::inference_call::settle_call(
+        calls.get_mut(outcome.entity).ok(),
+        outcome,
+        stage.as_deref(),
+        &mut commands,
+    );
+    state.apply(world);
+    next
+}
+
 /// A dispatched job journals its attempt, carrying the run, the stage and the
 /// name the run calls the provider by - none of which the retry loop knows on
 /// its own, which is why the dispatch system hands them over with the request.
@@ -1127,7 +1234,9 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     ));
 
     run(&mut world);
-    assert!(rx.recv().await.expect("outcome").result.is_ok());
+    let mut outcome = rx.recv().await.expect("outcome");
+    settle(&mut world, &mut outcome);
+    assert!(outcome.result.is_ok());
 
     // One lane carries every kind of record the run makes - a usage record lands
     // on this one from the response system, a context change from the window - so
@@ -1143,8 +1252,8 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     })
     .expect("the journal is still open");
 
-    // The attempt record is appended before the outcome is reported, so the
-    // outcome arriving means the append has already been sent.
+    // The world appends the attempt record when it settles the trip, so the
+    // settling above means the append has already been sent.
     let records = crate::inference_bridge::journaled_attempts(&mut journal);
     assert_eq!(records.len(), 1, "{records:?}");
     let record = &records[0];
@@ -1203,7 +1312,9 @@ async fn a_captured_run_journals_the_request_it_sent_and_the_window_it_came_from
     ));
 
     run(&mut world);
-    assert!(rx.recv().await.expect("outcome").result.is_ok());
+    let mut outcome = rx.recv().await.expect("outcome");
+    settle(&mut world, &mut outcome);
+    assert!(outcome.result.is_ok());
 
     let records = crate::inference_bridge::journaled_attempts(&mut journal);
     assert_eq!(records.len(), 1, "{records:?}");
@@ -1527,6 +1638,7 @@ fn collect_applies_ok_and_advances_to_process_response() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1560,6 +1672,7 @@ fn collect_holds_a_success_that_lands_on_a_paused_agent() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1610,6 +1723,7 @@ fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1654,6 +1768,7 @@ fn collect_choice_parks_without_a_stage_log_to_write_to() {
             "refused",
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect_transition(&mut world);
@@ -1710,6 +1825,7 @@ fn collect_parks_a_run_whose_provider_is_unreachable() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1771,6 +1887,7 @@ fn a_run_with_no_stage_log_still_parks_on_an_unreachable_provider() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1793,6 +1910,7 @@ fn collect_marks_error_on_failure() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1848,6 +1966,7 @@ fn an_unusable_provider_fails_over_instead_of_killing_the_run() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1889,6 +2008,7 @@ fn failover_is_recorded_in_the_stage_log() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1927,6 +2047,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
             "[timeout] the provider went quiet".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1971,6 +2092,7 @@ fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2011,6 +2133,7 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2067,6 +2190,7 @@ fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2106,6 +2230,7 @@ fn a_credits_pause_records_the_remedy_on_the_run() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2136,6 +2261,7 @@ fn the_credits_pause_copes_without_a_stage_log_buffer() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2166,6 +2292,7 @@ fn an_exhausted_fallback_list_still_terminates_on_a_dead_key() {
             detail: "HTTP 401 Unauthorized".to_string(),
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2195,6 +2322,7 @@ fn an_ordinary_error_does_not_burn_a_fallback() {
             "HTTP 400: bad request".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2229,6 +2357,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
             attempt_id: String::new(),
             result: Err(credits_exhausted()),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
         run_collect(&mut world);
@@ -2250,6 +2379,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -2297,6 +2427,7 @@ fn a_success_between_failures_clears_the_count_end_to_end() {
             attempt_id: String::new(),
             result,
             pricing: None,
+            attempt: None,
         })
         .unwrap();
         run_collect(world);
@@ -2360,6 +2491,7 @@ fn a_slow_provider_keeps_its_place_where_a_refused_one_loses_it() {
                 attempt_id: String::new(),
                 result: Err(fail_with(label)),
                 pricing: None,
+                attempt: None,
             })
             .unwrap();
             run_collect(&mut world);
@@ -2406,6 +2538,7 @@ fn an_ordinary_error_does_not_count_against_the_provider() {
             "HTTP 400: bad request".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2432,6 +2565,7 @@ fn collect_works_without_the_breaker_installed() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2460,6 +2594,7 @@ fn an_unusable_provider_without_a_stage_component_still_terminates() {
             detail: "HTTP 401 Unauthorized".to_string(),
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2699,6 +2834,7 @@ fn collect_inference_logs_a_produced_part_the_run_dropped() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2748,6 +2884,7 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3010,6 +3147,7 @@ fn collect_does_not_learn_the_cost_of_the_bytes_a_request_sent() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3038,6 +3176,7 @@ fn collect_learns_the_drift_between_what_was_believed_and_what_was_charged() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3073,6 +3212,7 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3108,6 +3248,7 @@ fn collect_learns_from_a_refused_request_too() {
             max: 1_350,
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3134,6 +3275,7 @@ fn collect_calibrates_nothing_when_there_was_no_estimate() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3250,6 +3392,7 @@ fn collect_inference_drops_a_response_for_a_cancelled_run() {
         attempt_id: String::new(),
         result: Ok(resp("too late")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3285,6 +3428,7 @@ fn collect_inference_skips_empty_output_but_logs_tokens() {
         attempt_id: String::new(),
         result: Ok(resp("   ")), // whitespace-only ⇒ no output line
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3312,6 +3456,7 @@ fn collect_inference_error_buffers_error_line() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3339,6 +3484,7 @@ fn collect_inference_tolerates_cursor_beyond_ledger() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -4504,6 +4650,7 @@ fn collect_drops_outcome_for_non_awaiting_agent() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -4539,6 +4686,7 @@ fn collect_inference_accumulates_token_totals() {
         attempt_id: String::new(),
         result: Ok(r),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -10059,6 +10207,7 @@ fn collect_choice_errors_when_system_prompt_overflows() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -14995,6 +15144,7 @@ fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: Some(leviath_providers::ModelPricing::flat(1_000_000.0, 0.0)),
+        attempt: None,
     })
     .unwrap();
 
@@ -15038,6 +15188,7 @@ fn a_self_transition_starts_a_second_visit_of_the_same_stage() {
         attempt_id: String::new(),
         result: Ok(resp("a")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15074,6 +15225,7 @@ fn collect_choice_holds_an_outcome_that_lands_on_a_paused_agent() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15134,6 +15286,7 @@ fn collect_choice_parks_a_run_the_provider_could_not_be_reached_for() {
             "the provider never answered",
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15199,6 +15352,7 @@ fn collect_choice_still_fails_a_stage_on_an_error_nobody_can_resume_past() {
             "not JSON".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15230,6 +15384,7 @@ fn collect_choice_enters_chosen_stage() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15276,6 +15431,7 @@ fn a_routing_call_is_counted_against_the_run() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15316,6 +15472,7 @@ fn collect_choice_does_not_resurrect_or_complete_a_cancelled_run() {
             attempt_id: String::new(),
             result: Ok(resp(choice)),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
 
@@ -15356,6 +15513,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15391,6 +15549,7 @@ fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
         attempt_id: String::new(),
         result: Ok(resp("review")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15435,6 +15594,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
             attempt_id: String::new(),
             result: Ok(resp("review")),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
     }
@@ -15464,6 +15624,7 @@ fn collect_choice_done_completes() {
         attempt_id: String::new(),
         result: Ok(resp("DONE")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15490,6 +15651,7 @@ fn collect_choice_unknown_target_falls_back_to_first_stage() {
         attempt_id: String::new(),
         result: Ok(resp("ghost")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15511,6 +15673,7 @@ fn collect_choice_marks_error_on_failure() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15535,6 +15698,7 @@ fn collect_choice_drops_stale_outcome() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     // No matching AwaitingTransitionResponse agent ⇒ silently dropped.
@@ -15567,6 +15731,7 @@ fn collect_inference_records_activity_with_provider_and_latency() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15606,6 +15771,7 @@ fn collect_inference_records_a_failed_call_without_stage_inference() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15814,6 +15980,7 @@ fn collect_choice_emits_a_stage_transition_event() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -20479,6 +20646,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20499,6 +20667,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
         attempt_id: String::new(),
         result: Ok(resp("done")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20527,6 +20696,7 @@ fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20546,6 +20716,7 @@ fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
         attempt_id: String::new(),
         result: Ok(resp("done")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);

@@ -438,7 +438,14 @@ impl PipelineWorld {
                 // the async lanes. Ahead of everything else so a cancel frees its
                 // inference permit and tool-lane capacity on the very next tick,
                 // rather than whenever the provider or tool happens to answer.
-                abort_terminal_work,
+                // Beside it, the calls waiting out a backoff: an ended agent's
+                // gives its permit back, and a due one sends its next trip.
+                (
+                    abort_terminal_work,
+                    crate::inference_call::fire_due_calls,
+                    crate::title_bridge::fire_due_titles,
+                )
+                    .chain(),
                 deliver_messages,
                 collect_compaction,
                 // Apply any completed Summarize context-transform summaries into
@@ -868,6 +875,7 @@ impl PipelineWorld {
                 token.cancel();
             }
         }
+        crate::inference_call::drop_held_calls(&mut self.world);
     }
 
     /// A point-in-time read of what the world is holding and what it is waiting
@@ -2066,6 +2074,7 @@ mod tests {
                     attempt_id: String::new(),
                     result: Ok(text("t1")),
                     pricing: None,
+                    attempt: None,
                 },
                 lane: crate::pipeline::HeldLane::Stage,
             });
@@ -2121,6 +2130,7 @@ mod tests {
                     attempt_id: String::new(),
                     result: Ok(text("t1")),
                     pricing: None,
+                    attempt: None,
                 },
                 lane: crate::pipeline::HeldLane::TransitionChoice,
             });

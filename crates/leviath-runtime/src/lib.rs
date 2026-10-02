@@ -98,6 +98,7 @@ pub mod fanout;
 pub(crate) mod gate_prompt;
 pub mod host;
 pub(crate) mod inference_bridge;
+pub(crate) mod inference_call;
 pub mod inference_pool;
 pub(crate) mod inference_usage;
 pub mod insert;

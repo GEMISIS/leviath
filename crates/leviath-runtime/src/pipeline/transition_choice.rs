@@ -307,38 +307,19 @@ pub(crate) fn dispatch_transition_choice(
             // does.
             journal: None,
         };
-        let cancel = crate::cancel::CancelToken::new();
-        // Supervised for the same reason as the inference lane: the agent is
-        // about to wait on `AwaitingTransitionResponse`, so a job that dies
-        // without reporting would strand it mid-route.
-        let lost_outcomes = stage.transition_outcomes.clone();
-        let lost_wake = stage.wake.clone();
-        crate::lane_supervisor::spawn_supervised(
-            &stage.runtime,
-            "transition-choice",
-            run_inference_job(
-                job,
-                stage.transition_outcomes.clone(),
-                stage.wake.clone(),
-                crate::inference_bridge::RetryPolicy::default(),
-                cancel.clone(),
-            ),
-            move |message| {
-                let _ = lost_outcomes.send(crate::inference_bridge::InferenceOutcome {
-                    entity,
-                    attempt_id: String::new(),
-                    result: Err(leviath_providers::ProviderError::Other(message)),
-                    latency: std::time::Duration::ZERO,
-                    // A job that never reached a provider has no rates and no
-                    // cost; there is nothing to price.
-                    pricing: None,
-                });
-                lost_wake.notify_one();
-            },
+        // Held on the agent as a call like the stage's own, so the agent waits
+        // on `AwaitingTransitionResponse` while the world decides on each
+        // failed trip; the trips themselves are supervised.
+        let (call, cancel) = crate::inference_call::start_call(
+            &stage,
+            job,
+            crate::inference_bridge::RetryPolicy::default(),
+            crate::inference_call::CallLane::Routing,
         );
         track_in_flight(&mut commands, entity, in_flight, cancel);
         commands
             .entity(entity)
+            .insert(call)
             .remove::<AwaitingTransitionChoice>()
             .remove::<DispatchStall>()
             .insert(AwaitingTransitionResponse(choice.0.clone()));
@@ -373,12 +354,13 @@ type CollectTransitionChoiceQuery = (
 pub(crate) fn collect_transition_choice(
     mut results: ResMut<TransitionResults>,
     mut agents: Query<CollectTransitionChoiceQuery>,
+    mut calls: crate::inference_call::CallParams,
     sink: Option<Res<crate::host::WorldEventSink>>,
     persist: Option<Res<crate::pipeline::PersistenceStage>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    while let Ok(outcome) = results.0.try_recv() {
+    while let Ok(mut outcome) = results.0.try_recv() {
         let Ok((
             spec,
             mut cursor,
@@ -407,7 +389,12 @@ pub(crate) fn collect_transition_choice(
             commands
                 .entity(outcome.entity)
                 .remove::<AwaitingTransitionResponse>()
-                .remove::<InFlightWork>();
+                .remove::<InFlightWork>()
+                .remove::<crate::inference_call::InferenceCall>();
+            continue;
+        }
+        // A failed trip the call will make again: the agent keeps waiting.
+        if calls.settle(&mut outcome, &mut commands) != crate::inference_call::Next::Done {
             continue;
         }
         // Paused mid-routing. Same hazard as the stage lane: every arm below

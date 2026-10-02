@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 use crate::blob_store::FsBlobStore;
+use crate::inference_call::tests::run_inference_job;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
 use leviath_core::mime::{Blob, BlobStore, MimeRegistry, MimeType, Part};
 use leviath_providers::files::{FileUpload, MediaLimits, RemoteFile};
