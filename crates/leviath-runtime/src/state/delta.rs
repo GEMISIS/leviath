@@ -272,29 +272,19 @@ impl StateDelta {
         }
     }
 
-    /// Every edge this step took, oldest first: its `Transition` events, or
-    /// for a step with none (a step converted from an old run's journal),
-    /// the `last_transition` it set.
+    /// Every edge this step took, oldest first: its `Transition` events.
+    ///
+    /// Not the `last_transition` it set. The event is journaled as the edge is
+    /// taken and can land a step before the state that shows the move, so the
+    /// change is a second sighting of a move already counted.
     pub fn transitions(&self) -> Vec<&TransitionRecord> {
-        let taken: Vec<&TransitionRecord> = self
-            .events
+        self.events
             .iter()
             .filter_map(|e| match e {
                 RunEvent::Transition(t) => Some(t),
                 _ => None,
             })
-            .collect();
-        match taken.is_empty() {
-            false => taken,
-            true => self
-                .changes
-                .iter()
-                .filter_map(|c| match c {
-                    Change::LastTransition(Some(t)) => Some(t),
-                    _ => None,
-                })
-                .collect(),
-        }
+            .collect()
     }
 
     /// Whether the step changed nothing and recorded nothing.

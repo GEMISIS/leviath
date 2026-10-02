@@ -327,11 +327,10 @@ fn status_cell(entry: &RunListEntry) -> String {
         // explaining, so a bare `paused` would be the worst answer here: it
         // reads as a deliberate pause somebody can undo whenever they like.
         (AgentStatus::Paused, Some(reason)) => format!("paused: {reason}"),
-        // A run whose graph has no way out: worth more than any note about
-        // its result, because it is the reason there may never be one.
-        (status, _) if !entry.may_never_finish.is_empty() => {
-            format!("{status} (may never finish)")
-        }
+        // A run whose graph has no way out, while it is still going: worth
+        // more than any note about its result, because it is the reason there
+        // may never be one.
+        (status, _) if still_looping(entry) => format!("{status} (may never finish)"),
         (status, _) if entry.empty_output => format!("{status} (no output)"),
         // A script the run needed and could not use is the quietest failure of
         // the lot: a broken output validator is skipped rather than fatal, so
@@ -345,6 +344,13 @@ fn status_cell(entry: &RunListEntry) -> String {
         (status, _) if entry.splits_degraded > 0 => format!("{status} (fan-out empty)"),
         (status, _) => status.to_string(),
     }
+}
+
+/// Whether a run that may never finish has not finished yet. One that has
+/// stopped, however it stopped, is past the warning.
+fn still_looping(entry: &RunListEntry) -> bool {
+    !entry.may_never_finish.is_empty()
+        && !leviath_runtime::pipeline::is_terminal_status(&entry.status)
 }
 
 /// A compact age, in the largest unit that keeps the number small: `12s`, `4m`,
@@ -630,6 +636,7 @@ pub(crate) fn format_runs(
     }
     let looping: Vec<String> = runs
         .iter()
+        .filter(|e| still_looping(e))
         .flat_map(|e| {
             e.may_never_finish
                 .iter()

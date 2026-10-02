@@ -1236,10 +1236,10 @@ fn each_move_counts_against_the_edge_it_took() {
             seq: i as u64 + 1,
             at: 1,
             changes: vec![
-                Change::LastTransition(record),
+                Change::LastTransition(record.clone()),
                 Change::AcceptsMessages(true),
             ],
-            events: Vec::new(),
+            events: record.into_iter().map(RunEvent::Transition).collect(),
         })
         .collect();
     let graph = RunGraph::from(&crate::commands::serve::core::inspect::graph_of(

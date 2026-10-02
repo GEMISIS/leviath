@@ -409,8 +409,8 @@ fn deltas_and_events_survive_the_binary_codec() {
 }
 
 /// A step lists every edge it took from its `Transition` events, two in one
-/// step included; a step with none, as a converted run's are, reads the
-/// `last_transition` it set; and a step that moved nowhere took no edge.
+/// step included. A `last_transition` change alone is the state catching up
+/// with a move an earlier step's event already counted.
 #[test]
 fn a_step_lists_every_edge_it_took() {
     let taken = |from: &str, to: &str| TransitionRecord {
@@ -448,7 +448,7 @@ fn a_step_lists_every_edge_it_took() {
         ],
         vec![],
     );
-    assert_eq!(names(&converted), ["a->b"]);
+    assert!(names(&converted).is_empty());
     assert!(
         step(vec![], vec![RunEvent::Log("x".into())])
             .transitions()

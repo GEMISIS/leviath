@@ -67,6 +67,11 @@ fn a_run_that_may_never_finish_is_marked_in_its_row_and_under_the_table() {
         0,
     );
     assert!(!calm.contains("may never finish"), "{calm}");
+    // Once it has stopped, the warning is behind it.
+    e.status = AgentStatus::Cancelled;
+    assert_eq!(status_cell(&e), "cancelled (no output)");
+    let stopped = format_runs(&[e], &[], &healthy_daemon(), 0);
+    assert!(!stopped.contains("may never finish"), "{stopped}");
 }
 
 #[test]
