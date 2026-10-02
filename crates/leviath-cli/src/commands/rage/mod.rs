@@ -25,6 +25,7 @@ use crate::tui::{EventSource, TerminalSetup};
 mod archive;
 mod collect;
 mod render;
+mod replay;
 mod report;
 mod scrub;
 #[cfg(test)]
@@ -41,9 +42,10 @@ pub const RAGE_LONG_ABOUT: &str = "\
 Pack the logs and settings a bug report needs into one zip, with every key removed.
 
 The zip holds `lev doctor --offline`, the daemon's state and log, the config
-file with its keys taken out, every installed blueprint, and, for a run, the
-run's summary, its run file as JSON, its stage logs and its blueprint. API keys, OAuth
-tokens, header values and other credentials are removed. The task text, the
+file with its keys taken out, every installed blueprint, and, for a run, its
+run file, the same as JSON, the request that starts it again, its summary,
+its stage logs and its blueprint. API keys, OAuth tokens, header values and
+other credentials are removed. The task text, the
 model's replies, tool output and file contents are kept: they are what a
 helper needs. Read the zip before you share it.
 
