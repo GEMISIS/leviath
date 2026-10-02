@@ -26,7 +26,9 @@ use tracing::info;
 use leviath_cli::commands;
 use leviath_cli::commands::dashboard::{CrosstermEventSource, DashboardArgs, TerminalSetup};
 use leviath_cli::daemon::readiness::poll_until;
+use leviath_cli::daemon::startup_view::StartupView;
 use leviath_cli::dispatch::{Commands, RiskyExecutors, apply_region_flags, dispatch};
+use leviath_runtime::control_socket::RESTART_GRACE;
 
 /// mimalloc instead of the platform allocator. The daemon's workload is a
 /// stream of large, variably-sized, short-lived allocations (assembled
@@ -448,27 +450,25 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     }
     // Read here, where the paths the user typed still mean what they meant.
     let parts = commands::run::attach::attach_all(&args.attach, &std::env::current_dir()?)?;
-    let spawn_args = leviath_cli::daemon::client::resolve_spawn_args(
-        leviath_cli::daemon::client::LaunchRequest {
-            path,
-            task: args.task.as_deref(),
-            stdin_is_terminal: &|| std::io::IsTerminal::is_terminal(&io::stdin()),
-            model: args.model,
-            workdir: &workdir,
-            yolo: args.yolo.is_some(),
-            yolo_profile: args.yolo.filter(|name| !name.is_empty()),
-            allow: args.allow,
-            max_depth: args.max_depth,
-            regions: args.regions,
-            no_seed_commands: args.no_seed_commands,
-            output_request: commands::run::output_request(
-                args.output_format,
-                args.output_instructions,
-                args.output_schema,
-            )?,
-            parts,
-        },
-    )?;
+    let spawn_args = commands::run::request::read_run_flags(commands::run::request::RunFlags {
+        path,
+        task: args.task.as_deref(),
+        stdin_is_terminal: &|| std::io::IsTerminal::is_terminal(&io::stdin()),
+        model: args.model,
+        workdir: &workdir,
+        yolo: args.yolo.is_some(),
+        yolo_profile: args.yolo.filter(|name| !name.is_empty()),
+        allow: args.allow,
+        max_depth: args.max_depth,
+        regions: args.regions,
+        no_seed_commands: args.no_seed_commands,
+        output_request: commands::run::output_request(
+            args.output_format,
+            args.output_instructions,
+            args.output_schema,
+        )?,
+        parts,
+    })?;
     // Deliberately after the resolve, not before. No `--task` opens an editor,
     // and a user can sit in vim for twenty minutes: checking daemon liveness
     // and build staleness first would mean spawning against a socket last
@@ -527,6 +527,7 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
         running && daemon_build_is_stale(read_build_marker().as_deref()),
     );
     if !steps.spawn {
+        control_client()?.wait_until_started().await?;
         return Ok(());
     }
     if steps.shutdown_first {
@@ -550,6 +551,7 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
     leviath_sys::process::configure_detached(&mut cmd);
     cmd.spawn()?;
     if poll_until(&mut || is_daemon_running(&id)).await {
+        control_client()?.wait_until_started().await?;
         return Ok(());
     }
     anyhow::bail!(
@@ -730,7 +732,7 @@ fn remove_legacy_services() -> Vec<std::path::PathBuf> {
 async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     use leviath_cli::daemon::setup::{control_address, setup_daemon_host};
     use leviath_runtime::control_socket::{
-        DaemonIdentity, bind_control_listener, control_id_from_str, handle_connection_as,
+        DaemonIdentity, bind_control_listener, control_id_from_str,
     };
 
     // Refuse to start on a config that exists but doesn't parse. The old
@@ -764,7 +766,7 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
 
     // `bind_control_listener` enforces the single-instance guarantee and is fully
     // unit-tested; only driving its `accept` in a loop is the untestable sliver.
-    let mut listener = bind_control_listener(&id)?;
+    let listener = bind_control_listener(&id)?;
     // A fresh token per daemon: whoever cannot read our own directory cannot
     // drive the control channel. This is what authenticates callers on Windows,
     // where there is no kernel peer check to fall back on.
@@ -777,16 +779,6 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // Record the build we started from so a later CLI can detect stale code and
     // restart us (must happen right after we win the single-instance bind).
     leviath_cli::daemon::setup::write_build_marker();
-    // Fallible because building a provider's outbound HTTPS client can fail -
-    // in practice when the machine's root certificate store cannot be read. The
-    // daemon refuses to start rather than accepting runs it could never infer
-    // for, and the error names the cause instead of a panic backtrace.
-    let mut host = setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current()).await?;
-
-    // Accept connections and feed control ops to the host; `Subscribe`
-    // connections stream world events from the host's event sender.
-    let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
-    let events = host.event_sender();
     // Who this daemon is, told to every client that asks in its handshake. A
     // long-lived client (`lev serve`, `lev dash`, the ACP bridge) compares it
     // against its own build to tell a restart from an update.
@@ -795,21 +787,26 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // answering for a different one.
     let identity = DaemonIdentity::this_process(leviath_cli::daemon::setup::CURRENT_BUILD)
         .with_tool_env(leviath_cli::daemon::setup::visible_tool_env());
-    tokio::spawn(async move {
-        // `Ok(None)` means someone connected but is not this user: the listener
-        // has already closed that connection and logged it. Skip and keep
-        // serving rather than treating it as a fatal accept error.
-        while let Ok(accepted) = listener.accept().await {
-            let Some(stream) = accepted else { continue };
-            let op_tx = op_tx.clone();
-            let events = events.clone();
-            let token = token.clone();
-            let identity = identity.clone();
-            tokio::spawn(async move {
-                let _ = handle_connection_as(stream, op_tx, events, Some(token), identity).await;
-            });
-        }
-    });
+    // Connections are accepted from the start: until the host is serving,
+    // each request is answered with the start-up step under way, which the
+    // start-up writes to `board`; after, the gate sends them to the host.
+    let board = leviath_runtime::control_socket::StartupBoard::default();
+    let gate = leviath_runtime::control_socket::ControlGate::new(board.clone());
+    gate.accept_all(listener, token, identity);
+    // A daemon in the foreground shows its own start-up as a waiting client does.
+    let tty = std::io::IsTerminal::is_terminal(&io::stderr());
+    let following = StartupView::on_stderr(tty).follow(board.clone());
+    // Fallible because building a provider's outbound HTTPS client can fail -
+    // in practice when the machine's root certificate store cannot be read. The
+    // daemon refuses to start rather than accepting runs it could never infer
+    // for, and the error names the cause instead of a panic backtrace.
+    let mut host =
+        setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current(), &board).await?;
+
+    // Control ops go to the host; a subscription streams its world events.
+    let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
+    gate.open(op_tx, host.event_sender());
+    following.finish().await;
 
     // Ctrl-C shuts the world down cleanly.
     let shutdown = host.world_mut().shutdown_handle();
@@ -828,8 +825,13 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
 ///
 /// For one-shot commands: an absent daemon is reported at once, with the
 /// advice to start it. The build id lets the client tell a daemon that
-/// restarted from one that was updated under it.
+/// restarted from one that was updated under it. A daemon still starting is waited on, showing how far along it is.
 fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
+    Ok(quiet_control_client()?.with_startup_watch(StartupView::on_stderr(true).watch()))
+}
+
+/// [`control_client`] waiting on a starting daemon in silence.
+fn quiet_control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
     let id = leviath_cli::daemon::setup::control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
     let dir = leviath_cli::daemon::setup::control_dir()
@@ -843,9 +845,9 @@ fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlCl
 /// [`control_client`] for the front-ends that outlive a daemon: `lev serve`,
 /// `lev dash`, `lev agent-client`. These wait a restart out instead of
 /// failing the request that landed in it - see
-/// [`RESTART_GRACE`](leviath_runtime::control_socket::RESTART_GRACE).
+/// [`RESTART_GRACE`].
 fn long_lived_control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
-    Ok(control_client()?.with_reconnect_grace(leviath_runtime::control_socket::RESTART_GRACE))
+    Ok(quiet_control_client()?.with_reconnect_grace(RESTART_GRACE))
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event

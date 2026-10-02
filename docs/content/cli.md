@@ -371,6 +371,9 @@ lev blueprint migrate ./my-agent -o ./my-agent/agent.toml # write it beside the 
 lev validate ./my-agent/agent.toml
 ```
 
+A key Leviath 0.6.4 and earlier accepted but never read is left out, with a `warning:` line on
+stderr naming the blueprint, the key and its value.
+
 A region the manifest seeds with a key such as `seed = "diff"` becomes an input named `diff`, bound
 to that region. See
 [migrating from agent.leviath](/docs/blueprint-format#migrating-from-agentleviath) for how each key
@@ -814,7 +817,7 @@ config grants.
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
 | `lev msg <AGENT_ID> <CONTENT>` | `--attach` | Deliver a message into a running agent's context. `--attach` and a `@path` in the text send files with it |
 | `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds |
-| `lev resume <RUN_ID>` | | Un-pause a run |
+| `lev resume <RUN_ID>` | | Un-pause a run, or bring back a cancelled one where it stopped |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |
 | `lev context <RUN_ID>` | `--json`, `--full` | Show a run's context-window history from its `run.lvr` archive |
 | `lev result <RUN_ID>` | `--json`, `--raw`, `--artifact`, `--out`, `--open` | Print what the agent handed back, or hand out the files it produced. See [below](#lev-result) |
@@ -999,7 +1002,7 @@ you are driving Leviath from a scheduler.
 | `paused` | Paused with `lev pause` |
 | `waiting` | Blocked. The reason follows the colon |
 | `complete` | Finished |
-| `cancelled` | Cancelled with `lev cancel` |
+| `cancelled` | Cancelled with `lev cancel`. `lev resume` brings it back |
 | `error` | Ended with the error shown |
 
 A `waiting` run always says what it is blocked on, because the answer decides whether you

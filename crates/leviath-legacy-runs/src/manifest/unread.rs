@@ -2,11 +2,13 @@
 //!
 //! Most of a manifest's tables ignore a key the parser does not know, so a
 //! misspelled or retired setting loads as if it were not there. A converted
-//! blueprint or run leaves each one out, as the parser did, with a note
-//! naming it. The tables that already refuse a stranger (a stage, its
+//! blueprint or run leaves each one out, as the parser did, and names it
+//! with its value so the upgrade can warn about it. The tables that already refuse a stranger (a stage, its
 //! context, routing, hooks, edges, gates and sandboxes) are not walked here.
 
 use toml::{Table, Value};
+
+use crate::report::Dropped;
 
 use super::model::MODEL_KEYS;
 use super::regions::REGION_KEYS;
@@ -53,9 +55,11 @@ const MAPPING_KEYS: &[&str] = &["from_region", "to_region", "transform", "fields
 const INSTALL_KEYS: &[&str] = &["command", "commands", "script", "server"];
 const SERVER_KEYS: &[&str] = &["transport", "command", "url", "args", "headers", "env"];
 
-/// Every key of `manifest` that nothing reads, one line each, naming where it
-/// is.
-pub(crate) fn unread_keys(manifest: &Table) -> Vec<String> {
+/// The most of a dropped value a warning shows, in bytes.
+const SHOWN_VALUE_BYTES: usize = 60;
+
+/// Every key of `manifest` that nothing reads, with where it is and its value.
+pub(crate) fn unread_keys(manifest: &Table) -> Vec<Dropped> {
     let mut found = Unread(Vec::new());
     found.keys("the manifest", Some(manifest), TOP_KEYS);
     let agent = table(manifest.get("agent"));
@@ -126,21 +130,21 @@ pub(crate) fn unread_keys(manifest: &Table) -> Vec<String> {
     found.0
 }
 
-/// The lines found so far.
-struct Unread(Vec<String>);
+/// The keys found so far.
+struct Unread(Vec<Dropped>);
 
 impl Unread {
     /// Every key of `table` (when there is one) that is not in `known`.
     fn keys(&mut self, at: &str, table: Option<&Table>, known: &[&str]) {
-        for key in table.into_iter().flat_map(Table::keys) {
+        for (key, value) in table.into_iter().flatten() {
             if !known.contains(&key.as_str()) {
-                let hint = match (at, key.as_str()) {
-                    ("the manifest", "nudge") => " (an agent's nudge settings are [agent.nudge])",
-                    _ => "",
-                };
-                self.0.push(format!(
-                    "{at}: `{key}` is left out: nothing reads it, so it never changed a run{hint}"
-                ));
+                let hint = (at, key.as_str()) == ("the manifest", "nudge");
+                self.0.push(Dropped {
+                    at: at.to_string(),
+                    key: key.clone(),
+                    value: shown(value),
+                    hint: hint.then(|| "an agent's nudge settings are [agent.nudge]".to_string()),
+                });
             }
         }
     }
@@ -164,6 +168,18 @@ impl Unread {
                 REGION_KEYS,
             );
         }
+    }
+}
+
+/// `value` as TOML, cut short with `...` when it is long.
+fn shown(value: &Value) -> String {
+    let text = value.to_string();
+    match text.len() > SHOWN_VALUE_BYTES {
+        true => format!(
+            "{}...",
+            leviath_core::text::substring(&text, 0, SHOWN_VALUE_BYTES)
+        ),
+        false => text,
     }
 }
 

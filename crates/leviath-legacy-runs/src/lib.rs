@@ -50,8 +50,8 @@ use leviath_runtime::spec::graph::{RunGraph, StageDef};
 use leviath_runtime::spec::names::ModelRef;
 
 pub use error::ConvertError;
-pub use migrate::{migrate, migrate_file, migrate_noted};
-pub use report::{BlueprintSource, ConvertReport, Defaulted};
+pub use migrate::{Migrated, migrate, migrate_file, migrate_noted};
+pub use report::{BlueprintSource, ConvertReport, Defaulted, Dropped};
 
 /// Where the conversion looks for what an old run directory does not hold.
 #[derive(Clone, Default)]
@@ -139,6 +139,9 @@ pub fn convert(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<ConvertReport, Co
     let (start, deltas, last) = history::build(&old, &built.spec, &mut report);
     let bytes = write::encode(&old, &built, &start, &deltas, &last);
     let written = write::install(run_dir, &bytes)?;
+    let blueprint_name = old.meta().agent_name.clone();
     let source = old.blueprint.source;
-    Ok(report.finish(built.spec.run_id, source, deltas.len(), written))
+    let mut done = report.finish(built.spec.run_id, source, deltas.len(), written);
+    done.blueprint_name = blueprint_name;
+    Ok(done)
 }

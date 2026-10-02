@@ -36,12 +36,10 @@ fn an_installed_blueprint_is_copied_once_and_the_backup_is_announced_once() {
         "before"
     );
 
-    let lines = announce(home.path());
-    assert_eq!(lines.len(), 1);
-    assert!(
-        lines[0].contains(&backup.dir().display().to_string()),
-        "{lines:?}"
-    );
+    assert!(announce(home.path()).is_empty(), "nothing to tell yet");
+    backup.announce_later(&["first".to_string()]);
+    backup.announce_later(&["second".to_string()]);
+    assert_eq!(announce(home.path()), ["first", "second"]);
     assert!(announce(home.path()).is_empty(), "told once");
     assert!(backup.dir().join("agents/coder").is_dir(), "never deleted");
 }
@@ -151,6 +149,22 @@ fn a_save_that_fails_leaves_nothing_behind() {
     assert!(announce(blocked.path()).is_empty());
 }
 
+/// Nothing is kept to tell when nothing was saved, and a summary that
+/// cannot be kept is said in the log.
+#[test]
+fn a_summary_is_kept_only_beside_a_backup_and_a_failure_is_logged() {
+    let home = tempfile::tempdir().unwrap();
+    let backup = Backup::of_home(home.path());
+    backup.announce_later(&["nothing saved".to_string()]);
+    assert!(!backup.dir().exists());
+    let run = home.path().join("r");
+    tree(&run, "x");
+    backup.save_run(&run).unwrap();
+    std::fs::create_dir_all(backup.dir().join(UNANNOUNCED)).unwrap();
+    crate::test_support::with_tracing(|| backup.announce_later(&["lost".to_string()]));
+    assert!(backup.dir().join(UNANNOUNCED).is_dir());
+}
+
 #[test]
 fn a_later_start_of_the_same_release_adds_to_the_backup_it_began() {
     let home = tempfile::tempdir().unwrap();
@@ -171,6 +185,7 @@ fn the_backup_of_the_users_own_home_is_told_once() {
     tree(&run, "x");
     let backup = Backup::of_home(&root);
     backup.save_run(&run).unwrap();
+    backup.announce_later(&["upgraded".to_string()]);
     temp_env::with_vars(
         [("LEVIATH_HOME", Some(home.path().to_str().unwrap()))],
         || {

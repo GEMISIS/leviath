@@ -23,6 +23,37 @@ impl fmt::Display for Defaulted {
     }
 }
 
+/// A key an `agent.leviath` held that Leviath 0.6.4 and earlier accepted
+/// but never read. Upgrading leaves it out of the new file, and whoever
+/// upgrades is warned about each one: it never changed a run, but the
+/// person who wrote it may have believed it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dropped {
+    /// Where it was (`[agent]`, `region 'log'`).
+    pub at: String,
+    /// The key.
+    pub key: String,
+    /// Its value, as TOML, shortened when long.
+    pub value: String,
+    /// Where the setting it may have meant lives, when there is one.
+    pub hint: Option<String>,
+}
+
+impl fmt::Display for Dropped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hint = self
+            .hint
+            .as_ref()
+            .map(|hint| format!(" ({hint})"))
+            .unwrap_or_default();
+        write!(
+            f,
+            "{}: `{} = {}` was dropped: Leviath 0.6.4 and earlier accepted it but never read it, so it never changed a run{hint}",
+            self.at, self.key, self.value
+        )
+    }
+}
+
 /// Where the run's graph was read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlueprintSource {
@@ -46,6 +77,8 @@ pub enum BlueprintSource {
 pub struct ConvertReport {
     /// The run.
     pub run_id: RunId,
+    /// The name of the blueprint the run ran.
+    pub blueprint_name: String,
     /// The run file written.
     pub run_file: PathBuf,
     /// Where the old files went.
@@ -58,6 +91,9 @@ pub struct ConvertReport {
     pub defaulted: Vec<Defaulted>,
     /// Anything else worth knowing about how the run was read.
     pub notes: Vec<String>,
+    /// The keys of the run's blueprint the conversion left out because
+    /// nothing ever read them.
+    pub dropped: Vec<Dropped>,
 }
 
 impl ConvertReport {
@@ -72,6 +108,7 @@ impl ConvertReport {
 pub(crate) struct Report {
     pub(crate) defaulted: Vec<Defaulted>,
     pub(crate) notes: Vec<String>,
+    pub(crate) dropped: Vec<Dropped>,
 }
 
 impl Report {
@@ -104,7 +141,11 @@ impl Report {
             .notes
             .iter()
             .map(|n| format!("converted from the old layout: {n}"));
-        defaulted.chain(notes).collect()
+        let dropped = self
+            .dropped
+            .iter()
+            .map(|d| format!("converted from the old layout: {d}"));
+        defaulted.chain(notes).chain(dropped).collect()
     }
 
     pub(crate) fn finish(
@@ -116,12 +157,14 @@ impl Report {
     ) -> ConvertReport {
         ConvertReport {
             run_id,
+            blueprint_name: String::new(),
             run_file,
             legacy_dir,
             blueprint,
             deltas,
             defaulted: self.defaulted,
             notes: self.notes,
+            dropped: self.dropped,
         }
     }
 }
