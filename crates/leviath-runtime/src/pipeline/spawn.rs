@@ -4,7 +4,7 @@
 use super::*;
 
 /// A blueprint stage resolved to a concrete provider, model, and effective tool
-/// set - the per-stage input to `spawn_agent`. The caller (CLI / daemon) owns
+/// set - the per-stage input to a spawn. The caller (CLI / daemon) owns
 /// the model-selection policy (overrides, availability, user defaults) and tool
 /// filtering; the runtime just turns the result into agent data.
 #[derive(Debug)]

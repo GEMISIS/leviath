@@ -446,12 +446,12 @@ struct BatchDispatch<'a> {
 
 impl BatchDispatch<'_> {
     /// The record.
-    fn record(&self) -> leviath_core::run_archive::RunRecord {
-        leviath_core::run_archive::RunRecord::ToolBatch {
+    fn record(&self) -> crate::runfile::record::RunRecord {
+        crate::runfile::record::RunRecord::ToolBatch {
             calls: self
                 .calls
                 .iter()
-                .map(|c| leviath_core::run_archive::ToolCallRecord {
+                .map(|c| crate::runfile::record::ToolCallRecord {
                     id: c.tool_id.clone(),
                     execution_id: self.executions.get(&c.tool_id).cloned().unwrap_or_default(),
                     name: c.name.clone(),
@@ -493,7 +493,7 @@ pub(super) fn journal_artifacts(
     for (execution_id, artifacts) in produced {
         let _ = persist.0.send(PersistMsg::Append {
             run_id: run_id.to_string(),
-            record: Box::new(leviath_core::run_archive::RunRecord::ArtifactsProduced {
+            record: Box::new(crate::runfile::record::RunRecord::ArtifactsProduced {
                 execution_id: execution_id.clone(),
                 artifacts: artifacts.clone(),
                 at: chrono::Utc::now().timestamp(),
@@ -843,7 +843,7 @@ pub(crate) fn dispatch_tools(
             // because `commands` cannot be borrowed inside it.
             //
             // After the gate, not before it with the other inline tools: the
-            // submitted answer leaves the machine (`GET /api/agents/{id}/result`,
+            // submitted answer leaves the machine (`GET /api/runs/{id}/result`,
             // the dashboard), so `submit_output` is classified outbound, and a
             // classification the gate never sees gates nothing. Applied above
             // the gate, a Private region reaches a remote reader with no
@@ -1109,7 +1109,7 @@ pub(crate) fn dispatch_tools(
                 let progress: ToolProgress = Arc::new(move |call_id: &str, result| {
                     let _ = sender.send(PersistMsg::Append {
                         run_id: run_id.clone(),
-                        record: Box::new(leviath_core::run_archive::RunRecord::ToolCallDone {
+                        record: Box::new(crate::runfile::record::RunRecord::ToolCallDone {
                             iteration,
                             call_id: call_id.to_string(),
                             // The attempt this completes, so a completion cannot

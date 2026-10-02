@@ -1,6 +1,6 @@
 //! Reading a run's model calls back out of its run file.
 
-use leviath_core::run_archive::{AttemptOutcome, Retry};
+use leviath_runtime::runfile::record::{AttemptOutcome, Retry};
 use leviath_runtime::spec::names::ModelRef;
 use leviath_runtime::state::RunEvent;
 
@@ -115,7 +115,7 @@ async fn a_run_with_no_file_made_no_calls_and_an_unreadable_one_is_an_error() {
 #[tokio::test]
 async fn a_call_kept_whole_reads_back_whole() {
     use leviath_core::JsonDoc;
-    use leviath_core::run_archive::CaptureStatus;
+    use leviath_runtime::runfile::record::CaptureStatus;
     use leviath_runtime::state::journal::{
         AttemptOutcomeState, AttemptState, CaptureState, ModelInputState, RequestDigestState,
     };

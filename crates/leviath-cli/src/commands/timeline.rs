@@ -14,8 +14,8 @@
 //! the command names it rather than leaving it in a column of numbers.
 
 use clap::Args;
-use leviath_core::run_archive::{InferenceKind, RunRecord};
 use leviath_core::run_meta::{RunMeta, RunStatus};
+use leviath_runtime::runfile::record::InferenceKind;
 use serde::Serialize;
 
 /// Arguments for `lev timeline`.
@@ -104,7 +104,7 @@ pub(crate) struct Totals {
     /// Seconds parked: waiting on children, or on a person to answer a
     /// prompt (an approval, an `ask_user_*` tool, an interaction point).
     pub waiting: i64,
-    /// Whatever is left: scheduling, persistence, gaps between records.
+    /// Whatever is left: scheduling, persistence, gaps between steps.
     pub other: i64,
 }
 
@@ -161,105 +161,124 @@ pub(crate) async fn execute(args: TimelineArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One thing the timeline reads off a run's steps.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Moment {
+    /// The run's status changed.
+    Status {
+        /// The status it changed to.
+        status: RunStatus,
+        /// Unix seconds.
+        at: i64,
+    },
+    /// A model call landed.
+    Call {
+        /// Which kind of call it was.
+        kind: InferenceKind,
+        /// The stage the run was in.
+        stage: String,
+        /// The stage-local iteration.
+        iteration: usize,
+        /// The model, as the run file names it.
+        model: String,
+        /// Prompt tokens billed.
+        prompt_tokens: usize,
+        /// Output tokens.
+        completion_tokens: usize,
+        /// Prompt tokens served from cache.
+        cached_tokens: usize,
+        /// Unix seconds.
+        at: i64,
+    },
+    /// A tool call finished.
+    ToolDone {
+        /// Unix seconds.
+        at: i64,
+    },
+}
+
 /// Read one run's record and steps and reduce them to a [`RunTimeline`]: from
 /// its run file.
 fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
     use std::borrow::Cow;
     let dir = crate::runstate::run_dir(run_id);
-    let (meta, records) = crate::runstate::read_meta(run_id)
+    let (meta, moments) = crate::runstate::read_meta(run_id)
         .map_err(|e| Cow::Owned(e.to_string()))
         .and_then(|meta| {
             crate::runstate::run_file::open_in(&dir)
                 .ok()
-                .and_then(|reader| run_file_records(&reader))
-                .map(|records| (meta, records))
+                .and_then(|reader| run_file_moments(&reader))
+                .map(|moments| (meta, moments))
                 .ok_or(Cow::Borrowed("its steps do not decode"))
         })
         .map_err(|why| anyhow::anyhow!("no readable record for run '{run_id}': {why}"))?;
-    Ok(analyze(&meta, &records))
+    Ok(analyze(&meta, &moments))
 }
 
-/// A run file's steps as the records [`analyze`] reads: each model call as
-/// its usage, in the stage and iteration it was made in, each finished tool
-/// call, and each change of status. `None` when a step does not decode.
-fn run_file_records(reader: &leviath_runtime::runfile::RunFileReader) -> Option<Vec<RunRecord>> {
+/// A run file's steps as the moments [`analyze`] reads: each model call in
+/// the stage and iteration it was made in, each finished tool call, and each
+/// change of status. `None` when a step does not decode.
+fn run_file_moments(reader: &leviath_runtime::runfile::RunFileReader) -> Option<Vec<Moment>> {
     let start = reader.state_at(0).ok();
     let deltas = reader.deltas(1, reader.last_seq()).ok();
     start
         .zip(deltas)
-        .map(|(state, deltas)| records_of(reader.spec(), state, deltas))
+        .map(|(state, deltas)| moments_of(reader.spec(), state, deltas))
 }
 
-/// The steps `deltas` took from `state`, the run's start, as records.
-fn records_of(
+/// The steps `deltas` took from `state`, the run's start, as moments.
+fn moments_of(
     spec: &leviath_runtime::spec::run_spec::RunSpec,
     mut state: leviath_runtime::state::RunState,
     deltas: Vec<leviath_runtime::state::StateDelta>,
-) -> Vec<RunRecord> {
+) -> Vec<Moment> {
     use leviath_runtime::state::{Change, RunEvent};
-    let mut records = Vec::new();
+    let mut moments = Vec::new();
     for delta in deltas {
         let before = state.cursor.clone();
         delta.apply(&mut state);
         let iteration = before.iteration as usize;
         for event in &delta.events {
             match event {
-                RunEvent::Inference { model, spend, .. } => {
-                    records.push(RunRecord::InferenceUsage {
-                        kind: InferenceKind::Stage,
-                        stage: before.stage.to_string(),
-                        iteration,
-                        provider: model
-                            .provider
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_default(),
-                        model: model.model.to_string(),
-                        prompt_tokens: spend.prompt_tokens as usize,
-                        completion_tokens: spend.completion_tokens as usize,
-                        cached_tokens: spend.cached_tokens as usize,
-                        cache_write_tokens: spend.cache_write_tokens as usize,
-                        cost_usd: None,
-                        cost_reported_by_provider: None,
-                        at: delta.at,
-                    });
-                }
-                RunEvent::ToolFinished { call_id, .. } => records.push(RunRecord::ToolCallDone {
+                RunEvent::Inference { model, spend, .. } => moments.push(Moment::Call {
+                    kind: InferenceKind::Stage,
+                    stage: before.stage.to_string(),
                     iteration,
-                    call_id: call_id.clone(),
-                    execution_id: String::new(),
-                    result: leviath_core::region::EntryContent::text(""),
-                    outcome: None,
+                    model: model.model.to_string(),
+                    prompt_tokens: spend.prompt_tokens as usize,
+                    completion_tokens: spend.completion_tokens as usize,
+                    cached_tokens: spend.cached_tokens as usize,
                     at: delta.at,
                 }),
+                RunEvent::ToolFinished { .. } => moments.push(Moment::ToolDone { at: delta.at }),
                 _ => {}
             }
         }
         if delta.changes.iter().any(|c| matches!(c, Change::Status(_))) {
-            records.push(RunRecord::StatusChanged {
+            moments.push(Moment::Status {
                 status: leviath_runtime::runfile::summary_of(spec, &state, delta.at).status,
                 at: delta.at,
             });
         }
     }
-    records
+    moments
 }
 
-/// Reduce a run's journal to its timeline. Pure, so the shape is testable
+/// Reduce a run's steps to its timeline. Pure, so the shape is testable
 /// without a runs directory.
-pub(crate) fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
+pub(crate) fn analyze(meta: &RunMeta, moments: &[Moment]) -> RunTimeline {
     let mut calls = Vec::new();
     let mut totals = Totals {
         wall: (meta.updated_at - meta.started_at).max(0),
         ..Totals::default()
     };
     // `prev` is the last moment the run was known to be doing something else,
-    // so the next usage record's call is taken to have started there.
+    // so the next call is taken to have started there.
     let mut prev = meta.started_at;
     let mut waiting_since: Option<i64> = None;
-    for record in records {
-        match record {
-            RunRecord::StatusChanged { status, at } => {
+    for moment in moments {
+        match moment {
+            Moment::Status { status, at } => {
                 if matches!(status, RunStatus::WaitingInput) {
                     waiting_since = Some(*at);
                 } else if let Some(since) = waiting_since.take() {
@@ -267,7 +286,7 @@ pub(crate) fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
                     prev = *at;
                 }
             }
-            RunRecord::InferenceUsage {
+            Moment::Call {
                 kind,
                 stage,
                 iteration,
@@ -276,11 +295,10 @@ pub(crate) fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
                 completion_tokens,
                 cached_tokens,
                 at,
-                ..
             } => {
-                // A usage record while parked is a child's doing, journaled
-                // through the parent (the title call is the usual one); it is
-                // not this run's time.
+                // A call while parked is a child's doing, recorded through the
+                // parent (the title call is the usual one); it is not this
+                // run's time.
                 if waiting_since.is_none() {
                     let span = CallSpan {
                         stage: stage.clone(),
@@ -298,11 +316,10 @@ pub(crate) fn analyze(meta: &RunMeta, records: &[RunRecord]) -> RunTimeline {
                 }
                 prev = *at;
             }
-            RunRecord::ToolCallDone { at, .. } => {
+            Moment::ToolDone { at } => {
                 totals.tools += (*at - prev).max(0);
                 prev = *at;
             }
-            _ => {}
         }
     }
     totals.other = (totals.wall - totals.inference - totals.tools - totals.waiting).max(0);

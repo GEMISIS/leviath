@@ -189,7 +189,7 @@ pub(crate) fn run_file_stamp(run_id: &str) -> Option<FileStamp> {
 /// Every point's `meta` is [`RunMeta::redacted`]: nothing that shows a
 /// history has a use for the webhook's signing secret. See
 /// [`run_file::history_in`].
-pub(crate) fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+pub(crate) fn context_history(run_id: &str) -> Vec<leviath_runtime::runfile::history::RunPoint> {
     run_history(run_id).points
 }
 
@@ -227,7 +227,7 @@ pub fn runs_dir() -> PathBuf {
 /// A `run_id` that is not a single safe path component resolves to
 /// `<runs_dir>/<invalid>`, a name that cannot exist - so a caller that passes an
 /// attacker-supplied id gets a miss rather than a traversal. `run_id` reaches
-/// this from URL segments on `GET /api/agents/{id}/logs` and friends, where
+/// this from URL segments on `GET /api/runs/{id}/logs` and friends, where
 /// `Path::join` would otherwise happily accept `../../` or an absolute path.
 ///
 /// Returning a definitely-missing path rather than an `Option` keeps every
@@ -834,7 +834,7 @@ pub(crate) enum LogStream {
 
 /// Read a run's logs, choosing the stage and the stream.
 ///
-/// The one answer to "where is a run's output" for `GET /api/agents/{id}/logs`
+/// The one answer to "where is a run's output" for `GET /api/runs/{id}/logs`
 /// and `agent_result` alike: logs live per stage under `stages/<idx>/`, and a
 /// run with no stage recorded yet has none.
 ///
@@ -966,7 +966,7 @@ mod tests {
     use super::*;
     use crate::test_support::fixtures;
 
-    /// `run_id` arrives from URL segments on `GET /api/agents/{id}/logs` and
+    /// `run_id` arrives from URL segments on `GET /api/runs/{id}/logs` and
     /// friends. `Path::join` neither normalizes `..` nor resists an absolute
     /// path, so an unvalidated id read files anywhere. An unsafe one resolves to
     /// a name that cannot exist, giving the caller a plain miss.

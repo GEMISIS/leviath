@@ -1029,7 +1029,9 @@ mod tests {
                 active: Default::default(),
             },
         );
-        let carried = meta.final_output.expect("the submission reached meta.json");
+        let carried = meta
+            .final_output
+            .expect("the submission reached the run's summary");
         // The descriptor, not the bytes: the run's record is read for every run
         // on every listing, so the answer itself lives in a sidecar file.
         assert_eq!(

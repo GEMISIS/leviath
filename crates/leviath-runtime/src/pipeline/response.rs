@@ -293,7 +293,7 @@ pub(crate) fn collect_inference(
                     persist.as_deref(),
                     md,
                     &crate::inference_usage::CallUsage {
-                        kind: leviath_core::run_archive::InferenceKind::Stage,
+                        kind: crate::runfile::record::InferenceKind::Stage,
                         stage: &state.current_stage,
                         iteration: state.iteration,
                         provider: &called_provider,
@@ -474,7 +474,7 @@ pub(crate) fn collect_inference(
                     // the same journal as the attempts it sits between. A world
                     // with no lane writes nothing, exactly as the attempts do.
                     if let Some(persist) = persist.as_deref() {
-                        let record = leviath_core::run_archive::FailoverRecord {
+                        let record = crate::runfile::record::FailoverRecord {
                             stage: state.current_stage.clone(),
                             iteration: state.iteration,
                             from_provider: called_provider.clone(),
@@ -491,9 +491,9 @@ pub(crate) fn collect_inference(
                         };
                         let _ = persist.0.send(PersistMsg::Append {
                             run_id: state.agent_id.clone(),
-                            record: Box::new(
-                                leviath_core::run_archive::RunRecord::InferenceFailover(record),
-                            ),
+                            record: Box::new(crate::runfile::record::RunRecord::InferenceFailover(
+                                record,
+                            )),
                             ack: None,
                         });
                     }
@@ -753,9 +753,9 @@ pub(crate) enum StageOutcome {
 /// One [`StageRecord`](leviath_core::run_meta::StageRecord) per blueprint stage,
 /// seeded at spawn (names + `Pending`) and reconciled by `dispatch_persistence`
 /// (status + timestamps), with per-stage tokens accrued by `collect_inference`.
-/// Serialized to `stages.json` so the dashboard / serve API can show every
-/// stage's real name and status - not just the active one (whose name is the only
-/// one carried in `meta.json`).
+/// Recorded in the run file, so `lev stages`, the dashboard and the API can show
+/// every stage's real name and status, not just the active one (whose name is
+/// the only one the run's summary carries).
 #[derive(Component, Debug, Clone)]
 pub struct StageLedger(pub Vec<leviath_core::run_meta::StageRecord>);
 

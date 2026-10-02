@@ -39,7 +39,7 @@ A small screen asks what the problem was about. For a run, it asks which one. Th
 | `agents/` | Every installed blueprint |
 | `tools/`, `providers/` | Your drop-in Rhai scripts |
 | `logs/` | `daemon.log`, `daemon.stdio.log`, each `serve-<name>.log` and `dashboard.log`, with their rolled copies |
-| `runs/<id>/` | The run you picked and its sub-agent runs: each run file (`run.lvr`), stage logs and media |
+| `runs/<id>/` | The run you picked and its sub-agent runs: each run's summary, its run file as JSON (`run.json`), stage logs and media |
 | `blueprint/` | The blueprint you were building, with a check that says whether it parses |
 | `setup/imports.json` | Which other tools' config files exist on this machine, by path only |
 

@@ -96,7 +96,7 @@ pub(crate) enum PersistMsg {
         run_id: String,
         /// What happened. Boxed like `Snapshot`'s job: the channel moves these
         /// by value.
-        record: Box<leviath_core::run_archive::RunRecord>,
+        record: Box<crate::runfile::record::RunRecord>,
         /// Carries what became of the append: the dispatch-side barrier that
         /// keeps a batch's record ahead of the batch's side effects, and tells
         /// the dispatcher whether the record is really there. Fired exactly

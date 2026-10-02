@@ -450,41 +450,41 @@ async fn a_deny_with_feedback_round_trips_through_the_hub() {
     assert!(hub.pending().is_empty());
 }
 
-/// The same answer over the control socket's wire shape and through the
-/// run journal: what `lev respond` or the API sends is what the daemon reads,
-/// and the tool result it becomes survives the archive a resumed run replays.
+/// The same answer over the control socket's wire shape and into the run
+/// file: what `lev respond` or the API sends is what the daemon reads, and the
+/// tool result it becomes is the event a resumed run replays.
 #[test]
-fn a_deny_with_feedback_survives_the_wire_and_the_journal() {
-    use leviath_core::run_archive::{
-        RUN_ARCHIVE_VERSION, RunRecord, read_archive, write_archive_start, write_record,
-    };
+fn a_deny_with_feedback_survives_the_wire_and_the_run_file() {
+    use crate::runfile::journal_events;
+    use crate::runfile::record::RunRecord;
+    use crate::state::RunEvent;
     let wire = r#"{"request_id":"q1","value":null,"choice_index":null,"approved":false,"scope":"once","feedback":"use the API"}"#;
     let parsed: InteractionResponse = serde_json::from_str(wire).unwrap();
     assert_eq!(
         parsed,
         InteractionResponse::deny_with_feedback("q1", "use the API")
     );
-    let mut buf = Vec::new();
-    write_archive_start(&mut buf, RUN_ARCHIVE_VERSION).unwrap();
-    write_record(
-        &mut buf,
-        &RunRecord::ToolCallDone {
-            execution_id: String::new(),
-            outcome: None,
-            iteration: 1,
-            call_id: "c1".to_string(),
-            result: "[denied] User declined tool call 'bash'. Feedback: use the API"
-                .to_string()
-                .into(),
-            at: 0,
-        },
-    )
-    .unwrap();
-    let (_, records) = read_archive(&mut buf.as_slice()).unwrap();
-    assert!(matches!(
-        &records[0],
-        RunRecord::ToolCallDone { result, .. } if result.ends_with("Feedback: use the API")
-    ));
+    let events = journal_events(&RunRecord::ToolCallDone {
+        execution_id: String::new(),
+        outcome: None,
+        iteration: 1,
+        call_id: "c1".to_string(),
+        result: "[denied] User declined tool call 'bash'. Feedback: use the API"
+            .to_string()
+            .into(),
+        at: 0,
+    });
+    let finished: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::ToolFinished { result, .. } => Some(result.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        ["[denied] User declined tool call 'bash'. Feedback: use the API"]
+    );
 }
 
 // ─── The record of what a person answered ─────────────────────────────────────

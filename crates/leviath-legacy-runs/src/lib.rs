@@ -29,6 +29,7 @@
 mod context;
 mod error;
 mod history;
+pub mod journal;
 mod legacy;
 mod manifest;
 mod migrate;
@@ -106,6 +107,12 @@ pub trait StageLookup: Send + Sync {
 /// convert: an LVR1 journal and its `meta.json`.
 pub fn is_legacy(run_dir: &Path) -> bool {
     legacy::is_legacy(run_dir)
+}
+
+/// The metadata of the old run in `run_dir`, as its `meta.json` holds it, or
+/// `None` when there is none that reads.
+pub fn meta(run_dir: &Path) -> Option<leviath_core::run_meta::RunMeta> {
+    legacy::meta(run_dir)
 }
 
 /// The run graph of the old run in `run_dir`, read as its conversion reads

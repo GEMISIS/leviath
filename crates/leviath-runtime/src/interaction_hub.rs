@@ -81,7 +81,7 @@ pub struct InteractionHub {
     /// outside the tick - over the control socket, from `lev respond` - and the
     /// persistence lane is reached from inside one. `journal_interactions`
     /// drains this every tick.
-    settled: Arc<Mutex<Vec<(String, leviath_core::run_archive::InteractionRecord)>>>,
+    settled: Arc<Mutex<Vec<(String, crate::runfile::record::InteractionRecord)>>>,
     /// How many request ids each run has drawn, by run.
     ///
     /// The tail of a request id comes from here rather than from the
@@ -399,7 +399,7 @@ impl InteractionHub {
     ) {
         leviath_core::sync::lock(&self.settled).push((
             agent_id.to_string(),
-            leviath_core::run_archive::InteractionRecord {
+            crate::runfile::record::InteractionRecord {
                 request_id: request.id.clone(),
                 kind: request.kind.clone(),
                 tool: request.tool_name.clone(),
@@ -414,9 +414,7 @@ impl InteractionHub {
 
     /// Every settled interaction since the last drain, and the run each belongs
     /// to. What `journal_interactions` sends to the lane.
-    pub(crate) fn take_settled(
-        &self,
-    ) -> Vec<(String, leviath_core::run_archive::InteractionRecord)> {
+    pub(crate) fn take_settled(&self) -> Vec<(String, crate::runfile::record::InteractionRecord)> {
         std::mem::take(&mut *leviath_core::sync::lock(&self.settled))
     }
 

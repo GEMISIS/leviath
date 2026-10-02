@@ -1,7 +1,7 @@
 //! Old run directories that are broken, partial or unusual.
 
-use leviath_core::run_archive::RunRecord;
 use leviath_core::run_meta::{RunStatus as OldStatus, WaitReason};
+use leviath_legacy_runs::journal::JournalRecord;
 use leviath_legacy_runs::{BlueprintSource, ConvertEnv, ConvertError, convert};
 use leviath_runtime::spec::inputs::InputValue;
 use leviath_runtime::spec::launch::Unattended;
@@ -88,7 +88,7 @@ fn rich(run: &Run) {
 
 /// Set the run's status everywhere, dropping the journal's own status records.
 fn status(run: &Run, status: OldStatus, waiting: Option<WaitReason>, error: Option<&str>) {
-    run.journal(|r| r.retain(|r| !matches!(r, RunRecord::StatusChanged { .. })));
+    run.journal(|r| r.retain(|r| !matches!(r, JournalRecord::StatusChanged { .. })));
     run.meta(|m| {
         m.status = status.clone();
         m.waiting_on = waiting.clone();
@@ -101,7 +101,7 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
     let run = Run::fixture("finished");
     rich(&run);
     run.journal(|records| {
-        let RunRecord::ContextCheckpoint { snapshot, .. } = &mut records[1] else {
+        let JournalRecord::ContextCheckpoint { snapshot, .. } = &mut records[1] else {
             panic!("the second record is the first checkpoint");
         };
         let mut brief = snapshot.regions[0].clone();
@@ -326,7 +326,7 @@ fn a_run_in_a_stage_its_graph_lacks_resumes_at_the_entry() {
 fn context_entries_of_every_kind_are_typed() {
     let run = Run::fixture("finished");
     run.journal(|records| {
-        let RunRecord::ContextCheckpoint { snapshot, .. } = &mut records[1] else {
+        let JournalRecord::ContextCheckpoint { snapshot, .. } = &mut records[1] else {
             panic!("the second record is the first checkpoint");
         };
         let entry = |v: serde_json::Value| serde_json::from_value(v).unwrap();

@@ -2,7 +2,7 @@
 //! with every key removed.
 //!
 //! When something goes wrong, the useful evidence is spread over the config
-//! file, the daemon's log, a run's journal and the blueprint that ran, and
+//! file, the daemon's log, a run's file and the blueprint that ran, and
 //! a helper who gets one of them cannot reproduce anything. This builds one
 //! `.zip` holding all of it, scrubbed of API keys, OAuth tokens and header
 //! values (see `scrub`), and says in red what it still holds: the task, the
@@ -42,7 +42,7 @@ Pack the logs and settings a bug report needs into one zip, with every key remov
 
 The zip holds `lev doctor --offline`, the daemon's state and log, the config
 file with its keys taken out, every installed blueprint, and, for a run, the
-run's metadata, stages, context, journal and blueprint. API keys, OAuth
+run's summary, its run file as JSON, its stage logs and its blueprint. API keys, OAuth
 tokens, header values and other credentials are removed. The task text, the
 model's replies, tool output and file contents are kept: they are what a
 helper needs. Read the zip before you share it.

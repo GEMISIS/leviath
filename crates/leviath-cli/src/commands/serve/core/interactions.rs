@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
 use leviath_core::interaction::{InteractionKind, Settlement};
-use leviath_core::run_archive::InteractionRecord;
+use leviath_runtime::runfile::record::InteractionRecord;
 use leviath_runtime::state::journal::{QuestionKind, SettledState};
 use leviath_runtime::state::{OpenInteraction, RunEvent};
 

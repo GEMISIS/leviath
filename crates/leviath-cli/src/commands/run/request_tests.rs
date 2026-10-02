@@ -626,8 +626,8 @@ fn an_issues_report_counts_its_problems() {
 
 /// What the binary hands over for a run of `path` with `regions`, the task
 /// `do it`, working in `/mine`.
-fn launch(path: &str, regions: super::super::RunInputs) -> LaunchRequest<'_> {
-    LaunchRequest {
+fn launch(path: &str, regions: super::super::RunInputs) -> RunFlags<'_> {
+    RunFlags {
         path,
         task: Some("do it"),
         stdin_is_terminal: &crate::daemon::client::never_interactive,
@@ -663,7 +663,7 @@ fn what_the_binary_hands_over_is_read_as_a_command_line() {
         check: true,
         ..Default::default()
     };
-    let run = resolve_spawn_args(launch(".", from_file.clone())).unwrap();
+    let run = read_run_flags(launch(".", from_file.clone())).unwrap();
     assert!(run.check);
     assert_eq!(task_of(&run), "do it");
     assert_eq!(run.workdir, "/theirs", "a defaulted workdir gives way");
@@ -671,17 +671,17 @@ fn what_the_binary_hands_over_is_read_as_a_command_line() {
         workdir_given: true,
         ..from_file.clone()
     };
-    let run = resolve_spawn_args(launch(".", typed_workdir)).unwrap();
+    let run = read_run_flags(launch(".", typed_workdir)).unwrap();
     assert_eq!(run.workdir, "/mine", "a typed one does not");
     let typed_path = super::super::RunInputs {
         path_given: true,
         ..from_file
     };
-    let err = resolve_spawn_args(launch("coder", typed_path)).unwrap_err();
+    let err = read_run_flags(launch("coder", typed_path)).unwrap_err();
     assert!(err.to_string().contains("not both"), "{err}");
 
     let path = manifest.to_string_lossy();
-    let run = resolve_spawn_args(launch(&path, Default::default())).unwrap();
+    let run = read_run_flags(launch(&path, Default::default())).unwrap();
     assert!(source_name(&run).ends_with("my-agent"));
     assert!(!run.check);
 }

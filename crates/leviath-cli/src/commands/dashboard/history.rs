@@ -1,17 +1,17 @@
-//! Cached run history: the archived context points and the stage-visit
+//! Cached run history: the recorded context points and the stage-visit
 //! timeline derived from them.
 //!
 //! The `,`/`.` history keys would otherwise re-read and re-replay the entire
 //! run file on every keypress; the stage explorer needs the same data plus
 //! real visit counts (the stage ledger holds one record per stage, so a
 //! revisit is not a row of its own there). This module loads
-//! the archive once per run (through an injectable loader, so tests count
-//! reads), derives the visit timeline, and refreshes only when the archive
+//! the run file once per run (through an injectable loader, so tests count
+//! reads), derives the visit timeline, and refreshes only when the run file
 //! has changed, checked on a tick-based TTL while something is looking at it.
 
-use leviath_core::run_archive::RunPoint;
+use leviath_runtime::runfile::history::RunPoint;
 
-/// One contiguous stay in a stage, derived from the archived points.
+/// One contiguous stay in a stage, derived from the recorded points.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StageVisit {
     pub(super) stage: String,
@@ -27,16 +27,16 @@ pub(super) struct StageVisit {
     pub(super) first_point: usize,
 }
 
-/// The cached archive of one run.
+/// The cached history of one run.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RunHistoryCache {
     pub(super) run_id: String,
     pub(super) points: Vec<RunPoint>,
     pub(super) visits: Vec<StageVisit>,
-    /// Tick the archive was last found unchanged (or loaded), for the TTL.
+    /// Tick the run file was last found unchanged (or loaded), for the TTL.
     pub(super) checked_at_tick: u64,
-    /// The archive's stat when the points were read, so a reload happens only
-    /// when it has grown: a finished run's archive is read once.
+    /// The run file's stat when the points were read, so a reload happens only
+    /// when it has grown: a finished run's file is read once.
     pub(super) stamp: Option<crate::runstate::FileStamp>,
     /// Each edge the run took, `(from, to)`, from its run file's transition
     /// records. `None` when nothing recorded them.
@@ -83,7 +83,7 @@ impl super::state::Dashboard {
     }
 }
 
-/// Look at the archive no more often than this many ticks (~1s at the 100ms
+/// Look at the run file no more often than this many ticks (~1s at the 100ms
 /// tick rate), and read it again only if it changed.
 pub(super) const HISTORY_TTL_TICKS: u64 = 10;
 

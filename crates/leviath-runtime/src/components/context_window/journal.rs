@@ -1,7 +1,7 @@
 //! Recording what changed a context window, as it changes.
 //!
-//! The persistence lane already carries the window itself, as a snapshot per
-//! tick. That is what a region held; it is not what moved it, and the two are
+//! The persistence lane already carries the window itself, in each step's
+//! state. That is what a region held; it is not what moved it, and the two are
 //! not recoverable from one another: a plan region that emptied looks the same
 //! whether a compaction took it, a stage-edge transform cleared it, or the model
 //! called `context_delete`.
@@ -12,7 +12,7 @@
 //! four, a resume rebuilds every region there is - so a transaction is opened
 //! over the regions it is about to touch, and committed once, naming the window
 //! it started from and the window it produced. Read
-//! [`leviath_core::run_archive::RunRecord::ContextTransaction`] for what that
+//! [`crate::runfile::record::RunRecord::ContextTransaction`] for what that
 //! buys a reader.
 //!
 //! Each commit appends its own small record, the same fire-and-forget shape
@@ -29,8 +29,8 @@
 //! of them would be a wider change than the records are worth, and would still
 //! leave the ones reached from a plain helper function unattributed.
 
+use crate::runfile::record::{RegionCommit, RunRecord};
 use leviath_core::ContextCause;
-use leviath_core::run_archive::{RegionCommit, RunRecord};
 use leviath_core::run_meta::revision::{EntryFacts, RegionFacts, region_digest, window_revision};
 
 use crate::persistence_bridge::PersistMsg;

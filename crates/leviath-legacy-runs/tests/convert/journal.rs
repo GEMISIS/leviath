@@ -1,6 +1,6 @@
 //! Journal records of every kind, and how each one reads.
 
-use leviath_core::run_archive::RunRecord;
+use leviath_legacy_runs::journal::JournalRecord;
 use leviath_runtime::state::{RunEvent, RunStatus};
 use serde_json::json;
 
@@ -22,7 +22,7 @@ fn logged(events: &[RunEvent], needle: &str) -> bool {
 fn every_kind_of_record_reads_as_an_event_or_a_change() {
     let run = Run::fixture("finished");
     let header = run.records()[0].clone();
-    let RunRecord::Header { meta, .. } = &header else {
+    let JournalRecord::Header { meta, .. } = &header else {
         panic!("the journal starts with its header");
     };
     let checkpoint = json!({"Checkpoint": {
@@ -34,7 +34,7 @@ fn every_kind_of_record_reads_as_an_event_or_a_change() {
     let recorded = run
         .records()
         .into_iter()
-        .find(|r| matches!(r, RunRecord::InferenceAttempt(_)))
+        .find(|r| matches!(r, JournalRecord::InferenceAttempt(_)))
         .unwrap();
     let attempt = |outcome: serde_json::Value| {
         let mut a = serde_json::to_value(&recorded).unwrap();
@@ -130,14 +130,14 @@ fn every_kind_of_record_reads_as_an_event_or_a_change() {
 fn a_journal_that_starts_with_a_full_checkpoint_seeds_from_it() {
     let run = Run::fixture("finished");
     run.journal(|records| {
-        let RunRecord::Header { meta, .. } = &records[0] else {
+        let JournalRecord::Header { meta, .. } = &records[0] else {
             panic!("the journal starts with its header");
         };
         let meta = meta.clone();
-        let RunRecord::ContextCheckpoint { snapshot, at } = records[1].clone() else {
+        let JournalRecord::ContextCheckpoint { snapshot, at } = records[1].clone() else {
             panic!("the second record is the first checkpoint");
         };
-        records[1] = RunRecord::Checkpoint {
+        records[1] = JournalRecord::Checkpoint {
             meta,
             context: snapshot,
             at,
@@ -153,7 +153,7 @@ fn a_batch_with_some_results_back_keeps_them() {
     let run = Run::fixture("mid-tool-batch");
     run.journal(|records| {
         for r in records.iter_mut() {
-            if let RunRecord::ToolBatch { calls, .. } = r {
+            if let JournalRecord::ToolBatch { calls, .. } = r {
                 let mut second = calls[0].clone();
                 second.id = "call_2".into();
                 second.arguments = "{".into();
@@ -178,7 +178,7 @@ fn a_batch_with_some_results_back_keeps_them() {
 fn every_step_is_stamped_no_earlier_than_the_one_before() {
     let run = Run::fixture("finished");
     let first = run.records()[0].clone();
-    let RunRecord::Header { meta, .. } = &first else {
+    let JournalRecord::Header { meta, .. } = &first else {
         panic!("the journal starts with its header");
     };
     let early = meta.started_at - 100;

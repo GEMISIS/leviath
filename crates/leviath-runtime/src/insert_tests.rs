@@ -272,9 +272,9 @@ fn a_graph_lands_the_same_through_spawn_and_through_insert() {
         })
         .collect();
     let mut spawned = world_with_window(200_000);
-    let a = crate::pipeline::spawn_agent_seeded(
+    let a = crate::pipeline::place_test_run(
         &mut spawned,
-        crate::pipeline::SeededSpawn {
+        crate::pipeline::TestRun {
             agent_id: "coder-1".to_string(),
             graph: graph.clone(),
             seeds: [("task".to_string(), "fix the bug".to_string())].into(),

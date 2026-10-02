@@ -353,7 +353,7 @@ pub(crate) fn fail_stalled_dispatch(
         // Every run parks, unattended included. Failing an unattended one on
         // the reasoning that a scheduler watches for a terminal status and
         // would wait for ever undersells harnesses: `paused` is visible in
-        // `meta.json` and `lev ps --json`, and one that can top up an account
+        // `lev ps --json` and the API, and one that can top up an account
         // and `lev resume` gets its work back. One that cannot is no worse
         // off - it cancels the run, a decision it can make in a second, where
         // a failed run's work is gone for good.

@@ -530,7 +530,7 @@ pub fn classified_builtin(tool_name: &str) -> Option<ToolClassification> {
         }
         // `submit_output` records the answer the caller gets back, and the
         // caller is not always on this machine: `lev serve` hands it to any
-        // reader of `GET /api/agents/{id}/result`, and the dashboard shows
+        // reader of `GET /api/runs/{id}/result`, and the dashboard shows
         // it. It is the run's one deliberate channel out, so it takes the
         // shape `shell` has, outbound with Public clearance, and a Private
         // region in a submitted answer raises the leak prompt (or the

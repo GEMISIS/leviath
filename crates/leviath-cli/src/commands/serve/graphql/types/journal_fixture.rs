@@ -8,7 +8,7 @@
 //! after a step that moves the run's cursor to where the record says it
 //! happened.
 
-use leviath_core::run_archive::RunRecord;
+use leviath_runtime::runfile::record::RunRecord;
 use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter, journal_events};
 use leviath_runtime::spec::env::CodeFiles;
 use leviath_runtime::spec::names::{RunId, StageName};
@@ -53,18 +53,17 @@ pub(crate) fn started_at(
     .expect("the run file is written")
 }
 
-/// When `record` happened, when it says.
-fn at_of(record: &RunRecord) -> Option<i64> {
+/// When `record` happened.
+fn at_of(record: &RunRecord) -> i64 {
     match record {
-        RunRecord::InferenceAttempt(a) => Some(a.at),
-        RunRecord::InferenceFailover(f) => Some(f.at),
-        RunRecord::ToolBatch { at, .. }
+        RunRecord::InferenceAttempt(a) => a.at,
+        RunRecord::InferenceFailover(f) => f.at,
+        RunRecord::InferenceUsage { at, .. }
+        | RunRecord::ToolBatch { at, .. }
         | RunRecord::ToolCallDone { at, .. }
         | RunRecord::ArtifactsProduced { at, .. }
         | RunRecord::Interaction { at, .. }
-        | RunRecord::ContextTransaction { at, .. }
-        | RunRecord::ContextChange { at, .. } => Some(*at),
-        _ => None,
+        | RunRecord::ContextTransaction { at, .. } => *at,
     }
 }
 
@@ -104,6 +103,15 @@ fn place(state: &mut RunState, stages: &[StageName], record: &RunRecord) {
 pub(crate) fn journal(run_id: &str, records: &[RunRecord]) {
     let mut writer = started(run_id);
     append(&mut writer, records);
+}
+
+/// Record the run file of `run_id` with one step per event, each at its time.
+pub(crate) fn events(run_id: &str, events: Vec<(leviath_runtime::state::RunEvent, i64)>) {
+    let mut writer = started(run_id);
+    for (event, at) in events {
+        let state = writer.state().clone();
+        writer.record(state, at, vec![event]).expect("a step");
+    }
 }
 
 /// Record `records` as the run file of `run_id`, after a first step that
@@ -200,19 +208,17 @@ pub(crate) fn stay(id: &str, entered_at: i64) -> leviath_runtime::state::StageRe
 
 /// Record `records` as further steps of the run file `writer` is writing.
 pub(crate) fn append(writer: &mut RunFileWriter, records: &[RunRecord]) {
-    let mut at = 0;
     let stages = writer_stages(writer);
     for record in records {
-        at = at_of(record).unwrap_or(at);
+        let at = at_of(record);
         let mut state = writer.state().clone();
         place(&mut state, &stages, record);
         writer
             .record(state.clone(), at, Vec::new())
             .expect("a step");
-        let events = journal_events(record);
-        if !events.is_empty() {
-            writer.record(state, at, events).expect("a step");
-        }
+        writer
+            .record(state, at, journal_events(record))
+            .expect("a step");
     }
 }
 
@@ -226,4 +232,24 @@ fn writer_stages(writer: &RunFileWriter) -> Vec<StageName> {
         .iter()
         .map(|stage| stage.name.clone())
         .collect()
+}
+
+/// A usage record is placed at its own time, like every other record.
+#[test]
+fn a_usage_record_happens_when_it_says() {
+    let usage = RunRecord::InferenceUsage {
+        kind: Default::default(),
+        stage: "plan".to_string(),
+        iteration: 0,
+        provider: "anthropic".to_string(),
+        model: "claude".to_string(),
+        prompt_tokens: 1,
+        completion_tokens: 1,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: None,
+        cost_reported_by_provider: None,
+        at: 42,
+    };
+    assert_eq!(at_of(&usage), 42);
 }

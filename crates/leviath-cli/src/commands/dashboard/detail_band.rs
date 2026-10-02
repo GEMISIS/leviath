@@ -279,7 +279,7 @@ impl Dashboard {
         }
     }
 
-    /// The run's path as the band draws it: what the archive recorded, plus
+    /// The run's path as the band draws it: what the run file recorded, plus
     /// the stage the run is in now.
     fn path_visits(&self, agent: &DashboardAgent) -> Vec<Visit> {
         let visits: Vec<Visit> = self
@@ -331,7 +331,7 @@ impl Dashboard {
         if agent.graph.is_none() {
             return false;
         }
-        // The path (and the visit counts behind it) comes from the archive.
+        // The path (and the visit counts behind it) comes from the run file.
         self.ensure_history(&agent.id);
         let (graph, live, visits) = self.run_path_for(agent);
         if visits == 0 {
@@ -494,7 +494,7 @@ regions = []
     /// Give `run` an archived path: one point per stage named, in order, so
     /// `derive_visits` sees them as consecutive stays.
     fn seed(dash: &mut Dashboard, run_id: &str, stages: &[&str]) {
-        let points: Vec<leviath_core::run_archive::RunPoint> = stages
+        let points: Vec<leviath_runtime::runfile::history::RunPoint> = stages
             .iter()
             .enumerate()
             .map(|(i, stage)| {
@@ -509,7 +509,7 @@ regions = []
                 );
                 meta.current_stage = (*stage).to_string();
                 meta.iteration = 2;
-                leviath_core::run_archive::RunPoint {
+                leviath_runtime::runfile::history::RunPoint {
                     meta,
                     context: leviath_core::run_meta::ContextSnapshot {
                         stage_name: (*stage).to_string(),

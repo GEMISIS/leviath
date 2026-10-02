@@ -283,7 +283,7 @@ type FinalOutputQuery = (
 /// The same shape as [`require_context_regions`] and the edge gate's
 /// `require_modifications`, and deliberately so: a missing output never strands
 /// a run. When the re-entry budget is spent the transition proceeds and the run
-/// records `output_forced`, so a caller reading `meta.json` can tell "no answer
+/// records `output_forced`, so a caller reading the run's flags can tell "no answer
 /// because the agent never gave one" from "no answer because nobody asked".
 ///
 /// Skipped when the stage ended on an error or max-iterations outcome, which

@@ -1,12 +1,12 @@
 //! `lev context <run-id>` - show a run's context-window history.
 //!
-//! Replays the run's portable archive (`run.lvr`) into the sequence of context
+//! Replays the run file (`run.lvr`) into the sequence of context
 //! windows over time (one per recorded checkpoint/step) and prints them, so you
 //! can inspect what the agent's memory looked like at each stage and point -
 //! for debugging or auditing. Read-only; sources everything from disk.
 
 use clap::Args;
-use leviath_core::run_archive::RunPoint;
+use leviath_runtime::runfile::history::RunPoint;
 
 /// Arguments for `lev context`.
 #[derive(Args, Debug)]
@@ -26,7 +26,7 @@ pub(crate) async fn execute(args: ContextArgs) -> anyhow::Result<()> {
     let history = crate::runstate::context_history(&args.run_id);
     if history.is_empty() {
         anyhow::bail!(
-            "no context history for run '{}' (no readable run.lvr archive)",
+            "no context history for run '{}' (no readable run file)",
             args.run_id
         );
     }

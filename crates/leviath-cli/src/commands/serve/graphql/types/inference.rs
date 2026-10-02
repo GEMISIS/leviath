@@ -13,8 +13,8 @@
 //! the join a client would otherwise be left to guess at.
 
 use async_graphql::{Enum, Object, SimpleObject};
-use leviath_core::run_archive::{AttemptRecord, FailoverRecord};
 use leviath_graphql_derive::mirror;
+use leviath_runtime::runfile::record::{AttemptRecord, FailoverRecord};
 
 use super::super::connection::{
     Connection, Paged, PositionQuery, Total, position_order, position_page,
@@ -45,9 +45,9 @@ pub(crate) enum RetryDecision {
     RenewedFiles,
 }
 
-impl From<leviath_core::run_archive::Retry> for RetryDecision {
-    fn from(retry: leviath_core::run_archive::Retry) -> Self {
-        use leviath_core::run_archive::Retry as Core;
+impl From<leviath_runtime::runfile::record::Retry> for RetryDecision {
+    fn from(retry: leviath_runtime::runfile::record::Retry) -> Self {
+        use leviath_runtime::runfile::record::Retry as Core;
         match retry {
             Core::Reported => Self::Reported,
             Core::SameModel => Self::SameModel,
@@ -103,7 +103,7 @@ pub(crate) struct AttemptOutcome {
 
 impl From<&AttemptRecord> for AttemptOutcome {
     fn from(record: &AttemptRecord) -> Self {
-        use leviath_core::run_archive::AttemptOutcome as Core;
+        use leviath_runtime::runfile::record::AttemptOutcome as Core;
         // Every field but `kind` stays null on the arm it does not belong to,
         // so a client switching on `kind` first never has to check whether an
         // unrelated field is meaningful before reading it.
@@ -158,8 +158,8 @@ pub(crate) struct RequestDigest {
     pub(crate) temperature: f64,
 }
 
-impl From<&leviath_core::run_archive::RequestDigest> for RequestDigest {
-    fn from(digest: &leviath_core::run_archive::RequestDigest) -> Self {
+impl From<&leviath_runtime::runfile::record::RequestDigest> for RequestDigest {
+    fn from(digest: &leviath_runtime::runfile::record::RequestDigest) -> Self {
         Self {
             system_hash: format!("{:016x}", digest.system_hash),
             messages: count(digest.messages),
@@ -191,9 +191,9 @@ pub(crate) enum CaptureStatus {
     Expired,
 }
 
-impl From<leviath_core::run_archive::CaptureStatus> for CaptureStatus {
-    fn from(status: leviath_core::run_archive::CaptureStatus) -> Self {
-        use leviath_core::run_archive::CaptureStatus as Core;
+impl From<leviath_runtime::runfile::record::CaptureStatus> for CaptureStatus {
+    fn from(status: leviath_runtime::runfile::record::CaptureStatus) -> Self {
+        use leviath_runtime::runfile::record::CaptureStatus as Core;
         match status {
             Core::Retained => Self::Retained,
             Core::NotCaptured => Self::NotCaptured,
@@ -206,7 +206,7 @@ impl From<leviath_core::run_archive::CaptureStatus> for CaptureStatus {
 /// The resolver state behind the `ModelRequest` type.
 pub(crate) struct ModelRequest {
     /// What the journal recorded about the request.
-    pub(crate) record: leviath_core::run_archive::ModelInput,
+    pub(crate) record: leviath_runtime::runfile::record::ModelInput,
 }
 
 /// What one attempt sent the model, and what the request was assembled from.

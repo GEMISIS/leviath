@@ -1,6 +1,6 @@
 use super::*;
 use crate::runfile::reader_tests::{initial, spec};
-use leviath_core::run_archive::RunRecord;
+use crate::runfile::record::RunRecord;
 use leviath_core::run_meta::RunMeta;
 use tokio::sync::mpsc;
 
@@ -54,7 +54,7 @@ fn stepped(run_id: &str) -> Box<PersistJob> {
 /// A record that a tool batch was dispatched.
 fn batch_record(call_id: &str) -> RunRecord {
     RunRecord::ToolBatch {
-        calls: vec![leviath_core::run_archive::ToolCallRecord {
+        calls: vec![crate::runfile::record::ToolCallRecord {
             id: call_id.to_string(),
             execution_id: String::new(),
             name: "shell".to_string(),
@@ -139,25 +139,21 @@ async fn a_superseded_snapshots_stage_lines_still_reach_the_stage_log() {
     assert_eq!(logs.lines().collect::<Vec<_>>(), ["[a]", "[b]"]);
 }
 
-/// A snapshot writes its run's step into the run file and nothing in the
-/// older layout: no `meta.json`, no `context.json`, no LVR1 journal.
+/// A snapshot writes its run's step into the run file, and the run file is
+/// the only file it writes.
 #[tokio::test]
-async fn a_snapshot_writes_its_step_and_none_of_the_older_files() {
+async fn a_snapshot_writes_its_step_into_the_run_file_and_nothing_else() {
     let dir = tempfile::tempdir().unwrap();
     let stats = run_lane(dir.path(), vec![PersistMsg::Snapshot(stepped("run-1"))]).await;
     let run_dir = dir.path().join("run-1");
     let read =
         crate::runfile::RunFileReader::open(&run_dir.join(leviath_core::files::RUN_FILE)).unwrap();
     assert_eq!(read.latest_state().unwrap(), initial());
-    for old in [
-        leviath_core::files::META_FILE,
-        leviath_core::files::CONTEXT_FILE,
-        leviath_core::files::STAGES_FILE,
-        leviath_core::files::FANOUT_FILE,
-        leviath_core::files::INTERACTIONS_FILE,
-    ] {
-        assert!(!run_dir.join(old).exists(), "{old} is not written");
-    }
+    let written: Vec<String> = std::fs::read_dir(&run_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(written, [leviath_core::files::RUN_FILE]);
     let report = stats.report();
     assert_eq!(report.appends_attempted, 1);
     assert!(report.is_healthy());
@@ -317,8 +313,19 @@ async fn an_acked_record_is_a_step_of_its_own() {
             },
             PersistMsg::Append {
                 run_id: "run-1".to_string(),
-                record: Box::new(RunRecord::StatusChanged {
-                    status: leviath_core::run_meta::RunStatus::Running,
+                // A usage record naming no valid model becomes no event.
+                record: Box::new(RunRecord::InferenceUsage {
+                    kind: Default::default(),
+                    stage: String::new(),
+                    iteration: 0,
+                    provider: String::new(),
+                    model: String::new(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                    cost_usd: None,
+                    cost_reported_by_provider: None,
                     at: 1,
                 }),
                 ack: Some(quiet),

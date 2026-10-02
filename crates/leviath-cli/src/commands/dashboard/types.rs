@@ -21,7 +21,7 @@ pub(super) enum StageContentMode {
     Output,
     Logs,
     Context,
-    /// The run's submitted answer, exactly as `GET /api/agents/{id}/result`
+    /// The run's submitted answer, exactly as `GET /api/runs/{id}/result`
     /// serves it. Offered only while the selected run has one.
     FinalOutput,
 }
@@ -594,7 +594,7 @@ pub(super) struct NewRunContext {
 /// Resolving a blueprint reads and parses files and the spawn itself is a
 /// socket round trip, so neither happens on the draw loop.
 #[derive(Debug, Default, PartialEq)]
-pub(super) struct SpawnCommand {
+pub(super) struct NewRunCommand {
     /// The agent path or name to resolve.
     pub(super) agent_path: String,
     /// The task text as typed.
@@ -613,7 +613,7 @@ pub(super) struct SpawnCommand {
     pub(super) values: std::collections::BTreeMap<String, leviath_runtime::spec::inputs::RawInput>,
 }
 
-/// The result of a [`SpawnCommand`], drained each tick and shown as a toast.
+/// The result of a [`NewRunCommand`], drained each tick and shown as a toast.
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct SpawnOutcome {
     /// Human-readable result to toast.

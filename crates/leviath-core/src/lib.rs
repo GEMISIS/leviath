@@ -29,7 +29,6 @@ pub mod paths;
 pub mod policy;
 pub mod read_paths;
 pub mod region;
-pub mod run_archive;
 pub mod run_meta;
 pub mod sandbox;
 pub mod secrets;

@@ -1,10 +1,11 @@
-//! Plain, serializable run-state data types.
+//! A run's summary and the views read off it.
 //!
-//! These are pure data (`serde`-derived structs/enums plus trivial constructors)
-//! with no filesystem or async dependencies, so they can be named by both
-//! `leviath-cli` and the `leviath-runtime` engine. The runtime builds them
-//! from a run's file (`leviath_runtime::runfile::summary`), and the CLI's
-//! `runstate` module reads run directories.
+//! These are pure data (`serde`-derived structs/enums plus trivial
+//! constructors) with no filesystem or async dependencies, so they can be named
+//! by both `leviath-cli` and the `leviath-runtime` engine. None of them is a
+//! file: the runtime builds them from a live run's components, or from a run's
+//! file (`leviath_runtime::runfile::summary`), and `lev ps`, the dashboard and
+//! the API serve them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -387,7 +388,11 @@ pub fn wait_reason_from(parked: bool, markers: &WaitMarkers) -> Option<WaitReaso
     None
 }
 
-/// Metadata for a single background agent run.
+/// One run's summary: what `lev ps`, the dashboard and the API list for it.
+///
+/// Built from the run's state, never stored on its own. A live run's comes
+/// from its components on every persistence tick, and a run on disk's from the
+/// last step of its run file, so the two read the same.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunMeta {
     /// Identifies the run everywhere, and names its directory under
@@ -427,7 +432,7 @@ pub struct RunMeta {
     /// as an entity in one shared world, so no run has a pid of its own.
     ///
     /// Kept because it is part of every run record, and served from
-    /// `GET /api/agents`. Do not key liveness on it. `pid == 0`
+    /// `GET /api/runs`. Do not key liveness on it. `pid == 0`
     /// is true of a run that is working, a run that has finished, and a run
     /// nothing is driving, so a sweeper that reverts on it reverts everything.
     /// Ask the daemon (`lev ps`) whether it is still hosting the run, and read
@@ -491,8 +496,7 @@ pub struct RunMeta {
     /// Unix timestamp (seconds)
     pub updated_at: i64,
     /// Unix seconds when this run last actually moved: a new iteration, a new
-    /// stage, or a change of status. `None` before the first snapshot lands, and
-    /// on runs written by a daemon older than this field.
+    /// stage, or a change of status. `None` before the first snapshot lands.
     ///
     /// Distinct from `updated_at`, which also advances on the 30-second
     /// persistence heartbeat and so stays fresh on a run that is wedged. A fresh
@@ -535,51 +539,37 @@ pub struct RunMeta {
     /// Optional shared secret used to HMAC-SHA256 sign the webhook body
     /// (`X-Leviath-Signature` header) so the receiver can verify authenticity.
     ///
-    /// Persisted, because the daemon must still be able to sign a webhook for a
-    /// run it reloaded after a restart. **Never serve it** - strip it with
-    /// [`RunMeta::redacted`] before any of this struct leaves the process.
+    /// **Never serve it**: strip it with [`RunMeta::redacted`] before any of
+    /// this struct leaves the process.
     #[serde(default)]
     pub callback_secret: Option<String>,
     /// Links sub-agent runs to their parent run.
     #[serde(default)]
     pub parent_run_id: Option<String>,
     /// Run-ids of this agent's direct sub-agents (sub-agent-tool spawns and
-    /// fan-out workers). Persisted so the daemon can rebuild the exact
-    /// parent→children tree on restart rather than reload children as orphans.
+    /// fan-out workers).
     #[serde(default)]
     pub children: Vec<String>,
     /// This agent's depth in the sub-agent tree (0 for a top-level run).
-    /// Persisted so a reloaded child enforces its remaining spawn-depth budget.
     #[serde(default)]
     pub depth: usize,
     /// The sub-agent depth cap this agent imposes on its own children
-    /// (0 when it has none). Restores `SubAgentChildren::max_child_depth`.
+    /// (0 when it has none).
     #[serde(default)]
     pub max_child_depth: usize,
     /// Why this run may have produced nothing useful - see [`RunFlags`].
     #[serde(default)]
     pub flags: RunFlags,
-    /// Whether the run was launched unattended (`--yolo`), so a daemon restart
-    /// resumes it the way it was started.
-    ///
-    /// Persisted rather than dropped on reload. Forgetting a launch override
-    /// only ever prompts more, never less, which is why dropping it reads as
-    /// safe; what it actually does is convert an unattended run into one
-    /// parked on a prompt nobody is watching for, discarding consent the
-    /// operator gave at launch. Runs written before this field existed default
-    /// to attended, so nothing is escalated retroactively.
+    /// Whether the run was launched unattended (`--yolo`), as its spec's
+    /// launch policy says.
     #[serde(default)]
     pub yolo: bool,
-    /// The named yolo profile (`--yolo=<name>`) the run was launched under,
-    /// persisted with `yolo` for the same reason: a restart that dropped the
-    /// name would resume a carefully scoped run under bare `--yolo`, which is
-    /// the escalating direction. Absent for the bare flag and for runs written
-    /// before profiles existed.
+    /// The named yolo profile (`--yolo=<name>`) the run was launched under.
+    /// Absent for the bare flag and for an attended run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yolo_profile: Option<String>,
     /// How much of the blueprint's `[read_paths]` the config granted, as
-    /// resolved at spawn. `None` for a blueprint that declared none, and for
-    /// runs written before this field existed.
+    /// resolved at spawn. `None` for a blueprint that declared none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_paths: Option<ReadPathGrantCounts>,
     /// What the agent handed back, if it submitted anything: everything about
@@ -593,41 +583,22 @@ pub struct RunMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_output: Option<crate::output::FinalOutputDescriptor>,
 
-    /// Why this run is parked, when it is. `None` on every other status, and
-    /// on a run written before this field existed. Same vocabulary the live
-    /// listing reports, so `lev ps` and a client reading this record describe a
-    /// run the same way.
-    ///
-    /// Additive on purpose: `default` means a record without the key still
-    /// loads, and `skip_serializing_if` means a run that is not parked carries
-    /// no such key at all.
+    /// Why this run is parked, when it is. `None` on every other status. Same
+    /// vocabulary the live listing reports, so `lev ps` and a client reading
+    /// this record describe a run the same way. A run that is not parked
+    /// carries no such key at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_on: Option<WaitReason>,
     /// The output shape this run was launched asking for, when the caller
     /// overrode the blueprint's.
-    ///
-    /// Persisted for the same reason `yolo` is: a daemon restart rebuilds the
-    /// run's spawn arguments from this file, and dropping the request would
-    /// silently revert the run to the blueprint's shape partway through. The
-    /// caller asked once and should not have to ask again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_request: Option<crate::output::OutputSpec>,
     /// The `--model` the run was launched with, exactly as given
     /// (`provider/model` or a bare model), when the caller gave one.
     ///
     /// Distinct from `model`, which is what the entry stage *resolved to* and
-    /// is recorded whether or not anything was overridden. A daemon restart
-    /// rebuilds the run's spawn arguments from this record, and must hand back
-    /// this field rather than `model`: handing back `model` pins every stage
-    /// of a run launched with no `--model` to its first stage's provider and
-    /// model, and loses its failover list. This field is what was actually
-    /// asked for, so a reload asks for the same thing - and for a run that
-    /// asked for nothing, resolves each stage afresh, as the launch did.
-    ///
-    /// Runs written before this field existed reload with no override. That
-    /// loses a `--model` given to such a run, which is the smaller harm: the
-    /// stage falls back to its blueprint's list rather than being pinned to a
-    /// pair the user may never have named.
+    /// is recorded whether or not anything was overridden: this is what was
+    /// asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_override: Option<String>,
 
@@ -827,7 +798,7 @@ impl RunMeta {
     /// This run's metadata with the webhook signing secret removed, for anything
     /// that leaves the process.
     ///
-    /// `GET /api/agents`, `/api/agents/{id}` and `/api/agents/{id}/children`
+    /// `GET /api/runs`, `/api/runs/{id}` and `/api/runs/{id}/children`
     /// all serialize `RunMeta` whole, so without this any holder of the API
     /// token reads every run's `callback_secret` - the key that authenticates
     /// Leviath's webhooks to their receivers. Mirrors the `RedactedConfig`
@@ -978,26 +949,13 @@ pub struct RegionEntrySnapshot {
     /// Key for HashMap region entries (file paths, section names, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// How sensitive this entry is.
-    ///
-    /// Persisted because taint was not, and a restore that dropped it silently
-    /// disarmed the gate: the reloaded run re-enabled taint tracking, found
-    /// every region back at `Public`, and let outbound tools through that had
-    /// been blocked a moment earlier. Any restart, crash-recovery, `resume`, or
-    /// page-in did it.
-    ///
-    /// Defaults to `Public` for snapshots written before this field existed -
-    /// the same value they were being restored with anyway, so nothing is worse
-    /// than it was, and new runs are correct from their first write.
+    /// How sensitive this entry is. A view that dropped it would show a
+    /// tainted region as `Public`. `Public` where nothing recorded one.
     #[serde(default)]
     pub taint: crate::taint::TaintLevel,
-    /// The opaque provider token this turn has to be replayed with.
-    ///
-    /// Persisted for the same reason `taint` is: a restore that dropped it
-    /// would silently break reasoning continuity on a stateless backend, and
-    /// the run would look fine while paying to re-derive its chain of thought
-    /// every turn. Defaults to absent for snapshots written before the field,
-    /// which is what they were being restored with anyway.
+    /// The opaque provider token this turn has to be replayed with, so
+    /// reasoning carries on across turns on a stateless backend. Absent where
+    /// nothing recorded one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
 }
@@ -1243,7 +1201,7 @@ mod tests {
     }
 
     /// The webhook signing secret must not survive into anything served over
-    /// the API - an unredacted meta lets `GET /api/agents` hand it to any
+    /// the API - an unredacted meta lets `GET /api/runs` hand it to any
     /// token holder.
     #[test]
     fn redacted_drops_the_callback_secret_and_keeps_everything_else() {

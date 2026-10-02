@@ -8,8 +8,8 @@
 //! with the conversion's report in its log, so folding the deltas always ends
 //! exactly at the last state.
 
-use leviath_core::run_archive::{self, AttemptOutcome, AttemptRecord, RunRecord};
 use leviath_core::run_meta::{ContextSnapshot, RunMeta};
+use leviath_runtime::runfile::record::{AttemptOutcome, AttemptRecord};
 use leviath_runtime::spec::names::ModelRef;
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::context::ToolCallState;
@@ -18,6 +18,7 @@ use leviath_runtime::state::{
 };
 
 use crate::context::Losses;
+use crate::journal::{self, JournalRecord};
 use crate::legacy::LegacyRun;
 use crate::report::Report;
 use crate::state::{context_in, entry, from_meta, last, stage_of};
@@ -67,35 +68,35 @@ impl Replay<'_> {
         }
     }
 
-    fn record(&mut self, r: &RunRecord) {
+    fn record(&mut self, r: &JournalRecord) {
         let (moved, events) = match r {
-            RunRecord::Header { meta, .. } => {
+            JournalRecord::Header { meta, .. } => {
                 self.meta = (**meta).clone();
                 (false, Vec::new())
             }
-            RunRecord::ContextCheckpoint { snapshot, at } => {
+            JournalRecord::ContextCheckpoint { snapshot, at } => {
                 self.at = *at;
                 self.context = snapshot.clone();
                 (true, Vec::new())
             }
-            RunRecord::ContextDiff { delta, at } => {
+            JournalRecord::ContextDiff { delta, at } => {
                 self.at = *at;
-                run_archive::apply_delta(&mut self.context, delta);
+                journal::apply_delta(&mut self.context, delta);
                 (true, Vec::new())
             }
-            RunRecord::Progress { meta, delta, at } => {
+            JournalRecord::Progress { meta, delta, at } => {
                 self.at = *at;
                 self.meta = (**meta).clone();
-                run_archive::apply_delta(&mut self.context, delta);
+                journal::apply_delta(&mut self.context, delta);
                 (true, Vec::new())
             }
-            RunRecord::Checkpoint { meta, context, at } => {
+            JournalRecord::Checkpoint { meta, context, at } => {
                 self.at = *at;
                 self.meta = (**meta).clone();
                 self.context = context.clone();
                 (true, Vec::new())
             }
-            RunRecord::StatusChanged { status, at } => {
+            JournalRecord::StatusChanged { status, at } => {
                 self.at = *at;
                 self.meta.status = status.clone();
                 (false, Vec::new())
@@ -106,9 +107,9 @@ impl Replay<'_> {
     }
 
     /// The events a record that is not a state change carries.
-    fn events(&mut self, r: &RunRecord) -> Vec<RunEvent> {
+    fn events(&mut self, r: &JournalRecord) -> Vec<RunEvent> {
         match r {
-            RunRecord::InferenceAttempt(a) => {
+            JournalRecord::InferenceAttempt(a) => {
                 self.attempt = Some(a.clone());
                 match &a.outcome {
                     AttemptOutcome::Succeeded => Vec::new(),
@@ -121,7 +122,7 @@ impl Replay<'_> {
                     ))],
                 }
             }
-            RunRecord::InferenceUsage {
+            JournalRecord::InferenceUsage {
                 provider,
                 model: name,
                 prompt_tokens,
@@ -161,7 +162,7 @@ impl Replay<'_> {
                     finish_reason: attempt.map(|a| a.finish_reason),
                 }]
             }
-            RunRecord::InferenceFailover(f) => {
+            JournalRecord::InferenceFailover(f) => {
                 self.at = f.at;
                 match (
                     model(&f.from_provider, &f.from_model),
@@ -178,7 +179,7 @@ impl Replay<'_> {
                     ))],
                 }
             }
-            RunRecord::ToolBatch { calls, at, .. } => {
+            JournalRecord::ToolBatch { calls, at, .. } => {
                 self.at = *at;
                 let mut events = Vec::new();
                 for c in calls {
@@ -203,7 +204,7 @@ impl Replay<'_> {
                 }
                 events
             }
-            RunRecord::ToolCallDone {
+            JournalRecord::ToolCallDone {
                 call_id,
                 result,
                 outcome,
@@ -221,7 +222,7 @@ impl Replay<'_> {
                     millis: 0,
                 }]
             }
-            RunRecord::Interaction {
+            JournalRecord::Interaction {
                 request_id,
                 settlement,
                 at,
@@ -233,7 +234,7 @@ impl Replay<'_> {
                     answer: serde_json::to_string(settlement).unwrap_or_default(),
                 }]
             }
-            RunRecord::Message { message, at } => {
+            JournalRecord::Message { message, at } => {
                 self.at = *at;
                 vec![RunEvent::Message(MessageState {
                     from: message.role.clone(),
@@ -241,7 +242,7 @@ impl Replay<'_> {
                     region: None,
                 })]
             }
-            RunRecord::OwnershipChanged {
+            JournalRecord::OwnershipChanged {
                 machine_id,
                 world_id,
                 at,
@@ -251,7 +252,7 @@ impl Replay<'_> {
                     "the run moved to machine {machine_id}, world {world_id}"
                 ))]
             }
-            RunRecord::ArtifactsProduced {
+            JournalRecord::ArtifactsProduced {
                 execution_id,
                 artifacts,
                 at,
@@ -262,7 +263,7 @@ impl Replay<'_> {
                     artifacts.len()
                 ))]
             }
-            RunRecord::Inference { stage, at, .. } => {
+            JournalRecord::Inference { stage, at, .. } => {
                 self.at = *at;
                 vec![RunEvent::Log(format!("a model call in stage {stage}"))]
             }

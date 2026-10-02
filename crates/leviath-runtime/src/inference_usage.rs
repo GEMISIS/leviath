@@ -1,20 +1,17 @@
 //! What one provider call cost, recorded where it lands.
 //!
-//! A run bills for four kinds of call and, until this module existed, counted
-//! one of them. Stage turns went into [`TokenTotals`];
-//! the compaction, title, and routing lanes each threw their usage away at the
-//! outcome boundary, because each channel carried only the payload its collector
-//! wanted - a summary, a title, a stage name - and usage was not it.
+//! A run bills for four kinds of call: stage turns, compaction, the title and
+//! routing. Each lane's channel carries only the payload its collector wants (a
+//! summary, a title, a stage name), so the usage is accounted here, in one
+//! place, rather than per lane.
 //!
-//! Two things follow from putting the accounting in one place rather than
-//! repeating it per lane. The cumulative totals finally cover every call, so a
+//! Two things follow. The cumulative [`TokenTotals`] cover every call, so a
 //! run's reported spend is what the provider actually billed. And each call
-//! writes a [`RunRecord::InferenceUsage`] as it lands, which is the part
-//! [`RunRecord::Progress`] cannot do: progress counters are cumulative, so two
-//! calls between two ticks arrive as their sum, and a chart of that sum shows a
-//! spike no single call ever made.
+//! sends a [`RunRecord::InferenceUsage`] as it lands, which cumulative counters
+//! cannot do: two calls between two steps would arrive as their sum, and a chart
+//! of that sum shows a spike no single call ever made.
 
-use leviath_core::run_archive::{InferenceKind, RunRecord};
+use crate::runfile::record::{InferenceKind, RunRecord};
 
 use crate::persistence::{RunMetadata, TokenTotals};
 use crate::persistence_bridge::PersistMsg;
@@ -233,10 +230,8 @@ mod tests {
         });
         let records = appended(&mut rx);
         assert_eq!(records.len(), 1, "one call, one record");
-        let value = serde_json::to_value(&records[0]).unwrap();
-        let f = &value["InferenceUsage"];
-        assert_eq!(f["cost_usd"], serde_json::json!(0.0042));
-        assert_eq!(f["cost_reported_by_provider"], serde_json::json!(true));
+        let shown = format!("{:?}", records[0]);
+        assert!(shown.contains("cost_usd: Some(0.0042), cost_reported_by_provider: Some(true)"));
     }
 
     /// With no reported cost, the model's rates are applied and the record says
@@ -266,10 +261,8 @@ mod tests {
 
         let records = appended(&mut rx);
         assert_eq!(records.len(), 1, "one call, one record");
-        let value = serde_json::to_value(&records[0]).unwrap();
-        let f = &value["InferenceUsage"];
-        assert_eq!(f["cost_usd"], serde_json::json!(30.0));
-        assert_eq!(f["cost_reported_by_provider"], serde_json::json!(false));
+        let shown = format!("{:?}", records[0]);
+        assert!(shown.contains("cost_usd: Some(30.0), cost_reported_by_provider: Some(false)"));
     }
 
     /// Neither route available: the call is journaled with no cost at all
@@ -291,10 +284,11 @@ mod tests {
 
         let records = appended(&mut rx);
         assert_eq!(records.len(), 1, "one call, one record");
-        let value = serde_json::to_value(&records[0]).unwrap();
-        let f = value["InferenceUsage"].as_object().unwrap();
-        assert!(!f.contains_key("cost_usd"), "absent, not 0.0");
-        assert!(!f.contains_key("cost_reported_by_provider"));
+        let shown = format!("{:?}", records[0]);
+        assert!(
+            shown.contains("cost_usd: None, cost_reported_by_provider: None"),
+            "absent, not 0.0"
+        );
     }
 
     /// The two halves are independent by design, so the four combinations of
@@ -334,28 +328,15 @@ mod tests {
         assert_eq!(appended.len(), 1, "one call, one record");
         let (run_id, record) = appended.remove(0);
         assert_eq!(run_id, "run-u");
-        // Asserted on the serialized form with the wall-clock stamp lifted out,
-        // so this pins the field names a journal reader parses without pinning
-        // the one value that cannot be known ahead of time.
-        let mut value = serde_json::to_value(&record).unwrap();
-        let fields = value["InferenceUsage"].as_object_mut().unwrap();
-        assert!(fields.remove("at").is_some(), "a call is stamped");
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "InferenceUsage": {
-                    "kind": "compaction",
-                    "stage": "plan",
-                    "iteration": 2,
-                    "provider": "anthropic",
-                    "model": "claude-sonnet-5",
-                    "prompt_tokens": 100,
-                    "completion_tokens": 20,
-                    "cached_tokens": 3,
-                    "cache_write_tokens": 4,
-                }
-            })
-        );
+        // Every field but the wall-clock stamp, the one value that cannot be
+        // known ahead of time.
+        let shown = format!("{record:?}");
+        assert!(shown.starts_with(
+            "InferenceUsage { kind: Compaction, stage: \"plan\", iteration: 2, \
+                 provider: \"anthropic\", model: \"claude-sonnet-5\", prompt_tokens: 100, \
+                 completion_tokens: 20, cached_tokens: 3, cache_write_tokens: 4, \
+                 cost_usd: None, cost_reported_by_provider: None, at: "
+        ));
 
         // No journal: still counted.
         let mut totals = TokenTotals::default();

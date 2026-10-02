@@ -3,18 +3,18 @@
 //!
 //! A run bills one [`RunRecord::InferenceUsage`](super::RunRecord::InferenceUsage)
 //! per call that *worked*, which is the right shape for an invoice and the wrong
-//! shape for a post-mortem. A call that was refused three times and answered on
-//! the fourth is journaled identically to one that was answered at once, and a
-//! call that moved from one provider to another leaves nothing behind at all. The
-//! records here are the missing half: one per trip to a provider, plus one per
-//! failover, so "why did this turn take ninety seconds" has an answer that does
-//! not depend on the daemon's log still being around.
+//! shape for a post-mortem. Billing alone records a call that was refused three
+//! times and answered on the fourth the same as one answered at once, and a call
+//! that moved from one provider to another not at all. The records here are the
+//! other half: one per trip to a provider, plus one per failover, so "why did
+//! this turn take ninety seconds" has an answer that does not depend on the
+//! daemon's log still being around.
 //!
 //! Small by default. Timing, classification, how the answer ended, and enough
 //! identity ([`RequestDigest`]) to answer whether two attempts sent the same
 //! thing: no response body, no error message, and no request body unless the
-//! operator asked for one. A record that grew with the prompt would put a copy of the
-//! whole window in the journal once per retry, which is why [`ModelInput`]
+//! operator asked for one. A record that grew with the prompt would put a copy of
+//! the whole window in the run file once per retry, which is why [`ModelInput`]
 //! carries a body only where [`CaptureStatus::Retained`] says it does.
 
 use std::collections::BTreeMap;
@@ -48,7 +48,7 @@ pub struct RequestDigest {
     pub temperature: f32,
 }
 
-/// Whether an attempt's exact request is in the journal, and where it went if
+/// Whether an attempt's exact request is in its record, and where it went if
 /// not.
 ///
 /// Every variant describes the state of the *record*, not the intent behind it,
@@ -81,8 +81,8 @@ pub enum CaptureStatus {
 /// `request` is the whole prompt. It holds whatever the run's context held -
 /// file contents, command output, credentials a tool read - so it is written
 /// only for a run whose operator asked for it, and there is no size cap on it:
-/// every call re-sends the window, so a captured run's journal grows by roughly
-/// the context size per attempt.
+/// every call re-sends the window, so a captured run's file grows by roughly the
+/// context size per attempt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelInput {
     /// Whether `request` is here, and where it went if it is not.
@@ -97,8 +97,7 @@ pub struct ModelInput {
     /// taken.
     pub bytes: u64,
     /// The fingerprint of the context this request was assembled from, as
-    /// [`ContextDigest::fingerprint`](super::ContextDigest::fingerprint)
-    /// computes it, so an attempt joins to the window it came from. Empty where
+    /// [`context_fingerprint`](super::context_fingerprint) computes it, so an attempt joins to the window it came from. Empty where
     /// no body was taken: the fingerprint costs a walk of the whole window, and
     /// a run that is not being captured should not pay for one.
     pub source_context_digest: String,
@@ -143,7 +142,7 @@ pub enum Retry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
-    /// The provider answered. What the answer cost is journaled separately, as
+    /// The provider answered. What the answer cost is recorded separately, as
     /// the call's usage record.
     Succeeded,
     /// The call did not produce an answer.
@@ -169,10 +168,9 @@ pub enum AttemptOutcome {
 /// One attempt at one provider call.
 ///
 /// Written per trip to the provider, including the first, and including the ones
-/// that failed. This is the record that was missing: a retried call and a
-/// first-time success were indistinguishable in the journal, so the time a run
-/// spent being refused was invisible and a failover looked like a run that had
-/// simply always used the second provider.
+/// that failed. Without it a retried call and a first-time success read the
+/// same, the time a run spent being refused is invisible, and a failover looks
+/// like a run that had simply always used the second provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     /// This attempt's own id, minted before the request went out.
@@ -182,8 +180,8 @@ pub struct AttemptRecord {
     /// the stage and the attempt number cannot serve for that - a stage makes
     /// hundreds of attempts and the number restarts at every call.
     ///
-    /// Empty in a journal written before attempts had identity, where the number
-    /// within a call was all there was.
+    /// Empty where the run recorded no id for it, and the number within a call
+    /// is all there is.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     /// The stage the run was in. Empty for a lane that has no stage of its own.
@@ -202,8 +200,7 @@ pub struct AttemptRecord {
     /// How the provider said the answer ended, where there was one:
     /// `complete`, `token_limit`, `tool_call`, `stop`, or `unknown` for a
     /// reason this build did not recognise. Empty on an attempt that produced
-    /// no answer, and in a journal written before finish reasons were
-    /// recorded.
+    /// no answer, and where the run recorded no reason.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub finish_reason: String,
     /// The provider's own words for the stop, where `finish_reason` is
@@ -219,8 +216,8 @@ pub struct AttemptRecord {
     /// What went out, as much of it as is worth keeping.
     pub digest: RequestDigest,
     /// What went out exactly, when the run was asked to keep it, and what the
-    /// request was assembled from either way. Absent in a journal whose writer
-    /// recorded no model input at all.
+    /// request was assembled from either way. Absent where the run recorded no
+    /// model input at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_input: Option<ModelInput>,
     /// Unix seconds when the attempt finished.
@@ -232,8 +229,8 @@ pub struct AttemptRecord {
 /// Its own record rather than a field on [`AttemptRecord`], because the decision
 /// is made somewhere else and later: the job reports its failure, the tick loop
 /// collects it, and only then does the stage look at what else it was given. By
-/// that point the attempt that failed has already been journaled, and an
-/// append-only journal cannot go back and amend it.
+/// that point the attempt that failed has already been recorded, and an
+/// append-only run file cannot go back and amend it.
 ///
 /// Paired with the attempts it sits between, this is what separates "the same
 /// provider refused four times" from "four providers each refused once": the

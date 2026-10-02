@@ -12,9 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::run_archive::RunPoint;
 use leviath_core::run_meta::{ContextSnapshot, StageRecord};
 use leviath_runtime::runfile::RunFileReader;
+use leviath_runtime::runfile::history::RunPoint;
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::{Change, RunState};
 

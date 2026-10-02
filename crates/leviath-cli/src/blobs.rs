@@ -1,5 +1,5 @@
 //! A run's stored parts, read from its files on disk: what `lev blobs` lists
-//! and `GET /api/agents/{id}/blobs` serves.
+//! and `GET /api/runs/{id}/blobs` serves.
 //!
 //! A run's context names every stored part by hash, and its run file holds
 //! the bytes. A live run's tools also keep each part under

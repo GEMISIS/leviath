@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::runfile::record::RunRecord;
 use leviath_core::JsonDoc;
-use leviath_core::run_archive::RunRecord;
 
 use super::error::RunFileError;
 use super::frames::OwnerFrame;
@@ -23,8 +23,8 @@ use crate::spec::env::CodeFiles;
 use crate::spec::names::{Digest, ModelId, ModelRef, ProviderName};
 use crate::spec::run_spec::RunSpec;
 use crate::state::context::{PartBody, ToolCallState};
-use crate::state::journal::{ContextCommitState, ContextNoteState, SettledState};
-use crate::state::{MessageState, RunEvent, RunState, RunStatus, Spend, ToolResultState};
+use crate::state::journal::{ContextCommitState, SettledState};
+use crate::state::{RunEvent, RunState, RunStatus, Spend, ToolResultState};
 
 /// One run's state, to record in its run file.
 #[derive(Debug)]
@@ -422,79 +422,6 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, record: &RunRecord) {
             revision_after: revision_after.clone(),
             regions: regions.iter().map(recorded::region_commit).collect(),
         }))),
-        RunRecord::ContextChange {
-            region,
-            cause,
-            entries_added,
-            entries_removed,
-            token_delta,
-            ..
-        } => events.push(RunEvent::ContextNoted(ContextNoteState {
-            region: region.clone(),
-            cause: recorded::cause(*cause),
-            entries_added: u32::try_from(*entries_added).unwrap_or(u32::MAX),
-            entries_removed: u32::try_from(*entries_removed).unwrap_or(u32::MAX),
-            token_delta: *token_delta,
-        })),
-        other => push_plain(events, other),
-    }
-}
-
-/// A finished call: its result, and how it ended with the parts it carried.
-fn push_done(
-    events: &mut Vec<RunEvent>,
-    call_id: &str,
-    execution_id: &str,
-    result: &leviath_core::region::EntryContent,
-    outcome: Option<leviath_core::execution::ToolOutcome>,
-) {
-    let is_error = match outcome {
-        Some(o) => o != leviath_core::execution::ToolOutcome::Succeeded,
-        None => result.as_str().starts_with("[error]"),
-    };
-    events.push(RunEvent::ToolFinished {
-        call_id: call_id.to_string(),
-        result: ToolResultState {
-            text: result.as_str().to_string(),
-            is_error,
-        },
-        millis: 0,
-    });
-    events.push(RunEvent::Completed {
-        call_id: call_id.to_string(),
-        execution_id: execution_id.to_string(),
-        outcome: outcome.map(super::recorded::outcome),
-        parts: result
-            .stored()
-            .filter_map(|part| part.name.clone())
-            .collect(),
-    });
-}
-
-/// A model call's spend-bearing event: an answer, or a line saying it failed.
-fn push_attempt(events: &mut Vec<RunEvent>, a: &leviath_core::run_archive::AttemptRecord) {
-    use leviath_core::run_archive::AttemptOutcome;
-    match &a.outcome {
-        AttemptOutcome::Succeeded => {
-            events.extend(
-                model_ref(&a.provider, &a.model).map(|model| RunEvent::Inference {
-                    attempt: a.id.clone(),
-                    model,
-                    spend: Spend::default(),
-                    finish_reason: (!a.finish_reason.is_empty()).then(|| a.finish_reason.clone()),
-                }),
-            )
-        }
-        AttemptOutcome::Failed { kind, .. } => events.push(RunEvent::Log(format!(
-            "model call {} on {}/{} failed: {kind}",
-            a.id, a.provider, a.model
-        ))),
-    }
-}
-
-/// The events of the records that carry nothing beyond what they say.
-fn push_plain(events: &mut Vec<RunEvent>, record: &RunRecord) {
-    match record {
         RunRecord::InferenceUsage {
             provider,
             model,
@@ -534,12 +461,58 @@ fn push_plain(events: &mut Vec<RunEvent>, record: &RunRecord) {
                 });
             }
         }
-        RunRecord::Message { message, .. } => events.push(RunEvent::Message(MessageState {
-            from: message.role.clone(),
-            text: message.content.clone(),
-            region: None,
-        })),
-        _ => {}
+    }
+}
+
+/// A finished call: its result, and how it ended with the parts it carried.
+fn push_done(
+    events: &mut Vec<RunEvent>,
+    call_id: &str,
+    execution_id: &str,
+    result: &leviath_core::region::EntryContent,
+    outcome: Option<leviath_core::execution::ToolOutcome>,
+) {
+    let is_error = match outcome {
+        Some(o) => o != leviath_core::execution::ToolOutcome::Succeeded,
+        None => result.as_str().starts_with("[error]"),
+    };
+    events.push(RunEvent::ToolFinished {
+        call_id: call_id.to_string(),
+        result: ToolResultState {
+            text: result.as_str().to_string(),
+            is_error,
+        },
+        millis: 0,
+    });
+    events.push(RunEvent::Completed {
+        call_id: call_id.to_string(),
+        execution_id: execution_id.to_string(),
+        outcome: outcome.map(super::recorded::outcome),
+        parts: result
+            .stored()
+            .filter_map(|part| part.name.clone())
+            .collect(),
+    });
+}
+
+/// A model call's spend-bearing event: an answer, or a line saying it failed.
+fn push_attempt(events: &mut Vec<RunEvent>, a: &crate::runfile::record::AttemptRecord) {
+    use crate::runfile::record::AttemptOutcome;
+    match &a.outcome {
+        AttemptOutcome::Succeeded => {
+            events.extend(
+                model_ref(&a.provider, &a.model).map(|model| RunEvent::Inference {
+                    attempt: a.id.clone(),
+                    model,
+                    spend: Spend::default(),
+                    finish_reason: (!a.finish_reason.is_empty()).then(|| a.finish_reason.clone()),
+                }),
+            )
+        }
+        AttemptOutcome::Failed { kind, .. } => events.push(RunEvent::Log(format!(
+            "model call {} on {}/{} failed: {kind}",
+            a.id, a.provider, a.model
+        ))),
     }
 }
 

@@ -557,7 +557,7 @@ impl Dashboard {
                     self.detail_scroll = 0;
                 }
             }
-            // Browse the run's archived context-window history in the Context
+            // Browse the run's recorded context-window history in the Context
             // view: `,` = earlier point, `.` = later (past the newest → live).
             KeyCode::Char(',') => self.step_context_history(-1),
             KeyCode::Char('.') => self.step_context_history(1),
@@ -3831,7 +3831,7 @@ mod tests {
             .push(make_test_agent("run-1", AgentDisplayStatus::Active));
         dash.update_display_indices();
         dash.detail_view = true;
-        let points = vec![leviath_core::run_archive::RunPoint {
+        let points = vec![leviath_runtime::runfile::history::RunPoint {
             meta: fixtures::run_meta("run-1"),
             context: leviath_core::run_meta::ContextSnapshot {
                 stage_name: "s".to_string(),

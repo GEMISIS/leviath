@@ -39,7 +39,7 @@ pub(crate) fn graph(
     report: &mut Report,
 ) -> Result<(Blueprint, RunGraph), ConvertError> {
     let blueprint_path = match &old.blueprint.source {
-        BlueprintSource::Snapshot => old.dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
+        BlueprintSource::Snapshot => old.dir.join(crate::legacy::BLUEPRINT_SNAPSHOT_FILE),
         BlueprintSource::Installed(path) => {
             report.note(format!(
                 "the run kept no copy of its blueprint; read the installed one at {}, which may have changed since the run started",

@@ -9,7 +9,9 @@
 //! it applied.
 //!
 //! [`codec`] is the byte layout, [`writer`] and [`reader`] write and read
-//! it, and [`view`] renders what it holds as TOML.
+//! it, and [`view`] renders what it holds as TOML. [`record`] is what the
+//! world sends the persistence lane as things happen, which become the events
+//! of each step, and [`history`] is what a reader makes of the steps.
 
 use std::sync::OnceLock;
 
@@ -18,8 +20,10 @@ use sha2::Digest as _;
 pub mod codec;
 mod error;
 pub mod frames;
+pub mod history;
 pub(crate) mod lane;
 pub mod reader;
+pub mod record;
 mod recorded;
 mod summary;
 pub mod view;

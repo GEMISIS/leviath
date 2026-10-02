@@ -15,7 +15,7 @@
 
 use std::ops::ControlFlow;
 
-use leviath_core::run_archive::{
+use leviath_runtime::runfile::record::{
     AttemptOutcome, AttemptRecord, CaptureStatus, FailoverRecord, ModelInput, RequestDigest, Retry,
 };
 use leviath_runtime::spec::names::ModelRef;

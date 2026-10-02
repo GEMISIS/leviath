@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::journal::PendingToolBatch;
 use leviath_core::JsonDoc;
-use leviath_core::run_archive::PendingToolBatch;
 use leviath_core::run_meta::{
     RunFlags, RunMeta, RunStatus as OldStatus, StageRecord as OldStage, StageRunStatus,
     StageVisitRecord, WaitReason,

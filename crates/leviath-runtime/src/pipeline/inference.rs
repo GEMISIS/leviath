@@ -236,7 +236,7 @@ pub(crate) fn tool_catalog_version(tools: &[Tool]) -> String {
 /// "unchanged" cannot disagree.
 pub(crate) fn source_context_digest(window: &ContextWindow, stage_name: &str) -> String {
     let snapshot = crate::persistence::build_context_snapshot(window, stage_name);
-    leviath_core::run_archive::digest_context(&snapshot).fingerprint()
+    crate::runfile::record::context_fingerprint(&snapshot)
 }
 
 /// The parameters a built request really carries, after every override and
@@ -841,7 +841,7 @@ pub(crate) fn dispatch_inference(
                     provider: si.provider_name.clone(),
                     model: si.model.clone(),
                     lane: lane.0.clone(),
-                    digest: leviath_core::run_archive::RequestDigest {
+                    digest: crate::runfile::record::RequestDigest {
                         system_hash,
                         messages: request.messages.len(),
                         tools: request.tools.len(),

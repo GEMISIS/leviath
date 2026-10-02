@@ -114,8 +114,8 @@ impl<'a> RunLine<'a> {
 }
 
 /// What the binary hands over for `lev run`, flag by flag, before any of it
-/// is read: [`resolve_spawn_args`] turns it into a [`RunLine`] and reads that.
-pub struct LaunchRequest<'a> {
+/// is read: [`read_run_flags`] turns it into a [`RunLine`] and reads that.
+pub struct RunFlags<'a> {
     /// The blueprint path or name, as given, or `.` when none was.
     pub path: &'a str,
     /// The task text, if it was given rather than read from stdin or an editor.
@@ -150,7 +150,7 @@ pub struct LaunchRequest<'a> {
 ///
 /// A `--request` file names its own blueprint, so `path` counts beside one
 /// only when it was typed: the binary's `.` default is no blueprint at all.
-pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<LocalRun> {
+pub fn read_run_flags(req: RunFlags<'_>) -> anyhow::Result<LocalRun> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let regions = req.regions;
     let path = (regions.path_given || regions.request.is_none()).then_some(req.path);

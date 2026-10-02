@@ -1,6 +1,6 @@
 [blueprint]
 name = "reviewer"
-version = "0.3.0"
+version = "0.3.1"
 description = "Code review agent - discover, scan, review the areas in parallel, then deep review and report, with error recovery and multi-provider fallback"
 
 # discover -> scan -> split_review (review_worker x N) -> deep_review -> report -> summary
@@ -26,7 +26,8 @@ type = { kind = "text", multiline = true }
 binds = [{ region = "task" }]
 
 # The code/diff to review - required. Supply via `--diff <text|@file>` (CLI),
-# a ---region:diff--- block (ACP), or the API `regions` field.
+# or as the `diff` input of a spawn request (`"inputs": {"diff": ...}` over the
+# API, or `_leviath/spawn` over the Agent Client Protocol).
 [[graph.inputs]]
 name = "diff"
 type = { kind = "text", multiline = true }

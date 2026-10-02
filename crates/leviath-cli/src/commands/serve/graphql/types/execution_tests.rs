@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 use leviath_core::execution::ToolOutcome;
-use leviath_core::run_archive::{self, RunRecord, ToolCallRecord};
+use leviath_runtime::runfile::record::{self, RunRecord, ToolCallRecord};
 
 use super::run::Run;
 use crate::commands::serve::testutil::state_with_agent_paths;
@@ -584,7 +584,7 @@ async fn a_result_read_from_a_broken_journal_fails() {
             // would fail first: this is the race where the file breaks in between.
             let execution = super::execution::ToolExecution {
                 run_id: "did-things".to_string(),
-                record: leviath_core::run_archive::Execution {
+                record: leviath_runtime::runfile::history::Execution {
                     id: "x1".to_string(),
                     call_id: "c1".to_string(),
                     tool: "shell".to_string(),
@@ -728,7 +728,7 @@ fn committed(execution: &str, at: i64) -> RunRecord {
         revision_before: format!("cw1-{at}"),
         revision_after: format!("cw1-{}", at + 1),
         cause: leviath_core::ContextCause::ContextTool,
-        regions: vec![run_archive::RegionCommit {
+        regions: vec![record::RegionCommit {
             region: "plan".to_string(),
             digest_before: "rg1-a".to_string(),
             digest_after: "rg1-b".to_string(),
@@ -745,18 +745,18 @@ fn committed(execution: &str, at: i64) -> RunRecord {
 
 /// One attempt record, under the id an answer names it by.
 fn attempt(id: &str, provider: &str, model: &str) -> RunRecord {
-    RunRecord::InferenceAttempt(run_archive::AttemptRecord {
+    RunRecord::InferenceAttempt(Box::new(record::AttemptRecord {
         id: id.to_string(),
         stage: "plan".to_string(),
         attempt: 2,
         provider: provider.to_string(),
         model: model.to_string(),
-        outcome: run_archive::AttemptOutcome::Succeeded,
+        outcome: record::AttemptOutcome::Succeeded,
         finish_reason: "tool_call".to_string(),
         stopped_for: None,
         duration_ms: 900,
         backoff_ms: 100,
-        digest: run_archive::RequestDigest {
+        digest: record::RequestDigest {
             system_hash: 7,
             messages: 4,
             tools: 2,
@@ -765,7 +765,7 @@ fn attempt(id: &str, provider: &str, model: &str) -> RunRecord {
         },
         model_input: None,
         at: 99,
-    })
+    }))
 }
 
 /// An execution says which stay it belonged to, which trip to the provider asked
@@ -970,7 +970,7 @@ async fn an_unreadable_journal_is_not_an_execution_that_changed_nothing() {
             create_run(&meta()).expect("run written");
             let execution = super::execution::ToolExecution {
                 run_id: "did-things".to_string(),
-                record: leviath_core::run_archive::Execution {
+                record: leviath_runtime::runfile::history::Execution {
                     id: "x1".to_string(),
                     call_id: "c1".to_string(),
                     tool: "context_write".to_string(),
@@ -1060,7 +1060,7 @@ async fn every_mirrored_function_runs() {
 
     let execution = super::execution::ToolExecution {
         run_id: "did-things".to_string(),
-        record: leviath_core::run_archive::Execution {
+        record: leviath_runtime::runfile::history::Execution {
             id: "x1".to_string(),
             call_id: "c1".to_string(),
             tool: "shell".to_string(),

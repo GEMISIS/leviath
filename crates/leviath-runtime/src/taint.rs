@@ -443,7 +443,7 @@ mod tests {
 
     /// `submit_output` was classed with the context tools as internal, but
     /// the answer it records is served off-host by `GET
-    /// /api/agents/{id}/result` and shown in the dashboard, so with taint
+    /// /api/runs/{id}/result` and shown in the dashboard, so with taint
     /// tracking on a Private region could reach a remote reader with no
     /// prompt. It is outbound with Public clearance now: the same block
     /// `shell` gets over the same window.

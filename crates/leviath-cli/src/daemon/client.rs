@@ -8,7 +8,10 @@ use anyhow::bail;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::spec::request::SpawnRequest;
 
-pub use crate::commands::run::request::{LaunchRequest, resolve_spawn_args};
+// The binary's names for `lev run`'s flags and their reader.
+pub use crate::commands::run::request::{
+    RunFlags as LaunchRequest, read_run_flags as resolve_spawn_args,
+};
 
 /// The stdin probe for a caller that must never open an editor for a task:
 /// the dashboard, which owns the terminal itself. An editor launched under it

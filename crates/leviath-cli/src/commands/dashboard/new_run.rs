@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use super::state::Dashboard;
 use super::types::{
-    ConfirmAction, NewRunAgent, NewRunContext, NewRunPane, RefusedRun, SpawnCommand, SpawnOutcome,
+    ConfirmAction, NewRunAgent, NewRunCommand, NewRunContext, NewRunPane, RefusedRun, SpawnOutcome,
     ToastLevel,
 };
 use crate::commands::list::{ListFilter, build_list_report};
@@ -248,7 +248,7 @@ impl Dashboard {
             1 => " with 1 file".to_string(),
             n => format!(" with {n} files"),
         };
-        let _ = self.spawn_cmd_tx.send(SpawnCommand {
+        let _ = self.spawn_cmd_tx.send(NewRunCommand {
             agent_path: agent.path.clone(),
             task,
             workdir: self.new_run_ctx.workdir.display().to_string(),
@@ -720,7 +720,7 @@ pub(super) fn collect_workdir_files(root: &Path, cap: usize) -> Vec<String> {
 /// result back so a refused spawn is surfaced rather than swallowed.
 pub(super) async fn spawn_background_loop(
     control: ControlClient,
-    mut cmd_rx: mpsc::UnboundedReceiver<SpawnCommand>,
+    mut cmd_rx: mpsc::UnboundedReceiver<NewRunCommand>,
     outcome_tx: mpsc::UnboundedSender<SpawnOutcome>,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
@@ -731,7 +731,7 @@ pub(super) async fn spawn_background_loop(
 }
 
 /// One spawn: resolve the blueprint locally, then hand it to the daemon.
-async fn run_spawn(control: &ControlClient, cmd: SpawnCommand) -> SpawnOutcome {
+async fn run_spawn(control: &ControlClient, cmd: NewRunCommand) -> SpawnOutcome {
     let failed = |message: String| SpawnOutcome {
         message,
         ..SpawnOutcome::default()
@@ -798,7 +798,7 @@ pub(super) fn production_new_run_context() -> NewRunContext {
 #[cfg(test)]
 impl Dashboard {
     /// The retained spawn-command receiver, for asserting dispatches.
-    pub(super) fn spawn_cmd_rx_for_test(&mut self) -> &mut mpsc::UnboundedReceiver<SpawnCommand> {
+    pub(super) fn spawn_cmd_rx_for_test(&mut self) -> &mut mpsc::UnboundedReceiver<NewRunCommand> {
         &mut self
             .spawn_bg_ends
             .as_mut()
@@ -1741,7 +1741,7 @@ binds = [{{ region = "task" }}]
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         tokio::spawn(spawn_background_loop(control, cmd_rx, out_tx));
         cmd_tx
-            .send(SpawnCommand {
+            .send(NewRunCommand {
                 agent_path: dir.path().join("alpha").display().to_string(),
                 task: "ship it".to_string(),
                 workdir: dir.path().display().to_string(),
@@ -1813,7 +1813,7 @@ binds = [{{ region = "task" }}]
             let (control, server) = replying_daemon(dir.path(), reply);
             let outcome = run_spawn(
                 &control,
-                SpawnCommand {
+                NewRunCommand {
                     agent_path: dir.path().join("alpha").display().to_string(),
                     task: "ship it".to_string(),
                     workdir: dir.path().display().to_string(),
@@ -1843,7 +1843,7 @@ binds = [{{ region = "task" }}]
         let control = ControlClient::new(leviath_runtime::control_socket::control_id(dir.path()));
         let outcome = run_spawn(
             &control,
-            SpawnCommand {
+            NewRunCommand {
                 agent_path: dir.path().join("nope").display().to_string(),
                 task: "ship it".to_string(),
                 workdir: dir.path().display().to_string(),
@@ -1871,7 +1871,7 @@ binds = [{{ region = "task" }}]
         drop(out_rx);
         let handle = tokio::spawn(spawn_background_loop(control, cmd_rx, out_tx));
         cmd_tx
-            .send(SpawnCommand {
+            .send(NewRunCommand {
                 agent_path: dir.path().join("nope").display().to_string(),
                 task: "t".to_string(),
                 workdir: dir.path().display().to_string(),

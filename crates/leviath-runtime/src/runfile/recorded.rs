@@ -7,13 +7,13 @@
 //! execution's identity and ending, a settled question, a context change with
 //! its cause.
 
+use crate::runfile::record::{
+    AttemptOutcome, AttemptRecord, CaptureStatus, ModelInput, RegionCommit, RequestDigest, Retry,
+};
 use leviath_core::JsonDoc;
 use leviath_core::context_cause::ContextCause;
 use leviath_core::execution::ToolOutcome;
 use leviath_core::interaction::InteractionKind;
-use leviath_core::run_archive::{
-    AttemptOutcome, AttemptRecord, CaptureStatus, ModelInput, RegionCommit, RequestDigest, Retry,
-};
 
 use crate::state::journal::{
     ArtifactState, AttemptOutcomeState, AttemptState, CaptureState, CauseState, ModelInputState,

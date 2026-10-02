@@ -14,8 +14,8 @@
 //! rather than to a moment.
 
 use async_graphql::{Enum, ID, SimpleObject};
-use leviath_core::run_archive::IndexedChange;
 use leviath_graphql_derive::mirror;
+use leviath_runtime::runfile::history::IndexedChange;
 
 use super::super::connection::{
     Connection, Paged, PositionQuery, Total, position_order, position_page,
@@ -214,8 +214,8 @@ impl From<IndexedChange> for ContextChange {
     }
 }
 
-impl From<leviath_core::run_archive::RegionTransition> for RegionTransition {
-    fn from(region: leviath_core::run_archive::RegionTransition) -> Self {
+impl From<leviath_runtime::runfile::history::RegionTransition> for RegionTransition {
+    fn from(region: leviath_runtime::runfile::history::RegionTransition) -> Self {
         Self {
             region: region.region,
             digest_before: region.digest_before,

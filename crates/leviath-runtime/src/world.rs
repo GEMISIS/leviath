@@ -752,7 +752,7 @@ impl PipelineWorld {
     }
 
     /// Spawn an agent from a graph + task + per-stage resolution (see
-    /// [`crate::pipeline::spawn_agent`]) and wake the driver. Returns the new
+    /// [`crate::pipeline::place_test_task`]) and wake the driver. Returns the new
     /// entity, or an error if the first stage's system prompt doesn't fit.
     #[cfg(test)]
     pub(crate) fn spawn_from_graph(
@@ -763,7 +763,7 @@ impl PipelineWorld {
         stages: Vec<crate::pipeline::ResolvedStage>,
         global_hints: leviath_core::config::PromptHints,
     ) -> Result<AgentId, String> {
-        let entity = crate::pipeline::spawn_agent(
+        let entity = crate::pipeline::place_test_task(
             &mut self.world,
             agent_id,
             graph,

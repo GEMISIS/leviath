@@ -460,11 +460,11 @@ pub(crate) mod spawning {
 
     /// Spawn a run of `graph` into `world` with `task` in its task region and
     /// stage `i` on `stages[i]`, and return its entity. Everything else is as
-    /// [`spawn_agent_seeded`] does it.
+    /// [`place_test_run`] does it.
     ///
     /// `global_hints` is the operator's toggle for each system-prompt hint; a
     /// hint the graph leaves open takes it.
-    pub(crate) fn spawn_agent(
+    pub(crate) fn place_test_task(
         world: &mut World,
         agent_id: String,
         graph: RunGraph,
@@ -473,9 +473,9 @@ pub(crate) mod spawning {
         global_hints: leviath_core::config::PromptHints,
     ) -> Result<Entity, String> {
         let seeds = std::collections::HashMap::from([("task".to_string(), task.to_string())]);
-        spawn_agent_seeded(
+        place_test_run(
             world,
-            SeededSpawn {
+            TestRun {
                 agent_id,
                 graph,
                 seeds,
@@ -488,7 +488,7 @@ pub(crate) mod spawning {
     }
 
     /// Everything a seeded spawn needs besides the world it spawns into.
-    pub(crate) struct SeededSpawn {
+    pub(crate) struct TestRun {
         /// The run id this run is registered under.
         pub(crate) agent_id: String,
         /// The graph being spawned.
@@ -552,11 +552,8 @@ pub(crate) mod spawning {
     ///
     /// Every percentage region budget is sized here against the model windows
     /// the providers report, and written into each stage's plan.
-    pub(crate) fn spawn_agent_seeded(
-        world: &mut World,
-        spawn: SeededSpawn,
-    ) -> Result<Entity, String> {
-        let SeededSpawn {
+    pub(crate) fn place_test_run(world: &mut World, spawn: TestRun) -> Result<Entity, String> {
+        let TestRun {
             agent_id,
             mut graph,
             seeds,
@@ -627,7 +624,7 @@ pub(crate) mod spawning {
     }
 }
 
-pub(crate) use spawning::{SeededSpawn, spawn_agent, spawn_agent_seeded};
+pub(crate) use spawning::{TestRun, place_test_run, place_test_task};
 
 #[cfg(test)]
 mod tests {

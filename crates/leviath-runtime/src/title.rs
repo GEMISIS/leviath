@@ -798,7 +798,7 @@ pub(crate) fn collect_title(
                 persist.as_deref(),
                 Some(&meta),
                 &crate::inference_usage::CallUsage {
-                    kind: leviath_core::run_archive::InferenceKind::Title,
+                    kind: crate::runfile::record::InferenceKind::Title,
                     // No stage of its own: titling runs once at spawn, beside
                     // the run rather than inside any of its stages.
                     stage: "",

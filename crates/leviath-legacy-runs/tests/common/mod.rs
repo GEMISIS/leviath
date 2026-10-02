@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::run_archive::{self, RunRecord};
 use leviath_core::run_meta::RunMeta;
+use leviath_legacy_runs::journal::{self, JournalRecord};
 use leviath_legacy_runs::{ConvertEnv, ConvertError, ConvertReport, convert};
 use leviath_runtime::runfile::codec::{self, FrameKind};
 use leviath_runtime::spec::names::Digest;
@@ -73,22 +73,24 @@ impl Run {
         std::fs::remove_file(self.path(name)).unwrap();
     }
 
-    pub fn records(&self) -> Vec<RunRecord> {
+    pub fn records(&self) -> Vec<JournalRecord> {
         let bytes = std::fs::read(self.path("run.lvr")).unwrap();
-        run_archive::read_archive(&mut bytes.as_slice()).unwrap().1
+        journal::read(&bytes).unwrap()
     }
 
-    pub fn set_records(&self, records: &[RunRecord]) {
-        let mut out = Vec::new();
-        run_archive::write_archive_start(&mut out, 1).unwrap();
+    pub fn set_records(&self, records: &[JournalRecord]) {
+        let mut out = journal::MAGIC.to_vec();
+        out.extend(1u16.to_be_bytes());
         for r in records {
-            run_archive::write_record(&mut out, r).unwrap();
+            let payload = serde_json::to_vec(r).unwrap();
+            out.extend((payload.len() as u64).to_be_bytes());
+            out.extend(payload);
         }
         std::fs::write(self.path("run.lvr"), out).unwrap();
     }
 
     /// Change the journal.
-    pub fn journal(&self, edit: impl FnOnce(&mut Vec<RunRecord>)) {
+    pub fn journal(&self, edit: impl FnOnce(&mut Vec<JournalRecord>)) {
         let mut records = self.records();
         edit(&mut records);
         self.set_records(&records);
@@ -96,7 +98,7 @@ impl Run {
 
     /// Append records written as JSON.
     pub fn append(&self, records: serde_json::Value) {
-        let more: Vec<RunRecord> = serde_json::from_value(records).unwrap();
+        let more: Vec<JournalRecord> = serde_json::from_value(records).unwrap();
         self.journal(|r| r.extend(more));
     }
 
@@ -109,9 +111,9 @@ impl Run {
         self.journal(|records| {
             for r in records.iter_mut() {
                 match r {
-                    RunRecord::Header { meta, .. }
-                    | RunRecord::Progress { meta, .. }
-                    | RunRecord::Checkpoint { meta, .. } => edit(meta),
+                    JournalRecord::Header { meta, .. }
+                    | JournalRecord::Progress { meta, .. }
+                    | JournalRecord::Checkpoint { meta, .. } => edit(meta),
                     _ => {}
                 }
             }

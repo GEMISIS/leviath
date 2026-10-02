@@ -39,7 +39,7 @@ impl Dashboard {
         ctx_area: Rect,
         agent: &DashboardAgent,
     ) {
-        // When browsing archived history, show that point; else the live window.
+        // When browsing recorded history, show that point; else the live window.
         let snap_opt = self
             .browsed_context_point()
             .map(|p| p.context.clone())
@@ -201,7 +201,7 @@ impl Dashboard {
 
         // The run's submitted answer, read through the same function the
         // HTTP API serves it from, so the Final view and
-        // `GET /api/agents/{id}/result` cannot show different text. Read once
+        // `GET /api/runs/{id}/result` cannot show different text. Read once
         // per frame: it decides whether the `[f] final` chip is offered and
         // what that view shows.
         let final_output = runstate::read_final_output(&agent.id);
@@ -593,7 +593,7 @@ impl Dashboard {
         agent: &DashboardAgent,
         render_width: u16,
     ) -> (Vec<Line<'static>>, Vec<usize>) {
-        // When browsing the run's archived context history, show that point's
+        // When browsing the run's recorded context history, show that point's
         // window; otherwise the live current window for the selected stage.
         let snap_opt = self
             .browsed_context_point()
@@ -2774,7 +2774,7 @@ regions = []
     fn seed_history(
         dash: &mut crate::commands::dashboard::state::Dashboard,
         run_id: &str,
-        points: Vec<leviath_core::run_archive::RunPoint>,
+        points: Vec<leviath_runtime::runfile::history::RunPoint>,
     ) {
         dash.history = Some(crate::commands::dashboard::history::RunHistoryCache {
             run_id: run_id.to_string(),
@@ -2789,8 +2789,8 @@ regions = []
     /// A one-point context history for the browsing render tests.
     fn one_point_history(
         context: runstate::ContextSnapshot,
-    ) -> Vec<leviath_core::run_archive::RunPoint> {
-        vec![leviath_core::run_archive::RunPoint {
+    ) -> Vec<leviath_runtime::runfile::history::RunPoint> {
+        vec![leviath_runtime::runfile::history::RunPoint {
             meta: leviath_core::run_meta::RunMeta::new(
                 "r".to_string(),
                 "a".to_string(),

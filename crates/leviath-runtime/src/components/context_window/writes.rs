@@ -171,7 +171,7 @@ impl ContextWindow {
     ///
     /// The embedder's door, and the terse form tests write through. A write
     /// through it leaves no
-    /// [`RunRecord::ContextChange`](leviath_core::run_archive::RunRecord::ContextChange)
+    /// [`RunRecord::ContextTransaction`](crate::runfile::record::RunRecord::ContextTransaction)
     /// at all, which is silence rather than a guess: a history is allowed to be
     /// incomplete and is not allowed to be wrong. Every writer this crate owns
     /// states its cause through the crate-internal `add_to_region_caused`, and a

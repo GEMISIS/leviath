@@ -172,7 +172,7 @@ pub struct RunArgs {
 /// the flags the binary resolves itself were given.
 ///
 /// One value, so the binary hands it to
-/// [`LaunchRequest`](crate::daemon::client::LaunchRequest) whole and every
+/// [`RunFlags`](crate::commands::run::request::RunFlags) whole and every
 /// part of it is read in the library, where the tests reach it.
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunInputs {

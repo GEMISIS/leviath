@@ -17,9 +17,8 @@
 use std::ops::ControlFlow;
 
 use leviath_core::context_cause::ContextCause;
-use leviath_core::run_archive::{
-    ContextChangeRecord, IndexedChange, RegionCommit, RegionTransition,
-};
+use leviath_runtime::runfile::history::{ContextChangeRecord, IndexedChange, RegionTransition};
+use leviath_runtime::runfile::record::RegionCommit;
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::context::RegionChange;
 use leviath_runtime::state::journal::CauseState;

@@ -22,7 +22,7 @@
 use std::ops::ControlFlow;
 
 use leviath_core::execution::ToolOutcome;
-use leviath_core::run_archive::Execution;
+use leviath_runtime::runfile::history::Execution;
 use leviath_runtime::state::RunEvent;
 use leviath_runtime::state::journal::{ArtifactState, ToolOutcomeState};
 

@@ -10,8 +10,8 @@
 //! that paused for somebody looks exactly like one that never asked.
 
 use async_graphql::{Enum, ID, Object, SimpleObject};
-use leviath_core::run_archive::InteractionRecord;
 use leviath_graphql_derive::mirror;
+use leviath_runtime::runfile::record::InteractionRecord;
 
 use super::super::connection::{
     Connection, Paged, PositionQuery, Total, position_order, position_page,

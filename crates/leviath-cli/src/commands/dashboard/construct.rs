@@ -238,7 +238,7 @@ impl Dashboard {
     pub(super) fn take_spawn_bg_ends(
         &mut self,
     ) -> Option<(
-        mpsc::UnboundedReceiver<SpawnCommand>,
+        mpsc::UnboundedReceiver<NewRunCommand>,
         mpsc::UnboundedSender<SpawnOutcome>,
     )> {
         self.spawn_bg_ends.take()

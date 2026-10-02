@@ -6,7 +6,7 @@
 //! transition taken is animated, revisit loops run along a lane below the
 //! nodes and the escape edges (`error`, `dead_end`, ...) hide behind `e`.
 //! The timeline tab lists each actual visit with its time, duration and
-//! iterations, derived from the run archive.
+//! iterations, derived from the run file.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -89,7 +89,7 @@ impl Dashboard {
             return;
         };
         // Visit counts and the timeline stay live while the explorer is open
-        // (TTL-gated, so this is one archive read a second at most).
+        // (TTL-gated, so this is one run file read a second at most).
         self.ensure_history(&agent.id);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -285,7 +285,7 @@ impl Dashboard {
         let mut lines: Vec<Line<'static>> = Vec::new();
         if visits.is_empty() {
             lines.push(Line::from(Span::styled(
-                " No archived visits yet. The timeline fills in as the run records progress.",
+                " No recorded visits yet. The timeline fills in as the run records progress.",
                 Style::default().fg(C_DIM),
             )));
         }
@@ -479,7 +479,7 @@ regions = []
     }
 
     fn seed(dash: &mut crate::commands::dashboard::state::Dashboard, stages: &[(&str, i64)]) {
-        let points: Vec<leviath_core::run_archive::RunPoint> = stages
+        let points: Vec<leviath_runtime::runfile::history::RunPoint> = stages
             .iter()
             .map(|(stage, at)| {
                 let mut meta = leviath_core::run_meta::RunMeta::new(
@@ -493,7 +493,7 @@ regions = []
                 );
                 meta.current_stage = stage.to_string();
                 meta.iteration = 2;
-                leviath_core::run_archive::RunPoint {
+                leviath_runtime::runfile::history::RunPoint {
                     meta,
                     context: leviath_core::run_meta::ContextSnapshot {
                         stage_name: stage.to_string(),
@@ -798,6 +798,6 @@ regions = []
         dash.stage_explorer = Some(explorer);
 
         let text = rendered(&mut dash);
-        assert!(text.contains("No archived visits yet"), "{text}");
+        assert!(text.contains("No recorded visits yet"), "{text}");
     }
 }

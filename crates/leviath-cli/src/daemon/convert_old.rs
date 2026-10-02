@@ -103,14 +103,14 @@ pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&E
     }
 }
 
-/// Without the converter, a run in the older layout is only reported.
+/// Without the converter, a run directory with no run file this build reads
+/// is only reported.
 #[cfg(not(feature = "legacy-runs"))]
 pub(crate) fn convert_one(dir: &Path, _agents_dir: Option<&Path>, _envs: Option<&Envs<'_>>) {
-    let old = dir.join(leviath_core::files::META_FILE).is_file()
-        && !dir.join(leviath_core::files::RUN_FILE).is_file();
-    if old {
+    let file = std::fs::read(dir.join(leviath_core::files::RUN_FILE)).unwrap_or_default();
+    if dir.is_dir() && !file.starts_with(leviath_runtime::runfile::codec::MAGIC) {
         let shown = dir.display();
-        tracing::warn!(dir = %shown, "an old run directory, and this build cannot convert it");
+        tracing::warn!(dir = %shown, "a run directory with no run file this build can read");
     }
 }
 
@@ -184,9 +184,7 @@ fn servers_of_unfinished(
         return Vec::new();
     };
     let unfinished = |dir: &Path| {
-        std::fs::read_to_string(dir.join(leviath_core::files::META_FILE))
-            .ok()
-            .and_then(|text| serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text).ok())
+        leviath_legacy_runs::meta(dir)
             .is_some_and(|meta| !crate::runstate::is_terminal_status(&meta.status))
     };
     entries

@@ -2,28 +2,49 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::files::{
-    ARCHIVE_FILE, BLOBS_DIR, BLUEPRINT_SNAPSHOT_FILE, CONTEXT_FILE, FANOUT_FILE, INTERACTIONS_FILE,
-    META_FILE, STAGES_FILE,
-};
-use leviath_core::run_archive::{self, FoldedRun, RunIdentity, RunRecord};
+use leviath_core::files::{BLOBS_DIR, RUN_FILE};
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
 use leviath_runtime::runfile::codec::MAGIC;
 use leviath_runtime::spec::names::Digest;
 use serde::Deserialize;
 
+use crate::journal::{self, Folded, JournalRecord, RunIdentity};
 use crate::report::BlueprintSource;
 use crate::{ConvertEnv, ConvertError};
 
 /// An old blueprint manifest inside its agent directory.
 const MANIFEST_FILENAME: &str = "agent.leviath";
 
-/// The first bytes of an old journal.
-const LVR1: &[u8; 4] = b"LVR1";
+/// The run's metadata: status, timings, totals.
+pub(crate) const META_FILE: &str = "meta.json";
+
+/// The run's latest context-window snapshot, for a run with no journal.
+const CONTEXT_FILE: &str = "context.json";
+
+/// The per-stage ledger.
+const STAGES_FILE: &str = "stages.json";
+
+/// A fan-out parent's waiting state.
+const FANOUT_FILE: &str = "fanout.json";
+
+/// The interaction point a paused run waited on.
+const INTERACTIONS_FILE: &str = "interactions.json";
+
+/// The copy of the blueprint the run executed.
+pub(crate) const BLUEPRINT_SNAPSHOT_FILE: &str = "blueprint.leviath";
+
+/// The journal, at the name the run file has now: the two are told apart by
+/// their first bytes.
+const ARCHIVE_FILE: &str = RUN_FILE;
 
 pub(crate) fn is_legacy(run_dir: &Path) -> bool {
     let journal = std::fs::read(run_dir.join(ARCHIVE_FILE)).unwrap_or_default();
     run_dir.join(META_FILE).is_file() && !journal.starts_with(MAGIC)
+}
+
+/// The metadata an old run directory holds, when it holds any that reads.
+pub(crate) fn meta(run_dir: &Path) -> Option<RunMeta> {
+    json_file(&run_dir.join(META_FILE)).ok().flatten()
 }
 
 /// A fan-out parent's waiting state, as `fanout.json` holds it.
@@ -81,8 +102,8 @@ pub(crate) struct LegacyRun {
     pub(crate) dir: PathBuf,
     /// The metadata the journal started with.
     pub(crate) header: RunMeta,
-    pub(crate) records: Vec<RunRecord>,
-    pub(crate) folded: FoldedRun,
+    pub(crate) records: Vec<JournalRecord>,
+    pub(crate) folded: Folded,
     pub(crate) stages: Vec<StageRecord>,
     pub(crate) fanout: Option<FanOutFile>,
     pub(crate) point: Option<PointFile>,
@@ -103,8 +124,8 @@ impl LegacyRun {
     /// was seeded with.
     pub(crate) fn first_context(&self) -> Option<&ContextSnapshot> {
         self.records.iter().find_map(|r| match r {
-            RunRecord::ContextCheckpoint { snapshot, .. } => Some(snapshot),
-            RunRecord::Checkpoint { context, .. } => Some(context),
+            JournalRecord::ContextCheckpoint { snapshot, .. } => Some(snapshot),
+            JournalRecord::Checkpoint { context, .. } => Some(context),
             _ => None,
         })
     }
@@ -124,15 +145,14 @@ impl LegacyRun {
             Some(bytes) => journal_records(&journal_path, &bytes)?,
             None => records_without_journal(dir, meta.clone())?,
         };
-        let Some(RunRecord::Header { meta: header, .. }) = records.first() else {
+        let Some(JournalRecord::Header { meta: header, .. }) = records.first() else {
             return Err(ConvertError::Unreadable {
                 path: journal_path,
                 why: "the journal does not start with its header".into(),
             });
         };
         let header = (**header).clone();
-        let folded =
-            run_archive::fold(&records).expect("a journal that starts with its header folds");
+        let folded = journal::fold(&records).expect("a journal that starts with its header folds");
         let (blobs, stray_blobs) = blobs(&dir.join(BLOBS_DIR))?;
         Ok(Self {
             stages: json_file(&dir.join(STAGES_FILE))?.unwrap_or_default(),
@@ -163,24 +183,22 @@ fn json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, Con
         })
 }
 
-fn journal_records(path: &Path, bytes: &[u8]) -> Result<Vec<RunRecord>, ConvertError> {
+fn journal_records(path: &Path, bytes: &[u8]) -> Result<Vec<JournalRecord>, ConvertError> {
     let unreadable = |why: String| ConvertError::Unreadable {
         path: path.to_path_buf(),
         why,
     };
-    if !bytes.starts_with(LVR1) {
+    if !bytes.starts_with(journal::MAGIC) {
         return Err(unreadable(
             "it is neither an LVR1 journal nor a run file".into(),
         ));
     }
-    run_archive::read_archive_lenient(&mut &bytes[..])
-        .map(|(_, records)| records)
-        .map_err(|e| unreadable(e.to_string()))
+    journal::read(bytes).map_err(unreadable)
 }
 
 /// A run from before the journal: its header is `meta.json` and its one
 /// context checkpoint is `context.json`.
-fn records_without_journal(dir: &Path, meta: RunMeta) -> Result<Vec<RunRecord>, ConvertError> {
+fn records_without_journal(dir: &Path, meta: RunMeta) -> Result<Vec<JournalRecord>, ConvertError> {
     let at = meta.updated_at;
     let identity = RunIdentity {
         run_id: meta.run_id.clone(),
@@ -188,12 +206,12 @@ fn records_without_journal(dir: &Path, meta: RunMeta) -> Result<Vec<RunRecord>, 
         world_id: String::new(),
         created_at: meta.started_at,
     };
-    let mut records = vec![RunRecord::Header {
+    let mut records = vec![JournalRecord::Header {
         identity,
         meta: Box::new(meta),
     }];
     let context: Option<ContextSnapshot> = json_file(&dir.join(CONTEXT_FILE))?;
-    records.extend(context.map(|snapshot| RunRecord::ContextCheckpoint { snapshot, at }));
+    records.extend(context.map(|snapshot| JournalRecord::ContextCheckpoint { snapshot, at }));
     Ok(records)
 }
 

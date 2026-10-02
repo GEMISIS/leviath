@@ -500,7 +500,7 @@ pub(crate) fn collect_transition_choice(
             persist.as_deref(),
             metadata,
             &crate::inference_usage::CallUsage {
-                kind: leviath_core::run_archive::InferenceKind::Routing,
+                kind: crate::runfile::record::InferenceKind::Routing,
                 stage: &state.current_stage,
                 iteration: state.iteration,
                 provider: &si.provider_name,

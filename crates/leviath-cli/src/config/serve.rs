@@ -31,7 +31,7 @@ pub struct ServeConfig {
     pub request_timeout_secs: u64,
 
     /// Bytes one request body may carry: the ceiling on a multipart upload
-    /// to `POST /api/agents` or `POST /api/agents/{id}/message`.
+    /// to `POST /api/runs` or `POST /api/runs/{id}/message`.
     #[serde(default = "default_max_upload_bytes")]
     pub max_upload_bytes: u64,
 }

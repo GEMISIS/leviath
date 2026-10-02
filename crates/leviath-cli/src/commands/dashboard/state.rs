@@ -83,13 +83,13 @@ pub(crate) struct Dashboard {
     pub(super) stage_explorer: Option<ExplorerState>,
     /// Cursor + expansion state of the structured Context view.
     pub(super) context_tree: ContextTreeState,
-    /// Cached archive of the selected run (points + visit timeline).
+    /// Cached history of the selected run (points + visit timeline).
     pub(super) history: Option<super::history::RunHistoryCache>,
-    /// Loads a run's archived points. Injected (mirroring `clock`/`yank_fn`)
-    /// so tests can count loads and pin that `,`/`.` read the archive once
+    /// Loads a run's recorded points. Injected (mirroring `clock`/`yank_fn`)
+    /// so tests can count loads and pin that `,`/`.` read the run file once
     /// per run, not once per keypress.
     pub(super) history_loader: fn(&str) -> runstate::RunHistory,
-    /// A run's archive stat, which decides whether `history` is still
+    /// A run file's stat, which decides whether `history` is still
     /// current. Injected beside `history_loader` for the same reason.
     pub(super) history_stamp: fn(&str) -> Option<runstate::FileStamp>,
     /// Scroll offset for detail view content: 0 = bottom (auto-scroll), >0 = scrolled up
@@ -101,7 +101,7 @@ pub(crate) struct Dashboard {
     /// Whether the content pane shows Output or Logs - global across all stage tabs.
     pub(super) stage_content_mode: StageContentMode,
     /// Which historical context point is being viewed: `None` = the live current
-    /// window (the default), `Some(i)` = archived point `i` in the cached
+    /// window (the default), `Some(i)` = recorded point `i` in the cached
     /// history (see `history`).
     pub(super) context_history_idx: Option<usize>,
     /// True after the first sync completes; suppresses startup toasts for pre-existing state.
@@ -284,14 +284,14 @@ pub(crate) struct Dashboard {
     /// this process made, with a name nobody can guess, closes both.
     pub(super) external_edit_scratch: Option<tempfile::TempDir>,
     /// Sends resolve-and-spawn work to the background lane.
-    pub(super) spawn_cmd_tx: mpsc::UnboundedSender<SpawnCommand>,
+    pub(super) spawn_cmd_tx: mpsc::UnboundedSender<NewRunCommand>,
     /// Receives spawn results, drained into toasts each tick.
     pub(super) spawn_outcome_rx: mpsc::UnboundedReceiver<SpawnOutcome>,
     /// The background loop's ends of the spawn channels, taken by
     /// `init_dashboard`; tests keep them to assert dispatches and inject
     /// outcomes.
     pub(super) spawn_bg_ends: Option<(
-        mpsc::UnboundedReceiver<SpawnCommand>,
+        mpsc::UnboundedReceiver<NewRunCommand>,
         mpsc::UnboundedSender<SpawnOutcome>,
     )>,
     /// Receives the daemon's answer to each [`DaemonCommand`], drained each tick
@@ -514,17 +514,17 @@ impl Dashboard {
     }
 
     /// Leave context-history browsing and go back to the live current window.
-    /// The cached archive is kept: it invalidates by run id and TTL, not here.
+    /// The cached history is kept: it invalidates by run id and TTL, not here.
     pub(super) fn reset_context_history(&mut self) {
         self.context_history_idx = None;
     }
 
-    /// Make sure the cached archive covers `run_id` and holds everything in
-    /// it. This is the ONLY place the archive is loaded, so `,`/`.` step
+    /// Make sure the cached history covers `run_id` and holds everything in
+    /// it. This is the ONLY place the run file is loaded, so `,`/`.` step
     /// through memory rather than replaying `run.lvr` per keypress.
     ///
-    /// The archive is looked at once per TTL and read again only when its
-    /// stat moved: a finished run's archive cannot change, and it can be tens
+    /// The run file is looked at once per TTL and read again only when its
+    /// stat moved: a finished run's run file cannot change, and it can be tens
     /// of MB to replay on the draw loop.
     pub(super) fn ensure_history(&mut self, run_id: &str) {
         use super::history::{HISTORY_TTL_TICKS, RunHistoryCache};
@@ -539,7 +539,7 @@ impl Dashboard {
                 return;
             }
         }
-        // A run switch drops any browsed position along with the old archive.
+        // A run switch drops any browsed position along with the old run file.
         if self.history.as_ref().is_some_and(|h| h.run_id != run_id) {
             self.context_history_idx = None;
         }
@@ -567,10 +567,10 @@ impl Dashboard {
         self.history.as_ref().filter(|h| h.run_id == id)
     }
 
-    /// Step through the selected run's archived context-window history in the
+    /// Step through the selected run's recorded context-window history in the
     /// Context view: `delta > 0` moves to a later point, `delta < 0` to an
-    /// earlier one. Reads the cached archive; stepping past the newest point
-    /// returns to the live window. No-op if the run has no archived history.
+    /// earlier one. Reads the cached history; stepping past the newest point
+    /// returns to the live window. No-op if the run has no recorded history.
     pub(super) fn step_context_history(&mut self, delta: isize) {
         let Some(run_id) = self.selected_agent().map(|a| a.id.clone()) else {
             return;
@@ -603,7 +603,7 @@ impl Dashboard {
         // same spot across two points is the whole reason to browse history.
     }
 
-    /// Jump the Context view straight to archived point `idx` (the timeline's
+    /// Jump the Context view straight to recorded point `idx` (the timeline's
     /// Enter). Clamped; assumes `ensure_history` ran for the selected run.
     pub(super) fn jump_to_history_point(&mut self, idx: usize) {
         let len = self.selected_history().map(|h| h.points.len()).unwrap_or(0);
@@ -615,7 +615,7 @@ impl Dashboard {
     }
 
     /// The snapshot the Context view is showing right now: the browsed
-    /// archived point, else the selected stage's on-disk snapshot, else the
+    /// recorded point, else the selected stage's on-disk snapshot, else the
     /// run's live snapshot - the same fallback chain the renderer uses, so
     /// the key handler and the drawn tree can never disagree.
     pub(super) fn current_context_snapshot(&self) -> Option<runstate::ContextSnapshot> {
@@ -634,10 +634,12 @@ impl Dashboard {
             .unwrap_or_default()
     }
 
-    /// The context snapshot to render in the Context view: the selected archived
+    /// The context snapshot to render in the Context view: the selected recorded
     /// history point when browsing, else `None` (callers fall back to the live
     /// current window).
-    pub(super) fn browsed_context_point(&self) -> Option<&leviath_core::run_archive::RunPoint> {
+    pub(super) fn browsed_context_point(
+        &self,
+    ) -> Option<&leviath_runtime::runfile::history::RunPoint> {
         let idx = self.context_history_idx?;
         let id = self.selected_agent().map(|a| a.id.as_str())?;
         self.history
@@ -1333,7 +1335,7 @@ mod tests {
             LOADS.fetch_add(1, Ordering::SeqCst);
             let mut meta = fixtures::run_meta("run-1");
             meta.current_stage = "main".to_string();
-            let point = |at: i64| leviath_core::run_archive::RunPoint {
+            let point = |at: i64| leviath_runtime::runfile::history::RunPoint {
                 meta: meta.clone(),
                 context: leviath_core::run_meta::ContextSnapshot {
                     stage_name: "main".to_string(),
@@ -1398,7 +1400,7 @@ mod tests {
         fn one_point_loader(_run_id: &str) -> crate::runstate::RunHistory {
             let meta = fixtures::run_meta("x");
             crate::runstate::RunHistory {
-                points: vec![leviath_core::run_archive::RunPoint {
+                points: vec![leviath_runtime::runfile::history::RunPoint {
                     meta,
                     context: leviath_core::run_meta::ContextSnapshot {
                         stage_name: "s".to_string(),

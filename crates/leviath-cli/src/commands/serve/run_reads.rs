@@ -122,7 +122,7 @@ pub(super) async fn run_context(
 pub(super) async fn run_context_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<Page<leviath_core::run_archive::RunPoint>>, ApiError> {
+) -> Result<Json<Page<leviath_runtime::runfile::history::RunPoint>>, ApiError> {
     let spec = history::HistorySpec::resolve(
         &id,
         query.limit,

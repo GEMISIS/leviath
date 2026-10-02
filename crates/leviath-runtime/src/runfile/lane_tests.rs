@@ -7,17 +7,27 @@ use crate::state::journal::{
 use leviath_core::region::EntryContent;
 use serde_json::json;
 
-fn record(value: serde_json::Value) -> RunRecord {
-    serde_json::from_value(value).unwrap()
+fn attempt(provider: &str, model: &str, outcome: serde_json::Value, finish: &str) -> RunRecord {
+    RunRecord::InferenceAttempt(Box::new(
+        serde_json::from_value(json!({
+            "id": "a1", "stage": "plan", "attempt": 1, "provider": provider, "model": model,
+            "outcome": outcome, "finish_reason": finish, "duration_ms": 5, "backoff_ms": 0,
+            "digest": {"system_hash": 1, "messages": 1, "tools": 0, "max_tokens": 10, "temperature": 0.0},
+            "at": 1
+        }))
+        .unwrap(),
+    ))
 }
 
-fn attempt(provider: &str, model: &str, outcome: serde_json::Value, finish: &str) -> RunRecord {
-    record(json!({"InferenceAttempt": {
-        "id": "a1", "stage": "plan", "attempt": 1, "provider": provider, "model": model,
-        "outcome": outcome, "finish_reason": finish, "duration_ms": 5, "backoff_ms": 0,
-        "digest": {"system_hash": 1, "messages": 1, "tools": 0, "max_tokens": 10, "temperature": 0.0},
-        "at": 1
-    }}))
+fn call(id: &str, name: &str, arguments: &str) -> crate::runfile::record::ToolCallRecord {
+    crate::runfile::record::ToolCallRecord {
+        id: id.into(),
+        execution_id: String::new(),
+        name: name.into(),
+        arguments: arguments.into(),
+        result: None,
+        thought_signature: None,
+    }
 }
 
 fn usage(model: &str, cost: Option<f64>, reported: Option<bool>) -> RunRecord {
@@ -137,17 +147,32 @@ fn a_failed_call_is_a_log_line_and_a_nameless_model_is_nothing() {
 }
 
 #[test]
-fn failovers_tools_answers_and_messages_become_events() {
+fn failovers_tools_and_answers_become_events() {
     let failover = |to: &str| {
-        record(json!({"InferenceFailover": {
-            "stage": "plan", "iteration": 1, "from_provider": "mock", "from_model": "m",
-            "to_provider": "mock", "to_model": to, "reason": "credits", "kind": "billing", "at": 1
-        }}))
+        RunRecord::InferenceFailover(crate::runfile::record::FailoverRecord {
+            stage: "plan".into(),
+            iteration: 1,
+            from_provider: "mock".into(),
+            from_model: "m".into(),
+            to_provider: "mock".into(),
+            to_model: to.into(),
+            reason: "credits".into(),
+            kind: "billing".into(),
+            at: 1,
+        })
     };
-    let batch = record(json!({"ToolBatch": {"calls": [
-        {"id": "c1", "name": "read_file", "arguments": "{\"path\":\"a\"}"},
-        {"id": "c2", "name": "shell", "arguments": "not json"}
-    ], "at": 1}}));
+    let batch = RunRecord::ToolBatch {
+        calls: vec![
+            call("c1", "read_file", "{\"path\":\"a\"}"),
+            call("c2", "shell", "not json"),
+        ],
+        at: 1,
+        stage_index: 0,
+        iteration: 0,
+        visit_id: String::new(),
+        requested_by: String::new(),
+        response: String::new(),
+    };
     let done = |outcome, text: &str| RunRecord::ToolCallDone {
         iteration: 1,
         call_id: "c1".into(),
@@ -156,13 +181,16 @@ fn failovers_tools_answers_and_messages_become_events() {
         outcome,
         at: 1,
     };
-    let answered = record(json!({"Interaction": {
-        "request_id": "q1", "kind": "free_text", "prompt": "?", "stage": "plan",
-        "settlement": {"answered": {"text": "yes"}}, "asked_at": 1, "at": 2
-    }}));
-    let message =
-        record(json!({"Message": {"message": {"role": "user", "content": "hi"}, "at": 1}}));
-    let status = record(json!({"StatusChanged": {"status": "complete", "at": 1}}));
+    let answered = RunRecord::Interaction {
+        request_id: "q1".into(),
+        kind: serde_json::from_value(json!("free_text")).unwrap(),
+        tool: None,
+        prompt: "?".into(),
+        stage: "plan".into(),
+        settlement: serde_json::from_value(json!({"answered": {"text": "yes"}})).unwrap(),
+        asked_at: 1,
+        at: 2,
+    };
     let all = events_of(&[
         failover("n"),
         failover(""),
@@ -172,8 +200,6 @@ fn failovers_tools_answers_and_messages_become_events() {
         done(None, "[error] gone"),
         done(None, "fine"),
         answered,
-        message,
-        status,
     ]);
     // The events that keep a record whole sit beside the ones it always
     // became: one dispatch per call, one ending per result, one settlement.
@@ -205,7 +231,7 @@ fn failovers_tools_answers_and_messages_become_events() {
             None
         ]
     );
-    assert_eq!(events.len(), 9);
+    assert_eq!(events.len(), 8);
     assert_eq!(
         events[0],
         RunEvent::Failover {
@@ -235,14 +261,6 @@ fn failovers_tools_answers_and_messages_become_events() {
     };
     assert_eq!(id, "q1");
     assert!(answer.contains("yes"));
-    assert_eq!(
-        events[8],
-        RunEvent::Message(MessageState {
-            from: "user".into(),
-            text: "hi".into(),
-            region: None
-        })
-    );
 }
 
 fn step(run_id: &str, state: RunState) -> RunFileStep {
@@ -270,15 +288,11 @@ async fn a_run_gets_a_file_on_its_first_step_and_events_on_its_next() {
     run_dir(runs.path(), "r1");
     let mut lane = RunFileLane::new("machine", "world");
     let states = scripted_run(3);
-    let log = RunRecord::StatusChanged {
-        status: leviath_core::run_meta::RunStatus::Running,
-        at: 1,
-    };
-    let message = || RunRecord::Message {
-        message: leviath_core::run_archive::MessageRecord {
-            role: "user".into(),
-            content: "hi".into(),
-        },
+    // A usage record on a model with no valid name becomes no event.
+    let silent = usage("", None, None);
+    let message = || RunRecord::ArtifactsProduced {
+        execution_id: "x1".into(),
+        artifacts: Vec::new(),
         at: 1,
     };
     // What is noted for a run with no file is dropped when it is flushed.
@@ -293,7 +307,7 @@ async fn a_run_gets_a_file_on_its_first_step_and_events_on_its_next() {
         None
     );
     assert_eq!(lane.writers.len(), 1);
-    lane.note("r1", &log);
+    lane.note("r1", &silent);
     lane.note("r1", &message());
     assert_eq!(
         lane.record(runs.path(), step("r1", states[1].clone()))
@@ -345,11 +359,9 @@ async fn a_finished_run_closes_its_file_and_a_new_lane_carries_one_on() {
     // file, which is opened again for it and closed again after.
     lane.note(
         "r1",
-        &RunRecord::Message {
-            message: leviath_core::run_archive::MessageRecord {
-                role: "user".into(),
-                content: "too late?".into(),
-            },
+        &RunRecord::ArtifactsProduced {
+            execution_id: "too late?".into(),
+            artifacts: Vec::new(),
             at: 9,
         },
     );
@@ -461,7 +473,7 @@ fn a_batch_names_its_executions_and_ends_the_calls_it_carries() {
         stand_in: "[image]".into(),
     })
     .named("chart.png");
-    let mut refused = leviath_core::run_archive::ToolCallRecord {
+    let mut refused = crate::runfile::record::ToolCallRecord {
         id: "c1".into(),
         execution_id: "x1".into(),
         name: "shell".into(),
@@ -535,7 +547,7 @@ fn artifacts_and_context_changes_are_kept_whole() {
         revision_before: "cw1-a".into(),
         revision_after: "cw1-b".into(),
         cause: leviath_core::ContextCause::ToolResult,
-        regions: vec![leviath_core::run_archive::RegionCommit {
+        regions: vec![crate::runfile::record::RegionCommit {
             region: "plan".into(),
             digest_before: "d1".into(),
             digest_after: "d2".into(),
@@ -558,21 +570,6 @@ fn artifacts_and_context_changes_are_kept_whole() {
         unreachable!()
     };
     assert_eq!(anonymous.execution_id, None);
-
-    let noted = journal_events(&RunRecord::ContextChange {
-        region: "plan".into(),
-        cause: leviath_core::ContextCause::Compaction,
-        entries_added: 1,
-        entries_removed: 3,
-        token_delta: -40,
-        at: 1,
-    });
-    let RunEvent::ContextNoted(note) = &noted[0] else {
-        unreachable!()
-    };
-    assert_eq!(note.cause, CauseState::Compaction);
-    assert_eq!(note.entries_removed, 3);
-    assert_eq!(note.token_delta, -40);
 }
 
 /// A batch with calls `ids` and nothing back yet.

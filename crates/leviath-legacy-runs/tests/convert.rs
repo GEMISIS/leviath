@@ -16,7 +16,7 @@ mod journal;
 mod lookup;
 
 use common::{FIXTURES, Run, RunFile};
-use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy};
+use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy, meta};
 use leviath_runtime::spec::inputs::InputValue;
 use leviath_runtime::spec::launch::Unattended;
 use leviath_runtime::spec::run_spec::SpecOrigin;
@@ -47,8 +47,12 @@ fn every_fixture_converts_to_a_run_file_that_folds_to_its_last_state() {
     for name in FIXTURES {
         let run = Run::fixture(name);
         assert!(is_legacy(&run.dir));
+        let before = meta(&run.dir).map(|m| m.run_id);
         let (report, file) = run.converted();
         assert!(!is_legacy(&run.dir));
+        // The metadata moved into `legacy/` with the rest of the old files.
+        assert!(meta(&run.dir).is_none());
+        assert_eq!(before.as_deref(), Some(report.run_id.as_str()));
         assert_eq!(report.run_file, run.path("run.lvr"));
         assert_eq!(file.states.len(), 2);
         assert_eq!(file.states[0].seq, 0);

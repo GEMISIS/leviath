@@ -6,8 +6,8 @@
 //! here, and none of them is visible in a folded context window.
 
 use async_graphql::{Context, Enum, ID, Object, SimpleObject};
-use leviath_core::run_archive::Execution;
 use leviath_graphql_derive::mirror;
+use leviath_runtime::runfile::history::Execution;
 
 use super::super::connection::{
     Connection, Paged, PositionQuery, Total, position_order, position_page,

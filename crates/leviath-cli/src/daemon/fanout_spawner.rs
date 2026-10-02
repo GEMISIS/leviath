@@ -233,7 +233,7 @@ binds = [{ region = "task" }]
             },
             ..SpawnRequest::new(source)
         }
-        .input("task", RawInput::Text("Work item id: item-1".into()));
+        .input("task", RawInput::Text("item-1".into()));
         let caller = Caller::Worker {
             parent: spec.run_id.clone(),
             policy: spec.launch.clone(),

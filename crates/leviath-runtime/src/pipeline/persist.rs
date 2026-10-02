@@ -48,8 +48,8 @@ pub struct PersistWatermark {
     ///
     /// `last_written_at` cannot answer that: the heartbeat advances it whether
     /// or not anything happened, which is the whole point of the heartbeat and
-    /// exactly why `meta.json`'s `updated_at` is not evidence of progress: a
-    /// wedged run keeps a fresh one. This is the timestamp `lev ps` ages its
+    /// exactly why a run's `updated_at` is not evidence of progress: a wedged
+    /// run keeps a fresh one. This is the timestamp `lev ps` ages its
     /// rows against.
     last_progress_at: Option<i64>,
     /// The taint audit already on disk, as `(stage index, event count)`.
@@ -135,7 +135,7 @@ pub(crate) fn journal_interactions(hub: Option<Res<InteractionHub>>, stage: Res<
     for (run_id, record) in hub.take_settled() {
         let _ = stage.0.send(PersistMsg::Append {
             run_id,
-            record: Box::new(leviath_core::run_archive::RunRecord::Interaction {
+            record: Box::new(crate::runfile::record::RunRecord::Interaction {
                 request_id: record.request_id,
                 kind: record.kind,
                 tool: record.tool,
@@ -179,18 +179,13 @@ fn fold_broken_scripts(
     }
 }
 
-/// Persistence-dispatch system: for each agent carrying run metadata whose
-/// (iteration, stage, status) has changed since its last snapshot, build the
-/// `meta.json` + `context.json` value snapshot and hand it to the persistence
-/// lane. Fire-and-forget - no result to collect; the single-worker lane keeps a
-/// given agent's writes ordered. Agents without [`RunMetadata`] aren't persisted.
 /// Interaction-status reflection system: mirror the shared [`InteractionHub`]'s
 /// open requests into agent status so a blocked agent shows as `Waiting` (and
 /// the dashboard / `lev ps` surface its prompt) instead of a silent `Active`.
 ///
 /// An agent's `ask_user_*` / tool-approval / plan-approval call blocks deep in
 /// the async tool lane, invisible to the ECS - which otherwise leaves the agent
-/// `Active` with meta.json written `running`, so the dashboard (gated on
+/// `Active` and reported `running`, so the dashboard (gated on
 /// `WaitingInput`) never shows the prompt and the run looks frozen. This system
 /// closes that gap: an agent whose id has an open hub request flips
 /// `Active → Waiting` (tagged [`AwaitingInteraction`]); when the request clears
@@ -384,8 +379,8 @@ type PersistenceQuery = (
         Option<&'static crate::components::OutputValidators>,
         Option<&'static crate::persistence::FinalOutput>,
         // The remaining reasons a run can be parked. Read here because this is
-        // where they are queryable, and recorded on `meta.json` so a client
-        // does not have to reconstruct them from what it can see.
+        // where they are queryable, and recorded on the run's summary so a
+        // client does not have to reconstruct them from what it can see.
         Option<&'static crate::gate_prompt::AwaitingGatePrompt>,
         Option<&'static super::WaitingForChildren>,
         Option<&'static crate::components::AwaitingInteraction>,
@@ -479,8 +474,8 @@ fn build_snapshots(
 
         let status = crate::persistence::run_status_from(&state.status);
         // The parking markers, gathered here because this is where they are
-        // queryable, and recorded on `meta.json` so a client does not have to
-        // reconstruct them from what it can see.
+        // queryable, and recorded on the run's summary so a client does not
+        // have to reconstruct them from what it can see.
         //
         // `interaction` is left for the write path below. Naming which prompt is
         // holding the run costs a scan of the hub, and it only ever refines a
@@ -619,8 +614,8 @@ fn build_snapshots(
         // Read the progress stamp *after* the update above, so a write that
         // carried progress reports `now` and a heartbeat-only write reports
         // whenever the run last moved. That difference is the whole signal: it is
-        // what lets an observer reading `meta.json` tell a slow run from a wedged
-        // one, which `updated_at` (which is `now` either way) cannot.
+        // what lets an observer reading `lev ps` or the API tell a slow run
+        // from a wedged one, which `updated_at` (which is `now` either way) cannot.
         // Now name the prompt, on the path that writes it.
         parked.interaction = hub.as_ref().and_then(|h| {
             h.pending()
@@ -628,9 +623,9 @@ fn build_snapshots(
                 .find(|(agent_id, _)| *agent_id == state.agent_id)
                 .map(|(_, req)| req.kind)
         });
-        // Rolled up from the ledger rather than tracked separately, so the set
-        // on `meta.json` and the per-stage lists in `stages.json` are the same
-        // fact written twice and cannot drift into two answers.
+        // Rolled up from the ledger rather than tracked separately, so the
+        // run's set and the per-stage lists in its ledger are the same fact
+        // read twice and cannot drift into two answers.
         let stage_models = ledger
             .as_deref()
             .map(|l| leviath_core::run_meta::stage_models_of(&l.0))
@@ -696,9 +691,8 @@ fn build_snapshots(
         // that: it coalesces queued snapshots per run and keeps only the
         // newest. A run that finishes inside one persistence window would have
         // the job carrying the body dropped as superseded, while every later
-        // job carries `None` and still rewrites `meta.json` with the
-        // descriptor - leaving the descriptor and the sidecar permanently
-        // disagreeing, which `read_final_output` reads as "no answer".
+        // job carries `None` and still carries the descriptor - leaving the
+        // descriptor and the sidecar permanently disagreeing, which `read_final_output` reads as "no answer".
         //
         // The skip lives in the lane instead, past the coalescing, where "did
         // this get written" is a fact rather than an assumption; it stops a
@@ -739,7 +733,7 @@ mod broken_script_tests {
     }
 
     /// The names the component collected reach the run's flags, which is what
-    /// puts them on `meta.json`, `lev ps`, the API and the dashboard.
+    /// puts them on the run's summary: `lev ps`, the API and the dashboard.
     #[test]
     fn the_components_names_reach_the_flags() {
         let validators = OutputValidators::new(std::collections::HashMap::new());

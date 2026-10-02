@@ -119,7 +119,7 @@ async fn the_views_of_a_run_read_its_run_file() {
         step(&dir, 10, |s| say(s, "first words"));
         step(&dir, 20, |s| take(s, "analyze", "implement", "next"));
         // A stray context file beside it is never what is read.
-        std::fs::write(dir.join(leviath_core::files::CONTEXT_FILE), "{}").unwrap();
+        std::fs::write(dir.join("context.json"), "{}").unwrap();
 
         let window = read_context_snapshot(&run_id).expect("a window");
         let said = |w: &ContextSnapshot| {

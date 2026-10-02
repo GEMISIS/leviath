@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
-use leviath_core::run_archive::{
+use leviath_runtime::runfile::record::{
     self, AttemptOutcome, AttemptRecord, FailoverRecord, RequestDigest, Retry, RunRecord,
 };
 
@@ -85,7 +85,7 @@ fn attempt(n: u32, provider: &str, model: &str, outcome: AttemptOutcome) -> RunR
         AttemptOutcome::Succeeded => "complete".to_string(),
         AttemptOutcome::Failed { .. } => String::new(),
     };
-    RunRecord::InferenceAttempt(AttemptRecord {
+    RunRecord::InferenceAttempt(Box::new(AttemptRecord {
         id: format!("a{n:08x}"),
         stage: "plan".to_string(),
         attempt: n,
@@ -105,19 +105,19 @@ fn attempt(n: u32, provider: &str, model: &str, outcome: AttemptOutcome) -> RunR
         },
         model_input: None,
         at: 200,
-    })
+    }))
 }
 
 /// One attempt whose journal recorded a model input in `status`.
-fn attempt_with_input(status: run_archive::CaptureStatus) -> RunRecord {
-    let retained = status == run_archive::CaptureStatus::Retained;
+fn attempt_with_input(status: record::CaptureStatus) -> RunRecord {
+    let retained = status == record::CaptureStatus::Retained;
     let body = serde_json::json!({ "model": "claude-sonnet-4-5", "messages": [] });
     let RunRecord::InferenceAttempt(mut record) =
         attempt(1, "anthropic", "claude", AttemptOutcome::Succeeded)
     else {
         unreachable!("attempt builds an attempt record")
     };
-    record.model_input = Some(run_archive::ModelInput {
+    record.model_input = Some(record::ModelInput {
         capture_status: status,
         request: retained.then(|| body.clone()),
         bytes: body.to_string().len() as u64,
@@ -536,10 +536,10 @@ fn every_retry_decision_has_a_word() {
 fn every_capture_state_has_a_word() {
     use super::CaptureStatus as Served;
     let cases = [
-        (run_archive::CaptureStatus::Retained, Served::Retained),
-        (run_archive::CaptureStatus::NotCaptured, Served::NotCaptured),
-        (run_archive::CaptureStatus::Redacted, Served::Redacted),
-        (run_archive::CaptureStatus::Expired, Served::Expired),
+        (record::CaptureStatus::Retained, Served::Retained),
+        (record::CaptureStatus::NotCaptured, Served::NotCaptured),
+        (record::CaptureStatus::Redacted, Served::Redacted),
+        (record::CaptureStatus::Expired, Served::Expired),
     ];
     for (core, served) in cases {
         assert_eq!(Served::from(core), served, "{core:?}");
@@ -552,9 +552,7 @@ fn every_capture_state_has_a_word() {
 async fn a_captured_attempt_serves_the_request_it_sent() {
     crate::runstate::with_isolated_runs_dir_async("graphql-model-input", |_dir| async move {
         create_run(&meta()).expect("run written");
-        write_journal(vec![attempt_with_input(
-            run_archive::CaptureStatus::Retained,
-        )]);
+        write_journal(vec![attempt_with_input(record::CaptureStatus::Retained)]);
 
         let json = data(
             r#"{ run { inferences(first: 10) { results { modelInput {
@@ -597,7 +595,7 @@ async fn an_uncaptured_attempt_carries_no_body_and_no_window_fingerprint() {
     crate::runstate::with_isolated_runs_dir_async("graphql-no-capture", |_dir| async move {
         create_run(&meta()).expect("run written");
         write_journal(vec![
-            attempt_with_input(run_archive::CaptureStatus::NotCaptured),
+            attempt_with_input(record::CaptureStatus::NotCaptured),
             attempt(2, "openai", "gpt-5", AttemptOutcome::Succeeded),
         ]);
 
@@ -648,7 +646,7 @@ async fn every_mirrored_function_runs() {
         let RunRecord::InferenceAttempt(record) = attempt(1, "anthropic", "claude", outcome) else {
             unreachable!("attempt builds an attempt record")
         };
-        record
+        *record
     };
     let mut stopped = record(AttemptOutcome::Succeeded);
     stopped.finish_reason = "unknown".to_string();
@@ -688,8 +686,8 @@ async fn every_mirrored_function_runs() {
     .await;
 
     exercise(&[super::ModelRequest {
-        record: run_archive::ModelInput {
-            capture_status: run_archive::CaptureStatus::Retained,
+        record: record::ModelInput {
+            capture_status: record::CaptureStatus::Retained,
             request: Some(serde_json::json!({ "model": "claude-sonnet-4-5" })),
             bytes: 43,
             source_context_digest: "0f0f0f0f0f0f0f0f".to_string(),
@@ -709,7 +707,7 @@ async fn every_mirrored_function_runs() {
         unreachable!("attempt builds an attempt record")
     };
     let inference_attempt = super::InferenceAttempt {
-        record,
+        record: *record,
         failover: None,
     };
     exercise(std::slice::from_ref(&inference_attempt)).await;

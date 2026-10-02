@@ -344,7 +344,7 @@ pub(crate) struct AttemptJournal {
     /// request. Even a file renewal leaves it untouched: it replaces the ids
     /// stored parts are named by, and the digest counts messages and tools
     /// rather than looking inside them.
-    pub digest: leviath_core::run_archive::RequestDigest,
+    pub digest: crate::runfile::record::RequestDigest,
     /// Whether the exact request is kept, and the things about it that are the
     /// same for every attempt at this call.
     pub model_input: ModelInputPlan,
@@ -373,8 +373,8 @@ pub(crate) struct ModelInputPlan {
 
 impl ModelInputPlan {
     /// This attempt's model input, with the body when the plan keeps bodies.
-    fn record(&self, request: &InferenceRequest) -> leviath_core::run_archive::ModelInput {
-        use leviath_core::run_archive::{CaptureStatus, ModelInput};
+    fn record(&self, request: &InferenceRequest) -> crate::runfile::record::ModelInput {
+        use crate::runfile::record::{CaptureStatus, ModelInput};
         // A struct always serializes to an object, so the fallback is the empty
         // value rather than a panic on a path that cannot be reached.
         let body = self
@@ -406,7 +406,7 @@ impl ModelInputPlan {
 /// words. A failure carries its classification and what the loop did next.
 enum Ending<'a> {
     Answered(&'a leviath_providers::FinishReason),
-    Failed(leviath_core::run_archive::AttemptOutcome),
+    Failed(crate::runfile::record::AttemptOutcome),
 }
 
 impl AttemptJournal {
@@ -422,7 +422,7 @@ impl AttemptJournal {
     ) {
         let (outcome, finish) = match ending {
             Ending::Answered(finish) => (
-                leviath_core::run_archive::AttemptOutcome::Succeeded,
+                crate::runfile::record::AttemptOutcome::Succeeded,
                 Some(finish),
             ),
             Ending::Failed(outcome) => (outcome, None),
@@ -431,8 +431,8 @@ impl AttemptJournal {
             .lane
             .send(crate::persistence_bridge::PersistMsg::Append {
                 run_id: self.run_id.clone(),
-                record: Box::new(leviath_core::run_archive::RunRecord::InferenceAttempt(
-                    leviath_core::run_archive::AttemptRecord {
+                record: Box::new(crate::runfile::record::RunRecord::InferenceAttempt(
+                    Box::new(crate::runfile::record::AttemptRecord {
                         id: id.to_string(),
                         stage: self.stage.clone(),
                         attempt,
@@ -446,7 +446,7 @@ impl AttemptJournal {
                         digest: self.digest.clone(),
                         model_input: Some(self.model_input.record(request)),
                         at: chrono::Utc::now().timestamp(),
-                    },
+                    }),
                 )),
                 ack: None,
             });
@@ -478,9 +478,9 @@ pub(crate) fn failure_label(error: &ProviderError) -> String {
 /// and what the loop did next.
 fn failed(
     error: &ProviderError,
-    next: leviath_core::run_archive::Retry,
-) -> leviath_core::run_archive::AttemptOutcome {
-    leviath_core::run_archive::AttemptOutcome::Failed {
+    next: crate::runfile::record::Retry,
+) -> crate::runfile::record::AttemptOutcome {
+    crate::runfile::record::AttemptOutcome::Failed {
         kind: failure_label(error),
         transient: error.is_transient(),
         capacity: error.retry_advice().capacity,
@@ -804,7 +804,7 @@ pub(crate) async fn run_inference_job(
                     record(
                         &id,
                         made,
-                        Ending::Failed(failed(&e, leviath_core::run_archive::Retry::RenewedFiles)),
+                        Ending::Failed(failed(&e, crate::runfile::record::Retry::RenewedFiles)),
                         took,
                         waited,
                         &request,
@@ -826,7 +826,7 @@ pub(crate) async fn run_inference_job(
                         record(
                             &id,
                             made,
-                            Ending::Failed(failed(&e, leviath_core::run_archive::Retry::SameModel)),
+                            Ending::Failed(failed(&e, crate::runfile::record::Retry::SameModel)),
                             took,
                             waited,
                             &request,
@@ -840,7 +840,7 @@ pub(crate) async fn run_inference_job(
                         record(
                             &id,
                             made,
-                            Ending::Failed(failed(&e, leviath_core::run_archive::Retry::Reported)),
+                            Ending::Failed(failed(&e, crate::runfile::record::Retry::Reported)),
                             took,
                             waited,
                             &request,
@@ -912,7 +912,7 @@ pub(crate) async fn run_inference_job(
 mod tests {
     use super::*;
     use crate::inference_pool::{InferencePoolConfig, InferencePools};
-    use leviath_core::run_archive::{AttemptOutcome, Retry};
+    use crate::runfile::record::{AttemptOutcome, Retry};
     use tokio::sync::mpsc;
 
     fn test_request() -> InferenceRequest {
@@ -1771,7 +1771,7 @@ mod tests {
             provider: "openai".to_string(),
             model: "gpt".to_string(),
             lane,
-            digest: leviath_core::run_archive::RequestDigest {
+            digest: crate::runfile::record::RequestDigest {
                 system_hash: 11,
                 messages: 0,
                 tools: 0,
@@ -2312,13 +2312,13 @@ mod tests {
 #[cfg(test)]
 pub(crate) fn journaled_attempts(
     lane: &mut tokio::sync::mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
-) -> Vec<leviath_core::run_archive::AttemptRecord> {
+) -> Vec<crate::runfile::record::AttemptRecord> {
     let mut records = Vec::new();
     while let Ok(msg) = lane.try_recv() {
         if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let leviath_core::run_archive::RunRecord::InferenceAttempt(attempt) = *record
+            && let crate::runfile::record::RunRecord::InferenceAttempt(attempt) = *record
         {
-            records.push(attempt);
+            records.push(*attempt);
         }
     }
     records

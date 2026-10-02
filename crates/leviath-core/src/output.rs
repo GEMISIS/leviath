@@ -1,7 +1,7 @@
 //! An agent's final output: the one value a run hands back to whoever asked.
 //!
 //! Every surface that reports a result reads this and nothing else:
-//! `GET /api/agents/{id}/result`, the completion webhook's `result` field,
+//! `GET /api/runs/{id}/result`, the completion webhook's `result` field,
 //! `wait_for_agent`'s answer to a parent, and a fan-out worker's contribution
 //! to its merge stage. None of them has to guess at a log tail or at whatever
 //! text sat in a last assistant message, which for a worker whose final turn

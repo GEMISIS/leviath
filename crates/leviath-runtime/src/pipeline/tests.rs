@@ -1133,11 +1133,9 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     // reading the attempts back has to skip the rest rather than trip over it.
     lane.send(crate::persistence_bridge::PersistMsg::Append {
         run_id: "r".to_string(),
-        record: Box::new(leviath_core::run_archive::RunRecord::Message {
-            message: leviath_core::run_archive::MessageRecord {
-                role: "user".to_string(),
-                content: "not an attempt".to_string(),
-            },
+        record: Box::new(crate::runfile::record::RunRecord::ArtifactsProduced {
+            execution_id: "not an attempt".to_string(),
+            artifacts: Vec::new(),
             at: 0,
         }),
         ack: None,
@@ -1155,7 +1153,7 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     assert_eq!(record.model, "m");
     assert_eq!(
         record.outcome,
-        leviath_core::run_archive::AttemptOutcome::Succeeded
+        crate::runfile::record::AttemptOutcome::Succeeded
     );
     // The digest is what the request was, counted rather than copied: one tool
     // was advertised and the stage's own budget was asked for.
@@ -1169,7 +1167,7 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     let input = record.model_input.as_ref().expect("a model input");
     assert_eq!(
         input.capture_status,
-        leviath_core::run_archive::CaptureStatus::NotCaptured
+        crate::runfile::record::CaptureStatus::NotCaptured
     );
     assert!(input.request.is_none(), "{input:?}");
     assert_eq!(input.bytes, 0);
@@ -1211,7 +1209,7 @@ async fn a_captured_run_journals_the_request_it_sent_and_the_window_it_came_from
     let input = records[0].model_input.as_ref().expect("a model input");
     assert_eq!(
         input.capture_status,
-        leviath_core::run_archive::CaptureStatus::Retained
+        crate::runfile::record::CaptureStatus::Retained
     );
     let body = input.request.as_ref().expect("a retained body");
     // The request Leviath assembled, field for field: the model it named and the
@@ -1972,7 +1970,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
     let mut records = Vec::new();
     while let Ok(msg) = journal.try_recv() {
         if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let leviath_core::run_archive::RunRecord::InferenceFailover(failover) = *record
+            && let crate::runfile::record::RunRecord::InferenceFailover(failover) = *record
         {
             records.push(failover);
         }
@@ -2016,7 +2014,7 @@ fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
     let mut records = Vec::new();
     while let Ok(msg) = journal.try_recv() {
         if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let leviath_core::run_archive::RunRecord::InferenceFailover(failover) = *record
+            && let crate::runfile::record::RunRecord::InferenceFailover(failover) = *record
         {
             records.push(failover);
         }
@@ -4193,7 +4191,7 @@ fn spawn_agent_seeds_the_stage_ledger_with_names() {
         enabled: Some(true),
     });
     let mut world = World::new();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "run-led".to_string(),
         bp,
@@ -4243,7 +4241,7 @@ fn spawn_agent_seeded_resolves_percent_region_against_provider_window() {
     // Provider "p" (Cfg) reports a 100_000-token window; a 35% region must
     // resolve to 35_000, and the window total becomes the model window.
     let mut world = world_with_provider();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "run".to_string(),
         percent_region_blueprint(0.35),
@@ -4263,7 +4261,7 @@ fn spawn_agent_seeded_falls_back_when_provider_missing() {
     // window (and warns). 35% of 8192 ≈ 2867.
     crate::test_support::with_tracing(|| {
         let mut world = World::new();
-        let e = spawn_agent(
+        let e = place_test_task(
             &mut world,
             "run".to_string(),
             percent_region_blueprint(0.35),
@@ -4285,7 +4283,7 @@ fn spawn_agent_seeded_absolute_blueprint_is_unchanged() {
     // window total match the declared values, provider or not.
     let mut world = world_with_provider();
     let bp = blueprint(vec![tg::stage("main")]);
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4319,7 +4317,7 @@ fn spawn_agent_seeded_resolves_per_stage_layout() {
         0,
     ));
     let bp = graph_of_staged(vec![stage], global);
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4339,7 +4337,7 @@ fn spawn_agent_seeded_errors_when_resolved_global_layout_is_invalid() {
     // only 5_000 working tokens (< MIN_WORKING_TOKENS). Post-resolution
     // validation must fail the spawn with an actionable message.
     let mut world = world_with_provider();
-    let err = spawn_agent(
+    let err = place_test_task(
         &mut world,
         "run".to_string(),
         percent_region_blueprint(0.95),
@@ -4372,7 +4370,7 @@ fn spawn_agent_seeded_errors_when_resolved_per_stage_layout_is_invalid() {
         0,
     ));
     let bp = graph_of_staged(vec![stage], global);
-    let err = spawn_agent(
+    let err = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4479,7 +4477,7 @@ fn spawn_sizes_a_region_against_the_smallest_window_that_actually_sees_it() {
     // The narrow stage never reads the big region.
     narrow.hide = tg::regions(&["big"]);
     let bp = graph_of_staged(vec![mk("a", "wide"), narrow], layout);
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4519,7 +4517,7 @@ fn spawn_fails_when_a_shared_region_starves_the_narrow_stage() {
     // against its floor - only the shared region does.
     narrow.hide = tg::regions(&["wideonly"]);
     let bp = graph_of_staged(vec![mk("a", "wide"), narrow], layout);
-    let err = spawn_agent(
+    let err = place_test_task(
         &mut world,
         "run".to_string(),
         bp,
@@ -4807,7 +4805,7 @@ fn a_reply_and_the_nudge_answering_it_record_different_causes() {
 
     let mut moved = Vec::new();
     while let Ok(crate::persistence_bridge::PersistMsg::Append { record, .. }) = rx.try_recv() {
-        if let leviath_core::run_archive::RunRecord::ContextTransaction { regions, cause, .. } =
+        if let crate::runfile::record::RunRecord::ContextTransaction { regions, cause, .. } =
             *record
         {
             for region in regions {
@@ -5833,7 +5831,7 @@ fn append_msg(
     msg: PersistMsg,
 ) -> (
     String,
-    leviath_core::run_archive::RunRecord,
+    crate::runfile::record::RunRecord,
     Option<tokio::sync::oneshot::Sender<crate::persistence_bridge::Appended>>,
 ) {
     match msg {
@@ -5850,7 +5848,7 @@ fn append_msg(
 
 #[tokio::test]
 async fn dispatch_journals_the_batch_then_each_completion() {
-    use leviath_core::run_archive::RunRecord;
+    use crate::runfile::record::RunRecord;
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
@@ -5956,7 +5954,7 @@ fn produced_files_are_journaled_against_the_call_that_made_them() {
     let mut produced = Vec::new();
     while let Ok(PersistMsg::Append { run_id, record, .. }) = prx.try_recv() {
         assert_eq!(run_id, "run-a");
-        if let leviath_core::run_archive::RunRecord::ArtifactsProduced {
+        if let crate::runfile::record::RunRecord::ArtifactsProduced {
             execution_id,
             artifacts,
             ..
@@ -6024,13 +6022,13 @@ async fn a_dispatched_batch_records_what_it_belongs_to() {
     let mut committed = Vec::new();
     while let Ok(PersistMsg::Append { record, .. }) = prx.try_recv() {
         match *record {
-            leviath_core::run_archive::RunRecord::ToolBatch {
+            crate::runfile::record::RunRecord::ToolBatch {
                 calls,
                 visit_id,
                 requested_by,
                 ..
             } => batch = Some((calls, visit_id, requested_by)),
-            leviath_core::run_archive::RunRecord::ContextTransaction {
+            crate::runfile::record::RunRecord::ContextTransaction {
                 execution_id,
                 cause,
                 ..
@@ -6095,7 +6093,7 @@ async fn dispatch_journals_a_batch_it_resolved_itself() {
     let PersistMsg::Append { record, .. } = prx.try_recv().expect("a batch record") else {
         panic!("the dispatcher appends, it does not snapshot")
     };
-    let leviath_core::run_archive::RunRecord::ToolBatch { calls, .. } = *record else {
+    let crate::runfile::record::RunRecord::ToolBatch { calls, .. } = *record else {
         panic!("a batch record")
     };
     assert_eq!(calls.len(), 1);
@@ -10083,7 +10081,7 @@ fn spawn_agent_seeds_the_stage_log_with_each_stages_notes() {
     ];
 
     let mut world = World::new();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "agent-x".to_string(),
         bp,
@@ -10118,7 +10116,7 @@ fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
     let bp = graph_of_staged(vec![s], layout);
 
     let mut world = World::new();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "agent-x".to_string(),
         bp,
@@ -10169,7 +10167,7 @@ fn spawn_agent_defaults_config_and_no_routing() {
     // routing component.
     let bp = blueprint(vec![stage_named("only", None, false, None)]);
     let mut world = World::new();
-    let e = spawn_agent(
+    let e = place_test_task(
         &mut world,
         "a".to_string(),
         bp,
@@ -10389,7 +10387,7 @@ fn spawn_agent_errors_on_oversized_system_prompt() {
     let bp = graph_of_staged(vec![s], layout);
 
     let mut world = World::new();
-    let err = spawn_agent(
+    let err = place_test_task(
         &mut world,
         "a".to_string(),
         bp,
@@ -20961,7 +20959,7 @@ mod model_parts {
 /// second crash still sees them finished.
 #[tokio::test]
 async fn a_recovered_batch_runs_only_what_had_not_finished() {
-    use leviath_core::run_archive::RunRecord;
+    use crate::runfile::record::RunRecord;
     let (jtx, mut jrx) = mpsc::unbounded_channel();
     let (ptx, mut prx) = mpsc::unbounded_channel();
     let mut world = World::new();
@@ -21262,9 +21260,9 @@ fn resolved_on(provider: &str, model: &str) -> ResolvedStage {
 #[test]
 fn a_blueprint_spawn_seeds_by_region_and_takes_the_operators_nudge() {
     let mut world = World::new();
-    let e = spawn_agent_seeded(
+    let e = place_test_run(
         &mut world,
-        SeededSpawn {
+        TestRun {
             agent_id: "r".to_string(),
             graph: blueprint(vec![stage_named("a", None, false, None)]),
             seeds: [

@@ -929,7 +929,7 @@ impl Run {
     /// the cheaper direction to read.
     ///
     /// Unfiltered, only the page's own windows are read, exactly as
-    /// `GET /api/agents/{id}/context/history` reads them. A `filter` is a
+    /// `GET /api/runs/{id}/context/history` reads them. A `filter` is a
     /// question about each point, and answering it means opening that point's
     /// window, so a filtered page reads the run's whole history to decide what
     /// is on it. Page first and filter in the client where the history is long.

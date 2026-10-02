@@ -441,7 +441,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "logs/dashboard.log",
             "logs/serve-3000.log",
             "logs/serve-3000.log.1",
-            &format!("runs/{ROOT_RUN}/meta.json"),
+            &format!("runs/{ROOT_RUN}/summary.json"),
             &format!("runs/{ROOT_RUN}/final_output"),
             &format!("runs/{ROOT_RUN}/stages/0/output.log"),
             &format!("runs/{ROOT_RUN}/stages/0/taint_audit.json"),
@@ -449,7 +449,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             &format!("runs/{ROOT_RUN}/blobs/aa11"),
             &format!("runs/{ROOT_RUN}/blueprint/agent.toml"),
             &format!("runs/{ROOT_RUN}/blueprint/tools/helper.rhai"),
-            &format!("runs/{LISTED_CHILD}/meta.json"),
+            &format!("runs/{LISTED_CHILD}/summary.json"),
             &format!("runs/{LISTED_CHILD}/run.json"),
             &format!("runs/{LISTED_CHILD}/blueprint/agent.toml"),
         ] {
@@ -480,7 +480,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
         );
         // The run's metadata lost its signing key and kept its task.
         let meta: serde_json::Value =
-            serde_json::from_slice(member(&members, &format!("runs/{ROOT_RUN}/meta.json")))
+            serde_json::from_slice(member(&members, &format!("runs/{ROOT_RUN}/summary.json")))
                 .unwrap();
         assert_eq!(meta["callback_secret"], serde_json::Value::Null);
         assert_eq!(meta["task"], "fix the planted bug");
@@ -535,7 +535,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
         assert!(
             reasons
                 .iter()
-                .any(|r| r.contains(CHILD_RUN) && r.contains("meta.json")),
+                .any(|r| r.contains(CHILD_RUN) && r.contains("summary.json")),
             "{reasons:?}"
         );
         assert!(
@@ -738,7 +738,12 @@ async fn an_unreadable_run_file_is_left_out_and_says_why() {
                 .iter()
                 .any(|m| contains(&m.bytes, CONFIG_KEY))
         );
-        assert!(bundle.skipped.iter().any(|s| s.path == "runs/r1/meta.json"));
+        assert!(
+            bundle
+                .skipped
+                .iter()
+                .any(|s| s.path == "runs/r1/summary.json")
+        );
         assert!(bundle.skipped.iter().any(|s| s.path == "runs/r1/run.lvr"));
     })
     .await

@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use leviath_blueprint::FILE_NAME;
-use leviath_core::files::{BLOBS_DIR, META_FILE, RUN_FILE};
+use leviath_core::files::{BLOBS_DIR, RUN_FILE};
 use leviath_core::run_meta::RunMeta;
 use leviath_core::secrets::is_sensitive_env_name;
 
@@ -30,6 +30,9 @@ pub(crate) const LOG_TAIL: u64 = 2 * 1024 * 1024;
 pub(crate) const LOG_READ_CAP: u64 = 64 * 1024 * 1024;
 /// The most a run's answer or stage file may weigh before it is left out.
 pub(crate) const RUN_FILE_CAP: u64 = 8 * 1024 * 1024;
+
+/// The bundle member holding a run's summary as `lev ps --json` reads it.
+const SUMMARY_FILE: &str = "summary.json";
 /// The most a run file may weigh before it is left out. A mature run's file
 /// is tens of megabytes, which is exactly what a reader needs.
 pub(crate) const ARCHIVE_CAP: u64 = 64 * 1024 * 1024;
@@ -458,7 +461,7 @@ fn copy_run(
     match crate::runstate::read_meta_from(&dir) {
         Ok(meta) => {
             let value = serde_json::to_value(meta.redacted()).unwrap_or_default();
-            bundle.json(format!("{dest}/{META_FILE}"), scrubber, value);
+            bundle.json(format!("{dest}/{SUMMARY_FILE}"), scrubber, value);
             // A run of an installed blueprint names it, not a path.
             let blueprint = match meta.agent_path.is_empty() {
                 true => env.agents_dir.join(&meta.agent_name),
@@ -483,7 +486,7 @@ fn copy_run(
             }
         }
         Err(e) => bundle.skip(
-            format!("{dest}/{META_FILE}"),
+            format!("{dest}/{SUMMARY_FILE}"),
             format!("the run's record could not be read: {e}"),
         ),
     }

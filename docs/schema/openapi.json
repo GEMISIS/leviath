@@ -670,7 +670,7 @@
               "type": "boolean",
               "default": false
             },
-            "description": "Delete a run whose meta.json will not parse, which is otherwise a 409. A record that cannot be read is not proof the run finished - that is what a live run looks like to a binary whose RunMeta has moved on - so this is something the caller types rather than the default. The bulk route never forces."
+            "description": "Delete a run whose run file will not read, which is otherwise a 409. A record that cannot be read is not proof the run finished - that is what a live run looks like to a binary whose RunMeta has moved on - so this is something the caller types rather than the default. The bulk route never forces."
           }
         ],
         "responses": {

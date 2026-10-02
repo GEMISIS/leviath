@@ -71,7 +71,7 @@ pub(crate) use requirements::{
 };
 mod spawn;
 #[cfg(test)]
-pub(crate) use crate::test_graph::{SeededSpawn, spawn_agent, spawn_agent_seeded};
+pub(crate) use crate::test_graph::{TestRun, place_test_run, place_test_task};
 pub(crate) use spawn::DEFAULT_CONTEXT_WINDOW_TOKENS;
 pub use spawn::ResolvedStage;
 mod transition_choice;

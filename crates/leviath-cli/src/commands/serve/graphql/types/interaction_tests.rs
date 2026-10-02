@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 use leviath_core::interaction::{ApprovalScope, InteractionKind, Settlement};
-use leviath_core::run_archive::{self, RunRecord};
+use leviath_runtime::runfile::record::{self, RunRecord};
 
 use super::super::super::connection::Connection;
 use super::super::run::Run;
@@ -780,7 +780,7 @@ async fn every_mirrored_function_runs() {
 
     let settled = super::Interaction::settled(
         "asked-things".to_string(),
-        run_archive::InteractionRecord {
+        record::InteractionRecord {
             request_id: "r1".to_string(),
             kind: InteractionKind::FreeText,
             tool: None,

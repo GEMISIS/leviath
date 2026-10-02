@@ -242,7 +242,7 @@ pub(crate) fn collect_compaction(
                 persist.as_deref(),
                 md,
                 &crate::inference_usage::CallUsage {
-                    kind: leviath_core::run_archive::InferenceKind::Compaction,
+                    kind: crate::runfile::record::InferenceKind::Compaction,
                     stage: state.map_or("", |s| s.current_stage.as_str()),
                     iteration: state.map_or(0, |s| s.iteration),
                     provider: &outcome.provider_name,

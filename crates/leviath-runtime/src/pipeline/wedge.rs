@@ -6,7 +6,7 @@
 //! is the fan-out collector's, and so on. The marker is what makes the agent
 //! reachable. An agent that is non-terminal and holds *none* of them is in a
 //! state no query matches, so nothing will ever touch it again, and it stays
-//! `running` in `meta.json` for the life of the daemon.
+//! `running` in `lev ps` for the life of the daemon.
 //!
 //! That is not hypothetical. `PipelineWorld` already logs "a pipeline system
 //! panicked outside any agent's scope; the daemon survived (an agent may be

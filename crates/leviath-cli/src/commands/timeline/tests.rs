@@ -1,5 +1,5 @@
 use super::*;
-use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus};
+use leviath_core::run_meta::{RunMeta, RunStatus};
 
 fn meta(run_id: &str, started: i64, ended: i64) -> RunMeta {
     let mut m = RunMeta::new(
@@ -24,52 +24,31 @@ fn usage(
     model: &str,
     out: usize,
     at: i64,
-) -> RunRecord {
-    RunRecord::InferenceUsage {
+) -> Moment {
+    Moment::Call {
         kind,
         stage: stage.to_string(),
         iteration,
-        provider: "openrouter".to_string(),
         model: model.to_string(),
         prompt_tokens: 1_000,
         completion_tokens: out,
         cached_tokens: 100,
-        cache_write_tokens: 0,
-        cost_usd: None,
-        cost_reported_by_provider: None,
         at,
     }
 }
 
-fn status(status: RunStatus, at: i64) -> RunRecord {
-    RunRecord::StatusChanged { status, at }
+fn status(status: RunStatus, at: i64) -> Moment {
+    Moment::Status { status, at }
 }
 
-fn tool_done(at: i64) -> RunRecord {
-    RunRecord::ToolCallDone {
-        execution_id: String::new(),
-        outcome: None,
-        iteration: 1,
-        call_id: "c1".to_string(),
-        result: "ok".to_string().into(),
-        at,
-    }
+fn tool_done(at: i64) -> Moment {
+    Moment::ToolDone { at }
 }
 
-/// The journal of a run that searched, spawned children, waited, then wrote a
+/// The steps of a run that searched, spawned children, waited, then wrote a
 /// report five times at the same size: every span kind the reducer knows.
-fn journal() -> Vec<RunRecord> {
+fn journal() -> Vec<Moment> {
     vec![
-        // Ignored kinds cover the catch-all arm.
-        RunRecord::ContextCheckpoint {
-            snapshot: ContextSnapshot {
-                stage_name: "gather".to_string(),
-                total_tokens: 0,
-                max_tokens: 1_000,
-                regions: vec![],
-            },
-            at: 1_000,
-        },
         usage(
             InferenceKind::Title,
             "",
@@ -86,15 +65,6 @@ fn journal() -> Vec<RunRecord> {
             600,
             1_010,
         ),
-        RunRecord::ToolBatch {
-            calls: vec![],
-            at: 1_010,
-            stage_index: 0,
-            iteration: 1,
-            visit_id: String::new(),
-            requested_by: String::new(),
-            response: String::new(),
-        },
         tool_done(1_012),
         usage(
             InferenceKind::Stage,
@@ -347,20 +317,55 @@ where
     .await
 }
 
-/// Record `records` as steps of `run_id`'s file, one step each, the way the
-/// persistence lane records what the pipeline journals.
-fn write_journal(run_id: &str, records: &[RunRecord]) {
-    use leviath_runtime::state::RunStatus as State;
+/// Record `moments` as steps of `run_id`'s file, one step each.
+fn write_journal(run_id: &str, moments: &[Moment]) {
+    use leviath_runtime::spec::names::{ModelId, ModelRef, ProviderName};
+    use leviath_runtime::state::{RunEvent, RunStatus as State, Spend, ToolResultState};
     let dir = crate::runstate::run_dir(run_id);
-    for (i, record) in records.iter().enumerate() {
-        let events = leviath_runtime::runfile::journal_events(record);
-        let status = match record {
-            RunRecord::StatusChanged { status, .. } => Some(match status {
-                RunStatus::WaitingInput => State::Waiting,
-                RunStatus::Complete => State::Complete,
-                _ => State::Active,
-            }),
-            _ => None,
+    for (i, moment) in moments.iter().enumerate() {
+        let (events, status) = match moment {
+            Moment::Status { status, .. } => (
+                Vec::new(),
+                Some(match status {
+                    RunStatus::WaitingInput => State::Waiting,
+                    RunStatus::Complete => State::Complete,
+                    _ => State::Active,
+                }),
+            ),
+            Moment::Call {
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                ..
+            } => (
+                vec![RunEvent::Inference {
+                    attempt: String::new(),
+                    model: ModelRef {
+                        provider: ProviderName::new("openrouter").ok(),
+                        model: ModelId::new(model).expect("a model"),
+                    },
+                    spend: Spend {
+                        prompt_tokens: *prompt_tokens as u64,
+                        completion_tokens: *completion_tokens as u64,
+                        cached_tokens: *cached_tokens as u64,
+                        ..Spend::default()
+                    },
+                    finish_reason: None,
+                }],
+                None,
+            ),
+            Moment::ToolDone { .. } => (
+                vec![RunEvent::ToolFinished {
+                    call_id: "c1".to_string(),
+                    result: ToolResultState {
+                        text: "ok".to_string(),
+                        is_error: false,
+                    },
+                    millis: 0,
+                }],
+                None,
+            ),
         };
         crate::runstate::run_file::tests::step_with(&dir, 1_000 + i as i64, events, |s| {
             if let Some(status) = status {

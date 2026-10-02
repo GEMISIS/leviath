@@ -74,21 +74,22 @@ pub(crate) fn readme(
 
     out.push_str("## How to read a run\n\n");
     out.push_str(
-        "Copy `runs/<id>` into `~/.leviath/runs/` on a machine with `lev` installed (or into \
-         `$LEVIATH_HOME/.leviath/runs/` to keep it apart from your own runs). Then:\n\n",
+        "`runs/<id>/run.json` is the run's file (`run.lvr`) decoded to JSON, with its secrets \
+         removed. `spec` is what the run was resolved to before it started: its graph, inputs, \
+         models and tools. `state` is the run as it stood after its last step. `steps` is every \
+         step it took, each with what changed and what happened in it: model calls, tool calls, \
+         answers and messages. On the machine the run came from, `lev run show <id>`, \
+         `lev run show <id> --at <step>` and `lev run show <id> --deltas ..` print the same \
+         values.\n\n",
     );
-    out.push_str("```bash\nlev context <id>     # the context window at every step\nlev timeline <id>    # where the time went\nlev stages <id>      # per-stage tokens and cost\nlev result <id>      # what the run handed back\n```\n\n");
     out.push_str(
-        "`run.lvr` is the run's journal: the bytes `LVR1`, a two-byte version, then frames of an \
-         eight-byte big-endian length and a JSON record. The first record is the header with the \
-         run's metadata; the rest are every inference request and reply, every tool call and its \
-         result, and the context window as it changed. The copy here was re-written with its \
-         secrets removed, so a JSON reader gets the same records `lev` does.\n\n",
+        "`runs/<id>/summary.json` is the run's summary: its status, stage, task, tokens, cost and \
+         flags. `runs/<id>/stages/` holds each stage's output and log lines.\n\n",
     );
     out.push_str(
         "`runs/<id>/blueprint/` is the agent that ran, as it was on disk. `lev add <that dir>` \
-         installs it, and `lev run <name> --task \"...\"` with the task from `meta.json` reproduces \
-         the run, model differences aside.\n\n",
+         installs it, and `lev run <name> --task \"...\"` with the task from `summary.json` \
+         reproduces the run, model differences aside.\n\n",
     );
 
     out.push_str("## Redactions\n\n");
@@ -133,7 +134,7 @@ const LAYOUT: &[(&str, &str)] = &[
     ),
     (
         "runs/<id>/",
-        "The chosen run and its sub-agent runs: metadata, stages, context, journal, blobs, blueprint",
+        "The chosen run and its sub-agent runs: summary, run file as JSON, stage logs, blobs, blueprint",
     ),
     (
         "blueprint/",

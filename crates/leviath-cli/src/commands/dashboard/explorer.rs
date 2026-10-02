@@ -472,7 +472,7 @@ regions = []
     }
 
     fn seed(dash: &mut Dashboard, run_id: &str, stages: &[(&str, i64)]) {
-        let points: Vec<leviath_core::run_archive::RunPoint> = stages
+        let points: Vec<leviath_runtime::runfile::history::RunPoint> = stages
             .iter()
             .map(|(stage, at)| {
                 let mut meta = leviath_core::run_meta::RunMeta::new(
@@ -486,7 +486,7 @@ regions = []
                 );
                 meta.current_stage = stage.to_string();
                 meta.iteration = 1;
-                leviath_core::run_archive::RunPoint {
+                leviath_runtime::runfile::history::RunPoint {
                     meta,
                     context: leviath_core::run_meta::ContextSnapshot {
                         stage_name: stage.to_string(),
