@@ -780,7 +780,7 @@ pub(crate) fn collect_title(
     mut agents: Query<CollectTitleQuery, With<AwaitingTitle>>,
     mut calls: Query<&mut TitleCall>,
     stage: Option<Res<InferenceStage>>,
-    persist: Option<Res<crate::pipeline::PersistenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();

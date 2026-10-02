@@ -24,7 +24,7 @@ use leviath_runtime::spec::run_spec::{EnvFingerprint, RunSpec, SeededContent, Sp
 use crate::context::{Losses, parts};
 use crate::legacy::LegacyRun;
 use crate::manifest::{parse_manifest, read_manifest_tables, unread_keys};
-use crate::report::{BlueprintSource, Report};
+use crate::report::{BlueprintSource, Dropped, Report};
 use crate::{ConvertError, StageLookup};
 
 /// A spec and the code its frames carry.
@@ -58,11 +58,13 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> (Source, RunGraph) 
     };
     let shown = blueprint_path.display().to_string();
     match read_blueprint(&old.blueprint.text, blueprint_path) {
-        Ok((blueprint, graph, notes)) => match crate::recorded::missing_stage(old, &graph) {
+        Ok((blueprint, graph, notes, dropped)) => match crate::recorded::missing_stage(old, &graph)
+        {
             None => {
                 for note in notes {
                     report.note(note);
                 }
+                report.dropped.extend(dropped);
                 (Source::Blueprint(Box::new(blueprint)), graph)
             }
             Some(stage) => recorded(
@@ -77,23 +79,21 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> (Source, RunGraph) 
     }
 }
 
-/// The blueprint in `text`, read from `path`, its run graph, and what
-/// converting it had to change.
+/// The blueprint in `text`, read from `path`, its run graph, what
+/// converting it had to change, and the keys it left out.
 fn read_blueprint(
     text: &str,
     path: PathBuf,
-) -> Result<(Blueprint, RunGraph, Vec<String>), ConvertError> {
+) -> Result<(Blueprint, RunGraph, Vec<String>, Vec<Dropped>), ConvertError> {
     let blueprint = parse_manifest(text).map_err(|e| ConvertError::Unreadable {
         path,
         why: e.to_string(),
     })?;
-    let (mut graph, mut notes) =
+    let (mut graph, notes) =
         crate::old::graph::from_blueprint_noted(&blueprint).map_err(ConvertError::Graph)?;
     read_manifest_tables(&mut graph, text).map_err(ConvertError::Graph)?;
-    notes.extend(unread_keys(
-        &toml::from_str(text).expect("a manifest that parsed is TOML"),
-    ));
-    Ok((blueprint, graph, notes))
+    let dropped = unread_keys(&toml::from_str(text).expect("a manifest that parsed is TOML"));
+    Ok((blueprint, graph, notes, dropped))
 }
 
 /// The graph the run recorded, its blueprint unread for `why`.
@@ -113,7 +113,7 @@ pub(crate) fn build(
     let meta = old.meta();
     for name in &old.stray_blobs {
         report.note(format!(
-            "blobs/{name} was left out: a stored part is named by its digest"
+            "blobs/{name} is not named in the run file: a stored part is a file named by its digest"
         ));
     }
     let (source, graph) = graph(old, report);

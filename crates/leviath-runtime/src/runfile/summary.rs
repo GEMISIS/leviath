@@ -47,6 +47,11 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
             active: Some(place::run_clock(state).0),
         },
     );
+    // The answer's content is in a file beside the run file; its size is in
+    // the state.
+    if let (Some(described), Some(answer)) = (meta.final_output.as_mut(), &state.final_output) {
+        described.bytes = usize::try_from(answer.bytes).unwrap_or(usize::MAX);
+    }
     // Why it is parked is what the state recorded when it last moved, unless
     // the machine it was last brought back on could not take it.
     meta.waiting_on = match &state.held {

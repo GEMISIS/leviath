@@ -1,11 +1,10 @@
 //! A run's stored parts, read from its files on disk: what `lev blobs` lists
 //! and `GET /api/runs/{id}/blobs` serves.
 //!
-//! A run's context names every stored part by hash, and its run file holds
-//! the bytes. A live run's tools also keep each part under
-//! `<run>/blobs/<sha256>`, where one stored a moment ago sits until the run's
-//! next step writes it into the file. Nothing here asks the daemon, so a run
-//! that finished last week answers as readily as one still going.
+//! A run's context names every stored part by hash, and so does its run
+//! file; the bytes are beside it, under `<run>/blobs/<sha256>`, and nowhere
+//! else. Nothing here asks the daemon, so a run that finished last week
+//! answers as readily as one still going.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -89,24 +88,20 @@ pub(crate) fn export_name(
     }
 }
 
-/// Where a live run's tools keep the bytes of the part hashed `sha256` until
-/// the run's next step writes them into its file.
+/// Where the run `run_id` keeps the bytes of the part hashed `sha256`.
 pub(crate) fn blob_path(run_id: &str, sha256: &str) -> PathBuf {
     runstate::run_dir(run_id)
         .join(leviath_core::files::BLOBS_DIR)
         .join(sha256)
 }
 
-/// The stored parts a run's context holds, by hash, first appearance first.
-/// A part counts as stored when the run's file holds its bytes, or its blob
-/// directory does. `None` when the run has no file to read.
+/// The stored parts a run's context holds, by hash, first appearance first,
+/// each marked stored when its file is in the run's blob directory. `None`
+/// when the run has no file to read.
 pub(crate) fn list(run_id: &str) -> Option<Vec<BlobEntry>> {
-    let (reader, state) = runstate::run_file::latest_in(&runstate::run_dir(run_id))?;
-    let snapshot = leviath_runtime::runfile::context_snapshot(reader.spec(), &state);
-    let held: Vec<&str> = reader.blob_digests().map(|d| d.as_str()).collect();
-    Some(entries(&snapshot, |sha| {
-        held.contains(&sha) || blob_path(run_id, sha).is_file()
-    }))
+    let tail = runstate::run_file::tail_in(&runstate::run_dir(run_id)).ok()?;
+    let snapshot = leviath_runtime::runfile::context_snapshot(&tail.spec, &tail.state);
+    Some(list_from(run_id, &snapshot))
 }
 
 /// The stored parts `snapshot` holds, by hash, first appearance first, with
@@ -206,9 +201,8 @@ pub(crate) fn find<'a>(entries: &'a [BlobEntry], needle: &str) -> Option<&'a Blo
 }
 
 /// The bytes of the part hashed `sha256`, refusing a key that is not a hash
-/// before it touches a path. The run's file holds every part the run stored;
-/// a part a live run's tool stored a moment ago may only be in its blob
-/// directory yet.
+/// before it touches a path. A part whose file is missing from the run's
+/// blob directory is `NotFound`, naming the part.
 pub(crate) fn read(run_id: &str, sha256: &str) -> std::io::Result<Vec<u8>> {
     let digest = Digest::new(sha256).map_err(|_| {
         std::io::Error::new(
@@ -216,13 +210,15 @@ pub(crate) fn read(run_id: &str, sha256: &str) -> std::io::Result<Vec<u8>> {
             format!("'{sha256}' is not a sha256"),
         )
     })?;
-    let dir = runstate::run_dir(run_id);
-    if let Ok(reader) = runstate::run_file::open_in(&dir)
-        && let Some(bytes) = reader.blob(&digest).map_err(std::io::Error::other)?
-    {
-        return Ok(bytes);
-    }
-    std::fs::read(blob_path(run_id, sha256))
+    leviath_runtime::runfile::read_blob(&runstate::run_dir(run_id), &digest).map_err(|why| {
+        let kind = match why {
+            leviath_runtime::runfile::RunFileErrorKind::MissingBlob(_) => {
+                std::io::ErrorKind::NotFound
+            }
+            _ => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, format!("run '{run_id}' {why}"))
+    })
 }
 
 #[cfg(test)]
@@ -343,15 +339,13 @@ mod tests {
         });
     }
 
-    /// A part whose bytes are only in the run's file (a run converted from
-    /// the old layout keeps no blob directory) is listed as stored and reads
-    /// back; one the file holds but cannot decode is an error.
+    /// A part whose file is gone from the run's blob directory is listed as
+    /// not stored and refused by name; the run's file never holds its bytes.
     #[test]
-    fn a_part_held_only_in_the_run_file_is_listed_and_read() {
+    fn a_part_whose_file_is_gone_is_listed_unstored_and_refused_by_name() {
         use leviath_core::mime::Part;
-        use leviath_runtime::runfile::codec::{FrameKind, encode};
-        runstate::with_isolated_runs_dir("blobs-in-file", |_d| {
-            let run_id = "file-blob-run";
+        runstate::with_isolated_runs_dir("blobs-gone", |_d| {
+            let run_id = "gone-blob-run";
             runstate::create_run(&crate::test_support::fixtures::run_meta(run_id)).unwrap();
             let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
             let blob = Blob::new(MimeType::parse("text/plain").unwrap(), b"notes".to_vec());
@@ -382,25 +376,23 @@ mod tests {
                 }],
             };
             runstate::write_context_snapshot(run_id, &snapshot).unwrap();
-            let dir = runstate::run_dir(run_id);
-            std::fs::remove_dir_all(dir.join(leviath_core::files::BLOBS_DIR)).unwrap();
-            assert!(!list(run_id).unwrap()[0].stored, "nothing holds the bytes");
-
-            let file = dir.join(leviath_core::files::RUN_FILE);
-            let mut bytes = std::fs::read(&file).unwrap();
-            let digest = Digest::new(sha.as_str()).unwrap();
-            bytes.extend(encode(FrameKind::Blob, &(digest, b"notes".to_vec())).unwrap());
-            std::fs::write(&file, &bytes).unwrap();
             let listed = list(run_id).unwrap();
             assert_eq!(listed[0].name.as_deref(), Some("notes.txt"));
             assert!(listed[0].stored);
             assert_eq!(read(run_id, &sha).unwrap(), b"notes");
 
-            // A blob frame that does not decode is the file's fault.
-            let other = Digest::of(b"half");
-            bytes.extend(encode(FrameKind::Blob, &other).unwrap());
-            std::fs::write(&file, &bytes).unwrap();
-            assert!(read(run_id, other.as_str()).is_err());
+            let dir = runstate::run_dir(run_id);
+            std::fs::remove_dir_all(dir.join(leviath_core::files::BLOBS_DIR)).unwrap();
+            assert!(!list(run_id).unwrap()[0].stored, "nothing holds the bytes");
+            let gone = read(run_id, &sha).unwrap_err();
+            assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
+            assert!(gone.to_string().contains(&sha), "{gone}");
+            // A path that is not a file fails as it is.
+            std::fs::create_dir_all(blob_path(run_id, &sha)).unwrap();
+            assert_eq!(
+                read(run_id, &sha).unwrap_err().kind(),
+                std::io::ErrorKind::Other
+            );
         });
     }
 }

@@ -1225,7 +1225,7 @@ fn settle(world: &mut World, outcome: &mut InferenceOutcome) -> crate::inference
 async fn a_dispatched_call_journals_the_attempt_it_makes() {
     let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
     let (lane, mut journal) = mpsc::unbounded_channel();
-    world.insert_resource(crate::pipeline::PersistenceStage(lane.clone()));
+    world.insert_resource(crate::pipeline::JournalSender::new(lane.clone(), None));
     world.spawn((
         agent_state(),
         window(),
@@ -1238,10 +1238,11 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     settle(&mut world, &mut outcome);
     assert!(outcome.result.is_ok());
 
-    // One lane carries every kind of record the run makes - a usage record lands
-    // on this one from the response system, a context change from the window - so
-    // reading the attempts back has to skip the rest rather than trip over it.
-    lane.send(crate::persistence_bridge::PersistMsg::Append {
+    // One journal carries every kind of record the run makes - a usage record
+    // lands on this one from the response system, a context change from the
+    // window - so reading the attempts back has to skip the rest rather than
+    // trip over it.
+    lane.send(crate::pipeline::journal::Journaled {
         run_id: "r".to_string(),
         record: Box::new(crate::runfile::record::RunRecord::ArtifactsProduced {
             execution_id: "not an attempt".to_string(),
@@ -1302,7 +1303,7 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
 async fn a_captured_run_journals_the_request_it_sent_and_the_window_it_came_from() {
     let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
     let (lane, mut journal) = mpsc::unbounded_channel();
-    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
     world.spawn((
         agent_state(),
         window(),
@@ -2032,7 +2033,7 @@ fn failover_is_recorded_in_the_stage_log() {
 fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
     let (mut world, tx) = world_with_results();
     let (lane, mut journal) = mpsc::unbounded_channel();
-    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
     let e = world
         .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
         .id();
@@ -2055,9 +2056,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
 
     let mut records = Vec::new();
     while let Ok(msg) = journal.try_recv() {
-        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let crate::runfile::record::RunRecord::InferenceFailover(failover) = *record
-        {
+        if let crate::runfile::record::RunRecord::InferenceFailover(failover) = *msg.record {
             records.push(failover);
         }
     }
@@ -2082,7 +2081,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
 fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
     let (mut world, tx) = world_with_results();
     let (lane, mut journal) = mpsc::unbounded_channel();
-    world.insert_resource(crate::pipeline::PersistenceStage(lane));
+    world.insert_resource(crate::pipeline::JournalSender::new(lane, None));
     let e = world
         .spawn((agent_state(), AwaitingInference, stage_with_fallback()))
         .id();
@@ -2100,9 +2099,7 @@ fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
 
     let mut records = Vec::new();
     while let Ok(msg) = journal.try_recv() {
-        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let crate::runfile::record::RunRecord::InferenceFailover(failover) = *record
-        {
+        if let crate::runfile::record::RunRecord::InferenceFailover(failover) = *msg.record {
             records.push(failover);
         }
     }
@@ -4004,7 +4001,7 @@ fn dispatch_persistence_flushes_buffered_io_without_a_watermark_change() {
             assert!(output_appends.is_empty());
             assert_eq!(log_appends, vec![(0, "late log".to_string())]);
         }
-        PersistMsg::Snapshot(_) | PersistMsg::Append { .. } => {
+        PersistMsg::Snapshot(_) | PersistMsg::Step(_) => {
             panic!("buffered lines alone must not force a whole-window snapshot")
         }
     }
@@ -4903,7 +4900,7 @@ fn a_reply_and_the_nudge_answering_it_record_different_causes() {
     let mut window = ctx(&[("conversation", 10_000)]);
     // Held for the test: a window's handle on the lane is weak, exactly so that
     // it cannot keep the lane open past the world that owns it.
-    let stage = crate::pipeline::PersistenceStage(tx);
+    let stage = crate::pipeline::JournalSender::new(tx, None);
     window.attach_journal("run-r", Some(&stage));
     let mut world = World::new();
     world.spawn((
@@ -4917,7 +4914,7 @@ fn a_reply_and_the_nudge_answering_it_record_different_causes() {
     run_empty(&mut world);
 
     let mut moved = Vec::new();
-    while let Ok(crate::persistence_bridge::PersistMsg::Append { record, .. }) = rx.try_recv() {
+    while let Ok(crate::pipeline::journal::Journaled { record, .. }) = rx.try_recv() {
         if let crate::runfile::record::RunRecord::ContextTransaction { regions, cause, .. } =
             *record
         {
@@ -5994,24 +5991,15 @@ impl ToolService for ReportingService {
     }
 }
 
-/// Unwrap the Append message a journaling test expects on the persistence lane.
+/// The parts of a record a journaling test reads off the world's journal.
 fn append_msg(
-    msg: PersistMsg,
+    msg: crate::pipeline::journal::Journaled,
 ) -> (
     String,
     crate::runfile::record::RunRecord,
     Option<tokio::sync::oneshot::Sender<crate::persistence_bridge::Appended>>,
 ) {
-    match msg {
-        PersistMsg::Append {
-            run_id,
-            record,
-            ack,
-        } => (run_id, *record, ack),
-        PersistMsg::Snapshot(_) | PersistMsg::StageLines { .. } => {
-            panic!("expected an append on the lane")
-        }
-    }
+    (msg.run_id, *msg.record, msg.ack)
 }
 
 #[tokio::test]
@@ -6022,7 +6010,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     // A batch mixing an inline-resolved call (a context tool) and a lane call.
     let e = world
         .spawn((
@@ -6102,7 +6090,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
 #[test]
 fn produced_files_are_journaled_against_the_call_that_made_them() {
     let (ptx, mut prx) = mpsc::unbounded_channel();
-    let stage = PersistenceStage(ptx);
+    let stage = crate::pipeline::JournalSender::new(ptx, None);
     let made = |name: &str| leviath_core::output::Artifact {
         name: name.to_string(),
         path: format!("out/{name}"),
@@ -6120,7 +6108,7 @@ fn produced_files_are_journaled_against_the_call_that_made_them() {
     );
 
     let mut produced = Vec::new();
-    while let Ok(PersistMsg::Append { run_id, record, .. }) = prx.try_recv() {
+    while let Ok(crate::pipeline::journal::Journaled { run_id, record, .. }) = prx.try_recv() {
         assert_eq!(run_id, "run-a");
         if let crate::runfile::record::RunRecord::ArtifactsProduced {
             execution_id,
@@ -6165,8 +6153,8 @@ async fn a_dispatched_batch_records_what_it_belongs_to() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx.clone()));
-    let stage = PersistenceStage(ptx);
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx.clone(), None));
+    let stage = crate::pipeline::JournalSender::new(ptx, None);
     let mut state = agent_state();
     state.current_visit = "v-second-stay".to_string();
     let (offers, mut result) = infer_with(vec![ctx_call("c1", "notes", "hi")]);
@@ -6188,7 +6176,7 @@ async fn a_dispatched_batch_records_what_it_belongs_to() {
 
     let mut batch = None;
     let mut committed = Vec::new();
-    while let Ok(PersistMsg::Append { record, .. }) = prx.try_recv() {
+    while let Ok(crate::pipeline::journal::Journaled { record, .. }) = prx.try_recv() {
         match *record {
             crate::runfile::record::RunRecord::ToolBatch {
                 calls,
@@ -6242,7 +6230,7 @@ async fn dispatch_journals_a_batch_it_resolved_itself() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     let e = world
         .spawn((
             agent_state(),
@@ -6258,9 +6246,7 @@ async fn dispatch_journals_a_batch_it_resolved_itself() {
     s.run(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(jrx.try_recv().is_err(), "nothing went to the lane");
-    let PersistMsg::Append { record, .. } = prx.try_recv().expect("a batch record") else {
-        panic!("the dispatcher appends, it does not snapshot")
-    };
+    let record = prx.try_recv().expect("a batch record").record;
     let crate::runfile::record::RunRecord::ToolBatch { calls, .. } = *record else {
         panic!("a batch record")
     };
@@ -6360,7 +6346,7 @@ async fn dispatch_without_run_metadata_is_unjournaled() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     world.spawn((
         agent_state(),
         infer_with(vec![tc("c1", "read_file")]),
@@ -6388,7 +6374,7 @@ async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     world.insert_resource(crate::interaction_hub::InteractionHub::new());
     world.insert_resource(crate::gate_prompt::GatePromptStage {
         outcomes: gtx,
@@ -14324,7 +14310,7 @@ fn world_with_persistence() -> (World, mpsc::UnboundedReceiver<PersistMsg>) {
 fn snapshot_job(msg: PersistMsg) -> PersistJob {
     match msg {
         PersistMsg::Snapshot(job) => *job,
-        PersistMsg::Append { .. } | PersistMsg::StageLines { .. } => {
+        PersistMsg::Step(_) | PersistMsg::StageLines { .. } => {
             panic!("expected a snapshot on the lane")
         }
     }
@@ -14338,7 +14324,7 @@ fn next_snapshot(rx: &mut mpsc::UnboundedReceiver<PersistMsg>) -> PersistJob {
     loop {
         match rx.try_recv().expect("a snapshot on the lane") {
             PersistMsg::Snapshot(job) => return *job,
-            PersistMsg::Append { .. } | PersistMsg::StageLines { .. } => continue,
+            PersistMsg::Step(_) | PersistMsg::StageLines { .. } => continue,
         }
     }
 }
@@ -21261,7 +21247,7 @@ async fn a_recovered_batch_runs_only_what_had_not_finished() {
     let mut world = World::new();
     world.insert_resource(ToolServiceRes(Arc::new(ReportingService)));
     world.insert_resource(ToolStage::detached(jtx));
-    world.insert_resource(PersistenceStage(ptx));
+    world.insert_resource(crate::pipeline::JournalSender::new(ptx, None));
     let e = world
         .spawn((
             agent_state(),

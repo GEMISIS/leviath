@@ -240,14 +240,22 @@ impl DaemonStarter {
         }
     }
 
-    /// Write a resolved run's file, holding its spec, its code, its attached
-    /// files and the state it starts in, and put its attached files where its
-    /// tools read them.
+    /// Put a resolved run's attached files in its blob directory, then write
+    /// its file, holding its spec, its code and the state it starts in. The
+    /// file names the attached files and never holds their bytes, so a file
+    /// that cannot be stored refuses the run.
     fn record(&self, resolved: &Resolved, state: &RunState) -> Result<(), SpawnIssues> {
         let spec = &resolved.spec;
         let dir = self.runs_dir.join(spec.run_id.as_str());
         let path = dir.join(leviath_core::files::RUN_FILE);
         leviath_sys::perms::create_private_dir_all(&dir)
+            .and_then(|()| {
+                store_blobs(
+                    self.blob_store.as_ref(),
+                    spec.run_id.as_str(),
+                    &resolved.blobs,
+                )
+            })
             .map_err(text)
             .and_then(|()| {
                 leviath_runtime::runfile::RunFileWriter::create(
@@ -257,28 +265,15 @@ impl DaemonStarter {
                     state,
                     Default::default(),
                 )
+                .map(drop)
                 .map_err(text)
-            })
-            .and_then(|mut writer| {
-                resolved
-                    .blobs
-                    .iter()
-                    .try_for_each(|(digest, bytes)| writer.add_blob(digest, bytes).map(drop))
-                    .map_err(text)
             })
             .map_err(|e| {
                 refusal(
                     IssueCode::Unavailable,
                     format!("the run's file could not be written: {e}"),
                 )
-            })?;
-        store_blobs(
-            self.blob_store.as_ref(),
-            spec.run_id.as_str(),
-            &resolved.blobs,
-            &state.context,
-        );
-        Ok(())
+            })
     }
 
     /// Record on a run's file that it could not be bound, and why, so the
@@ -389,44 +384,19 @@ impl RunStarter for DaemonStarter {
     }
 }
 
-/// Put a run's attached files in `store`, typed as the parts that name them
-/// in `context` say. A file no part names is not written: nothing would read
-/// it.
+/// Put a run's attached files in `store`, by digest, where its tools and
+/// every reader of the run find them. The bytes are stored as they are: they
+/// were checked against their types when the run was resolved.
 pub(crate) fn store_blobs(
     store: &dyn leviath_core::mime::BlobStore,
     run_id: &str,
     blobs: &std::collections::BTreeMap<leviath_runtime::spec::names::Digest, Vec<u8>>,
-    context: &leviath_runtime::state::ContextState,
-) {
-    use leviath_runtime::state::context::PartBody;
-    let parts: Vec<&leviath_runtime::state::context::PartState> = context
-        .regions
-        .iter()
-        .flat_map(|r| &r.entries)
-        .flat_map(|e| &e.parts)
-        .collect();
+) -> std::io::Result<()> {
     let registry = leviath_core::mime::MimeRegistry::builtin();
-    for (digest, bytes) in blobs {
-        let part = parts.iter().find(|p| match &p.body {
-            PartBody::Stored(blob) => blob.digest == *digest,
-            PartBody::Inline(_) => false,
-        });
-        let Some(part) = part else {
-            continue;
-        };
-        if store.has(run_id, digest.as_str()) {
-            continue;
-        }
-        let blob = leviath_core::mime::Blob {
-            mime_type: leviath_core::mime::MimeType::parse(&part.mime_type)
-                .unwrap_or_else(|_| leviath_core::mime::octet_stream()),
-            bytes: bytes.clone(),
-            name: part.name.clone(),
-        };
-        if let Err(e) = store.put(run_id, &blob, &registry) {
-            tracing::warn!(run_id, digest = %digest, error = %e, "a run's file could not be stored for its tools");
-        }
-    }
+    blobs.values().try_for_each(|bytes| {
+        let blob = leviath_core::mime::Blob::new(leviath_core::mime::octet_stream(), bytes.clone());
+        store.put(run_id, &blob, &registry).map(drop)
+    })
 }
 
 /// Append to the run file at `path` that the run failed with `issues`.

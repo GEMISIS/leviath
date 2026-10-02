@@ -15,6 +15,11 @@
 //! home's backup (see [`crate::home_backup`]); one that cannot be saved is
 //! left as it was.
 //!
+//! A migrated blueprint leaves out every key the old release accepted and
+//! never read. Each is a warning: in the summary of the upgrade, in the
+//! daemon's log, and beside the blueprint in `lev list` and `lev validate`
+//! until its owner edits it (see [`crate::upgrade_warnings`]).
+//!
 //! Only the daemon does this, at start, for the agents directory of the home
 //! it serves and the operator's `agent_paths`, before it converts old runs (so
 //! their workers can be pinned to the new files). One daemon runs per home, so
@@ -22,6 +27,10 @@
 //! `lev run` only say which blueprints are waiting and how to upgrade them.
 
 use std::path::{Path, PathBuf};
+
+use leviath_runtime::control_socket::StartupBoard;
+
+use crate::daemon::upgrade::Upgrade;
 
 /// Where an upgraded blueprint's old files go, inside its directory.
 pub(crate) const LEGACY_DIR: &str = "legacy";
@@ -32,9 +41,14 @@ const OLD_MANIFEST: &str = "agent.leviath";
 /// What happened to one old blueprint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// Migrated to an `agent.toml` beside its files, with a line for each
-    /// setting the new file leaves out or spells differently.
-    Migrated(Vec<String>),
+    /// Migrated to an `agent.toml` beside its files.
+    Migrated {
+        /// A line for each setting the new file spells differently.
+        notes: Vec<String>,
+        /// A warning for each key the new file leaves out because nothing
+        /// ever read it.
+        dropped: Vec<String>,
+    },
     /// A blueprint this build ships, replaced by the bundled one.
     Reinstalled,
     /// Left as it was, for these reasons.
@@ -97,22 +111,50 @@ pub(crate) fn upgrade_all(
     agents_dir: Option<&Path>,
     others: &[PathBuf],
     backup: &crate::home_backup::Backup,
+    board: &StartupBoard,
 ) -> Vec<Upgraded> {
-    old_blueprints(agents_dir, others)
+    let found = old_blueprints(agents_dir, others);
+    if !found.is_empty() {
+        board.begin("upgrading blueprints", found.len() as u64);
+        board.detail(saving_to(backup));
+    }
+    found
         .into_iter()
-        .map(|(dir, blueprint, installed)| {
-            if let Err(e) = backup.save_blueprint(&blueprint, agents_dir) {
-                return Upgraded {
-                    dir: blueprint,
-                    outcome: Outcome::Failed(vec![format!(
-                        "it could not be backed up first, so it was not changed: {e}"
-                    )]),
-                };
-            }
-            let bundled = installed.then(|| bundled_named(&blueprint)).flatten();
-            upgrade_one(&dir, &blueprint, bundled)
+        .enumerate()
+        .map(|(i, (dir, blueprint, installed))| {
+            let done = upgrade_saved(&dir, blueprint, installed, (backup, agents_dir));
+            board.done(i as u64 + 1);
+            done
         })
         .collect()
+}
+
+/// Upgrade the old blueprint `blueprint` in `dir` once it is saved in
+/// `backup`; one that cannot be saved is left as it was.
+fn upgrade_saved(
+    dir: &Path,
+    blueprint: PathBuf,
+    installed: bool,
+    (backup, agents_dir): (&crate::home_backup::Backup, Option<&Path>),
+) -> Upgraded {
+    if let Err(e) = backup.save_blueprint(&blueprint, agents_dir) {
+        return Upgraded {
+            dir: blueprint,
+            outcome: Outcome::Failed(vec![format!(
+                "it could not be backed up first, so it was not changed: {e}"
+            )]),
+        };
+    }
+    let bundled = installed.then(|| bundled_named(&blueprint)).flatten();
+    upgrade_one(dir, &blueprint, bundled)
+}
+
+/// What the start-up board says about where the upgrade's backup goes.
+pub(crate) fn saving_to(backup: &crate::home_backup::Backup) -> String {
+    format!(
+        "saving everything it changes to {} first",
+        backup.dir().display()
+    )
 }
 
 /// The bundled blueprint an installed directory is named after.
@@ -208,14 +250,17 @@ fn reinstall_with(
 pub(crate) fn upgrade_at_start(
     runs_dir: &Path,
     home_runs: &Path,
-    agents_dir: Option<&Path>,
-    others: &[PathBuf],
+    (agents_dir, others): (Option<&Path>, &[PathBuf]),
+    board: &StartupBoard,
+    upgrade: &mut Upgrade,
 ) {
     if runs_dir == home_runs {
         upgrade_logged(
             agents_dir,
             others,
             &crate::home_backup::Backup::of_runs(home_runs),
+            board,
+            upgrade,
         );
     }
 }
@@ -227,7 +272,13 @@ fn migrate(dir: &Path) -> Result<Outcome, Vec<String>> {
     let old = dir.join(OLD_MANIFEST);
     let manifest =
         std::fs::read_to_string(&old).map_err(|e| vec![format!("{}: {e}", old.display())])?;
-    let (toml, notes) = leviath_legacy_runs::migrate_noted(&manifest)?;
+    let leviath_legacy_runs::Migrated {
+        text: toml,
+        notes,
+        dropped,
+        ..
+    } = leviath_legacy_runs::migrate_noted(&manifest)?;
+    let dropped: Vec<String> = dropped.iter().map(ToString::to_string).collect();
     let legacy = dir.join(LEGACY_DIR);
     std::fs::create_dir_all(&legacy)
         .and_then(|()| {
@@ -239,7 +290,22 @@ fn migrate(dir: &Path) -> Result<Outcome, Vec<String>> {
         })
         .and_then(|()| std::fs::rename(&old, legacy.join(OLD_MANIFEST)))
         .map_err(|e| vec![format!("could not write the migrated blueprint: {e}")])?;
-    Ok(Outcome::Migrated(notes))
+    keep_warnings(dir, &dropped);
+    Ok(Outcome::Migrated { notes, dropped })
+}
+
+/// Keep the warnings of the blueprint just upgraded in `dir` beside it, for
+/// `lev list` and `lev validate` to show. A note that cannot be written is
+/// said in the log: the warnings are still in the upgrade's summary.
+#[cfg(feature = "legacy-runs")]
+fn keep_warnings(dir: &Path, dropped: &[String]) {
+    if dropped.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::upgrade_warnings::record(dir, dropped) {
+        let (shown, why) = (dir.display().to_string(), e.to_string());
+        tracing::warn!(dir = %shown, error = %why, "the keys an upgrade dropped could not be kept beside the blueprint");
+    }
 }
 
 /// Without the old-format reader an old blueprint cannot be migrated.
@@ -252,30 +318,41 @@ fn migrate(_dir: &Path) -> Result<Outcome, Vec<String>> {
     ])
 }
 
-/// Upgrade at daemon start, each outcome in the daemon's log.
+/// Upgrade at daemon start, each outcome in the daemon's log and added to
+/// `upgrade`.
 pub(crate) fn upgrade_logged(
     agents_dir: Option<&Path>,
     others: &[PathBuf],
     backup: &crate::home_backup::Backup,
+    board: &StartupBoard,
+    upgrade: &mut Upgrade,
 ) {
     // Formatted outside the macros, so the text is made whether or not a
     // subscriber reads the fields.
     let saved = backup.dir().display().to_string();
-    for done in upgrade_all(agents_dir, others, backup) {
+    for done in upgrade_all(agents_dir, others, backup, board) {
         let (name, dir) = (done.name(), done.dir.display().to_string());
         match &done.outcome {
-            Outcome::Migrated(notes) => {
-                tracing::info!(blueprint = %name, dir = %dir, backup = %saved, "migrated an agent.leviath blueprint to agent.toml; the old file is under legacy/, and the whole directory as it was is in the backup");
-                for note in notes {
-                    tracing::info!(blueprint = %name, dir = %dir, note = %note, "a setting of the migrated blueprint");
+            Outcome::Migrated { notes, dropped } => {
+                upgrade.blueprints += 1;
+                let notes = notes.join("; ");
+                tracing::info!(blueprint = %name, dir = %dir, backup = %saved, notes = %notes, "migrated an agent.leviath blueprint to agent.toml; the old file is under legacy/, and the whole directory as it was is in the backup");
+                for line in dropped {
+                    tracing::warn!(blueprint = %name, dir = %dir, dropped = %line, "a key of the migrated blueprint was dropped");
+                    upgrade.warnings.push(format!("blueprint '{name}': {line}"));
                 }
             }
             Outcome::Reinstalled => {
+                upgrade.blueprints += 1;
                 tracing::info!(blueprint = %name, dir = %dir, backup = %saved, "replaced an old install of a bundled blueprint with this build's; the old files are under legacy/, and the whole directory as it was is in the backup")
             }
             Outcome::Failed(problems) => {
+                upgrade.blueprints_failed += 1;
                 for problem in problems {
                     tracing::warn!(blueprint = %name, dir = %dir, problem = %problem, "an agent.leviath blueprint could not be migrated and was left as it was");
+                    upgrade.warnings.push(format!(
+                        "blueprint '{name}' at {dir} was left as it was: {problem}"
+                    ));
                 }
             }
         }

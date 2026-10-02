@@ -1,9 +1,10 @@
-//! Reading a run file: its spec, its code and blobs, and its state at any step.
+//! Reading a run file: its spec, its code, its state at any step, and the
+//! stored parts it names beside it.
 //!
 //! [`RunFileReader::open`] reads the whole file once and indexes its frames.
 //! Nothing else is decoded until it is asked for, and the index is built by
 //! reading only the first bytes of a frame's payload: every state and delta
-//! starts with its `seq`, and every code and blob frame with its digest.
+//! starts with its `seq`, and every code frame with its digest.
 //! Reading those first bytes still decompresses the frame's first block, so
 //! the deltas, which are most of a long run's frames, are numbered from the
 //! first and the last of them where that is unambiguous.
@@ -16,7 +17,7 @@ use serde::de::DeserializeOwned;
 
 use super::codec::{self, CodecError, FrameKind, FrameRef};
 use super::error::{RunFileError, RunFileErrorKind};
-use super::frames::{BlobFrame, CodeFrame, OwnerFrame};
+use super::frames::{CodeFrame, OwnerFrame};
 use crate::spec::env::CodeFiles;
 use crate::spec::names::Digest;
 use crate::spec::run_spec::RunSpec;
@@ -33,7 +34,6 @@ pub struct RunFileReader {
     bytes: Vec<u8>,
     spec: RunSpec,
     code: BTreeMap<Digest, FrameRef>,
-    blobs: BTreeMap<Digest, FrameRef>,
     owners: Vec<FrameRef>,
     states: Vec<(u64, FrameRef)>,
     deltas: Vec<(u64, FrameRef)>,
@@ -85,7 +85,6 @@ impl RunFileReader {
             path: path.to_path_buf(),
             spec,
             code: BTreeMap::new(),
-            blobs: BTreeMap::new(),
             owners: Vec::new(),
             states: Vec::new(),
             deltas: Vec::new(),
@@ -94,12 +93,9 @@ impl RunFileReader {
         };
         for frame in frames.into_iter().skip(1) {
             match frame.kind {
-                FrameKind::Code | FrameKind::Blob => {
+                FrameKind::Code => {
                     let digest: Digest = peek(&bytes, &frame).map_err(err)?;
-                    match frame.kind == FrameKind::Code {
-                        true => reader.code.insert(digest, frame),
-                        false => reader.blobs.insert(digest, frame),
-                    };
+                    reader.code.insert(digest, frame);
                 }
                 FrameKind::State => {
                     let seq: u64 = peek(&bytes, &frame).map_err(err)?;
@@ -172,17 +168,15 @@ impl RunFileReader {
         self.code.keys()
     }
 
-    /// A stored part's bytes, by digest.
-    pub fn blob(&self, digest: &Digest) -> Result<Option<Vec<u8>>, RunFileError> {
-        match self.blobs.get(digest) {
-            Some(frame) => Ok(Some(self.decode::<BlobFrame>(frame)?.bytes)),
-            None => Ok(None),
-        }
+    /// The run's directory: where the file is, and the files it names.
+    pub fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or(Path::new(""))
     }
 
-    /// The digests of the blobs the file holds.
-    pub fn blob_digests(&self) -> impl Iterator<Item = &Digest> {
-        self.blobs.keys()
+    /// A stored part's bytes, by digest, from `blobs/` beside the file. A
+    /// part whose file is not there is [`RunFileErrorKind::MissingBlob`].
+    pub fn blob(&self, digest: &Digest) -> Result<Vec<u8>, RunFileError> {
+        read_blob(self.dir(), digest).map_err(|kind| RunFileError::new(&self.path, kind))
     }
 
     /// Every change of owner, oldest first.
@@ -254,6 +248,23 @@ impl RunFileReader {
             .map(|(_, f)| self.decode(f))
             .collect()
     }
+}
+
+/// Where the stored part `digest` of the run in `run_dir` is.
+pub fn blob_path(run_dir: &Path, digest: &Digest) -> PathBuf {
+    run_dir
+        .join(leviath_core::files::BLOBS_DIR)
+        .join(digest.as_str())
+}
+
+/// The bytes of the stored part `digest` of the run in `run_dir`. A file
+/// that is not there is [`RunFileErrorKind::MissingBlob`], naming the part;
+/// one that does not read is [`RunFileErrorKind::Io`].
+pub fn read_blob(run_dir: &Path, digest: &Digest) -> Result<Vec<u8>, RunFileErrorKind> {
+    std::fs::read(blob_path(run_dir, digest)).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => RunFileErrorKind::MissingBlob(digest.clone()),
+        _ => RunFileErrorKind::Io(e.to_string()),
+    })
 }
 
 /// Each delta frame with its step.

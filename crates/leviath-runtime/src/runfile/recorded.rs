@@ -1,8 +1,8 @@
 //! A journal record's facts, as the run file's events keep them.
 //!
-//! The world hands the persistence lane one journal record per thing that
-//! happened. [`push_events`](super::lane::push_events) turns each into the
-//! events a step carries; the conversions here are the parts of that which
+//! The world is sent one journal record per thing that happened.
+//! [`push_events`](super::events::push_events) turns each into the events a
+//! step carries; the conversions here are the parts of that which
 //! keep a record whole: a model call with its timing and request, an
 //! execution's identity and ending, a settled question, a context change with
 //! its cause.

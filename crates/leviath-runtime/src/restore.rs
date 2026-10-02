@@ -35,9 +35,8 @@ pub struct Resumable {
     pub state: crate::state::RunState,
     /// The code its spec names, for binding.
     pub code: crate::spec::env::CodeFiles,
-    /// The files it was given or made, by digest, for the store its tools
-    /// read from. A file whose bytes do not read is left out.
-    pub blobs: std::collections::BTreeMap<crate::spec::names::Digest, Vec<u8>>,
+    /// The answer it handed back, read from the file its state names.
+    pub answer: Option<String>,
     /// How many questions it has put to a person, answered or still open,
     /// so a question it asks again gets an id of its own.
     pub asked: u64,
@@ -46,7 +45,9 @@ pub struct Resumable {
 /// Read the run in `run_dir` back from its run file.
 ///
 /// `Ok(None)` when the directory holds no run file. A run file that is there
-/// and cannot be read is an error naming the file and what is wrong with it.
+/// and cannot be read is an error naming the file and what is wrong with it,
+/// and so is a stored part it names whose file is missing from `blobs/`, or
+/// an answer whose file does not read as the run file names it.
 pub fn read_for_resume(
     run_dir: &std::path::Path,
 ) -> Result<Option<Resumable>, crate::runfile::RunFileError> {
@@ -59,10 +60,24 @@ pub fn read_for_resume(
     if let (Some(fan_out), Some(runs_dir)) = (state.fan_out.as_mut(), run_dir.parent()) {
         settle_finished_workers(fan_out, runs_dir);
     }
-    let blobs = reader
-        .blob_digests()
-        .map(|d| (d.clone(), reader.blob(d).ok().flatten().unwrap_or_default()))
-        .collect();
+    let fail = |kind| crate::runfile::RunFileError::new(&path, kind);
+    if let Some(blob) = state
+        .blobs
+        .iter()
+        .find(|b| !crate::runfile::blob_path(run_dir, &b.digest).is_file())
+    {
+        return Err(fail(crate::runfile::RunFileErrorKind::MissingBlob(
+            blob.digest.clone(),
+        )));
+    }
+    let answer = match (&state.final_output, &state.files.final_output) {
+        (Some(_), Some(file)) => Some(
+            file.read(run_dir)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .map_err(|e| fail(crate::runfile::RunFileErrorKind::Beside(e)))?,
+        ),
+        _ => None,
+    };
     // Every step decoded on the way to the state, so these read too.
     let answered = reader
         .deltas(1, reader.last_seq())
@@ -75,7 +90,7 @@ pub fn read_for_resume(
     Ok(Some(Resumable {
         asked: u64::try_from(answered + open).unwrap_or(u64::MAX),
         code: reader.code_files()?,
-        blobs,
+        answer,
         state,
         spec: std::sync::Arc::new(reader.spec().clone()),
     }))
@@ -91,15 +106,12 @@ pub fn read_for_resume(
 fn settle_finished_workers(fan_out: &mut crate::state::FanOutState, runs_dir: &std::path::Path) {
     let active = std::mem::take(&mut fan_out.active);
     for (item, run) in active {
-        let reader = crate::runfile::RunFileReader::open(
-            &runs_dir
-                .join(run.as_str())
-                .join(leviath_core::files::RUN_FILE),
-        )
-        .ok();
+        let dir = runs_dir.join(run.as_str());
+        let reader =
+            crate::runfile::RunFileReader::open(&dir.join(leviath_core::files::RUN_FILE)).ok();
         let finished = reader
             .and_then(|reader| reader.latest_state().ok().map(|state| (state, reader)))
-            .and_then(|(state, reader)| worker_result(reader.spec(), &state));
+            .and_then(|(state, reader)| worker_result(reader.spec(), &state, &dir));
         match finished {
             Some(Ok(summary)) => fan_out.done.push((item, summary)),
             Some(Err(why)) => fan_out.failed.push((item, why)),
@@ -109,15 +121,17 @@ fn settle_finished_workers(fan_out: &mut crate::state::FanOutState, runs_dir: &s
 }
 
 /// What a worker finished with, or `None` while it is still going: as the
-/// parent reads a worker it reaps live (its final output, else its last
-/// reply, unless its stage requires an output it did not give).
+/// parent reads a worker it reaps live (its final output, read from the file
+/// its state names in its directory `dir`, else its last reply, unless its
+/// stage requires an output it did not give).
 fn worker_result(
     spec: &crate::spec::run_spec::RunSpec,
     state: &crate::state::RunState,
+    dir: &std::path::Path,
 ) -> Option<Result<String, String>> {
     match &state.status {
         RunStatus::Complete => Some(match &state.final_output {
-            Some(out) => Ok(out.content.clone()),
+            Some(_) => worker_answer(state, dir),
             None if spec
                 .graph
                 .stage(state.cursor.stage.as_str())
@@ -131,6 +145,18 @@ fn worker_result(
         RunStatus::Cancelled => Some(Err("worker cancelled".to_string())),
         _ => None,
     }
+}
+
+/// A finished worker's answer, from the file its state names.
+fn worker_answer(state: &crate::state::RunState, dir: &std::path::Path) -> Result<String, String> {
+    let file = state
+        .files
+        .final_output
+        .as_ref()
+        .ok_or("worker handed back an answer its run file names no file for")?;
+    file.read(dir)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|e| format!("worker's answer cannot be read: {e}"))
 }
 
 /// The text of the last model turn in a run's context.
@@ -225,7 +251,14 @@ pub fn resume(
     bindings: crate::spec::env::Bindings,
 ) -> Entity {
     run.state.held = None;
-    crate::insert::insert(world, run.spec, bindings, &run.state)
+    let entity = crate::insert::insert(world, run.spec, bindings, &run.state);
+    if let (Some(content), Some(mut out)) = (
+        run.answer,
+        world.get_mut::<crate::persistence::FinalOutput>(entity),
+    ) {
+        out.0.content = content;
+    }
+    entity
 }
 
 /// Why a run is held, as the listings say it: the machine changed, and what

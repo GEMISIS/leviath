@@ -71,6 +71,7 @@ pub(crate) fn spec_in(dir: &Path) -> anyhow::Result<RunSpec> {
 
 /// The run file in `dir` and the state of its last step, or `None` when the
 /// directory has no run file this build reads.
+#[cfg(test)]
 pub(crate) fn latest_in(dir: &Path) -> Option<(RunFileReader, RunState)> {
     let reader = open_in(dir).ok()?;
     let state = reader.latest_state().ok()?;

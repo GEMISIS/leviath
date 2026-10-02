@@ -28,7 +28,8 @@ pub const BACKUPS_DIR: &str = "backups";
 /// What a backup says about itself.
 const README: &str = "README.txt";
 
-/// Present in a backup no command has told the user about yet.
+/// What the upgrade that filled a backup did, in a backup no command has
+/// told the user about yet.
 const UNANNOUNCED: &str = ".unannounced";
 
 /// How one file of a run is saved: hard-linked, or a stand-in that fails
@@ -154,14 +155,32 @@ impl Backup {
              Leviath never deletes anything here. Delete it yourself once you no longer need it.\n",
             env!("CARGO_PKG_VERSION")
         );
-        leviath_sys::perms::create_private_dir_all(&self.dir)
-            .and_then(|()| leviath_sys::perms::write_private(&self.dir.join(UNANNOUNCED), b""))
-            .and_then(|()| {
-                leviath_sys::perms::write_private(&self.dir.join(README), text.as_bytes())
-            })?;
+        leviath_sys::perms::create_private_dir_all(&self.dir).and_then(|()| {
+            leviath_sys::perms::write_private(&self.dir.join(README), text.as_bytes())
+        })?;
         let shown = self.dir.display().to_string();
         tracing::info!(backup = %shown, "backing up what an earlier release wrote before changing it");
         Ok(())
+    }
+
+    /// Keep `lines`, what an upgrade that saved something here did, for the
+    /// next command a person runs to show them once (see [`announce`]).
+    /// Nothing is kept when nothing was saved, so there is no backup to
+    /// speak of.
+    pub fn announce_later(&self, lines: &[String]) {
+        if !self.dir.join(README).is_file() {
+            return;
+        }
+        let path = self.dir.join(UNANNOUNCED);
+        let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+        for line in lines {
+            text.push_str(line);
+            text.push('\n');
+        }
+        if let Err(e) = leviath_sys::perms::write_private(&path, text.as_bytes()) {
+            let (shown, why) = (path.display().to_string(), e.to_string());
+            tracing::warn!(path = %shown, error = %why, "what the upgrade did could not be kept to show the user");
+        }
     }
 }
 
@@ -182,8 +201,8 @@ fn copy_tree(src: &Path, dst: &Path, put: Link<'_>) -> std::io::Result<()> {
         })
 }
 
-/// The line to show once for each backup under the data root `root` that no
-/// command has told the user about yet. Each is told about once.
+/// What each upgrade under the data root `root` did that no command has
+/// told the user about yet, a line each. Each is told about once.
 pub fn announce(root: &Path) -> Vec<String> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(root.join(BACKUPS_DIR))
         .into_iter()
@@ -195,20 +214,18 @@ pub fn announce(root: &Path) -> Vec<String> {
     found.sort();
     found
         .into_iter()
-        .filter(|d| std::fs::remove_file(d.join(UNANNOUNCED)).is_ok())
-        .map(|d| {
-            format!(
-                "Upgrading this home from an earlier release, the daemon saved what it changed \
-                 (old blueprints and run directories) to {} first. Leviath never deletes it.",
-                d.display()
-            )
+        .filter_map(|d| {
+            let marker = d.join(UNANNOUNCED);
+            let text = std::fs::read_to_string(&marker).unwrap_or_default();
+            std::fs::remove_file(&marker).ok().map(|()| text)
         })
+        .flat_map(|text| text.lines().map(str::to_string).collect::<Vec<_>>())
         .collect()
 }
 
-/// Tell the user, on stderr, about each backup of their home no command has
-/// told them about yet. `lev ps` calls this, so the first look at a home
-/// after its upgrade says where what changed was saved.
+/// Tell the user, on stderr, what each upgrade of their home did that no
+/// command has told them about yet. `lev ps` calls this, so the first look
+/// at a home after its upgrade says what changed and where it was saved.
 pub fn tell_once() {
     for line in leviath_core::paths::data_dir()
         .iter()

@@ -356,7 +356,7 @@ pub(crate) fn collect_transition_choice(
     mut agents: Query<CollectTransitionChoiceQuery>,
     mut calls: crate::inference_call::CallParams,
     sink: Option<Res<crate::host::WorldEventSink>>,
-    persist: Option<Res<crate::pipeline::PersistenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();

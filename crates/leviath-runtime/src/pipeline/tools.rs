@@ -522,20 +522,19 @@ impl BatchDispatch<'_> {
 /// no lane writes nothing. Called from the same place the batch record is written
 /// so the artifacts cannot land before the dispatch that made them.
 pub(super) fn journal_artifacts(
-    persist: &PersistenceStage,
+    journal: &super::JournalSender,
     run_id: &str,
     produced: &[(String, Vec<leviath_core::output::Artifact>)],
 ) {
     for (execution_id, artifacts) in produced {
-        let _ = persist.0.send(PersistMsg::Append {
-            run_id: run_id.to_string(),
-            record: Box::new(crate::runfile::record::RunRecord::ArtifactsProduced {
+        journal.record(
+            run_id,
+            crate::runfile::record::RunRecord::ArtifactsProduced {
                 execution_id: execution_id.clone(),
                 artifacts: artifacts.clone(),
                 at: chrono::Utc::now().timestamp(),
-            }),
-            ack: None,
-        });
+            },
+        );
     }
 }
 
@@ -555,8 +554,8 @@ pub(crate) struct DaemonServices<'w> {
     pub hub: Option<Res<'w, InteractionHub>>,
     /// The lane a gate prompt's answer comes back on.
     pub gate_stage: Option<Res<'w, crate::gate_prompt::GatePromptStage>>,
-    /// The lane run state is written on.
-    pub persist: Option<Res<'w, PersistenceStage>>,
+    /// Where what a run does is recorded, for its run file.
+    pub persist: Option<Res<'w, super::JournalSender>>,
 }
 
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
@@ -568,9 +567,10 @@ pub(crate) struct DaemonServices<'w> {
 /// enqueued in turn.
 ///
 /// A persisted agent's batch is journaled at dispatch: a `ToolBatch` record
-/// (inline results pre-filled, lane calls pending) goes to the persistence lane
-/// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
-/// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
+/// (inline results pre-filled, lane calls pending) goes to the world's journal
+/// with an ack the exec waits on, answered once the step holding it is written,
+/// and a per-call [`ToolProgress`] journals each completion as a
+/// `ToolCallDone`. On a crash mid-batch, recovery replays the
 /// recorded results instead of re-running their side effects.
 pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
@@ -1065,11 +1065,7 @@ pub(crate) fn dispatch_tools(
             // names an execution a reader can find. No ack, because nothing is
             // about to run that could outrace the record.
             if let (Some(persist), Some(md)) = (persist.as_ref(), metadata) {
-                let _ = persist.0.send(PersistMsg::Append {
-                    run_id: md.run_id.clone(),
-                    record: Box::new(dispatch.record()),
-                    ack: None,
-                });
+                persist.record(&md.run_id, dispatch.record());
                 journal_artifacts(persist, &md.run_id, &produced);
             }
             // Nothing async to run - apply the context results now and loop back.

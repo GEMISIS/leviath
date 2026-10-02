@@ -1,33 +1,7 @@
 {
-  "blob": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "A stored part's bytes, stored once by their digest.",
-    "properties": {
-      "bytes": {
-        "description": "The bytes.",
-        "items": {
-          "format": "uint8",
-          "maximum": 255,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "type": "array"
-      },
-      "digest": {
-        "description": "The sha256 of `bytes`. First, for the same reason as\n[`CodeFrame::digest`].",
-        "type": "string"
-      }
-    },
-    "required": [
-      "digest",
-      "bytes"
-    ],
-    "title": "BlobFrame",
-    "type": "object"
-  },
   "code": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Code the run uses, stored once by its digest.",
+    "description": "Code the run uses, stored once by its digest.\n\nCode is the one kind of bytes the file holds itself: the spec names the\nscripts the run was resolved against, and a resume binds exactly those,\nwhatever has become of the files they were read from. Everything else a\nrun keeps beside its file and names (see [`crate::state::files`]).",
     "properties": {
       "bytes": {
         "description": "The code.",
@@ -211,6 +185,52 @@
           "duration_ms",
           "backoff_ms",
           "digest"
+        ],
+        "type": "object"
+      },
+      "BlobFile": {
+        "description": "A stored part the run holds, in `blobs/<sha256>` beside its run file.",
+        "properties": {
+          "digest": {
+            "description": "The sha256 of its bytes, which is also its file's name.",
+            "type": "string"
+          },
+          "mime_type": {
+            "description": "Its mime type.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Its file name, when it had one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "description": "The region it first appeared in. `None` for a part no recorded\ncontext held.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "description": "Its size in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool": {
+            "description": "The tool whose result carried it, when one did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "digest",
+          "mime_type",
+          "size"
         ],
         "type": "object"
       },
@@ -826,6 +846,35 @@
               "Held"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`files`.",
+            "properties": {
+              "Files": {
+                "$ref": "#/$defs/RunFiles"
+              }
+            },
+            "required": [
+              "Files"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`blobs`.",
+            "properties": {
+              "Blobs": {
+                "items": {
+                  "$ref": "#/$defs/BlobFile"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "Blobs"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1427,6 +1476,33 @@
         ],
         "type": "object"
       },
+      "FileRef": {
+        "description": "One file beside the run file.",
+        "properties": {
+          "bytes": {
+            "description": "Its size in bytes when the step that names it was written. A log is\nonly appended to, so a log may be longer by then, never shorter.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Where it is, relative to the run's directory, with `/` between parts.",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "The sha256 of its contents, for a file written whole.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "bytes"
+        ],
+        "type": "object"
+      },
       "FinalOutputState": {
         "description": "A run's final output.",
         "properties": {
@@ -1437,9 +1513,11 @@
             },
             "type": "array"
           },
-          "content": {
-            "description": "The output.",
-            "type": "string"
+          "bytes": {
+            "description": "Its size in bytes. The output itself is in `final_output` beside the\nrun file, which [`RunFiles::final_output`] names.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "format": {
             "description": "Its format label.",
@@ -1463,7 +1541,7 @@
           }
         },
         "required": [
-          "content",
+          "bytes",
           "stage",
           "submitted_at",
           "truncated",
@@ -2816,6 +2894,33 @@
           }
         ]
       },
+      "RunFiles": {
+        "description": "The files beside a run's file, other than its stored parts.",
+        "properties": {
+          "final_output": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The answer the run handed back, once it has one."
+          },
+          "stages": {
+            "description": "Each stage's files, by the stage's position in the graph, in order.",
+            "items": {
+              "$ref": "#/$defs/StageFiles"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "stages"
+        ],
+        "type": "object"
+      },
       "RunStatus": {
         "description": "How a run is doing.",
         "oneOf": [
@@ -3086,6 +3191,54 @@
           "reported_calls",
           "computed_calls",
           "unpriced_calls"
+        ],
+        "type": "object"
+      },
+      "StageFiles": {
+        "description": "One stage's files.",
+        "properties": {
+          "index": {
+            "description": "The stage's position in the run's graph.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "logs": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The stage's tool activity and events."
+          },
+          "output": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the model wrote, once it wrote anything."
+          },
+          "taint_audit": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The taint gate's decisions, once it made one."
+          }
+        },
+        "required": [
+          "index"
         ],
         "type": "object"
       },
@@ -8201,6 +8354,52 @@
         ],
         "type": "object"
       },
+      "BlobFile": {
+        "description": "A stored part the run holds, in `blobs/<sha256>` beside its run file.",
+        "properties": {
+          "digest": {
+            "description": "The sha256 of its bytes, which is also its file's name.",
+            "type": "string"
+          },
+          "mime_type": {
+            "description": "Its mime type.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Its file name, when it had one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "description": "The region it first appeared in. `None` for a part no recorded\ncontext held.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "description": "Its size in bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool": {
+            "description": "The tool whose result carried it, when one did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "digest",
+          "mime_type",
+          "size"
+        ],
+        "type": "object"
+      },
       "BlobState": {
         "description": "A stored part's bytes, by digest.",
         "properties": {
@@ -8759,6 +8958,33 @@
         ],
         "type": "object"
       },
+      "FileRef": {
+        "description": "One file beside the run file.",
+        "properties": {
+          "bytes": {
+            "description": "Its size in bytes when the step that names it was written. A log is\nonly appended to, so a log may be longer by then, never shorter.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Where it is, relative to the run's directory, with `/` between parts.",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "The sha256 of its contents, for a file written whole.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "bytes"
+        ],
+        "type": "object"
+      },
       "FinalOutputState": {
         "description": "A run's final output.",
         "properties": {
@@ -8769,9 +8995,11 @@
             },
             "type": "array"
           },
-          "content": {
-            "description": "The output.",
-            "type": "string"
+          "bytes": {
+            "description": "Its size in bytes. The output itself is in `final_output` beside the\nrun file, which [`RunFiles::final_output`] names.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "format": {
             "description": "Its format label.",
@@ -8795,7 +9023,7 @@
           }
         },
         "required": [
-          "content",
+          "bytes",
           "stage",
           "submitted_at",
           "truncated",
@@ -9560,6 +9788,33 @@
         ],
         "type": "object"
       },
+      "RunFiles": {
+        "description": "The files beside a run's file, other than its stored parts.",
+        "properties": {
+          "final_output": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The answer the run handed back, once it has one."
+          },
+          "stages": {
+            "description": "Each stage's files, by the stage's position in the graph, in order.",
+            "items": {
+              "$ref": "#/$defs/StageFiles"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "stages"
+        ],
+        "type": "object"
+      },
       "RunStatus": {
         "description": "How a run is doing.",
         "oneOf": [
@@ -9784,6 +10039,54 @@
           "reported_calls",
           "computed_calls",
           "unpriced_calls"
+        ],
+        "type": "object"
+      },
+      "StageFiles": {
+        "description": "One stage's files.",
+        "properties": {
+          "index": {
+            "description": "The stage's position in the run's graph.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "logs": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The stage's tool activity and events."
+          },
+          "output": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the model wrote, once it wrote anything."
+          },
+          "taint_audit": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FileRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The taint gate's decisions, once it made one."
+          }
+        },
+        "required": [
+          "index"
         ],
         "type": "object"
       },
@@ -10430,6 +10733,13 @@
         "description": "Whether messages sent to it are delivered now.",
         "type": "boolean"
       },
+      "blobs": {
+        "description": "Every stored part it holds, beside its run file under `blobs/`.",
+        "items": {
+          "$ref": "#/$defs/BlobFile"
+        },
+        "type": "array"
+      },
       "children": {
         "description": "The child runs it started.",
         "items": {
@@ -10460,6 +10770,10 @@
           }
         ],
         "description": "The fan-out in progress, when there is one."
+      },
+      "files": {
+        "$ref": "#/$defs/RunFiles",
+        "description": "The answer, logs and audits it keeps beside its run file."
       },
       "final_output": {
         "anyOf": [
@@ -10618,7 +10932,9 @@
       "clock",
       "flags",
       "children",
-      "point"
+      "point",
+      "files",
+      "blobs"
     ],
     "title": "RunState",
     "type": "object"

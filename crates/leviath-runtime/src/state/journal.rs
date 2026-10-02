@@ -5,8 +5,8 @@
 //! The state says where a run is; these say how it got there, for the reads
 //! that answer "what did this run do": the attempts a provider call took, a
 //! request that was captured, the execution a context change came from. Each
-//! is a [`RunEvent`](super::RunEvent) of the step it happened in, read from
-//! the journal record the world hands the persistence lane.
+//! is a [`RunEvent`](super::RunEvent) of the step it happened in, folded in
+//! the world from the journal record sent when it happened.
 
 use std::collections::BTreeMap;
 

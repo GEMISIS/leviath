@@ -223,7 +223,7 @@ type CollectCompactionQuery = (
 pub(crate) fn collect_compaction(
     mut results: ResMut<CompactionResults>,
     mut agents: Query<CollectCompactionQuery, With<AwaitingCompaction>>,
-    persist: Option<Res<crate::pipeline::PersistenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();

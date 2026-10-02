@@ -439,10 +439,13 @@ lev validate ./summarizer/agent.toml
 Without `-o` it prints the new file. An existing output file is left alone unless you pass
 `--force`. When the manifest cannot be read, every problem is listed at once. A setting the new
 format spells differently gets a `note:` line on stderr. A fan-out's `max_workers = 0` is one: it
-meant no cap, and a graph says no cap by leaving `max_workers` out. A key the old format read
-nothing from, such as `max_stored` on a region, is left out with a note too. It never changed a
-run, so the new file runs the same without it. The daemon's upgrade and the conversion of old runs
-follow the same rule.
+meant no cap, and a graph says no cap by leaving `max_workers` out.
+
+A key Leviath 0.6.4 and earlier accepted but never read, such as `max_stored` on a region or a
+misspelled key, is dropped with a `warning:` line naming the blueprint, the key and its value. It
+never changed a run, so the new file runs the same without it, but you may have meant something by
+it. The daemon's upgrade and the conversion of old runs drop the same keys and warn the same way:
+see [upgrading from an earlier release](/docs/daemon#upgrading-from-an-earlier-release).
 
 Here is a small manifest and what it becomes. Before:
 

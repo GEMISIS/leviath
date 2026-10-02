@@ -15,6 +15,7 @@ use leviath_runtime::world::PipelineWorld;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
+use leviath_runtime::control_socket::StartupBoard;
 use leviath_runtime::fanout::FanOutSpawnerRes;
 
 use crate::config::Config;
@@ -104,15 +105,18 @@ pub fn daemon_build_is_stale(recorded: Option<&str>) -> bool {
 
 /// Build the daemon's [`WorldHost`], doing the async startup work: build the
 /// provider registry from config and connect the shared MCP servers (both reused
-/// by every agent), then wire the host + spawner via [`build_host`].
+/// by every agent), upgrade what an earlier release left in the home, then wire
+/// the host + spawner via [`build_host`]. Each step says on `board` what it is
+/// doing, for the clients that reach the daemon meanwhile.
 pub async fn setup_daemon_host(
     config: Config,
     runs_dir: std::path::PathBuf,
     runtime: Handle,
+    board: &StartupBoard,
 ) -> anyhow::Result<WorldHost> {
     setup_daemon_host_with(
         config,
-        runs_dir,
+        (runs_dir, board),
         runtime,
         &leviath_providers::provider::build_http_client,
     )
@@ -131,7 +135,7 @@ const PROVIDER_PRIME_TIMEOUT_SECS: u64 = 10;
 /// start-up failure path is reachable from a test.
 pub(crate) async fn setup_daemon_host_with(
     config: Config,
-    runs_dir: std::path::PathBuf,
+    (runs_dir, board): (std::path::PathBuf, &StartupBoard),
     runtime: Handle,
     build_client: leviath_providers::provider::HttpClientFactory<'_>,
 ) -> anyhow::Result<WorldHost> {
@@ -166,6 +170,7 @@ pub(crate) async fn setup_daemon_host_with(
     // name silently gets a 128 000-token window, with every percentage region
     // budget sized against it. Awaited rather than spawned so the first run has
     // the answer instead of racing it; failures are warnings.
+    board.begin("asking providers which models they serve", 0);
     let prime_failures = providers
         .prime_capabilities(
             std::time::Duration::from_secs(PROVIDER_PRIME_TIMEOUT_SECS),
@@ -201,6 +206,7 @@ pub(crate) async fn setup_daemon_host_with(
     let refresher_config = reloader.clone();
     // MCP connections are shared across agents; the workdir here only seeds the
     // (discarded) built-ins - each agent gets its own over its own workdir.
+    board.begin("connecting MCP servers", 0);
     let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
     // The shared MCP pool: seed the connected global servers, then reconnect the
     // per-agent MCP servers of any unfinished run so a run resumed on restart
@@ -228,13 +234,15 @@ pub(crate) async fn setup_daemon_host_with(
     let agents_dir = leviath_core::paths::agents_dir();
     // Blueprints a previous release installed become `agent.toml` first, so
     // they are found by name and an old run's workers are pinned to them.
+    let mut upgrade = crate::daemon::upgrade::Upgrade::default();
     crate::blueprint_upgrade::upgrade_at_start(
         &runs_dir,
         &crate::runstate::runs_dir(),
-        agents_dir.as_deref(),
-        &config.agent_paths,
+        (agents_dir.as_deref(), &config.agent_paths),
+        board,
+        &mut upgrade,
     );
-    crate::daemon::convert_old::convert_at_start(
+    let runs = crate::daemon::convert_old::convert_at_start(
         &runs_dir,
         crate::daemon::convert_old::AtStart {
             config: &config,
@@ -245,8 +253,12 @@ pub(crate) async fn setup_daemon_host_with(
             shared_mcp: registry.mcp.clone(),
             pool: &mcp_pool,
         },
+        board,
     )
     .await;
+    upgrade.add_runs(runs);
+    upgrade.finish(&crate::home_backup::Backup::of_runs(&runs_dir));
+    board.begin("bringing back unfinished runs", 0);
     mcp_pool.warm_recovered(&runs_dir).await;
     // The index `lev ps` and the dashboard list runs from follows the runs
     // as they change.
@@ -818,6 +830,7 @@ mod tests {
                     config_with_anthropic_key(),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon host builds in tests");
@@ -857,6 +870,7 @@ mod tests {
                     Config::default(),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon host builds in tests");
@@ -906,6 +920,7 @@ mod tests {
                     config_with_anthropic_key(),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon host builds in tests");
@@ -948,6 +963,7 @@ mod tests {
                     Config::default(),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon host builds in tests");
@@ -1255,10 +1271,14 @@ binds = [{ region = "task" }]
         manifest: &std::path::Path,
         url: String,
     ) -> String {
-        let mut host =
-            setup_daemon_host(gateway_config(url), runs.to_path_buf(), Handle::current())
-                .await
-                .expect("the first daemon starts");
+        let mut host = setup_daemon_host(
+            gateway_config(url),
+            runs.to_path_buf(),
+            Handle::current(),
+            &StartupBoard::default(),
+        )
+        .await
+        .expect("the first daemon starts");
         let run_id = spawn_through(&mut host, task_request(manifest, "t"))
             .await
             .expect("the run starts while the gateway answers");
@@ -1330,6 +1350,7 @@ binds = [{ region = "task" }]
                     gateway_config(url),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon starts");
@@ -1390,6 +1411,7 @@ binds = [{ region = "task" }]
                     gateway_config(url),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("the daemon starts");
@@ -1455,6 +1477,7 @@ binds = [{ region = "task" }]
                     gateway_config(url),
                     runs.path().to_path_buf(),
                     Handle::current(),
+                    &StartupBoard::default(),
                 )
                 .await
                 .expect("a dead gateway does not stop the daemon starting");
@@ -1865,13 +1888,15 @@ binds = [{{ region = "task" }}]
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = Config::default();
         config.providers.anthropic_api_key = Some("k".to_string());
-        let err =
-            setup_daemon_host_with(config, dir.path().to_path_buf(), Handle::current(), &|_t| {
-                Err(leviath_providers::provider::malformed_url_error())
-            })
-            .await
-            .err()
-            .expect("a failing client factory should stop the daemon starting");
+        let err = setup_daemon_host_with(
+            config,
+            (dir.path().to_path_buf(), &StartupBoard::default()),
+            Handle::current(),
+            &|_t| Err(leviath_providers::provider::malformed_url_error()),
+        )
+        .await
+        .err()
+        .expect("a failing client factory should stop the daemon starting");
         assert!(err.to_string().contains("root certificate store"));
     }
 

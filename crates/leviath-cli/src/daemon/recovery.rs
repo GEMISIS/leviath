@@ -47,14 +47,19 @@ pub(crate) struct Recovered {
 }
 
 /// Convert the old run in `dir` (every one under it, with `all`), looking its
-/// stages up the way a new run of its graph would be resolved here.
+/// stages up the way a new run of its graph would be resolved here, and say
+/// what it did the way an upgrade at start does.
 fn convert_old(starter: &DaemonStarter, dir: &Path, all: bool) {
     let envs = |graph: &leviath_runtime::spec::graph::RunGraph| {
         starter.env_for_graph(graph, starter.config.current())
     };
     let agents = starter.agents_dir.as_deref();
     match all {
-        true => crate::daemon::convert_old::convert_all(dir, agents, Some(&envs)),
+        true => {
+            let board = leviath_runtime::control_socket::StartupBoard::default();
+            crate::daemon::convert_old::convert_all(dir, agents, Some(&envs), &board)
+                .finish(&crate::home_backup::Backup::of_runs(dir));
+        }
         false => crate::daemon::convert_old::convert_one(dir, agents, Some(&envs)),
     }
 }
@@ -115,12 +120,6 @@ fn resume_one(
         run.state.status = RunStatus::Paused;
         run.state.phase = leviath_runtime::state::PipelinePhase::Paused;
     }
-    crate::daemon::starter::store_blobs(
-        starter.blob_store.as_ref(),
-        &run_id,
-        &run.blobs,
-        &run.state.context,
-    );
     let lease = starter.mcp_pool.lease_servers(
         &crate::daemon::starter::mcp_configs(&run.spec.graph),
         &run_id,

@@ -553,11 +553,10 @@ pub(super) fn validate_manifest_text(manifest: &str, dir: &Path) -> ValidateResp
         Err(problems) => return ValidateResponse::invalid(problems),
     };
     let mut verdict = validate_agent_toml(&manifest, dir);
-    if converted {
-        verdict
-            .warnings
-            .get_or_insert_with(Vec::new)
-            .insert(0, CONVERTED_NOTE.to_string());
+    if let Some(dropped) = converted {
+        let warnings = verdict.warnings.get_or_insert_with(Vec::new);
+        warnings.insert(0, CONVERTED_NOTE.to_string());
+        warnings.splice(1..1, dropped);
     }
     verdict
 }

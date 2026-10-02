@@ -1344,14 +1344,16 @@ The daemon's control socket, its token, its pid file, and a build marker live he
 
 ### What a run directory holds
 
-One file holds the run, with plain logs beside it for reading:
+One file holds the run, and names the plain files it keeps beside it:
 
 | Path | What it is |
 |---|---|
-| `run.lvr` | The [run file](/docs/run-file): the run's spec, the code and blobs it needs, every step, and state checkpoints. Appended to |
+| `run.lvr` | The [run file](/docs/run-file): the run's spec, its code, every step, and state checkpoints. Appended to |
+| `final_output` | The answer the run handed back |
 | `stages/<n>/output.log` | What the model wrote in stage `n`, as plain text |
 | `stages/<n>/logs.log` | Operational events and tool activity for stage `n` |
-| `blobs/` | The bytes of the files the run holds as parts, also copied into `run.lvr` |
+| `stages/<n>/taint_audit.json` | The taint gate's decisions in stage `n` |
+| `blobs/` | The files the run holds as parts, one per digest. `run.lvr` names them and holds no copy |
 
 `run.lvr` is what [`lev context`](/docs/cli) replays, what `lev run show` prints, and what a daemon
 restart reads to resume the run. A run directory from an older Leviath is converted when it is

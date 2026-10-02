@@ -28,7 +28,7 @@ fn every_key_a_shipped_manifest_holds_is_read() {
     assert!(all.len() > 5, "found {}", all.len());
     for (name, text) in all {
         let doc: Table = toml::from_str(&text).unwrap();
-        assert_eq!(unread_keys(&doc), Vec::<String>::new(), "{name}");
+        assert_eq!(unread_keys(&doc), Vec::<Dropped>::new(), "{name}");
     }
 }
 
@@ -82,10 +82,7 @@ context = { regions = { notes = { odd = 1 } } }
 interaction_points = [{ odd = 1 }]
 "#;
     let found = unread_keys(&toml::from_str(manifest).unwrap());
-    let places: Vec<&str> = found
-        .iter()
-        .map(|line| line.split(": `").next().unwrap())
-        .collect();
+    let places: Vec<&str> = found.iter().map(|d| d.at.as_str()).collect();
     assert_eq!(
         places,
         [
@@ -116,6 +113,27 @@ interaction_points = [{ odd = 1 }]
             "[stages.main] interaction point 0",
         ]
     );
-    assert!(found[1].ends_with("(an agent's nudge settings are [agent.nudge])"));
-    assert!(!found[0].contains("[agent.nudge]"), "{}", found[0]);
+    let (first, second) = (found[0].to_string(), found[1].to_string());
+    assert!(second.ends_with("(an agent's nudge settings are [agent.nudge])"));
+    assert!(second.contains("`nudge = { max = 3 }`"), "{second}");
+    assert!(!first.contains("[agent.nudge]"), "{first}");
+}
+
+/// A dropped key's warning names its value, and a long one is cut short so
+/// the warning stays one readable line.
+#[test]
+fn a_dropped_key_shows_its_value_cut_short_when_long() {
+    let long = "x".repeat(200);
+    let doc: Table = toml::from_str(&format!("[agent]\nshort = 5\nlong = \"{long}\"\n")).unwrap();
+    let found = unread_keys(&doc);
+    let lines: Vec<String> = found.iter().map(ToString::to_string).collect();
+    assert_eq!(found.len(), 2, "{lines:?}");
+    let long_line = lines.iter().find(|l| l.contains("`long = ")).unwrap();
+    assert!(long_line.contains("...` was dropped"), "{long_line}");
+    assert!(!long_line.contains(&long), "{long_line}");
+    let short = lines.iter().find(|l| l.contains("`short = 5`")).unwrap();
+    assert!(
+        short.starts_with("[agent]: `short = 5` was dropped: Leviath 0.6.4 and earlier accepted it but never read it"),
+        "{short}"
+    );
 }

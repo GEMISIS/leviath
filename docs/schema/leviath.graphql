@@ -729,6 +729,12 @@ type BlobEntryOutput {
 	url: String
 }
 
+"The run stored a part beside its run file."
+type BlobsChangeOutput {
+	"Every stored part it names now."
+	blobs: [StateBlobOutput!]!
+}
+
 """
 One page of a listing: the items, where to resume, and how many there are
 altogether.
@@ -4554,6 +4560,12 @@ type FileWindowOutput {
 	content: String!
 	"Whether the file continues past this window."
 	truncated: Boolean!
+}
+
+"The run's answer, logs or audits beside its run file changed."
+type FilesChangeOutput {
+	"The files it names now."
+	files: StateFilesOutput!
 }
 
 """
@@ -12389,6 +12401,10 @@ type RunStateOutput {
 	is not held.
 	"""
 	held: [SpawnIssueOutput!]
+	"The answer, logs and audits it keeps beside its run file."
+	files: StateFilesOutput!
+	"The stored parts it keeps beside its run file."
+	blobs: [StateBlobOutput!]!
 }
 
 "Where a run is in its life."
@@ -14317,6 +14333,18 @@ type StageContextOutput {
 	resetNames: [String!]!
 }
 
+"One stage's files beside its run's file."
+type StageFileSetOutput {
+	"The stage's position in the run's graph."
+	index: Int!
+	"What the model wrote in the stage."
+	output: StateFileOutput
+	"The stage's tool activity and events."
+	logs: StateFileOutput
+	"The taint gate's decisions in the stage."
+	taintAudit: StateFileOutput
+}
+
 """
 Filter on `StageHooksOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -15564,20 +15592,39 @@ type StartUpdateResult {
 
 "A run's final answer, once it has one."
 type StateAnswerOutput {
-	"The answer."
-	content: String!
+	"""
+	Its size in bytes. The answer itself is in the file the run's `files`
+	name, and `Run.finalOutput` reads it.
+	"""
+	bytes: BigInt!
 	"The format it was asked for in."
 	format: String
 	"The stage that submitted it."
 	stage: String!
 	"When."
 	submittedAt: Timestamp!
-	"Whether `content` was cut short."
+	"Whether the answer was cut short."
 	truncated: Boolean!
 }
 
+"A stored part a run holds, in `blobs/` beside its run file."
+type StateBlobOutput {
+	"The sha256 of its bytes, which is also its file's name."
+	sha256: String!
+	"Its mime type."
+	mimeType: String!
+	"Its size in bytes."
+	size: BigInt!
+	"Its file name, when it had one."
+	name: String
+	"The region it first appeared in."
+	region: String
+	"The tool whose result carried it, when one did."
+	tool: String
+}
+
 "One part of a run's state that a step changed, with its new value."
-union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput
+union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput
 
 "Working time: seconds banked, and when the running clock started."
 type StateClockOutput {
@@ -15607,6 +15654,27 @@ type StateDeltaOutput {
 	changes: [StateChange!]!
 	"What happened during it."
 	events: [StepEvent!]!
+}
+
+"One file beside a run's file."
+type StateFileOutput {
+	"Where it is, relative to the run's directory."
+	path: String!
+	"""
+	Its size in bytes when the step that names it was written. A log only
+	grows, so it may be longer by now.
+	"""
+	bytes: BigInt!
+	"The sha256 of its contents, for a file written whole."
+	sha256: String
+}
+
+"The answer, logs and audits a run keeps beside its run file."
+type StateFilesOutput {
+	"The file holding the answer, once it has one."
+	finalOutput: StateFileOutput
+	"Each stage's files, in stage order."
+	stages: [StageFileSetOutput!]!
 }
 
 "What a run noticed about itself on the way."

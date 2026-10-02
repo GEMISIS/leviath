@@ -326,6 +326,14 @@ fn an_old_blueprint_is_checked_as_what_it_converts_to() {
             .map(String::as_str),
         Some(super::CONVERTED_NOTE)
     );
+    // A key the old release never read is dropped, and the verdict warns.
+    let unread = OLD_MANIFEST.replacen("[agent]", "[agent]\ncolour = \"blue\"", 1);
+    let verdict = validate_manifest_text(&unread, dir.path());
+    let warnings = verdict.warnings.unwrap_or_default();
+    assert!(
+        warnings[1].contains("`colour = \"blue\"` was dropped"),
+        "{warnings:?}"
+    );
     let broken = OLD_MANIFEST.replace("[stages.work]", "[stages.work]\nbogus_key = 1");
     let verdict = validate_manifest_text(&broken, dir.path());
     assert!(!verdict.valid);
@@ -350,12 +358,12 @@ fn an_old_blueprint_is_checked_as_what_it_converts_to() {
 fn only_an_old_blueprint_is_converted() {
     let (same, converted) = super::as_agent_toml(&tiny_blueprint("t")).unwrap();
     assert_eq!(same, tiny_blueprint("t"));
-    assert!(!converted);
+    assert!(converted.is_none());
     // Text that is not TOML at all is left for the parser to refuse.
     let (same, converted) = super::as_agent_toml("not [ toml").unwrap();
     assert_eq!(same, "not [ toml");
-    assert!(!converted);
+    assert!(converted.is_none());
     let (toml, converted) = super::as_agent_toml(OLD_MANIFEST).unwrap();
-    assert!(converted);
+    assert_eq!(converted, Some(Vec::new()));
     assert!(toml.contains("[blueprint]"));
 }

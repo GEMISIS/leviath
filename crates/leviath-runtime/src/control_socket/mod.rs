@@ -33,12 +33,17 @@ use crate::state::RunState;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 mod client;
-pub use client::{CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, WorldEventStream};
+pub use client::{
+    CodeMismatch, ControlClient, LinkStatus, RESTART_GRACE, StartupEvent, StartupWatch,
+    WorldEventStream,
+};
+mod startup;
 #[cfg(test)]
 use client::{
     DEFAULT_CONTROL_TIMEOUT_SECS, SPAWN_CONTROL_TIMEOUT_SECS, is_transient, request_timeout,
     timeout_for,
 };
+pub use startup::{ControlGate, StartupBoard, StartupProgress};
 
 #[cfg(unix)]
 mod unix;
@@ -409,6 +414,12 @@ pub enum ControlResponse {
         /// The daemon's identity.
         daemon: DaemonIdentity,
     },
+    /// The daemon is still starting and did nothing with the request: what
+    /// it is doing, and how far along. Ask again in a moment.
+    Starting {
+        /// The start-up step under way.
+        progress: StartupProgress,
+    },
 }
 
 /// Which process a control connection reached.
@@ -747,7 +758,16 @@ pub async fn handle_connection_as<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    handle_connection_capped(stream, op_tx, events, token, identity, MAX_REQUEST_BYTES).await
+    handle_connection_capped(
+        stream,
+        op_tx,
+        events,
+        token,
+        identity,
+        MAX_REQUEST_BYTES,
+        None,
+    )
+    .await
 }
 
 /// The reply to a successful `authenticate`: `Welcome` when the client asked
@@ -761,7 +781,9 @@ fn authenticated_reply(hello: bool, identity: &DaemonIdentity) -> ControlRespons
     }
 }
 
-/// [`handle_connection_as`] with the per-request cap injected.
+/// [`handle_connection_as`] with the per-request cap injected, answering
+/// every request but `authenticate` from `starting` while the daemon is
+/// still starting.
 ///
 /// The cap is a parameter purely so a test can cross it without pushing tens
 /// of MiB through a duplex - and crossing it is the only way to tell a
@@ -773,6 +795,7 @@ async fn handle_connection_capped<S>(
     token: Option<ControlToken>,
     identity: DaemonIdentity,
     max_request_bytes: u64,
+    starting: Option<&StartupBoard>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -863,22 +886,30 @@ where
             continue;
         }
 
-        let response = match serde_json::from_str::<ControlRequest>(&line) {
+        let request = serde_json::from_str::<ControlRequest>(&line);
+        let response = match (request, starting) {
+            // Already authenticated: a repeat is harmless, not an error. On a
+            // tokenless daemon this is also the only way a client's `hello`
+            // gets answered, since no handshake gate ran.
+            (Ok(ControlRequest::Authenticate { hello, .. }), _) => {
+                authenticated_reply(hello, &identity)
+            }
+            // Still starting: nothing reaches the world yet, a subscription
+            // included, and the client asks again.
+            (Ok(_), Some(board)) => ControlResponse::Starting {
+                progress: board.current(),
+            },
             // Subscribe switches this connection to an event stream and never
             // returns to the request loop. Drop this connection's sender clone
             // after subscribing so the channel closes once the world's sender
             // does (a clean end on daemon shutdown).
-            Ok(ControlRequest::Subscribe) => {
+            (Ok(ControlRequest::Subscribe), None) => {
                 let rx = events.subscribe();
                 drop(events);
                 return stream_events(&mut lines, &mut write_half, rx).await;
             }
-            // Already authenticated: a repeat is harmless, not an error. On a
-            // tokenless daemon this is also the only way a client's `hello`
-            // gets answered, since no handshake gate ran.
-            Ok(ControlRequest::Authenticate { hello, .. }) => authenticated_reply(hello, &identity),
-            Ok(req) => dispatch(req, &op_tx).await,
-            Err(e) => ControlResponse::Error {
+            (Ok(req), None) => dispatch(req, &op_tx).await,
+            (Err(e), _) => ControlResponse::Error {
                 message: format!("{INVALID_REQUEST}: {e}"),
             },
         };
@@ -1237,6 +1268,7 @@ mod tests {
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
+                None,
             )
             .await
         });
@@ -1312,6 +1344,7 @@ mod tests {
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
+                None,
             )
             .await
         });
@@ -1381,6 +1414,7 @@ mod tests {
                 None,
                 DaemonIdentity::this_process("test"),
                 40,
+                None,
             )
             .await
         });

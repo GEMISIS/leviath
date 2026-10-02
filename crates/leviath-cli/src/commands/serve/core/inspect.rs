@@ -228,30 +228,29 @@ pub(crate) fn stages(run_id: &str) -> Result<Vec<StageRecord>, ServeError> {
 }
 
 /// The stored parts the run's context holds as of its last step, by hash,
-/// first appearance first. A part counts as stored when the run file or the
-/// run's blob directory holds its bytes.
+/// first appearance first, each marked stored when its file is in the run's
+/// blob directory.
 pub(crate) fn blobs(run_id: &str) -> Result<Vec<crate::blobs::BlobEntry>, ServeError> {
     let reader = run_file::require(run_id)?;
     let state = state_at(&reader, run_id, reader.last_seq())?;
     let snapshot = leviath_runtime::runfile::context_snapshot(reader.spec(), &state);
-    let held: Vec<&str> = reader.blob_digests().map(|d| d.as_str()).collect();
-    let mut entries = crate::blobs::list_from(run_id, &snapshot);
-    for entry in &mut entries {
-        entry.stored |= held.contains(&entry.sha256.as_str());
-    }
-    Ok(entries)
+    Ok(crate::blobs::list_from(run_id, &snapshot))
 }
 
-/// The bytes of the part hashed `sha256`: from the run file, or from the run's
-/// blob directory. `None` when neither holds them.
+/// The bytes of the part hashed `sha256`, from the run's blob directory.
+/// `None` when the hash is not one, or its file is not there; a file that is
+/// there and does not read is an error.
 pub(crate) fn blob(run_id: &str, sha256: &str) -> Result<Option<Vec<u8>>, ServeError> {
-    let from_file = match (run_file::open(run_id)?, Digest::new(sha256)) {
-        (Some(reader), Ok(digest)) => reader
-            .blob(&digest)
-            .map_err(|e| run_file::unreadable(run_id, &e))?,
-        _ => None,
+    let Ok(digest) = Digest::new(sha256) else {
+        return Ok(None);
     };
-    Ok(from_file.or_else(|| crate::blobs::read(run_id, sha256).ok()))
+    match leviath_runtime::runfile::read_blob(&crate::runstate::run_dir(run_id), &digest) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(leviath_runtime::runfile::RunFileErrorKind::MissingBlob(_)) => Ok(None),
+        Err(why) => Err(ServeError::Internal(format!(
+            "the stored part {sha256} of run '{run_id}' does not read: {why}"
+        ))),
+    }
 }
 
 #[cfg(test)]

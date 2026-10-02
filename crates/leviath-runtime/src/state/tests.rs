@@ -222,7 +222,7 @@ pub(crate) fn busy() -> RunState {
     s.children.push(RunId::new("child-1").unwrap());
     s.title = Some("Fix it".into());
     s.final_output = Some(FinalOutputState {
-        content: "done".into(),
+        bytes: 4,
         format: Some("markdown".into()),
         stage: stage("build"),
         submitted_at: 9,
@@ -250,6 +250,20 @@ pub(crate) fn busy() -> RunState {
         )
         .into(),
     );
+    s.files.final_output = Some(super::FileRef::whole("final_output", b"done"));
+    s.files.set_stage_file(
+        1,
+        super::StageFile::Logs,
+        super::FileRef::log("stages/1/logs.log", 9),
+    );
+    s.blobs.push(super::BlobFile {
+        digest: crate::spec::names::Digest::of(b"png"),
+        mime_type: "image/png".into(),
+        size: 3,
+        name: Some("chart.png".into()),
+        region: Some(crate::spec::names::RegionName::new("notes").unwrap()),
+        tool: Some("make_chart".into()),
+    });
     s
 }
 

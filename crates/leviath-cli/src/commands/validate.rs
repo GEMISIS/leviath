@@ -64,6 +64,11 @@ pub(crate) struct ValidateReport {
     /// Stages a run of this blueprint could reach and never leave, one line
     /// each. The blueprint still runs; `--deny-warnings` fails on these too.
     pub may_never_finish: Vec<String>,
+    /// The keys upgrading this blueprint from `agent.leviath` dropped, until
+    /// its owner edits it. Shown, never counted: the blueprint is as it
+    /// should be, these say what the old one held.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub upgrade_warnings: Vec<String>,
 }
 
 impl ValidateReport {
@@ -87,6 +92,7 @@ impl ValidateReport {
             notes: count(LintSeverity::Note),
             findings,
             may_never_finish,
+            upgrade_warnings: Vec::new(),
         }
     }
 
@@ -101,6 +107,7 @@ impl ValidateReport {
             warnings: 0,
             notes: 0,
             may_never_finish: Vec::new(),
+            upgrade_warnings: Vec::new(),
         }
     }
 
@@ -193,10 +200,14 @@ fn execute_reporting_outcome(
         .graph
         .warnings(&leviath_runtime::spec::issues::SpecPath::root().field("graph"));
     let may_never_finish: Vec<String> = never.iter().map(ToString::to_string).collect();
+    let upgrade_warnings = crate::upgrade_warnings::read(&checked.agent_dir);
     // The human report is several separate printers. JSON is one document, so
     // it is built after the lint and emitted once, and none of these run.
     if !args.json {
         for line in crate::commands::run::request::warnings_report(&never) {
+            println!("{line}");
+        }
+        for line in upgrade_lines(&upgrade_warnings, &checked.agent_dir) {
             println!("{line}");
         }
         for line in toml_blueprint::success_lines(&checked) {
@@ -214,12 +225,13 @@ fn execute_reporting_outcome(
     let findings = lint_blueprint(&checked.file, &env);
     let (errors, warnings) = match args.json {
         true => {
-            let report = ValidateReport::linted(
+            let mut report = ValidateReport::linted(
                 BlueprintSummary::of(&checked),
                 findings,
                 may_never_finish,
                 args.deny_warnings,
             );
+            report.upgrade_warnings = upgrade_warnings;
             report.print();
             (report.errors, report.warnings + never.len())
         }
@@ -233,6 +245,19 @@ fn execute_reporting_outcome(
         return Ok(ValidateOutcome::LintFailed { errors, warnings });
     }
     Ok(ValidateOutcome::Success)
+}
+
+/// A `warning:` line for each key upgrading the blueprint in `dir` dropped,
+/// and how to dismiss them.
+fn upgrade_lines(warnings: &[String], dir: &std::path::Path) -> Vec<String> {
+    let mut lines: Vec<String> = warnings.iter().map(|w| format!("warning: {w}")).collect();
+    if !lines.is_empty() {
+        lines.push(format!(
+            "  ({})",
+            crate::upgrade_warnings::dismiss_hint(dir)
+        ));
+    }
+    lines
 }
 
 /// What the lint knows about this machine: the blueprint's own tools always,
@@ -1591,6 +1616,40 @@ tools = ["submit_output"]
                 .unwrap()
                 .is_success()
         );
+    }
+
+    /// A blueprint an upgrade dropped keys from is validated with a warning
+    /// for each, which never fails it, until its file changes.
+    #[test]
+    fn an_upgraded_blueprint_warns_what_it_dropped_without_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), &clean_manifest());
+        assert!(upgrade_lines(&[], dir.path()).is_empty());
+        std::fs::create_dir_all(dir.path().join("legacy")).unwrap();
+        let dropped = "[agent]: `colour = \"blue\"` was dropped".to_string();
+        crate::upgrade_warnings::record(dir.path(), std::slice::from_ref(&dropped)).unwrap();
+        let lines = upgrade_lines(std::slice::from_ref(&dropped), dir.path());
+        assert_eq!(lines[0], format!("warning: {dropped}"));
+        assert!(lines[1].contains("upgrade-warnings.json"), "{lines:?}");
+        let mut deny = args_for(dir.path());
+        deny.deny_warnings = true;
+        for args in [deny, json_args_for(dir.path())] {
+            assert!(
+                execute_reporting_outcome(&args, None, None)
+                    .unwrap()
+                    .is_success()
+            );
+        }
+        let mut report = ValidateReport::failed("x".to_string());
+        assert!(
+            serde_json::to_value(&report)
+                .unwrap()
+                .get("upgrade_warnings")
+                .is_none()
+        );
+        report.upgrade_warnings = vec![dropped.clone()];
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["upgrade_warnings"][0], dropped.as_str());
     }
 
     #[test]

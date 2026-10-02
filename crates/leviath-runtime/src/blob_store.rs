@@ -3,10 +3,9 @@
 //!
 //! A part whose bytes are not text is written once under
 //! `<runs_dir>/<run_id>/blobs/<sha256>` and referenced by hash everywhere
-//! else. The run's file takes a copy of each one at the run's next step and is
-//! what holds them for good: a part the blob directory lacks is read from the
-//! file. Deleting the run deletes its blobs; nothing outside the run's
-//! directory points at them. A world with no runs directory (the embedding
+//! else, the run's file included: the file names each part and never holds
+//! its bytes, so a part whose file is gone is refused by name. Deleting the
+//! run deletes its blobs; nothing outside the run's directory points at them. A world with no runs directory (the embedding
 //! mode) keeps the same bytes in memory instead.
 
 use std::collections::BTreeMap;
@@ -311,26 +310,6 @@ impl FsBlobStore {
         }
         Ok(self.dir_for(run_id)?.join(sha256))
     }
-
-    /// The bytes hashed `sha256` as `run_id`'s run file holds them. The run
-    /// file holds every part the run stored; the blob directory is where its
-    /// tools write a part and read it back while the run goes on, and a run
-    /// converted from the older layout, or one whose directory lost it, has
-    /// only the file.
-    fn held_in_run_file(
-        &self,
-        run_id: &str,
-        digest: &crate::spec::names::Digest,
-    ) -> Option<Vec<u8>> {
-        let path = self
-            .runs_dir
-            .join(run_id)
-            .join(leviath_core::files::RUN_FILE);
-        std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| crate::runfile::RunFileReader::from_bytes(&path, bytes).ok())
-            .and_then(|reader| reader.blob(digest).ok().flatten())
-    }
 }
 
 impl BlobStore for FsBlobStore {
@@ -355,15 +334,17 @@ impl BlobStore for FsBlobStore {
 
     fn read(&self, run_id: &str, sha256: &str) -> io::Result<Arc<[u8]>> {
         let path = self.path_for(run_id, sha256)?;
-        match std::fs::read(&path) {
-            Ok(bytes) => Ok(Arc::from(bytes)),
-            // `path_for` checked the hash, so it is a digest.
-            Err(e) => crate::spec::names::Digest::new(sha256)
-                .ok()
-                .and_then(|digest| self.held_in_run_file(run_id, &digest))
-                .ok_or(e)
-                .map(Arc::from),
-        }
+        std::fs::read(&path)
+            .map(Arc::from)
+            .map_err(|e| match e.kind() {
+                io::ErrorKind::NotFound => io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "run '{run_id}' names the stored part {sha256}, and its file is missing"
+                    ),
+                ),
+                _ => e,
+            })
     }
 
     fn copy(&self, from_run: &str, to_run: &str, sha256: &str) -> io::Result<()> {
@@ -714,34 +695,33 @@ mod tests {
         assert_eq!(state.get(&world).unwrap().provider_file_ttl_secs(), 7);
     }
 
-    /// A part only the run file holds (its blob directory gone, or never
-    /// written, as for a run converted from the older layout) reads from the
-    /// file, and copies out of it.
+    /// A part whose file is not in the run's blob directory is refused by
+    /// name, whatever the run's file says: the file names parts and never
+    /// holds their bytes. A part that is there reads, and copies.
     #[test]
-    fn a_part_only_the_run_file_holds_reads_from_the_file() {
-        use crate::runfile::codec::{FrameKind, encode, header};
+    fn a_part_whose_file_is_missing_is_refused_by_name() {
         use crate::spec::names::Digest;
         let tmp = tempfile::tempdir().unwrap();
         let store = FsBlobStore::new(tmp.path().to_path_buf());
-        let bytes = b"kept in the file".to_vec();
-        let digest = Digest::of(&bytes);
-        let sha = digest.as_str().to_string();
-        assert!(store.read("run-a", &sha).is_err(), "no run, no part");
-        let dir = tmp.path().join("run-a");
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut file = header(crate::runfile::fingerprint());
-        file.extend(encode(FrameKind::Spec, &crate::spec::run_spec::tests::spec()).unwrap());
-        file.extend(encode(FrameKind::Blob, &(digest, bytes.clone())).unwrap());
-        std::fs::write(dir.join(leviath_core::files::RUN_FILE), file).unwrap();
+        let bytes = b"kept beside the run file".to_vec();
+        let sha = Digest::of(&bytes).as_str().to_string();
+        let missing = store.read("run-a", &sha).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert!(missing.to_string().contains(&sha), "{missing}");
+        assert!(missing.to_string().contains("run 'run-a'"), "{missing}");
+        let blobs = tmp.path().join("run-a").join(BLOBS_DIR);
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::write(blobs.join(&sha), &bytes).unwrap();
         assert_eq!(&*store.read("run-a", &sha).unwrap(), bytes.as_slice());
-        assert!(store.has("run-a", &sha));
         store.copy("run-a", "run-b", &sha).unwrap();
         assert!(store.path_for("run-b", &sha).unwrap().is_file());
-        let missing = Digest::of(b"never stored");
-        assert!(store.read("run-a", missing.as_str()).is_err());
-        // A run file that does not read holds nothing.
-        std::fs::write(dir.join(leviath_core::files::RUN_FILE), b"not a run file").unwrap();
-        assert!(store.read("run-a", &sha).is_err());
+        // A path where a file should be that is not one fails as it is.
+        let other = Digest::of(b"a directory").as_str().to_string();
+        std::fs::create_dir_all(blobs.join(&other)).unwrap();
+        assert_ne!(
+            store.read("run-a", &other).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

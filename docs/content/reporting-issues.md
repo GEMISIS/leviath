@@ -46,8 +46,9 @@ A small screen asks what the problem was about. For a run, it asks which one. Th
 The last three depend on what you said the problem was about. Everything else is always in.
 
 A run's `run.lvr` is its run file rewritten with the secrets taken out, and `run.json` holds the
-same values as JSON. Copied into another home's `runs` directory, the run reads like any other with
-`lev run show`, `lev timeline` and `lev result`. `request.json` is the spawn request that starts it
+same values as JSON. The files it names beside it (its answer, stage logs, audits and media) are in
+the bundle at the same paths. Copied into another home's `runs` directory, the run reads like any
+other with `lev run show`, `lev timeline` and `lev result`. `request.json` is the spawn request that starts it
 again, and the zip's `README.md` gives the commands for both.
 
 ## What the zip never holds

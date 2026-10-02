@@ -172,7 +172,7 @@ pub(crate) fn collect_inference(
     mut agents: Query<InferenceQuery, With<AwaitingInference>>,
     mut calls: crate::inference_call::CallParams,
     breaker: Breaker,
-    persist: Option<Res<crate::pipeline::persist::PersistenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
 ) {
@@ -491,7 +491,7 @@ pub(crate) fn collect_inference(
                     //
                     // Keyed on the agent id, which is the run id, so it lands in
                     // the same journal as the attempts it sits between. A world
-                    // with no lane writes nothing, exactly as the attempts do.
+                    // with no journal writes nothing, exactly as the attempts do.
                     if let Some(persist) = persist.as_deref() {
                         let record = crate::runfile::record::FailoverRecord {
                             stage: state.current_stage.clone(),
@@ -508,13 +508,10 @@ pub(crate) fn collect_inference(
                             kind: crate::inference_bridge::failure_label(&err),
                             at: now,
                         };
-                        let _ = persist.0.send(PersistMsg::Append {
-                            run_id: state.agent_id.clone(),
-                            record: Box::new(crate::runfile::record::RunRecord::InferenceFailover(
-                                record,
-                            )),
-                            ack: None,
-                        });
+                        persist.record(
+                            &state.agent_id,
+                            crate::runfile::record::RunRecord::InferenceFailover(record),
+                        );
                     }
                     let si = inference
                         .as_deref_mut()

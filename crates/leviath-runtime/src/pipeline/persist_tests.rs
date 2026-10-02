@@ -328,7 +328,9 @@ fn next_step(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
 ) -> Option<crate::state::RunState> {
     match rx.try_recv().ok()? {
-        crate::persistence_bridge::PersistMsg::Snapshot(job) => job.run_file.map(|s| s.state),
+        crate::persistence_bridge::PersistMsg::Snapshot(job) => {
+            job.run_file.and_then(|s| s.now).map(|now| now.state)
+        }
         _ => None,
     }
 }

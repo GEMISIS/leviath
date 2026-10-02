@@ -42,8 +42,8 @@ pub use crate::bind::RegionScripts;
 /// Place a run into the world and return its entity.
 ///
 /// The spec, the state and the bindings are all it reads, besides the world's
-/// persistence lane (which the window's change records go down when the world
-/// has one) and the entities of any fan-out workers already placed.
+/// journal (which the window's change records go to when the world has one)
+/// and the entities of any fan-out workers already placed.
 pub fn insert(
     world: &mut World,
     spec: Arc<RunSpec>,
@@ -55,7 +55,7 @@ pub fn insert(
     let mut window = place::context_window(&spec, state);
     window.attach_journal(
         spec.run_id.as_str(),
-        world.get_resource::<crate::pipeline::PersistenceStage>(),
+        world.get_resource::<crate::pipeline::JournalSender>(),
     );
     let workers = place::worker_entities(world, state);
     // A resumed run is at the step its file ended on, until it takes another.
@@ -82,6 +82,7 @@ pub fn insert(
         place::run_clock(state),
         crate::pipeline::PersistWatermark::default(),
         place::outcome_flags(state),
+        crate::pipeline::RunBlobs(state.blobs.clone()),
     ));
     place::spec_components(&mut entity, &spec, &setup);
     place::optional_state(&mut entity, state);

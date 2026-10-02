@@ -89,6 +89,8 @@ mod messaging;
 pub(crate) use messaging::{MessageIntake, deliver_messages};
 mod journal_health;
 pub(crate) use journal_health::{PersistLaneHealth, fail_runs_with_unwritable_journals};
+pub(crate) mod journal;
+pub(crate) use journal::{JournalInbox, JournalSender, RunBlobs, RunJournals};
 mod persist;
 pub use persist::PersistWatermark;
 #[cfg(test)]

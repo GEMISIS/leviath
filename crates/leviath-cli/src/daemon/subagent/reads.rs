@@ -232,6 +232,10 @@ pub(super) fn render_history(run_id: &str, view: View, history: &RunHistory) -> 
             "children": state.children,
             "wait_reason": state.wait_reason,
             "final_output": state.final_output,
+            "answer": history.answer.as_ref().map(|answer| match answer {
+                Ok(text) => json!(text),
+                Err(why) => json!({ "unreadable": why }),
+            }),
             "transitions": transitions.len(),
             "last_transition": transitions.last(),
         })),

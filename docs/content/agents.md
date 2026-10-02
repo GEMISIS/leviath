@@ -141,15 +141,19 @@ stateDiagram-v2
   Running --> CompleteInteractive: done, still accepting messages
   Running --> Error: unrecoverable error
   Running --> Cancelled: lev cancel
+  Cancelled --> Running: lev resume
   Complete --> [*]
   CompleteInteractive --> [*]
   Error --> [*]
-  Cancelled --> [*]
 ```
 
 These are the exact `RunStatus` values the [dashboard](/docs/dashboard) and [API](/docs/api)
 report. `CompleteInteractive` means every required stage finished but the run is still
 accepting [messages](/docs/interaction).
+
+`Cancelled` is not the end of a run. A cancelled run stops where it is and keeps everything it
+had, and `lev resume` brings it back to carry on from there. `Complete`, `CompleteInteractive`
+and `Error` are where a run ends.
 
 `WaitingInput` covers two very different situations: a run stopped on a prompt somebody has
 to answer, and a run parked while its own [sub-agents](/docs/sub-agents) or

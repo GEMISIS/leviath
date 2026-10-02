@@ -351,7 +351,20 @@ fn context_entries_of_every_kind_are_typed() {
         bad.name = " bad".into();
         snapshot.regions.push(bad);
     });
+    // The part's file is in the blob directory too: it is named once, as its
+    // context holds it.
+    let good = "a".repeat(64);
+    std::fs::create_dir_all(run.path("blobs")).unwrap();
+    std::fs::write(run.path("blobs").join(&good), b"png").unwrap();
     let (report, file) = run.converted();
+    let named: Vec<_> = file
+        .last
+        .blobs
+        .iter()
+        .filter(|b| b.digest.as_str() == good)
+        .collect();
+    assert_eq!(named.len(), 1);
+    assert_eq!(named[0].mime_type, "image/png");
     let task = &file.states[0].context.region("task").unwrap().entries;
     assert_eq!(task[1].kind, EntryKind::UserMessage);
     assert_eq!(
@@ -374,8 +387,11 @@ fn context_entries_of_every_kind_are_typed() {
     assert!(report.notes.iter().any(|n| n.contains("\"nope\"")));
 }
 
+/// Stored parts stay in `blobs/`, where a run keeps them, and the run file
+/// names each one rather than holding its bytes. A file there whose name is
+/// not a digest is not named, and the report says so.
 #[test]
-fn stored_parts_become_blob_frames() {
+fn stored_parts_stay_beside_the_run_file_and_are_named() {
     let run = Run::fixture("finished");
     let blobs = run.path("blobs");
     std::fs::create_dir_all(&blobs).unwrap();
@@ -383,9 +399,30 @@ fn stored_parts_become_blob_frames() {
     std::fs::write(blobs.join(digest.as_str()), b"png").unwrap();
     std::fs::write(blobs.join("notes.txt"), b"x").unwrap();
     let (report, file) = run.converted();
-    assert_eq!(file.blobs, vec![(digest, b"png".to_vec())]);
+    let named: Vec<_> = file
+        .last
+        .blobs
+        .iter()
+        .map(|b| {
+            (
+                b.digest.clone(),
+                b.size,
+                b.mime_type.as_str(),
+                b.region.is_none(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        vec![(digest.clone(), 3, "application/octet-stream", true)]
+    );
     assert!(report.notes.iter().any(|n| n.contains("blobs/notes.txt")));
-    assert!(report.legacy_dir.join("blobs").is_dir());
+    assert!(blobs.join(digest.as_str()).is_file());
+    assert!(!report.legacy_dir.join("blobs").exists());
+    let bytes = std::fs::read(run.path("run.lvr")).unwrap();
+    let reader =
+        leviath_runtime::runfile::RunFileReader::from_bytes(&run.path("run.lvr"), bytes).unwrap();
+    assert_eq!(reader.blob(&digest).unwrap(), b"png");
 }
 
 #[test]
@@ -479,9 +516,10 @@ fn a_final_output_without_its_file_or_stage_is_named() {
     });
     let (report, file) = run.converted();
     let out = file.last.final_output.as_ref().unwrap();
-    assert_eq!(out.content, "");
+    assert_eq!(out.bytes, 0);
+    assert_eq!(file.last.files.final_output, None);
     assert_eq!(out.stage.as_str(), "engine");
-    assert!(report.defaulted("final_output.content").is_some());
+    assert!(report.defaulted("final_output.bytes").is_some());
     // The files it handed back are kept with it.
     assert_eq!(out.artifacts.len(), 1);
     assert_eq!(out.artifacts[0].path, "a.png");
@@ -592,12 +630,18 @@ fn broken_directories_are_refused_by_name() {
 
 #[test]
 fn files_that_cannot_be_read_or_moved_are_named() {
+    // A directory where a stored part would be is not one, and is said so.
     let run = Run::fixture("finished");
     let digest = leviath_runtime::spec::names::Digest::of(b"x");
     std::fs::create_dir_all(run.path("blobs").join(digest.as_str())).unwrap();
-    let err = run.convert().unwrap_err();
-    assert!(matches!(err, ConvertError::Io { .. }));
-    assert!(err.to_string().contains(digest.as_str()));
+    let (report, file) = run.converted();
+    assert!(file.last.blobs.is_empty());
+    let note = format!("blobs/{digest} is not named in the run file");
+    assert!(
+        report.notes.iter().any(|n| n.contains(&note)),
+        "{:?}",
+        report.notes
+    );
 
     let run = Run::fixture("finished");
     run.write("legacy", "in the way");
@@ -631,20 +675,22 @@ fn a_task_the_graph_does_not_take_is_noted() {
 }
 
 /// A region key the old parser read nothing from, such as `max_stored`,
-/// converts as if it were not there, and a note names it.
+/// converts as if it were not there, and the report names it with its value.
 #[test]
-fn a_key_the_old_parser_ignored_is_left_out_with_a_note() {
+fn a_key_the_old_parser_ignored_is_left_out_and_reported() {
     let run = Run::fixture("finished");
     let text = std::fs::read_to_string(run.path("blueprint.leviath")).unwrap();
     let text = text.replace("seed = \"task\" }", "seed = \"task\", max_stored = 4 }");
     run.write("blueprint.leviath", &text);
     let (report, _) = run.converted();
     let notes = &report.notes;
+    let dropped: Vec<String> = report.dropped.iter().map(ToString::to_string).collect();
+    assert_eq!(report.blueprint_name, "probe");
     assert!(
-        notes
+        dropped
             .iter()
-            .any(|n| n.contains("region 'task'") && n.contains("`max_stored`")),
-        "{notes:?}"
+            .any(|n| n.contains("region 'task'") && n.contains("`max_stored = 4`")),
+        "{dropped:?}"
     );
     assert!(
         !notes.iter().any(|n| n.contains("could not be read")),

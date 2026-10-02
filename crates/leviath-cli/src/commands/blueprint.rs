@@ -11,6 +11,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 
+#[cfg(feature = "legacy-runs")]
+use leviath_legacy_runs::Migrated;
+
+/// What a build without the old-format reader would have converted to; it
+/// never converts, so none is ever made.
+#[cfg(not(feature = "legacy-runs"))]
+pub(crate) struct Migrated {
+    name: String,
+    text: String,
+    notes: Vec<String>,
+    dropped: Vec<String>,
+}
+
 /// Arguments for `lev blueprint`.
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct BlueprintArgs {
@@ -62,7 +75,12 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
     let manifest = manifest_path(&args.path);
     let text = std::fs::read_to_string(&manifest)
         .with_context(|| format!("could not read '{}'", manifest.display()))?;
-    let (blueprint, notes) = convert(&text).map_err(|problems| {
+    let Migrated {
+        name,
+        text: blueprint,
+        notes,
+        dropped,
+    } = convert(&text).map_err(|problems| {
         let mut lines = vec![format!(
             "'{}' does not convert: {} problem(s)",
             manifest.display(),
@@ -71,8 +89,8 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
         lines.extend(problems.iter().map(|p| format!("  {p}")));
         anyhow::anyhow!(lines.join("\n"))
     })?;
-    for note in notes {
-        eprintln!("note: {note}");
+    for line in said(&name, &notes, &dropped) {
+        eprintln!("{line}");
     }
     let Some(out) = &args.output else {
         return Ok(Some(blueprint));
@@ -93,6 +111,17 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
     Ok(None)
 }
 
+/// What a migration tells the person running it besides the blueprint: a
+/// `note:` for each setting the new file spells differently, and a
+/// `warning:` for each key it dropped because the old release never read it.
+fn said(name: &str, notes: &[String], dropped: &[impl std::fmt::Display]) -> Vec<String> {
+    let notes = notes.iter().map(|note| format!("note: {note}"));
+    let dropped = dropped
+        .iter()
+        .map(|line| format!("warning: blueprint '{name}': {line}"));
+    notes.chain(dropped).collect()
+}
+
 /// The name of an `agent.leviath` manifest, inside its directory.
 const MANIFEST_FILE: &str = "agent.leviath";
 
@@ -107,13 +136,13 @@ fn manifest_path(path: &Path) -> PathBuf {
 /// The text of an `agent.leviath` as an `agent.toml`, or every problem with
 /// it.
 #[cfg(feature = "legacy-runs")]
-pub(crate) fn convert(manifest: &str) -> Result<(String, Vec<String>), Vec<String>> {
+pub(crate) fn convert(manifest: &str) -> Result<Migrated, Vec<String>> {
     leviath_legacy_runs::migrate_noted(manifest)
 }
 
 /// Without the old-format reader there is nothing to convert with.
 #[cfg(not(feature = "legacy-runs"))]
-pub(crate) fn convert(_manifest: &str) -> Result<(String, Vec<String>), Vec<String>> {
+pub(crate) fn convert(_manifest: &str) -> Result<Migrated, Vec<String>> {
     Err(vec![
         "this build of lev cannot read agent.leviath files (it was built without the \
          legacy-runs feature)"
@@ -177,6 +206,33 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         .expect("printed");
         assert!(printed.contains("fan_out"), "{printed}");
         assert!(!printed.contains("max_workers"), "{printed}");
+    }
+
+    /// A key the old release accepted and never read is left out of the
+    /// blueprint, and the migration warns about it, naming the blueprint, the
+    /// key and its value.
+    #[tokio::test]
+    async fn a_key_nothing_read_is_dropped_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = OLD_CODER.replacen("[agent]", "[agent]\ncolour = \"blue\"", 1);
+        std::fs::write(dir.path().join(MANIFEST_FILE), &text).unwrap();
+        let printed = migrate(&MigrateArgs {
+            path: dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .unwrap()
+        .expect("printed");
+        assert!(!printed.contains("colour"), "{printed}");
+        let done = convert(&text).unwrap();
+        let lines = said(&done.name, &["spelled anew".to_string()], &done.dropped);
+        assert_eq!(lines[0], "note: spelled anew");
+        assert!(
+            lines[1].starts_with(
+                "warning: blueprint 'coder': [agent]: `colour = \"blue\"` was dropped: Leviath \
+                 0.6.4 and earlier accepted it but never read it"
+            ),
+            "{lines:?}"
+        );
     }
 
     /// A manifest converts to a blueprint that loads as the same run, named

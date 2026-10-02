@@ -692,22 +692,23 @@ impl From<&Flags> for StateFlags {
 #[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct StateAnswer {
-    /// The answer.
-    pub(crate) content: String,
+    /// Its size in bytes. The answer itself is in the file the run's `files`
+    /// name, and `Run.finalOutput` reads it.
+    pub(crate) bytes: BigInt,
     /// The format it was asked for in.
     pub(crate) format: Option<String>,
     /// The stage that submitted it.
     pub(crate) stage: String,
     /// When.
     pub(crate) submitted_at: Timestamp,
-    /// Whether `content` was cut short.
+    /// Whether the answer was cut short.
     pub(crate) truncated: bool,
 }
 
 impl From<&FinalOutputState> for StateAnswer {
     fn from(o: &FinalOutputState) -> Self {
         Self {
-            content: o.content.clone(),
+            bytes: super::big(o.bytes),
             format: o.format.clone(),
             stage: o.stage.to_string(),
             submitted_at: Timestamp(o.submitted_at),
@@ -857,6 +858,10 @@ pub(crate) struct RunState {
     /// machine no longer has, or that changed since it started. Null when it
     /// is not held.
     pub(crate) held: Option<Vec<crate::commands::serve::graphql::mutation::spawn::SpawnIssue>>,
+    /// The answer, logs and audits it keeps beside its run file.
+    pub(crate) files: super::files::StateFiles,
+    /// The stored parts it keeps beside its run file.
+    pub(crate) blobs: Vec<super::files::StateBlob>,
 }
 
 /// The issues a held run is held for, as the schema types them.
@@ -902,6 +907,8 @@ impl From<&CoreState> for RunState {
             last_transition: s.last_transition.as_ref().map(StageTransition::from),
             checkpoint: CheckpointProgress::from(&s.point),
             held: held_issues(s.held.as_ref()),
+            files: super::files::StateFiles::from(&s.files),
+            blobs: s.blobs.iter().map(super::files::StateBlob::from).collect(),
         }
     }
 }

@@ -4989,6 +4989,9 @@ async fn subagent_history_reads_the_callers_own_tree() {
     // `gone` was recorded as a child but left no run file to read.
     parent.last_mut().unwrap().children =
         vec![RunId::new("t-2").unwrap(), RunId::new("gone").unwrap()];
+    // It names an answer whose file is not there.
+    parent.last_mut().unwrap().files.final_output =
+        Some(crate::state::FileRef::whole("final_output", b"lost"));
     write_run_file(dir.path(), "t-1", &parent);
     let mut child = crate::runfile::reader_tests::scripted_run(2);
     let moved = TransitionRecord {
@@ -4999,7 +5002,10 @@ async fn subagent_history_reads_the_callers_own_tree() {
         visit: "v2".to_string(),
     };
     child[1].last_transition = Some(moved.clone());
+    child.last_mut().unwrap().files.final_output =
+        Some(crate::state::FileRef::whole("final_output", b"done"));
     write_run_file(dir.path(), "t-2", &child);
+    std::fs::write(dir.path().join("t-2").join("final_output"), b"done").unwrap();
     write_run_file(dir.path(), "t-3", &child);
     let mut host = host_in(dir.path());
 
@@ -5018,12 +5024,21 @@ async fn subagent_history_reads_the_callers_own_tree() {
     assert_eq!(read.last_seq, child.len() as u64 - 1);
     assert_eq!(read.state.seq, read.last_seq);
     assert_eq!(read.transitions, vec![(1, moved)]);
+    assert_eq!(read.answer, Some(Ok("done".to_string())));
     let early = ask_sub(&mut host, history("t-2", "t-1", Some(1)))
         .await
         .unwrap();
     assert_eq!(early.state.seq, 1);
-    let own = ask_sub(&mut host, history("t-1", "t-1", None)).await;
-    assert!(own.unwrap().transitions.is_empty());
+    let own = ask_sub(&mut host, history("t-1", "t-1", None))
+        .await
+        .unwrap();
+    assert!(own.transitions.is_empty());
+    assert!(
+        own.answer
+            .unwrap()
+            .unwrap_err()
+            .contains("final_output does not read")
+    );
 
     let outside = ask_sub(&mut host, history("t-3", "t-1", None)).await;
     assert!(

@@ -1,6 +1,7 @@
 use super::*;
+use crate::runfile::lane::{RunFileStep, RunNow};
 use crate::runfile::reader_tests::{initial, spec};
-use crate::runfile::record::RunRecord;
+use crate::state::RunEvent;
 use leviath_core::run_meta::RunMeta;
 use tokio::sync::mpsc;
 
@@ -34,13 +35,60 @@ fn job(run_id: &str) -> PersistJob {
 }
 
 /// The run-file step of a run of `spec()` in its `initial()` state.
-fn step(run_id: &str) -> Option<Box<crate::runfile::lane::RunFileStep>> {
-    Some(Box::new(crate::runfile::lane::RunFileStep {
+fn step(run_id: &str) -> Option<Box<RunFileStep>> {
+    Some(Box::new(RunFileStep {
         run_id: run_id.to_string(),
-        spec: std::sync::Arc::new(spec()),
-        state: initial(),
+        now: Some(RunNow {
+            spec: std::sync::Arc::new(spec()),
+            state: initial(),
+        }),
         at: 1,
+        events: Vec::new(),
+        acks: Vec::new(),
     }))
+}
+
+/// A line that says something happened, as a step's event.
+fn log(line: &str) -> RunEvent {
+    RunEvent::Log(line.to_string())
+}
+
+/// A step of `events` for `run_id`, and the waiter that hears where it
+/// landed.
+fn events(
+    run_id: &str,
+    events: Vec<RunEvent>,
+) -> (PersistMsg, tokio::sync::oneshot::Receiver<Appended>) {
+    let (ack, landed) = tokio::sync::oneshot::channel();
+    let mut step = RunFileStep::events(run_id, 1, events);
+    step.acks.push(ack);
+    (PersistMsg::Step(Box::new(step)), landed)
+}
+
+/// A snapshot whose step holds `events`, and the waiter that hears where it
+/// landed.
+fn stepped_with(
+    run_id: &str,
+    happened: Vec<RunEvent>,
+) -> (PersistMsg, tokio::sync::oneshot::Receiver<Appended>) {
+    let (ack, landed) = tokio::sync::oneshot::channel();
+    let mut job = stepped(run_id);
+    let step = job.run_file.as_mut().unwrap();
+    step.events = happened;
+    step.acks.push(ack);
+    (PersistMsg::Snapshot(job), landed)
+}
+
+/// Every event `run_id`'s file holds, step by step.
+fn steps_of(runs: &Path, run_id: &str) -> Vec<Vec<RunEvent>> {
+    let read =
+        crate::runfile::RunFileReader::open(&runs.join(run_id).join(leviath_core::files::RUN_FILE))
+            .unwrap();
+    read.deltas(1, read.last_seq())
+        .unwrap()
+        .into_iter()
+        .map(|d| d.events)
+        .collect()
 }
 
 /// A job carrying its run-file step.
@@ -49,26 +97,6 @@ fn stepped(run_id: &str) -> Box<PersistJob> {
         run_file: step(run_id),
         ..job(run_id)
     })
-}
-
-/// A record that a tool batch was dispatched.
-fn batch_record(call_id: &str) -> RunRecord {
-    RunRecord::ToolBatch {
-        calls: vec![crate::runfile::record::ToolCallRecord {
-            id: call_id.to_string(),
-            execution_id: String::new(),
-            name: "shell".to_string(),
-            arguments: "{}".to_string(),
-            result: None,
-            thought_signature: None,
-        }],
-        at: 1,
-        stage_index: 0,
-        iteration: 0,
-        visit_id: String::new(),
-        requested_by: String::new(),
-        response: "running".to_string(),
-    }
 }
 
 /// Run the worker over `msgs` in one batch, under `runs`.
@@ -172,6 +200,8 @@ async fn every_file_beside_the_run_file_is_private_to_this_user() {
     j.output_appends = vec![(0, "said".to_string())];
     let outcome = write_snapshot(dir.path(), &j, None).await;
     assert!(outcome.dir_made && outcome.files.is_none());
+    assert_eq!(outcome.named.stages.len(), 1);
+    assert!(outcome.named.final_output.is_some());
     let run_dir = dir.path().join("run-perms");
     for path in [
         run_dir.join(leviath_core::FINAL_OUTPUT_FILE),
@@ -261,80 +291,53 @@ async fn a_stage_log_that_cannot_be_opened_is_not_a_loss() {
     let dir = tempfile::tempdir().unwrap();
     let stage = dir.path().join("r").join("stages").join("0");
     std::fs::create_dir_all(stage.join("logs.log")).unwrap();
-    append_stage_line(&dir.path().join("r"), 0, "logs.log", "x", "r").await;
+    let mut named = RunFiles::default();
+    let lines = [(0, "x".to_string())];
+    append_lines(&dir.path().join("r"), &[], &lines, "r", &mut named).await;
+    assert_eq!(named, RunFiles::default(), "a log not written is not named");
 }
 
-/// A world with no runs dir writes nothing and still acks every append.
+/// A world with no runs dir writes nothing and still answers every step's
+/// waiters.
 #[tokio::test]
 async fn worker_without_a_runs_dir_drains_messages_and_writes_nothing() {
     let (tx, rx) = mpsc::unbounded_channel();
-    let (ack, acked) = tokio::sync::oneshot::channel();
-    tx.send(PersistMsg::Snapshot(stepped("r"))).unwrap();
-    tx.send(PersistMsg::Append {
+    let (snapshot, snapshot_landed) = stepped_with("r", vec![log("a")]);
+    let (step, step_landed) = events("r", vec![log("b")]);
+    tx.send(snapshot).unwrap();
+    tx.send(PersistMsg::Snapshot(Box::new(job("r")))).unwrap();
+    tx.send(step).unwrap();
+    tx.send(PersistMsg::StageLines {
         run_id: "r".to_string(),
-        record: Box::new(batch_record("c1")),
-        ack: Some(ack),
-    })
-    .unwrap();
-    tx.send(PersistMsg::Append {
-        run_id: "r".to_string(),
-        record: Box::new(batch_record("c2")),
-        ack: None,
+        output_appends: vec![(0, "x".to_string())],
+        log_appends: vec![],
     })
     .unwrap();
     drop(tx);
     persistence_worker(None, rx, health()).await;
-    assert_eq!(acked.await.unwrap(), Appended::NoJournal);
+    assert_eq!(snapshot_landed.await.unwrap(), Appended::NoJournal);
+    assert_eq!(step_landed.await.unwrap(), Appended::NoJournal);
 }
 
-/// A record with an ack is written as a step of its own before the ack, so
-/// a tool batch is on disk before it runs. One for a run with no file open,
-/// or for a deleted run, lands nowhere and says so.
+/// A step is written as it comes and tells its waiters where it landed, so
+/// a tool batch is on disk before it runs. One for a run with no file yet,
+/// one with nothing in it, and one for a run never written land nowhere and
+/// say so.
 #[tokio::test]
-async fn an_acked_record_is_a_step_of_its_own() {
+async fn a_step_tells_its_waiters_where_it_landed() {
     let dir = tempfile::tempdir().unwrap();
-    let (first, landed) = tokio::sync::oneshot::channel();
-    let (early, before) = tokio::sync::oneshot::channel();
-    let (gone, deleted) = tokio::sync::oneshot::channel();
-    let (quiet, nothing) = tokio::sync::oneshot::channel();
+    let (early, before) = events("run-1", vec![log("early")]);
+    let (first, landed) = events("run-1", vec![log("batch")]);
+    let (quiet, nothing) = events("run-1", Vec::new());
+    let (gone, deleted) = events("never-written", vec![log("lost")]);
     run_lane(
         dir.path(),
         vec![
-            PersistMsg::Append {
-                run_id: "run-1".to_string(),
-                record: Box::new(batch_record("c0")),
-                ack: Some(early),
-            },
+            early,
             PersistMsg::Snapshot(stepped("run-1")),
-            PersistMsg::Append {
-                run_id: "run-1".to_string(),
-                record: Box::new(batch_record("c1")),
-                ack: Some(first),
-            },
-            PersistMsg::Append {
-                run_id: "run-1".to_string(),
-                // A usage record naming no valid model becomes no event.
-                record: Box::new(RunRecord::InferenceUsage {
-                    kind: Default::default(),
-                    stage: String::new(),
-                    iteration: 0,
-                    provider: String::new(),
-                    model: String::new(),
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                    cost_usd: None,
-                    cost_reported_by_provider: None,
-                    at: 1,
-                }),
-                ack: Some(quiet),
-            },
-            PersistMsg::Append {
-                run_id: "never-written".to_string(),
-                record: Box::new(batch_record("c2")),
-                ack: Some(gone),
-            },
+            first,
+            quiet,
+            gone,
         ],
     )
     .await;
@@ -343,54 +346,48 @@ async fn an_acked_record_is_a_step_of_its_own() {
     assert_eq!(
         nothing.await.unwrap(),
         Appended::NoJournal,
-        "a record that is no event of the run's writes no step"
+        "a step with nothing in it writes nothing"
     );
     assert_eq!(deleted.await.unwrap(), Appended::NoJournal);
-    let read = crate::runfile::RunFileReader::open(
-        &dir.path().join("run-1").join(leviath_core::files::RUN_FILE),
-    )
-    .unwrap();
-    let steps = read.deltas(1, read.last_seq()).unwrap();
-    assert!(
-        matches!(&steps[0].events[0], crate::state::RunEvent::ToolStarted(call) if call.id == "c1"),
-        "{steps:?}"
-    );
+    assert_eq!(steps_of(dir.path(), "run-1"), vec![vec![log("batch")]]);
+    assert!(!dir.path().join("never-written").exists());
 }
 
-/// A record no ack waits on, and no later change of state carries, is still
-/// written when its batch ends: what happened after a run's last change does
-/// not wait for a change that may never come. One for a run this lane never
-/// wrote is dropped.
+/// A snapshot superseded in its batch loses its state to the newer one, but
+/// not what happened: its events and waiters ride on the run's next step,
+/// ahead of that step's own, whether that is a step of events or the newest
+/// snapshot, and a newest snapshot with no step of its own gets one for them.
 #[tokio::test]
-async fn a_noted_record_is_written_when_its_batch_ends() {
+async fn a_superseded_snapshots_events_ride_on_the_next_step() {
     let dir = tempfile::tempdir().unwrap();
+    let (s1, first) = stepped_with("run-1", vec![log("a")]);
+    let (between, second) = events("run-1", vec![log("b")]);
+    let (s2, third) = stepped_with("run-1", vec![log("c")]);
+    let (s3, fourth) = stepped_with("run-1", vec![log("d")]);
+    let (s4, fifth) = stepped_with("run-1", vec![log("e")]);
+    run_lane(dir.path(), vec![PersistMsg::Snapshot(stepped("run-1"))]).await;
+    run_lane(dir.path(), vec![s1, between, s2, s3, s4]).await;
+    // The second batch's newest snapshot here has no step of its own.
+    let (s5, sixth) = stepped_with("run-1", vec![log("f")]);
     run_lane(
         dir.path(),
-        vec![
-            PersistMsg::Snapshot(stepped("run-1")),
-            PersistMsg::Append {
-                run_id: "run-1".to_string(),
-                record: Box::new(batch_record("c1")),
-                ack: None,
-            },
-            PersistMsg::Append {
-                run_id: "never-written".to_string(),
-                record: Box::new(batch_record("c2")),
-                ack: None,
-            },
-        ],
+        vec![s5, PersistMsg::Snapshot(Box::new(job("run-1")))],
     )
     .await;
-    let read = crate::runfile::RunFileReader::open(
-        &dir.path().join("run-1").join(leviath_core::files::RUN_FILE),
-    )
-    .unwrap();
-    let steps = read.deltas(1, read.last_seq()).unwrap();
-    assert!(
-        matches!(&steps[0].events[0], crate::state::RunEvent::ToolStarted(call) if call.id == "c1"),
-        "{steps:?}"
+    assert_eq!(first.await.unwrap(), Appended::Landed { position: 1 });
+    assert_eq!(second.await.unwrap(), Appended::Landed { position: 1 });
+    for later in [third, fourth, fifth] {
+        assert_eq!(later.await.unwrap(), Appended::Landed { position: 2 });
+    }
+    assert_eq!(sixth.await.unwrap(), Appended::Landed { position: 3 });
+    assert_eq!(
+        steps_of(dir.path(), "run-1"),
+        vec![
+            vec![log("a"), log("b")],
+            vec![log("c"), log("d"), log("e")],
+            vec![log("f")],
+        ]
     );
-    assert!(!dir.path().join("never-written").exists());
 }
 
 /// A run file step that cannot be written is the run's history lost: it is
@@ -438,24 +435,21 @@ async fn a_lost_step_fails_its_run_and_a_lost_file_does_not() {
     );
 }
 
-/// An acked record whose step cannot be written says so, and fails the run.
+/// A step that cannot be written tells its waiters so, and fails the run.
 #[tokio::test]
-async fn an_acked_record_that_cannot_be_written_says_so() {
+async fn a_step_that_cannot_be_written_says_so() {
     crate::test_support::with_tracing(|| {});
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("run-1")).unwrap();
     let mut lane = crate::runfile::lane::RunFileLane::new("m", "w");
     let stats = health();
     record_run_file(&mut lane, dir.path(), *step("run-1").unwrap(), &stats).await;
-    // Nothing noted, or no file open, writes nothing.
-    assert_eq!(lane.flush(dir.path(), "run-1").await.unwrap(), None);
-    assert_eq!(lane.flush(dir.path(), "no-file").await.unwrap(), None);
-    lane.note("run-1", &batch_record("c1"));
     lane.break_writes("run-1");
-    assert_eq!(
-        flush_run_file(&mut lane, dir.path(), "run-1", &stats).await,
-        Appended::Failed
-    );
+    let (ack, landed) = tokio::sync::oneshot::channel();
+    let mut broken = RunFileStep::events("run-1", 2, vec![log("lost")]);
+    broken.acks.push(ack);
+    record_run_file(&mut lane, dir.path(), broken, &stats).await;
+    assert_eq!(landed.await.unwrap(), Appended::Failed);
     assert_eq!(stats.report().appends_failed, 1);
     assert_eq!(stats.take_unwritable()[0].run_id, "run-1");
 }
@@ -468,11 +462,9 @@ async fn a_snapshot_with_nowhere_to_write_fails_no_run() {
     crate::test_support::with_tracing(|| {});
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("run-blocked"), b"in the way").unwrap();
-    let stats = run_lane(
-        dir.path(),
-        vec![PersistMsg::Snapshot(stepped("run-blocked"))],
-    )
-    .await;
+    let (blocked, landed) = stepped_with("run-blocked", vec![log("x")]);
+    let stats = run_lane(dir.path(), vec![blocked]).await;
+    assert_eq!(landed.await.unwrap(), Appended::NoJournal);
     let report = stats.report();
     assert_eq!(report.appends_attempted, 0);
     assert_eq!(report.snapshots_failed, 1);
@@ -491,17 +483,13 @@ async fn a_deleted_run_is_not_written_back() {
         rx,
         health(),
     ));
-    let (ack, acked) = tokio::sync::oneshot::channel();
+    let (first, acked) = events("run-1", vec![log("c0")]);
     tx.send(PersistMsg::Snapshot(stepped("run-1"))).unwrap();
-    tx.send(PersistMsg::Append {
-        run_id: "run-1".to_string(),
-        record: Box::new(batch_record("c0")),
-        ack: Some(ack),
-    })
-    .unwrap();
+    tx.send(first).unwrap();
     acked.await.unwrap();
     std::fs::remove_dir_all(dir.path().join("run-1")).unwrap();
-    tx.send(PersistMsg::Snapshot(stepped("run-1"))).unwrap();
+    let (again, dropped) = stepped_with("run-1", vec![log("c1")]);
+    tx.send(again).unwrap();
     tx.send(PersistMsg::StageLines {
         run_id: "run-1".to_string(),
         output_appends: vec![(0, "x".to_string())],
@@ -510,6 +498,7 @@ async fn a_deleted_run_is_not_written_back() {
     .unwrap();
     drop(tx);
     lane.await.unwrap();
+    assert_eq!(dropped.await.unwrap(), Appended::NoJournal);
     assert!(
         !dir.path().join("run-1").exists(),
         "nothing brought it back"
@@ -543,10 +532,62 @@ async fn a_lost_write_keeps_the_first_loss() {
     j.final_output = Some("x".to_string());
     j.taint_audit = Some((0, "[]".to_string()));
     let outcome = write_snapshot(dir.path(), &j, None).await;
+    // A file that was not placed is not named.
+    assert_eq!(outcome.named, RunFiles::default());
     let lost = outcome.files.expect("both were lost");
     assert!(
         lost.path.extension().is_some_and(|e| e == "tmp"),
         "{lost:?}"
+    );
+}
+
+/// The answer, the stage logs and the taint audit are written beside the
+/// run file and named by the step that follows them, with their sizes and,
+/// for a file written whole, its digest; none of their bytes go into the run
+/// file. Lines that arrive after the step are named when the lane stops.
+#[tokio::test]
+async fn the_files_beside_a_run_are_named_by_its_step_and_never_copied_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let answer = "an answer long enough to find in the run file ".repeat(40);
+    let mut first = *stepped("run-1");
+    first.final_output = Some(answer.clone());
+    first.taint_audit = Some((1, "[\"audit\"]".to_string()));
+    first.output_appends = vec![(0, "said".to_string())];
+    first.log_appends = vec![(0, "a line".to_string()), (0, "another".to_string())];
+    run_lane(
+        dir.path(),
+        vec![
+            PersistMsg::Snapshot(Box::new(first)),
+            PersistMsg::StageLines {
+                run_id: "run-1".to_string(),
+                output_appends: vec![],
+                log_appends: vec![(0, "later".to_string())],
+            },
+        ],
+    )
+    .await;
+    let run_dir = dir.path().join("run-1");
+    let path = run_dir.join(leviath_core::files::RUN_FILE);
+    let files = crate::runfile::RunFileReader::open(&path)
+        .unwrap()
+        .latest_state()
+        .unwrap()
+        .files;
+    let named = files.final_output.as_ref().unwrap();
+    assert_eq!(named.read(&run_dir).unwrap(), answer.as_bytes());
+    assert_eq!(
+        named.sha256,
+        Some(crate::spec::names::Digest::of(answer.as_bytes()))
+    );
+    let audit = files.stage_file(1, StageFile::TaintAudit).unwrap();
+    assert_eq!(audit.read(&run_dir).unwrap(), b"[\"audit\"]");
+    assert_eq!(files.stage_file(0, StageFile::Output).unwrap().bytes, 5);
+    // The line that came after the step is named as the lane stops.
+    assert_eq!(files.stage_file(0, StageFile::Logs).unwrap().bytes, 21);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(
+        !bytes.windows(20).any(|w| w == &answer.as_bytes()[..20]),
+        "the answer is not copied into the run file"
     );
 }
 

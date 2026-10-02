@@ -143,8 +143,8 @@ pub(crate) struct LaneServices<'w> {
     pub service: Res<'w, ToolServiceRes>,
     /// The lane batches are sent on.
     pub stage: Res<'w, ToolStage>,
-    /// The lane run state is written on.
-    pub persist: Option<Res<'w, PersistenceStage>>,
+    /// Where what a run does is recorded, for its run file.
+    pub persist: Option<Res<'w, super::JournalSender>>,
     /// Where world events are broadcast.
     pub sink: Option<Res<'w, crate::host::WorldEventSink>>,
     /// The hub an approval is asked through.
@@ -293,21 +293,19 @@ fn journal_batch(
     // unpersisted agents) dispatch unjournaled with a no-op progress.
     let journal = match (lane.persist.as_ref(), metadata) {
         (Some(persist), Some(md)) => {
-            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-            let _ = persist.0.send(PersistMsg::Append {
-                run_id: md.run_id.clone(),
-                record: Box::new(dispatch.record()),
-                ack: Some(ack_tx),
-            });
+            let ack_rx = persist.record_acked(&md.run_id, dispatch.record());
             super::tools::journal_artifacts(persist, &md.run_id, &batch.produced);
-            let sender = persist.0.clone();
+            // The calls finish off the tick, so their records wake the world:
+            // one that lands while the rest of the batch runs is in the run's
+            // file before the batch ends.
+            let sender = persist.waking();
             let run_id = md.run_id.clone();
             let iteration = state.iteration;
             let minted = batch.executions.clone();
             let progress: ToolProgress = Arc::new(move |call_id: &str, result| {
-                let _ = sender.send(PersistMsg::Append {
-                    run_id: run_id.clone(),
-                    record: Box::new(crate::runfile::record::RunRecord::ToolCallDone {
+                sender.record(
+                    &run_id,
+                    crate::runfile::record::RunRecord::ToolCallDone {
                         iteration,
                         call_id: call_id.to_string(),
                         // The attempt this completes, so a completion cannot
@@ -315,14 +313,12 @@ fn journal_batch(
                         // provider's id.
                         execution_id: minted.get(call_id).cloned().unwrap_or_default(),
                         result: result.clone(),
-                        // The structured verdict comes with the executor
-                        // contract; until then the completion says only that
-                        // the call finished.
+                        // The completion says only that the call finished:
+                        // its verdict is not known here.
                         outcome: None,
                         at: chrono::Utc::now().timestamp(),
-                    }),
-                    ack: None,
-                });
+                    },
+                );
             });
             // The run id travels with the ack: an ack only exists when the
             // batch was journaled for a known run, so pairing them here leaves

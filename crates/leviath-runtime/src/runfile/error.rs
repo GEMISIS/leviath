@@ -42,6 +42,11 @@ pub enum RunFileErrorKind {
     },
     /// A frame names code the file does not hold.
     MissingCode(Digest),
+    /// The run names a stored part whose file is not in its `blobs/`
+    /// directory.
+    MissingBlob(Digest),
+    /// A file the run names beside its run file does not read as named.
+    Beside(crate::state::files::FileRefError),
 }
 
 impl RunFileError {
@@ -78,6 +83,11 @@ impl fmt::Display for RunFileErrorKind {
                 write!(f, "has no step {seq}; its last step is {last}")
             }
             Self::MissingCode(d) => write!(f, "does not hold the code {d} its spec names"),
+            Self::MissingBlob(d) => write!(
+                f,
+                "names the stored part {d}, and blobs/{d} beside it is missing"
+            ),
+            Self::Beside(e) => write!(f, "names a file beside it that does not read: {e}"),
         }
     }
 }

@@ -79,6 +79,10 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
     std::fs::write(old.join("blueprint.leviath"), probe_with_server(&stub)).unwrap();
     let done = runs.join("done");
     copy_dir(&fixture("finished"), &done);
+    // Its blueprint holds a key the old release never read.
+    let text = std::fs::read_to_string(done.join("blueprint.leviath")).unwrap();
+    let text = text.replace("seed = \"task\" }", "seed = \"task\", max_stored = 4 }");
+    std::fs::write(done.join("blueprint.leviath"), text).unwrap();
     std::fs::create_dir_all(runs.join("junk")).unwrap();
 
     let mut registry = leviath_runtime::ProviderRegistry::new();
@@ -92,7 +96,8 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
     let config = crate::config::Config::default();
     let agents = fixture("agents");
     let home_path = home.path().to_str().unwrap().to_string();
-    temp_env::async_with_vars([("LEVIATH_HOME", Some(home_path))], async {
+    let board = StartupBoard::default();
+    let upgrade = temp_env::async_with_vars([("LEVIATH_HOME", Some(home_path))], async {
         convert_at_start(
             &runs,
             AtStart {
@@ -104,10 +109,22 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
                 shared_mcp: shared.clone(),
                 pool: &pool,
             },
+            &board,
         )
-        .await;
+        .await
     })
     .await;
+    let now = board.current();
+    assert_eq!(
+        (now.step.as_str(), now.done, now.total),
+        ("converting runs", 2, 2)
+    );
+    assert_eq!(upgrade.converted, 2);
+    let dropped: Vec<_> = upgrade.dropped_in_runs.iter().collect();
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    let ((name, line), runs_of) = dropped[0];
+    assert_eq!((name.as_str(), *runs_of), ("probe", 1));
+    assert!(line.contains("`max_stored = 4` was dropped"), "{line}");
 
     let run = leviath_runtime::restore::read_for_resume(&old)
         .unwrap()
@@ -204,7 +221,13 @@ fn what_the_machine_cannot_answer_comes_back_as_why() {
 #[test]
 fn nothing_to_convert_is_left_alone() {
     let runs = tempfile::tempdir().unwrap();
-    convert_all(&runs.path().join("gone"), None, None);
+    let gone = convert_all(
+        &runs.path().join("gone"),
+        None,
+        None,
+        &StartupBoard::default(),
+    );
+    assert_eq!(gone.converted + gone.failed, 0);
     convert_one(runs.path(), None, None);
     assert!(std::fs::read_dir(runs.path()).unwrap().next().is_none());
     assert!(servers_of_unfinished(&runs.path().join("gone"), None).is_empty());
@@ -230,7 +253,11 @@ fn a_run_that_does_not_convert_is_tried_once_per_release() {
     let meta = std::fs::read(run.join("meta.json")).unwrap();
     std::fs::write(run.join("meta.json"), "not json").unwrap();
 
-    crate::test_support::with_tracing(|| convert_all(&runs, None, None));
+    let upgrade = crate::test_support::with_tracing(|| {
+        convert_all(&runs, None, None, &StartupBoard::default())
+    });
+    assert_eq!(upgrade.failed, 1);
+    assert_eq!(upgrade.unconverted, Some(Unconverted::path_for(&runs)));
     let listed = unconverted(&runs).expect("the run is listed");
     assert_eq!(listed["version"], env!("CARGO_PKG_VERSION"));
     let why = listed["runs"]["old"].as_str().unwrap();
@@ -239,7 +266,7 @@ fn a_run_that_does_not_convert_is_tried_once_per_release() {
 
     // Mended, it is still left alone by this release.
     std::fs::write(run.join("meta.json"), &meta).unwrap();
-    convert_all(&runs, None, None);
+    convert_all(&runs, None, None, &StartupBoard::default());
     assert!(leviath_legacy_runs::is_legacy(&run));
     assert!(unconverted(&runs).is_some());
 
@@ -252,7 +279,7 @@ fn a_run_that_does_not_convert_is_tried_once_per_release() {
     assert!(unconverted(&runs).is_none());
     // A list from another release with nothing left to try is removed too.
     std::fs::write(Unconverted::path_for(&runs), older.to_string()).unwrap();
-    convert_all(&runs, None, None);
+    convert_all(&runs, None, None, &StartupBoard::default());
     assert!(unconverted(&runs).is_none());
 }
 
@@ -266,7 +293,10 @@ fn a_run_that_cannot_be_backed_up_is_not_converted() {
     let run = runs.join("old");
     copy_dir(&fixture("finished"), &run);
     std::fs::write(home.path().join(crate::home_backup::BACKUPS_DIR), "a file").unwrap();
-    crate::test_support::with_tracing(|| convert_all(&runs, None, None));
+    let upgrade = crate::test_support::with_tracing(|| {
+        convert_all(&runs, None, None, &StartupBoard::default())
+    });
+    assert_eq!((upgrade.converted, upgrade.failed), (0, 1));
     assert!(leviath_legacy_runs::is_legacy(&run));
     assert!(unconverted(&runs).is_none());
 }
@@ -282,7 +312,7 @@ fn a_list_that_cannot_be_written_is_said_so() {
     copy_dir(&fixture("finished"), &run);
     std::fs::write(run.join("meta.json"), "not json").unwrap();
     std::fs::create_dir_all(Unconverted::path_for(&runs)).unwrap();
-    crate::test_support::with_tracing(|| convert_all(&runs, None, None));
+    crate::test_support::with_tracing(|| convert_all(&runs, None, None, &StartupBoard::default()));
     assert!(Unconverted::path_for(&runs).is_dir());
     assert!(leviath_legacy_runs::is_legacy(&run));
 }
