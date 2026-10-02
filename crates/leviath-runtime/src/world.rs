@@ -2353,7 +2353,11 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         };
-        tokio::time::timeout(std::time::Duration::from_secs(2), read)
+        // Every caller expects the record to land, so the poll returns as soon
+        // as it does; the deadline only bounds a real failure. It is long
+        // because a coverage-instrumented build on a loaded Windows runner
+        // can take seconds to write a run file.
+        tokio::time::timeout(std::time::Duration::from_secs(30), read)
             .await
             .ok()
     }
