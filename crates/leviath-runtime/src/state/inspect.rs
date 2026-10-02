@@ -134,13 +134,26 @@ fn step_of(world: &World, entity: Entity) -> u64 {
 }
 
 /// Where the run is among its stage's checkpoints, and the document an open
-/// one shows.
+/// one shows, or one about to be put shows: a run paused after one answer
+/// holds the next checkpoint until it is resumed, and brought back from its
+/// file it asks that one over the same document.
 fn point_of(world: &World, entity: Entity) -> PointProgress {
     use crate::interaction_points as ip;
-    let asking = world
+    let open = world
         .get::<ip::AwaitingInteractionPoint>(entity)
         .and(world.get::<ip::PointBody>(entity))
         .map(|b| b.0.clone());
+    let next = world.get::<ip::ReadyForInteractionPoint>(entity).and(
+        world
+            .get::<ip::PlanBodyOverride>(entity)
+            .map(|o| o.0.clone())
+            .or_else(|| {
+                world
+                    .get::<crate::components::InferenceResult>(entity)
+                    .map(|r| r.response.clone())
+            }),
+    );
+    let asking = open.or(next);
     PointProgress {
         cursor: world
             .get::<ip::InteractionPointCursor>(entity)

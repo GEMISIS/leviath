@@ -596,3 +596,154 @@ async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
         assert_eq!(told, !clean_stop, "the model is told what it must check");
     }
 }
+
+/// [`graph`] with its stage stopping at `points` approval checkpoints.
+fn checkpoint_spec(points: usize) -> Arc<crate::spec::run_spec::RunSpec> {
+    use crate::spec::graph::{AnswerStyle, InteractionPointDef, StageMode, UnattendedPoint};
+    let mut graph = graph();
+    graph.stages[0].mode = StageMode::InteractivePoints(
+        (0..points)
+            .map(|i| InteractionPointDef {
+                name: format!("p{i}"),
+                prompt: "Approve?".to_string(),
+                required: true,
+                unattended: UnattendedPoint::AutoApprove,
+                style: AnswerStyle::MultipleChoice,
+                options: vec!["Approve".to_string(), "Abort".to_string()],
+                directives: std::collections::BTreeMap::new(),
+                abort_options: vec!["Abort".to_string()],
+                edit_options: vec![],
+                document_region: None,
+            })
+            .collect(),
+    );
+    crate::test_graph::both(graph).0
+}
+
+/// A world over `dir` with a person to ask, whose model is `model`.
+fn checkpoint_world(
+    dir: &std::path::Path,
+    model: Arc<Script>,
+) -> (PipelineWorld, crate::interaction_hub::InteractionHub) {
+    let mut providers = crate::ProviderRegistry::new();
+    providers.register("script".to_string(), model);
+    let mut world = PipelineWorld::new(
+        providers,
+        Arc::new(EchoTools),
+        crate::InferencePoolConfig::new(),
+        1,
+        Some(dir.to_path_buf()),
+        Handle::current(),
+    );
+    let hub = crate::interaction_hub::InteractionHub::new();
+    world.insert_interaction_hub(hub.clone());
+    (world, hub)
+}
+
+/// Drive `world` until `hub` has a question open, and return its id.
+async fn open_question(
+    world: &mut PipelineWorld,
+    hub: &crate::interaction_hub::InteractionHub,
+) -> String {
+    let mut open = Vec::new();
+    for _ in 0..500 {
+        world.run_to_fixed_point();
+        open = hub.pending();
+        if !open.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    open.pop().expect("a question is put to a person").1.id
+}
+
+/// Approve the question `id` on `hub`.
+fn approve(hub: &crate::interaction_hub::InteractionHub, id: &str) {
+    let mut yes = leviath_core::interaction::InteractionResponse::text(id, "");
+    yes.choice_index = Some(0);
+    assert!(hub.answer(yes));
+}
+
+/// An answer given while the run is paused is the run's answer: the run's file
+/// holds it, so a run brought back from its file (paged back in on resume, or
+/// after a daemon restart) carries on past the checkpoint rather than asking
+/// it again, without asking the model again either. With a second checkpoint
+/// behind it, the second is the one asked next.
+#[tokio::test]
+async fn a_checkpoint_answered_while_paused_is_answered_when_the_run_comes_back() {
+    for points in [1, 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Arc::new(Script {
+            responses: Mutex::new([with_tool("c1"), text("## Plan")].into_iter().collect()),
+        });
+        let (mut world, hub) = checkpoint_world(dir.path(), first);
+        let id = world.spawn_agent((
+            (
+                StageCursor { index: 0 },
+                agent("s"),
+                MessageInbox::default(),
+                StageProgress::default(),
+                VisitCounts::default(),
+                window(),
+                stage(),
+                setup().inference_config,
+            ),
+            (
+                metadata("run-p"),
+                crate::persistence::TokenTotals::default(),
+                crate::pipeline::PersistWatermark::default(),
+                crate::persistence::RunClock::default(),
+                ReadyToInfer,
+                crate::insert::RunSpecC(checkpoint_spec(points)),
+            ),
+        ));
+        let asked = open_question(&mut world, &hub).await;
+        assert!(world.pause(id));
+        world.run_to_fixed_point();
+        approve(&hub, &asked);
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            world.run_to_fixed_point();
+        }
+        assert_eq!(world.agent_status(id), Some(AgentStatus::Paused));
+        world.flush_and_stop().await;
+
+        let run = crate::restore::read_for_resume(&dir.path().join("run-p"))
+            .unwrap()
+            .unwrap();
+        let model = Arc::new(Script {
+            responses: Mutex::new([text("asked again")].into_iter().collect()),
+        });
+        let (mut again, hub) = checkpoint_world(dir.path(), model.clone());
+        let e = crate::restore::resume(
+            again.world_mut(),
+            run,
+            crate::spec::env::Bindings::new().with(stage()),
+        );
+        let e = again.own_agent(e);
+        assert_eq!(again.agent_status(e), Some(AgentStatus::Paused));
+        assert!(again.resume(e));
+        if points == 2 {
+            let next = open_question(&mut again, &hub).await;
+            assert_ne!(next, asked, "the answered checkpoint is not asked again");
+            assert!(
+                next.contains("p1"),
+                "the second checkpoint is asked: {next}"
+            );
+            approve(&hub, &next);
+        }
+        for _ in 0..200 {
+            again.run_to_fixed_point();
+            if again.agent_status(e) == Some(AgentStatus::Complete) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let open = hub.pending().len();
+        assert_eq!(open, 0, "nothing is left asking a person");
+        assert_eq!(again.agent_status(e), Some(AgentStatus::Complete));
+        let unasked = model.responses.lock().unwrap().len();
+        assert_eq!(unasked, 1, "the model is not asked the stage again");
+        again.flush_and_stop().await;
+    }
+}

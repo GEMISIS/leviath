@@ -633,6 +633,9 @@ pub(crate) fn phase(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, state: &Run
             (None, None) if state.seq == 0 && enters_with_hook(spec, state) => {
                 entity.insert(crate::pipeline::EnteringEntryStage);
             }
+            (None, None) if checkpoints_answered(spec, state) => {
+                entity.insert(crate::pipeline::ResolveTransition);
+            }
             (None, None) => {
                 entity.insert(ReadyToInfer);
             }
@@ -646,6 +649,18 @@ fn enters_with_hook(spec: &RunSpec, state: &RunState) -> bool {
         .hooks
         .on_stage_enter
         .is_some()
+}
+
+/// Whether the stage the run is in stops at checkpoints and every one of them
+/// has been answered: the stage is done and the run moves on along its edges,
+/// rather than asking its model for the stage again.
+fn checkpoints_answered(spec: &RunSpec, state: &RunState) -> bool {
+    match &spec.graph.stages[stage_index(spec, state)].mode {
+        crate::spec::graph::StageMode::InteractivePoints(points) => {
+            !points.is_empty() && state.point.cursor as usize >= points.len()
+        }
+        _ => false,
+    }
 }
 
 /// `point`: where the run is among its stage's checkpoints. Nothing is

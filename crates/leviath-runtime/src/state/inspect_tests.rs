@@ -826,6 +826,35 @@ fn a_tool_batch_in_flight_reads_with_the_results_already_in() {
     assert!(batch.done.is_empty());
 }
 
+/// A checkpoint about to be put reads with the document it will show: the
+/// person's edit when there is one, else the reply under review.
+#[test]
+fn a_checkpoint_about_to_be_put_reads_with_its_document() {
+    use crate::interaction_points as ip;
+    let mut world = World::new();
+    let reply = crate::components::InferenceResult {
+        response: "the plan".into(),
+        ..tool_reply()
+    };
+    let next = spawn(&mut world, AgentStatus::Paused);
+    world
+        .entity_mut(next)
+        .insert((ip::ReadyForInteractionPoint, reply.clone()));
+    let point = inspect(&world, next).unwrap().point;
+    assert_eq!(point.asking.as_deref(), Some("the plan"));
+    let edited = spawn(&mut world, AgentStatus::Paused);
+    world.entity_mut(edited).insert((
+        ip::ReadyForInteractionPoint,
+        reply,
+        ip::PlanBodyOverride("the edited plan".into()),
+    ));
+    let point = inspect(&world, edited).unwrap().point;
+    assert_eq!(point.asking.as_deref(), Some("the edited plan"));
+    let bare = spawn(&mut world, AgentStatus::Paused);
+    world.entity_mut(bare).insert(ip::ReadyForInteractionPoint);
+    assert_eq!(inspect(&world, bare).unwrap().point.asking, None);
+}
+
 /// A window whose last turn made a call that has already settled.
 fn busy_window_with_old_calls() -> ContextWindow {
     let mut w = ContextWindow::new(1000);
