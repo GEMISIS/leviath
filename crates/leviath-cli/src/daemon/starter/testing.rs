@@ -264,7 +264,7 @@ version = "0.1.0"
 
 [graph]
 entry = "work"
-mcp_servers = [{{ name = "search", command = "python3", args = ["{}"] }}]
+mcp_servers = [{{ name = "search", command = "python3", args = ['{}'] }}]
 
 [[graph.stages]]
 name = "work"

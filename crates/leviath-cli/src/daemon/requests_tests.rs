@@ -139,10 +139,12 @@ fn every_flag_reaches_the_request() {
 #[test]
 fn blanks_are_left_out_and_a_profile_names_the_mode() {
     let source = SpawnSource::Blueprint(BlueprintRef::parse("coder").unwrap());
+    // Absolute on every host: `/abs` is not, on Windows, and gains a drive.
+    let abs = std::env::temp_dir().join("abs");
     let request = TaskLaunch {
         task: "  ".to_string(),
         model: Some(" ".to_string()),
-        workdir: Some("/abs".to_string()),
+        workdir: Some(abs.to_string_lossy().into_owned()),
         unattended: true,
         profile: Some("careful".to_string()),
         ..TaskLaunch::default()
@@ -151,7 +153,7 @@ fn blanks_are_left_out_and_a_profile_names_the_mode() {
     .unwrap();
     assert!(request.inputs.is_empty());
     assert!(request.model.is_none());
-    assert_eq!(request.workdir.as_deref(), Some(Path::new("/abs")));
+    assert_eq!(request.workdir.as_deref(), Some(abs.as_path()));
     assert!(matches!(request.launch.unattended, Unattended::Profile(p) if p.as_str() == "careful"));
     assert!(request.launch.seed_commands);
 

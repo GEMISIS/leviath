@@ -662,13 +662,14 @@ binds = [{ region = "task" }]
     async fn spawn_worker_propagates_a_missing_worker_blueprint() {
         let dir = tempfile::tempdir().unwrap();
         let (mut world, spawner, parent) = world_with_parent(&two_stage_in(dir.path()));
+        let missing = dir.path().join("no-such-agent");
         assert!(
             spawn(
                 &mut world,
                 &spawner,
                 parent,
                 None,
-                Some("/no/such/agent/xyz")
+                Some(&missing.to_string_lossy())
             )
             .is_err()
         );

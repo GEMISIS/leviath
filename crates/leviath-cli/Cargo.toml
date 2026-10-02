@@ -53,7 +53,12 @@ leviath-providers = { workspace = true }
 leviath-mcp = { workspace = true }
 leviath-package = { workspace = true }
 leviath-blueprint = { workspace = true }
-leviath-legacy-runs = { workspace = true, optional = true }
+# `publish = false` (see the `legacy-runs` feature). Pinned by version all the
+# same: a path dependency with no version is a wildcard, which cargo-deny
+# refuses in a published crate. The release deletes this line and the feature
+# before publishing (prod.yml), and `cargo xtask version --check` holds the
+# deletion and the pin together.
+leviath-legacy-runs = { path = "../leviath-legacy-runs", version = "0.6.4", optional = true }
 leviath-scripting = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

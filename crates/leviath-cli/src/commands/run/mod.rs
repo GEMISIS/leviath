@@ -54,26 +54,10 @@ pub struct RunArgs {
     #[arg(short, long, value_name = "TEXT|FILE")]
     pub task: Option<String>,
 
-    /// Give the run an input, read by the type the blueprint declares for it
-    /// (repeatable). Text is the text, or `@file` for a file's text; a number
-    /// is a number; `true` or `false`; a list is `a,b,c` or a JSON array; a
-    /// record is a JSON object; a file input takes `@path`, which is attached
-    /// and named. `--<name> value` is the short form for any input.
-    #[arg(short, long = "input", value_name = "NAME=VALUE")]
-    pub inputs: Vec<String>,
-
-    /// Send a whole spawn request from a file, TOML or JSON, instead of
-    /// naming a blueprint. `lev schema spawn-request` prints what one holds.
-    /// Any input and launch flag given beside it lands on it too.
-    #[arg(long, value_name = "FILE")]
-    pub request: Option<std::path::PathBuf>,
-
-    /// Check the run without starting it: the daemon resolves it the whole
-    /// way and prints what it would run (each stage's model and tools, the
-    /// inputs, the workdir), or every problem it found, one per line with
-    /// where in the request it is.
-    #[arg(long)]
-    pub check: bool,
+    /// The inputs, `--request` and `--check`: everything that says what the
+    /// run reads, carried as one value.
+    #[command(flatten)]
+    pub regions: RunInputs,
 
     /// Model override (`provider/model` or a bare model name).
     #[arg(short, long)]
@@ -181,12 +165,53 @@ pub struct RunArgs {
     /// `@path` inside the task text does the same for that file.
     #[arg(long, value_name = "PATH[:REGION][:TYPE][:text]")]
     pub attach: Vec<String>,
+}
+
+/// What `lev run` reads, besides the launch flags: its inputs, a whole
+/// request in place of a blueprint, whether only to check it, and which of
+/// the flags the binary resolves itself were given.
+///
+/// One value, so the binary hands it to
+/// [`LaunchRequest`](crate::daemon::client::LaunchRequest) whole and every
+/// part of it is read in the library, where the tests reach it.
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunInputs {
+    /// Give the run an input, read by the type the blueprint declares for it
+    /// (repeatable). Text is the text, or `@file` for a file's text; a number
+    /// is a number; `true` or `false`; a list is `a,b,c` or a JSON array; a
+    /// record is a JSON object; a file input takes `@path`, which is attached
+    /// and named. `--<name> value` is the short form for any input.
+    #[arg(short, long = "input", value_name = "NAME=VALUE")]
+    pub inputs: Vec<String>,
+
+    /// Send a whole spawn request from a file, TOML or JSON, instead of
+    /// naming a blueprint. `lev schema spawn-request` prints what one holds.
+    /// Any input and launch flag given beside it lands on it too.
+    #[arg(long, value_name = "FILE")]
+    pub request: Option<std::path::PathBuf>,
+
+    /// Check the run without starting it: the daemon resolves it the whole
+    /// way and prints what it would run (each stage's model and tools, the
+    /// inputs, the workdir), or every problem it found, one per line with
+    /// where in the request it is.
+    #[arg(long)]
+    pub check: bool,
 
     /// Inputs given the short way (`--<name> <value>`), collected by an argv
-    /// pre-scan in the binary since input names are blueprint-defined. clap
-    /// skips this field; it is populated after parsing.
+    /// pre-scan ([`extract_region_flags`]) since input names are
+    /// blueprint-defined. clap skips this field; it is filled after parsing.
     #[arg(skip)]
-    pub regions: HashMap<String, String>,
+    pub named: HashMap<String, String>,
+
+    /// Whether a blueprint PATH was typed. The binary passes `.` when none
+    /// was, and a `--request` file names its own blueprint.
+    #[arg(skip)]
+    pub path_given: bool,
+
+    /// Whether `--workdir` was typed rather than defaulted: a `--request`
+    /// file's own workdir gives way only to one asked for.
+    #[arg(skip)]
+    pub workdir_given: bool,
 }
 
 /// Every long flag `lev run` and `lev run show` own, and the global ones,
@@ -284,6 +309,14 @@ pub fn effective_workdir(
 }
 
 /// Pre-scan a full argv (program name first) for inputs given the short way
+/// (`--<name> value`) on the `run` subcommand, against the flags of the `lev`
+/// command line ([`crate::dispatch::command_line`]). See
+/// [`extract_named_inputs`].
+pub fn extract_region_flags(argv: Vec<String>) -> (Vec<String>, HashMap<String, String>) {
+    extract_named_inputs(argv, &known_run_flags(&crate::dispatch::command_line()))
+}
+
+/// Pre-scan a full argv (program name first) for inputs given the short way
 /// (`--<name> value`) on the `run` subcommand, since input names are
 /// blueprint-defined and clap can't declare them. Returns `(argv_for_clap,
 /// named_inputs)`: a `--<name>` (or `--<name>=<value>`) whose `<name>` is not
@@ -294,7 +327,7 @@ pub fn effective_workdir(
 /// `run` subcommand token, or it is `lev run show`, nothing is extracted (the
 /// returned argv equals the input). Pure - no environment or I/O - so it is
 /// unit-testable in isolation.
-pub fn extract_region_flags(
+pub fn extract_named_inputs(
     argv: Vec<String>,
     known: &[String],
 ) -> (Vec<String>, HashMap<String, String>) {
@@ -455,19 +488,26 @@ mod tests {
         );
     }
 
-    /// The `lev` command as the binary builds it, near enough: every
-    /// subcommand and the global `--verbose`.
+    /// The `lev` command line.
     fn lev() -> clap::Command {
-        use clap::Subcommand as _;
-        crate::dispatch::Commands::augment_subcommands(
-            clap::Command::new("lev").arg(
-                clap::Arg::new("verbose")
-                    .short('v')
-                    .long("verbose")
-                    .global(true)
-                    .action(clap::ArgAction::SetTrue),
-            ),
-        )
+        crate::dispatch::command_line()
+    }
+
+    /// The binary's own pre-scan asks the real command line which flags are
+    /// `run`'s, so a global flag passes through and an input is pulled out.
+    #[test]
+    fn the_binary_pre_scan_knows_the_real_flags() {
+        let (out, named) = extract_region_flags(argv(&[
+            "lev",
+            "--verbose",
+            "run",
+            "a",
+            "--check",
+            "--spec",
+            "x",
+        ]));
+        assert_eq!(out, argv(&["lev", "--verbose", "run", "a", "--check"]));
+        assert_eq!(named.get("spec").map(String::as_str), Some("x"));
     }
 
     /// The known flags of the real command line, for the pre-scan tests.
@@ -487,7 +527,7 @@ mod tests {
             run: RunArgs,
         }
         let line = argv(&["lev", "run", "show", "r1", "--at", "3", "--weird", "x"]);
-        let (out, regions) = extract_region_flags(line.clone(), &known());
+        let (out, regions) = extract_named_inputs(line.clone(), &known());
         assert_eq!(out, line);
         assert!(regions.is_empty());
         let p = Probe::try_parse_from(["lev", "show", "r1", "--at", "3", "--json"]).unwrap();
@@ -515,10 +555,10 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(p.run.path.as_deref(), Some("coder"));
-        assert_eq!(p.run.inputs, ["depth=3", "tags=a,b"]);
-        assert!(p.run.check);
+        assert_eq!(p.run.regions.inputs, ["depth=3", "tags=a,b"]);
+        assert!(p.run.regions.check);
         assert_eq!(
-            p.run.request.as_deref(),
+            p.run.regions.request.as_deref(),
             Some(std::path::Path::new("r.toml"))
         );
         assert!(p.run.command.is_none());
@@ -526,7 +566,7 @@ mod tests {
 
     #[test]
     fn extracts_dynamic_region_flags_and_preserves_known_ones() {
-        let (out, regions) = extract_region_flags(
+        let (out, regions) = extract_named_inputs(
             argv(&[
                 "lev",
                 "run",
@@ -566,7 +606,7 @@ mod tests {
     #[test]
     fn extracts_equals_joined_region_flag() {
         let (out, regions) =
-            extract_region_flags(argv(&["lev", "run", "a", "--criteria=be safe"]), &known());
+            extract_named_inputs(argv(&["lev", "run", "a", "--criteria=be safe"]), &known());
         assert_eq!(out, argv(&["lev", "run", "a"]));
         assert_eq!(regions.get("criteria").map(String::as_str), Some("be safe"));
     }
@@ -574,7 +614,7 @@ mod tests {
     #[test]
     fn no_region_flags_leaves_argv_unchanged() {
         let input = argv(&["lev", "run", "a", "--task", "t"]);
-        let (out, regions) = extract_region_flags(input.clone(), &known());
+        let (out, regions) = extract_named_inputs(input.clone(), &known());
         assert_eq!(out, input);
         assert!(regions.is_empty());
     }
@@ -583,7 +623,7 @@ mod tests {
     fn non_run_subcommand_is_untouched() {
         // A dynamic-looking flag on another subcommand is left for clap to reject.
         let input = argv(&["lev", "ps", "--weird", "x"]);
-        let (out, regions) = extract_region_flags(input.clone(), &known());
+        let (out, regions) = extract_named_inputs(input.clone(), &known());
         assert_eq!(out, input);
         assert!(regions.is_empty());
     }
@@ -592,7 +632,7 @@ mod tests {
     fn no_subcommand_token_is_untouched() {
         // Only flags, no bareword subcommand → nothing extracted.
         let input = argv(&["lev", "--verbose"]);
-        let (out, regions) = extract_region_flags(input.clone(), &known());
+        let (out, regions) = extract_named_inputs(input.clone(), &known());
         assert_eq!(out, input);
         assert!(regions.is_empty());
     }
@@ -600,7 +640,7 @@ mod tests {
     #[test]
     fn trailing_region_flag_without_value_maps_to_empty() {
         // A dynamic flag at the very end with no following value → empty string.
-        let (out, regions) = extract_region_flags(argv(&["lev", "run", "a", "--spec"]), &known());
+        let (out, regions) = extract_named_inputs(argv(&["lev", "run", "a", "--spec"]), &known());
         assert_eq!(out, argv(&["lev", "run", "a"]));
         assert_eq!(regions.get("spec").map(String::as_str), Some(""));
     }
@@ -608,7 +648,7 @@ mod tests {
     #[test]
     fn global_verbose_before_run_still_activates() {
         let (_out, regions) =
-            extract_region_flags(argv(&["lev", "-v", "run", "a", "--spec", "x"]), &known());
+            extract_named_inputs(argv(&["lev", "-v", "run", "a", "--spec", "x"]), &known());
         assert_eq!(regions.get("spec").map(String::as_str), Some("x"));
     }
 
@@ -617,7 +657,7 @@ mod tests {
     #[test]
     fn workdir_flag_is_not_eaten_as_a_region() {
         let input = argv(&["lev", "run", "a", "--workdir", "/elsewhere", "--task", "t"]);
-        let (out, regions) = extract_region_flags(input.clone(), &known());
+        let (out, regions) = extract_named_inputs(input.clone(), &known());
         assert_eq!(out, input);
         assert!(regions.is_empty());
     }
@@ -693,7 +733,7 @@ mod tests {
     /// whichever way its value is attached.
     #[test]
     fn the_pre_scan_passes_a_profile_flag_through() {
-        let (out, regions) = extract_region_flags(
+        let (out, regions) = extract_named_inputs(
             argv(&["lev", "run", "coder", "--yolo=careful", "--files", "@x"]),
             &known(),
         );

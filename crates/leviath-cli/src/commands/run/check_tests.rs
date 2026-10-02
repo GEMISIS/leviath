@@ -84,8 +84,11 @@ fn a_summary_reads_as_the_run_it_would_be() {
     assert!(text.contains("    ship  openai/gpt-5  no tools"), "{text}");
 
     let mut other = summary();
+    // Absolute on every host; `/agents/coder` is not, on Windows.
+    let coder = std::env::temp_dir().join("agents").join("coder");
+    let coder = coder.to_string_lossy();
     other.origin = SpecOrigin::BlueprintFile {
-        path: BlueprintPath::new("/agents/coder").unwrap(),
+        path: BlueprintPath::new(coder.as_ref()).unwrap(),
         name: BlueprintName::new("coder").unwrap(),
         digest: None,
         version: "0.1.0".to_string(),
@@ -95,7 +98,7 @@ fn a_summary_reads_as_the_run_it_would_be() {
     other.inputs = InputValues::default();
     let text = check_report(&other, false);
     assert!(
-        text.contains("(blueprint in /agents/coder, version 0.1.0)"),
+        text.contains(&format!("(blueprint in {coder}, version 0.1.0)")),
         "{text}"
     );
     assert!(text.contains("  unattended: yes"), "{text}");

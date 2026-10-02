@@ -220,11 +220,12 @@ fn the_task_is_read_from_a_file_or_demanded() {
     // `--check` does not stop to ask: the daemon reports a missing task with
     // every other problem.
     let run = run_request(RunLine {
-        ask_for_task: false,
+        check: true,
         ..line(&manifest, dir.path())
     })
     .unwrap();
     assert!(!run.request.inputs.contains_key(TASK_INPUT));
+    assert!(run.check);
 }
 
 /// A task that is optional is not demanded when something else was handed
@@ -590,4 +591,66 @@ fn an_issues_report_counts_its_problems() {
         issues_report(&one),
         "1 problem with this run:\n  model: invalid: no"
     );
+}
+
+/// What the binary hands over for a run of `path` with `regions`, the task
+/// `do it`, working in `/mine`.
+fn launch(path: &str, regions: super::super::RunInputs) -> LaunchRequest<'_> {
+    LaunchRequest {
+        path,
+        task: Some("do it"),
+        stdin_is_terminal: &crate::daemon::client::never_interactive,
+        model: None,
+        workdir: "/mine",
+        yolo: false,
+        yolo_profile: None,
+        allow: Vec::new(),
+        max_depth: None,
+        regions,
+        no_seed_commands: false,
+        output_request: None,
+        parts: Vec::new(),
+    }
+}
+
+/// What the binary hands over reads the way a command line does: the `.`
+/// it passes for no PATH is no blueprint beside a `--request` file, a typed
+/// PATH beside one is refused, and `--check` and a typed `--workdir` reach
+/// the run.
+#[test]
+fn what_the_binary_hands_over_is_read_as_a_command_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = write_manifest(&dir.path().join("my-agent"));
+    let file = dir.path().join("r.json");
+    let request = serde_json::json!({
+        "source": {"blueprint_file": manifest.parent().unwrap()},
+        "workdir": "/theirs",
+    });
+    std::fs::write(&file, request.to_string()).unwrap();
+    let from_file = super::super::RunInputs {
+        request: Some(file.clone()),
+        check: true,
+        ..Default::default()
+    };
+    let run = resolve_spawn_args(launch(".", from_file.clone())).unwrap();
+    assert!(run.check);
+    assert_eq!(task_of(&run), "do it");
+    assert_eq!(run.workdir, "/theirs", "a defaulted workdir gives way");
+    let typed_workdir = super::super::RunInputs {
+        workdir_given: true,
+        ..from_file.clone()
+    };
+    let run = resolve_spawn_args(launch(".", typed_workdir)).unwrap();
+    assert_eq!(run.workdir, "/mine", "a typed one does not");
+    let typed_path = super::super::RunInputs {
+        path_given: true,
+        ..from_file
+    };
+    let err = resolve_spawn_args(launch("coder", typed_path)).unwrap_err();
+    assert!(err.to_string().contains("not both"), "{err}");
+
+    let path = manifest.to_string_lossy();
+    let run = resolve_spawn_args(launch(&path, Default::default())).unwrap();
+    assert!(source_name(&run).ends_with("my-agent"));
+    assert!(!run.check);
 }

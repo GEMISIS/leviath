@@ -366,15 +366,35 @@ pub trait RiskyExecutors {
     ) -> impl std::future::Future<Output = anyhow::Result<()>>;
 }
 
-/// Inject argv-prescanned dynamic `--<region>` seed flags into a parsed
-/// `run` command. A no-op for every other subcommand. Kept here (a tested lib
-/// seam) so the bin entrypoint's post-parse wiring stays branch-free.
+/// The `lev` command line, as clap reads it: every subcommand and the
+/// binary's one global flag, `--verbose`. The argv pre-scan asks it which
+/// flags `run` owns ([`commands::run::extract_region_flags`]).
+pub fn command_line() -> clap::Command {
+    use clap::Subcommand as _;
+    Commands::augment_subcommands(
+        clap::Command::new("lev").arg(
+            clap::Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .global(true)
+                .action(clap::ArgAction::SetTrue),
+        ),
+    )
+}
+
+/// Finish a parsed `run` command: put the inputs the argv pre-scan found
+/// (`--<name> value`) on it, and note whether a PATH and a `--workdir` were
+/// typed, which the binary's defaults would otherwise hide. A no-op for every
+/// other subcommand. Kept here (a tested lib seam) so the bin entrypoint's
+/// post-parse wiring stays branch-free.
 pub fn apply_region_flags(
     command: &mut Commands,
     regions: std::collections::HashMap<String, String>,
 ) {
     if let Commands::Run(args) = command {
-        args.regions = regions;
+        args.regions.named = regions;
+        args.regions.path_given = args.path.is_some();
+        args.regions.workdir_given = args.workdir.is_some();
     }
 }
 
@@ -568,10 +588,30 @@ mod tests {
     fn apply_region_flags_populates_run_and_noops_other_commands() {
         let mut run = Commands::Run(commands::run::RunArgs::default());
         let flags = std::collections::HashMap::from([("criteria".to_string(), "safe".to_string())]);
-        apply_region_flags(&mut run, flags);
+        apply_region_flags(&mut run, flags.clone());
+        let untyped = commands::run::RunInputs {
+            named: flags.clone(),
+            ..Default::default()
+        };
         assert!(
-            matches!(&run, Commands::Run(a) if a.regions.get("criteria").map(String::as_str) == Some("safe")),
+            matches!(&run, Commands::Run(a) if a.regions == untyped),
             "region flag was injected into the Run args"
+        );
+        let mut typed = Commands::Run(commands::run::RunArgs {
+            path: Some("coder".to_string()),
+            workdir: Some(std::path::PathBuf::from("w")),
+            ..Default::default()
+        });
+        apply_region_flags(&mut typed, flags.clone());
+        let given = commands::run::RunInputs {
+            named: flags,
+            path_given: true,
+            workdir_given: true,
+            ..Default::default()
+        };
+        assert!(
+            matches!(&typed, Commands::Run(a) if a.regions == given),
+            "a typed PATH and --workdir are noted"
         );
         // A non-run command hits the no-op branch: it must not panic (and there
         // is nothing to inject). Asserting the variant here would leave an

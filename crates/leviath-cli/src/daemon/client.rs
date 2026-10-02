@@ -8,6 +8,8 @@ use anyhow::bail;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::spec::request::SpawnRequest;
 
+pub use crate::commands::run::request::{LaunchRequest, resolve_spawn_args};
+
 /// The stdin probe for a caller that must never open an editor for a task:
 /// the dashboard, which owns the terminal itself. An editor launched under it
 /// would fight it for the screen.
@@ -34,6 +36,8 @@ pub struct LocalRun {
     pub yolo_profile: Option<String>,
     /// The output shape asked for, for the warning about retired checks.
     pub output: Option<leviath_core::output::OutputSpec>,
+    /// `--check`: ask the daemon what the run would be instead of starting it.
+    pub check: bool,
 }
 
 /// Warn, on stderr, when the agent about to run declares `[read_paths]` the
@@ -313,13 +317,17 @@ fn warn_before(run: &LocalRun) -> anyhow::Result<()> {
 ///
 /// `count == 1` defers to `send_spawn`, keeping today's single-run output
 /// shapes. A mid-batch failure stops the batch and says how many runs had
-/// already started - those runs keep running; `lev ps` lists them.
+/// already started - those runs keep running; `lev ps` lists them. A `--check`
+/// run starts nothing: it is sent to be checked, once.
 pub async fn send_spawn_batch(
     client: &ControlClient,
     run: LocalRun,
     count: usize,
     json: bool,
 ) -> anyhow::Result<()> {
+    if run.check {
+        return crate::commands::run::check::send_check(client, &run, json).await;
+    }
     if count == 0 {
         bail!("--count must be at least 1");
     }
@@ -376,6 +384,7 @@ impl Default for LocalRun {
             yolo: false,
             yolo_profile: None,
             output: None,
+            check: false,
         }
     }
 }
@@ -499,6 +508,23 @@ mod tests {
             .await
             .expect("the single spawn succeeds");
         server.await.unwrap();
+    }
+
+    /// A `--check` run is sent to be checked, never spawned, whatever the
+    /// count: the daemon's answer is the check's.
+    #[tokio::test]
+    async fn a_check_run_is_checked_not_spawned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, server) = fake_daemon(dir.path(), r#"{"result":"error","message":"boom"}"#);
+        let run = LocalRun {
+            check: true,
+            ..LocalRun::default()
+        };
+        let err = send_spawn_batch(&ControlClient::new(id), run, 3, false)
+            .await
+            .expect_err("the daemon refused");
+        server.await.unwrap();
+        assert!(err.to_string().contains("the check failed: boom"), "{err}");
     }
 
     #[tokio::test]

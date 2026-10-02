@@ -16,7 +16,10 @@ fn the_published_schemas_match_this_build() {
         if std::env::var_os("LEVIATH_WRITE_SCHEMAS").is_some() {
             std::fs::write(&path, &text).unwrap();
         }
-        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        // A Windows checkout may turn the file's newlines into CRLF.
+        let on_disk = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert!(
             on_disk == text,
             "{name} is out of date; rerun this test with LEVIATH_WRITE_SCHEMAS=1 and commit the file"
@@ -38,7 +41,10 @@ fn layout_samples() -> Vec<u8> {
     // A large real graph (the coder blueprint's, frozen here so later edits
     // to the bundled blueprint do not move the hash).
     let mut spec = crate::spec::run_spec::tests::spec();
-    spec.graph = toml::from_str::<RunGraph>(include_str!("layout_sample.toml")).unwrap();
+    // Read with LF newlines whatever the checkout gave the file: its
+    // multi-line strings keep a CRLF, and the bytes would move.
+    let sample = include_str!("layout_sample.toml").replace("\r\n", "\n");
+    spec.graph = toml::from_str::<RunGraph>(&sample).unwrap();
     let text = InputType::Text {
         multiline: true,
         min_len: Some(1),

@@ -343,6 +343,9 @@ mod tests {
 
             // A run the directory does not hold brings no context either.
             assert!(loader.collect(Some("gone"), true).context.is_none());
+            // Nor a graph: one whose file went between the listing and the
+            // read is asked for again next round.
+            assert!(loader.graph_of("gone").is_none());
         });
     }
 

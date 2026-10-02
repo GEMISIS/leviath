@@ -46,10 +46,10 @@ pub struct RunLine<'a> {
     pub task: Option<&'a str>,
     /// Whether stdin is a terminal, injected so the editor path is testable.
     pub stdin_is_terminal: &'a dyn Fn() -> bool,
-    /// Whether a task the run needs and was not given is asked for (on
-    /// stdin, or in an editor). Off for `--check`, which reports a missing
-    /// task with every other problem rather than stopping to ask for one.
-    pub ask_for_task: bool,
+    /// `--check`: only check the run. A task it needs and was not given is
+    /// reported with every other problem rather than asked for (on stdin, or
+    /// in an editor), and the run is sent to be checked, not started.
+    pub check: bool,
     /// `--input name=value`, in the order given.
     pub inputs: Vec<String>,
     /// `--<name> value`, the short form of `--input name=value`.
@@ -93,7 +93,7 @@ impl<'a> RunLine<'a> {
             request_file: None,
             task: None,
             stdin_is_terminal: &crate::daemon::client::never_interactive,
-            ask_for_task: true,
+            check: false,
             inputs: Vec::new(),
             named: HashMap::new(),
             values: BTreeMap::new(),
@@ -110,6 +110,70 @@ impl<'a> RunLine<'a> {
             output_request: None,
         }
     }
+}
+
+/// What the binary hands over for `lev run`, flag by flag, before any of it
+/// is read: [`resolve_spawn_args`] turns it into a [`RunLine`] and reads that.
+pub struct LaunchRequest<'a> {
+    /// The blueprint path or name, as given, or `.` when none was.
+    pub path: &'a str,
+    /// The task text, if it was given rather than read from stdin or an editor.
+    pub task: Option<&'a str>,
+    /// Whether stdin is a terminal, injected so the editor path is testable.
+    pub stdin_is_terminal: &'a dyn Fn() -> bool,
+    /// `--model`, over the blueprint's choice.
+    pub model: Option<String>,
+    /// The working directory tools run in.
+    pub workdir: &'a str,
+    /// `--yolo`: run unattended.
+    pub yolo: bool,
+    /// `--yolo=<name>`: the profile that says which parts of unattended a
+    /// person still wants. `None` is the bare flag.
+    pub yolo_profile: Option<String>,
+    /// `--allow`: tools permitted outright.
+    pub allow: Vec<String>,
+    /// `--max-depth`: sub-agent tree cap.
+    pub max_depth: Option<usize>,
+    /// The inputs, `--request`, `--check`, and which defaults were typed.
+    pub regions: super::RunInputs,
+    /// `--no-seed-commands`: refuse the blueprint's command seeds.
+    pub no_seed_commands: bool,
+    /// The output shape the caller asked for, over the blueprint's.
+    pub output_request: Option<leviath_core::output::OutputSpec>,
+    /// Files attached with `--attach`, already read.
+    pub parts: Vec<InboundPart>,
+}
+
+/// Read what the binary handed over for `lev run` into the run it asks for,
+/// with relative paths in values read against the current directory.
+///
+/// A `--request` file names its own blueprint, so `path` counts beside one
+/// only when it was typed: the binary's `.` default is no blueprint at all.
+pub fn resolve_spawn_args(req: LaunchRequest<'_>) -> anyhow::Result<LocalRun> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let regions = req.regions;
+    let path = (regions.path_given || regions.request.is_none()).then_some(req.path);
+    run_request(RunLine {
+        path,
+        request_file: regions.request.as_deref(),
+        task: req.task,
+        stdin_is_terminal: req.stdin_is_terminal,
+        check: regions.check,
+        inputs: regions.inputs,
+        named: regions.named,
+        values: BTreeMap::new(),
+        parts: req.parts,
+        cwd: &cwd,
+        model: req.model,
+        workdir: req.workdir,
+        workdir_given: regions.workdir_given,
+        yolo: req.yolo,
+        yolo_profile: req.yolo_profile,
+        allow: req.allow,
+        max_depth: req.max_depth,
+        no_seed_commands: req.no_seed_commands,
+        output_request: req.output_request,
+    })
 }
 
 /// The run a command line asks for: its request, and what the inputs are
@@ -202,7 +266,7 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
         && !source.request.inputs.contains_key(TASK_INPUT)
     {
         let handed_in = !source.request.inputs.is_empty() || !parts.is_empty();
-        let waived = (handed_in && !decl.required) || !line.ask_for_task;
+        let waived = (handed_in && !decl.required) || line.check;
         let task = match (given_task, waived) {
             (None, true) => String::new(),
             _ => resolve_task(
@@ -249,6 +313,7 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
         yolo,
         yolo_profile,
         output: line.output_request,
+        check: line.check,
     })
 }
 

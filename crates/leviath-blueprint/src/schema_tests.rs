@@ -14,7 +14,10 @@ fn the_published_blueprint_schema_matches_this_build() {
     if std::env::var_os("LEVIATH_WRITE_SCHEMAS").is_some() {
         std::fs::write(&path, &text).unwrap();
     }
-    let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+    // A Windows checkout may turn the file's newlines into CRLF.
+    let on_disk = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     assert!(
         on_disk == text,
         "blueprint.schema.json is out of date; rerun this test with LEVIATH_WRITE_SCHEMAS=1 and commit the file"

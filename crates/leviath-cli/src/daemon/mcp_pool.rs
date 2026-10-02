@@ -880,7 +880,7 @@ name = "a"
 version = "0.1.0"
 
 [graph]
-mcp_servers = [{{ name = "{server}", command = "python3", args = ["{}"] }}]
+mcp_servers = [{{ name = "{server}", command = "python3", args = ['{}'] }}]
 
 [[graph.stages]]
 name = "main"
@@ -924,7 +924,7 @@ name = "a"
 version = "0.1.0"
 
 [graph]
-mcp_servers = [{{ name = "{server}", command = "python3", args = ["{}"] }}]
+mcp_servers = [{{ name = "{server}", command = "python3", args = ['{}'] }}]
 
 [[graph.stages]]
 name = "main"

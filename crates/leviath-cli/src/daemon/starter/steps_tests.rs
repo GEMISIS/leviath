@@ -184,7 +184,11 @@ async fn a_fan_outs_worker_servers_are_found_by_path_or_query() {
     assert_eq!(names("{ query = \"mcpagent\" }"), ["search"]);
     assert!(names("{ query = \"nothing-matches\" }").is_empty());
     assert!(names("{ stage = \"w\" }").is_empty());
-    assert!(names("{ blueprint_file = '/no/such/worker' }").is_empty());
+    let missing = format!(
+        "{{ blueprint_file = '{}' }}",
+        agents.path().join("no-such-worker").display()
+    );
+    assert!(names(&missing).is_empty());
 }
 
 /// Warming a run connects its own MCP servers and its fan-out workers', so

@@ -116,9 +116,6 @@ leviath-graphql-derive = { path = "crates/leviath-graphql-derive", version = "0.
 leviath-sys = { path = "crates/leviath-sys", version = "0.6.4" }
 leviath-telemetry = { path = "crates/leviath-telemetry", version = "0.6.4" }
 leviath-testkit = { path = "crates/leviath-testkit" }
-# Path-only too, and `publish = false`: it converts old run directories, is
-# deleted before 1.0, and is never published.
-leviath-legacy-runs = { path = "crates/leviath-legacy-runs" }
 
 # External dependencies
 bevy_ecs = { version = "0.19", features = ["multi_threaded"] }

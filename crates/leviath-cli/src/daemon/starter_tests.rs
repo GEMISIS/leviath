@@ -147,7 +147,9 @@ async fn build_agent_fails_fast_on_a_broken_custom_region_script() {
     )
     .unwrap_err();
     assert!(err.contains("layout.regions[0].kind"), "got: {err}");
-    assert!(err.contains("hooks/brain.rhai"), "got: {err}");
+    // In the host's own separator: `hooks\brain.rhai` on Windows.
+    let script = std::path::Path::new("hooks").join("brain.rhai");
+    assert!(err.contains(&script.display().to_string()), "got: {err}");
 }
 
 /// A blueprint's mime check that cannot be loaded stops the spawn, the

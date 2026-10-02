@@ -160,7 +160,15 @@ layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pin
             output_format: None,
             output_instructions: None,
         };
-        let spawn = spawn_request(&resolved, "do the thing", "/work", &args, Vec::new()).unwrap();
+        let work = root.path().join("work");
+        let spawn = spawn_request(
+            &resolved,
+            "do the thing",
+            &work.to_string_lossy(),
+            &args,
+            Vec::new(),
+        )
+        .unwrap();
         // The blueprint is named by its directory, which the daemon reads it
         // and the files beside it from.
         let source = serde_json::to_value(&spawn.source).unwrap();
@@ -176,7 +184,7 @@ layout = {{ total_budget_tokens = 1000, regions = [{{ name = "task", kind = "pin
             Some(&RawInput::Text("do the thing".to_string()))
         );
         assert_eq!(spawn.inputs.len(), 1, "the task is the only input");
-        assert_eq!(spawn.workdir, Some(std::path::PathBuf::from("/work")));
+        assert_eq!(spawn.workdir, Some(work));
         assert!(spawn.model.is_none());
         assert_eq!(
             spawn.launch.unattended,

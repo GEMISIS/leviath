@@ -233,18 +233,20 @@ mod tests {
                 pacing,
             );
 
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            while !reload.registry().unread_catalogs().is_empty()
-                && tokio::time::Instant::now() < deadline
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            // Waits on the cache, which is written just after the list is
+            // installed: a slow runner can see the list before the file.
+            let path = reload.cache_path().unwrap();
+            leviath_testkit::wait_until("the cache was written", || {
+                leviath_providers::CapabilityCache::load(path)
+                    .is_some_and(|cache| cache.check("openrouter").is_some())
+            })
+            .await;
             assert!(
                 reload.registry().unread_catalogs().is_empty(),
                 "the list came back"
             );
-            let cache = leviath_providers::CapabilityCache::load(reload.cache_path().unwrap())
-                .expect("the cache was written");
+            let cache =
+                leviath_providers::CapabilityCache::load(path).expect("the cache was written");
             assert_eq!(
                 cache.check("openrouter").map(|c| &c.outcome),
                 Some(&leviath_providers::CheckOutcome::Reachable { models: 1 })
@@ -252,10 +254,10 @@ mod tests {
 
             // The full refresh finds the gateway gone again: the list it has
             // is kept, and the live one is owed once more.
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            while reload.awaiting_live().is_empty() && tokio::time::Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            leviath_testkit::wait_until("the gateway is owed again", || {
+                !reload.awaiting_live().is_empty()
+            })
+            .await;
             task.abort();
             assert_eq!(reload.awaiting_live(), ["openrouter"]);
             assert!(

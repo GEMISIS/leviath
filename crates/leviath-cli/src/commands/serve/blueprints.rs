@@ -1189,7 +1189,12 @@ system_prompt = "Gather"
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("spreader");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        write_test_agent(&agent_dir, manifest);
+        // Absolute on every host (`/opt/agents/reader` is not, on Windows),
+        // as a TOML literal string so a Windows path's `\` stays a `\`.
+        let reader = std::env::temp_dir().join("agents").join("reader");
+        let reader = reader.to_string_lossy();
+        let manifest = manifest.replace("\"/opt/agents/reader\"", &format!("'{reader}'"));
+        write_test_agent(&agent_dir, &manifest);
 
         let state = test_state_with_path(dir.path().to_path_buf());
         let app = Router::new()
@@ -1233,7 +1238,7 @@ system_prompt = "Gather"
                 },
                 {
                     "stage": "local",
-                    "worker_agent": "/opt/agents/reader",
+                    "worker_agent": reader,
                     "max_workers": 30,
                     "max_items": null,
                     "on_worker_failure": "continue",

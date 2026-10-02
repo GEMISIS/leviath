@@ -682,9 +682,14 @@ async fn a_fan_out_names_a_worker_directory_or_a_query() {
     let query =
         r#"{ stage(name: "build") { fanOut { workerAgent workerStageName workerQuery } } }"#;
 
-    let from_dir = ask_about(&fanned(r#"{ blueprint_file = "/agents/helper" }"#), query).await;
+    // Absolute on every host (`/agents/helper` is not, on Windows), as a
+    // TOML literal string so a Windows path's `\` stays a `\`.
+    let helper = std::env::temp_dir().join("agents").join("helper");
+    let helper = helper.to_string_lossy();
+    let worker = format!("{{ blueprint_file = '{helper}' }}");
+    let from_dir = ask_about(&fanned(&worker), query).await;
     let fan = &from_dir["stage"]["fanOut"];
-    assert_eq!(fan["workerAgent"], "/agents/helper");
+    assert_eq!(fan["workerAgent"], helper.as_ref());
     assert!(fan["workerQuery"].is_null());
 
     let by_query = ask_about(&fanned(r#"{ query = "a code reviewer" }"#), query).await;

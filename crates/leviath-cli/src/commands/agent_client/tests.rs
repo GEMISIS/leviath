@@ -620,10 +620,13 @@ async fn empty_cwd_defaults_to_the_launch_directory() {
     h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
         .await;
     let _ = h.recv_until(is_result).await;
-    assert_eq!(
-        captured.lock().unwrap().as_deref(),
-        Some(HARNESS_DEFAULT_CWD)
-    );
+    // Compared as paths: on Windows the rooted default gains the drive.
+    let captured = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .map(std::path::PathBuf::from);
+    assert_eq!(captured, std::path::absolute(HARNESS_DEFAULT_CWD).ok());
     h.close_input().await;
 }
 

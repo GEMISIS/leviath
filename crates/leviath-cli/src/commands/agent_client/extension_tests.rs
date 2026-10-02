@@ -118,8 +118,8 @@ async fn a_spawn_opens_a_session_bound_to_its_run() {
         .await;
     let result = h.recv().await.result.expect("spawned");
     assert_eq!(result["runId"], RUN_ID);
-    let session_id = result["sessionId"].as_str().unwrap().to_string();
-    assert!(session_id.starts_with("coder"), "{session_id}");
+    let opened = result["sessionId"].as_str().unwrap().to_string();
+    assert!(opened.starts_with("coder"), "{opened}");
     let sent = spawn_requests(&seen);
     assert_eq!(sent.len(), 1);
     assert_eq!(
@@ -135,13 +135,13 @@ async fn a_spawn_opens_a_session_bound_to_its_run() {
     h.send(&call(
         2,
         "session/prompt",
-        serde_json::json!({"sessionId": session_id, "prompt": []}),
+        serde_json::json!({"sessionId": opened, "prompt": []}),
     ))
     .await;
     let chunk = h
         .recv_until(|m| update_kind(m).as_deref() == Some("agent_message_chunk"))
         .await;
-    assert_eq!(chunk.params.unwrap()["sessionId"], session_id.as_str());
+    assert_eq!(chunk.params.unwrap()["sessionId"], opened.as_str());
     let end = h.recv_until(is_result).await;
     assert_eq!(end.result.unwrap()["stopReason"], "end_turn");
     let messaged = |seen: &Seen| {
@@ -156,7 +156,7 @@ async fn a_spawn_opens_a_session_bound_to_its_run() {
     h.send(&call(
         3,
         "session/prompt",
-        serde_json::json!({"sessionId": session_id, "prompt": [{"type": "text", "text": "more"}]}),
+        serde_json::json!({"sessionId": opened, "prompt": [{"type": "text", "text": "more"}]}),
     ))
     .await;
     let _ = h.recv_until(is_result).await;

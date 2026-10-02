@@ -77,8 +77,16 @@ jobs:
         with:
           # Same key as Clippy: both compile every target on this OS.
           shared-key: build-${{ matrix.os }}
+      # Two steps, so the two largest compiles never run side by side:
+      # leviath-cli's library peaks near 6 GB of rustc memory and its
+      # unit-test crate near 9 GB. Built in one invocation they compile at
+      # once, and the 7 GB macOS runner swapped until the job timed out.
       - name: Build
-        run: cargo build --all-targets
+        # bash on every OS, so the first command failing fails the step.
+        shell: bash
+        run: |
+          cargo build --workspace --lib --bins
+          cargo build --all-targets
       - name: Test
         run: cargo test
       # GitHub's native per-job `badge.svg?job=...` filter was observed to
