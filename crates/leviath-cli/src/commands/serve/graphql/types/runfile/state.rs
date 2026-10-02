@@ -866,6 +866,10 @@ pub(crate) struct RunState {
     pub(crate) grants: StateGrants,
     /// The bytes it has written, against its write ceilings.
     pub(crate) written_bytes: BigInt,
+    /// When it last made progress, when its record keeps that apart from
+    /// its last step (a run converted from an earlier release). Null when
+    /// its last step is its progress.
+    pub(crate) last_progress_at: Option<Timestamp>,
 }
 
 /// The approvals a person granted a run beyond the call they were asked
@@ -942,6 +946,7 @@ impl From<&CoreState> for RunState {
             blobs: s.blobs.iter().map(super::files::StateBlob::from).collect(),
             grants: StateGrants::from(&s.grants),
             written_bytes: big(s.written),
+            last_progress_at: s.last_progress_at.map(Timestamp),
         }
     }
 }

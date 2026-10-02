@@ -458,16 +458,17 @@ impl Dashboard {
 
         // Bottom-left file path hint
         let file_path_hint = {
-            // The file each view reads: a stage's log, the run's file for
-            // its window, or the run's answer for the Final view and the
-            // Output view's fallback to it.
-            // A file the run file does not name yet is shown as the run file,
-            // which is where it will be named.
+            // The file each view reads: a stage's log (where the run writes
+            // it, before it has written any), the run's file for its window,
+            // or the run's answer for the Final view and the Output view's
+            // fallback to it. An answer the run file does not name yet is
+            // shown as the run file, which is where it will be named.
             let run_dir = runstate::run_dir(&agent.id);
+            let run_file = runstate::run_file::path_in(&run_dir);
             use leviath_runtime::state::StageFile;
-            let named = match (self.stage_content_mode, showing_final_output) {
+            let path = match (self.stage_content_mode, showing_final_output) {
                 (_, true) | (StageContentMode::FinalOutput, _) => {
-                    runstate::final_output_path(&run_dir)
+                    runstate::final_output_path(&run_dir).unwrap_or(run_file)
                 }
                 (StageContentMode::Output, false) => {
                     runstate::stage_file_path(&run_dir, self.selected_stage, StageFile::Output)
@@ -475,9 +476,8 @@ impl Dashboard {
                 (StageContentMode::Logs, false) => {
                     runstate::stage_file_path(&run_dir, self.selected_stage, StageFile::Logs)
                 }
-                (StageContentMode::Context, false) => None,
+                (StageContentMode::Context, false) => run_file,
             };
-            let path = named.unwrap_or_else(|| runstate::run_file::path_in(&run_dir));
             let raw = path.to_string_lossy().to_string();
             // Display-only `~` abbreviation of the OS home directory;
             // deliberately NOT the LEVIATH_HOME-aware resolver (see the
@@ -3131,6 +3131,9 @@ regions = []
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("Logs"), "{buf}");
+        // A stage that has logged nothing yet shows where its log will be.
+        assert!(buf.contains("run-logs-fph/stages/0/"), "{buf}");
+        assert!(!buf.contains("run.lvr"), "{buf}");
     }
 
     // ─── render_content_pane: search with no matches shows 0 matches ──────

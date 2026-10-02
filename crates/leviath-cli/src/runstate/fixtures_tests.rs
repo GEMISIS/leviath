@@ -223,6 +223,11 @@ fn state_of(meta: &RunMeta, spec: &RunSpec, base: Option<RunState>) -> RunState 
         _ => PipelinePhase::ReadyToInfer,
     };
     state.status = status;
+    // A record that names its stage was in it; one that names none entered
+    // no stage.
+    if !meta.current_stage.is_empty() {
+        state.visits.entry(stage.clone()).or_insert(1);
+    }
     state.cursor.stage = stage;
     state.cursor.iteration = u32::try_from(meta.iteration).unwrap_or(u32::MAX);
     let n = |x: usize| x as u64;

@@ -121,7 +121,7 @@ async fn the_old_body_starts_a_run_and_answers_in_the_old_shape() {
     let body = serde_json::json!({
         "blueprint": "compat-probe",
         "task": "summarise @brief.txt",
-        "regions": {"query": "what to look up", "notes": "free text"},
+        "regions": {"query": "what to look up"},
         "workdir": work.path(),
         "model": "openai/gpt-mock",
         "yolo_profile": "careful",
@@ -148,10 +148,9 @@ async fn the_old_body_starts_a_run_and_answers_in_the_old_shape() {
         panic!("{:?}", request.source)
     };
     assert!(path.to_string().ends_with("compat-probe"), "{path}");
-    // `query` is the region `subject` fills; `notes` is filled only through
-    // a template, so it keeps its own name and validation names it.
+    // `query` is the region `subject` fills.
     let names: Vec<&str> = request.inputs.keys().map(String::as_str).collect();
-    assert_eq!(names, ["notes", "subject", "task"]);
+    assert_eq!(names, ["subject", "task"]);
     assert_eq!(
         request.inputs["subject"],
         RawInput::Text("what to look up".into())
@@ -231,8 +230,9 @@ async fn a_refusal_is_one_message_under_the_old_statuses() {
 }
 
 /// A region no input of the blueprint fills is left out, as older servers
-/// left it, and the answer says so; the rest of the body still starts the
-/// run. A file named in that text is not read.
+/// left a region they did not seed, and so is one an input fills through a
+/// template: the answer says so, naming the input, and the rest of the body
+/// still starts the run. A file named in that text is not read.
 #[tokio::test]
 async fn a_region_no_input_fills_is_left_out_with_a_warning() {
     let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
@@ -245,15 +245,32 @@ async fn a_region_no_input_fills_is_left_out_with_a_warning() {
         "blueprint": "compat-probe",
         "task": "go",
         "workdir": work.path(),
-        "regions": {"query": "what to look up", "scratch": "see @notes.txt"},
+        "regions": {
+            "query": "what to look up",
+            "scratch": "see @notes.txt",
+            "notes": "seeded",
+        },
     });
     let (status, answer) = send(state, spawn(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(answer["run_id"], "compat-probe-2");
-    let warnings = answer["warnings"].as_array().expect("a warning");
-    assert_eq!(warnings.len(), 1, "{answer}");
-    let said = warnings[0].as_str().unwrap();
-    assert!(said.contains("regions.scratch"), "{said}");
+    let warnings: Vec<&str> = answer["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(warnings.len(), 2, "{answer}");
+    assert!(
+        warnings[0].starts_with("regions.notes:") && warnings[0].contains("'count'"),
+        "{}",
+        warnings[0]
+    );
+    assert!(
+        warnings[1].starts_with("regions.scratch:"),
+        "{}",
+        warnings[1]
+    );
     let request = spawned(&seen);
     let names: Vec<&str> = request.inputs.keys().map(String::as_str).collect();
     assert_eq!(names, ["subject", "task"]);
@@ -345,26 +362,30 @@ fn a_region_is_named_as_the_input_that_fills_it() {
         .run_graph()
         .inputs;
     assert_eq!(
-        super::input_for_region(&inputs, "task").as_deref(),
+        super::input_for_region(&inputs, "task").ok().as_deref(),
         Some("task")
     );
     assert_eq!(
-        super::input_for_region(&inputs, "query").as_deref(),
+        super::input_for_region(&inputs, "query").ok().as_deref(),
         Some("subject")
     );
-    assert_eq!(
-        super::input_for_region(&inputs, "notes").as_deref(),
-        Some("notes")
-    );
-    assert_eq!(super::input_for_region(&inputs, "nowhere"), None);
+    // Filled through a template: the text has nowhere to go, and the
+    // input that does fill it is named.
+    let templated = super::input_for_region(&inputs, "notes").unwrap_err();
+    assert!(templated.contains("'count'"), "{templated}");
+    let nowhere = super::input_for_region(&inputs, "nowhere").unwrap_err();
+    assert!(nowhere.contains("no input fills"), "{nowhere}");
     // Two inputs filling one region: neither is the region's.
     let mut twice = inputs.clone();
     twice.push(inputs[1].clone());
     twice[3].name = leviath_runtime::spec::names::InputName::new("other").unwrap();
-    assert_eq!(
-        super::input_for_region(&twice, "query").as_deref(),
-        Some("query")
-    );
+    let both = super::input_for_region(&twice, "query").unwrap_err();
+    assert!(both.contains("'subject', 'other'"), "{both}");
+    // A typed input filling a region with its value alone takes no text.
+    let mut typed = inputs.clone();
+    typed[1].ty = typed[2].ty.clone();
+    let typed = super::input_for_region(&typed, "query").unwrap_err();
+    assert!(typed.contains("'subject'"), "{typed}");
 }
 
 #[tokio::test]

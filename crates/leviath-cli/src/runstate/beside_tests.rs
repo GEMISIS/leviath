@@ -3,7 +3,8 @@ use crate::runstate::{create_run, run_dir, with_isolated_runs_dir};
 
 /// A run's logs and answer are found through what its run file names: a
 /// file the run file does not name is not read, even where a run would keep
-/// it, and a file it names is read wherever it says.
+/// it, and a file it names is read wherever it says. A stage file not named
+/// yet is where the run will write it.
 #[test]
 fn files_are_found_through_what_the_run_file_names() {
     with_isolated_runs_dir("beside-named", |_| {
@@ -12,7 +13,10 @@ fn files_are_found_through_what_the_run_file_names() {
         std::fs::create_dir_all(dir.join("stages/0")).unwrap();
         std::fs::write(dir.join("stages/0/logs.log"), "unnamed\n").unwrap();
         assert_eq!(tail_stage_file(&dir, 0, StageFile::Logs, 100), "");
-        assert_eq!(stage_file_path(&dir, 0, StageFile::Logs), None);
+        assert_eq!(
+            stage_file_path(&dir, 0, StageFile::Logs),
+            dir.join("stages/0/logs.log")
+        );
         assert_eq!(final_output_path(&dir), None);
 
         // Named somewhere else entirely, it is read from there.
@@ -28,11 +32,14 @@ fn files_are_found_through_what_the_run_file_names() {
         assert_eq!(tail_stage_file(&dir, 0, StageFile::Logs, 100), "moved\n");
         assert_eq!(
             stage_file_path(&dir, 0, StageFile::Logs),
-            Some(dir.join("legacy/stages/0/logs.log"))
+            dir.join("legacy/stages/0/logs.log")
         );
         assert_eq!(tail_stage_file(&dir, 1, StageFile::Logs, 100), "");
         assert_eq!(tail_stage_file(&dir, usize::MAX, StageFile::Logs, 100), "");
-        assert_eq!(stage_file_path(&dir, usize::MAX, StageFile::Logs), None);
+        assert_eq!(
+            stage_file_path(&dir, usize::MAX, StageFile::Logs),
+            dir.join(format!("stages/{}/logs.log", u32::MAX))
+        );
         // A directory with no run file names nothing.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(*named_files(empty.path()), RunFiles::default());

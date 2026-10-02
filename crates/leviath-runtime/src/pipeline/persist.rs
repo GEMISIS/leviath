@@ -80,6 +80,15 @@ pub struct PersistWatermark {
     /// parent's file has to say which workers are done: a restart reads the
     /// workers it lists as running and counts any it cannot find as failed.
     last_fan_out: Option<[usize; 4]>,
+    /// Where the run was among its stage's checkpoints as of the last
+    /// snapshot: the checkpoint, its revision round, and whether it was being
+    /// put to a person.
+    ///
+    /// An answer moves these without the iteration, stage or status moving
+    /// when the run is paused, and the run's file has to hold the answer's
+    /// effect: a run brought back from its file asks the checkpoint again
+    /// otherwise, and the answer is lost.
+    last_point: Option<(usize, usize, bool)>,
 }
 
 impl PersistWatermark {
@@ -394,6 +403,8 @@ type PersistenceQuery = (
         Option<&'static super::WaitingForChildren>,
         Option<&'static crate::components::AwaitingInteraction>,
         Option<&'static super::PausedForSetup>,
+        Option<&'static crate::interaction_points::InteractionPointCursor>,
+        Option<&'static crate::interaction_points::InteractionPointRounds>,
         // Optional so a world that builds agents by hand (tests, embedded
         // hosts) still persists; those runs simply keep no working clock and
         // fall back to wall-clock age when read.
@@ -484,6 +495,8 @@ fn build_snapshots(
             waiting_for_children,
             awaiting_interaction,
             paused_for_setup,
+            point_cursor,
+            point_rounds,
             clock,
         ),
     ) in agents.iter_mut()
@@ -567,6 +580,12 @@ fn build_snapshots(
         let tools_changed = watermark.last_awaiting_tools != Some(awaiting_tools);
         let fan_out_now = fan_out_waiting.map(crate::fanout::FanOutWaiting::progress);
         let fan_out_changed = watermark.last_fan_out != fan_out_now;
+        let point_now = (
+            point_cursor.map_or(0, |c| c.0),
+            point_rounds.map_or(0, |r| r.0),
+            awaiting_point.is_some(),
+        );
+        let point_changed = watermark.last_point != Some(point_now);
         // Beat even when nothing changed, so `updated_at` distinguishes a run
         // that is slow from one that nothing is driving.
         let due_for_heartbeat = watermark
@@ -576,6 +595,7 @@ fn build_snapshots(
             || title_changed
             || tools_changed
             || fan_out_changed
+            || point_changed
             || due_for_heartbeat;
         if !due && !has_appends {
             continue; // nothing meaningful changed, nothing buffered, beat not due
@@ -623,6 +643,7 @@ fn build_snapshots(
         }
         watermark.last_awaiting_tools = Some(awaiting_tools);
         watermark.last_fan_out = fan_out_now;
+        watermark.last_point = Some(point_now);
         watermark.last_written_at = Some(now);
 
         // Tree links, for a deterministic restart-time rebuild of the graph.

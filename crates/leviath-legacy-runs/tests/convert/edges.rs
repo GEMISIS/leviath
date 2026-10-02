@@ -322,6 +322,53 @@ fn a_run_in_no_stage_it_names_resumes_at_the_entry() {
     assert!(report.defaulted("cursor.stage").is_some());
 }
 
+/// A run whose record names no stage entered none, and is listed with none;
+/// one that names its stage was in it, ledger or not.
+#[test]
+fn a_run_that_named_no_stage_is_listed_in_none() {
+    let run = Run::fixture("finished");
+    run.remove("stages.json");
+    run.meta(|m| m.current_stage = String::new());
+    let (_, file) = run.converted();
+    assert!(file.last.visits.is_empty());
+    let listed = leviath_runtime::runfile::summary_of(&file.spec, &file.last, 0);
+    assert_eq!(listed.current_stage, "");
+
+    let named = Run::fixture("finished");
+    named.remove("stages.json");
+    let (_, file) = named.converted();
+    assert_eq!(file.last.visits.get("main"), Some(&1));
+    let listed = leviath_runtime::runfile::summary_of(&file.spec, &file.last, 0);
+    assert_eq!(listed.current_stage, "main");
+}
+
+/// When the run last made progress is kept where its record says it was
+/// earlier than the record's last write, as a reaped worker's is: its
+/// parent touches `meta.json` and nothing else.
+#[test]
+fn a_record_touched_after_its_last_progress_keeps_when_that_was() {
+    let run = Run::fixture("finished");
+    let mut at = 0;
+    run.json("meta.json", |m| {
+        at = m["updated_at"].as_i64().unwrap() - 130;
+        m["last_progress_at"] = at.into();
+    });
+    let (_, file) = run.converted();
+    assert_eq!(file.last.last_progress_at, Some(at));
+    let updated = file.deltas.last().unwrap().at;
+    let listed = leviath_runtime::runfile::summary_of(&file.spec, &file.last, updated);
+    assert_eq!(listed.last_progress_at, Some(at));
+    assert_eq!(listed.updated_at, updated);
+
+    let moved = Run::fixture("finished");
+    moved.meta(|m| m.last_progress_at = Some(m.updated_at));
+    let (_, file) = moved.converted();
+    assert_eq!(
+        file.last.last_progress_at, None,
+        "its last step is its progress"
+    );
+}
+
 #[test]
 fn context_entries_of_every_kind_are_typed() {
     let run = Run::fixture("finished");

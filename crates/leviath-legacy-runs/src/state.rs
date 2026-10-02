@@ -218,6 +218,12 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
     }
     state.ledger = old.stages.iter().filter_map(|r| ledger(r, meta)).collect();
     state.visits = visits(&old.stages);
+    // A run whose record names its stage was in it, whether or not it kept a
+    // ledger to count the visits by. One whose record names none entered no
+    // stage, and is listed with none.
+    if stage_of(graph, meta).is_some() {
+        state.visits.entry(stage.name.clone()).or_insert(1);
+    }
     state.cursor.visit = old
         .stages
         .iter()
@@ -265,6 +271,12 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
             "the run's record says it was not empty, though it changed no file and handed back no answer, and every earlier release showed what the record said",
         );
     }
+    // Kept only when it says something the last step's time does not: a
+    // worker's record is touched again when its parent reaps it.
+    state.last_progress_at = old
+        .listed
+        .last_progress_at
+        .filter(|at| *at < old.listed.updated_at);
     if old.listed.active.is_none() {
         // What every earlier release showed as its working time.
         state.clock = clock(None, Some(old.listed.started_at), old.listed.updated_at);

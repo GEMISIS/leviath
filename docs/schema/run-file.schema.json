@@ -903,6 +903,23 @@
               "Written"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`last_progress_at`.",
+            "properties": {
+              "LastProgressAt": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "LastProgressAt"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -10928,6 +10945,14 @@
           "$ref": "#/$defs/OpenInteraction"
         },
         "type": "array"
+      },
+      "last_progress_at": {
+        "description": "When the run last made progress, when its record keeps that apart\nfrom its last step: a run converted from an earlier release whose\nparent touched its record after it finished. `None` means its last\nstep.",
+        "format": "int64",
+        "type": [
+          "integer",
+          "null"
+        ]
       },
       "last_transition": {
         "anyOf": [

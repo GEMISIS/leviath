@@ -92,6 +92,11 @@ pub struct RunState {
     pub grants: Grants,
     /// The bytes it has written, against its `[limits]` write ceilings.
     pub written: u64,
+    /// When the run last made progress, when its record keeps that apart
+    /// from its last step: a run converted from an earlier release whose
+    /// parent touched its record after it finished. `None` means its last
+    /// step.
+    pub last_progress_at: Option<i64>,
 }
 
 /// The approvals a person granted a run beyond the call they were asked
@@ -157,6 +162,7 @@ impl RunState {
             blobs: Vec::new(),
             grants: Grants::default(),
             written: 0,
+            last_progress_at: None,
         }
     }
 }

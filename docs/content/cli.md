@@ -828,8 +828,9 @@ config grants.
 ### Pausing a run
 
 A run waiting on a question, an approval or a checkpoint can be paused too. The question stays
-open, and you can still answer it. The run takes the answer and holds until `lev resume`. A run
-waiting only on its own sub-agents pauses those sub-agents instead.
+open, and you can still answer it. The run takes the answer and holds until `lev resume`, and
+keeps it across a daemon restart. A run waiting only on its own sub-agents pauses those sub-agents
+instead. Pausing a run that is already paused says so.
 
 `lev cancel --force` writes the run's on-disk state terminal without asking the daemon, for when
 the daemon is gone or unresponsive. Without it, the daemon is asked first, since it can stop the
