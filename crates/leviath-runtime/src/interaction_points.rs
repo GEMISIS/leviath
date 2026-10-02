@@ -201,17 +201,22 @@ fn lookup_directive<'a>(
 /// Build the interaction request for a point in its declared style, attaching
 /// `body` (the document the stage produced - e.g. the plan) so the client can
 /// show just this instance's document to review, rather than the full history.
-fn build_point_request(point: &InteractionPointDef, id: String, body: &str) -> InteractionRequest {
+///
+/// The request names the stage that asks, as every other request does; the
+/// point's own name is in the request id.
+fn build_point_request(
+    point: &InteractionPointDef,
+    stage: &str,
+    id: String,
+    body: &str,
+) -> InteractionRequest {
     let mut req = match point.style {
-        AnswerStyle::MultipleChoice => InteractionRequest::multiple_choice(
-            id,
-            &point.prompt,
-            point.options.clone(),
-            &point.name,
-        ),
-        AnswerStyle::Confirm => InteractionRequest::confirm(id, &point.prompt, &point.name),
+        AnswerStyle::MultipleChoice => {
+            InteractionRequest::multiple_choice(id, &point.prompt, point.options.clone(), stage)
+        }
+        AnswerStyle::Confirm => InteractionRequest::confirm(id, &point.prompt, stage),
         AnswerStyle::FreeText => {
-            InteractionRequest::free_text(id, &point.prompt, &point.name, point.required)
+            InteractionRequest::free_text(id, &point.prompt, stage, point.required)
         }
     };
     if !body.trim().is_empty() {
@@ -308,6 +313,8 @@ pub(crate) struct PointAsk {
     /// That agent's run id, which the request id is namespaced by so two runs
     /// at the same point never collide in the shared hub.
     pub agent_id: String,
+    /// The stage the point belongs to, which the request names.
+    pub stage: String,
     /// The point as the graph declared it.
     pub point: InteractionPointDef,
     /// The text being asked about.
@@ -320,6 +327,7 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
     let PointAsk {
         entity,
         agent_id,
+        stage,
         point,
         body,
         round,
@@ -337,7 +345,7 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
         &format!("{}-{round}", point.name),
     );
     let backend = hub.backend_for(agent_id);
-    let req = build_point_request(&point, ask_id.clone(), &body);
+    let req = build_point_request(&point, &stage, ask_id.clone(), &body);
     let resp = backend.ask(req).await;
 
     // A point that declared it needs a person, and did not get one. Routing an
@@ -372,7 +380,7 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
             let edit_req = InteractionRequest::edit_text(
                 format!("{ask_id}-edit"),
                 "Edit the document - your changes replace it, then submit:",
-                &point.name,
+                &stage,
                 body,
             );
             let edited = backend.ask(edit_req).await.value.unwrap_or_default();
@@ -429,16 +437,19 @@ pub fn restore_interaction_point(
         .expect("a reloaded agent has AgentState")
         .agent_id
         .clone();
-    let point = {
+    let (stage, point) = {
         let spec = world
             .get::<RunSpecC>(entity)
             .expect("a reloaded agent has a spec");
         let cursor = world
             .get::<StageCursor>(entity)
             .expect("a reloaded agent has a stage cursor");
-        stage_points(spec, cursor)
-            .and_then(|p| p.get(state.cursor))
-            .cloned()
+        (
+            stage_name(spec, cursor),
+            stage_points(spec, cursor)
+                .and_then(|p| p.get(state.cursor))
+                .cloned(),
+        )
     };
     let Some(point) = point else {
         tracing::warn!(
@@ -467,6 +478,7 @@ pub fn restore_interaction_point(
         PointAsk {
             entity,
             agent_id,
+            stage,
             point,
             body: state.body,
             round: state.round,
@@ -480,6 +492,11 @@ pub fn restore_interaction_point(
 }
 
 // ─── Systems ─────────────────────────────────────────────────────────────────
+
+/// The name of the agent's current stage.
+fn stage_name(spec: &RunSpecC, cursor: &StageCursor) -> String {
+    spec.0.graph.stages[cursor.index].name.as_str().to_string()
+}
 
 /// Read the interaction points of an agent's current stage, or `None` if the
 /// stage isn't an interactive-points stage.
@@ -632,6 +649,7 @@ pub(crate) fn dispatch_interaction_point(
             PointAsk {
                 entity,
                 agent_id: state.agent_id.clone(),
+                stage: stage_name(bp, cursor),
                 point,
                 body: body.clone(),
                 round: rounds.map_or(0, |r| r.0),
@@ -969,6 +987,7 @@ mod tests {
         use leviath_core::interaction::InteractionKind;
         let mc = build_point_request(
             &point("p", AnswerStyle::MultipleChoice, &["a", "b"]),
+            "s",
             "id".to_string(),
             "## Plan\n1. do it",
         );
@@ -980,17 +999,27 @@ mod tests {
             mc.body_format,
             leviath_core::interaction::BodyFormat::Markdown
         );
-        let cf = build_point_request(&point("p", AnswerStyle::Confirm, &[]), "id".to_string(), "");
+        let cf = build_point_request(
+            &point("p", AnswerStyle::Confirm, &[]),
+            "s",
+            "id".to_string(),
+            "",
+        );
         assert_eq!(cf.kind, InteractionKind::Confirm);
         // A blank body is not attached.
         assert_eq!(cf.body, None);
         let ft = build_point_request(
             &point("p", AnswerStyle::FreeText, &[]),
+            "s",
             "id".to_string(),
             "   ",
         );
         assert_eq!(ft.kind, InteractionKind::FreeText);
         assert_eq!(ft.body, None);
+        // Each names the stage that asks, not the point.
+        for req in [&mc, &cf, &ft] {
+            assert_eq!(req.stage_name, "s");
+        }
     }
 
     #[test]
@@ -1209,6 +1238,9 @@ mod tests {
         let pending = hub.pending();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1.body.as_deref(), Some("the plan"));
+        // The request names the stage that asks; the point is in its id.
+        assert_eq!(pending[0].1.stage_name, "plan");
+        assert!(pending[0].1.id.contains("plan_approval"));
         // The produced plan became the authoritative content of the pinned
         // `plan` region (no user-edit marker, since it came from inference).
         let plan = world
@@ -1310,7 +1342,7 @@ mod tests {
         }
         let pending = hub.pending();
         assert_eq!(pending.len(), 1, "a person is being asked");
-        assert_eq!(pending[0].1.stage_name, "plan_approval");
+        assert_eq!(pending[0].1.stage_name, "plan");
     }
 
     /// End to end through the real ask task: a held point whose prompt expires
@@ -1336,6 +1368,7 @@ mod tests {
                 PointAsk {
                     entity: Entity::from_raw_u32(1).unwrap(),
                     agent_id: "run-1".to_string(),
+                    stage: "plan".to_string(),
                     point,
                     body: "the plan".to_string(),
                     round: 0,
@@ -1864,6 +1897,7 @@ mod tests {
                     entity: Entity::from_raw_u32(1)
                         .expect("a small literal index is always a valid entity id"),
                     agent_id: "run".to_string(),
+                    stage: "plan".to_string(),
                     point,
                     body: "body".to_string(),
                     round: 0,
@@ -1990,6 +2024,7 @@ mod tests {
                     entity: Entity::from_raw_u32(1)
                         .expect("a small literal index is always a valid entity id"),
                     agent_id: "run".to_string(),
+                    stage: "plan".to_string(),
                     point: plan_point(),
                     body: "body".to_string(),
                     round: 0,
