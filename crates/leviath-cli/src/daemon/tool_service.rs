@@ -3031,7 +3031,8 @@ pub(crate) mod tests {
         );
         let results = exec().await;
         assert_eq!(results.len(), 1);
-        assert!(results[0].1.contains("not decided"), "{}", results[0].1);
+        let refused = results[0].1.to_string();
+        assert!(refused.contains("not decided"), "{refused}");
 
         // An agent with no tool state is refused when judged, errors when run,
         // and has no write total.
@@ -3066,12 +3067,31 @@ pub(crate) mod tests {
             )],
         )
         .await;
-        assert!(
-            asked[0].1.contains("closed without an answer"),
-            "{}",
-            asked[0].1
-        );
+        let asked = asked[0].1.to_string();
+        assert!(asked.contains("closed without an answer"), "{asked}");
         assert_eq!(service.written(e), Some(0));
+
+        // A question in an unattended run is answered by the run itself.
+        let hub = InteractionHub::new();
+        let mut unattended =
+            (*state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new())).clone();
+        unattended.unattended = true;
+        let yolo =
+            Entity::from_raw_u32(3).expect("a small literal index is always a valid entity id");
+        service.register(yolo, Arc::new(unattended));
+        let answered = run_judged(
+            &service,
+            yolo,
+            vec![call(
+                "c3",
+                "ask_user_text",
+                serde_json::json!({"prompt": "which way?"}),
+            )],
+        )
+        .await;
+        let answered = answered[0].1.to_string();
+        assert!(answered.contains("unattended run"), "{answered}");
+        assert!(hub.pending().is_empty(), "nobody was asked");
     }
 
     #[tokio::test]

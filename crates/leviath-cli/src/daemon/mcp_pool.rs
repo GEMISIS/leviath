@@ -366,9 +366,9 @@ impl McpPool {
                 });
             entry.generation += 1;
             entry.holders.insert(run_id.to_string());
-            if !lease.signatures.contains(&sig) {
-                lease.signatures.push(sig);
-            }
+            // A server listed twice is held once: releasing it the second
+            // time finds the run no longer among its holders.
+            lease.signatures.push(sig);
         }
         lease
     }

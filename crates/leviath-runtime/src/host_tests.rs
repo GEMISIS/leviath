@@ -4286,6 +4286,36 @@ async fn emit_events_skips_despawned_agents() {
     host.emit_events();
 }
 
+/// The serve loop places a page-in that had to wait when it lands, answers
+/// the op that asked, and keeps serving until every page in flight is placed
+/// even after its control channel has closed.
+#[tokio::test]
+async fn serve_places_a_page_in_that_had_to_wait() {
+    let mut host = host_with(vec![]);
+    host.set_reloader(Box::new(|run_id, _| {
+        let run_id = run_id.to_string();
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            let placer: super::PlacePage = Box::new(move |world: &mut PipelineWorld| {
+                Ok(world.spawn_agent((agent_state(&run_id),)))
+            });
+            Ok(placer)
+        })
+    }));
+    let (op_tx, op_rx) = mpsc::unbounded_channel();
+    let (reply, rx) = oneshot::channel();
+    op_tx
+        .send(ControlOp::Pause {
+            run_id: "away".to_string(),
+            reply,
+        })
+        .unwrap();
+    drop(op_tx);
+    host.serve(op_rx).await;
+    assert!(rx.await.unwrap(), "paused once it was paged in");
+    assert!(host.live_entity("away").is_some());
+}
+
 #[tokio::test]
 async fn serve_returns_when_control_channel_closes() {
     let mut host = host_with(vec![text("done")]);

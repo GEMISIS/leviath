@@ -348,6 +348,35 @@ async fn an_answer_for_a_gone_agent_is_dropped() {
     assert!(ran(&judge).is_empty());
 }
 
+/// A service that keeps no write total of its own.
+struct Plain;
+
+impl ToolService for Plain {
+    fn exec_for(
+        &self,
+        _entity: Entity,
+        _calls: Vec<leviath_providers::ToolCall>,
+        _progress: ToolProgress,
+    ) -> BoxedToolExec {
+        Box::new(|| Box::pin(async { Vec::new() }))
+    }
+}
+
+/// With a service that keeps no write total, a landed batch leaves the
+/// ledger at what the world charged.
+#[tokio::test]
+async fn a_service_with_no_write_total_leaves_the_ledger_alone() {
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(Plain)));
+    let e = world.spawn((WriteLedger { written: 9 }, WritesOut)).id();
+    let mut s = Schedule::default();
+    s.add_systems(settle_write_ledgers);
+    s.run(&mut world);
+    assert_eq!(world.get::<WriteLedger>(e).unwrap().written, 9);
+    let exec = Plain.exec_for(Entity::PLACEHOLDER, Vec::new(), noop_progress());
+    assert!(exec().await.is_empty());
+}
+
 /// Once the batch lands, its executors' write total is the run's.
 #[test]
 fn a_landed_batch_settles_the_runs_write_ledger() {

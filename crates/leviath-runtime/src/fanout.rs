@@ -841,9 +841,9 @@ fn finish_stage_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting) {
 /// The files a finished worker handed back, re-stored under the parent's run
 /// as parts named `<item>/<artifact>`.
 ///
-/// A worker's answer used to travel up as its text alone: a fan-out of image
-/// or mesh workers merged nothing but each worker's description of what it
-/// made. The bytes are read from the worker's own store and stored again
+/// A worker's answer travels up with its files, not as its text alone, so a
+/// fan-out of image or mesh workers merges what they made rather than their
+/// descriptions of it. The bytes are read from the worker's own store and stored again
 /// under the parent (the store is content-addressed, so a file two workers
 /// both produced is one file on disk), typed and sized by the parent's
 /// registry like any other inbound part. A file the store no longer holds,
