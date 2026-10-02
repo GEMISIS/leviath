@@ -26,9 +26,10 @@ pub fn fixtures_dir() -> PathBuf {
 }
 
 /// The installed agents the fixtures ran.
-pub fn env() -> ConvertEnv {
+pub fn env() -> ConvertEnv<'static> {
     ConvertEnv {
         agents_dir: Some(fixtures_dir().join("agents")),
+        stages: None,
     }
 }
 

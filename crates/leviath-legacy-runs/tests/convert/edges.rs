@@ -165,9 +165,12 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
     assert_eq!(main.max_output_tokens, Some(4096));
     assert_eq!(main.fallbacks.len(), 1);
     assert_eq!(main.fallbacks[0].model.as_str(), "m2");
+    // A stage that takes the caller's model runs on the one the run was
+    // launched with.
     let second = spec.stage("second").unwrap();
-    assert_eq!(second.provider.as_str(), "unknown");
-    assert!(report.defaulted("stages.second.model").is_some());
+    assert_eq!(second.provider.as_str(), "openai");
+    assert_eq!(second.model.as_str(), "gpt-mock");
+    assert!(report.defaulted("stages.second.model").is_none());
     assert_eq!(spec.stage("third").unwrap().max_output_tokens, None);
     assert!(report.defaulted("stages.third.max_output_tokens").is_some());
     assert!(matches!(&spec.launch.unattended, Unattended::Profile(p) if p.as_str() == "careful"));
@@ -186,6 +189,19 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
     assert_eq!(file.fold(), file.last);
     let region = file.states[0].context.region("task").unwrap();
     assert!(region.taint.is_some(), "the entry stage tracks taint");
+}
+
+/// A stage whose only model names no provider, in a run launched with no
+/// model, has nothing to run on until something looks one up, and the report
+/// says so.
+#[test]
+fn a_stage_with_a_bare_model_and_no_launch_model_is_named_unknown() {
+    let run = Run::fixture("finished");
+    rich(&run);
+    let (report, file) = run.converted();
+    let second = file.spec.stage("second").unwrap();
+    assert_eq!(second.provider.as_str(), "unknown");
+    assert!(report.defaulted("stages.second.model").is_some());
 }
 
 #[test]

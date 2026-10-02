@@ -222,13 +222,27 @@ pub(crate) async fn setup_daemon_host_with(
         &registry.mcp_tool_defs,
         &registry.mcp_tool_owners,
     );
-    // Old run directories become run files first, so the servers they
-    // declare are warmed with everyone else's.
-    crate::daemon::recovery::convert_old_runs(
+    // Old run directories become run files first, each stage looked up
+    // against this machine's providers and tools, so the servers they declare
+    // are warmed with everyone else's.
+    let agents_dir = leviath_core::paths::agents_dir();
+    crate::daemon::convert_old::convert_at_start(
         &runs_dir,
-        leviath_core::paths::agents_dir().as_deref(),
-    );
+        crate::daemon::convert_old::AtStart {
+            config: &config,
+            registry: provider_reload.registry(),
+            agents_dir: agents_dir.as_deref(),
+            mcp_defs: &registry.mcp_tool_defs,
+            mcp_owners: &registry.mcp_tool_owners,
+            shared_mcp: registry.mcp.clone(),
+            pool: &mcp_pool,
+        },
+    )
+    .await;
     mcp_pool.warm_recovered(&runs_dir).await;
+    // The index `lev ps` and the dashboard list runs from follows the runs
+    // as they change.
+    crate::run_index::keep_fresh(&runtime, runs_dir.clone());
     let refresher_runtime = runtime.clone();
     let host = build_host(HostParts {
         config,

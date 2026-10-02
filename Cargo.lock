@@ -2836,6 +2836,7 @@ dependencies = [
  "leviath-core",
  "leviath-runtime",
  "leviath-sys",
+ "leviath-tools",
  "serde",
  "serde_json",
  "tempfile",

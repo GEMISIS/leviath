@@ -1,14 +1,17 @@
 //! A run's stored parts, read from its files on disk: what `lev blobs` lists
 //! and `GET /api/agents/{id}/blobs` serves.
 //!
-//! A run's context snapshot names every stored part by hash, and the bytes
-//! sit under `<run>/blobs/<sha256>`. Nothing here asks the daemon, so a run
+//! A run's context names every stored part by hash, and its run file holds
+//! the bytes. A live run's tools also keep each part under
+//! `<run>/blobs/<sha256>`, where one stored a moment ago sits until the run's
+//! next step writes it into the file. Nothing here asks the daemon, so a run
 //! that finished last week answers as readily as one still going.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use leviath_core::mime::{MimeRegistry, MimeType, is_sha256_hex};
+use leviath_core::mime::{MimeRegistry, MimeType};
+use leviath_runtime::spec::names::Digest;
 use serde::{Deserialize, Serialize};
 
 use crate::runstate;
@@ -86,7 +89,8 @@ pub(crate) fn export_name(
     }
 }
 
-/// Where a run keeps the bytes of the part hashed `sha256`.
+/// Where a live run's tools keep the bytes of the part hashed `sha256` until
+/// the run's next step writes them into its file.
 pub(crate) fn blob_path(run_id: &str, sha256: &str) -> PathBuf {
     runstate::run_dir(run_id)
         .join(leviath_core::files::BLOBS_DIR)
@@ -94,10 +98,15 @@ pub(crate) fn blob_path(run_id: &str, sha256: &str) -> PathBuf {
 }
 
 /// The stored parts a run's context holds, by hash, first appearance first.
-/// `None` when the run has no context snapshot to read.
+/// A part counts as stored when the run's file holds its bytes, or its blob
+/// directory does. `None` when the run has no file to read.
 pub(crate) fn list(run_id: &str) -> Option<Vec<BlobEntry>> {
-    let snapshot = runstate::read_context_snapshot(run_id)?;
-    Some(list_from(run_id, &snapshot))
+    let (reader, state) = runstate::run_file::latest_in(&runstate::run_dir(run_id))?;
+    let snapshot = leviath_runtime::runfile::context_snapshot(reader.spec(), &state);
+    let held: Vec<&str> = reader.blob_digests().map(|d| d.as_str()).collect();
+    Some(entries(&snapshot, |sha| {
+        held.contains(&sha) || blob_path(run_id, sha).is_file()
+    }))
 }
 
 /// The stored parts `snapshot` holds, by hash, first appearance first, with
@@ -105,6 +114,15 @@ pub(crate) fn list(run_id: &str) -> Option<Vec<BlobEntry>> {
 pub(crate) fn list_from(
     run_id: &str,
     snapshot: &leviath_core::run_meta::ContextSnapshot,
+) -> Vec<BlobEntry> {
+    entries(snapshot, |sha| blob_path(run_id, sha).is_file())
+}
+
+/// The stored parts `snapshot` holds, by hash, first appearance first, each
+/// marked stored as `stored` says of its hash.
+fn entries(
+    snapshot: &leviath_core::run_meta::ContextSnapshot,
+    stored: impl Fn(&str) -> bool,
 ) -> Vec<BlobEntry> {
     let mut order: Vec<String> = Vec::new();
     let mut found: BTreeMap<String, BlobEntry> = BTreeMap::new();
@@ -138,7 +156,7 @@ pub(crate) fn list_from(
                                 duration_ms: blob.duration_ms,
                                 tokens: charged_tokens(blob),
                                 regions: vec![region.name.clone()],
-                                stored: blob_path(run_id, &blob.sha256).is_file(),
+                                stored: stored(&blob.sha256),
                             },
                         );
                     }
@@ -188,13 +206,21 @@ pub(crate) fn find<'a>(entries: &'a [BlobEntry], needle: &str) -> Option<&'a Blo
 }
 
 /// The bytes of the part hashed `sha256`, refusing a key that is not a hash
-/// before it touches a path.
+/// before it touches a path. The run's file holds every part the run stored;
+/// a part a live run's tool stored a moment ago may only be in its blob
+/// directory yet.
 pub(crate) fn read(run_id: &str, sha256: &str) -> std::io::Result<Vec<u8>> {
-    if !is_sha256_hex(sha256) {
-        return Err(std::io::Error::new(
+    let digest = Digest::new(sha256).map_err(|_| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("'{sha256}' is not a sha256"),
-        ));
+        )
+    })?;
+    let dir = runstate::run_dir(run_id);
+    if let Ok(reader) = runstate::run_file::open_in(&dir)
+        && let Some(bytes) = reader.blob(&digest).map_err(std::io::Error::other)?
+    {
+        return Ok(bytes);
     }
     std::fs::read(blob_path(run_id, sha256))
 }
@@ -314,6 +340,67 @@ mod tests {
             // no file has no window to list.
             assert!(list(run_id).unwrap().is_empty());
             assert!(list("ghost").is_none());
+        });
+    }
+
+    /// A part whose bytes are only in the run's file (a run converted from
+    /// the old layout keeps no blob directory) is listed as stored and reads
+    /// back; one the file holds but cannot decode is an error.
+    #[test]
+    fn a_part_held_only_in_the_run_file_is_listed_and_read() {
+        use leviath_core::mime::Part;
+        use leviath_runtime::runfile::codec::{FrameKind, encode};
+        runstate::with_isolated_runs_dir("blobs-in-file", |_d| {
+            let run_id = "file-blob-run";
+            runstate::create_run(&crate::test_support::fixtures::run_meta(run_id)).unwrap();
+            let store = leviath_runtime::blob_store::FsBlobStore::new(runstate::runs_dir());
+            let blob = Blob::new(MimeType::parse("text/plain").unwrap(), b"notes".to_vec());
+            let stored = store.put(run_id, &blob, &MimeRegistry::builtin()).unwrap();
+            let sha = stored.sha256.clone();
+            let entry = runstate::RegionEntrySnapshot {
+                content: leviath_core::region::EntryContent::from_parts(vec![
+                    Part::stored(stored).named("notes.txt"),
+                ]),
+                tokens: 1,
+                kind: Default::default(),
+                metadata: None,
+                key: None,
+                taint: leviath_core::taint::TaintLevel::Public,
+                reasoning: None,
+            };
+            let snapshot = runstate::ContextSnapshot {
+                stage_name: "main".into(),
+                total_tokens: 1,
+                max_tokens: 100,
+                regions: vec![runstate::RegionSnapshot {
+                    name: "task".into(),
+                    kind: "pinned".into(),
+                    current_tokens: 1,
+                    max_tokens: 100,
+                    entries: vec![entry],
+                    description: None,
+                }],
+            };
+            runstate::write_context_snapshot(run_id, &snapshot).unwrap();
+            let dir = runstate::run_dir(run_id);
+            std::fs::remove_dir_all(dir.join(leviath_core::files::BLOBS_DIR)).unwrap();
+            assert!(!list(run_id).unwrap()[0].stored, "nothing holds the bytes");
+
+            let file = dir.join(leviath_core::files::RUN_FILE);
+            let mut bytes = std::fs::read(&file).unwrap();
+            let digest = Digest::new(sha.as_str()).unwrap();
+            bytes.extend(encode(FrameKind::Blob, &(digest, b"notes".to_vec())).unwrap());
+            std::fs::write(&file, &bytes).unwrap();
+            let listed = list(run_id).unwrap();
+            assert_eq!(listed[0].name.as_deref(), Some("notes.txt"));
+            assert!(listed[0].stored);
+            assert_eq!(read(run_id, &sha).unwrap(), b"notes");
+
+            // A blob frame that does not decode is the file's fault.
+            let other = Digest::of(b"half");
+            bytes.extend(encode(FrameKind::Blob, &other).unwrap());
+            std::fs::write(&file, &bytes).unwrap();
+            assert!(read(run_id, other.as_str()).is_err());
         });
     }
 }

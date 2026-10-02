@@ -2,35 +2,30 @@
 //! context snapshot.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::old::blueprint::Blueprint;
 use crate::old::layout::RegionSeed;
 use leviath_core::JsonDoc;
 use leviath_core::output::OutputSpec;
-use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageModelUse, StageRecord as OldStage};
-use leviath_runtime::spec::graph::{
-    ArtifactDef, CodeRef, OutputCap, OutputDef, RunGraph, StageDef,
-};
+use leviath_core::run_meta::{ContextSnapshot, RunMeta};
+use leviath_runtime::spec::env::CodeFiles;
+use leviath_runtime::spec::graph::{ArtifactDef, CodeRef, OutputDef, RunGraph};
 use leviath_runtime::spec::inputs::{InputValue, InputValues};
 use leviath_runtime::spec::launch::{
     Callback, Delivery, LaunchPolicy, Placement, Secret, Unattended,
 };
 use leviath_runtime::spec::names::{
-    BlueprintName, BlueprintRef, Digest, HttpUrl, MimePattern, ModelId, ModelRef, ProfileName,
-    ProviderName, RegionName, RunId,
+    BlueprintName, BlueprintRef, Digest, HttpUrl, MimePattern, ModelRef, ProfileName, RegionName,
+    RunId,
 };
-use leviath_runtime::spec::run_spec::{
-    EnvFingerprint, RunSpec, SeededContent, SpecOrigin, StagePlan,
-};
+use leviath_runtime::spec::run_spec::{EnvFingerprint, RunSpec, SeededContent, SpecOrigin};
 
-use crate::ConvertError;
-use crate::context::{Losses, n32, parts};
+use crate::context::{Losses, parts};
 use crate::legacy::LegacyRun;
 use crate::manifest::{parse_manifest, read_manifest_tables};
 use crate::report::{BlueprintSource, Report};
-
-/// Why the tool definitions are left out of every stage plan.
-const NO_TOOL_DEFS: &str = "an old run kept the names of its tools but not their definitions";
+use crate::{ConvertError, StageLookup};
 
 /// A spec and the code its frames carry.
 pub(crate) struct Built {
@@ -38,13 +33,11 @@ pub(crate) struct Built {
     pub(crate) code: Vec<(Digest, Vec<u8>)>,
 }
 
-pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, ConvertError> {
-    let meta = old.meta();
-    for name in &old.stray_blobs {
-        report.note(format!(
-            "blobs/{name} was left out: a stored part is named by its digest"
-        ));
-    }
+/// The run's blueprint, and the run graph read from it.
+pub(crate) fn graph(
+    old: &LegacyRun,
+    report: &mut Report,
+) -> Result<(Blueprint, RunGraph), ConvertError> {
     let blueprint_path = match &old.blueprint.source {
         BlueprintSource::Snapshot => old.dir.join(leviath_core::files::BLUEPRINT_SNAPSHOT_FILE),
         BlueprintSource::Installed(path) => {
@@ -61,6 +54,21 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
     })?;
     let mut graph = crate::old::graph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
     read_manifest_tables(&mut graph, &old.blueprint.text).map_err(ConvertError::Graph)?;
+    Ok((blueprint, graph))
+}
+
+pub(crate) fn build(
+    old: &LegacyRun,
+    lookup: Option<&dyn StageLookup>,
+    report: &mut Report,
+) -> Result<Built, ConvertError> {
+    let meta = old.meta();
+    for name in &old.stray_blobs {
+        report.note(format!(
+            "blobs/{name} was left out: a stored part is named by its digest"
+        ));
+    }
+    let (blueprint, graph) = graph(old, report)?;
     let digest = match meta.blueprint_digest.as_deref().map(Digest::new) {
         Some(Ok(d)) => d,
         _ => {
@@ -85,18 +93,39 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
     let binds = caller_inputs(&blueprint);
     let inputs = inputs(&graph, &binds, meta, first, report);
     let seeded = seeded(&graph, &binds, &inputs, first);
-    let stages = graph
-        .stages
-        .iter()
-        .map(|s| plan(s, &old.stages, &old.folded.context, report))
-        .collect();
-    report.fill(
-        "stages.*.region_budgets",
-        "the budgets of the stage the run was last in",
-        "an old run recorded region budgets only for the stage it was in",
+    let (mut code, mut code_frames) = code(&graph, old, report);
+    let requested_model = requested_model(meta, report);
+    // Bare `--yolo` answered everything; what a named profile answered was
+    // never recorded, so such a run asks.
+    let auto_answers = match meta.yolo && meta.yolo_profile.is_none() {
+        true => leviath_runtime::spec::run_spec::AutoAnswers::all(),
+        false => Default::default(),
+    };
+    let held: CodeFiles = code_frames.iter().cloned().collect();
+    let workdir = Path::new(&meta.workdir);
+    let (stages, found) = crate::plan::plan_all(
+        &crate::plan::Stages {
+            graph: &graph,
+            ledger: &old.stages,
+            context: &old.folded.context,
+            requested: requested_model.as_ref(),
+            auto: auto_answers,
+            lookup,
+            code: &held,
+            base: old.blueprint.script_dir.as_deref(),
+            workdir: Some(workdir).filter(|w| !w.as_os_str().is_empty()),
+        },
+        report,
     );
-    report.fill("stages.*.tools", "[]", NO_TOOL_DEFS);
-    let (code, code_frames) = code(&graph, old, report);
+    for (reference, bytes) in found {
+        let digest = Digest::of(&bytes);
+        if !code_frames.iter().any(|(d, _)| *d == digest) {
+            code_frames.push((digest.clone(), bytes));
+        }
+        if !code.iter().any(|(c, _)| *c == reference) {
+            code.push((reference, digest));
+        }
+    }
     let spec = RunSpec {
         run_id: RunId::new(meta.run_id.as_str()).map_err(ConvertError::name("run_id"))?,
         origin,
@@ -105,14 +134,9 @@ pub(crate) fn build(old: &LegacyRun, report: &mut Report) -> Result<Built, Conve
         seeded,
         code,
         requested_output: meta.output_request.as_ref().map(|o| output(o, report)),
-        requested_model: requested_model(meta, report),
+        requested_model,
         launch: launch(&graph, meta, report),
-        // Bare `--yolo` answered everything; what a named profile answered
-        // was never recorded, so such a run asks.
-        auto_answers: match meta.yolo && meta.yolo_profile.is_none() {
-            true => leviath_runtime::spec::run_spec::AutoAnswers::all(),
-            false => Default::default(),
-        },
+        auto_answers,
         placement: placement(meta, report)?,
         delivery: delivery(meta, report),
         env: EnvFingerprint::default(),
@@ -237,92 +261,6 @@ fn seeded(
         out.insert(r.name.clone(), content);
     }
     out
-}
-
-/// A model the stage ledger recorded, as a checked reference.
-pub(crate) fn ledger_model(m: &StageModelUse) -> Option<ModelRef> {
-    ModelRef::parse(&format!("{}/{}", m.provider, m.model)).ok()
-}
-
-/// The provider and model a stage ran on: the last one its ledger recorded,
-/// else the first its graph names.
-fn model_of(stage: &StageDef, ledger: &[OldStage]) -> Option<ModelRef> {
-    let used = ledger
-        .iter()
-        .find(|r| r.name == stage.name.as_str())
-        .and_then(|r| r.models.last())
-        .and_then(ledger_model);
-    used.or_else(|| stage.model.models.first().cloned())
-}
-
-fn plan(
-    stage: &StageDef,
-    ledger: &[OldStage],
-    context: &ContextSnapshot,
-    report: &mut Report,
-) -> StagePlan {
-    let window = context.max_tokens;
-    let at = format!("stages.{}", stage.name);
-    let (provider, model) = match model_of(stage, ledger) {
-        Some(ModelRef {
-            provider: Some(provider),
-            model,
-        }) => (provider, model),
-        _ => {
-            report.fill(
-                format!("{at}.model"),
-                "unknown/unknown",
-                "the stage never ran and its graph names no provider",
-            );
-            (
-                ProviderName::new("unknown").expect("a plain word is a provider name"),
-                ModelId::new("unknown").expect("a plain word is a model id"),
-            )
-        }
-    };
-    report.fill(
-        format!("{at}.context_window"),
-        window,
-        "an old run did not record its models' windows; this is the context budget it last ran with",
-    );
-    let max_output_tokens = match &stage.model.params.max_output_tokens {
-        Some(OutputCap::Tokens(n)) => Some(*n),
-        Some(_) => {
-            report.fill(
-                format!("{at}.max_output_tokens"),
-                "None",
-                "the cap was relative to a window the old run did not record",
-            );
-            None
-        }
-        None => None,
-    };
-    let current = ModelRef {
-        provider: Some(provider.clone()),
-        model: model.clone(),
-    };
-    StagePlan {
-        stage: stage.name.clone(),
-        fallbacks: stage
-            .model
-            .models
-            .iter()
-            .filter(|m| **m != current)
-            .cloned()
-            .collect(),
-        provider,
-        model,
-        context_window: n32(window),
-        max_output_tokens,
-        tools: Vec::new(),
-        output: stage.output.clone(),
-        region_budgets: context
-            .regions
-            .iter()
-            .filter_map(|r| Some((RegionName::new(r.name.as_str()).ok()?, n32(r.max_tokens))))
-            .collect(),
-        notes: vec!["converted from an old run directory".to_string()],
-    }
 }
 
 /// Every script the graph names, found by walking its serialized form for

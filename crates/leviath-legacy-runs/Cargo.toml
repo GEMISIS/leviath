@@ -23,6 +23,8 @@ leviath-core = { workspace = true }
 leviath-runtime = { workspace = true }
 # The run file is written owner-only, like every run file.
 leviath-sys = { workspace = true }
+# A converted stage's `submit_output` is described as a new run's is.
+leviath-tools = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

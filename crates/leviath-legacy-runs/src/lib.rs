@@ -33,6 +33,7 @@ mod legacy;
 mod manifest;
 mod migrate;
 mod old;
+mod plan;
 mod report;
 mod spec;
 mod state;
@@ -40,17 +41,61 @@ mod write;
 
 use std::path::{Path, PathBuf};
 
+use leviath_runtime::spec::env::{CodeFiles, ModelPlan, StageTools};
+use leviath_runtime::spec::graph::{RunGraph, StageDef};
+use leviath_runtime::spec::names::ModelRef;
+
 pub use error::ConvertError;
 pub use migrate::{migrate, migrate_file};
 pub use report::{BlueprintSource, ConvertReport, Defaulted};
 
 /// Where the conversion looks for what an old run directory does not hold.
-#[derive(Debug, Clone, Default)]
-pub struct ConvertEnv {
+#[derive(Clone, Default)]
+pub struct ConvertEnv<'a> {
     /// The installed blueprints, as `<dir>/<name>/agent.leviath`. Runs from
     /// before the blueprint snapshot existed are read against the installed
     /// copy, and the report says so.
     pub agents_dir: Option<PathBuf>,
+    /// What this machine answers about a stage: the window of the model it
+    /// runs and the tools it gets. Without it, a stage keeps the model its
+    /// run named, sized to the context budget it last ran with, and no tools.
+    pub stages: Option<&'a dyn StageLookup>,
+}
+
+impl std::fmt::Debug for ConvertEnv<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConvertEnv")
+            .field("agents_dir", &self.agents_dir)
+            .field("stages", &self.stages.is_some())
+            .finish()
+    }
+}
+
+/// What the host answers about one stage of a run being converted, the way
+/// it answers when it resolves a new run. An old run named its models and
+/// its tools but kept neither a model's window nor a tool's definition, so a
+/// converted run has both looked up here once and carries them from then on.
+pub trait StageLookup: Send + Sync {
+    /// The model `stage` runs on: `requested` when the run asked for one,
+    /// else the stage's own choice over the operator's defaults.
+    fn model(
+        &self,
+        graph: &RunGraph,
+        stage: &StageDef,
+        requested: Option<&ModelRef>,
+    ) -> Result<ModelPlan, String>;
+    /// The tools `stage` gets, each with its schema, and the code of any
+    /// script tool among them that `code` does not already hold. `base` is
+    /// the directory of the installed agent the run came from, and `workdir`
+    /// the run's own.
+    fn tools(
+        &self,
+        graph: &RunGraph,
+        stage: &StageDef,
+        code: &CodeFiles,
+        base: Option<&Path>,
+        workdir: Option<&Path>,
+    ) -> Result<StageTools, String>;
 }
 
 /// Whether `run_dir` holds a run in the old layout that [`convert`] would
@@ -59,15 +104,23 @@ pub fn is_legacy(run_dir: &Path) -> bool {
     legacy::is_legacy(run_dir)
 }
 
+/// The run graph of the old run in `run_dir`, read as its conversion reads
+/// it, so a host can make ready what the run needs (the MCP servers its
+/// stages connect to) before converting it.
+pub fn graph(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<RunGraph, ConvertError> {
+    let old = legacy::LegacyRun::read(run_dir, env)?;
+    spec::graph(&old, &mut report::Report::default()).map(|(_, graph)| graph)
+}
+
 /// Convert the run in `run_dir` into a single run file at
 /// `<run_dir>/run.lvr`, moving the old files into `<run_dir>/legacy/`.
 ///
 /// A directory that already holds a run file is refused with
 /// [`ConvertError::AlreadyConverted`], so converting twice is harmless.
-pub fn convert(run_dir: &Path, env: &ConvertEnv) -> Result<ConvertReport, ConvertError> {
+pub fn convert(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<ConvertReport, ConvertError> {
     let old = legacy::LegacyRun::read(run_dir, env)?;
     let mut report = report::Report::default();
-    let built = spec::build(&old, &mut report)?;
+    let built = spec::build(&old, env.stages, &mut report)?;
     let (start, deltas, last) = history::build(&old, &built.spec, &mut report);
     let bytes = write::encode(&old, &built, &start, &deltas, &last);
     let written = write::install(run_dir, &bytes)?;

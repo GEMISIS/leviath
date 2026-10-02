@@ -315,7 +315,7 @@ fn ledger(r: &OldStage, meta: &RunMeta) -> Option<StageRecord> {
         models: r
             .models
             .iter()
-            .filter_map(crate::spec::ledger_model)
+            .filter_map(crate::plan::ledger_model)
             .collect(),
         visits: r.visits.iter().map(|v| visit(v, at)).collect(),
         region_tokens: r

@@ -106,7 +106,7 @@ impl LegacyRun {
         })
     }
 
-    pub(crate) fn read(dir: &Path, env: &ConvertEnv) -> Result<Self, ConvertError> {
+    pub(crate) fn read(dir: &Path, env: &ConvertEnv<'_>) -> Result<Self, ConvertError> {
         let journal_path = dir.join(ARCHIVE_FILE);
         let journal = std::fs::read(&journal_path).ok();
         if journal.as_deref().is_some_and(|j| j.starts_with(MAGIC)) {
@@ -223,7 +223,7 @@ fn blobs(dir: &Path) -> Result<Blobs, ConvertError> {
 }
 
 /// The installed copy of the run's agent: its manifest path and directory.
-fn installed(meta: &RunMeta, env: &ConvertEnv) -> Vec<PathBuf> {
+fn installed(meta: &RunMeta, env: &ConvertEnv<'_>) -> Vec<PathBuf> {
     let from_path = PathBuf::from(&meta.agent_path);
     let from_path = match from_path.extension().is_some_and(|e| e == "leviath") {
         true => from_path,
@@ -238,7 +238,11 @@ fn installed(meta: &RunMeta, env: &ConvertEnv) -> Vec<PathBuf> {
     out
 }
 
-fn blueprint(dir: &Path, meta: &RunMeta, env: &ConvertEnv) -> Result<BlueprintFile, ConvertError> {
+fn blueprint(
+    dir: &Path,
+    meta: &RunMeta,
+    env: &ConvertEnv<'_>,
+) -> Result<BlueprintFile, ConvertError> {
     let candidates = installed(meta, env);
     let script_dir = candidates
         .iter()

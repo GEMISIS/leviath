@@ -40,6 +40,12 @@ struct Replay<'a> {
 }
 
 impl Replay<'_> {
+    /// When a step taken at `at` is stamped: never before the step before
+    /// it, since a journal's clocks and the metadata's need not agree.
+    fn stamp(&self, at: i64) -> i64 {
+        self.deltas.last().map_or(at, |d| d.at.max(at))
+    }
+
     /// Apply one journal step's changes and events as a delta.
     fn step(&mut self, context_moved: bool, events: Vec<RunEvent>) {
         let mut next = self.state.clone();
@@ -54,7 +60,7 @@ impl Replay<'_> {
                 &mut Losses::default(),
             );
         }
-        let delta = StateDelta::between(&self.state, &next, self.at, events);
+        let delta = StateDelta::between(&self.state, &next, self.stamp(self.at), events);
         if !delta.is_empty() {
             delta.apply(&mut self.state);
             self.deltas.push(delta);
@@ -297,7 +303,8 @@ pub(crate) fn build(
     }
     let mut last = last(old, spec, report);
     let events = report.log_lines().into_iter().map(RunEvent::Log).collect();
-    let end = StateDelta::between(&replay.state, &last, old.meta().updated_at, events);
+    let at = replay.stamp(old.meta().updated_at);
+    let end = StateDelta::between(&replay.state, &last, at, events);
     end.apply(&mut replay.state);
     last.seq = end.seq;
     replay.deltas.push(end);

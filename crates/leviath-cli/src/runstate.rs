@@ -440,29 +440,16 @@ pub(crate) fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
     Ok(leviath_runtime::runfile::summary(&reader)?)
 }
 
-/// Inner implementation of `list_runs`, parameterised so the early-return
-/// branch can be exercised in tests without deleting real on-disk state.
+/// Inner implementation of `list_runs`, parameterised so a missing runs
+/// directory can be exercised in tests without deleting real on-disk state.
 fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
-    if !dir.exists() {
-        return Vec::new();
-    }
-
-    let mut runs = Vec::new();
-
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            if let Ok(meta) = read_meta_from(&entry.path()) {
-                runs.push(meta);
-            }
-        }
-    }
-
-    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
-    runs
+    crate::run_index::list(&dir)
 }
 
-/// List all runs, sorted by started_at descending (most recent first).
-/// Silently skips any runs whose metadata cannot be read.
+/// List all runs, sorted by started_at descending (most recent first),
+/// through the run index (see [`crate::run_index`]), so a run file is read
+/// only when it changed since the index last saw it. Silently skips any runs
+/// whose metadata cannot be read.
 pub(crate) fn list_runs() -> Vec<RunMeta> {
     list_runs_in_dir(runs_dir())
 }
@@ -558,20 +545,32 @@ pub(crate) fn list_runs_cached(
     cache: &mut StatCache<RunMeta>,
     listing: &mut RunDirListing,
 ) -> Vec<Arc<RunMeta>> {
-    if listing.refresh(&runs_dir()) {
+    let root = runs_dir();
+    if listing.refresh(&root) {
         cache.retain_under(&listing.dir_set());
     }
     let mut runs = Vec::with_capacity(listing.dirs.len());
+    // Loaded the first time a run has to be read, so a warm poll that only
+    // stats never opens it.
+    let mut index: Option<crate::run_index::RunIndex> = None;
     for dir in &listing.dirs {
         // A run this poller already knows to be finished is asked about
         // once a second; a live one (or one never seen) every time.
         if let Some(meta) = cache.get_reading(
             &run_file::path_in(dir),
-            || read_meta_from(dir).ok(),
+            || {
+                index
+                    .get_or_insert_with(|| crate::run_index::RunIndex::load(&root))
+                    .run(dir)
+            },
             |meta| meta.map_or(std::time::Duration::ZERO, settle_window),
         ) {
             runs.push(meta);
         }
+    }
+    if let Some(mut index) = index {
+        index.keep_only(&listing.dir_set());
+        index.save();
     }
     runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     runs

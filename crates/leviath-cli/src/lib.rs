@@ -27,6 +27,7 @@ pub mod logging;
 pub(crate) mod provider_checks;
 pub(crate) mod read_path_report;
 pub(crate) mod render;
+pub(crate) mod run_index;
 pub mod runstate;
 pub(crate) mod shell_keys;
 #[cfg(test)]

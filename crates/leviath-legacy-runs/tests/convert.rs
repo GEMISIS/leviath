@@ -12,6 +12,8 @@ mod common;
 mod edges;
 #[path = "convert/journal.rs"]
 mod journal;
+#[path = "convert/lookup.rs"]
+mod lookup;
 
 use common::{FIXTURES, Run, RunFile};
 use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy};
