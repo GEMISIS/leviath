@@ -5175,6 +5175,45 @@ async fn subagent_history_reads_the_callers_own_tree() {
     assert_eq!(none.unwrap_err(), "this host keeps no run files");
 }
 
+/// `run_history` reads run files off the serve loop: handling the op only
+/// hands the read to a blocking task, and the answer comes when that task
+/// has run. The runtime here has one blocking thread, held busy, so the read
+/// cannot have happened by the time the op is handled.
+#[test]
+fn subagent_history_is_read_off_the_serve_loop() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        write_run_file(
+            dir.path(),
+            "t-1",
+            &crate::runfile::reader_tests::scripted_run(2),
+        );
+        let mut host = host_in(dir.path());
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let busy = tokio::task::spawn_blocking(move || held.recv());
+        let (tx, mut rx) = oneshot::channel();
+        host.handle_subagent(SubAgentOp::History {
+            run_id: "t-1".to_string(),
+            caller_run_id: "t-1".to_string(),
+            at: None,
+            reply: tx,
+        });
+        assert!(
+            matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "answered on the loop"
+        );
+        release.send(()).unwrap();
+        busy.await.unwrap().unwrap();
+        let read = rx.await.unwrap().unwrap();
+        assert_eq!(read.state.seq, read.last_seq);
+    });
+}
+
 /// A live run's current state is read off the world, not its file, and a
 /// cycle in recorded children does not loop.
 #[tokio::test]

@@ -462,12 +462,10 @@ mod tests {
             lost,
             Box::pin(async { panic!("the gate prompt blew up") }),
         );
-        for _ in 0..500 {
-            run_collect(&mut world);
-            if world.get::<AwaitingGatePrompt>(e).is_none() {
-                break;
-            }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while world.get::<AwaitingGatePrompt>(e).is_some() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            run_collect(&mut world);
         }
         drop(silent);
         assert!(world.get::<AwaitingGatePrompt>(e).is_none(), "not held");

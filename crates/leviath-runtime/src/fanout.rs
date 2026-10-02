@@ -32,10 +32,12 @@
 //! A single sub-agent is `spawn_agent`, not a fan-out of one.
 //!
 //! [`FAN_OUT_TOOL`]: leviath_core::stage_tools::FAN_OUT_TOOL
+mod io;
 mod items;
 mod report;
 mod starts;
 mod worker_sources;
+pub(crate) use io::{FanOutIo, ReadingWorkerInputs};
 pub(crate) use items::{FanOutRequest, config_for, is_fan_out_tool, parse_fan_out_call};
 pub use items::{WORK_ITEM_LABEL, WorkItem};
 use report::*;
@@ -53,8 +55,6 @@ use crate::spec::inputs::InputDecl;
 use crate::spec::names::BlueprintRef;
 use crate::spec::request::{SpawnRequest, SpawnSource};
 use bevy_ecs::prelude::*;
-use leviath_core::mime::{InboundPart, Part};
-use leviath_core::output::Artifact;
 
 use crate::blob_store::{BlobStoreHandle, MimeLimits, MimeRegistryHandle, RunMimeRegistry};
 use crate::context_setup::PartSink;
@@ -140,6 +140,9 @@ pub struct FanOutWaiting {
     /// Items whose workers are being prepared off the tick (see
     /// [`starts`]). They count as running against the concurrency cap.
     starting: Vec<WorkItem>,
+    /// Finished workers whose files are being copied up off the tick (see
+    /// [`io`]). The fan-out does not finish until they land.
+    handing_up: usize,
     active: Vec<ActiveWorker>,
     summaries: Vec<(String, String)>,
     failures: Vec<(String, String)>,
@@ -282,6 +285,7 @@ pub fn restore_fan_out_waiting(
         max_workers: state.max_workers,
         pending: state.pending.into_iter().collect(),
         starting: Vec::new(),
+        handing_up: 0,
         active,
         summaries: state.summaries,
         failures,
@@ -474,13 +478,23 @@ pub(crate) struct PendingFanOut {
 /// launched on the same tick rather than a tick later.
 pub(crate) fn start_pending_fan_outs(world: &mut World) {
     crate::tick_scope::clear();
+    io::land_inputs(world);
+    // A call waits while its worker's inputs are read, and while its agent
+    // is paused; one whose agent stopped is never started.
     let pending: Vec<(Entity, PendingFanOut)> = {
-        let mut q = world.query::<(Entity, &PendingFanOut)>();
-        q.iter(world).map(|(e, p)| (e, p.clone())).collect()
+        let mut q = world
+            .query_filtered::<(Entity, &PendingFanOut, &AgentState), Without<ReadingWorkerInputs>>(
+            );
+        q.iter(world)
+            .filter(|(_, _, s)| s.status == AgentStatus::Active)
+            .map(|(e, p, _)| (e, p.clone()))
+            .collect()
     };
     for (entity, PendingFanOut { call_id, request }) in pending {
         crate::tick_scope::enter(entity);
-        world.entity_mut(entity).remove::<PendingFanOut>();
+        let mut agent = world.entity_mut(entity);
+        agent.remove::<PendingFanOut>();
+        let read = agent.take::<io::WorkerInputs>();
         // A fan-out stage's own keys when there are any, so a stage that set
         // `max_items` or `on_worker_failure` still gets them; nothing when an
         // ordinary stage called the tool.
@@ -521,8 +535,23 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         // A worker takes the inputs of the graph it runs, so its items are
         // checked here against them, before any worker starts, each at its
         // item's path: this run's own graph for a worker stage, the named
-        // blueprint's when the spawner can read it.
-        if let Some(decls) = worker_decls(world, &config.worker, spec.as_deref())
+        // blueprint's when the spawner can read it. Reading a blueprint is
+        // I/O, so it is done off the tick and the call waits for it.
+        let known = match (io::WorkerBlueprint::of(&config.worker), read) {
+            (None, _) => Ok(spec.as_ref().map(|s| s.graph.inputs.clone())),
+            (Some(_), Some(io::WorkerInputs(decls))) => Ok(decls),
+            (Some(blueprint), None) => Err(blueprint),
+        };
+        let decls = match known.map_err(|blueprint| io::read_inputs(world, entity, blueprint)) {
+            Ok(decls) | Err(Some(decls)) => decls,
+            Err(None) => {
+                world
+                    .entity_mut(entity)
+                    .insert((PendingFanOut { call_id, request }, ReadingWorkerInputs));
+                continue;
+            }
+        };
+        if let Some(decls) = decls
             && let Err(issues) = items::check_items(&decls, &request.items)
         {
             answer_call(
@@ -549,28 +578,6 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         }
         begin_fan_out(world, entity, config, request.items, origin);
     }
-}
-
-/// The inputs a fan-out's worker takes, when they can be read before it
-/// starts: this run's own graph's for a worker stage, and otherwise those of
-/// the blueprint the installed spawner reads for it.
-fn worker_decls(
-    world: &World,
-    worker: &WorkerSource,
-    spec: Option<&crate::spec::run_spec::RunSpec>,
-) -> Option<Vec<InputDecl>> {
-    let spawner = world
-        .get_resource::<FanOutSpawnerRes>()
-        .map(|r| r.0.clone());
-    let source = match worker {
-        WorkerSource::Stage(_) => return spec.map(|s| s.graph.inputs.clone()),
-        WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
-        WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),
-        WorkerSource::Query(query) => {
-            SpawnSource::Blueprint(spawner.as_ref()?.find_worker(query).ok()?)
-        }
-    };
-    spawner?.worker_inputs(&source)
 }
 
 /// Start a fan-out: park `parent` on its workers.
@@ -620,6 +627,7 @@ pub(crate) fn begin_fan_out(
             max_workers,
             pending: items.into_iter().collect(),
             starting: Vec::new(),
+            handing_up: 0,
             active: Vec::new(),
             summaries: Vec::new(),
             failures: Vec::new(),
@@ -650,6 +658,8 @@ pub(crate) fn fan_out_collect(world: &mut World) {
         starts::abandon(world, orphan);
     }
     let mut landed = mine;
+    // The copies of finished workers' files that landed since the last pass.
+    let mut handed = io::drain_hand_ups(world);
 
     for parent in parents {
         crate::tick_scope::enter(parent);
@@ -673,6 +683,12 @@ pub(crate) fn fan_out_collect(world: &mut World) {
         for start in here {
             starts::land(world, parent, &mut w, start);
         }
+        let (mine, rest): (Vec<_>, Vec<_>) = handed.drain(..).partition(|h| h.parent == parent);
+        handed = rest;
+        for copy in mine {
+            w.parts.extend(copy.parts);
+            w.handing_up = w.handing_up.saturating_sub(1);
+        }
 
         // 1. Reap workers that have reached a terminal state. A consumed
         // worker's result now lives in `w.summaries`/`w.failures`, so its heavy
@@ -691,7 +707,15 @@ pub(crate) fn fan_out_collect(world: &mut World) {
                     merge_worker_sources(world, parent, aw.entity, &aw.item_id);
                     match result {
                         Ok(content) => {
-                            w.parts.extend(hand_up_artifacts(world, parent, &aw));
+                            // The copy is I/O: off the tick, landing on a
+                            // later pass, unless the world has no runtime.
+                            match io::HandUp::of(world, parent, &aw)
+                                .map(|job| io::hand_up(world, job))
+                            {
+                                Some(Some(copied)) => w.parts.extend(copied.parts),
+                                Some(None) => w.handing_up += 1,
+                                None => {}
+                            }
                             w.summaries.push((aw.item_id, content));
                         }
                         Err(message) => w.failures.push((aw.item_id, message)),
@@ -734,8 +758,9 @@ pub(crate) fn fan_out_collect(world: &mut World) {
             starts::land(world, parent, &mut w, start);
         }
 
-        // 3. Finished when nothing is running, starting or queued.
-        if w.running() == 0 && w.pending.is_empty() {
+        // 3. Finished when nothing is running, starting, queued or still
+        // handing its files up.
+        if w.running() == 0 && w.pending.is_empty() && w.handing_up == 0 {
             finish_fan_out(world, parent, w);
         } else {
             world.entity_mut(parent).insert(w);
@@ -836,84 +861,6 @@ fn finish_stage_fan_out(world: &mut World, parent: Entity, w: &FanOutWaiting) {
     inject_results(world, parent, &region, &report, w.parts.clone());
 
     leave_fan_out(world, parent, &w.config);
-}
-
-/// The files a finished worker handed back, re-stored under the parent's run
-/// as parts named `<item>/<artifact>`.
-///
-/// A worker's answer travels up with its files, not as its text alone, so a
-/// fan-out of image or mesh workers merges what they made rather than their
-/// descriptions of it. The bytes are read from the worker's own store and stored again
-/// under the parent (the store is content-addressed, so a file two workers
-/// both produced is one file on disk), typed and sized by the parent's
-/// registry like any other inbound part. A file the store no longer holds,
-/// or one over the part ceiling, is left out with a warning rather than
-/// failing the merge.
-fn hand_up_artifacts(world: &World, parent: Entity, worker: &ActiveWorker) -> Vec<Part> {
-    let Some(output) = world.get::<crate::persistence::FinalOutput>(worker.entity) else {
-        return Vec::new();
-    };
-    let artifacts: Vec<&Artifact> = output
-        .0
-        .artifacts
-        .iter()
-        .filter(|a| !a.sha256.is_empty())
-        .collect();
-    if artifacts.is_empty() {
-        return Vec::new();
-    }
-    let Some(store) = world.get_resource::<BlobStoreHandle>() else {
-        return Vec::new();
-    };
-    let Some(registry) = world
-        .get::<RunMimeRegistry>(parent)
-        .map(RunMimeRegistry::registry)
-        .or_else(|| {
-            world
-                .get_resource::<MimeRegistryHandle>()
-                .map(|r| r.0.clone())
-        })
-    else {
-        return Vec::new();
-    };
-    let parent_run = world
-        .get::<crate::persistence::RunMetadata>(parent)
-        .map(|m| m.run_id.clone())
-        .unwrap_or_default();
-    let limits = world
-        .get_resource::<MimeLimits>()
-        .copied()
-        .unwrap_or_default();
-    let sink = PartSink {
-        store: store.0.as_ref(),
-        registry: &registry,
-        run_id: &parent_run,
-        max_part_bytes: limits.max_part_bytes,
-        inline_text_bytes: limits.inline_text_bytes,
-    };
-    artifacts
-        .into_iter()
-        .filter_map(|artifact| {
-            let name = format!("{}/{}", worker.item_id, artifact.name);
-            let stored = store
-                .0
-                .read(&worker.run_id, &artifact.sha256)
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| {
-                    sink.store_part(
-                        &InboundPart::from_bytes(name.clone(), bytes.to_vec())
-                            .typed(artifact.mime_type.clone()),
-                    )
-                });
-            match stored {
-                Ok(part) => Some(part),
-                Err(why) => {
-                    tracing::warn!(item = %worker.item_id, part = %name, "[mime] worker artifact not handed up: {why}");
-                    None
-                }
-            }
-        })
-        .collect()
 }
 
 /// A `fan_out` tool call: the report is that call's result, and the agent picks
@@ -1078,6 +1025,8 @@ mod tests {
     use crate::spec::graph::{RunGraph, StageDef, StageMode as Mode};
     use crate::spec::names::{RegionName, StageName};
     use crate::test_graph::{both, layout, model, region, spec_c};
+    use leviath_core::mime::Part;
+    use leviath_core::output::Artifact;
     use leviath_core::{Region, RegionKind};
     use std::collections::HashSet;
 
@@ -3350,6 +3299,11 @@ mod tests {
     /// registry, hands up nothing.
     #[test]
     fn a_finished_workers_artifacts_are_handed_up_as_parts() {
+        fn hand_up_artifacts(world: &World, parent: Entity, aw: &ActiveWorker) -> Vec<Part> {
+            io::HandUp::of(world, parent, aw)
+                .map(|job| job.run().parts)
+                .unwrap_or_default()
+        }
         let mut world = World::new();
         let store: Arc<dyn leviath_core::mime::BlobStore> =
             Arc::new(leviath_core::mime::MemoryBlobStore::new());
@@ -3584,7 +3538,7 @@ mod tests {
     // ── typed work items ──────────────────────────────────────────────────────
 
     /// A fan-out stage whose graph declares a `topic` text input.
-    fn topic_blueprint(config: FanOutDef) -> RunGraph {
+    pub(super) fn topic_blueprint(config: FanOutDef) -> RunGraph {
         use crate::spec::inputs::{InputDecl, InputSlot, InputType, RegionBinding};
         let mut bp = fanout_blueprint(config);
         bp.layout
@@ -3608,7 +3562,7 @@ mod tests {
         bp
     }
 
-    fn pending(world: &mut World, e: Entity, args: serde_json::Value) {
+    pub(super) fn pending(world: &mut World, e: Entity, args: serde_json::Value) {
         world.entity_mut(e).insert(PendingFanOut {
             call_id: "call-1".to_string(),
             request: parse_fan_out_call(&args).unwrap(),
@@ -3708,40 +3662,36 @@ mod tests {
         );
     }
 
-    /// Which inputs a worker is held to before it starts: its own graph's for
-    /// a worker stage, the spawner's reading of a named, pathed or queried
-    /// blueprint, and none when nothing can say.
+    /// Which inputs a named, pathed or queried worker blueprint is held to
+    /// before it starts: the spawner's reading of it, and none when nothing
+    /// can say. A world with no runtime reads them in place.
     #[test]
-    fn a_workers_inputs_come_from_its_graph_or_the_spawner() {
-        let blueprint = WorkerSource::Blueprint(BlueprintRef::parse("probe").unwrap());
-        let file = WorkerSource::BlueprintFile(
-            crate::spec::names::BlueprintPath::new(
-                std::env::temp_dir().join("probe").to_string_lossy(),
-            )
-            .unwrap(),
-        );
-        let query = WorkerSource::Query("tests".into());
-        let nobody = WorkerSource::Query("nobody".into());
-        let stage = WorkerSource::Stage(StageName::new("w").unwrap());
-        let spec = spec_c("t", topic_blueprint(cfg(None, 1, WorkerFailure::Continue))).0;
-
+    fn a_workers_inputs_come_from_the_spawner() {
+        use io::WorkerBlueprint as B;
+        let blueprint = || {
+            B::Named(SpawnSource::Blueprint(
+                BlueprintRef::parse("probe").unwrap(),
+            ))
+        };
+        let file = || {
+            B::Named(SpawnSource::BlueprintFile(
+                crate::spec::names::BlueprintPath::new(
+                    std::env::temp_dir().join("probe").to_string_lossy(),
+                )
+                .unwrap(),
+            ))
+        };
+        let e = Entity::PLACEHOLDER;
         let mut world = World::new();
-        assert!(
-            worker_decls(&world, &blueprint, None).is_none(),
-            "no spawner"
-        );
-        assert!(worker_decls(&world, &query, None).is_none());
-        assert!(worker_decls(&world, &stage, None).is_none(), "no graph");
-        let topic = worker_decls(&world, &stage, Some(&*spec)).unwrap();
-        assert!(topic.iter().any(|d| d.name.as_str() == "topic"));
-
+        let read = |world: &World, b| io::read_inputs(world, e, b).expect("read in place");
+        assert!(read(&world, blueprint()).is_none(), "no spawner");
         install(&mut world, Arc::new(Typed(TestSpawner::ok())));
-        for worker in [&blueprint, &file, &query] {
-            assert!(worker_decls(&world, worker, None).is_some());
+        for worker in [blueprint(), file(), B::Query("tests".into())] {
+            assert!(read(&world, worker).is_some());
         }
-        assert!(worker_decls(&world, &nobody, None).is_none());
+        assert!(read(&world, B::Query("nobody".into())).is_none());
         install(&mut world, TestSpawner::ok());
-        assert!(worker_decls(&world, &blueprint, None).is_none(), "unread");
+        assert!(read(&world, blueprint()).is_none(), "unread");
     }
 
     /// An ordinary stage has no worker to fall back on, so a call that names
@@ -3796,3 +3746,7 @@ mod tests {
 #[cfg(test)]
 #[path = "fanout/starts_tests.rs"]
 mod starts_tests;
+
+#[cfg(test)]
+#[path = "fanout/io_tests.rs"]
+mod io_tests;

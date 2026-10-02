@@ -229,6 +229,7 @@ mod emit;
 mod paging;
 pub use paging::{PageJob, PlacePage};
 mod health;
+mod history;
 mod listing;
 mod starts;
 mod subagents;
