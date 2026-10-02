@@ -8,6 +8,7 @@ use crate::insert::RunSpecC;
 use crate::spec::graph::EdgeCarry;
 use crate::spec::graph::EdgeCondition;
 use crate::test_graph::{self as tg, spec_of, spec_with};
+use crate::test_support::Exploding;
 
 /// `edge`, renamed `name`.
 fn named(name: &str, edge: crate::spec::graph::EdgeDef) -> crate::spec::graph::EdgeDef {
@@ -1423,48 +1424,12 @@ impl StageInference {
     }
 }
 
-/// A provider whose `infer` panics, standing in for any bug that kills a lane
-/// task before it can report - the case that would otherwise leave the agent
-/// waiting on an outcome that never arrives.
-struct Exploding;
-#[async_trait::async_trait]
-impl Provider for Exploding {
-    async fn infer(
-        &self,
-        _r: &InferenceRequest,
-    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-        panic!("provider adapter blew up")
-    }
-    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-        1
-    }
-    fn max_context_tokens(&self, _m: &str) -> usize {
-        100_000
-    }
-    fn name(&self) -> &str {
-        "exploding"
-    }
-    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-        leviath_providers::ModelCapabilities::default()
-    }
-}
-
 /// Register [`Exploding`] under `"exploding"` in an already-built test world.
 fn register_exploding(world: &mut World) {
     world
         .resource_mut::<Providers>()
         .0
         .register("exploding".to_string(), Arc::new(Exploding));
-}
-
-#[tokio::test]
-async fn exploding_provider_metadata_is_exercised() {
-    // Keep the mock's non-`infer` trait methods measured.
-    let p = Exploding;
-    assert_eq!(p.name(), "exploding");
-    assert_eq!(p.count_tokens("t", "m").await, 1);
-    assert_eq!(p.max_context_tokens("m"), 100_000);
-    let _ = p.capabilities("m");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

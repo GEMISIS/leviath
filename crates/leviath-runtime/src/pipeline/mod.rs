@@ -102,6 +102,7 @@ mod compaction;
 pub(crate) use compaction::{
     AwaitingCompaction, CompactionResults, PendingEdgeCompact, apply_edge_transform,
     collect_compaction, compaction_request, dispatch_compaction, dispatch_edge_compact,
+    spawn_summary_job,
 };
 pub use compaction::{CompactionSettings, is_stage_specific};
 mod tool_results;

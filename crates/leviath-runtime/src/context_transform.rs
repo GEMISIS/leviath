@@ -21,7 +21,7 @@ use crate::spec::run_spec::RunSpec;
 use bevy_ecs::prelude::*;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::compaction_bridge::{CompactionJob, CompactionOutcome, run_compaction_job};
+use crate::compaction_bridge::{CompactionJob, CompactionOutcome};
 use crate::components::{AgentState, AgentStatus, ContextWindow};
 use crate::pipeline::{CompactionSettings, InferenceStage, Providers};
 
@@ -166,7 +166,13 @@ pub(crate) fn dispatch_content_summary(
                 (region.clone(), request)
             })
             .collect();
-        stage.runtime.spawn(run_compaction_job(
+        // Supervised: the child waits `AwaitingContentSummary` until an
+        // outcome lands, so a job that died without one would hold it there.
+        crate::pipeline::spawn_summary_job(
+            &stage,
+            &stage.content_summary_outcomes,
+            "content-summary",
+            entity,
             CompactionJob {
                 entity,
                 provider,
@@ -175,10 +181,7 @@ pub(crate) fn dispatch_content_summary(
                 requests,
                 permit,
             },
-            std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
-            stage.content_summary_outcomes.clone(),
-            stage.wake.clone(),
-        ));
+        );
         commands
             .entity(entity)
             .remove::<PendingContentSummary>()
@@ -752,6 +755,42 @@ mod tests {
             outcome.result.unwrap(),
             vec![("task".to_string(), "SUMMARY".to_string())]
         );
+    }
+
+    /// A summary job that dies without reporting still hands the lane an
+    /// outcome: the child waits `AwaitingContentSummary` until one lands, so a
+    /// lost job would park it there for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_summary_job_reports_an_error_instead_of_vanishing() {
+        let (mut world, mut rx) = summary_world(
+            false,
+            false,
+            InferencePools::new(InferencePoolConfig::new()),
+        );
+        world
+            .resource_mut::<Providers>()
+            .0
+            .register("p".to_string(), Arc::new(crate::test_support::Exploding));
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                settings(),
+                PendingContentSummary(vec![("task".to_string(), "raw".to_string())]),
+            ))
+            .id();
+        let _silent = crate::test_support::SilentPanics::install();
+        run_dispatch(&mut world);
+        assert!(world.get::<AwaitingContentSummary>(e).is_some());
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the supervisor reports promptly")
+            .expect("an outcome");
+        assert_eq!(outcome.entity, e);
+        let err = outcome
+            .result
+            .expect_err("a dead job is an error")
+            .to_string();
+        assert!(err.contains("content-summary"), "got: {err}");
     }
 
     #[tokio::test]

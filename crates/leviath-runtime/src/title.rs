@@ -666,19 +666,43 @@ pub(crate) fn dispatch_title(
         providers
             .0
             .apply_retention_knobs(&provider_name, &mut request.extra);
-        stage.runtime.spawn(run_title_job(
-            TitleJob {
-                entity,
-                provider,
-                provider_name: provider_name.clone(),
-                model: model.clone(),
-                request,
-                permit,
+        // Supervised: the run is held `AwaitingTitle` until an outcome lands,
+        // so a job that died without one would hold a finished run in memory
+        // until its deadline and then blame the clock. The synthesized error
+        // takes the collect system's failure path, which moves on down the
+        // chain exactly as a refused call does.
+        let lost = (sink.0.clone(), stage.wake.clone());
+        let (lost_provider, lost_model) = (provider_name.clone(), model.clone());
+        crate::lane_supervisor::spawn_supervised(
+            &stage.runtime,
+            "title",
+            run_title_job(
+                TitleJob {
+                    entity,
+                    provider,
+                    provider_name,
+                    model,
+                    request,
+                    permit,
+                },
+                retry,
+                sink.0.clone(),
+                stage.wake.clone(),
+            ),
+            move |message| {
+                let _ = lost.0.send(TitleOutcome {
+                    entity,
+                    result: Err(leviath_providers::ProviderError::Other(message)),
+                    finish_reason: None,
+                    // Nothing was served, so nothing was billed.
+                    usage: None,
+                    provider_name: lost_provider,
+                    model: lost_model,
+                    pricing: None,
+                });
+                lost.1.notify_one();
             },
-            retry,
-            sink.0.clone(),
-            stage.wake.clone(),
-        ));
+        );
         commands
             .entity(entity)
             .remove::<PendingTitle>()
@@ -1749,6 +1773,39 @@ mod tests {
             Some("Release notes digest")
         );
         assert!(world.get::<AwaitingTitle>(e).is_none());
+    }
+
+    /// A title job that dies without reporting still hands the lane an
+    /// outcome, so the run is not held for a name until its hold runs out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_title_job_reports_an_error_instead_of_vanishing() {
+        let (mut world, mut title_rx) = build_world(Ok("unused"), default_pools());
+        world.resource_mut::<Providers>().0.register(
+            "exploding".to_string(),
+            Arc::new(crate::test_support::Exploding),
+        );
+        world.insert_resource(TitleSettings(config(None, None)));
+        let e = world
+            .spawn((
+                metadata(Some("exploding/m")),
+                PendingTitle,
+                chain_of(&[("exploding", "m")]),
+            ))
+            .id();
+        let _silent = crate::test_support::SilentPanics::install();
+        run_dispatch(&mut world);
+        assert!(world.get::<AwaitingTitle>(e).is_some());
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), title_rx.recv())
+            .await
+            .expect("the supervisor reports promptly")
+            .expect("an outcome");
+        assert_eq!(outcome.entity, e);
+        assert_eq!(outcome.provider_name, "exploding");
+        let err = outcome
+            .result
+            .expect_err("a dead job is an error")
+            .to_string();
+        assert!(err.contains("title"), "got: {err}");
     }
 
     #[tokio::test]
