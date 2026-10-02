@@ -89,6 +89,7 @@ pub fn insert(
     place::point_progress(&mut entity, state);
     place::phase(&mut entity, &spec, state);
     bindings.apply(&mut entity);
+    place::grants(&mut entity, state);
     place::title_request(&mut entity, &spec, state);
     if let Some(scripts) = entity.take::<RegionScripts>()
         && let Some(mut window) = entity.get_mut::<ContextWindow>()

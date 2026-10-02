@@ -88,6 +88,10 @@ pub enum Change {
     Files(RunFiles),
     /// `blobs`.
     Blobs(Vec<BlobFile>),
+    /// `grants`.
+    Grants(Grants),
+    /// `written`.
+    Written(u64),
 }
 
 /// An edge a run took, and why.
@@ -272,6 +276,8 @@ impl StateDelta {
             held => Held,
             files => Files,
             blobs => Blobs,
+            grants => Grants,
+            written => Written,
         );
         Self {
             seq: prev.seq + 1,
@@ -335,6 +341,8 @@ impl StateDelta {
                 Change::Held(v) => state.held = v,
                 Change::Files(v) => state.files = v,
                 Change::Blobs(v) => state.blobs = v,
+                Change::Grants(v) => state.grants = v,
+                Change::Written(v) => state.written = v,
             }
         }
         state.seq = self.seq;

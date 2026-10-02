@@ -1473,3 +1473,56 @@ fn only_a_new_run_waits_for_its_entry_stage_hook() {
     assert!(world.get::<EnteringEntryStage>(old_run).is_none());
     assert!(world.get::<ReadyToInfer>(old_run).is_some());
 }
+
+/// What a person approved for the run or its stage, and what the run has
+/// written against its ceilings, are part of its state: read off a run and
+/// placed again (as a restart does), the new run keeps them, whatever the
+/// host bound it with.
+#[test]
+fn grants_and_writes_survive_being_placed_again() {
+    use crate::pipeline::{ToolGrants, WriteLedger};
+    use leviath_core::interaction::ApprovalScope;
+    let spec = Arc::new(two_stage_spec());
+    let mut world = World::new();
+    let first = insert(
+        &mut world,
+        spec.clone(),
+        Bindings::new(),
+        &initial_state(&spec),
+    );
+    let mut grants = ToolGrants::default();
+    grants.enter_stage(0);
+    grants.grant(Some(ApprovalScope::Run), &["git status".to_string()]);
+    grants.grant(Some(ApprovalScope::Stage), &["ls".to_string()]);
+    let gate = || {
+        crate::taint::TaintGate::new(leviath_core::SecurityConfig {
+            taint_tracking: true,
+        })
+    };
+    let mut cleared = gate();
+    cleared.clear_for_run("http_get");
+    world
+        .entity_mut(first)
+        .insert((grants, WriteLedger { written: 600 }, cleared));
+    let state = crate::state::inspect::inspect(&world, first).expect("a run");
+
+    let bound = Bindings::new().with((ToolGrants::default(), WriteLedger { written: 0 }, gate()));
+    let again = insert(&mut world, spec, bound, &state);
+    let gate = world.get::<crate::taint::TaintGate>(again).unwrap();
+    assert_eq!(
+        gate.tool_classification("http_get").clearance,
+        leviath_core::TaintLevel::Private,
+        "a tool cleared for the session stays cleared"
+    );
+    assert_eq!(gate.cleared(), ["http_get"]);
+    let grants = world.get::<ToolGrants>(again).expect("grants placed");
+    assert!(grants.granted("git status"), "a run grant is kept");
+    assert!(
+        grants.granted("ls"),
+        "a stage grant in the same stage is kept"
+    );
+    let mut moved = grants.clone();
+    moved.enter_stage(1);
+    assert!(!moved.granted("ls"), "and still ends with its stage");
+    assert_eq!(world.get::<WriteLedger>(again).unwrap().written, 600);
+}

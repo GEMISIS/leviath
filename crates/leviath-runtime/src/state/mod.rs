@@ -87,6 +87,27 @@ pub struct RunState {
     pub files: RunFiles,
     /// Every stored part it holds, beside its run file under `blobs/`.
     pub blobs: Vec<BlobFile>,
+    /// What a person approved for it beyond the calls they were asked
+    /// about, for the rest of the run or for its stage.
+    pub grants: Grants,
+    /// The bytes it has written, against its `[limits]` write ceilings.
+    pub written: u64,
+}
+
+/// The approvals a person granted a run beyond the call they were asked
+/// about, by the keys a later call is matched on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Grants {
+    /// Keys allowed for the rest of the run, sorted.
+    pub run: Vec<String>,
+    /// Keys allowed while the run stays in the stage at `stage_index`,
+    /// sorted.
+    pub stage: Vec<String>,
+    /// The stage `stage` was granted in, by its index in the graph.
+    pub stage_index: Option<u32>,
+    /// Tools a person cleared at the taint gate for the rest of the run
+    /// ("Allow for this session"), sorted.
+    pub cleared: Vec<String>,
 }
 
 /// How many `read_paths` a run's blueprint declares, and how many of them
@@ -134,6 +155,8 @@ impl RunState {
             held: None,
             files: RunFiles::default(),
             blobs: Vec::new(),
+            grants: Grants::default(),
+            written: 0,
         }
     }
 }

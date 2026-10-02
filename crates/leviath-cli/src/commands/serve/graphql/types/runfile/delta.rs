@@ -239,6 +239,22 @@ change_member!(
     }
 );
 
+change_member!(
+    /// A person approved a call for the run or its stage, or a stage grant
+    /// ended.
+    GrantsChange {
+        /// The grants now.
+        grants: super::state::StateGrants
+    }
+);
+change_member!(
+    /// The run wrote something.
+    WrittenChange {
+        /// The bytes it has written now.
+        written_bytes: BigInt
+    }
+);
+
 /// One part of a run's state that a step changed, with its new value.
 #[derive(Debug, Union)]
 pub(crate) enum StateChange {
@@ -296,6 +312,10 @@ pub(crate) enum StateChange {
     Files(FilesChange),
     /// The stored parts beside the run file.
     Blobs(BlobsChange),
+    /// What a person approved beyond the calls they were asked about.
+    Grants(GrantsChange),
+    /// What the run has written.
+    Written(WrittenChange),
 }
 
 impl From<&Change> for StateChange {
@@ -386,6 +406,12 @@ impl From<&Change> for StateChange {
             }),
             Change::Blobs(blobs) => Self::Blobs(BlobsChange {
                 blobs: blobs.iter().map(super::files::StateBlob::from).collect(),
+            }),
+            Change::Grants(grants) => Self::Grants(GrantsChange {
+                grants: super::state::StateGrants::from(grants),
+            }),
+            Change::Written(written) => Self::Written(WrittenChange {
+                written_bytes: big(*written),
             }),
         }
     }

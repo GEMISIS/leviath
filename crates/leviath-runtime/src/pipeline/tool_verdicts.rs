@@ -123,6 +123,32 @@ impl ToolGrants {
         };
         into.extend(keys.iter().cloned());
     }
+
+    /// The grants as a run's state keeps them.
+    pub fn to_state(&self) -> crate::state::Grants {
+        let sorted = |keys: &HashSet<String>| {
+            let mut keys: Vec<String> = keys.iter().cloned().collect();
+            keys.sort();
+            keys
+        };
+        crate::state::Grants {
+            run: sorted(&self.run),
+            stage: sorted(&self.stage),
+            stage_index: self
+                .stage_index
+                .map(|i| u32::try_from(i).unwrap_or(u32::MAX)),
+            cleared: Vec::new(),
+        }
+    }
+
+    /// The grants a run's state recorded.
+    pub fn from_state(state: &crate::state::Grants) -> Self {
+        Self {
+            run: state.run.iter().cloned().collect(),
+            stage: state.stage.iter().cloned().collect(),
+            stage_index: state.stage_index.map(|i| i as usize),
+        }
+    }
 }
 
 /// What a run has written, against its `[limits]` write ceilings: the bytes

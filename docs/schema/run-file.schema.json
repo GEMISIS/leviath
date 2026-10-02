@@ -875,6 +875,34 @@
               "Blobs"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`grants`.",
+            "properties": {
+              "Grants": {
+                "$ref": "#/$defs/Grants"
+              }
+            },
+            "required": [
+              "Grants"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`written`.",
+            "properties": {
+              "Written": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "Written"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1647,6 +1675,47 @@
           "output_forced",
           "splits_degraded",
           "broken_scripts"
+        ],
+        "type": "object"
+      },
+      "Grants": {
+        "description": "The approvals a person granted a run beyond the call they were asked\nabout, by the keys a later call is matched on.",
+        "properties": {
+          "cleared": {
+            "description": "Tools a person cleared at the taint gate for the rest of the run\n(\"Allow for this session\"), sorted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "run": {
+            "description": "Keys allowed for the rest of the run, sorted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "stage": {
+            "description": "Keys allowed while the run stays in the stage at `stage_index`,\nsorted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "stage_index": {
+            "description": "The stage `stage` was granted in, by its index in the graph.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run",
+          "stage",
+          "cleared"
         ],
         "type": "object"
       },
@@ -9132,6 +9201,47 @@
         ],
         "type": "object"
       },
+      "Grants": {
+        "description": "The approvals a person granted a run beyond the call they were asked\nabout, by the keys a later call is matched on.",
+        "properties": {
+          "cleared": {
+            "description": "Tools a person cleared at the taint gate for the rest of the run\n(\"Allow for this session\"), sorted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "run": {
+            "description": "Keys allowed for the rest of the run, sorted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "stage": {
+            "description": "Keys allowed while the run stays in the stage at `stage_index`,\nsorted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "stage_index": {
+            "description": "The stage `stage` was granted in, by its index in the graph.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run",
+          "stage",
+          "cleared"
+        ],
+        "type": "object"
+      },
       "InputValue": {
         "description": "A checked input value. Each variant matches one [`InputType`].",
         "oneOf": [
@@ -10790,6 +10900,10 @@
         "$ref": "#/$defs/Flags",
         "description": "What the run did that its caller should know."
       },
+      "grants": {
+        "$ref": "#/$defs/Grants",
+        "description": "What a person approved for it beyond the calls they were asked\nabout, for the rest of the run or for its stage."
+      },
       "held": {
         "anyOf": [
           {
@@ -10914,6 +11028,12 @@
           }
         ],
         "description": "Why it is waiting, when it is."
+      },
+      "written": {
+        "description": "The bytes it has written, against its `[limits]` write ceilings.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       }
     },
     "required": [
@@ -10934,7 +11054,9 @@
       "children",
       "point",
       "files",
-      "blobs"
+      "blobs",
+      "grants",
+      "written"
     ],
     "title": "RunState",
     "type": "object"

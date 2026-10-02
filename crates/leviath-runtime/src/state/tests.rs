@@ -264,6 +264,13 @@ pub(crate) fn busy() -> RunState {
         region: Some(crate::spec::names::RegionName::new("notes").unwrap()),
         tool: Some("make_chart".into()),
     });
+    s.grants = super::Grants {
+        run: vec!["git status".into()],
+        stage: vec!["ls".into()],
+        stage_index: Some(1),
+        cleared: vec!["http_get".into()],
+    };
+    s.written = 600;
     s
 }
 

@@ -83,7 +83,8 @@ from its start gives its state at any step.
 
 A **checkpoint** is the run's whole state, written out. That is where it is in its graph, what its
 pipeline is doing and every region's entries. It also holds open questions, tool calls in flight,
-a fan-out in progress, spend, time and child runs. It is exactly what
+a fan-out in progress, spend, time and child runs. So do the approvals a person granted it for
+the run or a stage, and the bytes it has written. It is exactly what
 [`lev run show --at`](/docs/inspecting-a-run#from-the-command-line) and `Run.state` return.
 
 The daemon writes one after 64 deltas, or once the deltas since the last one take more than twice

@@ -633,6 +633,13 @@ fn state() -> CoreState {
         held: Some(held()),
         files: files(),
         blobs: vec![blob()],
+        grants: leviath_runtime::state::Grants {
+            run: vec!["cargo test".into()],
+            stage: Vec::new(),
+            stage_index: None,
+            cleared: Vec::new(),
+        },
+        written: 600,
     }
 }
 
@@ -742,6 +749,13 @@ fn delta() -> CoreDelta {
             Change::Held(None),
             Change::Files(files()),
             Change::Blobs(vec![blob()]),
+            Change::Grants(leviath_runtime::state::Grants {
+                run: vec!["cargo test".into()],
+                stage: vec!["ls".into()],
+                stage_index: Some(1),
+                cleared: vec!["http_get".into()],
+            }),
+            Change::Written(600),
         ],
         events: vec![
             RunEvent::Inference {
@@ -1166,9 +1180,14 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];
-    assert_eq!(step["changes"].as_array().map(Vec::len), Some(29));
+    assert_eq!(step["changes"].as_array().map(Vec::len), Some(31));
     assert_eq!(step["changes"][27]["files"]["stages"][0]["index"], 0);
     assert_eq!(step["changes"][28]["blobs"][0]["mimeType"], "image/png");
+    assert_eq!(step["changes"][29]["grants"]["stageIndex"], 1);
+    assert_eq!(step["changes"][29]["grants"]["cleared"][0], "http_get");
+    assert_eq!(step["changes"][30]["writtenBytes"], 600);
+    assert_eq!(full["grants"]["run"][0], "cargo test");
+    assert_eq!(full["writtenBytes"], 600);
     assert_eq!(step["changes"][24]["checkpoint"]["document"], "the plan");
     assert_eq!(full["checkpoint"]["round"], 2);
     assert_eq!(step["changes"][25]["held"][0]["code"], "UNAVAILABLE");

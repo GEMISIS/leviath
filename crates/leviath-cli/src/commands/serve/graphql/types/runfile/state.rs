@@ -862,6 +862,37 @@ pub(crate) struct RunState {
     pub(crate) files: super::files::StateFiles,
     /// The stored parts it keeps beside its run file.
     pub(crate) blobs: Vec<super::files::StateBlob>,
+    /// What a person approved for it beyond the calls they were asked about.
+    pub(crate) grants: StateGrants,
+    /// The bytes it has written, against its write ceilings.
+    pub(crate) written_bytes: BigInt,
+}
+
+/// The approvals a person granted a run beyond the call they were asked
+/// about, by the keys a later call is matched on: a command, or a path.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct StateGrants {
+    /// Keys allowed for the rest of the run.
+    pub(crate) run: Vec<String>,
+    /// Keys allowed while the run stays in the stage they were granted in.
+    pub(crate) stage: Vec<String>,
+    /// The stage those were granted in, by its position in the graph from 0.
+    /// Null when nothing was granted for a stage.
+    pub(crate) stage_index: Option<i32>,
+    /// Tools a person cleared at the taint gate for the rest of the run.
+    pub(crate) cleared: Vec<String>,
+}
+
+impl From<&leviath_runtime::state::Grants> for StateGrants {
+    fn from(g: &leviath_runtime::state::Grants) -> Self {
+        Self {
+            run: g.run.clone(),
+            stage: g.stage.clone(),
+            stage_index: g.stage_index.map(saturating),
+            cleared: g.cleared.clone(),
+        }
+    }
 }
 
 /// The issues a held run is held for, as the schema types them.
@@ -909,6 +940,8 @@ impl From<&CoreState> for RunState {
             held: held_issues(s.held.as_ref()),
             files: super::files::StateFiles::from(&s.files),
             blobs: s.blobs.iter().map(super::files::StateBlob::from).collect(),
+            grants: StateGrants::from(&s.grants),
+            written_bytes: big(s.written),
         }
     }
 }

@@ -4825,6 +4825,15 @@ input GatewayWrite {
 }
 
 """
+A person approved a call for the run or its stage, or a stage grant
+ended.
+"""
+type GrantsChangeOutput {
+	"The grants now."
+	grants: StateGrantsOutput!
+}
+
+"""
 The run was held because this machine could not take it back, or it
 came back.
 """
@@ -12454,6 +12463,10 @@ type RunStateOutput {
 	files: StateFilesOutput!
 	"The stored parts it keeps beside its run file."
 	blobs: [StateBlobOutput!]!
+	"What a person approved for it beyond the calls they were asked about."
+	grants: StateGrantsOutput!
+	"The bytes it has written, against its write ceilings."
+	writtenBytes: BigInt!
 }
 
 "Where a run is in its life."
@@ -15673,7 +15686,7 @@ type StateBlobOutput {
 }
 
 "One part of a run's state that a step changed, with its new value."
-union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput
+union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput | GrantsChangeOutput | WrittenChangeOutput
 
 "Working time: seconds banked, and when the running clock started."
 type StateClockOutput {
@@ -15756,6 +15769,24 @@ type StateFlagsOutput {
 	splitsDegraded: Int!
 	"Scripts that would not run."
 	brokenScripts: [String!]!
+}
+
+"""
+The approvals a person granted a run beyond the call they were asked
+about, by the keys a later call is matched on: a command, or a path.
+"""
+type StateGrantsOutput {
+	"Keys allowed for the rest of the run."
+	run: [String!]!
+	"Keys allowed while the run stays in the stage they were granted in."
+	stage: [String!]!
+	"""
+	The stage those were granted in, by its position in the graph from 0.
+	Null when nothing was granted for a stage.
+	"""
+	stageIndex: Int
+	"Tools a person cleared at the taint gate for the rest of the run."
+	cleared: [String!]!
 }
 
 "A message waiting in a run's inbox."
@@ -19033,6 +19064,12 @@ type WriteFileCallOutput implements ToolCall {
 	rawArguments: JSON!
 	"The call's arguments."
 	args: WriteFileArgsOutput!
+}
+
+"The run wrote something."
+type WrittenChangeOutput {
+	"The bytes it has written now."
+	writtenBytes: BigInt!
 }
 
 """

@@ -8,7 +8,7 @@ use leviath_core::taint::{
     GateDecision, GateDecisionSource, GateEvent, SecurityConfig, TaintLevel, ToolClassification,
     builtin_tool_classification,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::components::ContextWindow;
 
@@ -39,6 +39,9 @@ pub struct TaintGate {
     tool_overrides: HashMap<String, ToolClassification>,
     /// Audit log of gate events.
     audit_log: Vec<GateEvent>,
+    /// Tools a person cleared for the rest of the run ("Allow for this
+    /// session"), kept so a run placed again clears them again.
+    cleared: BTreeSet<String>,
 }
 
 impl TaintGate {
@@ -48,6 +51,7 @@ impl TaintGate {
             config,
             tool_overrides: HashMap::new(),
             audit_log: Vec::new(),
+            cleared: BTreeSet::new(),
         }
     }
 
@@ -60,6 +64,7 @@ impl TaintGate {
             },
             tool_overrides: HashMap::new(),
             audit_log: Vec::new(),
+            cleared: BTreeSet::new(),
         }
     }
 
@@ -76,6 +81,19 @@ impl TaintGate {
         classification: ToolClassification,
     ) {
         self.tool_overrides.insert(tool_name, classification);
+    }
+
+    /// Clear `tool_name` for anything the run holds, for the rest of the run.
+    pub(crate) fn clear_for_run(&mut self, tool_name: &str) {
+        let mut cls = self.tool_classification(tool_name);
+        cls.clearance = TaintLevel::Private;
+        self.set_tool_classification(tool_name.to_string(), cls);
+        self.cleared.insert(tool_name.to_string());
+    }
+
+    /// The tools a person cleared for the rest of the run, sorted.
+    pub(crate) fn cleared(&self) -> Vec<String> {
+        self.cleared.iter().cloned().collect()
     }
 
     /// Get the classification for a tool (override first, then built-in default).
@@ -321,9 +339,7 @@ impl TaintGate {
                     clearance,
                     GateDecisionSource::UserAlwaysAllow,
                 );
-                let mut cls = self.tool_classification(tool_name);
-                cls.clearance = TaintLevel::Private;
-                self.set_tool_classification(tool_name.to_string(), cls);
+                self.clear_for_run(tool_name);
                 None
             }
             GateResolution::Deny => {

@@ -179,7 +179,9 @@ The two scoped options name what they grant, because a grant is not keyed on the
 approve `git push`. A line the parser cannot read as a list of commands (a backtick, a heredoc, an
 `eval`, a program named by a variable) has nothing reusable to grant, and the prompt says so.
 
-Nothing is written to disk. Every grant dies with the run that made it.
+A grant is kept in the run's own [run file](/docs/run-file), beside what the run has written
+against its write ceilings, so a run the daemon brings back after a restart keeps both. Nothing
+outside the run records it, and every grant dies with the run that made it.
 
 The taint gate in [security](/docs/security) uses the same prompt shape with its own wording. An
 outbound tool that would carry sensitive data above its clearance is blocked, then surfaced as a

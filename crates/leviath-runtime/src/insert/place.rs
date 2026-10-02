@@ -549,6 +549,28 @@ pub(crate) fn optional_state(entity: &mut EntityWorldMut<'_>, state: &RunState) 
     }
 }
 
+/// `grants` and `written`: what a person approved for the run and what it has
+/// written. Placed after the host's bindings, which start a run with none
+/// granted and with what its seeds wrote before it was placed, so a run
+/// placed again keeps both and adds what it was bound with. A tool cleared at
+/// the taint gate is cleared again on the gate the host bound.
+pub(crate) fn grants(entity: &mut EntityWorldMut<'_>, state: &RunState) {
+    if let Some(mut gate) = entity.get_mut::<crate::taint::TaintGate>() {
+        for tool in &state.grants.cleared {
+            gate.clear_for_run(tool);
+        }
+    }
+    let bound = entity
+        .get::<crate::pipeline::WriteLedger>()
+        .map_or(0, |l| l.written);
+    entity.insert((
+        crate::pipeline::ToolGrants::from_state(&state.grants),
+        crate::pipeline::WriteLedger {
+            written: state.written.saturating_add(bound),
+        },
+    ));
+}
+
 /// `final_output`, when the run has handed one back, without its content:
 /// that is in the file beside the run file its state names, which only a
 /// resume reads (see [`crate::restore::resume`]).

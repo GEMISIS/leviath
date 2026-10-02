@@ -466,3 +466,37 @@ async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
         assert!(leviath_runtime::restore::begin_session(runs.path()));
     }
 }
+
+/// What a person approved for the run or its stage, and what it has written
+/// against its ceilings, come back with a run the daemon restarts.
+#[tokio::test]
+async fn grants_and_writes_come_back_after_a_restart() {
+    let agent = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let manifest = manifest_in(agent.path(), ASKER);
+    let run = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
+    change(runs.path(), &run, |s| {
+        s.grants = leviath_runtime::state::Grants {
+            run: vec!["cargo test".to_string()],
+            stage: vec!["ls".to_string()],
+            stage_index: Some(0),
+            cleared: Vec::new(),
+        };
+        s.written = 4096;
+    });
+
+    let starter = starter(Config::default(), registry(), runs.path());
+    let mut world = world_for(&starter);
+    resume_all(&mut world, &starter, runs.path());
+
+    let entity = entity_of(&mut world, &run);
+    let grants = world
+        .world()
+        .get::<leviath_runtime::pipeline::ToolGrants>(entity)
+        .expect("the run's grants");
+    assert!(grants.granted("cargo test"));
+    assert!(grants.granted("ls"));
+    let state = live(&mut world, &run);
+    assert_eq!(state.written, 4096);
+    assert_eq!(state.grants.run, ["cargo test"]);
+}

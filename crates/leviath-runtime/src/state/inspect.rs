@@ -108,6 +108,19 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
         // file, as it writes them.
         files: super::RunFiles::default(),
         blobs: Vec::new(),
+        grants: super::Grants {
+            cleared: world
+                .get::<crate::taint::TaintGate>(entity)
+                .map(crate::taint::TaintGate::cleared)
+                .unwrap_or_default(),
+            ..world
+                .get::<crate::pipeline::ToolGrants>(entity)
+                .map(crate::pipeline::ToolGrants::to_state)
+                .unwrap_or_default()
+        },
+        written: world
+            .get::<crate::pipeline::WriteLedger>(entity)
+            .map_or(0, |l| l.written),
     })
 }
 
