@@ -122,20 +122,23 @@ pub(crate) struct PersistenceStage(pub UnboundedSender<PersistMsg>);
 /// Put every settled interaction in the journal.
 ///
 /// The hub is answered from outside the tick - over the control socket, by `lev
-/// respond`, by a dashboard - so it cannot reach the lane itself; it buffers
-/// what settled and this drains the buffer. Every tick, unconditionally: an
-/// append is never coalesced, and a run whose last act was answering a prompt
+/// respond`, by a dashboard - so it cannot reach the journal itself; it buffers
+/// what settled and this drains the buffer. Every tick, unconditionally: a
+/// record is never coalesced, and a run whose last act was answering a prompt
 /// must not lose the record because nothing else about it changed.
 ///
 /// The record carries the run it belongs to, so this needs no per-agent query
 /// and works for an agent that has already gone.
-pub(crate) fn journal_interactions(hub: Option<Res<InteractionHub>>, stage: Res<PersistenceStage>) {
+pub(crate) fn journal_interactions(
+    hub: Option<Res<InteractionHub>>,
+    journal: Res<super::JournalSender>,
+) {
     crate::tick_scope::clear();
     let Some(hub) = hub else { return };
     for (run_id, record) in hub.take_settled() {
-        let _ = stage.0.send(PersistMsg::Append {
-            run_id,
-            record: Box::new(crate::runfile::record::RunRecord::Interaction {
+        journal.record(
+            &run_id,
+            crate::runfile::record::RunRecord::Interaction {
                 request_id: record.request_id,
                 kind: record.kind,
                 tool: record.tool,
@@ -144,9 +147,8 @@ pub(crate) fn journal_interactions(hub: Option<Res<InteractionHub>>, stage: Res<
                 settlement: record.settlement,
                 asked_at: record.asked_at,
                 at: record.at,
-            }),
-            ack: None,
-        });
+            },
+        );
     }
 }
 
@@ -407,35 +409,45 @@ type PersistenceQuery = (
 /// nothing per tick.
 ///
 /// A run placed from a spec also gets its state read by
-/// [`inspect`](crate::state::inspect::inspect) at the same moments, carried to
-/// the lane inside its snapshot, and recorded in its run file there. That read
-/// needs the whole world, which is why this is an exclusive system wrapped
-/// around the query that builds the snapshots.
+/// [`inspect`](crate::state::inspect::inspect) at the same moments, with the
+/// events folded from what happened to it since its last step, and carried to
+/// the lane inside its snapshot as the step its run file records. What
+/// happened to a run with no snapshot due goes to the lane as a step of its
+/// own. Both reads need the whole world, which is why this is an exclusive
+/// system wrapped around the query that builds the snapshots.
 pub(crate) fn dispatch_persistence(world: &mut World) {
+    let mut happened = super::journal::drain(world);
     let jobs = world.run_system_cached(build_snapshots).unwrap_or_default();
     for (entity, mut job) in jobs {
-        job.run_file = run_file_step(world, entity, &job.run_id, job.meta.updated_at);
+        job.run_file =
+            run_file_step(world, entity, &job.run_id, job.meta.updated_at).map(|mut step| {
+                let run = happened.remove(&job.run_id).unwrap_or_default();
+                (step.events, step.acks) = (run.events, run.acks);
+                step
+            });
         let _ = world
             .resource::<PersistenceStage>()
             .0
             .send(PersistMsg::Snapshot(job));
     }
+    super::journal::send(world, happened);
 }
 
-/// The run-file step for the run on `entity`, when it was placed from a spec.
+/// The run-file step for the run on `entity`, when it was placed from a spec:
+/// its state now, with nothing yet said about what happened.
 fn run_file_step(
-    world: &World,
+    world: &mut World,
     entity: Entity,
     run_id: &str,
     at: i64,
 ) -> Option<Box<crate::runfile::lane::RunFileStep>> {
-    let spec = world.get::<crate::insert::RunSpecC>(entity)?.0.clone();
-    let state = crate::state::inspect::inspect(world, entity)?;
+    let now = super::journal::run_now(world, entity)?;
     Some(Box::new(crate::runfile::lane::RunFileStep {
         run_id: run_id.to_string(),
-        spec,
-        state,
+        now: Some(now),
         at,
+        events: Vec::new(),
+        acks: Vec::new(),
     }))
 }
 

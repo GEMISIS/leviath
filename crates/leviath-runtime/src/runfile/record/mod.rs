@@ -1,11 +1,12 @@
-//! What the world hands the persistence lane besides a run's state: one
-//! record per thing that happened.
+//! What the world is told about a run besides its state: one record per
+//! thing that happened.
 //!
 //! A step's state says where the run is; it cannot say what it did on the way.
-//! The systems that make a model call, dispatch tools, settle a question or
-//! commit a change to the window each send a [`RunRecord`] as it happens, and
-//! the lane turns it into the [`RunEvent`](crate::state::RunEvent)s of the
-//! run's next step (see [`journal_events`](super::journal_events)).
+//! The systems and tasks that make a model call, dispatch tools, settle a
+//! question or commit a change to the window each send a [`RunRecord`] to the
+//! world's journal as it happens, and the persist system folds it into the
+//! [`RunEvent`](crate::state::RunEvent)s of the run's next step (see
+//! [`journal_events`](super::journal_events)).
 
 use serde::{Deserialize, Serialize};
 
@@ -140,7 +141,7 @@ pub struct InteractionRecord {
     pub at: i64,
 }
 
-/// One thing a run did, sent to the persistence lane as it happens.
+/// One thing a run did, sent to the world's journal as it happens.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunRecord {
     /// What one provider call cost, sent as it lands.

@@ -79,7 +79,7 @@ pub struct InteractionHub {
     ///
     /// A buffer rather than a journal handle, because the hub is answered from
     /// outside the tick - over the control socket, from `lev respond` - and the
-    /// persistence lane is reached from inside one. `journal_interactions`
+    /// world's journal is reached from inside one. `journal_interactions`
     /// drains this every tick.
     settled: Arc<Mutex<Vec<(String, crate::runfile::record::InteractionRecord)>>>,
     /// How many request ids each run has drawn, by run.
@@ -413,7 +413,7 @@ impl InteractionHub {
     }
 
     /// Every settled interaction since the last drain, and the run each belongs
-    /// to. What `journal_interactions` sends to the lane.
+    /// to. What `journal_interactions` sends to the world's journal.
     pub(crate) fn take_settled(&self) -> Vec<(String, crate::runfile::record::InteractionRecord)> {
         std::mem::take(&mut *leviath_core::sync::lock(&self.settled))
     }

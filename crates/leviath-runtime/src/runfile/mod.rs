@@ -10,8 +10,8 @@
 //! beside it that its state names (see [`crate::state::files`]).
 //!
 //! [`codec`] is the byte layout, [`writer`] and [`reader`] write and read
-//! it, [`tail`] reads only where a run is now, and [`view`] renders what it holds as TOML. [`record`] is what the
-//! world sends the persistence lane as things happen, which become the events
+//! it, [`tail`] reads only where a run is now, and [`view`] renders what it holds as TOML. [`record`] is what is
+//! sent to the world as things happen, which the world folds into the events
 //! of each step, and [`history`] is what a reader makes of the steps.
 
 use std::sync::OnceLock;
@@ -20,6 +20,7 @@ use sha2::Digest as _;
 
 pub mod codec;
 mod error;
+pub(crate) mod events;
 pub mod frames;
 pub mod history;
 pub(crate) mod lane;
@@ -32,7 +33,7 @@ pub mod view;
 pub mod writer;
 
 pub use error::{RunFileError, RunFileErrorKind};
-pub use lane::{Answered, journal_events, journal_events_with};
+pub use events::{Answered, journal_events, journal_events_with};
 pub use reader::{RunFileReader, blob_path, read_blob};
 pub use summary::{context_snapshot, stage_records, summary, summary_of};
 pub use tail::{RunFileTail, read_spec};

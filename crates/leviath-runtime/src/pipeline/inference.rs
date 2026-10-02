@@ -608,10 +608,10 @@ pub(crate) struct DispatchTuning<'w, 's> {
     pub policy: Option<Res<'w, CircuitPolicy>>,
     /// The retry schedule.
     pub retry: Option<Res<'w, InferenceRetryTuning>>,
-    /// The journal lane, so each attempt the job makes is recorded where the
-    /// rest of the run is. Absent in an in-memory world, which then records
+    /// The world's journal, so each attempt the job makes is recorded where
+    /// the rest of the run is. Absent in an in-memory world, which then records
     /// nothing rather than failing to dispatch.
-    pub persist: Option<Res<'w, PersistenceStage>>,
+    pub persist: Option<Res<'w, super::JournalSender>>,
     /// The mime store, registry and limits.
     pub mime: crate::blob_store::MimeParams<'w, 's>,
 }
@@ -840,7 +840,7 @@ pub(crate) fn dispatch_inference(
                     stage: state.current_stage.clone(),
                     provider: si.provider_name.clone(),
                     model: si.model.clone(),
-                    lane: lane.0.clone(),
+                    lane: lane.waking(),
                     digest: crate::runfile::record::RequestDigest {
                         system_hash,
                         messages: request.messages.len(),
