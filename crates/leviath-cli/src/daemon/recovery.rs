@@ -27,6 +27,7 @@
 //! one.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use leviath_runtime::host::{NotPlaced, PageIn, RunListEntry};
@@ -82,20 +83,24 @@ fn read_run(dir: &Path) -> Option<Resumable> {
     Some(run)
 }
 
-/// Bind a run read back from its file and place it in the world. A binding
-/// that fails holds the run: why is recorded on its file, and its listing row
-/// returned. A cancelled run being resumed (`revive`) comes back paused; one
-/// that cannot be bound stays cancelled, with nothing recorded and no row.
-fn resume_one(
-    world: &mut PipelineWorld,
+/// A run read back from its file and bound to this machine, ready to place.
+pub(crate) struct Bound {
+    run: Resumable,
+    bindings: leviath_runtime::spec::env::Bindings,
+}
+
+/// Bind a run read back from its file. A binding that fails holds the run:
+/// why is recorded on its file, and its listing row returned. A cancelled run
+/// being resumed (`revive`) comes back paused; one that cannot be bound stays
+/// cancelled, with nothing recorded and no row.
+async fn bind_one(
     starter: &DaemonStarter,
     mut run: Resumable,
     revive: bool,
-) -> Result<Entity, Option<Box<RunListEntry>>> {
+) -> Result<Bound, Option<Box<RunListEntry>>> {
     let run_id = run.spec.run_id.to_string();
     let env = starter.env_for_graph(&run.spec.graph, starter.config.current());
-    let bound =
-        crate::daemon::block_on::block_on(leviath_runtime::bind::bind(&run.spec, &run.code, &env));
+    let bound = leviath_runtime::bind::bind(&run.spec, &run.code, &env).await;
     let bindings = match (bound, revive) {
         (Ok(bindings), _) => bindings,
         (Err(issues), true) => {
@@ -124,12 +129,19 @@ fn resume_one(
         &crate::daemon::starter::mcp_configs(&run.spec.graph),
         &run_id,
     );
-    starter.hub.continue_count(&run_id, run.asked);
-    Ok(leviath_runtime::restore::resume(
-        world.world_mut(),
+    Ok(Bound {
         run,
-        bindings.with(lease),
-    ))
+        bindings: bindings.with(lease),
+    })
+}
+
+/// Place a bound run in the world.
+fn place_one(world: &mut PipelineWorld, starter: &DaemonStarter, bound: Bound) -> Entity {
+    let Bound { run, bindings } = bound;
+    starter
+        .hub
+        .continue_count(run.spec.run_id.as_str(), run.asked);
+    leviath_runtime::restore::resume(world.world_mut(), run, bindings)
 }
 
 /// Record on the run file at `path` that the run is held for `issues`, unless
@@ -184,8 +196,12 @@ pub(crate) fn resume_all(
     let mut held = Vec::new();
     for run in leviath_runtime::restore::triage(found, |r| r) {
         let spec = run.spec.clone();
-        match resume_one(world, starter, run, false) {
-            Ok(entity) => placed.push(Placed { spec, entity }),
+        // Before the serve loop runs, so binding here holds up nothing.
+        match crate::daemon::block_on::block_on(bind_one(starter, run, false)) {
+            Ok(bound) => placed.push(Placed {
+                spec,
+                entity: place_one(world, starter, bound),
+            }),
             Err(entry) => held.extend(entry.map(|e| *e)),
         }
     }
@@ -200,16 +216,28 @@ pub(crate) fn resume_all(
 }
 
 /// Page one unloaded run back in, on demand, for `purpose`, against the
-/// providers `config.toml` names now. A run that finished or failed stays
-/// where it is, and so does one that was cancelled, unless it is being
-/// resumed: then it comes back paused, so resuming it carries on. A run this
-/// machine cannot take back is held, and its row says why.
-pub(crate) fn reload_run(
-    world: &mut PipelineWorld,
+/// providers `config.toml` names now: read and bind it here, off the serve
+/// loop, and say how to place it. A run that finished or failed stays where
+/// it is, and so does one that was cancelled, unless it is being resumed: then
+/// it comes back paused, so resuming it carries on. A run this machine cannot
+/// take back is held, and its row says why.
+pub(crate) async fn page_in(
+    starter: Arc<DaemonStarter>,
+    run_id: String,
+    purpose: PageIn,
+) -> Result<leviath_runtime::host::PlacePage, NotPlaced> {
+    let bound = bind_paged(&starter, &run_id, purpose).await?;
+    Ok(Box::new(move |world: &mut PipelineWorld| {
+        Ok(place_paged(world, &starter, bound))
+    }))
+}
+
+/// The I/O half of [`page_in`]: read `run_id` back and bind it.
+pub(crate) async fn bind_paged(
     starter: &DaemonStarter,
     run_id: &str,
     purpose: PageIn,
-) -> Result<AgentId, NotPlaced> {
+) -> Result<Bound, NotPlaced> {
     use leviath_runtime::components::AgentStatus;
     let dir = starter.runs_dir.join(run_id);
     convert_old(starter, &dir, false);
@@ -228,12 +256,34 @@ pub(crate) fn reload_run(
         _ => false,
     };
     starter.providers.refresh(&starter.config.current());
+    bind_one(starter, run, revive)
+        .await
+        .map_err(|held| match held {
+            Some(entry) => NotPlaced::Held(entry),
+            None => NotPlaced::Stopped(AgentStatus::Cancelled),
+        })
+}
+
+/// The world half of [`page_in`]: bring the world up to the config as it
+/// stands, and place the bound run in it.
+pub(crate) fn place_paged(
+    world: &mut PipelineWorld,
+    starter: &DaemonStarter,
+    bound: Bound,
+) -> AgentId {
     starter.refresh_world(world);
-    let entity = resume_one(world, starter, run, revive).map_err(|held| match held {
-        Some(entry) => NotPlaced::Held(entry),
-        None => NotPlaced::Stopped(AgentStatus::Cancelled),
-    })?;
-    Ok(world.own_agent(entity))
+    let entity = place_one(world, starter, bound);
+    world.own_agent(entity)
+}
+
+/// The host's reloader: each page-in runs on a task of its own, so the serve
+/// loop asks for a run and goes on driving the world until the run lands.
+pub(crate) fn reloader(starter: Arc<DaemonStarter>) -> leviath_runtime::host::Reloader {
+    Box::new(move |run_id, purpose| {
+        let job = tokio::spawn(page_in(starter.clone(), run_id.to_string(), purpose));
+        // A task that died is a run that did not come back.
+        Box::pin(async move { job.await.unwrap_or(Err(NotPlaced::Missing)) })
+    })
 }
 
 /// A run brought back, with the spec it was placed from.

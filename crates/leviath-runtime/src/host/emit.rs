@@ -236,8 +236,8 @@ impl WorldHost {
             // its way to disk. Unlike `Waiting` (see the NOTE below), `Paused`
             // carries no live continuation - it is the one non-terminal state
             // whose whole meaning is "nothing is driving this" - and Resume,
-            // Message and Cancel all page an unloaded run back in through
-            // `resolve_or_reload`, exactly as a daemon restart would. Scoped
+            // Message and Cancel all page an unloaded run back in (see
+            // `host::paging`), exactly as a daemon restart would. Scoped
             // to standalone roots: a run with tree links or an open prompt
             // keeps the restart-equivalence question open and stays resident.
             if self.parkable(entity, &state.status) {

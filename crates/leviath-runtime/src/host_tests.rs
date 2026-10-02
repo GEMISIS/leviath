@@ -245,9 +245,29 @@ fn recording_terminator(seen: Arc<Mutex<Vec<String>>>) -> ForceTerminator {
     })
 }
 
+/// A [`Reloader`] whose job needs no waiting: `place` decides, on the world,
+/// what paging `run_id` in for `purpose` comes to.
+fn sync_reloader(
+    place: impl Fn(&mut PipelineWorld, &str, PageIn) -> Result<AgentId, NotPlaced>
+    + Send
+    + Sync
+    + 'static,
+) -> Reloader {
+    let place = Arc::new(place);
+    Box::new(move |run_id, purpose| {
+        let place = place.clone();
+        let run_id = run_id.to_string();
+        Box::pin(async move {
+            let placer: super::PlacePage =
+                Box::new(move |world: &mut PipelineWorld| place(world, &run_id, purpose));
+            Ok(placer)
+        })
+    })
+}
+
 /// A [`Reloader`] that pages any run id in as a fresh agent.
 fn paging_reloader() -> Reloader {
-    Box::new(|world, run_id, _| Ok(world.spawn_agent((agent_state(run_id),))))
+    sync_reloader(|world, run_id, _| Ok(world.spawn_agent((agent_state(run_id),))))
 }
 
 async fn ask<T>(host: &mut WorldHost, make: impl FnOnce(oneshot::Sender<T>) -> ControlOp) -> T {
@@ -1368,7 +1388,7 @@ async fn result_reports_the_submitted_answer() {
 #[tokio::test]
 async fn a_paused_run_with_a_call_still_out_is_not_parked() {
     let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id, _| {
+    host.set_reloader(sync_reloader(|world, run_id, _| {
         let mut state = agent_state(run_id);
         state.status = AgentStatus::Paused;
         Ok(world.spawn_agent((state,)))
@@ -1402,7 +1422,7 @@ async fn a_paused_run_with_a_call_still_out_is_not_parked() {
 #[tokio::test]
 async fn a_paused_run_holding_a_landed_response_is_not_parked() {
     let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id, _| {
+    host.set_reloader(sync_reloader(|world, run_id, _| {
         let mut state = agent_state(run_id);
         state.status = AgentStatus::Paused;
         Ok(world.spawn_agent((state,)))
@@ -1451,7 +1471,7 @@ async fn a_paused_run_holding_a_landed_response_is_not_parked() {
 #[tokio::test]
 async fn a_paused_run_waiting_to_choose_its_next_stage_is_not_parked() {
     let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id, _| {
+    host.set_reloader(sync_reloader(|world, run_id, _| {
         let mut state = agent_state(run_id);
         state.status = AgentStatus::Paused;
         Ok(world.spawn_agent((state,)))
@@ -1488,7 +1508,7 @@ async fn a_persisted_paused_root_is_parked_and_pages_back_in() {
     let mut host = host_with(vec![]);
     // A reloader that restores the run the way `reload_run` does: paused,
     // ready to be resumed.
-    host.set_reloader(Box::new(|world, run_id, _| {
+    host.set_reloader(sync_reloader(|world, run_id, _| {
         let mut state = agent_state(run_id);
         state.status = AgentStatus::Paused;
         Ok(world.spawn_agent((state,)))
@@ -2529,7 +2549,7 @@ async fn cancel_closes_the_runs_open_interactions() {
 async fn cancel_falls_back_to_the_force_terminator_when_the_world_cannot_hold_the_run() {
     let mut host = host_with(vec![]);
     // A reloader that always declines - the deleted-blueprint case.
-    host.set_reloader(Box::new(|_world, _run_id, _| Err(NotPlaced::Missing)));
+    host.set_reloader(sync_reloader(|_world, _run_id, _| Err(NotPlaced::Missing)));
     let terminated = Arc::new(Mutex::new(Vec::new()));
     host.set_force_terminator(recording_terminator(terminated.clone()));
 
@@ -3996,7 +4016,7 @@ async fn emit_events_never_unloads_waiting_agents() {
 #[tokio::test]
 async fn resuming_a_run_that_had_to_be_loaded_reports_success() {
     let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id, _| {
+    host.set_reloader(sync_reloader(|world, run_id, _| {
         Ok(world.spawn_agent((agent_state(run_id),)))
     }));
 
@@ -4025,41 +4045,111 @@ async fn resuming_a_run_that_had_to_be_loaded_reports_success() {
 }
 
 #[tokio::test]
-async fn resolve_or_reload_pages_in_and_registers() {
+async fn an_op_pages_its_run_in_and_registers_it() {
     let mut host = host_with(vec![]);
+    let pause = |run_id: &'static str| {
+        move |reply| ControlOp::Pause {
+            run_id: run_id.to_string(),
+            reply,
+        }
+    };
     // No reloader installed → a miss stays a miss.
-    assert_eq!(
-        host.resolve_or_reload("ghost", PageIn::Address),
-        Err(NotPlaced::Missing)
-    );
+    assert_eq!(host.resolve_or_reload("ghost"), Err(NotPlaced::Missing));
+    assert!(!ask(&mut host, pause("ghost")).await);
 
     // A reloader that declines (run not resumable from disk) → still a miss,
     // and nothing gets registered.
-    host.set_reloader(Box::new(|_world, _run_id, _| Err(NotPlaced::Missing)));
-    assert_eq!(
-        host.resolve_or_reload("gone", PageIn::Address),
-        Err(NotPlaced::Missing)
-    );
+    host.set_reloader(sync_reloader(|_world, _run_id, _| Err(NotPlaced::Missing)));
+    assert!(!ask(&mut host, pause("gone")).await);
     assert!(
         host.live_entity("gone").is_none(),
         "a declined reload registers nothing"
     );
 
     // With a reloader that resolves → an unloaded run is paged in and registered.
-    host.set_reloader(Box::new(|world, run_id, _| {
+    let asked = Arc::new(Mutex::new(0));
+    let counted = asked.clone();
+    host.set_reloader(sync_reloader(move |world, run_id, _| {
+        *counted.lock().unwrap() += 1;
         Ok(world.spawn_agent((agent_state(run_id),)))
     }));
-    let paged = host
-        .resolve_or_reload("paged", PageIn::Address)
-        .expect("reloaded");
-    assert_eq!(
-        host.live_entity("paged"),
-        Some(paged),
-        "registered after reload"
-    );
+    assert!(ask(&mut host, pause("paged")).await);
+    let paged = host.live_entity("paged").expect("registered after reload");
 
     // A live run is returned without invoking the reloader (no re-spawn).
-    assert_eq!(host.resolve_or_reload("paged", PageIn::Address), Ok(paged));
+    assert_eq!(host.resolve_or_reload("paged"), Ok(paged));
+    ask(&mut host, pause("paged")).await;
+    assert_eq!(*asked.lock().unwrap(), 1);
+}
+
+/// A page-in that has to wait holds its op, and every op for the same run
+/// that arrives meanwhile, off the loop: nothing is answered until the run
+/// lands, and then each is handled as though the run had been there.
+#[tokio::test]
+async fn ops_wait_for_a_page_in_that_has_to_wait() {
+    let mut host = host_with(vec![]);
+    let (release, released) = oneshot::channel::<()>();
+    let released = Arc::new(Mutex::new(Some(released)));
+    host.set_reloader(Box::new(move |run_id, _| {
+        let released = released.lock().unwrap().take();
+        let run_id = run_id.to_string();
+        Box::pin(async move {
+            if let Some(released) = released {
+                let _ = released.await;
+            }
+            let placer: super::PlacePage = Box::new(move |world: &mut PipelineWorld| {
+                Ok(world.spawn_agent((agent_state(&run_id),)))
+            });
+            Ok(placer)
+        })
+    }));
+    let (first, mut first_rx) = oneshot::channel();
+    host.handle(ControlOp::Pause {
+        run_id: "slow".to_string(),
+        reply: first,
+    });
+    let (second, mut second_rx) = oneshot::channel();
+    host.handle(ControlOp::Message {
+        agent_id: "slow".to_string(),
+        content: "hello".to_string(),
+        target_region: None,
+        parts: Vec::new(),
+        reply: second,
+    });
+    assert!(
+        first_rx.try_recv().is_err(),
+        "held while the run is read back"
+    );
+    assert!(second_rx.try_recv().is_err());
+    assert!(host.live_entity("slow").is_none());
+
+    release.send(()).unwrap();
+    host.land_pages().await;
+    assert!(first_rx.await.unwrap(), "paused once it landed");
+    assert_eq!(second_rx.await.unwrap(), Ok(true));
+    assert!(host.live_entity("slow").is_some());
+}
+
+/// A page-in that has to wait and finds the run cannot be taken back holds
+/// its row, and the op that asked is told why.
+#[tokio::test]
+async fn a_page_in_that_waits_and_is_held_parks_the_row() {
+    let mut host = host_with(vec![]);
+    host.set_reloader(Box::new(|run_id, _| {
+        let run_id = run_id.to_string();
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            Err(NotPlaced::Held(Box::new(held_row(&run_id))))
+        })
+    }));
+    let (reply, rx) = oneshot::channel();
+    host.handle(ControlOp::Pause {
+        run_id: "stuck".to_string(),
+        reply,
+    });
+    host.land_pages().await;
+    assert!(!rx.await.unwrap());
+    assert!(host.parked.contains_key("stuck"));
 }
 
 #[tokio::test]
@@ -5142,7 +5232,7 @@ fn held_row(run_id: &str) -> RunListEntry {
 /// taken back on this machine, and anything else is not there. Records what
 /// each call was for.
 fn disk_reloader(asked: Arc<Mutex<Vec<(String, PageIn)>>>) -> Reloader {
-    Box::new(move |world, run_id, purpose| {
+    sync_reloader(move |world, run_id, purpose| {
         asked.lock().unwrap().push((run_id.to_string(), purpose));
         match (run_id, purpose) {
             ("done", _) => Err(NotPlaced::Stopped(AgentStatus::Complete)),

@@ -91,10 +91,18 @@ pub struct WorldHost {
     /// row: paused runs it paged out, and runs that cannot be brought back on
     /// this machine as it stands (see [`Self::hold`]). A parked run's full
     /// state is on disk; `Resume`, `Message` and `Cancel` all page it back
-    /// through [`Self::resolve_or_reload`], and [`Self::list`] keeps reporting
+    /// in (see `host::paging`), and [`Self::list`] keeps reporting
     /// it so an operator's `lev ps` view does not change just because the
     /// daemon stopped spending memory on a run nobody is driving.
     parked: HashMap<String, RunListEntry>,
+    /// Ops waiting on a run being paged in off the loop, by the run.
+    paging: HashMap<String, Vec<paging::Deferred>>,
+    /// How each page-in just placed went, for the ops it held while they
+    /// are handled.
+    paged: HashMap<String, Result<AgentId, NotPlaced>>,
+    /// Page-ins that finished off the loop, waiting to be placed.
+    paged_tx: UnboundedSender<paging::Paged>,
+    paged_rx: UnboundedReceiver<paging::Paged>,
 }
 
 /// Consecutive healthy re-drives (no dead cycles, empty tool queue) before the
@@ -172,6 +180,7 @@ impl WorldHost {
             .insert_resource(WorldEventSink(events.clone()));
         let (subagent_tx, subagent_rx) = tokio::sync::mpsc::unbounded_channel();
         let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (paged_tx, paged_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             world,
             by_run_id: HashMap::new(),
@@ -190,6 +199,10 @@ impl WorldHost {
             settings: HostSettings::default(),
             emitted_interactions: HashSet::new(),
             parked: HashMap::new(),
+            paging: HashMap::new(),
+            paged: HashMap::new(),
+            paged_tx,
+            paged_rx,
             subagent_tx,
             subagent_rx,
             redrive: DEFAULT_REDRIVE_INTERVAL,
@@ -213,6 +226,8 @@ impl WorldHost {
 // impl may live in any module of the defining crate, so each file below carries
 // its own `impl WorldHost` block rather than a trait or a free function.
 mod emit;
+mod paging;
+pub use paging::{PageJob, PlacePage};
 mod health;
 mod listing;
 mod starts;
@@ -406,32 +421,18 @@ impl WorldHost {
         self.resumer = resumer;
     }
 
-    /// Resolve a run id to a live entity, paging it in from disk for `purpose`
-    /// if it has been unloaded (and a reloader is installed), or say why it
-    /// was not. Newly-reloaded runs are registered, and leave the rows of
-    /// runs held out of the world and of runs that finished.
-    fn resolve_or_reload(&mut self, run_id: &str, purpose: PageIn) -> Result<AgentId, NotPlaced> {
+    /// Resolve a run id to a live entity, or say why it is not in the world.
+    /// An op that names an unloaded run has had it paged in before it is
+    /// handled (see `host::paging`), so a run that is still not here is one
+    /// the page-in did not place, for the reason it found.
+    fn resolve_or_reload(&mut self, run_id: &str) -> Result<AgentId, NotPlaced> {
         if let Some(entity) = self.live_entity(run_id) {
             return Ok(entity);
         }
-        let Some(reload) = self.reloader.as_mut() else {
-            return Err(NotPlaced::Missing);
-        };
-        match reload(&mut self.world, run_id, purpose) {
-            Ok(entity) => {
-                self.by_run_id.insert(run_id.to_string(), entity);
-                // Live again: its listing row comes off the entity.
-                self.parked.remove(run_id);
-                self.finished.retain(|(_, entry)| entry.run_id != run_id);
-                Ok(entity)
-            }
-            Err(NotPlaced::Held(entry)) => {
-                // Still held, for the reason found just now.
-                self.parked.insert(run_id.to_string(), (*entry).clone());
-                Err(NotPlaced::Held(entry))
-            }
-            Err(other) => Err(other),
-        }
+        self.paged
+            .get(run_id)
+            .cloned()
+            .unwrap_or(Err(NotPlaced::Missing))
     }
 
     /// Keep a run the daemon could not bring back on this machine in the
@@ -525,9 +526,15 @@ impl WorldHost {
             .map(|_| agent)
     }
 
-    /// Apply one control op and reply on its channel. A dropped reply receiver is
+    /// Apply one control op and reply on its channel, once the run it names
+    /// is in the world (see `host::paging`). A dropped reply receiver is
     /// harmless (the requester went away).
     pub fn handle(&mut self, op: ControlOp) {
+        self.page_first(paging::Deferred::Control(op));
+    }
+
+    /// Apply one control op whose run, if it names one, has been paged in.
+    fn handle_now(&mut self, op: ControlOp) {
         match op {
             ControlOp::Spawn { request, reply } => {
                 self.start(*request, crate::spec::env::Caller::TopLevel, None, reply);
@@ -635,7 +642,7 @@ impl WorldHost {
                 // Page the target in if it was unloaded, so delivery finds it.
                 // A run that has stopped stays stopped: it is not loaded back
                 // for a message it would never read.
-                let status = match self.resolve_or_reload(&agent_id, PageIn::Address) {
+                let status = match self.resolve_or_reload(&agent_id) {
                     Err(NotPlaced::Stopped(status)) => Some(status),
                     Err(NotPlaced::Held(entry)) => {
                         let _ = reply.send(Err(Self::held_refusal(&agent_id, &entry)));
@@ -719,7 +726,7 @@ impl WorldHost {
         redrive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut closed = false;
         'serve: loop {
-            if closed && self.starting == 0 {
+            if closed && self.starting == 0 && self.paging.is_empty() {
                 break 'serve;
             }
             self.world.run_to_fixed_point();
@@ -748,6 +755,8 @@ impl WorldHost {
                 Some(started) = self.started_rx.recv() => self.place(started),
                 // The host holds a `subagent_tx`, so this only yields `Some`.
                 Some(sub) = self.subagent_rx.recv() => self.handle_subagent(sub),
+                // And a `paged_tx`.
+                Some(paged) = self.paged_rx.recv() => self.landed_page(paged),
             }
         }
         // Shutting down: drain the persistence lane before the world is dropped.

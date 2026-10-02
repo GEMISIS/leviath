@@ -210,9 +210,9 @@ async fn a_refusal_that_cannot_be_recorded_still_leaves_the_run_out() {
     std::fs::remove_file(run_file(runs.path(), &run_id)).unwrap();
 
     let starter = starter(Config::default(), ProviderRegistry::new(), runs.path());
-    let mut world = world_for(&starter);
-    let held = resume_one(&mut world, &starter, found, false)
-        .expect_err("the run is held")
+    let held = crate::daemon::block_on::block_on(bind_one(&starter, found, false))
+        .err()
+        .expect("the run is held")
         .expect("with a row saying why");
     assert_eq!(held.run_id, run_id);
 }
@@ -530,4 +530,16 @@ fn a_run_converted_without_its_blueprint_never_resumes() {
         assert_eq!(meta.agent_name, "probe");
         assert!(read_run(&dir).is_none());
     });
+}
+
+/// Page `run_id` in for `purpose` as the host does, with its two halves run
+/// back to back: the read and bind, then the placing.
+pub(super) fn reload_run(
+    world: &mut PipelineWorld,
+    starter: &DaemonStarter,
+    run_id: &str,
+    purpose: PageIn,
+) -> Result<AgentId, NotPlaced> {
+    crate::daemon::block_on::block_on(bind_paged(starter, run_id, purpose))
+        .map(|bound| place_paged(world, starter, bound))
 }

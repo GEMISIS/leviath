@@ -542,10 +542,7 @@ pub fn build_host(parts: HostParts) -> WorldHost {
 
     // Reload-on-demand: an op targeting an unloaded run pages it back in from
     // its run file, against the machine as it stands now.
-    let reload_starter = starter.clone();
-    host.set_reloader(Box::new(move |world, run_id, purpose| {
-        crate::daemon::recovery::reload_run(world, &reload_starter, run_id, purpose)
-    }));
+    host.set_reloader(crate::daemon::recovery::reloader(starter.clone()));
 
     // Last resort for a cancel the world can't service: force the run's on-disk
     // state to `Cancelled`. The reloader above declines whenever a run can't be
@@ -995,6 +992,7 @@ mod tests {
                     run_id: "gone-1234-ab12".to_string(),
                     reply,
                 });
+                host.land_pages().await;
                 assert!(rx.await.unwrap(), "the cancel reports that it applied");
 
                 // A run id that names nothing at all is still an honest miss.
@@ -1003,6 +1001,7 @@ mod tests {
                     run_id: "no-such-run".to_string(),
                     reply,
                 });
+                host.land_pages().await;
                 assert!(!rx.await.unwrap());
 
                 // A closed control channel ends the serve loop, which writes
@@ -1811,12 +1810,14 @@ binds = [{{ region = "task" }}]
         // It is not loaded yet: a read-only Status does not page it in.
         assert_eq!(status_of(&mut host, &run_id).await, None);
 
-        // A Cancel routes through the reloader, paging it in and acting on it.
+        // A Cancel routes through the reloader, paging it in off the loop and
+        // acting on it once it lands.
         let (reply, rx) = oneshot::channel();
         host.handle(ControlOp::Cancel {
             run_id: run_id.clone(),
             reply,
         });
+        host.land_pages().await;
         assert!(rx.await.unwrap());
     }
 
