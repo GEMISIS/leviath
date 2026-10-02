@@ -13,7 +13,7 @@
 //! to the package version when git is unavailable (e.g. a packaged crate).
 //!
 //! The script re-runs when any file under the workspace's crates changes, or
-//! the commit or index git has checked out, so the dirty hash tracks source
+//! the commit git has checked out, so the dirty hash tracks source
 //! edits, not just commits, and the embedded blueprints (which live in this
 //! crate) stay in step with the files on disk. It does not re-run on every
 //! build, because Cargo compiles the crate again each time its build script
@@ -26,8 +26,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Run a git command and return its stdout bytes, or `None` on any failure.
+///
+/// `--no-optional-locks` keeps `git status` from refreshing the index on
+/// disk, so a build never writes to the checkout it reads.
 fn git(args: &[&str]) -> Option<Vec<u8>> {
     Command::new("git")
+        .arg("--no-optional-locks")
         .args(args)
         .output()
         .ok()
@@ -240,13 +244,19 @@ fn main() {
     // Re-run when what the build id or the embedded blueprints come from can
     // have moved: any file under the workspace's crates (an uncommitted edit
     // anywhere, and the blueprints, which live in this crate), and the commit
-    // and index git has checked out. Not on every build: Cargo compiles a
-    // crate again whenever its build script runs, even when nothing it emits
-    // changed, which doubled every `cargo test` after a `cargo test --no-run`.
+    // checked out (`HEAD`, and the branch it names). Not on every build: Cargo
+    // compiles a crate again whenever its build script runs, even when nothing
+    // it emits changed, which doubled every `cargo test` after a
+    // `cargo test --no-run`. Not the index either: other git commands refresh
+    // it with nothing changed.
     let crates = manifest_dir.join("..");
     println!("cargo:rerun-if-changed={}", crates.display());
-    for name in ["HEAD", "index"] {
-        if let Some(path) = git(&["rev-parse", "--git-path", name])
+    let branch = git(&["rev-parse", "--symbolic-full-name", "HEAD"])
+        .and_then(|o| String::from_utf8(o).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.starts_with("refs/"));
+    for name in std::iter::once("HEAD".to_string()).chain(branch) {
+        if let Some(path) = git(&["rev-parse", "--git-path", &name])
             .and_then(|o| String::from_utf8(o).ok())
             .map(|s| PathBuf::from(s.trim()))
         {
