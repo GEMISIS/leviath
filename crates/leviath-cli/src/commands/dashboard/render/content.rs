@@ -3132,7 +3132,8 @@ regions = []
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("Logs"), "{buf}");
         // A stage that has logged nothing yet shows where its log will be,
-        // in the separators of the platform it runs on.
+        // in the separators of the platform it runs on throughout (the
+        // footer may cut the file name off on a long temp path).
         let sep = std::path::MAIN_SEPARATOR;
         assert!(
             buf.contains(&format!("run-logs-fph{sep}stages{sep}0{sep}")),

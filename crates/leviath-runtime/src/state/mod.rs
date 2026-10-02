@@ -19,7 +19,7 @@ pub mod journal;
 
 pub use context::{ContextDiff, ContextState, EntryKind, EntryMeta, EntryState, RegionState};
 pub use delta::{Change, RunEvent, StateDelta, TransitionReason, TransitionRecord};
-pub use files::{BlobFile, FileRef, RunFiles, StageFile, StageFiles};
+pub use files::{BlobFile, FileRef, RunFiles, StageFile, StageFiles, under};
 
 use crate::spec::names::{EdgeName, ModelRef, RunId, StageName};
 use context::ToolCallState;

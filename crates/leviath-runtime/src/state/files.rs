@@ -24,6 +24,14 @@ pub const OUTPUT_LOG: &str = "output.log";
 /// The name of a stage's operational log.
 pub const LOGS_LOG: &str = "logs.log";
 
+/// The run-relative path `rel` (written with `/`, as a run file names it)
+/// under `run_dir`, joined a part at a time so it is in the platform's own
+/// separators.
+pub fn under(run_dir: &Path, rel: &str) -> PathBuf {
+    rel.split(['/', '\\'])
+        .fold(run_dir.to_path_buf(), |path, part| path.join(part))
+}
+
 /// The name of a stage's taint-gate audit.
 pub const TAINT_AUDIT: &str = "taint_audit.json";
 
@@ -110,7 +118,7 @@ impl FileRef {
                 .all(|part| !part.is_empty() && part != "." && part != "..")
             && !self.path.contains(':');
         match inside {
-            true => Ok(run_dir.join(&self.path)),
+            true => Ok(under(run_dir, &self.path)),
             false => Err(FileRefError::Outside(self.path.clone())),
         }
     }

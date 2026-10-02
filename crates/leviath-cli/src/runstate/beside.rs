@@ -89,7 +89,7 @@ pub(crate) fn stage_file_path(dir: &Path, index: usize, which: StageFile) -> Pat
     files
         .stage_file(index, which)
         .and_then(|named| path_of(dir, named))
-        .unwrap_or(dir.join(which.path(index)))
+        .unwrap_or(leviath_runtime::state::under(dir, &which.path(index)))
 }
 
 /// The last `max_bytes` of the log `which` of the stage at `index` of the run

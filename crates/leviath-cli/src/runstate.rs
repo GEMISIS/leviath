@@ -834,7 +834,7 @@ fn append_stage_line(run_id: &str, stage_idx: usize, which: StageFile, text: &st
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
     let index = stage_idx as u32;
-    let path = run_dir(run_id).join(which.path(index));
+    let path = leviath_runtime::state::under(&run_dir(run_id), &which.path(index));
     if let Ok(mut file) = leviath_sys::open_private_append(&path) {
         let _ = writeln!(file, "{}", text);
     }

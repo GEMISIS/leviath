@@ -679,7 +679,7 @@ async fn append_stage_line(
     line: &str,
     run_id: &str,
 ) -> Option<u64> {
-    let path = run_dir.join(which.path(index));
+    let path = crate::state::under(run_dir, &which.path(index));
     let _ = create_private_dir(path.parent().unwrap_or(run_dir)).await;
     match open_private_append(&path).await {
         Ok(mut handle) => {
