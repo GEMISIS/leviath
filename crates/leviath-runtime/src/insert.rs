@@ -213,6 +213,13 @@ pub(crate) fn initial_state_from(spec: &RunSpec, window: &ContextWindow) -> RunS
         clock: Default::default(),
     });
     state.flags.no_output_tools = !spec_view::any_stage_can_modify(&spec.graph);
+    // What the entry stage's `require_region_updated` gates compare against,
+    // as a transition records it for every other stage. Without it the gate
+    // has no baseline and lets an untouched region through.
+    state.progress.entry_region_digests =
+        crate::pipeline::watched_region_digests(&spec.graph, &spec.graph.stages[entry], window)
+            .into_iter()
+            .collect();
     state
 }
 

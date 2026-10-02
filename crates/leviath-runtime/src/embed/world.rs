@@ -999,10 +999,12 @@ budget = 20000
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].0, run_id);
 
-        // A live, parked agent still accepts messages. (Pause is refused
-        // while the agent waits on input - see the capacity test below for
-        // the pause/resume round-trip.)
-        assert!(!world.pause(&run_id).await);
+        // A run waiting on a person can be paused and resumed with its
+        // question still open, and a live, parked agent still accepts
+        // messages.
+        assert!(world.pause(&run_id).await);
+        assert!(world.resume(&run_id).await);
+        assert_eq!(world.pending_inputs().len(), 1, "the question stays open");
         assert!(world.send_message(&run_id, "prefer something boring").await);
         assert!(
             world

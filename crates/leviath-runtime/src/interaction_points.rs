@@ -751,7 +751,7 @@ pub(crate) fn collect_interaction_point(
                 };
             }
             PointOutcome::Approve { user_text } => {
-                state.status = AgentStatus::Active;
+                end_wait(&mut state);
                 inject(&mut window, &name, "", &user_text);
                 // Say plainly that this was approved *after* being changed.
                 //
@@ -792,7 +792,7 @@ pub(crate) fn collect_interaction_point(
                 user_text,
                 directive,
             } => {
-                state.status = AgentStatus::Active;
+                end_wait(&mut state);
                 inject(&mut window, &name, "", &user_text);
                 if round + 1 >= MAX_REVISION_ROUNDS {
                     proceed(&mut e); // revision cap ⇒ proceed
@@ -804,7 +804,7 @@ pub(crate) fn collect_interaction_point(
                 }
             }
             PointOutcome::Edit { user_text, edited } => {
-                state.status = AgentStatus::Active;
+                end_wait(&mut state);
                 inject(&mut window, &name, "", &user_text);
                 if round + 1 >= MAX_REVISION_ROUNDS {
                     proceed(&mut e);
@@ -834,6 +834,16 @@ pub(crate) fn collect_interaction_point(
                 }
             }
         }
+    }
+}
+
+/// The person answered: an agent that was waiting on them goes back to work.
+///
+/// Only from `Waiting`. A run paused while the question was open takes the
+/// answer and stays paused until it is resumed.
+fn end_wait(state: &mut AgentState) {
+    if state.status == AgentStatus::Waiting {
+        state.status = AgentStatus::Active;
     }
 }
 

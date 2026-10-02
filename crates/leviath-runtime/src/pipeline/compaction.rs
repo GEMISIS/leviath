@@ -74,14 +74,21 @@ type CompactionQuery = (
 );
 
 /// Compaction-dispatch system: for each `ReadyToInfer` agent with
-/// [`CompactionSettings`] whose window is over the eviction threshold, do the
-/// synchronous eviction inline; if that surfaces regions needing LLM
-/// summarization (and content to summarize), build one request per region,
-/// acquire a permit for the compaction model, spawn the job, and hold the agent
-/// as `AwaitingCompaction`. Anything that can't proceed (under threshold, nothing
-/// to summarize, provider missing, pool full) simply leaves the agent
-/// `ReadyToInfer` so inference proceeds - compaction is best-effort. (Ported from
-/// `AgentEngine::evict_and_compact`.)
+/// [`CompactionSettings`], summarize every compacting region that is past its
+/// own threshold (`compact_at`), and when the window as a whole is over the
+/// eviction threshold, run the synchronous eviction first. Builds one request
+/// per region with content to summarize, acquires a permit for the compaction
+/// model, spawns the job, and holds the agent as `AwaitingCompaction`. Anything
+/// that can't proceed (nothing past a threshold, nothing to summarize, provider
+/// missing, pool full) simply leaves the agent `ReadyToInfer` so inference
+/// proceeds - compaction is best-effort.
+///
+/// A region's own threshold is what `compact_at` promises, and acting on it
+/// before the window fills is what keeps a compacting region summarizing
+/// rather than rolling its oldest entries off when a write does not fit.
+/// Without window pressure a region holding a single entry waits: summarizing
+/// one entry in place leaves one entry, and a summary still past the threshold
+/// would be summarized again before every request.
 pub(crate) fn dispatch_compaction(
     mut agents: Query<CompactionQuery, (With<ReadyToInfer>, Without<AwaitingCompaction>)>,
     stage: Res<InferenceStage>,
@@ -98,30 +105,27 @@ pub(crate) fn dispatch_compaction(
         // there to leave room between "nearly full" and "over the window", and
         // an estimate measured running light spends that room without ever
         // reporting it.
-        if !crate::pipeline::needs_eviction_calibrated(
+        let pressed = crate::pipeline::needs_eviction_calibrated(
             window.current_tokens,
             window.max_tokens,
             EVICTION_THRESHOLD,
             calibration,
-        ) {
-            continue; // under threshold - nothing to do
-        }
+        );
         let target_free = window.max_tokens / 10;
-        let Ok(eviction) = window.try_evict(target_free) else {
+        if pressed && window.try_evict(target_free).is_err() {
             continue; // couldn't evict - proceed to inference as-is
-        };
+        }
 
-        // Build a summarize request per region that both needs compaction and
+        // Build a summarize request per region that is past its threshold and
         // has content to summarize.
         let config = &settings.0;
         let mut requests = Vec::new();
-        for region_name in &eviction.needs_compaction {
-            // The names come from `try_evict`'s own scan of `window.regions`, and
-            // nothing between there and here mutates the region set, so the region
-            // is guaranteed present.
-            let region = window
-                .get_region(region_name)
-                .expect("needs_compaction region present: named by try_evict's own scan");
+        for region in window
+            .regions
+            .iter()
+            .filter(|r| r.needs_compaction() && (pressed || r.content.len() > 1))
+        {
+            let region_name = &region.name;
             let content: String = region
                 .content
                 .iter()
@@ -304,14 +308,11 @@ pub(crate) fn collect_compaction(
                             if source_region == &region_name)
                     })
                     .map(|r| r.name.clone());
-                if let Some(history_name) = history {
-                    let _ = window.add_to_region_caused(
-                        leviath_core::ContextCause::Compaction,
-                        &history_name,
-                        summary,
-                        summary_tokens,
-                    );
-                }
+                // The summary rolls forward into the region's `compact_history`
+                // when it has one, and otherwise stays in the region it
+                // summarizes: a compacting region summarizes instead of
+                // evicting, so its older content is never simply dropped.
+                let into = history.unwrap_or_else(|| region_name.clone());
                 let before = window.begin_change(&region_name);
                 if let Some(region) = window.get_region_mut(&region_name) {
                     region.clear();
@@ -322,6 +323,12 @@ pub(crate) fn collect_compaction(
                     leviath_core::ContextCause::Compaction,
                     before,
                     crate::components::Pushed::Nothing,
+                );
+                let _ = window.add_to_region_caused(
+                    leviath_core::ContextCause::Compaction,
+                    &into,
+                    summary,
+                    summary_tokens,
                 );
             }
             window.current_tokens = window.calculate_tokens();

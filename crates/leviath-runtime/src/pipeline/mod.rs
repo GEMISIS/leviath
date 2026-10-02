@@ -42,7 +42,7 @@ pub(crate) use transition::{
     AwaitingTransitionChoice, StageEntry, StageSetup, VisitCounts, WaitingForChildren,
     apply_stage_context, attach_stage_components, emit_stage_transition, enter_stage, fail_stage,
     fail_stage_world, find_conditioned_edge_ref, hold_for_gate, region_digest, resolve_transition,
-    transition_record,
+    transition_record, watched_region_digests,
 };
 pub use transition::{LastTransition, StageCursor, force_transition, is_terminal_status};
 mod hooks;

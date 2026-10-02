@@ -10603,6 +10603,73 @@ async fn compaction_skips_non_active_agent() {
     assert!(world.get::<AwaitingCompaction>(e).is_none());
 }
 
+/// `compact_at` is the region's own threshold: a compacting region past it is
+/// summarized before the next request even when the window as a whole has
+/// room. Waiting for the window to fill left the region to roll its oldest
+/// entries off on write, which is eviction, the thing the kind exists to
+/// avoid.
+#[tokio::test]
+async fn a_compacting_region_past_its_own_threshold_is_summarized() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let mut w = ContextWindow::new(10_000);
+    let mut log = Region::new(
+        "log".to_string(),
+        RegionKind::Compacting {
+            threshold_tokens: 30,
+        },
+        60,
+    );
+    let _ = log.add_entry("first read", 20);
+    let _ = log.add_entry("second read", 20);
+    w.add_region(log);
+    w.current_tokens = w.calculate_tokens();
+    let e = world
+        .spawn((
+            w,
+            compaction_settings("cfg", "m"),
+            agent_state(),
+            ReadyToInfer,
+        ))
+        .id();
+
+    run_dispatch_compaction(&mut world);
+
+    assert!(world.get::<AwaitingCompaction>(e).is_some());
+}
+
+/// A region holding one entry past its threshold is left alone until the
+/// window needs the room: summarizing a single entry in place would leave a
+/// single entry, and one still past the threshold would be summarized again
+/// before every request.
+#[tokio::test]
+async fn a_compacting_region_holding_one_entry_waits_for_window_pressure() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    let mut w = ContextWindow::new(10_000);
+    let mut log = Region::new(
+        "log".to_string(),
+        RegionKind::Compacting {
+            threshold_tokens: 30,
+        },
+        60,
+    );
+    let _ = log.add_entry("one long summary", 40);
+    w.add_region(log);
+    w.current_tokens = w.calculate_tokens();
+    let e = world
+        .spawn((
+            w,
+            compaction_settings("cfg", "m"),
+            agent_state(),
+            ReadyToInfer,
+        ))
+        .id();
+
+    run_dispatch_compaction(&mut world);
+
+    assert!(world.get::<ReadyToInfer>(e).is_some());
+    assert!(world.get::<AwaitingCompaction>(e).is_none());
+}
+
 #[tokio::test]
 async fn compaction_skips_when_under_threshold() {
     let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
@@ -14064,10 +14131,11 @@ fn collect_compaction_drops_stale_outcome() {
     run_collect_compaction(&mut world); // no matching agent ⇒ dropped
 }
 
+/// A compacting region summarizes instead of evicting, so with no
+/// `compact_history` region to roll the summary into, the summary stays in
+/// the region it summarizes: older content is summarized, not lost.
 #[test]
-fn collect_compaction_summary_for_unpaired_region_is_skipped() {
-    // A summary for a region with no paired CompactHistory still clears the
-    // source (exercises the None history branch).
+fn collect_compaction_keeps_the_summary_of_an_unpaired_region_in_place() {
     let (mut world, tx) = world_with_compaction_results();
     let mut w = ContextWindow::new(100);
     let mut lone = Region::new(
@@ -14097,16 +14165,11 @@ fn collect_compaction_summary_for_unpaired_region_is_skipped() {
     .unwrap();
 
     run_collect_compaction(&mut world);
-
-    assert_eq!(
-        world
-            .get::<ContextWindow>(e)
-            .unwrap()
-            .get_region("lone")
-            .unwrap()
-            .current_tokens,
-        0
-    );
+    let window = world.get::<ContextWindow>(e).unwrap();
+    let lone = window.get_region("lone").unwrap();
+    let held: Vec<&str> = lone.content.iter().map(|x| x.content.as_str()).collect();
+    assert_eq!(held, vec!["s"], "the summary replaces what it summarizes");
+    assert_eq!(window.current_tokens, window.calculate_tokens());
 }
 
 // ── persistence dispatch ──
@@ -17863,6 +17926,38 @@ fn on_completion_can_rewrite_the_answer() {
     );
     run_terminal(&mut world);
     assert_eq!(answer_of(&world, e), "tidied: raw answer");
+}
+
+/// `on_completion` fires as the run finishes, whichever stage it finishes
+/// in. A graph that declares it on the stage that submits the answer and then
+/// moves on to another stage still has it run: the stage it finished in
+/// declares none, so the first stage in the graph that does is used.
+#[test]
+fn on_completion_declared_on_an_earlier_stage_still_fires() {
+    let mut world = World::new();
+    let mut first = tg::stage("a");
+    first.hooks.on_completion = Some(crate::spec::graph::CodeRef::File("h.rhai".to_string()));
+    let mut state = agent_state();
+    state.status = AgentStatus::Complete;
+    let e = world
+        .spawn((
+            spec_of(blueprint(vec![first, tg::stage("b")])),
+            state,
+            StageCursor { index: 1 },
+            hook_scripts(
+                r#"fn on_completion(ctx) { #{ action: "modify", value: ctx.stage + ": " + ctx.output } }"#,
+                &["on_completion"],
+            ),
+            crate::persistence::FinalOutput(leviath_core::output::FinalOutput::new(
+                "raw answer",
+                None,
+                "a".to_string(),
+                10,
+            )),
+        ))
+        .id();
+    run_terminal(&mut world);
+    assert_eq!(answer_of(&world, e), "b: raw answer");
 }
 
 #[test]

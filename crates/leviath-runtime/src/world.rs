@@ -2616,6 +2616,63 @@ mod tests {
         g::graph(vec![s], layout)
     }
 
+    /// A run waiting on a person can be paused. The question stays open, an
+    /// answer given while paused is taken, and the run holds there until it is
+    /// resumed rather than carrying on as if nobody had paused it.
+    #[tokio::test]
+    async fn a_run_waiting_on_a_person_pauses_and_holds_past_the_answer() {
+        let mut world = build_world(registry_with(vec![
+            with_tool("c1", "read"),
+            text("## Plan\n1. do it"),
+        ]));
+        let hub = crate::interaction_hub::InteractionHub::new();
+        world.insert_interaction_hub(hub.clone());
+        let e = world.spawn_agent((
+            crate::test_graph::both(interactive_blueprint()),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            ReadyToInfer,
+        ));
+        world.run_until_idle(30).await;
+        for _ in 0..50 {
+            if world.agent_status(e) == Some(AgentStatus::Waiting) {
+                break;
+            }
+            tokio::task::yield_now().await;
+            world.run_to_fixed_point();
+        }
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Waiting));
+
+        assert!(world.pause(e), "a run waiting on a person can be paused");
+        world.run_to_fixed_point();
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Paused));
+        assert_eq!(hub.pending().len(), 1, "the question stays open");
+
+        let id = hub.pending()[0].1.id.clone();
+        let mut answer = leviath_core::interaction::InteractionResponse::text(&id, "");
+        answer.choice_index = Some(0);
+        assert!(hub.answer(answer));
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            world.run_to_fixed_point();
+        }
+        assert_eq!(
+            world.agent_status(e),
+            Some(AgentStatus::Paused),
+            "the answer does not resume the run"
+        );
+
+        assert!(world.resume(e));
+        world.run_until_idle(30).await;
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
     #[tokio::test]
     async fn persists_interaction_point_when_a_live_agent_blocks() {
         // Drive a real agent through inference → transition → the interaction-point

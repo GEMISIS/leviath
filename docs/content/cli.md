@@ -813,7 +813,7 @@ config grants.
 | `lev ps` | `--json`, `--all` | List runs in the daemon with their status. `--all` also reads the runs dir. See [below](#reading-lev-ps) |
 | `lev dash` | | Full-screen TUI [dashboard](/docs/dashboard) |
 | `lev msg <AGENT_ID> <CONTENT>` | `--attach` | Deliver a message into a running agent's context. `--attach` and a `@path` in the text send files with it |
-| `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds |
+| `lev pause <RUN_ID>` | | Pause a run. It finishes its in-flight step, then holds. See [below](#pausing-a-run) |
 | `lev resume <RUN_ID>` | | Un-pause a run |
 | `lev cancel <RUN_ID>` | `--force` | Cancel a run. Also aliased as `lev kill` |
 | `lev context <RUN_ID>` | `--json`, `--full` | Show a run's context-window history from its `run.lvr` archive |
@@ -821,6 +821,12 @@ config grants.
 | `lev blobs <RUN_ID> [PART]` | `--json`, `--out`, `--open` | List the files a run holds as stored parts, or fetch one. See [below](#lev-blobs-run-id-part) |
 
 `lev msg --attach` and a `@path` in the message text take the same forms as on `lev run`.
+
+### Pausing a run
+
+A run waiting on a question, an approval or a checkpoint can be paused too. The question stays
+open, and you can still answer it. The run takes the answer and holds until `lev resume`. A run
+waiting only on its own sub-agents pauses those sub-agents instead.
 
 `lev cancel --force` writes the run's on-disk state terminal without asking the daemon, for when
 the daemon is gone or unresponsive. Without it, the daemon is asked first, since it can stop the

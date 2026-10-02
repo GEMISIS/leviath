@@ -1422,6 +1422,33 @@ fn a_worker_starts_in_its_worker_stage() {
     assert_eq!(initial_state(&spec).cursor.stage.as_str(), "a");
 }
 
+/// The entry stage is entered by starting the run, not by a transition, and
+/// a `require_region_updated` gate on its way out compares against the
+/// region as the run started. With no baseline the gate read the region as
+/// changed and let an untouched one through.
+#[test]
+fn a_new_run_records_what_its_entry_stage_gates_watch() {
+    let mut spec = two_stage_spec();
+    spec.graph.edges[0].gate = Some(crate::spec::graph::GateDef {
+        require_region_updated: Some(crate::spec::names::RegionName::new("task").unwrap()),
+        ..Default::default()
+    });
+    spec.seeded.insert(
+        crate::spec::names::RegionName::new("task").unwrap(),
+        crate::spec::run_spec::SeededContent {
+            text: "do it".into(),
+            parts: vec![],
+        },
+    );
+    let state = initial_state(&spec);
+    let window = seeded_window(&spec, &HashMap::new());
+    let task = window.get_region("task").unwrap();
+    assert_eq!(
+        state.progress.entry_region_digests.get("task"),
+        Some(&crate::pipeline::region_digest(task))
+    );
+}
+
 /// A new run whose entry stage has an `on_stage_enter` hook waits for it
 /// before its first request; a resumed one entered that stage long ago and
 /// goes straight back to asking.

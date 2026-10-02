@@ -69,6 +69,11 @@ The three region hooks see each region's text under `regions`. Under `parts`, th
 `tokens`, keyed by region name. A region holding none is absent from `parts`. A hook can refuse to
 start a stage whose `storyboard` is empty, or note in `regions` that six frames arrived.
 
+`on_completion` and `on_error` belong to the run rather than to a stage, so they fire once whichever
+stage the run ends in. The stage it ends in runs its own. When that stage declares none, the first
+stage in the graph that does is used, so a hook on the stage that submits the answer still runs
+after the run has moved on from it.
+
 A **cancelled** run fires neither terminal hook. It was stopped from outside, and a hook narrating
 that would report your own decision back to you.
 

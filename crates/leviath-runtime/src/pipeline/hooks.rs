@@ -539,7 +539,19 @@ pub(crate) fn run_terminal_hooks(
             commands.entity(entity).insert(TerminalHookFired);
             continue;
         };
-        let Some(script) = scripts.script_for(stage, hook) else {
+        // The run finished, not a stage: a terminal hook declared on any stage
+        // fires. The stage it finished in runs its own, and when it declares
+        // none the first stage in the graph that does is used, so a hook on
+        // the stage that submitted the answer still runs after the run moves
+        // on from it.
+        let declared = scripts.script_for(stage, hook).or_else(|| {
+            spec.0
+                .graph
+                .stages
+                .iter()
+                .find_map(|s| scripts.script_for(s, hook))
+        });
+        let Some(script) = declared else {
             commands.entity(entity).insert(TerminalHookFired);
             continue;
         };

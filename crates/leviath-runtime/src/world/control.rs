@@ -5,7 +5,8 @@
 //! limit. It is one coherent unit rather than an arbitrary cut: every method
 //! here reads or writes `AgentState::status`, they share the foreign-id guard
 //! in [`PipelineWorld::agent_status`], and the guards they apply to each other
-//! (`pause` only from `Active`/`Idle`, `resume` only from `Paused`/`Idle`) only
+//! (`pause` only from `Active`/`Idle` or a wait on a person, `resume` only from
+//! `Paused`/`Idle`) only
 //! make sense side by side.
 
 use super::*;
@@ -44,18 +45,33 @@ impl PipelineWorld {
     }
 
     /// Pause an agent (it finishes any in-flight step, then stops before starting
-    /// new work). Only `Active` and `Idle` agents can be paused: a `Waiting`
-    /// agent's status is the marker the fan-out merge poll and interaction
-    /// resolution depend on, so overwriting it would wedge the run, and pausing
-    /// a terminal agent is meaningless. Returns `false` if the agent no longer
-    /// exists or is not in a pausable state.
+    /// new work). `Active` and `Idle` agents can be paused, and so can one
+    /// `Waiting` on a person: its question stays open, an answer given while it
+    /// is paused is taken, and it holds there until resumed. An agent waiting on
+    /// its sub-agents cannot be: that `Waiting` is the marker the fan-out merge
+    /// poll depends on (pausing the tree pauses the children instead), and
+    /// pausing a terminal agent is meaningless. Returns `false` if the agent no
+    /// longer exists or is not in a pausable state.
     pub fn pause(&mut self, agent: AgentId) -> bool {
         match self.agent_status(agent) {
             Some(AgentStatus::Active | AgentStatus::Idle) => {
                 self.set_status(agent, AgentStatus::Paused)
             }
+            Some(AgentStatus::Waiting) if self.waits_on_a_person(agent) => {
+                self.set_status(agent, AgentStatus::Paused)
+            }
             _ => false,
         }
+    }
+
+    /// Whether a `Waiting` agent is waiting on a person (a question, an
+    /// approval, a checkpoint) rather than on its own sub-agents.
+    fn waits_on_a_person(&self, agent: AgentId) -> bool {
+        let entity = self.world.entity(agent.entity);
+        (entity.contains::<crate::components::AwaitingInteraction>()
+            || entity.contains::<crate::interaction_points::AwaitingInteractionPoint>())
+            && !entity.contains::<crate::fanout::FanOutWaiting>()
+            && !entity.contains::<crate::pipeline::WaitingForChildren>()
     }
 
     /// Resume a paused agent. `Idle` is also accepted (resume-as-nudge for an

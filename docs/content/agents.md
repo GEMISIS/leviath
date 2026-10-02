@@ -135,6 +135,7 @@ stateDiagram-v2
   Running --> WaitingInput: prompt, or holding for children
   WaitingInput --> Running: answered, or children done
   Running --> Paused: lev pause
+  WaitingInput --> Paused: lev pause, on a prompt
   Paused --> Running: lev resume
   Running --> Complete
   Running --> CompleteInteractive: done, still accepting messages
