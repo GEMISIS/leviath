@@ -69,6 +69,7 @@ fn settings_left_unset_are_absent_not_none() {
         "nudge": { "enabled": null, "max": null, "text": null },
         "hooks": { "after_inference": null, "on_error": null },
         "kept": { "max": null, "text": "go" },
+        "compact": { "prompt": null },
     });
     let text = render("spec", &value);
     assert!(!text.contains("none"), "{text}");

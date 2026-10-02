@@ -237,10 +237,15 @@ pub(crate) fn describe_capabilities(
 
 /// Whether the runtime clamps a blueprint's `allow` for `tool` back to the
 /// tool's stricter default, the way [`crate::tools::resolve_policy`] does
-/// when the operator has said nothing.
+/// when the operator has said nothing. The stage-control tools (`fan_out`,
+/// `submit_output`) are carried out by the run itself and never ask, so they
+/// are never clamped.
 fn clamped_by_default(tool: &str) -> bool {
     use crate::tools::{blueprint_loosenable, default_tool_policy, restrictiveness};
     let canonical = leviath_tools::canonical_tool_name(tool);
+    if leviath_tools::STAGE_CONTROL_TOOLS.contains(&canonical) {
+        return false;
+    }
     let default = default_tool_policy(tool, leviath_tools::is_builtin_tool(canonical));
     restrictiveness(default) > restrictiveness(ToolPolicy::Allow) && !blueprint_loosenable(tool)
 }
@@ -513,30 +518,27 @@ mod capability_tests {
     fn self_granted_tool_permissions_are_reported() {
         let toml = format!(
             "{PLAIN}tool_permissions = {{ shell = \"allow\", web_fetch = \"allow\", \
-             read_file = \"ask\" }}\n"
+             fan_out = \"allow\", read_file = \"ask\" }}\n"
         );
         let findings = describe_capabilities(&toml, &[]);
-        assert_eq!(findings.len(), 2, "{findings:#?}");
-        assert!(findings[0].starts_with("pre-approves"), "{}", findings[0]);
-        assert!(findings[0].contains("web_fetch"));
-        assert!(!findings[0].contains("shell"), "{}", findings[0]);
-        assert!(
-            findings[1].contains("asks to pre-approve shell"),
-            "{}",
-            findings[1]
+        // The run carries out a fan-out itself; it never asks. `ask` is the
+        // default posture, not a grant, so `read_file` is not listed.
+        assert_eq!(
+            findings,
+            [
+                "pre-approves these tools (no prompt at run time): fan_out, web_fetch",
+                "asks to pre-approve shell, which a blueprint cannot grant itself, so they \
+                 still ask at run time unless you allow them in config.toml or set \
+                 [security] allow_blueprint_permissions = true",
+            ]
         );
-        assert!(
-            findings[1].contains("still ask at run time"),
-            "{}",
-            findings[1]
-        );
-        // `ask` is the default posture, not a grant.
-        assert!(!findings.concat().contains("read_file"));
 
         // An operator who lets blueprints loosen makes it a real grant.
         let loosened = super::describe_capabilities(Some(&graph(&toml)), &[], None, true);
-        assert_eq!(loosened.len(), 1, "{loosened:#?}");
-        assert!(loosened[0].contains("shell"), "{}", loosened[0]);
+        assert_eq!(
+            loosened,
+            ["pre-approves these tools (no prompt at run time): fan_out, shell, web_fetch"]
+        );
     }
 
     /// Script permissions that only *tighten* are not a grant, so they must

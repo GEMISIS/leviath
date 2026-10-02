@@ -3732,6 +3732,12 @@ mod tests {
             world.get::<FanOutWaiting>(e).is_some(),
             "a typed item starts"
         );
+        fan_out_collect(&mut world);
+        assert_eq!(
+            world.get::<FanOutWaiting>(e).map(|w| w.active.len()),
+            Some(1),
+            "its worker was started"
+        );
     }
 
     /// Which inputs a worker is held to before it starts: its own graph's for

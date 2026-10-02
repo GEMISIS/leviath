@@ -37,15 +37,18 @@ fn render<T: Serialize + ?Sized>(key: &str, value: &T) -> String {
 
 /// `value` with every shape TOML cannot hold replaced by one it can.
 ///
-/// An object of one field, and that `null`, keeps it, read as `"none"`: that
-/// is a change clearing a field (`{ "Pending": null }`), and leaving the field
-/// out would leave an empty table that says nothing. A table of several
-/// settings all unset is an empty table, the way an unset setting is absent
-/// anywhere else.
+/// An object whose one field is a variant name (capitalised) and `null` keeps
+/// it, read as `"none"`: that is a change clearing a field
+/// (`{ "Pending": null }`), and leaving it out would leave an empty table
+/// that says nothing. A table of settings all unset is an empty table, the
+/// way an unset setting is absent anywhere else.
 fn tomlable(value: Value) -> Value {
     match value {
         Value::Object(map) => {
-            let cleared = map.len() == 1 && map.values().all(Value::is_null);
+            let cleared = map.len() == 1
+                && map
+                    .iter()
+                    .all(|(k, v)| v.is_null() && k.starts_with(|c: char| c.is_ascii_uppercase()));
             Value::Object(
                 map.into_iter()
                     .filter(|(_, v)| cleared || !v.is_null())
