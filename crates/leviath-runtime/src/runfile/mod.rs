@@ -9,7 +9,7 @@
 //! it applied.
 //!
 //! [`codec`] is the byte layout, [`writer`] and [`reader`] write and read
-//! it, and [`view`] renders what it holds as TOML. [`record`] is what the
+//! it, [`tail`] reads only where a run is now, and [`view`] renders what it holds as TOML. [`record`] is what the
 //! world sends the persistence lane as things happen, which become the events
 //! of each step, and [`history`] is what a reader makes of the steps.
 
@@ -26,6 +26,7 @@ pub mod reader;
 pub mod record;
 mod recorded;
 mod summary;
+pub mod tail;
 pub mod view;
 pub mod writer;
 
@@ -33,6 +34,7 @@ pub use error::{RunFileError, RunFileErrorKind};
 pub use lane::journal_events;
 pub use reader::RunFileReader;
 pub use summary::{context_snapshot, stage_records, summary, summary_of};
+pub use tail::{RunFileTail, read_spec};
 pub use writer::{CheckpointPolicy, RunFileWriter};
 
 /// The JSON Schemas of every type a run file stores, as one document.

@@ -10,6 +10,7 @@ use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
 
 use super::error::RunFileError;
 use super::reader::RunFileReader;
+use super::tail::RunFileTail;
 use crate::insert::place;
 use crate::persistence::{RunMetaSources, RunPosition, build_context_snapshot, build_run_meta};
 use crate::spec::run_spec::RunSpec;
@@ -17,16 +18,8 @@ use crate::state::RunState;
 
 /// The run in `reader`, as of its last step.
 pub fn summary(reader: &RunFileReader) -> Result<RunMeta, RunFileError> {
-    let spec = reader.spec();
-    let state = reader.latest_state()?;
-    // When the run last moved: its last step, or when it was resolved for one
-    // that has taken none. The step decoded a moment ago, as part of the state.
-    let updated_at = reader
-        .deltas(state.seq, state.seq)
-        .ok()
-        .and_then(|deltas| deltas.last().map(|delta| delta.at))
-        .unwrap_or(spec.created_at);
-    Ok(summary_of(spec, &state, updated_at))
+    let tail = RunFileTail::of(reader)?;
+    Ok(summary_of(&tail.spec, &tail.state, tail.updated_at))
 }
 
 /// The run `spec` describes, as it stood in `state`, last moving at
