@@ -2198,4 +2198,85 @@ mod tests {
         );
         assert!(world.get::<ReadyToInfer>(e).is_some());
     }
+
+    /// Two points in one stage, with the second prompt opening before the
+    /// status reflection has seen the first one close.
+    ///
+    /// The daemon's runtime has several worker threads, so the ask task that
+    /// `dispatch_interaction_point` spawns for the second point can register it
+    /// in the hub before `reflect_interaction_status` runs later in that same
+    /// tick. The reflection then sees a prompt still open and the agent still
+    /// marked as waiting, while `collect_interaction_point` had just set the
+    /// agent `Active`: it read as running with nothing left to drive it, and a
+    /// client waiting for `Waiting` never answered the second point. The order
+    /// is pinned here by running the systems one at a time.
+    #[tokio::test]
+    async fn the_second_point_reads_as_waiting_when_it_opens_before_the_reflection() {
+        let hub = InteractionHub::new();
+        let (tx, rx) = unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(hub.clone());
+        world.insert_resource(InteractionPointStage {
+            outcomes: tx,
+            wake: Arc::new(Notify::new()),
+            runtime: Handle::current(),
+        });
+        world.insert_resource(InteractionPointResults(rx));
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                blueprint_with(vec![
+                    point("p1", AnswerStyle::Confirm, &[]),
+                    point("p2", AnswerStyle::Confirm, &[]),
+                ]),
+                window(),
+                StageCursor { index: 0 },
+                infer("done"),
+                ReadyForInteractionPoint,
+            ))
+            .id();
+        let mut dispatch = Schedule::default();
+        dispatch.add_systems(dispatch_interaction_point);
+        let mut collect = Schedule::default();
+        collect.add_systems(collect_interaction_point);
+        let mut reflect = Schedule::default();
+        reflect.add_systems(crate::pipeline::reflect_interaction_status);
+        let settle = || async {
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+        };
+
+        // The first point opens and the agent reads as waiting on it.
+        dispatch.run(&mut world);
+        settle().await;
+        reflect.run(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Waiting
+        );
+        let first = hub.pending()[0].1.id.clone();
+
+        // The first is answered, its outcome lands, and the second opens -
+        // all before the reflection runs again.
+        assert!(hub.answer(InteractionResponse::approval(
+            &first,
+            true,
+            ApprovalScope::Once
+        )));
+        settle().await;
+        collect.run(&mut world);
+        dispatch.run(&mut world);
+        settle().await;
+        let open: Vec<String> = hub.pending().into_iter().map(|(_, r)| r.id).collect();
+        assert_eq!(open.len(), 1);
+        assert!(open[0].contains("p2"), "the second point is open: {open:?}");
+
+        reflect.run(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Waiting,
+            "an agent with an open prompt waits on it"
+        );
+    }
 }

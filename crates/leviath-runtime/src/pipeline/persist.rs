@@ -220,8 +220,15 @@ pub(crate) fn reflect_interaction_status(
     for (entity, mut state, marked, progress) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
         match (pending.contains(&state.agent_id), marked.is_some()) {
-            // Newly blocked on a prompt: surface it as Waiting.
-            (true, false) => {
+            // Blocked on a prompt: surface it as Waiting. Read from what is
+            // open now rather than from a change since the last tick, because
+            // one prompt can close and the next open between two reflections:
+            // a stage's second interaction point is asked by a task on another
+            // thread, which can register it before this system runs on the
+            // tick that set the agent `Active` for the first answer. The
+            // marker is still on from the first prompt then, and the agent is
+            // `Active` with a question open.
+            (true, _) => {
                 if state.status == AgentStatus::Active {
                     state.status = AgentStatus::Waiting;
                     commands.entity(entity).insert(AwaitingInteraction);
@@ -243,7 +250,7 @@ pub(crate) fn reflect_interaction_status(
                     credit_wait_to_stage_clock(&mut progress, now);
                 }
             }
-            _ => {}
+            (false, false) => {}
         }
     }
 }
