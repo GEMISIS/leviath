@@ -32,8 +32,9 @@ const OLD_MANIFEST: &str = "agent.leviath";
 /// What happened to one old blueprint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
-    /// Migrated to an `agent.toml` beside its files.
-    Migrated,
+    /// Migrated to an `agent.toml` beside its files, with a line for each
+    /// setting the new file leaves out or spells differently.
+    Migrated(Vec<String>),
     /// A blueprint this build ships, replaced by the bundled one.
     Reinstalled,
     /// Left as it was, for these reasons.
@@ -226,7 +227,7 @@ fn migrate(dir: &Path) -> Result<Outcome, Vec<String>> {
     let old = dir.join(OLD_MANIFEST);
     let manifest =
         std::fs::read_to_string(&old).map_err(|e| vec![format!("{}: {e}", old.display())])?;
-    let toml = leviath_legacy_runs::migrate(&manifest)?;
+    let (toml, notes) = leviath_legacy_runs::migrate_noted(&manifest)?;
     let legacy = dir.join(LEGACY_DIR);
     std::fs::create_dir_all(&legacy)
         .and_then(|()| {
@@ -238,7 +239,7 @@ fn migrate(dir: &Path) -> Result<Outcome, Vec<String>> {
         })
         .and_then(|()| std::fs::rename(&old, legacy.join(OLD_MANIFEST)))
         .map_err(|e| vec![format!("could not write the migrated blueprint: {e}")])?;
-    Ok(Outcome::Migrated)
+    Ok(Outcome::Migrated(notes))
 }
 
 /// Without the old-format reader an old blueprint cannot be migrated.
@@ -263,8 +264,11 @@ pub(crate) fn upgrade_logged(
     for done in upgrade_all(agents_dir, others, backup) {
         let (name, dir) = (done.name(), done.dir.display().to_string());
         match &done.outcome {
-            Outcome::Migrated => {
-                tracing::info!(blueprint = %name, dir = %dir, backup = %saved, "migrated an agent.leviath blueprint to agent.toml; the old file is under legacy/, and the whole directory as it was is in the backup")
+            Outcome::Migrated(notes) => {
+                tracing::info!(blueprint = %name, dir = %dir, backup = %saved, "migrated an agent.leviath blueprint to agent.toml; the old file is under legacy/, and the whole directory as it was is in the backup");
+                for note in notes {
+                    tracing::info!(blueprint = %name, dir = %dir, note = %note, "a setting of the migrated blueprint");
+                }
             }
             Outcome::Reinstalled => {
                 tracing::info!(blueprint = %name, dir = %dir, backup = %saved, "replaced an old install of a bundled blueprint with this build's; the old files are under legacy/, and the whole directory as it was is in the backup")

@@ -2,7 +2,8 @@
 //!
 //! The manifest is read by [`parse_manifest`], then read as a run graph, so
 //! the new file describes exactly the run the old one did. A key the parser
-//! does not read is reported rather than left behind. What
+//! does not read changed nothing a run did, so it is left out with a note
+//! naming it. What
 //! `lev blueprint migrate` writes is [`migrate`]'s output.
 
 use leviath_blueprint::{BlueprintFile, BlueprintMeta};
@@ -44,18 +45,18 @@ fn migrate_parts(manifest: &str) -> Result<(BlueprintFile, Vec<String>), Vec<Str
         .map_err(|issues| issues.iter().map(ToString::to_string).collect::<Vec<_>>());
     let name =
         BlueprintName::new(blueprint.name.as_str()).map_err(|e| format!("[agent] name: {e}"));
-    // A key the parser skipped would be missing from the new file with
-    // nothing to say so, which is a problem like any other.
+    // A key the parser skipped changed nothing a run did, so the new file
+    // leaves it out and a note names it.
     let unread = unread_keys(&toml::from_str(manifest).expect("a manifest that parsed is TOML"));
-    let ((mut graph, notes), name) = match (graph, name) {
-        (Ok(graph), Ok(name)) if unread.is_empty() => (graph, name),
+    let ((mut graph, mut notes), name) = match (graph, name) {
+        (Ok(graph), Ok(name)) => (graph, name),
         (graph, name) => {
             let mut problems = graph.err().unwrap_or_default();
             problems.extend(name.err());
-            problems.extend(unread);
             return Err(problems);
         }
     };
+    notes.extend(unread);
     // `[blueprint]` carries the name and description, and a graph read from
     // the file takes them from there, so the graph does not repeat them.
     let description = graph.description.take();

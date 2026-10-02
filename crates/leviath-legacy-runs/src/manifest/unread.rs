@@ -1,9 +1,9 @@
 //! The keys of a manifest that nothing reads.
 //!
 //! Most of a manifest's tables ignore a key the parser does not know, so a
-//! misspelled or retired setting loads as if it were not there. Converting
-//! such a manifest would drop the setting without a word; `migrate` reports
-//! each one instead. The tables that already refuse a stranger (a stage, its
+//! misspelled or retired setting loads as if it were not there. A converted
+//! blueprint or run leaves each one out, as the parser did, with a note
+//! naming it. The tables that already refuse a stranger (a stage, its
 //! context, routing, hooks, edges, gates and sandboxes) are not walked here.
 
 use toml::{Table, Value};
@@ -139,7 +139,7 @@ impl Unread {
                     _ => "",
                 };
                 self.0.push(format!(
-                    "{at}: `{key}` is not read, so the new file would not have it{hint}"
+                    "{at}: `{key}` is left out: nothing reads it, so it never changed a run{hint}"
                 ));
             }
         }

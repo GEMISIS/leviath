@@ -439,7 +439,10 @@ lev validate ./summarizer/agent.toml
 Without `-o` it prints the new file. An existing output file is left alone unless you pass
 `--force`. When the manifest cannot be read, every problem is listed at once. A setting the new
 format spells differently gets a `note:` line on stderr. A fan-out's `max_workers = 0` is one: it
-meant no cap, and a graph says no cap by leaving `max_workers` out.
+meant no cap, and a graph says no cap by leaving `max_workers` out. A key the old format read
+nothing from, such as `max_stored` on a region, is left out with a note too. It never changed a
+run, so the new file runs the same without it. The daemon's upgrade and the conversion of old runs
+follow the same rule.
 
 Here is a small manifest and what it becomes. Before:
 

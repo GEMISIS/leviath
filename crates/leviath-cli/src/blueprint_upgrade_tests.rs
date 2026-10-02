@@ -33,7 +33,7 @@ fn an_old_blueprint_is_migrated_beside_its_files() {
     let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].name(), "probe");
-    assert_eq!(done[0].outcome, Outcome::Migrated);
+    assert_eq!(done[0].outcome, Outcome::Migrated(Vec::new()));
     assert!(leviath_blueprint::load(&probe).is_ok());
     assert!(probe.join("legacy/agent.leviath").is_file());
     assert!(!probe.join(OLD_MANIFEST).exists());
@@ -124,11 +124,6 @@ fn a_bundled_blueprint_that_cannot_be_replaced_is_left_alone() {
 fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
     let home = tempfile::tempdir().unwrap();
     let mine = home.path().join("mine");
-    let unread = mine.join("unread");
-    old_blueprint(
-        &unread,
-        format!("{}\nmystery = 1\n", old_probe()).as_bytes(),
-    );
     let garbled = mine.join("garbled");
     old_blueprint(&garbled, &[0xff, 0xfe]);
     let blocked = mine.join("blocked");
@@ -147,7 +142,7 @@ fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
             .map(|d| d.outcome.clone())
             .unwrap()
     };
-    for dir in [&unread, &garbled, &blocked] {
+    for dir in [&garbled, &blocked] {
         let Outcome::Failed(problems) = outcome(dir) else {
             panic!("{} was migrated", dir.display());
         };
@@ -155,11 +150,48 @@ fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
         assert!(dir.join(OLD_MANIFEST).is_file());
         assert!(!dir.join(leviath_blueprint::FILE_NAME).exists());
     }
-    assert_eq!(outcome(&named), Outcome::Migrated);
-    assert_eq!(outcome(&lone), Outcome::Migrated);
+    assert_eq!(outcome(&named), Outcome::Migrated(Vec::new()));
+    assert_eq!(outcome(&lone), Outcome::Migrated(Vec::new()));
+}
 
-    let unread_outcome = format!("{:?}", outcome(&unread));
-    assert!(unread_outcome.contains("mystery"), "{unread_outcome}");
+/// A key the old parser read nothing from (`max_stored` on a region, as the
+/// old docs taught) does not stop the upgrade: the new file leaves it out and
+/// the outcome names it.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_key_the_old_parser_ignored_is_left_out_with_a_note() {
+    let home = tempfile::tempdir().unwrap();
+    let agents = home.path().join("agents");
+    let probe = agents.join("probe");
+    let text = old_probe().replace("seed = \"task\" }", "seed = \"task\", max_stored = 4 }");
+    old_blueprint(&probe, text.as_bytes());
+    old_blueprint(&agents.join("logged"), text.as_bytes());
+    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
+    let notes: Vec<&String> = done
+        .iter()
+        .flat_map(|d| match &d.outcome {
+            Outcome::Migrated(notes) => notes.iter(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(
+        notes.iter().all(|n| n.contains("`max_stored`")),
+        "{notes:?}"
+    );
+    let new = std::fs::read_to_string(probe.join(leviath_blueprint::FILE_NAME)).unwrap();
+    assert!(!new.contains("max_stored"), "{new}");
+    // The daemon's log names each note.
+    let logged = home.path().join("again");
+    old_blueprint(&logged.join("probe"), text.as_bytes());
+    crate::test_support::with_tracing(|| upgrade_logged(Some(&logged), &[], &backup(home.path())));
+    assert!(
+        logged
+            .join("probe")
+            .join(leviath_blueprint::FILE_NAME)
+            .is_file()
+    );
+    assert!(leviath_blueprint::load(&probe).is_ok());
 }
 
 /// The daemon logs every outcome, and a command only names what is waiting,

@@ -23,7 +23,7 @@ use leviath_runtime::spec::run_spec::{EnvFingerprint, RunSpec, SeededContent, Sp
 
 use crate::context::{Losses, parts};
 use crate::legacy::LegacyRun;
-use crate::manifest::{parse_manifest, read_manifest_tables};
+use crate::manifest::{parse_manifest, read_manifest_tables, unread_keys};
 use crate::report::{BlueprintSource, Report};
 use crate::{ConvertError, StageLookup};
 
@@ -87,9 +87,12 @@ fn read_blueprint(
         path,
         why: e.to_string(),
     })?;
-    let (mut graph, notes) =
+    let (mut graph, mut notes) =
         crate::old::graph::from_blueprint_noted(&blueprint).map_err(ConvertError::Graph)?;
     read_manifest_tables(&mut graph, text).map_err(ConvertError::Graph)?;
+    notes.extend(unread_keys(
+        &toml::from_str(text).expect("a manifest that parsed is TOML"),
+    ));
     Ok((blueprint, graph, notes))
 }
 

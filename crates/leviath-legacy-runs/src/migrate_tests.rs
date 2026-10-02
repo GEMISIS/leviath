@@ -134,10 +134,11 @@ fn a_bare_model_keeps_no_provider() {
     }
 }
 
-/// Every key nothing reads is a problem, wherever it sits, rather than a
-/// setting that vanishes from the new file.
+/// Every key nothing reads was accepted and ignored by the release that
+/// wrote the manifest, so the conversion leaves it out and names it in a
+/// note, wherever it sits, rather than refusing the blueprint.
 #[test]
-fn a_key_nothing_reads_is_reported_rather_than_dropped() {
+fn a_key_nothing_reads_is_left_out_with_a_note() {
     let old = r#"
 [agent]
 name = "t"
@@ -152,25 +153,27 @@ log = { kind = "pinned", max_tokens = 100, max_stored = 5 }
 [stages.main]
 system_prompt = "p"
 "#;
-    let problems = migrate_file(old).unwrap_err();
-    assert_eq!(problems.len(), 3, "{problems:?}");
+    let (text, notes) = migrate_noted(old).unwrap();
+    assert!(!text.contains("max_stored"), "{text}");
+    assert!(!text.contains("colour"), "{text}");
+    assert_eq!(notes.len(), 3, "{notes:?}");
     assert!(
-        problems
+        notes
             .iter()
             .any(|p| p.contains("`nudge`") && p.contains("[agent.nudge]")),
-        "{problems:?}"
+        "{notes:?}"
     );
     assert!(
-        problems
+        notes
             .iter()
             .any(|p| p.contains("region 'log'") && p.contains("`max_stored`")),
-        "{problems:?}"
+        "{notes:?}"
     );
     assert!(
-        problems
+        notes
             .iter()
             .any(|p| p.contains("[agent]") && p.contains("`colour`")),
-        "{problems:?}"
+        "{notes:?}"
     );
 }
 

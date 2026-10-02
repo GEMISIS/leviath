@@ -629,3 +629,25 @@ fn a_task_the_graph_does_not_take_is_noted() {
     assert!(file.spec.inputs.0.is_empty());
     assert!(report.notes.iter().any(|n| n.contains("not an input")));
 }
+
+/// A region key the old parser read nothing from, such as `max_stored`,
+/// converts as if it were not there, and a note names it.
+#[test]
+fn a_key_the_old_parser_ignored_is_left_out_with_a_note() {
+    let run = Run::fixture("finished");
+    let text = std::fs::read_to_string(run.path("blueprint.leviath")).unwrap();
+    let text = text.replace("seed = \"task\" }", "seed = \"task\", max_stored = 4 }");
+    run.write("blueprint.leviath", &text);
+    let (report, _) = run.converted();
+    let notes = &report.notes;
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("region 'task'") && n.contains("`max_stored`")),
+        "{notes:?}"
+    );
+    assert!(
+        !notes.iter().any(|n| n.contains("could not be read")),
+        "{notes:?}"
+    );
+}
