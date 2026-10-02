@@ -510,12 +510,14 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
-    /// Resume a paused run. Reply is `false` if there is no such (live) run.
+    /// Resume a paused run. Reply is `Ok(false)` if there is no such run or
+    /// nothing in it was paused, and `Err` with what to put back when the run
+    /// is held because this machine still cannot take it back.
     Resume {
         /// The run to resume.
         run_id: String,
         /// Reply channel.
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Result<bool, String>>,
     },
     /// Cancel a run. Reply is `false` if there is no such (live) run.
     Cancel {

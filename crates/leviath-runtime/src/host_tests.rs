@@ -1545,6 +1545,7 @@ async fn a_persisted_paused_root_is_parked_and_pages_back_in() {
             reply
         })
         .await
+        .unwrap_or(false)
     );
     assert!(host.parked.is_empty(), "resumed run left the parked map");
     let e2 = host.by_run_id["run-a"];
@@ -1635,6 +1636,7 @@ async fn pause_resume_cancel_by_run_id() {
             reply
         })
         .await
+        .unwrap_or(false)
     );
     assert_eq!(
         host.world.agent_status(host.by_run_id["run-a"]),
@@ -1666,6 +1668,7 @@ async fn pause_resume_cancel_by_run_id() {
             reply
         })
         .await
+        .unwrap_or(false)
     );
     assert!(
         !ask(&mut host, |reply| ControlOp::Cancel {
@@ -2423,7 +2426,8 @@ async fn resume_cascades_to_the_whole_tree() {
             run_id: "parent".to_string(),
             reply
         })
-        .await,
+        .await
+        .unwrap_or(false),
         "resuming the tree reports success even though the root itself was never paused"
     );
     assert_eq!(
@@ -2669,6 +2673,7 @@ async fn the_resume_hook_fires_for_a_resume_and_for_an_answered_prompt() {
             reply
         })
         .await
+        .unwrap_or(false)
     );
     assert_eq!(RESUMED.load(Ordering::SeqCst), 1);
 
@@ -2768,6 +2773,7 @@ async fn resuming_without_a_hook_is_just_unpausing() {
             reply
         })
         .await
+        .unwrap_or(false)
     );
     assert_eq!(
         host.world.agent_status(host.by_run_id["run-a"]),
@@ -3998,7 +4004,8 @@ async fn resuming_a_run_that_had_to_be_loaded_reports_success() {
             run_id: "run-from-disk".to_string(),
             reply
         })
-        .await,
+        .await
+        .unwrap_or(false),
         "the run came back from disk and is going again, which is a resume"
     );
 
@@ -4010,7 +4017,8 @@ async fn resuming_a_run_that_had_to_be_loaded_reports_success() {
             run_id: "run-live".to_string(),
             reply
         })
-        .await,
+        .await
+        .unwrap_or(false),
         "an already-running run is not resumed by asking"
     );
 }
@@ -4567,6 +4575,7 @@ async fn pausing_a_fan_out_parent_holds_its_worker_queue() {
             reply
         })
         .await
+        .unwrap_or(false)
     );
     assert!(
         !host
@@ -5194,7 +5203,8 @@ async fn resuming_a_cancelled_run_lists_it_once() {
         run_id: "cut".to_string(),
         reply,
     })
-    .await;
+    .await
+    .unwrap_or(false);
     assert!(resumed);
     assert_eq!(
         asked.lock().unwrap()[0],
@@ -5247,7 +5257,9 @@ async fn a_held_run_is_listed_refuses_messages_and_can_be_cancelled() {
         reply,
     })
     .await;
-    assert!(!resumed, "still held");
+    let why = resumed.expect_err("still held, and says why");
+    assert!(why.contains("cannot go on"), "{why}");
+    assert!(why.contains("put 'openai' back"), "{why}");
     assert_eq!(host.list(), vec![held_row("held")]);
 
     let cancelled = ask(&mut host, |reply| ControlOp::Cancel {

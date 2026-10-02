@@ -192,6 +192,24 @@ async fn a_refusal_names_what_it_could_mean() {
     }
 }
 
+/// A run the daemon still cannot take back on this machine stays paused, and
+/// the failure is a conflict that says what to put back.
+#[tokio::test]
+async fn a_held_run_says_why_it_did_not_resume() {
+    let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Error {
+        message: "run 'held' cannot go on on this machine as it stands: put 'openai' back"
+            .to_string(),
+    });
+    let failure = act(&state_with(control), "held", Action::Resume)
+        .await
+        .expect_err("still held");
+    assert_eq!(failure.code(), "CONFLICT");
+    assert!(
+        failure.to_string().contains("put 'openai' back"),
+        "{failure}"
+    );
+}
+
 /// An answer to a different question is this server's problem, not the
 /// caller's, and it is reported as one.
 #[tokio::test]

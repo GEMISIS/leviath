@@ -477,14 +477,15 @@ impl AgentWorld {
         .unwrap_or(false)
     }
 
-    /// Resume a paused run. `false` if there is no such live run.
+    /// Resume a paused run. `false` if there is no such live run, or it is
+    /// held because this machine cannot take it back.
     pub async fn resume(&self, id: &RunId) -> bool {
         self.ask(|reply| ControlOp::Resume {
             run_id: id.to_string(),
             reply,
         })
         .await
-        .unwrap_or(false)
+        .is_ok_and(|resumed| resumed == Ok(true))
     }
 
     /// Cancel a run. `false` if there is no such live run.

@@ -595,9 +595,7 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
         ControlRequest::Resume { run_id } => {
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::Resume { run_id, reply });
-            ControlResponse::Ok {
-                ok: rx.await.unwrap_or(false),
-            }
+            refusable(rx.await)
         }
         ControlRequest::Cancel { run_id } => {
             let (reply, rx) = oneshot::channel();
@@ -1147,10 +1145,11 @@ mod tests {
                     ControlOp::Blob { reply, .. } => {
                         let _ = reply.send(None);
                     }
-                    ControlOp::Pause { reply, .. }
-                    | ControlOp::Resume { reply, .. }
-                    | ControlOp::Cancel { reply, .. } => {
+                    ControlOp::Pause { reply, .. } | ControlOp::Cancel { reply, .. } => {
                         let _ = reply.send(true);
+                    }
+                    ControlOp::Resume { reply, .. } => {
+                        let _ = reply.send(Ok(true));
                     }
                     ControlOp::Message { reply, .. }
                     | ControlOp::AnswerInteraction { reply, .. } => {

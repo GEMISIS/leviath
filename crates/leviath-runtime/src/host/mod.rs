@@ -475,13 +475,27 @@ impl WorldHost {
     /// Why a message to a run held out of the world is not delivered: what
     /// has to change on this machine first.
     fn held_refusal(agent_id: &str, entry: &RunListEntry) -> String {
-        let remedy = match &entry.wait_reason {
+        format!(
+            "run '{agent_id}' cannot go on on this machine as it stands, so it reads no messages yet: {}",
+            Self::held_remedy(entry)
+        )
+    }
+
+    /// Why a held run did not resume: this machine still cannot take it
+    /// back, and what to put back first.
+    pub(super) fn held_resume_refusal(run_id: &str, entry: &RunListEntry) -> String {
+        format!(
+            "run '{run_id}' cannot go on on this machine as it stands, so it stays paused: {}",
+            Self::held_remedy(entry)
+        )
+    }
+
+    /// What a held run's listing row says to put back.
+    fn held_remedy(entry: &RunListEntry) -> &str {
+        match &entry.wait_reason {
             Some(WaitReason::NeedsSetup { remedy, .. }) => remedy.as_str(),
             _ => "",
-        };
-        format!(
-            "run '{agent_id}' cannot go on on this machine as it stands, so it reads no messages yet: {remedy}"
-        )
+        }
     }
 
     /// A clone of the interaction hub, for building per-agent backends.
@@ -582,8 +596,7 @@ impl WorldHost {
                 let _ = reply.send(ok);
             }
             ControlOp::Resume { run_id, reply } => {
-                let ok = self.resume_tree(&run_id);
-                let _ = reply.send(ok);
+                let _ = reply.send(self.resume_tree(&run_id));
             }
             ControlOp::Cancel { run_id, reply } => {
                 // Cancel is unconditional: it either takes effect in the world

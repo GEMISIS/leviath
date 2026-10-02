@@ -343,14 +343,20 @@ impl WorldHost {
     /// a fan-out parent is `Waiting`, which `PipelineWorld::resume` refuses, so
     /// resuming the tree through the parent would otherwise report failure and
     /// leave every paused child paused with nothing left to resume them.
-    pub(super) fn resume_tree(&mut self, run_id: &str) -> bool {
+    pub(super) fn resume_tree(&mut self, run_id: &str) -> Result<bool, String> {
         // Whether this run had to come back from disk. Paging in a stopped run
         // restores it ready to work, so the `resume` calls below find nothing
         // paused and all report false - while the run is, in fact, going again.
         // Loading it back is the act of resuming it, so it counts as one.
         let was_unloaded = self.live_entity(run_id).is_none();
-        let Ok(root) = self.resolve_or_reload(run_id, PageIn::Resume) else {
-            return false;
+        let root = match self.resolve_or_reload(run_id, PageIn::Resume) {
+            Ok(root) => root,
+            // Still held: the bind was tried again and still fails, so say
+            // what to put back.
+            Err(NotPlaced::Held(entry)) => {
+                return Err(Self::held_resume_refusal(run_id, &entry));
+            }
+            Err(_) => return Ok(false),
         };
         let mut acted = was_unloaded;
         for e in self.subtree(root.entity()) {
@@ -363,7 +369,7 @@ impl WorldHost {
             // its parent, and the pause stopped all of them.
             self.on_resumed(e);
         }
-        acted
+        Ok(acted)
     }
 
     pub(super) fn cancel_tree(&mut self, run_id: &str) -> bool {
