@@ -404,6 +404,9 @@ mod tests {
             // The next pass hands back the drawing it kept.
             let again = loader.collect(None, false);
             assert!(Arc::ptr_eq(&one, &graph_of(&again, &first).unwrap()));
+            // A run whose file is not there (yet) has no drawing, and is
+            // asked again next round.
+            assert!(loader.graph_of("no-such-run").is_none());
         })
         .await;
     }

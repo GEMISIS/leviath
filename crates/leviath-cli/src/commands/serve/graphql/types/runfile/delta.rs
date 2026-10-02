@@ -17,9 +17,9 @@ use super::journal::{
     DispatchedStep, ProducedFile, SettledStep, outcome_of,
 };
 use super::state::{
-    FanOutProgress, LedgerStage, OpenQuestion, PendingToolBatch, RunPhase, RunStateStatus,
-    StageProgress, StageTransition, StageVisitCount, StateAnswer, StateClock, StateCursor,
-    StateFlags, StateMessage, StateSpend, StateTotals, status_of, visit_counts,
+    CheckpointProgress, FanOutProgress, LedgerStage, OpenQuestion, PendingToolBatch, RunPhase,
+    RunStateStatus, StageProgress, StageTransition, StageVisitCount, StateAnswer, StateClock,
+    StateCursor, StateFlags, StateMessage, StateSpend, StateTotals, status_of, visit_counts,
 };
 
 /// Write one change member: a single-field object named for what changed.
@@ -207,6 +207,14 @@ change_member!(
     }
 );
 
+change_member!(
+    /// The run moved among its stage's checkpoints, or put one to a person.
+    CheckpointChange {
+        /// Where it is among them now.
+        checkpoint: CheckpointProgress
+    }
+);
+
 /// One part of a run's state that a step changed, with its new value.
 #[derive(Debug, Union)]
 pub(crate) enum StateChange {
@@ -256,6 +264,8 @@ pub(crate) enum StateChange {
     TitleError(TitleErrorChange),
     /// The run's read-path grants.
     ReadPaths(ReadPathsChange),
+    /// Where the run is among its stage's checkpoints.
+    Checkpoint(CheckpointChange),
 }
 
 impl From<&Change> for StateChange {
@@ -334,6 +344,9 @@ impl From<&Change> for StateChange {
             Change::ReadPaths(counts) => Self::ReadPaths(ReadPathsChange {
                 declared: counts.map(|c| super::saturating(c.declared)),
                 granted: counts.map(|c| super::saturating(c.granted)),
+            }),
+            Change::Point(point) => Self::Checkpoint(CheckpointChange {
+                checkpoint: CheckpointProgress::from(point),
             }),
         }
     }

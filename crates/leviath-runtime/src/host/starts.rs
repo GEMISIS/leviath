@@ -88,8 +88,11 @@ impl WorldHost {
     /// A run's state: live when the world holds it, else the last one its
     /// run file recorded.
     pub(super) fn inspect(&self, run_id: &str) -> Option<RunState> {
-        if let Some(agent) = self.live_entity(run_id) {
-            return crate::state::inspect::inspect(self.world.world(), agent.entity());
+        let live = self
+            .live_entity(run_id)
+            .and_then(|agent| crate::state::inspect::inspect(self.world.world(), agent.entity()));
+        if live.is_some() {
+            return live;
         }
         let path = self
             .world

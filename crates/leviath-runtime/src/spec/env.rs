@@ -319,6 +319,17 @@ pub trait BindEnv: Send + Sync {
     fn mcp_tools(&self, _server: &McpServerName) -> Option<Vec<ToolDef>> {
         None
     }
+    /// The providers configured on this machine now, for the `known` list
+    /// of an issue about one that went away or changed. Empty (the default)
+    /// when the host cannot say.
+    fn providers_now(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// The MCP servers configured or connected on this machine now, for the
+    /// same. Empty (the default) when the host cannot say.
+    fn mcp_servers_now(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Build the host's own live components for the run (compiled code, tool
     /// service state, connections).
     async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues>;

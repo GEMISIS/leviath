@@ -56,6 +56,9 @@ pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
              a run from an older release is converted when the daemon starts"
         )
     })?;
+    if let Some(note) = torn_note(id, reader.cut_bytes()) {
+        eprintln!("{note}");
+    }
     let last = reader.last_seq();
     if let Some(range) = &args.deltas {
         let (from, to) = range_of(range, last)?;
@@ -78,6 +81,18 @@ pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
     Ok(match args.json {
         true => to_json(reader.spec()),
         false => view::spec_toml(reader.spec()),
+    })
+}
+
+/// What to say about a run file that ends in a step a crash left half
+/// written, `cut` bytes of it: nothing when it ends whole.
+pub(crate) fn torn_note(id: &str, cut: usize) -> Option<String> {
+    (cut > 0).then(|| {
+        format!(
+            "warning: run '{id}' has a last step that was never finished being written \
+             ({cut} bytes); it is left out here, and the daemon cuts it off when it next \
+             opens the run"
+        )
     })
 }
 

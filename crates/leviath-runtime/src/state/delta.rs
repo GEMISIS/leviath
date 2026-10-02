@@ -80,6 +80,8 @@ pub enum Change {
     TitleError(Option<String>),
     /// `read_paths`.
     ReadPaths(Option<ReadPathCounts>),
+    /// `point`.
+    Point(PointProgress),
 }
 
 /// An edge a run took, and why.
@@ -249,6 +251,7 @@ impl StateDelta {
             last_transition => LastTransition,
             title_error => TitleError,
             read_paths => ReadPaths,
+            point => Point,
         );
         Self {
             seq: prev.seq + 1,
@@ -293,6 +296,7 @@ impl StateDelta {
                 Change::LastTransition(v) => state.last_transition = v,
                 Change::TitleError(v) => state.title_error = v,
                 Change::ReadPaths(v) => state.read_paths = v,
+                Change::Point(v) => state.point = v,
             }
         }
         state.seq = self.seq;

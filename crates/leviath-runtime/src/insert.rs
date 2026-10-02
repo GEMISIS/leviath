@@ -58,9 +58,13 @@ pub fn insert(
         world.get_resource::<crate::pipeline::PersistenceStage>(),
     );
     let workers = place::worker_entities(world, state);
+    // A resumed run is at the step its file ended on, until it takes another.
+    if let Some(lane) = world.get_resource::<crate::pipeline::PersistLaneHealth>() {
+        lane.0.stepped(spec.run_id.as_str(), state.seq);
+    }
     let mut entity = world.spawn((
         RunSpecC(spec.clone()),
-        place::agent_state(&spec, state),
+        place::placed_agent_state(&spec, state),
         place::message_inbox(&spec, state),
         crate::pipeline::StageCursor { index: idx },
         place::stage_progress(state),
@@ -81,6 +85,7 @@ pub fn insert(
     ));
     place::spec_components(&mut entity, &spec, &setup);
     place::optional_state(&mut entity, state);
+    place::point_progress(&mut entity, state);
     place::phase(&mut entity, &spec, state);
     bindings.apply(&mut entity);
     place::title_request(&mut entity, &spec, state);

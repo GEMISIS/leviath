@@ -537,6 +537,8 @@ fn fan_out(worker: WorkerSource, failure: WorkerFailure) -> FanOutState {
         done: vec![("item-3".into(), "summary".into())],
         failed: vec![("item-4".into(), "it broke".into())],
         paused: true,
+        origin: Default::default(),
+        parts: Vec::new(),
     }
 }
 
@@ -622,6 +624,11 @@ fn state() -> CoreState {
         last_transition: Some(transition(TransitionReason::Condition)),
         title_error: None,
         read_paths: None,
+        point: leviath_runtime::state::PointProgress {
+            cursor: 1,
+            round: 2,
+            asking: Some("the plan".into()),
+        },
     }
 }
 
@@ -684,6 +691,7 @@ fn delta() -> CoreDelta {
                 declared: 2,
                 granted: 1,
             })),
+            Change::Point(s.point.clone()),
         ],
         events: vec![
             RunEvent::Inference {
@@ -1098,7 +1106,9 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];
-    assert_eq!(step["changes"].as_array().map(Vec::len), Some(24));
+    assert_eq!(step["changes"].as_array().map(Vec::len), Some(25));
+    assert_eq!(step["changes"][24]["checkpoint"]["document"], "the plan");
+    assert_eq!(full["checkpoint"]["round"], 2);
     assert_eq!(
         step["events"].as_array().map(Vec::len),
         Some(7 + 8 + 6 + 5 + 13)

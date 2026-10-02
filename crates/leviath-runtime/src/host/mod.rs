@@ -419,6 +419,34 @@ impl WorldHost {
         Some(entity)
     }
 
+    /// Why a message to `agent_id` would never be read, when it would not:
+    /// no run by that id is here, or the run has stopped. A message is only
+    /// said to be delivered when a run will read it.
+    fn undeliverable(&self, agent_id: &str) -> Option<String> {
+        let status = self
+            .world
+            .world()
+            .iter_entities()
+            .filter_map(|e| e.get::<AgentState>())
+            .find(|s| s.agent_id == agent_id)
+            .map(|s| s.status.clone());
+        match status {
+            None => Some(format!(
+                "no run '{agent_id}' is here to read a message; `lev ps --all` lists the runs"
+            )),
+            Some(AgentStatus::Complete) => Some(format!(
+                "run '{agent_id}' has finished, so it reads no more messages; start a new run instead"
+            )),
+            Some(AgentStatus::Error { .. }) => Some(format!(
+                "run '{agent_id}' has failed, so it reads no more messages; start a new run instead"
+            )),
+            Some(AgentStatus::Cancelled) => Some(format!(
+                "run '{agent_id}' was cancelled; `lev resume {agent_id}` first, then send the message"
+            )),
+            Some(_) => None,
+        }
+    }
+
     /// A clone of the interaction hub, for building per-agent backends.
     #[cfg(test)]
     pub(crate) fn interactions(&self) -> InteractionHub {
@@ -560,6 +588,10 @@ impl WorldHost {
                 }
                 // Page the target in if it was unloaded, so delivery finds it.
                 self.resolve_or_reload(&agent_id);
+                if let Some(why) = self.undeliverable(&agent_id) {
+                    let _ = reply.send(Err(why));
+                    return;
+                }
                 let ok = self
                     .world
                     .send_message(AgentMessage {

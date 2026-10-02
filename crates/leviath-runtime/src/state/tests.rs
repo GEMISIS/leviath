@@ -183,6 +183,15 @@ pub(crate) fn busy() -> RunState {
         done: vec![("i2".into(), "fine".into())],
         failed: vec![("i3".into(), "bad".into())],
         paused: true,
+        origin: crate::fanout::FanOutOrigin::Tool {
+            call_id: "c9".into(),
+        },
+        parts: vec![crate::state::context::PartState {
+            mime_type: "text/plain".into(),
+            body: crate::state::context::PartBody::Inline("found".into()),
+            name: Some("found.txt".into()),
+            deliver: None,
+        }],
     });
     s.inbox.push(MessageState {
         from: "user".into(),
@@ -228,6 +237,11 @@ pub(crate) fn busy() -> RunState {
         reason: TransitionReason::ModelChoice,
         visit: "v2".into(),
     });
+    s.point = super::PointProgress {
+        cursor: 1,
+        round: 2,
+        asking: Some("## Plan".into()),
+    };
     s
 }
 

@@ -156,6 +156,35 @@ pub(crate) struct ContextToolResults(pub Vec<(String, String)>);
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct RecoveredResults(pub Vec<crate::tool_bridge::ToolResult>);
 
+/// The results of a batch's lane calls that have landed while the rest still
+/// run, written by the batch's [`ToolProgress`] the moment each call resolves.
+/// Read by `inspect`, so the run's state (and the run file it is recorded in)
+/// holds a finished call as done before the batch ends.
+#[derive(Component, Debug, Clone, Default)]
+pub(crate) struct LandedResults(pub Arc<std::sync::Mutex<Vec<crate::tool_bridge::ToolResult>>>);
+
+impl LandedResults {
+    /// What has landed so far.
+    pub(crate) fn snapshot(&self) -> Vec<crate::tool_bridge::ToolResult> {
+        self.0
+            .lock()
+            .expect("the landed results are never held across a panic")
+            .clone()
+    }
+
+    /// `progress`, also keeping each result here as it lands.
+    fn keeping(&self, progress: ToolProgress) -> ToolProgress {
+        let landed = self.0.clone();
+        Arc::new(move |call_id, result| {
+            landed
+                .lock()
+                .expect("the landed results are never held across a panic")
+                .push((call_id.to_string(), result.clone()));
+            progress(call_id, result);
+        })
+    }
+}
+
 /// Merge context + lane tool results into one `(id, result)` list in the
 /// original tool-call order (Anthropic requires a `tool_result` per `tool_use`,
 /// in order).
@@ -1136,7 +1165,10 @@ pub(crate) fn dispatch_tools(
             .flat_map(|e| e.content.stored().cloned())
             .collect();
         service.0.offer_parts(entity, offered);
-        let exec = service.0.exec_for(entity, lane_calls, progress);
+        let landed = LandedResults::default();
+        let exec = service
+            .0
+            .exec_for(entity, lane_calls, landed.keeping(progress));
         let exec = match ack {
             Some((ack, run_id)) => barrier_then(exec, ack, BATCH_JOURNAL_ACK_TIMEOUT, run_id),
             None => exec,
@@ -1155,6 +1187,7 @@ pub(crate) fn dispatch_tools(
             .entity(entity)
             .remove::<ReadyForTools>()
             .insert(AwaitingTools)
+            .insert(landed)
             .insert(ContextToolResults(context_results));
     }
 }

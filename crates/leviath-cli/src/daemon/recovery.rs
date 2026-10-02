@@ -15,9 +15,10 @@
 //! What the run was doing comes back with its state: a model call that was
 //! out is made again, a tool batch in flight is dispatched again with the
 //! results that came back carried over (a call that finished never runs
-//! twice), a choice of edge is asked again, and a fan-out picks its workers
-//! back up. A run directory in the older many-file layout is converted to a
-//! run file first, when this build carries the converter.
+//! twice), a question put to a person or a stage checkpoint is asked again, a
+//! choice of edge is asked again, and a fan-out picks its workers back up. A
+//! run directory in the older many-file layout is converted to a run file
+//! first, when this build carries the converter.
 
 use std::path::Path;
 
@@ -149,12 +150,21 @@ pub(crate) fn resume_all(
     runs_dir: &Path,
 ) -> Recovered {
     convert_old_runs(runs_dir, starter.agents_dir.as_deref());
-    let Ok(entries) = std::fs::read_dir(runs_dir) else {
-        return Recovered::default();
-    };
-    let found: Vec<Resumable> = entries
+    // A daemon that died may have left a command it ran still running, so a
+    // call that was in flight is not run again: it comes back interrupted.
+    let crashed = leviath_runtime::restore::begin_session(runs_dir);
+    // A directory that does not read holds nothing to bring back.
+    let found: Vec<Resumable> = std::fs::read_dir(runs_dir)
+        .into_iter()
+        .flatten()
         .flatten()
         .filter_map(|e| read_run(&e.path()))
+        .map(|mut run| {
+            if crashed {
+                leviath_runtime::restore::interrupt_in_flight(&mut run.state);
+            }
+            run
+        })
         .collect();
     starter.refresh_world(world);
     let mut placed: Vec<Placed> = Vec::new();
@@ -254,3 +264,7 @@ fn relink_tree(world: &mut PipelineWorld, placed: &[Placed]) {
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "recovery_resume_tests.rs"]
+mod resume_tests;

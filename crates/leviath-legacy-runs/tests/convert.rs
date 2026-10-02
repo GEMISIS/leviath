@@ -175,7 +175,13 @@ fn a_fan_out_parent_keeps_its_queue_and_its_workers() {
     assert_eq!(fan.active[0].0, "alpha");
     assert_eq!(file.last.children, vec![fan.active[0].1.clone()]);
     assert!(report.defaulted("fan_out.queued.*.inputs").is_some());
-    assert!(report.notes.iter().any(|n| n.contains("origin")));
+    assert_eq!(
+        fan.origin,
+        leviath_runtime::fanout::FanOutOrigin::Tool {
+            call_id: "call_1".into()
+        },
+        "a fan_out call's fan-out still answers that call"
+    );
     assert_eq!(file.spec.launch.max_depth, 2);
     assert!(file.spec.seeded.contains_key("notes"));
 }

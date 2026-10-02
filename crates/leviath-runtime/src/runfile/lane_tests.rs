@@ -574,3 +574,104 @@ fn artifacts_and_context_changes_are_kept_whole() {
     assert_eq!(note.entries_removed, 3);
     assert_eq!(note.token_delta, -40);
 }
+
+/// A batch with calls `ids` and nothing back yet.
+fn batch(ids: &[&str]) -> crate::state::PendingBatch {
+    crate::state::PendingBatch {
+        calls: ids
+            .iter()
+            .map(|id| ToolCallState {
+                id: id.to_string(),
+                name: "shell".into(),
+                args: JsonDoc::default(),
+                thought_signature: None,
+            })
+            .collect(),
+        done: Default::default(),
+    }
+}
+
+fn started(id: &str) -> RunEvent {
+    RunEvent::ToolStarted(ToolCallState {
+        id: id.to_string(),
+        name: "shell".into(),
+        args: JsonDoc::default(),
+        thought_signature: None,
+    })
+}
+
+fn finished(id: &str, text: &str) -> RunEvent {
+    RunEvent::ToolFinished {
+        call_id: id.to_string(),
+        result: ToolResultState {
+            text: text.to_string(),
+            is_error: false,
+        },
+        millis: 0,
+    }
+}
+
+/// A call that comes back mid-batch is held as done by the batch the state
+/// holds: only a call of that batch, only a result after the last batch the
+/// events start, and never over a result already there. A state written
+/// before the events, while they start a batch, holds some other batch.
+#[test]
+fn a_result_that_lands_mid_batch_is_held_as_done() {
+    let mut state = initial();
+    fold_finished(&mut state, &[finished("c1", "x")], Started::InThisState);
+    assert!(state.pending.is_none(), "no batch, nothing to hold");
+
+    state.pending = Some(batch(&["c1", "c2"]));
+    let events = [
+        finished("c2", "the old batch's c2"),
+        started("c1"),
+        started("c2"),
+        finished("c1", "ran c1"),
+        finished("c9", "not this batch"),
+    ];
+    let mut elsewhere = state.clone();
+    fold_finished(&mut elsewhere, &events, Started::Elsewhere);
+    assert!(elsewhere.pending.unwrap().done.is_empty());
+
+    fold_finished(&mut state, &events, Started::InThisState);
+    let done = &state.pending.as_ref().unwrap().done;
+    assert_eq!(done.keys().collect::<Vec<_>>(), ["c1"]);
+    assert_eq!(done["c1"].text, "ran c1");
+
+    // With no batch started, every result counts; one already held stays.
+    fold_finished(
+        &mut state,
+        &[finished("c1", "again"), finished("c2", "ran c2")],
+        Started::Elsewhere,
+    );
+    let done = &state.pending.as_ref().unwrap().done;
+    assert_eq!(done["c1"].text, "ran c1");
+    assert_eq!(done["c2"].text, "ran c2");
+}
+
+/// A call's completion noted on its own is written as a step that holds the
+/// call as done, so a file read after a crash mid-batch knows it finished.
+#[tokio::test]
+async fn a_completion_noted_mid_batch_is_a_step_with_the_call_done() {
+    let runs = tempfile::tempdir().unwrap();
+    let mut lane = RunFileLane::new("m", "w");
+    let mut busy = initial();
+    busy.pending = Some(batch(&["c1", "c2"]));
+    run_dir(runs.path(), "r1");
+    lane.record(runs.path(), step("r1", busy)).await.unwrap();
+    lane.note(
+        "r1",
+        &RunRecord::ToolCallDone {
+            iteration: 1,
+            call_id: "c1".into(),
+            execution_id: "e1".into(),
+            result: EntryContent::text("ran c1"),
+            outcome: None,
+            at: 1,
+        },
+    );
+    lane.flush(runs.path(), "r1").await.unwrap();
+    let state = file(runs.path(), "r1").latest_state().unwrap();
+    let done = state.pending.unwrap().done;
+    assert_eq!(done.keys().collect::<Vec<_>>(), ["c1"]);
+}

@@ -43,6 +43,37 @@ pub(crate) fn agent_status(status: &RunStatus) -> AgentStatus {
     }
 }
 
+/// The status a run is placed with. A run that was waiting on a person is
+/// placed working: the question it waited on went with the process that
+/// asked it, and the run has to ask it again (see [`phase`]); it shows as
+/// waiting again the moment the question is open. Every other status is
+/// placed as it was.
+fn placed_status(state: &RunState) -> AgentStatus {
+    use crate::state::WaitState;
+    let on_a_person = matches!(
+        state.wait_reason,
+        Some(
+            WaitState::UserPrompt
+                | WaitState::ToolApproval
+                | WaitState::InteractionPoint
+                | WaitState::TaintGate
+        )
+    );
+    match (&state.status, on_a_person) {
+        (RunStatus::Waiting, true) => AgentStatus::Active,
+        (status, _) => agent_status(status),
+    }
+}
+
+/// `status`, `cursor`, `accepts_messages` and `children`, for a run being
+/// placed: as [`agent_state`] reads them, with the status it resumes in.
+pub(crate) fn placed_agent_state(spec: &RunSpec, state: &RunState) -> AgentState {
+    AgentState {
+        status: placed_status(state),
+        ..agent_state(spec, state)
+    }
+}
+
 /// `status`, `cursor`, `accepts_messages` and `children`.
 pub(crate) fn agent_state(spec: &RunSpec, state: &RunState) -> AgentState {
     AgentState {
@@ -530,10 +561,12 @@ pub(crate) fn final_output(state: &RunState) -> Option<FinalOutput> {
 /// `phase` and `pending`: the marker that puts the run in front of the system
 /// that drives it next.
 ///
-/// A run waiting on a reply, a summary or a person goes back to asking (the
-/// reply it waited on did not survive); a run with tool calls in flight has
-/// them dispatched again, with the results that came back carried along; a
-/// run choosing its next edge is asked again among the same edges.
+/// A run waiting on a reply or a summary goes back to asking (the reply it
+/// waited on did not survive); a run with tool calls in flight has them
+/// dispatched again, with the results that came back carried along, so a
+/// question one of them put to a person is asked again; a run stopped at a
+/// checkpoint has it asked again over the same document; a run choosing its
+/// next edge is asked again among the same edges.
 pub(crate) fn phase(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, state: &RunState) {
     use crate::pipeline::{AwaitingTransitionChoice, ReadyToInfer, WaitingForChildren};
     match &state.phase {
@@ -551,13 +584,46 @@ pub(crate) fn phase(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, state: &Run
             entity.insert(AwaitingTransitionChoice(edges));
         }
 
-        _ => match &state.pending {
-            Some(batch) => pending_batch(entity, batch),
-            None => {
+        _ => match (&state.pending, &state.point.asking) {
+            (Some(batch), _) => pending_batch(entity, batch),
+            (None, Some(body)) => open_point(entity, body),
+            (None, None) => {
                 entity.insert(ReadyToInfer);
             }
         },
     }
+}
+
+/// `point`: where the run is among its stage's checkpoints. Nothing is
+/// placed for a run at the first checkpoint with no revisions.
+pub(crate) fn point_progress(entity: &mut EntityWorldMut<'_>, state: &RunState) {
+    use crate::interaction_points::{InteractionPointCursor, InteractionPointRounds};
+    let p = &state.point;
+    if p.cursor > 0 {
+        entity.insert(InteractionPointCursor(p.cursor as usize));
+    }
+    if p.round > 0 {
+        entity.insert(InteractionPointRounds(p.round as usize));
+    }
+}
+
+/// A checkpoint that was put to a person: asked again, over the same
+/// document. The reply under review is the document, and the point's own
+/// dispatch asks it under the id it had, since that id is the point's name
+/// and round.
+fn open_point(entity: &mut EntityWorldMut<'_>, body: &str) {
+    entity.insert((
+        crate::components::InferenceResult {
+            attempt_id: String::new(),
+            response: body.to_string(),
+            tool_calls: Vec::new(),
+            tokens_used: 0,
+            cut_off_at: None,
+            reasoning: None,
+            parts: Vec::new(),
+        },
+        crate::interaction_points::ReadyForInteractionPoint,
+    ));
 }
 
 /// `pending`: the batch's calls as the model made them, the results already
@@ -577,7 +643,9 @@ pub(crate) fn pending_batch(entity: &mut EntityWorldMut<'_>, batch: &crate::stat
         .done
         .iter()
         .map(|(id, r)| {
-            let text = match r.is_error {
+            // A failed call's text usually says so already; it is marked
+            // once, never twice.
+            let text = match r.is_error && !r.text.starts_with("[error]") {
                 true => format!("[error] {}", r.text),
                 false => r.text.clone(),
             };
@@ -647,9 +715,13 @@ pub(crate) fn fan_out(
             .collect(),
         summaries: f.done.clone(),
         failures: f.failed.clone(),
-        parts: Vec::new(),
+        parts: f
+            .parts
+            .iter()
+            .filter_map(crate::state::inspect::part_from)
+            .collect(),
         paused: f.paused,
-        origin: Default::default(),
+        origin: f.origin.clone(),
     };
     crate::fanout::restore_fan_out_waiting(world, entity, restored, &|run| {
         workers.get(run).copied()

@@ -976,10 +976,13 @@ mod tests {
     /// The run ids present in `dir`. An unreadable or absent directory is an
     /// empty set, which is the same assertion for the isolation check.
     fn run_ids_in(dir: &std::path::Path) -> std::collections::BTreeSet<String> {
+        // Runs are directories; the daemon's own session mark beside them
+        // is not one.
         std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
+            .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect()
     }

@@ -96,12 +96,15 @@ used.
 
 ### Beside the file
 
-A run's directory also holds `stages/<n>/output.log`, the readable output of each stage, and a
-`blobs/` directory when its tools stored files. Both are for reading while the run works. The run
-file holds its own copy of every stored file, so resuming needs nothing else.
+A run's directory also holds two logs per stage, and a `blobs/` directory when its tools stored
+files. `stages/<n>/output.log` is what the model wrote in stage `n`, and `stages/<n>/logs.log` is
+that stage's tool activity and events. A stage that wrote no text has only `logs.log`. All of
+these are for reading while the run works. The run file holds its own copy of every stored file,
+so resuming needs nothing else.
 
 A crash can cut a frame short. Every frame carries a checksum, so the next open finds a torn frame
-at the end and cuts it off. The run resumes from its last complete step.
+at the end and cuts it off. The run resumes from its last complete step. `lev run show` leaves the
+torn step out too, and says so.
 
 ## Resuming a run
 
@@ -122,8 +125,19 @@ What the run was doing comes back with it:
 | Running a batch of tool calls | It dispatches them again; calls that finished are not run twice |
 | Choosing its next stage | It is asked again, among the same edges |
 | Running a fan-out | It picks its workers back up by run id |
-| Waiting on a person | The question reopens |
-| Paused | It stays paused |
+| Asking a person a question | It asks again, under a new id |
+| Stopped at a stage checkpoint | It asks again, under the same id and over the same document |
+| Paused | It stays paused, and runs a batch it had in flight once resumed |
+
+Each call in a batch is recorded as done the moment it finishes, so a restart part way through
+a batch never runs a finished call again. After a clean stop, which stopped every command it had
+running, the calls that had not finished run again. If the daemon died instead, a command it
+started may still be running, so such a call is not run again: its result says it was interrupted,
+and the model checks whether it took effect before running it again. A fan-out worker that finished while the daemon
+was down is read from its own run file, and counts as done or failed as it ended.
+
+A run that has finished stays finished. It reads no more messages, and there is no way yet to send
+it on to another stage of its graph.
 
 Child runs come back before the runs that started them, so a parent waiting on its fan-out finds
 its workers in place. Among runs at the same depth, those with work to do come first. A run you
