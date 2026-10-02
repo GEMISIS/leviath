@@ -330,6 +330,11 @@ HMAC-SHA256 so the receiver can check it. [Spawning with a signed
 webhook](/docs/api#spawning-with-a-signed-webhook) shows how to verify it. The secret never
 reaches a log line.
 
+The POST is sent by [`lev serve`](/docs/api), whichever front door started the run. A run started
+with `lev run --request` or over ACP gets its callback only when a `lev serve` is running on the
+same machine as the run finishes. With no server running, nothing is sent and the run says nothing
+about it.
+
 `metadata` is a table of text labels: a ticket, a tenant, a batch. Nothing in the run reads them.
 They come back unchanged with the run, and the run search looks through them.
 

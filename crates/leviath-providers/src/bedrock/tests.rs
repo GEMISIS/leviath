@@ -1,6 +1,7 @@
 //! Tests for the provider itself, over local mock servers.
 
 use super::*;
+use crate::failure::FailureKind;
 use crate::provider::{FinishReason, Message};
 use leviath_testkit::{
     spawn_mock_recorder, spawn_mock_sequence, spawn_mock_server, spawn_mock_server_with_headers,

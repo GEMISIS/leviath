@@ -190,6 +190,13 @@ pub enum WorldEvent {
         /// How many times the destination stage has been entered, this entry
         /// included.
         iteration: usize,
+        /// The edge taken. `None` when the move took no declared edge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<String>,
+        /// Why that edge: its condition held, a gate let the run through, the
+        /// model picked it, and so on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::state::TransitionReason>,
     },
     /// A tool call was handed to the async tool lane for execution. Inline
     /// calls (context tools, refusals, gate blocks) resolve without touching

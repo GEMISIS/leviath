@@ -396,6 +396,23 @@ fn model_resolution_lines(
                 ""
             ));
         }
+        // What a provider outage moves the stage on to, in the order it tries
+        // them: the other entries this install can run.
+        let fallbacks: Vec<String> = models
+            .iter()
+            .filter(|e| {
+                model_key(e.model.as_str()) != model_key(&model)
+                    && model_is_reachable(e, &defaults, registry)
+            })
+            .map(ToString::to_string)
+            .collect();
+        if !fallbacks.is_empty() {
+            lines.push(format!(
+                "  {:<16}   falls back to: {}",
+                "",
+                fallbacks.join(", ")
+            ));
+        }
         // Only when the install disagrees with the blueprint: printing the
         // list under every stage that already got its first choice is noise,
         // and the point of the line is to make a substitution visible.
@@ -1005,6 +1022,13 @@ system_prompt = "hi"
             !lines.iter().any(|l| l.contains("blueprint order")),
             "no substitution, so nothing to explain: {lines:#?}"
         );
+        // The entry an outage would move the stage on to is named.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("falls back to: openrouter/deepseek/deepseek-v4-flash")),
+            "{lines:#?}"
+        );
 
         // Preferring openrouter does not substitute a different MODEL.
         let openrouter_first = keyed_config("openrouter");
@@ -1017,6 +1041,7 @@ system_prompt = "hi"
         assert!(
             !lines
                 .iter()
+                .filter(|l| !l.contains("falls back to"))
                 .any(|l| l.contains("openrouter/deepseek/deepseek-v4-flash")),
             "a preference for a provider must not pick a different model: {lines:#?}"
         );

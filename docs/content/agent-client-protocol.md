@@ -130,7 +130,9 @@ words, and `data` holds every one of them, each with its path in the request:
 
 `_leviath/validate_spawn` answers the same refusal for a bad request. For a good one its result
 names the entry stage, each stage's provider, model and tools, the checked inputs with their
-defaults, the launch policy and the working directory.
+defaults, the launch policy and the working directory. Both results spell their keys in camelCase
+like the rest of the protocol, as in `entryStage` and `launch.maxDepth`. The params stay a spawn
+request as `POST /api/runs` takes it, and each input keeps the name the blueprint gave it.
 
 ### What a host may ask for
 

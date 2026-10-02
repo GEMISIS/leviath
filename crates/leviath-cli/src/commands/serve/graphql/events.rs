@@ -795,6 +795,7 @@ pub(crate) fn run_frame(stamped: Stamped) -> Option<RunEventFrame> {
             from,
             to,
             iteration,
+            ..
         } => StageTransitionedEvent::new(head, run_id, agent_id, (from, to, big(iteration))).into(),
         ServerEvent::ToolCallStarted {
             agent_id,

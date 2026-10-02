@@ -516,7 +516,16 @@ pub(crate) fn resolve_transition(
                         state.status = AgentStatus::Active;
                         let name = graph.stages[idx].name.to_string();
                         let taken = transition_record(&from, &state, next.edge.clone(), reason);
-                        emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
+                        let how = (next.edge.as_ref(), reason);
+                        emit_stage_transition(
+                            &sink,
+                            metadata,
+                            &state.agent_id,
+                            from,
+                            &name,
+                            visit,
+                            how,
+                        );
                         let mut ec = commands.entity(entity);
                         ec.remove::<ResolveTransition>().remove::<StageOutcome>();
                         taken.into_iter().for_each(|t| {
@@ -714,6 +723,7 @@ pub(crate) fn emit_stage_transition(
     from: String,
     to: &str,
     iteration: usize,
+    (edge, reason): (Option<&EdgeName>, TransitionReason),
 ) {
     if let (Some(sink), Some(md)) = (sink.as_ref(), metadata) {
         let _ = sink.0.send(crate::host::WorldEvent::StageTransition {
@@ -722,6 +732,8 @@ pub(crate) fn emit_stage_transition(
             from,
             to: to.to_string(),
             iteration,
+            edge: edge.map(ToString::to_string),
+            reason: Some(reason),
         });
     }
 }

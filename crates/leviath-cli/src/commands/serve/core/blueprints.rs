@@ -148,6 +148,30 @@ pub(crate) fn digest_of(text: &str) -> String {
     leviath_core::mime::store::sha256_hex(text.as_bytes())
 }
 
+/// `text` as an `agent.toml`: itself when it is one, or the `agent.toml` an
+/// `agent.leviath` converts to, which is what older clients still send. An
+/// `agent.leviath` that does not convert is every problem the conversion
+/// found. `Ok(true)` says the text was converted.
+pub(crate) fn as_agent_toml(text: &str) -> Result<(String, bool), Vec<String>> {
+    let old = toml::from_str::<toml::Table>(text)
+        .is_ok_and(|table| table.contains_key("agent") && !table.contains_key("blueprint"));
+    match old {
+        true => crate::commands::blueprint::convert(text)
+            .map(|converted| (converted, true))
+            .map_err(|problems| {
+                problems
+                    .into_iter()
+                    .map(|p| format!("agent.leviath does not convert to agent.toml: {p}"))
+                    .collect()
+            }),
+        false => Ok((text.to_string(), false)),
+    }
+}
+
+/// What a client is told when the blueprint it sent was an `agent.leviath`.
+pub(crate) const CONVERTED_NOTE: &str =
+    "this is an agent.leviath blueprint; it is saved as the agent.toml it converts to";
+
 /// Parse an `agent.toml` and check that its graph holds together, the way
 /// `lev validate` and a spawn do. Each problem is one entry, naming the key it
 /// is at.
@@ -262,6 +286,9 @@ pub(crate) fn write_blueprint(
     manifest: String,
     replacing: bool,
 ) -> Result<WrittenBlueprint, ServeError> {
+    let (manifest, _) = as_agent_toml(&manifest).map_err(|problems| {
+        ServeError::BadRequest(format!("Invalid blueprint: {}", problems.join("; ")))
+    })?;
     let parsed = parse_blueprint(&manifest)
         .map_err(|e| ServeError::BadRequest(format!("Invalid blueprint: {}", e.join("; "))))?;
     let dir = blueprint_dir(name)?;

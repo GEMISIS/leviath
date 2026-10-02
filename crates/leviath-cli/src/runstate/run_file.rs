@@ -23,6 +23,19 @@ pub(crate) fn path_in(dir: &Path) -> PathBuf {
     dir.join(leviath_core::files::RUN_FILE)
 }
 
+/// `spec` as it is shown to a person or a client: the webhook's signing
+/// secret replaced with a marker. The run file keeps the secret so a resumed
+/// run can still sign, and nothing that reads a spec back has any use for it.
+pub(crate) fn redacted_spec(mut spec: RunSpec) -> RunSpec {
+    if let Some(callback) = spec.delivery.callback.as_mut() {
+        callback.secret = callback
+            .secret
+            .as_ref()
+            .map(|_| leviath_runtime::spec::launch::Secret::new("[redacted]"));
+    }
+    spec
+}
+
 /// The run file in `dir`, read from its bytes.
 pub(crate) fn open_in(dir: &Path) -> anyhow::Result<RunFileReader> {
     let path = path_in(dir);

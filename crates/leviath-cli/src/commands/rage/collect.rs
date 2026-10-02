@@ -14,6 +14,7 @@ use leviath_core::files::{BLOBS_DIR, RUN_FILE};
 use leviath_core::run_meta::RunMeta;
 use leviath_core::secrets::is_sensitive_env_name;
 
+use super::replay::{RunJson, request_of};
 use super::scrub::{self, Scrubber};
 use super::{About, RageEnv, report};
 use crate::commands::doctor::{DaemonTarget, DoctorArgs, run_checks};
@@ -501,7 +502,14 @@ fn copy_run(
         );
     }
     copy_stages(&dir, &dest, scrubber, bundle);
-    copy_run_file(&dir, &dest, scrubber, bundle);
+    copy_run_file(
+        &dir,
+        &dest,
+        scrubber,
+        bundle,
+        include_blobs,
+        &std::env::temp_dir(),
+    );
     copy_blobs(&dir, &dest, include_blobs, BLOB_CAP, blob_budget, bundle);
 }
 
@@ -546,33 +554,56 @@ fn copy_stages(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle)
     }
 }
 
-/// `run.lvr`, read and written out as `run.json` with its secrets out: the
-/// spec the run was resolved to, its state as of its last step, and every
-/// step. The webhook's signing secret is replaced before anything is read.
-fn copy_run_file(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle) {
+/// `run.lvr` rewritten with its secrets out, the same values as `run.json`,
+/// and `request.json`, the request that starts the run again. The webhook's
+/// signing secret is replaced before anything is read, and the rewritten file
+/// is built from the scrubbed values, so it holds nothing `run.json` does not.
+/// Its stored parts go in with it when `blobs` is set. `scratch` is where the
+/// file is rewritten before it is read into the bundle.
+pub(super) fn copy_run_file(
+    dir: &Path,
+    dest: &str,
+    scrubber: &Scrubber,
+    bundle: &mut Bundle,
+    blobs: bool,
+    scratch: &Path,
+) {
     let skipped = format!("{dest}/{RUN_FILE}");
     let path = dir.join(RUN_FILE);
-    let bytes = match read_capped(&path, ARCHIVE_CAP) {
-        Ok(bytes) => bytes,
+    let read = read_capped(&path, ARCHIVE_CAP).and_then(|bytes| {
+        leviath_runtime::runfile::RunFileReader::from_bytes(&path, bytes)
+            .map_err(|e| format!("the run file could not be read: {e}"))
+            .and_then(|reader| RunJson::read(&reader).map(|run| (reader, run)))
+    });
+    let (reader, run) = match read {
+        Ok(read) => read,
         Err(reason) => {
             bundle.skip(skipped, reason);
             return;
         }
     };
-    let read = leviath_runtime::runfile::RunFileReader::from_bytes(&path, bytes).and_then(|r| {
-        let mut spec = r.spec().clone();
-        if let Some(callback) = spec.delivery.callback.as_mut() {
-            callback.secret = None;
+    let mut value = serde_json::to_value(&run).expect("a run file's values serialize");
+    let redactions = scrubber.scrub_json(&mut value);
+    // Back to the run file's own types, which a scrubbed name that no longer
+    // reads as one would refuse.
+    let rewritten = serde_json::from_value::<RunJson>(value.clone())
+        .map_err(|e| format!("a value with a secret taken out no longer reads: {e}"))
+        .and_then(|scrubbed| {
+            scrubbed
+                .rewrite(&reader, blobs, scratch)
+                .map(|bytes| (scrubbed, bytes))
+        });
+    match rewritten {
+        Ok((scrubbed, bytes)) => {
+            bundle.bytes(skipped, bytes, redactions);
+            let request = serde_json::to_value(request_of(&scrubbed.spec))
+                .expect("a spawn request serializes");
+            bundle.json(format!("{dest}/request.json"), scrubber, request);
         }
-        r.latest_state().and_then(|state| {
-            r.deltas(1, r.last_seq())
-                .map(|steps| serde_json::json!({ "spec": spec, "state": state, "steps": steps }))
-        })
-    });
-    match read {
-        Ok(value) => bundle.json(format!("{dest}/run.json"), scrubber, value),
-        Err(e) => bundle.skip(skipped, format!("the run file could not be read: {e}")),
+        Err(reason) => bundle.skip(skipped, reason),
     }
+    let text = serde_json::to_string_pretty(&value).expect("a JSON value serializes");
+    bundle.text(format!("{dest}/run.json"), text, redactions, false);
 }
 
 /// `blobs/`: the run's stored parts, each within `per_part`, all within

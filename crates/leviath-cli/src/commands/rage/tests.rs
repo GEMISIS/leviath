@@ -446,6 +446,8 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             &format!("runs/{ROOT_RUN}/stages/0/output.log"),
             &format!("runs/{ROOT_RUN}/stages/0/taint_audit.json"),
             &format!("runs/{ROOT_RUN}/run.json"),
+            &format!("runs/{ROOT_RUN}/run.lvr"),
+            &format!("runs/{ROOT_RUN}/request.json"),
             &format!("runs/{ROOT_RUN}/blobs/aa11"),
             &format!("runs/{ROOT_RUN}/blueprint/agent.toml"),
             &format!("runs/{ROOT_RUN}/blueprint/tools/helper.rhai"),

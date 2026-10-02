@@ -199,6 +199,43 @@ async fn a_refusal_the_daemon_has_nothing_to_add_to_stands_alone() {
     assert_eq!(failure.code(), "DAEMON_UNAVAILABLE");
 }
 
+/// A request that names no workdir works where the server started, which is
+/// held to `--workdir-root` like any other, and the refusal says where the
+/// directory came from rather than naming a path the caller never sent.
+#[tokio::test]
+async fn no_workdir_under_a_root_is_refused_saying_where_it_came_from() {
+    let root = tempfile::tempdir().unwrap();
+    let summary = ControlResponse::Valid {
+        summary: Box::new(summary()),
+    };
+    let (client, _seen, _dir, _task) = recording(summary.clone());
+    let limits = ServeLimits {
+        workdir_root: Some(root.path().to_path_buf()),
+        ..ServeLimits::default()
+    };
+    let answer = validate(&state(client, limits.clone()), named("coder"))
+        .await
+        .unwrap();
+    let Verdict::Rejected(issues) = answer else {
+        panic!("the server's own directory is outside the root")
+    };
+    assert_eq!(issues.0[0].code, IssueCode::NotAllowed);
+    assert!(
+        issues.0[0]
+            .message
+            .starts_with("the request names no workdir"),
+        "{issues}"
+    );
+    // A workdir the caller sent is named as theirs.
+    let mut request = named("coder");
+    request.workdir = Some("/".into());
+    let (client, _seen, _dir, _task) = recording(summary);
+    let Verdict::Rejected(issues) = validate(&state(client, limits), request).await.unwrap() else {
+        panic!("/ is outside the root")
+    };
+    assert!(issues.0[0].message.starts_with("workdir '/'"), "{issues}");
+}
+
 /// A blueprint read from a directory is refused over the network, and the
 /// daemon is not asked to read it for its other issues.
 #[tokio::test]

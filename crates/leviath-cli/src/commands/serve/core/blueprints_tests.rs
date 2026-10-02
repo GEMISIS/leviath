@@ -253,3 +253,108 @@ async fn a_blueprint_is_installed_under_its_own_name() {
         })
         .await;
 }
+
+/// An `agent.leviath`, as older clients still save one.
+const OLD_MANIFEST: &str = r#"[agent]
+name = "oldie"
+version = "0.1.0"
+description = "An old-format blueprint"
+entry_stage = "work"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 1000, required = true, seed = "task" }
+conversation = { kind = "sliding_window", max_tokens = 4000, max_items = 30 }
+
+[stages.work]
+mode = "autonomous"
+description = "Do it"
+model = { models = [{ provider = "openai", model = "gpt-mock" }] }
+available_tools = ["read_file"]
+max_iterations = 6
+system_prompt = "Do the task."
+"#;
+
+/// An `agent.leviath` is converted before anything is written, and stored
+/// as the `agent.toml` it converts to. One that does not convert is refused
+/// with what the conversion found, and nothing is written.
+#[tokio::test]
+async fn an_old_blueprint_is_saved_as_the_agent_toml_it_converts_to() {
+    let agents = tempfile::tempdir().unwrap();
+    TEST_AGENTS_DIR
+        .scope(agents.path().to_path_buf(), async {
+            let written = write_blueprint("oldie", OLD_MANIFEST.to_string(), false)
+                .expect("an old blueprint converts");
+            assert_eq!(written.parsed.name, "oldie");
+            let stored =
+                std::fs::read_to_string(written.dir.join(leviath_blueprint::FILE_NAME)).unwrap();
+            assert!(stored.contains("[blueprint]"), "{stored}");
+            assert!(parse_blueprint(&stored).is_ok());
+
+            let broken = OLD_MANIFEST.replace("[stages.work]", "[stages.work]\nbogus_key = 1");
+            let refused = write_blueprint("oldie", broken, true)
+                .err()
+                .expect("it does not convert");
+            assert_eq!(refused.code(), "BAD_USER_INPUT");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("agent.leviath does not convert"),
+                "{refused}"
+            );
+            let kept =
+                std::fs::read_to_string(written.dir.join(leviath_blueprint::FILE_NAME)).unwrap();
+            assert_eq!(kept, stored, "a refused save writes nothing");
+        })
+        .await;
+}
+
+/// The check a client runs before it saves judges an `agent.leviath` as the
+/// `agent.toml` it would be saved as, and says it was converted.
+#[test]
+fn an_old_blueprint_is_checked_as_what_it_converts_to() {
+    use crate::commands::serve::blueprints::validate_manifest_text;
+    let dir = tempfile::tempdir().unwrap();
+    let verdict = validate_manifest_text(OLD_MANIFEST, dir.path());
+    assert!(verdict.valid, "{:?}", verdict.errors);
+    assert_eq!(
+        verdict
+            .warnings
+            .as_deref()
+            .unwrap_or_default()
+            .first()
+            .map(String::as_str),
+        Some(super::CONVERTED_NOTE)
+    );
+    let broken = OLD_MANIFEST.replace("[stages.work]", "[stages.work]\nbogus_key = 1");
+    let verdict = validate_manifest_text(&broken, dir.path());
+    assert!(!verdict.valid);
+    let errors = verdict.errors.unwrap_or_default();
+    assert!(
+        errors[0].starts_with("agent.leviath does not convert"),
+        "{errors:?}"
+    );
+    // An agent.toml gets no such note.
+    let verdict = validate_manifest_text(&tiny_blueprint("t"), dir.path());
+    assert!(verdict.valid);
+    assert!(
+        !verdict
+            .warnings
+            .unwrap_or_default()
+            .iter()
+            .any(|w| w == super::CONVERTED_NOTE)
+    );
+}
+
+#[test]
+fn only_an_old_blueprint_is_converted() {
+    let (same, converted) = super::as_agent_toml(&tiny_blueprint("t")).unwrap();
+    assert_eq!(same, tiny_blueprint("t"));
+    assert!(!converted);
+    // Text that is not TOML at all is left for the parser to refuse.
+    let (same, converted) = super::as_agent_toml("not [ toml").unwrap();
+    assert_eq!(same, "not [ toml");
+    assert!(!converted);
+    let (toml, converted) = super::as_agent_toml(OLD_MANIFEST).unwrap();
+    assert!(converted);
+    assert!(toml.contains("[blueprint]"));
+}

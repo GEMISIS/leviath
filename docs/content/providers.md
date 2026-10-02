@@ -252,13 +252,16 @@ rewrites the file. Set `override_model` if the old behaviour was the one you wan
 
 Run `lev validate <agent>` to see the result before you spend anything on it. It prints the model
 each stage would actually use on this machine. Where that differs from the blueprint's own order, it
-prints that order underneath, so you can see the substitution:
+prints that order underneath, so you can see the substitution. Under each stage it also names the
+models a provider outage would move the stage on to, in the order it tries them:
 
 ```
 Models this install would use:
   gather           openrouter/anthropic/claude-sonnet-5
+                     falls back to: openai/gpt-5.4-mini
                      blueprint order: anthropic/claude-sonnet-5, openai/gpt-5.4-mini, ...
   analyze          openrouter/anthropic/claude-opus-5
+                     falls back to: openai/gpt-5.5
                      blueprint order: anthropic/claude-opus-5, openai/gpt-5.5, ...
   default_provider = openrouter, override_model = (unset), fallback_model = (unset)
 ```

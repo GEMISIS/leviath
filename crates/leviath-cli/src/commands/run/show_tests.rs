@@ -170,3 +170,92 @@ async fn a_torn_last_step_is_left_out_and_said_so() {
     );
     assert!(torn_note("r-1", 0).is_none());
 }
+
+/// Rewrite the run in `dir` with `edit` made to its spec, from the state it
+/// started in.
+fn respec(dir: &std::path::Path, edit: impl FnOnce(&mut leviath_runtime::spec::run_spec::RunSpec)) {
+    use leviath_runtime::runfile::{CheckpointPolicy, RunFileWriter};
+    let reader = runstate::run_file::open_in(dir).unwrap();
+    let mut spec = reader.spec().clone();
+    edit(&mut spec);
+    let start = reader.state_at(0).unwrap();
+    RunFileWriter::create(
+        &runstate::run_file::path_in(dir),
+        &spec,
+        &leviath_runtime::spec::env::CodeFiles::new(),
+        &start,
+        CheckpointPolicy::default(),
+    )
+    .unwrap();
+}
+
+/// The webhook's signing secret is in the run file, so a resumed run can
+/// sign, and is never printed: the REST and GraphQL spec and `lev rage` hide
+/// it the same way.
+#[tokio::test]
+async fn the_webhook_secret_is_never_shown() {
+    use leviath_runtime::spec::launch::{Callback, Secret};
+    runstate::with_isolated_runs_dir_async("run-show-secret", |_d| async move {
+        let dir = recorded(&runstate::runs_dir());
+        respec(&dir, |spec| {
+            spec.delivery.callback = Some(Callback {
+                url: leviath_runtime::spec::names::HttpUrl::new("https://example.com/hook")
+                    .unwrap(),
+                secret: Some(Secret::new("hunter2-signing-key")),
+            });
+        });
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        for json in [false, true] {
+            let shown = render(&ShowArgs { json, ..args(&id) }).unwrap();
+            assert!(!shown.contains("hunter2"), "{shown}");
+            assert!(shown.contains("[redacted]"), "{shown}");
+        }
+        let kept = runstate::run_file::open_in(&dir).unwrap();
+        let secret = kept
+            .spec()
+            .delivery
+            .callback
+            .as_ref()
+            .unwrap()
+            .secret
+            .as_ref();
+        assert_eq!(secret.map(Secret::expose), Some("hunter2-signing-key"));
+    })
+    .await;
+}
+
+/// A run is named by its id or by a start of it only one run's id has, the
+/// way `lev rage` and `lev interactions` take one.
+#[tokio::test]
+async fn a_run_is_named_by_the_start_of_its_id() {
+    runstate::with_isolated_runs_dir_async("run-show-prefix", |_d| async move {
+        let first = three_steps();
+        let second = three_steps();
+        let unique = |id: &str, other: &str| {
+            let n = id
+                .chars()
+                .zip(other.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            id.chars().take(n + 1).collect::<String>()
+        };
+        for (id, other) in [(&first, &second), (&second, &first)] {
+            let shown = render(&args(&unique(id, other))).unwrap();
+            assert!(shown.contains(id.as_str()), "{shown}");
+        }
+        let shared: String = first
+            .chars()
+            .zip(second.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a)
+            .collect();
+        let err = render(&args(&shared)).unwrap_err().to_string();
+        assert!(
+            err.contains(first.as_str()) && err.contains(second.as_str()),
+            "{err}"
+        );
+        let err = render(&args("nobody-")).unwrap_err().to_string();
+        assert!(err.contains("run 'nobody-' has no run file"), "{err}");
+    })
+    .await;
+}

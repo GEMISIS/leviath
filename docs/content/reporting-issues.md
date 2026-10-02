@@ -39,11 +39,16 @@ A small screen asks what the problem was about. For a run, it asks which one. Th
 | `agents/` | Every installed blueprint |
 | `tools/`, `providers/` | Your drop-in Rhai scripts |
 | `logs/` | `daemon.log`, `daemon.stdio.log`, each `serve-<name>.log` and `dashboard.log`, with their rolled copies |
-| `runs/<id>/` | The run you picked and its sub-agent runs: each run's summary, its run file as JSON (`run.json`), stage logs and media |
+| `runs/<id>/` | The run you picked and its sub-agent runs: run file, `run.json`, `request.json`, summary, stage logs and media |
 | `blueprint/` | The blueprint you were building, with a check that says whether it parses |
 | `setup/imports.json` | Which other tools' config files exist on this machine, by path only |
 
 The last three depend on what you said the problem was about. Everything else is always in.
+
+A run's `run.lvr` is its run file rewritten with the secrets taken out, and `run.json` holds the
+same values as JSON. Copied into another home's `runs` directory, the run reads like any other with
+`lev run show`, `lev timeline` and `lev result`. `request.json` is the spawn request that starts it
+again, and the zip's `README.md` gives the commands for both.
 
 ## What the zip never holds
 

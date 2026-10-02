@@ -11,7 +11,6 @@ use leviath_core::run_meta::{ContextSnapshot, StageRecord};
 use leviath_runtime::control_socket::ControlResponse;
 use leviath_runtime::runfile::{RunFileErrorKind, RunFileReader};
 use leviath_runtime::spec::graph::EdgeCondition;
-use leviath_runtime::spec::launch::Secret;
 use leviath_runtime::spec::names::Digest;
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::{Change, RunState, StateDelta, TransitionReason, TransitionRecord};
@@ -28,11 +27,8 @@ use super::run_file;
 /// it so a resumed run can still sign, and nothing that reads a spec back has
 /// any use for it.
 pub(crate) fn spec(run_id: &str) -> Result<RunSpec, ServeError> {
-    let mut spec = run_file::require(run_id)?.spec().clone();
-    if let Some(callback) = spec.delivery.callback.as_mut() {
-        callback.secret = callback.secret.as_ref().map(|_| Secret::new("[redacted]"));
-    }
-    Ok(spec)
+    let spec = run_file::require(run_id)?.spec().clone();
+    Ok(crate::runstate::run_file::redacted_spec(spec))
 }
 
 /// A run's state at step `at`, or as it is now.

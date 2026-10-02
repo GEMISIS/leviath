@@ -584,8 +584,17 @@ pub(crate) fn collect_transition_choice(
                         // stage outcome, so an errored stage routes to `Next`
                         // and never reaches an LLM choice.
                         let name = graph.stages[idx].name.to_string();
+                        let how = (edge_name.as_ref(), reason);
+                        emit_stage_transition(
+                            &sink,
+                            metadata,
+                            &state.agent_id,
+                            from.clone(),
+                            &name,
+                            visit,
+                            how,
+                        );
                         let taken = transition_record(&from, &state, edge_name, reason);
-                        emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
                         let mut ec = commands.entity(outcome.entity);
                         ec.remove::<AwaitingTransitionResponse>();
                         taken.into_iter().for_each(|t| {

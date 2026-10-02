@@ -15676,6 +15676,8 @@ fn resolve_transition_emits_a_stage_transition_event() {
             from: "s".to_string(), // the fixture agent's starting stage name
             to: "b".to_string(),
             iteration: 1,
+            edge: Some("next".to_string()),
+            reason: Some(crate::state::TransitionReason::Condition),
         }
     );
     assert!(sink_rx.try_recv().is_err(), "exactly one event");
@@ -15744,6 +15746,8 @@ fn collect_choice_emits_a_stage_transition_event() {
             from: "s".to_string(),
             to: "b".to_string(),
             iteration: 1,
+            edge: Some("b".to_string()),
+            reason: Some(crate::state::TransitionReason::ModelChoice),
         }
     );
 }

@@ -126,13 +126,23 @@ async fn refused(
 fn server_issues(state: &AppState, request: &mut Request) -> SpawnIssues {
     let limits = &state.limits;
     let mut issues = SpawnIssues::new();
+    let named = request.workdir.is_some();
     let workdir = request
         .workdir
         .get_or_insert_with(|| std::env::current_dir().unwrap_or_default());
     // `--workdir-root` is the operator's answer to "where is this API allowed
     // to work": without it, a caller-supplied `"/"` would point a
-    // tool-executing run at the whole filesystem.
+    // tool-executing run at the whole filesystem. A request that names no
+    // workdir works where the server started, which is held to the same
+    // root, and the refusal says that is where the directory came from.
     if let Err(message) = limits.check_workdir(workdir) {
+        let message = match named {
+            true => message,
+            false => format!(
+                "the request names no workdir, so the run would work in the directory the \
+                 server was started in: {message}"
+            ),
+        };
         issues.push(
             SpawnIssue::new(
                 SpecPath::root().field("workdir"),

@@ -196,6 +196,13 @@ pub(crate) enum ServerEvent {
         /// How many times the destination stage has been entered, this entry
         /// included.
         iteration: usize,
+        /// The edge taken. Absent when the move took no declared edge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<String>,
+        /// Why that edge, as `GET /api/runs/{id}/graph` spells it:
+        /// `Condition`, `Gate`, `ModelChoice`, `Forced`, `Worker` or `Router`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<leviath_runtime::state::TransitionReason>,
     },
     /// A tool call was handed to the async tool lane.
     ///
@@ -725,6 +732,8 @@ mod tests {
                     from: "plan".to_string(),
                     to: "implement".to_string(),
                     iteration: 1,
+                    edge: None,
+                    reason: None,
                 },
                 "r8",
             ),

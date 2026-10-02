@@ -104,13 +104,13 @@ fn manifest_path(path: &Path) -> PathBuf {
 /// The text of an `agent.leviath` as an `agent.toml`, or every problem with
 /// it.
 #[cfg(feature = "legacy-runs")]
-fn convert(manifest: &str) -> Result<String, Vec<String>> {
+pub(crate) fn convert(manifest: &str) -> Result<String, Vec<String>> {
     leviath_legacy_runs::migrate(manifest)
 }
 
 /// Without the old-format reader there is nothing to convert with.
 #[cfg(not(feature = "legacy-runs"))]
-fn convert(_manifest: &str) -> Result<String, Vec<String>> {
+pub(crate) fn convert(_manifest: &str) -> Result<String, Vec<String>> {
     Err(vec![
         "this build of lev cannot read agent.leviath files (it was built without the \
          legacy-runs feature)"
