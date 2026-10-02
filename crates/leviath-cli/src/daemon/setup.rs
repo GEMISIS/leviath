@@ -285,14 +285,13 @@ fn make_reaper(
     mcp_pool: Arc<crate::daemon::mcp_pool::McpPool>,
 ) -> leviath_runtime::host::Reaper {
     Box::new(move |world, entity| {
-        // Release the run's MCP leases before the entity (and its metadata)
-        // goes away; servers nobody else holds get an idle-disconnect timer.
-        if let Some(md) = world
+        // Release the run's MCP leases before the entity goes away; servers
+        // nobody else holds get an idle-disconnect timer.
+        if let Some(lease) = world
             .world()
-            .get::<leviath_runtime::persistence::RunMetadata>(entity)
+            .get::<crate::daemon::mcp_pool::McpLease>(entity)
         {
-            let run_id = md.run_id.clone();
-            mcp_pool.release_run(&run_id);
+            mcp_pool.release(lease);
         }
         // A finished run deletes what it put in providers' file storage.
         leviath_runtime::provider_files::forget_finished(world.world(), entity);
@@ -725,13 +724,11 @@ mod tests {
             None,
             Handle::current(),
         );
-        let mut reaper = make_reaper(
-            tool_service.clone(),
-            crate::daemon::mcp_pool::McpPool::for_daemon(
-                Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
-                &[],
-            ),
+        let pool = crate::daemon::mcp_pool::McpPool::for_daemon(
+            Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
+            &[],
         );
+        let mut reaper = make_reaper(tool_service.clone(), pool.clone());
         // No registered state for this entity → a clean no-op (the reap-branch
         // logic itself is covered by CliToolService::reap's own unit test).
         let entity = bevy_ecs::entity::Entity::from_raw_u32(1)
@@ -739,33 +736,42 @@ mod tests {
         reaper(&mut world, entity);
         assert!(tool_service.take(entity).is_none());
 
-        // An entity that carries run metadata also releases its MCP leases on
-        // reap (a run that never leased releases nothing - the pool's own
-        // tested no-op arm).
-        let with_meta = world.spawn_agent((leviath_runtime::persistence::RunMetadata {
-            run_id: "reaped-run".to_string(),
-            agent_name: "a".to_string(),
-            agent_path: "/p".to_string(),
-            task: "t".to_string(),
-            model: None,
-            workdir: "/w".to_string(),
-            num_stages: 1,
-            started_at: 0,
-            parent_run_id: None,
-            metadata: std::collections::HashMap::new(),
-            callback_url: None,
-            callback_secret: None,
-            title: None,
-            title_error: None,
-            blueprint_digest: None,
-            unattended: false,
-            yolo_profile: None,
-            read_paths: None,
-            output_request: None,
-            model_override: None,
-        },));
+        // An entity that holds MCP servers hands them back on reap.
+        let server = leviath_mcp::MCPServerConfig::stdio("held", "true", vec![]);
+        let lease = pool.lease_servers(std::slice::from_ref(&server), "reaped-run");
+        assert_eq!(pool.leased_holders(&server), 1);
+        let with_meta = world.spawn_agent((
+            lease,
+            leviath_runtime::persistence::RunMetadata {
+                run_id: "reaped-run".to_string(),
+                agent_name: "a".to_string(),
+                agent_path: "/p".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: "/w".to_string(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: std::collections::HashMap::new(),
+                callback_url: None,
+                callback_secret: None,
+                title: None,
+                title_error: None,
+                blueprint_digest: None,
+                unattended: false,
+                yolo_profile: None,
+                read_paths: None,
+                output_request: None,
+                model_override: None,
+            },
+        ));
         reaper(&mut world, with_meta.entity());
         assert!(tool_service.take(with_meta.entity()).is_none());
+        assert_eq!(
+            pool.leased_holders(&server),
+            0,
+            "the reap released the run's servers"
+        );
     }
 
     fn fake_provider() -> FakeProvider {

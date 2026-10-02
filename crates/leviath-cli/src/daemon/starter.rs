@@ -314,11 +314,13 @@ impl DaemonStarter {
             }
         };
         let servers = mcp_configs(&resolved.spec.graph);
-        self.mcp_pool
+        let lease = self
+            .mcp_pool
             .lease_servers(&servers, resolved.spec.run_id.as_str());
         Ok(PreparedRun {
             spec: Arc::new(resolved.spec),
-            bindings,
+            // The servers it holds go on the run, for the reap to hand back.
+            bindings: bindings.with(lease),
             state,
         })
     }

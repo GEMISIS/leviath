@@ -121,7 +121,7 @@ fn resume_one(
         &run.blobs,
         &run.state.context,
     );
-    starter.mcp_pool.lease_servers(
+    let lease = starter.mcp_pool.lease_servers(
         &crate::daemon::starter::mcp_configs(&run.spec.graph),
         &run_id,
     );
@@ -129,7 +129,7 @@ fn resume_one(
     Ok(leviath_runtime::restore::resume(
         world.world_mut(),
         run,
-        bindings,
+        bindings.with(lease),
     ))
 }
 
