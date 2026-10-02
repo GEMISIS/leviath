@@ -468,7 +468,7 @@ async fn an_old_run_directory_is_converted_on_first_load() {
 }
 
 /// A finished run converted from the older layout still hands back its
-/// answer: the sidecar is kept aside under `legacy/`, and the run file holds
+/// answer: the sidecar stays where a run keeps it, and the run file holds
 /// the same bytes.
 #[cfg(feature = "legacy-runs")]
 #[test]
@@ -484,9 +484,18 @@ fn a_converted_run_answers_from_its_run_file() {
     copy_dir(&fixture, &dir);
     crate::daemon::convert_old::convert_one(&dir, None, None);
 
-    let kept = std::fs::read_to_string(dir.join("legacy").join(leviath_core::FINAL_OUTPUT_FILE))
-        .expect("the sidecar is kept aside");
+    let sidecar = dir.join(leviath_core::FINAL_OUTPUT_FILE);
+    let kept = std::fs::read_to_string(&sidecar).expect("the sidecar stays where it was");
+    assert!(
+        !dir.join("legacy")
+            .join(leviath_core::FINAL_OUTPUT_FILE)
+            .exists()
+    );
     let meta = crate::runstate::read_meta_from(&dir).expect("the run file reads");
+    let answer = crate::runstate::read_final_output_in(&dir, &meta).expect("the answer");
+    assert_eq!(answer.content, kept);
+    // Without the sidecar, the run file gives the same answer.
+    std::fs::remove_file(&sidecar).unwrap();
     let answer = crate::runstate::read_final_output_in(&dir, &meta).expect("the answer");
     assert_eq!(answer.content, kept);
 }
