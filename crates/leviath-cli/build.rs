@@ -12,11 +12,12 @@
 //! commit, changed code) be detected as stale and reload the daemon. Falls back
 //! to the package version when git is unavailable (e.g. a packaged crate).
 //!
-//! The script re-runs on every build (via a sentinel `rerun-if-changed` path
-//! that never exists) so the dirty hash tracks source edits, not just commits;
-//! when the computed id is unchanged this is free (Cargo won't recompile). That
-//! same always-rerun also keeps the embedded blueprints in step with the files
-//! on disk without a second watch list.
+//! The script re-runs when any file under the workspace's crates changes, or
+//! the commit or index git has checked out, so the dirty hash tracks source
+//! edits, not just commits, and the embedded blueprints (which live in this
+//! crate) stay in step with the files on disk. It does not re-run on every
+//! build, because Cargo compiles the crate again each time its build script
+//! runs, whatever the script emits.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
@@ -175,8 +176,13 @@ fn write_bundled_agents(out_dir: &Path, agents_dir: &Path) {
     }
 
     src.push_str("];\n");
-    std::fs::write(out_dir.join("bundled_agents.rs"), src)
-        .expect("failed to write the generated bundled_agents.rs");
+    // Written only when it changes: this script runs on every build, and a
+    // file rewritten with the same text still has a new timestamp, which makes
+    // Cargo compile the whole crate again.
+    let path = out_dir.join("bundled_agents.rs");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(src.as_str()) {
+        std::fs::write(&path, src).expect("failed to write the generated bundled_agents.rs");
+    }
 }
 
 /// Embed the Windows version resource, so the exe carries its own name,
@@ -231,9 +237,20 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     write_bundled_agents(&out_dir, &agents_dir);
 
-    // Re-run on every build so the dirty hash reflects the current source, not
-    // just the last commit, and the embedded blueprints track the files on
-    // disk. A path that never exists is always "changed", which forces the
-    // re-run; when nothing it emits has changed Cargo skips recompiling.
-    println!("cargo:rerun-if-changed=.leviath-build-always-rerun");
+    // Re-run when what the build id or the embedded blueprints come from can
+    // have moved: any file under the workspace's crates (an uncommitted edit
+    // anywhere, and the blueprints, which live in this crate), and the commit
+    // and index git has checked out. Not on every build: Cargo compiles a
+    // crate again whenever its build script runs, even when nothing it emits
+    // changed, which doubled every `cargo test` after a `cargo test --no-run`.
+    let crates = manifest_dir.join("..");
+    println!("cargo:rerun-if-changed={}", crates.display());
+    for name in ["HEAD", "index"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", name])
+            .and_then(|o| String::from_utf8(o).ok())
+            .map(|s| PathBuf::from(s.trim()))
+        {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }
