@@ -1262,14 +1262,18 @@ mod tests {
     /// A provider scripted with a queue of responses; each `infer` pops the next.
     struct Script {
         responses: Mutex<std::collections::VecDeque<InferenceResponse>>,
+        /// Every request it was sent, serialized.
+        seen: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
     impl Provider for Script {
         async fn infer(
             &self,
-            _req: &InferenceRequest,
+            req: &InferenceRequest,
         ) -> leviath_providers::Result<InferenceResponse> {
+            let sent = serde_json::to_string(req).expect("a request serializes");
+            self.seen.lock().unwrap().push(sent);
             let next = self.responses.lock().unwrap().pop_front();
             next.ok_or_else(|| ProviderError::Other("script exhausted".to_string()))
         }
@@ -1669,6 +1673,7 @@ mod tests {
             "script".to_string(),
             Arc::new(Script {
                 responses: Mutex::new(responses.into_iter().collect()),
+                seen: Mutex::new(Vec::new()),
             }),
         );
         r
@@ -1987,6 +1992,7 @@ mod tests {
         // Keep the mock's non-`infer`/`capabilities` methods measured.
         let p = Script {
             responses: Mutex::new(std::collections::VecDeque::new()),
+            seen: Mutex::new(Vec::new()),
         };
         assert_eq!(p.name(), "script");
         assert_eq!(p.count_tokens("t", "m").await, 1);
@@ -2331,39 +2337,15 @@ mod tests {
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
     }
 
-    /// A provider that answers "done" and keeps every request it was sent.
-    struct Recorder(Mutex<Vec<String>>);
-
-    #[async_trait::async_trait]
-    impl Provider for Recorder {
-        async fn infer(
-            &self,
-            req: &InferenceRequest,
-        ) -> leviath_providers::Result<InferenceResponse> {
-            let sent = serde_json::to_string(req).expect("a request serializes");
-            self.0.lock().unwrap().push(sent);
-            Ok(text("done"))
-        }
-        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-            1
-        }
-        fn max_context_tokens(&self, _m: &str) -> usize {
-            100_000
-        }
-        fn name(&self) -> &str {
-            "script"
-        }
-        fn capabilities(&self, _m: &str) -> ModelCapabilities {
-            ModelCapabilities::default()
-        }
-    }
-
     /// `on_stage_enter` fires on entering a stage, before its first
     /// inference, and the entry stage is entered too: a new run's first
     /// request carries what the hook wrote, as every later stage's does.
     #[tokio::test]
     async fn on_stage_enter_fires_on_the_entry_stage_before_its_first_request() {
-        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let recorder = Arc::new(Script {
+            responses: Mutex::new(std::iter::repeat_with(|| text("done")).take(4).collect()),
+            seen: Mutex::new(Vec::new()),
+        });
         let mut registry = ProviderRegistry::new();
         registry.register("script".to_string(), recorder.clone());
         let mut world = build_world(registry);
@@ -2402,7 +2384,7 @@ mod tests {
         world.run_until_idle(20).await;
 
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
-        let sent = recorder.0.lock().unwrap().clone();
+        let sent = recorder.seen.lock().unwrap().clone();
         assert!(
             sent.first().is_some_and(|r| r.contains("ENTRY-HOOK-RAN")),
             "the first request carries what the hook wrote: {sent:?}"

@@ -987,6 +987,22 @@ mod tests {
 
     // ── builders ──
 
+    impl PointReply {
+        /// The answer this reply carries, when it is one.
+        fn answer(self) -> Option<InteractionResponse> {
+            match self {
+                PointReply::Answer(resp) => Some(resp),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn only_an_answer_reply_carries_an_answer() {
+        assert!(PointReply::Edited(String::new()).answer().is_none());
+        assert!(PointReply::Decided(PointOutcome::Abort).answer().is_none());
+    }
+
     fn point(name: &str, style: AnswerStyle, options: &[&str]) -> InteractionPointDef {
         InteractionPointDef {
             name: name.to_string(),
@@ -1521,9 +1537,10 @@ mod tests {
             task.await.unwrap();
 
             let out = rx.try_recv().expect("an outcome was published");
-            let PointReply::Answer(resp) = out.reply else {
-                panic!("the task hands back the answer as given");
-            };
+            let resp = out
+                .reply
+                .answer()
+                .expect("the task hands back the answer as given");
             assert_eq!(
                 decide(Some(&routed_by), &resp).outcome(),
                 Ok(expected),
@@ -2047,9 +2064,13 @@ mod tests {
         let id = hub.pending()[0].1.id.clone();
         answer(&hub, id);
         task.await.unwrap();
-        let PointReply::Answer(resp) = rx.recv().await.unwrap().reply else {
-            panic!("the task hands back the answer as given");
-        };
+        let resp = rx
+            .recv()
+            .await
+            .unwrap()
+            .reply
+            .answer()
+            .expect("the task hands back the answer as given");
         decide(Some(&routed_by), &resp)
             .outcome()
             .expect("these answers decide without a second ask")
