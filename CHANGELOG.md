@@ -72,6 +72,20 @@ same list.
     `prime_named`, `restore_from_cache`, `save_primed` and `unread_catalogs`;
     `WorldHost::hold_for_catalog`; `is_unread_catalog_refusal`. An embedded
     `AgentWorld` reads an unread list before each spawn.
+- Every Gemini tool call went out with empty arguments. The Interactions API
+  now streams a call's arguments as `arguments_delta` text, which was
+  dropped, so the model was told "path is a required property" on every call.
+  The text is now joined and read when the call ends, and the older object
+  pieces still merge.
+- A Gemini 3.5 model that said something before calling a tool had its next
+  request refused with "Model turns with thought summaries must start with a
+  thought block". The thought that signs a turn's calls is now handed back
+  first in that turn, ahead of its text, and once for calls that share it.
+- With file uploads on, an OpenAI request that named an uploaded image was
+  refused with "Expected image type ... but got none". OpenAI reads an
+  image's format from its file name, and a part named after an artifact
+  (`image`) or not named at all was uploaded with no extension. Uploads now
+  end in an extension the mime registry gives the part's type.
 
 ## 0.6.4 - 2026-09-26
 
