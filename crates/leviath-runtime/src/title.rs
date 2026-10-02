@@ -774,7 +774,7 @@ type CollectTitleQuery = (
 pub(crate) fn collect_title(
     mut results: ResMut<TitleResults>,
     mut agents: Query<CollectTitleQuery, With<AwaitingTitle>>,
-    persist: Option<Res<crate::pipeline::PersistenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();

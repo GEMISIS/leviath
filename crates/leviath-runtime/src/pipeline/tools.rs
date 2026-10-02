@@ -486,20 +486,19 @@ impl BatchDispatch<'_> {
 /// no lane writes nothing. Called from the same place the batch record is written
 /// so the artifacts cannot land before the dispatch that made them.
 pub(super) fn journal_artifacts(
-    persist: &PersistenceStage,
+    journal: &super::JournalSender,
     run_id: &str,
     produced: &[(String, Vec<leviath_core::output::Artifact>)],
 ) {
     for (execution_id, artifacts) in produced {
-        let _ = persist.0.send(PersistMsg::Append {
-            run_id: run_id.to_string(),
-            record: Box::new(crate::runfile::record::RunRecord::ArtifactsProduced {
+        journal.record(
+            run_id,
+            crate::runfile::record::RunRecord::ArtifactsProduced {
                 execution_id: execution_id.clone(),
                 artifacts: artifacts.clone(),
                 at: chrono::Utc::now().timestamp(),
-            }),
-            ack: None,
-        });
+            },
+        );
     }
 }
 
@@ -519,8 +518,8 @@ pub(crate) struct DaemonServices<'w> {
     pub hub: Option<Res<'w, InteractionHub>>,
     /// The lane a gate prompt's answer comes back on.
     pub gate_stage: Option<Res<'w, crate::gate_prompt::GatePromptStage>>,
-    /// The lane run state is written on.
-    pub persist: Option<Res<'w, PersistenceStage>>,
+    /// Where what a run does is recorded, for its run file.
+    pub persist: Option<Res<'w, super::JournalSender>>,
     /// Where world events are broadcast.
     pub sink: Option<Res<'w, crate::host::WorldEventSink>>,
 }
@@ -534,9 +533,10 @@ pub(crate) struct DaemonServices<'w> {
 /// enqueued in turn.
 ///
 /// A persisted agent's batch is journaled at dispatch: a `ToolBatch` record
-/// (inline results pre-filled, lane calls pending) goes to the persistence lane
-/// with an ack the exec waits on, and a per-call [`ToolProgress`] journals each
-/// completion as a `ToolCallDone`. On a crash mid-batch, recovery replays the
+/// (inline results pre-filled, lane calls pending) goes to the world's journal
+/// with an ack the exec waits on, answered once the step holding it is written,
+/// and a per-call [`ToolProgress`] journals each completion as a
+/// `ToolCallDone`. On a crash mid-batch, recovery replays the
 /// recorded results instead of re-running their side effects.
 pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
@@ -1037,11 +1037,7 @@ pub(crate) fn dispatch_tools(
             // names an execution a reader can find. No ack, because nothing is
             // about to run that could outrace the record.
             if let (Some(persist), Some(md)) = (persist.as_ref(), metadata) {
-                let _ = persist.0.send(PersistMsg::Append {
-                    run_id: md.run_id.clone(),
-                    record: Box::new(dispatch.record()),
-                    ack: None,
-                });
+                persist.record(&md.run_id, dispatch.record());
                 journal_artifacts(persist, &md.run_id, &produced);
             }
             // Nothing async to run - apply the context results now and loop back.
@@ -1095,21 +1091,19 @@ pub(crate) fn dispatch_tools(
         // agents) dispatch unjournaled with a no-op progress.
         let (progress, ack) = match (persist.as_ref(), metadata) {
             (Some(persist), Some(md)) => {
-                let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                let _ = persist.0.send(PersistMsg::Append {
-                    run_id: md.run_id.clone(),
-                    record: Box::new(dispatch.record()),
-                    ack: Some(ack_tx),
-                });
+                let ack_rx = persist.record_acked(&md.run_id, dispatch.record());
                 journal_artifacts(persist, &md.run_id, &produced);
-                let sender = persist.0.clone();
+                // The calls finish off the tick, so their records wake the
+                // world: one that lands while the rest of the batch runs is
+                // in the run's file before the batch ends.
+                let sender = persist.waking();
                 let run_id = md.run_id.clone();
                 let iteration = state.iteration;
                 let minted = executions.clone();
                 let progress: ToolProgress = Arc::new(move |call_id: &str, result| {
-                    let _ = sender.send(PersistMsg::Append {
-                        run_id: run_id.clone(),
-                        record: Box::new(crate::runfile::record::RunRecord::ToolCallDone {
+                    sender.record(
+                        &run_id,
+                        crate::runfile::record::RunRecord::ToolCallDone {
                             iteration,
                             call_id: call_id.to_string(),
                             // The attempt this completes, so a completion cannot
@@ -1117,15 +1111,12 @@ pub(crate) fn dispatch_tools(
                             // provider's id.
                             execution_id: minted.get(call_id).cloned().unwrap_or_default(),
                             result: result.clone(),
-                            // The structured verdict comes with the executor
-                            // contract; until then the completion says only that
-                            // the call finished, which is what it has always
-                            // said.
+                            // The completion says only that the call finished:
+                            // its verdict is not known here.
                             outcome: None,
                             at: chrono::Utc::now().timestamp(),
-                        }),
-                        ack: None,
-                    });
+                        },
+                    );
                 });
                 // The run id travels with the ack: an ack only exists when the
                 // batch was journaled for a known run, so pairing them here

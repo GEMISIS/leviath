@@ -75,7 +75,7 @@ struct Setup {
     _pools: InferencePools,
     /// The journal the job appends its attempts to, so a test can read what the
     /// renewal recorded rather than only what the vendor was sent.
-    journal: mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+    journal: mpsc::UnboundedReceiver<crate::pipeline::journal::Journaled>,
 }
 
 fn setup(lost: usize, with_route: bool) -> Setup {
@@ -142,7 +142,7 @@ fn setup(lost: usize, with_route: bool) -> Setup {
             stage: "read".into(),
             provider: "anthropic".into(),
             model: "claude".into(),
-            lane,
+            lane: crate::pipeline::JournalSender::new(lane, None),
             digest: crate::runfile::record::RequestDigest {
                 system_hash: 7,
                 messages: 1,

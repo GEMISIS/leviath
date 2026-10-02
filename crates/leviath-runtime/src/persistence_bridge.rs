@@ -1,12 +1,14 @@
 //! The async I/O lane for agent-state persistence.
 //!
 //! The snapshot-dispatch system builds a [`PersistJob`] whenever an agent
-//! meaningfully changes and sends it to this single-worker lane.
-//! [`persistence_worker`] writes each job under `<runs_dir>/<run_id>/` **one at
-//! a time**, so writes for a given run never race or land out of order: the
-//! answer's bytes, the readable per-stage logs and the taint audit beside the
-//! run file, then the run's state as a step in its run file, naming each of
-//! those files as it now stands.
+//! meaningfully changes and sends it to this single-worker lane, with the
+//! run-file step the world decided for it; what happened to a run with no
+//! snapshot due comes as a step of its own. [`persistence_worker`] writes each
+//! message under `<runs_dir>/<run_id>/` **one at a time**, so writes for a given
+//! run never race or land out of order: the answer's bytes, the readable
+//! per-stage logs and the taint audit beside the run file, then the step in the
+//! run file, naming each of those files as it now stands. The lane decides
+//! nothing about a run's state; it writes what it is handed.
 //!
 //! Every error is logged and counted in
 //! [`crate::persist_stats::PersistLaneStats`], and the lane
@@ -51,9 +53,10 @@ pub(crate) struct PersistJob {
     /// Sent only when it changes: a heartbeat that rewrote a quarter-megabyte
     /// answer every thirty seconds would be pure waste on a long run.
     pub final_output: Option<String>,
-    /// The run's state for its run file, when it has a spec to write one
-    /// from. Coalescing drops a superseded one with its snapshot, which loses
-    /// nothing: the next step is a diff against whatever was last written.
+    /// The run's step for its run file, when it has a spec to write one
+    /// from. Coalescing drops a superseded one's state with its snapshot,
+    /// which loses nothing: the next step is a diff against whatever was last
+    /// written, and carries the superseded step's events and waiters.
     pub run_file: Option<Box<crate::runfile::lane::RunFileStep>>,
 }
 
@@ -87,25 +90,13 @@ pub(crate) enum Appended {
 
 /// One message on the persistence lane.
 pub(crate) enum PersistMsg {
-    /// A whole-agent snapshot. Boxed: a snapshot dwarfs an `Append` and the
-    /// channel moves these by value.
+    /// A whole-agent snapshot. Boxed: a snapshot dwarfs the other messages and
+    /// the channel moves these by value.
     Snapshot(Box<PersistJob>),
-    /// Something that happened between snapshots, for the run's next step: a
-    /// tool batch's dispatch, a call's completion, a model call. One with an
-    /// `ack` is written at once, as a step of its own.
-    Append {
-        /// The run id (its directory name under the runs dir).
-        run_id: String,
-        /// What happened. Boxed like `Snapshot`'s job: the channel moves these
-        /// by value.
-        record: Box<crate::runfile::record::RunRecord>,
-        /// Carries what became of the append: the dispatch-side barrier that
-        /// keeps a batch's record ahead of the batch's side effects, and tells
-        /// the dispatcher whether the record is really there. Fired exactly
-        /// once however the append went. `None` for appends that ride on the
-        /// next step (per-call results).
-        ack: Option<tokio::sync::oneshot::Sender<Appended>>,
-    },
+    /// A run-file step with no snapshot behind it: what happened to a run
+    /// since its last step, decided by the world, written at once. Boxed like
+    /// `Snapshot`'s job.
+    Step(Box<crate::runfile::lane::RunFileStep>),
     /// Buffered per-stage output/log lines with nothing else to report. The
     /// dispatch system sends this instead of a full [`PersistMsg::Snapshot`]
     /// when lines were buffered but the run's watermark did not move, so tool
@@ -121,6 +112,17 @@ pub(crate) enum PersistMsg {
     },
 }
 
+/// Who waits to hear where a step landed.
+type Ack = tokio::sync::oneshot::Sender<Appended>;
+
+/// Tell everyone waiting on a step what became of it. A waiter that has
+/// stopped waiting is not an error.
+fn answer(acks: Vec<Ack>, landed: Appended) {
+    for ack in acks {
+        let _ = ack.send(landed);
+    }
+}
+
 /// The single-lane persistence worker: writes each [`PersistJob`] under
 /// `runs_dir`, one at a time, until the job channel closes (world shutdown).
 ///
@@ -133,8 +135,8 @@ pub(crate) enum PersistMsg {
 /// drops every message without touching the filesystem (no run dirs, no
 /// machine-id), while keeping the channel-close shutdown contract so
 /// [`flush_and_stop`](crate::world::PipelineWorld::flush_and_stop) still joins
-/// it - and still acking appends, so a dispatch-side barrier never waits on a
-/// dead channel.
+/// it - and still answering every step's waiters, so a dispatch-side barrier
+/// never waits on a dead channel.
 ///
 /// `stats` is shared with the world, which reads it for `lev ps`, `lev doctor`
 /// and the GraphQL schema, and drains the runs whose run file could not be
@@ -146,8 +148,13 @@ pub(crate) async fn persistence_worker(
 ) {
     let Some(runs_dir) = runs_dir else {
         while let Some(msg) = jobs.recv().await {
-            if let PersistMsg::Append { ack: Some(ack), .. } = msg {
-                let _ = ack.send(Appended::NoJournal);
+            let step = match msg {
+                PersistMsg::Snapshot(mut job) => job.run_file.take(),
+                PersistMsg::Step(step) => Some(step),
+                PersistMsg::StageLines { .. } => None,
+            };
+            if let Some(step) = step {
+                answer(step.acks, Appended::NoJournal);
             }
         }
         return;
@@ -174,7 +181,7 @@ pub(crate) async fn persistence_worker(
         // keeping only the NEWEST snapshot per run: each snapshot carries the
         // whole state, so writing a superseded one is pure disk and memory
         // churn. On a slow disk this is what stops queued snapshots from
-        // piling up unboundedly. Appends and stage lines keep their order and
+        // piling up unboundedly. Steps and stage lines keep their order and
         // are never dropped.
         let mut batch = vec![first];
         while let Ok(msg) = jobs.try_recv() {
@@ -191,11 +198,13 @@ pub(crate) async fn persistence_worker(
                 newest_snapshot.insert(job.run_id.clone(), i);
             }
         }
-        // The stage lines of a superseded snapshot, kept for the newest one of
-        // its run, which writes them first: the state is replaced, the lines
-        // are not.
+        // What a superseded snapshot carried besides its state, kept for the
+        // run's next message: its stage lines for the newest snapshot, which
+        // writes them first, and its events and waiters for the next step.
+        // The state is replaced; what happened is not.
         let mut carried: std::collections::HashMap<String, StageLineSet> =
             std::collections::HashMap::new();
+        let mut happened = Happened::default();
         for (i, msg) in batch.into_iter().enumerate() {
             match msg {
                 PersistMsg::Snapshot(mut job) => {
@@ -204,6 +213,9 @@ pub(crate) async fn persistence_worker(
                         let kept = carried.entry(job.run_id.clone()).or_default();
                         kept.0.append(&mut job.output_appends);
                         kept.1.append(&mut job.log_appends);
+                        if let Some(step) = job.run_file.take() {
+                            happened.keep(*step);
+                        }
                         continue;
                     }
                     if let Some((mut output, mut logs)) = carried.remove(&job.run_id) {
@@ -211,11 +223,13 @@ pub(crate) async fn persistence_worker(
                         logs.append(&mut job.log_appends);
                         (job.output_appends, job.log_appends) = (output, logs);
                     }
+                    let step = happened.onto(&job.run_id, job.run_file.take());
                     if !may_write(&runs_dir, &job.run_id, &mut staked, true) {
                         // Deleted. Forget what was kept about it too, so the
                         // maps stay bounded by the runs still being written.
                         last_output.remove(&job.run_id);
                         run_files.forget(&job.run_id);
+                        answer_dropped(step);
                         continue;
                     }
                     let written = last_output.get(&job.run_id).copied();
@@ -233,32 +247,27 @@ pub(crate) async fn persistence_worker(
                     // A directory that will not be made is also the shape a run
                     // deleted between the check and the write leaves, and a
                     // delete must never fail a run, so nothing is recorded.
-                    if let Some(step) = job.run_file.take().filter(|_| outcome.dir_made) {
-                        record_run_file(&mut run_files, &runs_dir, *step, &stats).await;
+                    match step {
+                        Some(step) if outcome.dir_made => {
+                            record_run_file(&mut run_files, &runs_dir, step, &stats).await;
+                        }
+                        dropped => answer_dropped(dropped),
                     }
                 }
-                PersistMsg::Append {
-                    run_id,
-                    record,
-                    ack,
-                } => {
-                    run_files.note(&run_id, &record);
-                    // Ack unconditionally: the dispatch-side barrier must never
-                    // stall on a failed append, or on a run that has been
-                    // deleted out from under it. What the ack carries is which
-                    // of those happened, so the waiter can say so instead of
-                    // assuming the record landed.
-                    if let Some(ack) = ack {
-                        let landed = match may_write(&runs_dir, &run_id, &mut staked, false) {
-                            true => {
-                                flush_run_file(&mut run_files, &runs_dir, &run_id, &stats).await
-                            }
-                            false => {
-                                run_files.forget(&run_id);
-                                Appended::NoJournal
-                            }
-                        };
-                        let _ = ack.send(landed);
+                PersistMsg::Step(step) => {
+                    let run_id = step.run_id.clone();
+                    let step = happened.onto_step(*step);
+                    // Every waiter hears back: the dispatch-side barrier must
+                    // never stall on a failed step, or on a run that has been
+                    // deleted out from under it. What it hears is which of
+                    // those happened, so it can say so instead of assuming the
+                    // record landed.
+                    match may_write(&runs_dir, &run_id, &mut staked, false) {
+                        true => record_run_file(&mut run_files, &runs_dir, step, &stats).await,
+                        false => {
+                            run_files.forget(&run_id);
+                            answer(step.acks, Appended::NoJournal);
+                        }
                     }
                 }
                 PersistMsg::StageLines {
@@ -276,68 +285,119 @@ pub(crate) async fn persistence_worker(
                 }
             }
         }
-        // What the batch noted and no step carried (a run that did not change
-        // state after it, or one that has finished) is written now, so a
-        // run's file never waits on a next change that may not come.
+        // Files written beside a finished run's file, which no later step
+        // will name, are named now, so a log's size in the run file is the
+        // size the run left it at. A run deleted since has no file to name
+        // them in, and nothing is written.
         for run_id in run_files.noted() {
-            match may_write(&runs_dir, &run_id, &mut staked, false) {
-                true => {
-                    flush_run_file(&mut run_files, &runs_dir, &run_id, &stats).await;
-                }
-                false => run_files.forget(&run_id),
-            }
+            name_files(&mut run_files, &runs_dir, &run_id, &stats).await;
         }
     }
     // The world is stopping: name the files written since each live run's
     // last step, so a log's size in its run file is the size it was left at.
     for run_id in run_files.unnamed() {
-        flush_run_file(&mut run_files, &runs_dir, &run_id, &stats).await;
+        name_files(&mut run_files, &runs_dir, &run_id, &stats).await;
     }
 }
 
-/// Record one run-file step. A step that cannot be written is the run's
-/// history lost, so it is counted against the run, which the world then fails.
-async fn record_run_file(
-    run_files: &mut crate::runfile::lane::RunFileLane,
-    runs_dir: &Path,
-    step: crate::runfile::lane::RunFileStep,
-    stats: &PersistLaneStats,
-) {
-    let run_id = step.run_id.clone();
-    stats.append_attempted();
-    match run_files.record(runs_dir, step).await {
-        Ok(Some(seq)) => stats.stepped(&run_id, seq),
-        Ok(None) => {}
-        Err(e) => {
-            let message = e.kind.to_string();
-            tracing::warn!(run_id = %run_id, error = %e, "persistence: run file step not written");
-            stats.journal_append_failed(&run_id, &e.path, &message);
+/// The events and waiters of the steps a batch superseded, per run, for the
+/// run's next step to carry: a superseded snapshot's state is replaced by a
+/// newer one, but what happened before it still happened.
+#[derive(Default)]
+struct Happened(std::collections::HashMap<String, (Vec<crate::state::RunEvent>, Vec<Ack>)>);
+
+impl Happened {
+    /// Keep a superseded step's events and waiters.
+    fn keep(&mut self, mut step: crate::runfile::lane::RunFileStep) {
+        let kept = self.0.entry(step.run_id).or_default();
+        kept.0.append(&mut step.events);
+        kept.1.append(&mut step.acks);
+    }
+
+    /// The newest snapshot's step, with what was kept for its run ahead of
+    /// its own events. A snapshot with no step of its own gets a step of
+    /// events when something was kept.
+    fn onto(
+        &mut self,
+        run_id: &str,
+        step: Option<Box<crate::runfile::lane::RunFileStep>>,
+    ) -> Option<crate::runfile::lane::RunFileStep> {
+        match step {
+            Some(step) => Some(self.onto_step(*step)),
+            None => self.0.contains_key(run_id).then(|| {
+                self.onto_step(crate::runfile::lane::RunFileStep::events(
+                    run_id,
+                    now(),
+                    Vec::new(),
+                ))
+            }),
         }
     }
+
+    /// `step` with what was kept for its run ahead of its own events.
+    fn onto_step(
+        &mut self,
+        mut step: crate::runfile::lane::RunFileStep,
+    ) -> crate::runfile::lane::RunFileStep {
+        if let Some((mut events, mut acks)) = self.0.remove(&step.run_id) {
+            events.append(&mut step.events);
+            acks.append(&mut step.acks);
+            (step.events, step.acks) = (events, acks);
+        }
+        step
+    }
 }
 
-/// Write what was noted for `run_id` since its last step as a step of its
-/// own, now, and say where it landed.
-async fn flush_run_file(
+/// Tell the waiters of a step that will not be written that nothing landed.
+fn answer_dropped(step: Option<crate::runfile::lane::RunFileStep>) {
+    if let Some(step) = step {
+        answer(step.acks, Appended::NoJournal);
+    }
+}
+
+/// Now, in unix seconds.
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Name the files written beside `run_id`'s run file since its last step,
+/// in a step of their own.
+async fn name_files(
     run_files: &mut crate::runfile::lane::RunFileLane,
     runs_dir: &Path,
     run_id: &str,
     stats: &PersistLaneStats,
-) -> Appended {
+) {
+    let step = crate::runfile::lane::RunFileStep::events(run_id, now(), Vec::new());
+    record_run_file(run_files, runs_dir, step, stats).await;
+}
+
+/// Record one run-file step, and tell whoever waits on it where it landed. A
+/// step that cannot be written is the run's history lost, so it is counted
+/// against the run, which the world then fails.
+async fn record_run_file(
+    run_files: &mut crate::runfile::lane::RunFileLane,
+    runs_dir: &Path,
+    mut step: crate::runfile::lane::RunFileStep,
+    stats: &PersistLaneStats,
+) {
+    let run_id = step.run_id.clone();
+    let acks = std::mem::take(&mut step.acks);
     stats.append_attempted();
-    match run_files.flush(runs_dir, run_id).await {
+    let landed = match run_files.record(runs_dir, step).await {
         Ok(Some(seq)) => {
-            stats.stepped(run_id, seq);
+            stats.stepped(&run_id, seq);
             Appended::Landed { position: seq }
         }
         Ok(None) => Appended::NoJournal,
         Err(e) => {
             let message = e.kind.to_string();
             tracing::warn!(run_id = %run_id, error = %e, "persistence: run file step not written");
-            stats.journal_append_failed(run_id, &e.path, &message);
+            stats.journal_append_failed(&run_id, &e.path, &message);
             Appended::Failed
         }
-    }
+    };
+    answer(acks, landed);
 }
 
 /// Whether the lane should still write for `run_id`, remembering the run the
