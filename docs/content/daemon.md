@@ -156,7 +156,8 @@ Before it changes any of them, the daemon saves it under `~/.leviath/backups/<ve
 | `runs/` | Each old run directory, as it was |
 
 A run's files are hard links rather than copies, so the backup costs no extra disk space while the
-run's own `legacy/` folder holds the same files. One backup is kept per release, and Leviath never
+run's own `legacy/` folder holds the same files. Its stage logs are copied instead, because they
+stay in the run's directory, where a resumed run adds to them. One backup is kept per release, and Leviath never
 deletes anything in it. An item that cannot be saved is left exactly as it was. The daemon log names
 the backup, and the next `lev ps` prints where it is, once.
 

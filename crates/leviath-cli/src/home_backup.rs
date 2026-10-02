@@ -12,7 +12,8 @@
 //! - `runs/<run id>/`: an old run directory, each file hard-linked (copied
 //!   where a link cannot be made). Converting a run only moves its files, so
 //!   the links keep them exactly as they were and cost no space while the
-//!   run's own `legacy/` holds the same files.
+//!   run's own `legacy/` holds the same files. The stage logs are copied:
+//!   they stay in the run's directory, where a resumed run appends to them.
 //!
 //! One backup is kept per release: a later start of the same release adds
 //! what it changes to the backup that release began, and an item already in
@@ -101,12 +102,19 @@ impl Backup {
     }
 
     /// [`Self::save_run`], linking each file with `link`, and copying it
-    /// where that fails.
+    /// where that fails. The stage logs under `stages/` are always copied:
+    /// they stay in the run's directory once it is converted, and a resumed
+    /// run appends to them, which would change a linked copy too.
     pub fn save_run_with(&self, dir: &Path, link: Link<'_>) -> std::io::Result<PathBuf> {
         let name = dir.file_name().unwrap_or_default();
         let rel = Path::new("runs").join(name);
+        let logs = dir.join("stages");
         self.save(dir, &rel, &|from, to| {
-            link(from, to).or_else(|_| std::fs::copy(from, to).map(|_| ()))
+            let copy = || std::fs::copy(from, to).map(|_| ());
+            match from.starts_with(&logs) {
+                true => copy(),
+                false => link(from, to).or_else(|_| copy()),
+            }
         })
     }
 

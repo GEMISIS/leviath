@@ -79,6 +79,30 @@ fn every_fixture_converts_to_a_run_file_that_folds_to_its_last_state() {
     }
 }
 
+/// The per-stage logs and the answer's sidecar are files a run writes in
+/// the new layout too, in the same place, so they stay where every reader
+/// looks for them.
+#[test]
+fn the_stage_logs_and_the_answer_stay_where_a_run_keeps_them() {
+    let run = Run::fixture("real-finished");
+    std::fs::create_dir_all(run.path("stages/0")).unwrap();
+    run.write("stages/0/logs.log", "[tool] web_search: found\n");
+    run.write("stages/0/output.log", "the gather stage said this\n");
+    let (report, _) = run.converted();
+    assert_eq!(
+        std::fs::read_to_string(run.path("stages/0/logs.log")).unwrap(),
+        "[tool] web_search: found\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(run.path("stages/0/output.log")).unwrap(),
+        "the gather stage said this\n"
+    );
+    assert!(run.path("final_output").is_file());
+    assert!(!report.legacy_dir.join("stages").exists());
+    assert!(!report.legacy_dir.join("final_output").exists());
+    assert!(report.legacy_dir.join("meta.json").is_file());
+}
+
 #[test]
 fn converting_twice_is_refused_and_changes_nothing() {
     let run = Run::fixture("finished");

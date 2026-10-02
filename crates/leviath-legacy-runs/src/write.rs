@@ -17,6 +17,17 @@ pub(crate) const LEGACY_DIR: &str = "legacy";
 /// Where the run file is written before the old files move.
 const PARTIAL: &str = "run.lvr.converting";
 
+/// The files of an old run that a run in the new layout writes too, under
+/// the same names and in the same form: the per-stage logs and the answer's
+/// sidecar. They stay where they are, so every reader of a run finds them in
+/// one place whichever layout the run started in.
+const KEPT: &[&str] = &[
+    "stages",
+    leviath_core::FINAL_OUTPUT_FILE,
+    PARTIAL,
+    LEGACY_DIR,
+];
+
 /// The run file's bytes.
 ///
 /// The spec comes first, then each piece of code and each stored part once
@@ -51,8 +62,9 @@ fn frame<T: serde::Serialize>(kind: FrameKind, payload: &T) -> Vec<u8> {
     codec::encode(kind, payload).expect("a run-file frame always encodes")
 }
 
-/// Write `bytes` as the run file in `dir`, and move every other file in it
-/// into `legacy/`. Returns the run file and the legacy directory.
+/// Write `bytes` as the run file in `dir`, and move every other file in it,
+/// except the ones [`KEPT`] names, into `legacy/`. Returns the run file and
+/// the legacy directory.
 pub(crate) fn install(dir: &Path, bytes: &[u8]) -> Result<(PathBuf, PathBuf), ConvertError> {
     let partial = dir.join(PARTIAL);
     let legacy = dir.join(LEGACY_DIR);
@@ -63,7 +75,7 @@ pub(crate) fn install(dir: &Path, bytes: &[u8]) -> Result<(PathBuf, PathBuf), Co
         .and_then(|entries| {
             entries
                 .flatten()
-                .filter(|e| e.file_name() != LEGACY_DIR && e.file_name() != PARTIAL)
+                .filter(|e| !KEPT.iter().any(|kept| e.file_name() == *kept))
                 .try_for_each(|e| std::fs::rename(e.path(), legacy.join(e.file_name())))
         })
         .and_then(|()| std::fs::rename(&partial, &file))

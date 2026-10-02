@@ -93,6 +93,35 @@ fn a_run_is_linked_and_copied_where_a_link_cannot_be_made() {
     );
 }
 
+/// A run's stage logs stay in its directory after the conversion and a
+/// resumed run appends to them, so the backup holds copies of them, never
+/// links that would change with the run.
+#[test]
+fn a_runs_stage_logs_are_copied_so_appending_leaves_the_backup() {
+    use std::io::Write;
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    let run = runs.join("r-1");
+    std::fs::create_dir_all(run.join("stages/0")).unwrap();
+    std::fs::write(run.join("stages/0/logs.log"), "old\n").unwrap();
+    std::fs::write(run.join("meta.json"), "{}").unwrap();
+    let saved = Backup::of_runs(&runs).save_run(&run).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(run.join("stages/0/logs.log"))
+        .unwrap()
+        .write_all(b"new\n")
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(saved.join("stages/0/logs.log")).unwrap(),
+        "old\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(saved.join("meta.json")).unwrap(),
+        "{}"
+    );
+}
+
 #[test]
 fn a_save_that_fails_leaves_nothing_behind() {
     let home = tempfile::tempdir().unwrap();

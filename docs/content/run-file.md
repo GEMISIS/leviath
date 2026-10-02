@@ -194,7 +194,9 @@ asks for the run:
 - the state it was last in becomes the last checkpoint.
 
 The old files move into `legacy/` inside the run's directory rather than being deleted, and a
-directory that already holds a run file is never converted twice. The whole directory is saved in
+directory that already holds a run file is never converted twice. Two stay where they are, because a
+new run writes them in the same place and form: the stage logs under `stages/` and the answer in
+`final_output`. So `lev logs`, the dashboard and the API read a converted run's logs as they did. The whole directory is saved in
 the home's backup first. See [upgrading from an earlier release](/docs/daemon#upgrading-from-an-earlier-release).
 An old run did not record everything a run file holds. Each value the conversion had to fill in goes
 to the run's own log, with the value used and why, and `daemon.log` gets one line for the whole pass.

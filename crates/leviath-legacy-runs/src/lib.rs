@@ -8,7 +8,9 @@
 //! [`RunSpec`](leviath_runtime::spec::run_spec::RunSpec), its code and blobs,
 //! a state at the start, one delta per journal step that maps onto one, and
 //! the state the run was last in. The old files move into `legacy/` beside it
-//! rather than being deleted.
+//! rather than being deleted, except the per-stage logs (`stages/`) and the
+//! answer (`final_output`), which a run in the new layout writes in the same
+//! place and form, and so stay where every reader looks for them.
 //!
 //! An old run did not record everything a run file holds. Whatever the
 //! conversion had to fill in is named in the [`ConvertReport`], with the value
@@ -125,7 +127,8 @@ pub fn graph(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<RunGraph, ConvertEr
 }
 
 /// Convert the run in `run_dir` into a single run file at
-/// `<run_dir>/run.lvr`, moving the old files into `<run_dir>/legacy/`.
+/// `<run_dir>/run.lvr`, moving the old files into `<run_dir>/legacy/` (all
+/// but the per-stage logs and the answer, which stay where they are).
 ///
 /// A directory that already holds a run file is refused with
 /// [`ConvertError::AlreadyConverted`], so converting twice is harmless.
