@@ -361,10 +361,16 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, record: &RunRecord) {
                 requested_by: requested_by.clone(),
             }));
             // A call that came back in the batch record itself (a refusal, a
-            // result settled before dispatch) ends there.
+            // result settled before dispatch) ends there. One a restart found
+            // still running ended unobserved: its effect may or may not have
+            // landed.
             for c in calls {
                 if let Some(result) = &c.result {
-                    push_done(events, &c.id, &c.execution_id, result, None);
+                    let outcome = result
+                        .as_str()
+                        .starts_with(crate::restore::INTERRUPTED_TOOL_RESULT)
+                        .then_some(leviath_core::execution::ToolOutcome::Indeterminate);
+                    push_done(events, &c.id, &c.execution_id, result, outcome);
                 }
             }
         }

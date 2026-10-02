@@ -7,10 +7,12 @@
 //! binds the spec against this machine, and places it with `insert`. Nothing
 //! is resolved again, so the run carries on with the models, tools, launch
 //! policy and inputs it started with. A binding that fails (a provider that is
-//! gone, an MCP server whose tools changed) is a refusal naming what changed,
-//! recorded on the run's own file so it ends there instead of sitting as a run
-//! that never moves. A model list a gateway has not answered yet does not
-//! hold a run back: the run chose its models when it started.
+//! gone, an MCP server whose tools changed) is a refusal naming what changed.
+//! The run is held, not ended: the refusal is recorded on its file, its state
+//! is left as it was, and it is listed as paused until the machine is put
+//! back, when a restart or `lev resume` brings it back where it stopped. A
+//! model list a gateway has not answered yet does not hold a run back: the
+//! run chose its models when it started.
 //!
 //! What the run was doing comes back with its state: a model call that was
 //! out is made again, a tool batch in flight is dispatched again with the
@@ -23,6 +25,7 @@
 use std::path::Path;
 
 use bevy_ecs::entity::Entity;
+use leviath_runtime::host::{NotPlaced, PageIn, RunListEntry};
 use leviath_runtime::restore::Resumable;
 use leviath_runtime::spec::issues::SpawnIssues;
 use leviath_runtime::state::RunStatus;
@@ -31,10 +34,12 @@ use leviath_runtime::world::{AgentId, PipelineWorld};
 use crate::daemon::starter::DaemonStarter;
 
 /// What a restart brought back: the `(run_id, entity)` pairs for the host to
-/// map.
+/// map, and the listing rows of the runs this machine cannot take back as it
+/// stands, for the host to hold.
 #[derive(Default)]
 pub(crate) struct Recovered {
     pub reloaded: Vec<(String, AgentId)>,
+    pub held: Vec<RunListEntry>,
 }
 
 /// Convert the old run in `dir` (every one under it, with `all`), looking its
@@ -62,26 +67,43 @@ fn read_run(dir: &Path) -> Option<Resumable> {
 }
 
 /// Bind a run read back from its file and place it in the world. A binding
-/// that fails is recorded on the run's file and returned.
+/// that fails holds the run: why is recorded on its file, and its listing row
+/// returned. A cancelled run being resumed (`revive`) comes back paused; one
+/// that cannot be bound stays cancelled, with nothing recorded and no row.
 fn resume_one(
     world: &mut PipelineWorld,
     starter: &DaemonStarter,
-    run: Resumable,
-) -> Result<Entity, SpawnIssues> {
+    mut run: Resumable,
+    revive: bool,
+) -> Result<Entity, Option<Box<RunListEntry>>> {
     let run_id = run.spec.run_id.to_string();
     let env = starter.env_for_graph(&run.spec.graph, starter.config.current());
     let bound =
         crate::daemon::block_on::block_on(leviath_runtime::bind::bind(&run.spec, &run.code, &env));
-    let bindings = bound.inspect_err(|issues| {
-        let path = starter
-            .runs_dir
-            .join(&run_id)
-            .join(leviath_core::files::RUN_FILE);
-        tracing::error!(run_id = %run_id, issues = %issues, "a run could not be resumed on this machine");
-        if let Err(e) = crate::daemon::starter::record_failed(&path, &run.state, issues) {
-            tracing::warn!(run_id = %run_id, error = %e, "could not record why the run did not resume");
+    let bindings = match (bound, revive) {
+        (Ok(bindings), _) => bindings,
+        (Err(issues), true) => {
+            tracing::warn!(run_id = %run_id, issues = %issues, "a cancelled run cannot be resumed on this machine as it stands");
+            return Err(None);
         }
-    })?;
+        (Err(issues), false) => {
+            tracing::error!(run_id = %run_id, issues = %issues, "a run cannot be resumed on this machine as it stands; holding it");
+            let path = starter
+                .runs_dir
+                .join(&run_id)
+                .join(leviath_core::files::RUN_FILE);
+            if let Err(e) = record_held(&path, &run.state, &issues) {
+                tracing::warn!(run_id = %run_id, error = %e, "could not record why the run is held");
+            }
+            return Err(Some(Box::new(leviath_runtime::restore::held_entry(
+                &run.spec, &run.state, &issues,
+            ))));
+        }
+    };
+    if revive {
+        run.state.status = RunStatus::Paused;
+        run.state.phase = leviath_runtime::state::PipelinePhase::Paused;
+    }
     crate::daemon::starter::store_blobs(
         starter.blob_store.as_ref(),
         &run_id,
@@ -100,10 +122,32 @@ fn resume_one(
     ))
 }
 
+/// Record on the run file at `path` that the run is held for `issues`, unless
+/// the file already says so. Nothing else about the run changes, so it comes
+/// back where it stopped once the machine is put back.
+fn record_held(
+    path: &Path,
+    state: &leviath_runtime::state::RunState,
+    issues: &SpawnIssues,
+) -> Result<(), leviath_runtime::runfile::RunFileError> {
+    if state.held.as_ref() == Some(issues) {
+        return Ok(());
+    }
+    let mut writer = leviath_runtime::runfile::RunFileWriter::open(path, Default::default())?;
+    let mut held = state.clone();
+    held.held = Some(issues.clone());
+    let events = vec![leviath_runtime::state::RunEvent::Log(format!(
+        "held: this machine cannot take the run back as it stands. {issues}"
+    ))];
+    writer
+        .record(held, chrono::Utc::now().timestamp(), events)
+        .map(drop)
+}
+
 /// Bring back every unfinished run under `runs_dir`: children before the runs
 /// that started them, then the ones with work to do. A run that cannot be
-/// bound is recorded as failed and left out. The tree of runs is linked back
-/// together once every run is in the world.
+/// bound is held: recorded on its file and left out of the world. The tree of
+/// runs is linked back together once every run is in the world.
 pub(crate) fn resume_all(
     world: &mut PipelineWorld,
     starter: &DaemonStarter,
@@ -128,10 +172,12 @@ pub(crate) fn resume_all(
         .collect();
     starter.refresh_world(world);
     let mut placed: Vec<Placed> = Vec::new();
+    let mut held = Vec::new();
     for run in leviath_runtime::restore::triage(found, |r| r) {
         let spec = run.spec.clone();
-        if let Ok(entity) = resume_one(world, starter, run) {
-            placed.push(Placed { spec, entity });
+        match resume_one(world, starter, run, false) {
+            Ok(entity) => placed.push(Placed { spec, entity }),
+            Err(entry) => held.extend(entry.map(|e| *e)),
         }
     }
     relink_tree(world, &placed);
@@ -140,31 +186,45 @@ pub(crate) fn resume_all(
             .into_iter()
             .map(|p| (p.spec.run_id.to_string(), world.own_agent(p.entity)))
             .collect(),
+        held,
     }
 }
 
-/// Page one unloaded run back in, on demand. `None` when there is no such run
-/// on disk, when it finished or failed, or when it cannot be bound here.
-/// A run that was cancelled comes back paused, so resuming it carries on.
+/// Page one unloaded run back in, on demand, for `purpose`, against the
+/// providers `config.toml` names now. A run that finished or failed stays
+/// where it is, and so does one that was cancelled, unless it is being
+/// resumed: then it comes back paused, so resuming it carries on. A run this
+/// machine cannot take back is held, and its row says why.
 pub(crate) fn reload_run(
     world: &mut PipelineWorld,
     starter: &DaemonStarter,
     run_id: &str,
-) -> Option<AgentId> {
+    purpose: PageIn,
+) -> Result<AgentId, NotPlaced> {
+    use leviath_runtime::components::AgentStatus;
     let dir = starter.runs_dir.join(run_id);
     convert_old(starter, &dir, false);
-    let mut run = read_run(&dir)?;
-    match &run.state.status {
-        RunStatus::Complete | RunStatus::Error(_) => return None,
-        RunStatus::Cancelled => {
-            run.state.status = RunStatus::Paused;
-            run.state.phase = leviath_runtime::state::PipelinePhase::Paused;
+    let run = read_run(&dir).ok_or(NotPlaced::Missing)?;
+    let revive = match (&run.state.status, purpose) {
+        (RunStatus::Complete, _) => return Err(NotPlaced::Stopped(AgentStatus::Complete)),
+        (RunStatus::Error(message), _) => {
+            return Err(NotPlaced::Stopped(AgentStatus::Error {
+                message: message.clone(),
+            }));
         }
-        _ => {}
-    }
+        (RunStatus::Cancelled, PageIn::Address) => {
+            return Err(NotPlaced::Stopped(AgentStatus::Cancelled));
+        }
+        (RunStatus::Cancelled, PageIn::Resume) => true,
+        _ => false,
+    };
+    starter.providers.refresh(&starter.config.current());
     starter.refresh_world(world);
-    let entity = resume_one(world, starter, run).ok()?;
-    Some(world.own_agent(entity))
+    let entity = resume_one(world, starter, run, revive).map_err(|held| match held {
+        Some(entry) => NotPlaced::Held(entry),
+        None => NotPlaced::Stopped(AgentStatus::Cancelled),
+    })?;
+    Ok(world.own_agent(entity))
 }
 
 /// A run brought back, with the spec it was placed from.

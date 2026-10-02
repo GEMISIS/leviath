@@ -87,12 +87,13 @@ pub struct WorldHost {
     /// each paired with the unix second it was unloaded. See
     /// [`Self::record_finished`].
     finished: VecDeque<(i64, RunListEntry)>,
-    /// Paused runs the host has paged out of the world, by run id, each holding
-    /// its last listing row. A parked run's full state is on disk; `Resume`,
-    /// `Message` and `Cancel` all page it back through
-    /// [`Self::resolve_or_reload`], and [`Self::list`] keeps reporting it so an
-    /// operator's `lev ps` view does not change just because the daemon stopped
-    /// spending memory on a run nobody is driving.
+    /// Runs the host holds out of the world, by run id, each with its listing
+    /// row: paused runs it paged out, and runs that cannot be brought back on
+    /// this machine as it stands (see [`Self::hold`]). A parked run's full
+    /// state is on disk; `Resume`, `Message` and `Cancel` all page it back
+    /// through [`Self::resolve_or_reload`], and [`Self::list`] keeps reporting
+    /// it so an operator's `lev ps` view does not change just because the
+    /// daemon stopped spending memory on a run nobody is driving.
     parked: HashMap<String, RunListEntry>,
 }
 
@@ -405,31 +406,55 @@ impl WorldHost {
         self.resumer = resumer;
     }
 
-    /// Resolve a run id to a live entity, paging it in from disk if it has been
-    /// unloaded (and a reloader is installed). Returns `None` if the run is
-    /// neither live nor resumable from disk. Newly-reloaded runs are registered.
-    fn resolve_or_reload(&mut self, run_id: &str) -> Option<AgentId> {
+    /// Resolve a run id to a live entity, paging it in from disk for `purpose`
+    /// if it has been unloaded (and a reloader is installed), or say why it
+    /// was not. Newly-reloaded runs are registered, and leave the rows of
+    /// runs held out of the world and of runs that finished.
+    fn resolve_or_reload(&mut self, run_id: &str, purpose: PageIn) -> Result<AgentId, NotPlaced> {
         if let Some(entity) = self.live_entity(run_id) {
-            return Some(entity);
+            return Ok(entity);
         }
-        let entity = (self.reloader.as_mut()?)(&mut self.world, run_id)?;
-        self.by_run_id.insert(run_id.to_string(), entity);
-        // Live again: its listing row comes off the entity, not the parked map.
-        self.parked.remove(run_id);
-        Some(entity)
+        let Some(reload) = self.reloader.as_mut() else {
+            return Err(NotPlaced::Missing);
+        };
+        match reload(&mut self.world, run_id, purpose) {
+            Ok(entity) => {
+                self.by_run_id.insert(run_id.to_string(), entity);
+                // Live again: its listing row comes off the entity.
+                self.parked.remove(run_id);
+                self.finished.retain(|(_, entry)| entry.run_id != run_id);
+                Ok(entity)
+            }
+            Err(NotPlaced::Held(entry)) => {
+                // Still held, for the reason found just now.
+                self.parked.insert(run_id.to_string(), (*entry).clone());
+                Err(NotPlaced::Held(entry))
+            }
+            Err(other) => Err(other),
+        }
     }
 
-    /// Why a message to `agent_id` would never be read, when it would not:
-    /// no run by that id is here, or the run has stopped. A message is only
-    /// said to be delivered when a run will read it.
-    fn undeliverable(&self, agent_id: &str) -> Option<String> {
-        let status = self
-            .world
+    /// Keep a run the daemon could not bring back on this machine in the
+    /// listing, by `entry`, until it is brought back or cancelled. Its state
+    /// stays on disk as it was, so an op that names it tries again.
+    pub fn hold(&mut self, entry: RunListEntry) {
+        self.parked.insert(entry.run_id.clone(), entry);
+    }
+
+    /// The status of the run `agent_id` in the world, when it is in it.
+    fn status_in_world(&self, agent_id: &str) -> Option<AgentStatus> {
+        self.world
             .world()
             .iter_entities()
             .filter_map(|e| e.get::<AgentState>())
             .find(|s| s.agent_id == agent_id)
-            .map(|s| s.status.clone());
+            .map(|s| s.status.clone())
+    }
+
+    /// Why a message to `agent_id`, a run with `status` (`None` for no such
+    /// run), would never be read, when it would not. A message is only said
+    /// to be delivered when a run will read it.
+    fn undeliverable(agent_id: &str, status: Option<&AgentStatus>) -> Option<String> {
         match status {
             None => Some(format!(
                 "no run '{agent_id}' is here to read a message; `lev ps --all` lists the runs"
@@ -445,6 +470,18 @@ impl WorldHost {
             )),
             Some(_) => None,
         }
+    }
+
+    /// Why a message to a run held out of the world is not delivered: what
+    /// has to change on this machine first.
+    fn held_refusal(agent_id: &str, entry: &RunListEntry) -> String {
+        let remedy = match &entry.wait_reason {
+            Some(WaitReason::NeedsSetup { remedy, .. }) => remedy.as_str(),
+            _ => "",
+        };
+        format!(
+            "run '{agent_id}' cannot go on on this machine as it stands, so it reads no messages yet: {remedy}"
+        )
     }
 
     /// A clone of the interaction hub, for building per-agent backends.
@@ -555,11 +592,7 @@ impl WorldHost {
                 // `false` only when there is genuinely no such run anywhere -
                 // otherwise a run whose blueprint had moved stayed `running` on
                 // disk forever with no way to get rid of it.
-                let ok = self.cancel_tree(&run_id)
-                    || self
-                        .force_terminator
-                        .as_mut()
-                        .is_some_and(|terminate| terminate(&run_id));
+                let ok = self.cancel_tree(&run_id) || self.force_cancel(&run_id);
                 let _ = reply.send(ok);
             }
             ControlOp::List { reply } => {
@@ -587,8 +620,17 @@ impl WorldHost {
                     return;
                 }
                 // Page the target in if it was unloaded, so delivery finds it.
-                self.resolve_or_reload(&agent_id);
-                if let Some(why) = self.undeliverable(&agent_id) {
+                // A run that has stopped stays stopped: it is not loaded back
+                // for a message it would never read.
+                let status = match self.resolve_or_reload(&agent_id, PageIn::Address) {
+                    Err(NotPlaced::Stopped(status)) => Some(status),
+                    Err(NotPlaced::Held(entry)) => {
+                        let _ = reply.send(Err(Self::held_refusal(&agent_id, &entry)));
+                        return;
+                    }
+                    Ok(_) | Err(NotPlaced::Missing) => self.status_in_world(&agent_id),
+                };
+                if let Some(why) = Self::undeliverable(&agent_id, status.as_ref()) {
                     let _ = reply.send(Err(why));
                     return;
                 }

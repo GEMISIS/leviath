@@ -218,9 +218,63 @@ fn interrupted_result(tool_name: &str, children: &[String]) -> String {
 }
 
 /// Place a run read back by [`read_for_resume`] into the world, with the live
-/// handles binding its spec produced.
-pub fn resume(world: &mut World, run: Resumable, bindings: crate::spec::env::Bindings) -> Entity {
+/// handles binding its spec produced. A run that was held is held no longer.
+pub fn resume(
+    world: &mut World,
+    mut run: Resumable,
+    bindings: crate::spec::env::Bindings,
+) -> Entity {
+    run.state.held = None;
     crate::insert::insert(world, run.spec, bindings, &run.state)
+}
+
+/// Why a run is held, as the listings say it: the machine changed, and what
+/// to put back, one problem after another.
+pub fn held_reason(
+    issues: &crate::spec::issues::SpawnIssues,
+) -> leviath_core::run_meta::WaitReason {
+    let problems: Vec<String> = issues.iter().map(ToString::to_string).collect();
+    leviath_core::run_meta::WaitReason::NeedsSetup {
+        blocker: leviath_core::run_meta::SetupBlocker::MachineChanged,
+        remedy: format!(
+            "{}; put that back, then `lev resume` this run or restart the daemon",
+            problems.join("; ")
+        ),
+    }
+}
+
+/// The listing row of a run held because this machine cannot take it back
+/// as it stands: paused, with [`held_reason`] as its wait reason, and the rest
+/// as its state last recorded.
+pub fn held_entry(
+    spec: &crate::spec::run_spec::RunSpec,
+    state: &crate::state::RunState,
+    issues: &crate::spec::issues::SpawnIssues,
+) -> crate::host::RunListEntry {
+    use crate::insert::place;
+    let md = place::run_metadata(spec, state);
+    let flags = place::outcome_flags(state).0;
+    crate::host::RunListEntry {
+        run_id: md.run_id,
+        title: md.title,
+        status: crate::components::AgentStatus::Paused,
+        wait_reason: Some(held_reason(issues)),
+        stage: state.cursor.stage.to_string(),
+        stage_index: Some(place::stage_index(spec, state)),
+        num_stages: Some(md.num_stages),
+        iteration: state.cursor.iteration as usize,
+        tool_calls: state.totals.tool_calls as usize,
+        last_progress_at: None,
+        started_at: Some(md.started_at),
+        active: Some(place::run_clock(state).0),
+        unattended: md.unattended,
+        yolo_profile: md.yolo_profile,
+        empty_output: false,
+        splits_degraded: flags.splits_degraded,
+        broken_scripts: flags.broken_scripts,
+        read_paths: md.read_paths,
+        has_final_output: state.final_output.is_some(),
+    }
 }
 
 /// How urgently a run should come back on restart. Ordered so a higher value

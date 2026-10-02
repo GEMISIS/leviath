@@ -242,6 +242,14 @@ pub(crate) fn busy() -> RunState {
         round: 2,
         asking: Some("## Plan".into()),
     };
+    s.held = Some(
+        crate::spec::issues::SpawnIssue::new(
+            crate::spec::issues::SpecPath::root(),
+            crate::spec::issues::IssueCode::Changed,
+            "an MCP server's tools changed",
+        )
+        .into(),
+    );
     s
 }
 

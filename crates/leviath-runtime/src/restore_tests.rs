@@ -51,6 +51,48 @@ fn a_run_comes_back_from_its_file_at_its_last_step() {
     assert_eq!(placed.0.run_id, spec().run_id);
 }
 
+/// The issues a run was held for, as a held run's file records them.
+fn held_issues() -> crate::spec::issues::SpawnIssues {
+    crate::spec::issues::SpawnIssue::new(
+        crate::spec::issues::SpecPath::root()
+            .field("stages")
+            .key("ask")
+            .field("provider"),
+        crate::spec::issues::IssueCode::Unavailable,
+        "provider 'openai' is no longer configured on this machine",
+    )
+    .into()
+}
+
+/// A held run is listed paused, saying the machine changed and what to put
+/// back; once it is resumed it is held no longer.
+#[test]
+fn a_held_run_is_listed_with_why_and_resumed_unheld() {
+    let mut run = resumable(0, 1, RunStatus::Active, PipelinePhase::ReadyToInfer);
+    let issues = held_issues();
+    let row = held_entry(&run.spec, &run.state, &issues);
+    assert_eq!(row.run_id, spec().run_id.as_str());
+    assert_eq!(row.status, crate::components::AgentStatus::Paused);
+    assert_eq!(row.num_stages, Some(run.spec.graph.stages.len()));
+    assert!(!row.has_final_output);
+    let Some(leviath_core::run_meta::WaitReason::NeedsSetup { blocker, remedy }) = row.wait_reason
+    else {
+        panic!("a held row says why");
+    };
+    assert_eq!(
+        blocker,
+        leviath_core::run_meta::SetupBlocker::MachineChanged
+    );
+    assert!(remedy.contains("stages.ask.provider"), "{remedy}");
+    assert!(remedy.contains("lev resume"), "{remedy}");
+
+    run.state.held = Some(issues);
+    let mut world = World::new();
+    let entity = resume(&mut world, run, crate::spec::env::Bindings::new());
+    let read = crate::state::inspect::inspect(&world, entity).unwrap();
+    assert_eq!(read.held, None);
+}
+
 fn resumable(depth: u8, created_at: i64, status: RunStatus, phase: PipelinePhase) -> Resumable {
     let mut spec = spec();
     spec.placement.depth = depth;

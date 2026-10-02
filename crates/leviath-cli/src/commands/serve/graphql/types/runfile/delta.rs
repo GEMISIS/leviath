@@ -169,6 +169,14 @@ change_member!(
     }
 );
 change_member!(
+    /// The run was held because this machine could not take it back, or it
+    /// came back.
+    HeldChange {
+        /// What it is held for now. Null when it is no longer held.
+        held: Option<Vec<crate::commands::serve::graphql::mutation::spawn::SpawnIssue>>
+    }
+);
+change_member!(
     /// Titling the run gave up, or a title came after all.
     TitleErrorChange {
         /// Why the run has no title now. Null when nothing went wrong.
@@ -266,6 +274,8 @@ pub(crate) enum StateChange {
     ReadPaths(ReadPathsChange),
     /// Where the run is among its stage's checkpoints.
     Checkpoint(CheckpointChange),
+    /// Whether the run is held, and for what.
+    Held(HeldChange),
 }
 
 impl From<&Change> for StateChange {
@@ -347,6 +357,9 @@ impl From<&Change> for StateChange {
             }),
             Change::Point(point) => Self::Checkpoint(CheckpointChange {
                 checkpoint: CheckpointProgress::from(point),
+            }),
+            Change::Held(held) => Self::Held(HeldChange {
+                held: super::state::held_issues(held.as_ref()),
             }),
         }
     }

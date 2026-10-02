@@ -105,6 +105,7 @@ fn every_setup_blocker_maps_to_one_value() {
         (Core::ProviderUnreachable, SetupBlocker::ProviderUnreachable),
         (Core::ProviderTimedOut, SetupBlocker::ProviderTimedOut),
         (Core::ProviderFailed, SetupBlocker::ProviderFailed),
+        (Core::MachineChanged, SetupBlocker::MachineChanged),
     ];
     for (core, expected) in cases {
         assert_eq!(SetupBlocker::from(&core), expected, "{core:?}");

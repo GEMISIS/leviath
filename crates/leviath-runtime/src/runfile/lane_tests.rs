@@ -672,3 +672,43 @@ async fn a_completion_noted_mid_batch_is_a_step_with_the_call_done() {
     let done = state.pending.unwrap().done;
     assert_eq!(done.keys().collect::<Vec<_>>(), ["c1"]);
 }
+
+/// A call a restart found still running ended with nobody watching: the
+/// stand-in result it is carried back with is a failure whose outcome is not
+/// known, not a success.
+#[test]
+fn a_call_carried_back_interrupted_ends_unobserved_and_failed() {
+    let interrupted = crate::runfile::record::ToolCallRecord {
+        id: "c1".into(),
+        execution_id: "x1".into(),
+        name: "shell".into(),
+        arguments: "{}".into(),
+        result: Some(EntryContent::from(
+            crate::restore::INTERRUPTED_TOOL_RESULT.to_string(),
+        )),
+        thought_signature: None,
+    };
+    let events = journal_events(&RunRecord::ToolBatch {
+        calls: vec![interrupted],
+        at: 1,
+        stage_index: 0,
+        iteration: 1,
+        visit_id: String::new(),
+        requested_by: "a1".into(),
+        response: String::new(),
+    });
+    let finished = events
+        .iter()
+        .find_map(|e| match e {
+            RunEvent::ToolFinished { result, .. } => Some(result.is_error),
+            _ => None,
+        })
+        .expect("the call ends");
+    assert!(finished, "an interrupted call is an error");
+    assert!(events.contains(&RunEvent::Completed {
+        call_id: "c1".into(),
+        execution_id: "x1".into(),
+        outcome: Some(crate::state::journal::ToolOutcomeState::Indeterminate),
+        parts: Vec::new(),
+    }));
+}

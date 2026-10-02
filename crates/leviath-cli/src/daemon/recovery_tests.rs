@@ -54,14 +54,6 @@ fn change(runs: &Path, run_id: &str, change: impl FnOnce(&mut RunState)) {
         .expect("the step is written");
 }
 
-/// The status `run_id`'s file holds last.
-fn status_on_disk(runs: &Path, run_id: &str) -> RunStatus {
-    RunFileReader::open(&run_file(runs, run_id))
-        .and_then(|r| r.latest_state())
-        .expect("the run file reads")
-        .status
-}
-
 /// The entity `run_id` was placed as, in `world`.
 fn entity_of(world: &mut PipelineWorld, run_id: &str) -> Option<Entity> {
     let ecs = world.world_mut();
@@ -126,11 +118,19 @@ async fn finished_failed_and_cancelled_runs_stay_on_disk() {
     );
 }
 
-/// A run whose provider is gone from this machine is refused with what
-/// changed, and the refusal is recorded on its file so the run ends there
-/// rather than sitting as one that never moves.
+/// The last state `run_id`'s file holds.
+fn state_on_disk(runs: &Path, run_id: &str) -> RunState {
+    RunFileReader::open(&run_file(runs, run_id))
+        .and_then(|r| r.latest_state())
+        .expect("the run file reads")
+}
+
+/// A run whose provider is gone from this machine is held, not ended: what
+/// changed is recorded on its file, nothing else about it changes, it is
+/// listed as paused for that reason, and once the provider is back a restart
+/// brings it back where it stopped.
 #[tokio::test]
-async fn a_run_that_cannot_be_bound_here_is_recorded_as_failed() {
+async fn a_run_that_cannot_be_bound_here_is_held_until_the_machine_is_put_back() {
     let agent = tempfile::tempdir().unwrap();
     let runs = tempfile::tempdir().unwrap();
     let run_id = run_on_disk(
@@ -139,18 +139,58 @@ async fn a_run_that_cannot_be_bound_here_is_recorded_as_failed() {
         runs.path(),
         &coder(agent.path()),
     );
+    let before = state_on_disk(runs.path(), &run_id);
 
-    let starter = starter(Config::default(), ProviderRegistry::new(), runs.path());
-    let mut world = world_for(&starter);
-    let recovered = resume_all(&mut world, &starter, runs.path());
+    let bare = starter(Config::default(), ProviderRegistry::new(), runs.path());
+    let mut world = world_for(&bare);
+    let recovered = resume_all(&mut world, &bare, runs.path());
 
     assert!(recovered.reloaded.is_empty());
-    match status_on_disk(runs.path(), &run_id) {
-        RunStatus::Error(why) => assert!(why.contains("anthropic"), "{why}"),
-        other => panic!("the refusal is not on the run's file: {other:?}"),
+    assert_eq!(recovered.held.len(), 1);
+    let row = &recovered.held[0];
+    assert_eq!(row.run_id, run_id);
+    assert_eq!(row.status, leviath_runtime::components::AgentStatus::Paused);
+    let Some(leviath_core::run_meta::WaitReason::NeedsSetup { blocker, remedy }) = &row.wait_reason
+    else {
+        panic!("a held run says why: {:?}", row.wait_reason);
+    };
+    assert_eq!(
+        *blocker,
+        leviath_core::run_meta::SetupBlocker::MachineChanged
+    );
+    assert!(remedy.contains("anthropic"), "{remedy}");
+
+    let held = state_on_disk(runs.path(), &run_id);
+    let issues = held.held.clone().expect("the issues are on the run's file");
+    assert!(issues.to_string().contains("anthropic"), "{issues}");
+    assert_eq!(held.status, before.status, "the run is not ended");
+    assert_eq!(held.phase, before.phase);
+    assert_eq!(held.seq, before.seq + 1);
+
+    // Asked for again on the same machine: still held, and the file is not
+    // written a second time for the same reason.
+    match reload_run(&mut world, &bare, &run_id, PageIn::Address) {
+        Err(NotPlaced::Held(row)) => assert_eq!(row.run_id, run_id),
+        other => panic!("still held: {other:?}"),
     }
-    // A refused run is not paged in on demand either.
-    assert!(reload_run(&mut world, &starter, &run_id).is_none());
+    assert!(
+        resume_all(&mut world, &bare, runs.path())
+            .reloaded
+            .is_empty()
+    );
+    assert_eq!(state_on_disk(runs.path(), &run_id).seq, before.seq + 1);
+
+    // The provider is back: the run comes back, and is held no longer.
+    let fixed = starter(Config::default(), registry(), runs.path());
+    let mut world = world_for(&fixed);
+    let recovered = resume_all(&mut world, &fixed, runs.path());
+    assert_eq!(recovered.reloaded.len(), 1);
+    assert!(recovered.held.is_empty());
+    let entity = entity_of(&mut world, &run_id).expect("the run is in the world");
+    let live = leviath_runtime::state::inspect::inspect(world.world(), entity)
+        .expect("the run reads back");
+    assert_eq!(live.held, None);
+    assert_eq!(live.status, before.status);
 }
 
 /// A refusal that cannot be written down is logged, and the run is still
@@ -171,7 +211,10 @@ async fn a_refusal_that_cannot_be_recorded_still_leaves_the_run_out() {
 
     let starter = starter(Config::default(), ProviderRegistry::new(), runs.path());
     let mut world = world_for(&starter);
-    assert!(resume_one(&mut world, &starter, found).is_err());
+    let held = resume_one(&mut world, &starter, found, false)
+        .expect_err("the run is held")
+        .expect("with a row saying why");
+    assert_eq!(held.run_id, run_id);
 }
 
 #[tokio::test]
@@ -187,14 +230,21 @@ async fn what_is_not_a_readable_run_is_passed_over() {
     let mut world = world_for(&starter);
     let recovered = resume_all(&mut world, &starter, runs.path());
     assert!(recovered.reloaded.is_empty());
-    assert!(reload_run(&mut world, &starter, "garbage").is_none());
-    assert!(reload_run(&mut world, &starter, "no-such-run").is_none());
+    for run_id in ["garbage", "no-such-run"] {
+        assert_eq!(
+            reload_run(&mut world, &starter, run_id, PageIn::Resume).err(),
+            Some(NotPlaced::Missing)
+        );
+    }
 
     // No runs directory at all brings back nothing.
     let gone = runs.path().join("gone");
     assert!(resume_all(&mut world, &starter, &gone).reloaded.is_empty());
 }
 
+/// Only a resume brings a cancelled run back, paused so resuming it carries
+/// on; a message or a pause leaves it cancelled. A finished or failed run
+/// is never paged in, and says how it ended.
 #[tokio::test]
 async fn reload_run_pages_in_a_cancelled_run_paused_but_not_a_finished_one() {
     let agent = tempfile::tempdir().unwrap();
@@ -210,26 +260,60 @@ async fn reload_run_pages_in_a_cancelled_run_paused_but_not_a_finished_one() {
     });
     let live = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
 
+    use leviath_runtime::components::AgentStatus;
     let starter = starter(Config::default(), registry(), runs.path());
     let mut world = world_for(&starter);
-    assert!(reload_run(&mut world, &starter, &complete).is_none());
-    assert!(reload_run(&mut world, &starter, &failed).is_none());
-    let paged = reload_run(&mut world, &starter, &cancelled).expect("a cancelled run comes back");
+    for purpose in [PageIn::Address, PageIn::Resume] {
+        assert_eq!(
+            reload_run(&mut world, &starter, &complete, purpose).err(),
+            Some(NotPlaced::Stopped(AgentStatus::Complete))
+        );
+        assert_eq!(
+            reload_run(&mut world, &starter, &failed, purpose).err(),
+            Some(NotPlaced::Stopped(AgentStatus::Error {
+                message: "boom".to_string()
+            }))
+        );
+    }
+    let cancelled_seq = state_on_disk(runs.path(), &cancelled).seq;
     assert_eq!(
-        world.agent_status(paged),
-        Some(leviath_runtime::components::AgentStatus::Paused),
-        "paused, so resuming it carries on"
+        reload_run(&mut world, &starter, &cancelled, PageIn::Address).err(),
+        Some(NotPlaced::Stopped(AgentStatus::Cancelled))
     );
-    assert!(reload_run(&mut world, &starter, &live).is_some());
+    assert_eq!(
+        state_on_disk(runs.path(), &cancelled).seq,
+        cancelled_seq,
+        "nothing is written for a run that stays cancelled"
+    );
 
-    // A live run this machine can no longer bind is not paged in.
-    let unbound = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
+    // Cancelled, and this machine cannot take it back: it stays cancelled,
+    // with nothing written and no row held for it.
     let bare = crate::daemon::starter::testing::starter(
         Config::default(),
         ProviderRegistry::new(),
         runs.path(),
     );
-    assert!(reload_run(&mut world, &bare, &unbound).is_none());
+    assert_eq!(
+        reload_run(&mut world, &bare, &cancelled, PageIn::Resume).err(),
+        Some(NotPlaced::Stopped(AgentStatus::Cancelled))
+    );
+    assert_eq!(state_on_disk(runs.path(), &cancelled).seq, cancelled_seq);
+
+    let paged = reload_run(&mut world, &starter, &cancelled, PageIn::Resume)
+        .expect("a cancelled run comes back to be resumed");
+    assert_eq!(
+        world.agent_status(paged),
+        Some(AgentStatus::Paused),
+        "paused, so resuming it carries on"
+    );
+    assert!(reload_run(&mut world, &starter, &live, PageIn::Address).is_ok());
+
+    // A live run this machine can no longer bind is held.
+    let unbound = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
+    match reload_run(&mut world, &bare, &unbound, PageIn::Address) {
+        Err(NotPlaced::Held(row)) => assert_eq!(row.run_id, unbound),
+        other => panic!("held: {other:?}"),
+    }
 }
 
 /// Children come back linked to the run that started them, and a parent to

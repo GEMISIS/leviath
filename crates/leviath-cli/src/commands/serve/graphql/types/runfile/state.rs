@@ -853,6 +853,22 @@ pub(crate) struct RunState {
     pub(crate) last_transition: Option<StageTransition>,
     /// Where it is among its stage's checkpoints.
     pub(crate) checkpoint: CheckpointProgress,
+    /// Why it is held rather than running: each thing it names that this
+    /// machine no longer has, or that changed since it started. Null when it
+    /// is not held.
+    pub(crate) held: Option<Vec<crate::commands::serve::graphql::mutation::spawn::SpawnIssue>>,
+}
+
+/// The issues a held run is held for, as the schema types them.
+pub(crate) fn held_issues(
+    held: Option<&leviath_runtime::spec::issues::SpawnIssues>,
+) -> Option<Vec<crate::commands::serve::graphql::mutation::spawn::SpawnIssue>> {
+    held.map(|issues| {
+        issues
+            .iter()
+            .map(crate::commands::serve::graphql::mutation::spawn::SpawnIssue::from)
+            .collect()
+    })
 }
 
 impl From<&CoreState> for RunState {
@@ -885,6 +901,7 @@ impl From<&CoreState> for RunState {
                 .map(|w| leviath_core::run_meta::WaitReason::from(w).to_string()),
             last_transition: s.last_transition.as_ref().map(StageTransition::from),
             checkpoint: CheckpointProgress::from(&s.point),
+            held: held_issues(s.held.as_ref()),
         }
     }
 }

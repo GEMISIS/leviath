@@ -255,13 +255,37 @@ pub(crate) fn host_refusal(message: impl Into<String>) -> SpawnIssues {
 }
 
 /// The daemon-installed function that pages a previously-unloaded run back into
-/// the world from its on-disk state: given a run id, it reads the run's file,
-/// binds its spec and places it, and returns the new entity, or `None` if there
-/// is no such resumable run on disk. Used for reload-on-demand - a
+/// the world from its on-disk state: given a run id and what it is wanted
+/// for, it reads the run's file, binds its spec and places it, and returns the
+/// new entity, or why the run was not placed. Used for reload-on-demand - a
 /// control/sub-agent op targeting a run that isn't currently in memory pages it
 /// in first via the host's internal resolve-or-reload step. Installed with
 /// [`super::WorldHost::set_reloader`].
-pub(crate) type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<AgentId> + Send>;
+pub(crate) type Reloader =
+    Box<dyn FnMut(&mut PipelineWorld, &str, PageIn) -> Result<AgentId, NotPlaced> + Send>;
+
+/// What an op pages a run in for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageIn {
+    /// To resume it. A run that was cancelled comes back paused, so resuming
+    /// it carries on from where it stopped.
+    Resume,
+    /// For any other op. Only a run that has not stopped comes back: a
+    /// message or a pause sent to a finished run leaves it finished.
+    Address,
+}
+
+/// Why a run was not paged in.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NotPlaced {
+    /// No run by that id is on disk, or its file does not read.
+    Missing,
+    /// The run has stopped, with this status.
+    Stopped(AgentStatus),
+    /// The run cannot be brought back on this machine as it stands. The row
+    /// says why, in its wait reason.
+    Held(Box<RunListEntry>),
+}
 
 /// The daemon-installed last resort for cancelling a run the world cannot hold:
 /// given a run id, it forces that run's **on-disk** state to a terminal status

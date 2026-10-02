@@ -54,11 +54,15 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
             active: Some(place::run_clock(state).0),
         },
     );
-    // Why it is parked is what the state recorded when it last moved.
-    meta.waiting_on = state
-        .wait_reason
-        .as_ref()
-        .map(leviath_core::run_meta::WaitReason::from);
+    // Why it is parked is what the state recorded when it last moved, unless
+    // the machine it was last brought back on could not take it.
+    meta.waiting_on = match &state.held {
+        Some(issues) => Some(crate::restore::held_reason(issues)),
+        None => state
+            .wait_reason
+            .as_ref()
+            .map(leviath_core::run_meta::WaitReason::from),
+    };
     meta
 }
 

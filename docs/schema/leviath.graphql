@@ -4777,6 +4777,15 @@ input GatewayWrite {
 }
 
 """
+The run was held because this machine could not take it back, or it
+came back.
+"""
+type HeldChangeOutput {
+	"What it is held for now. Null when it is no longer held."
+	held: [SpawnIssueOutput!]
+}
+
+"""
 Whether a prompt hint is included at one manifest level.
 
 Omitting guidance never discourages the behaviour. It leaves the paragraph
@@ -12353,6 +12362,12 @@ type RunStateOutput {
 	lastTransition: StageTransitionOutput
 	"Where it is among its stage's checkpoints."
 	checkpoint: CheckpointProgressOutput!
+	"""
+	Why it is held rather than running: each thing it names that this
+	machine no longer has, or that changed since it started. Null when it
+	is not held.
+	"""
+	held: [SpawnIssueOutput!]
 }
 
 "Where a run is in its life."
@@ -13635,9 +13650,14 @@ enum SetupBlocker {
 	PROVIDER_TIMED_OUT
 	"The provider failed."
 	PROVIDER_FAILED
+	"""
+	The run names something this machine no longer has, or has changed
+	since it started.
+	"""
+	MACHINE_CHANGED
 }
 
-"Exact and set tests on `SetupBlocker` (PROVIDER_MISSING, CREDITS_EXHAUSTED, AUTH_FAILED, FORBIDDEN, PROVIDERS_UNAVAILABLE, PROVIDER_UNREACHABLE, PROVIDER_TIMED_OUT, PROVIDER_FAILED)."
+"Exact and set tests on `SetupBlocker` (PROVIDER_MISSING, CREDITS_EXHAUSTED, AUTH_FAILED, FORBIDDEN, PROVIDERS_UNAVAILABLE, PROVIDER_UNREACHABLE, PROVIDER_TIMED_OUT, PROVIDER_FAILED, MACHINE_CHANGED)."
 input SetupBlockerFilter {
 	"Exactly this value."
 	eq: SetupBlocker
@@ -15517,7 +15537,7 @@ type StateAnswerOutput {
 }
 
 "One part of a run's state that a step changed, with its new value."
-union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput
+union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput
 
 "Working time: seconds banked, and when the running clock started."
 type StateClockOutput {

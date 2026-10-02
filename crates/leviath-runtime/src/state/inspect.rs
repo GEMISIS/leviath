@@ -102,6 +102,8 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
             granted: u32::try_from(r.granted).unwrap_or(u32::MAX),
         }),
         point: point_of(world, entity),
+        // A run in the world is not held.
+        held: None,
     })
 }
 
