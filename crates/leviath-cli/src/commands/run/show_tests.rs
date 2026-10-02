@@ -35,6 +35,7 @@ async fn the_spec_a_state_and_the_steps_print_as_toml_or_json() {
         )
         .unwrap();
         assert_eq!(json["run_id"], id.as_str());
+        assert!(json.get("warnings").is_none(), "nothing to warn of: {json}");
 
         let state = render(&ShowArgs {
             at: Some(2),
@@ -282,6 +283,22 @@ async fn a_run_that_may_never_finish_still_shows() {
         let reader = runstate::run_file::open_in(&runstate::run_dir(&id)).unwrap();
         assert!(!reader.spec().warnings().is_empty());
         assert!(render(&args(&id)).unwrap().starts_with("[spec]"));
+        // The JSON spec carries them too, one line each, as `lev run --json`
+        // does, so a program reading it sees what a person reads.
+        let json: serde_json::Value = serde_json::from_str(
+            &render(&ShowArgs {
+                json: true,
+                ..args(&id)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["run_id"], id.as_str());
+        let warnings = json["warnings"].as_array().expect("a warnings list");
+        assert!(
+            warnings[0].as_str().unwrap().contains("may never finish"),
+            "{warnings:?}"
+        );
     })
     .await;
 }

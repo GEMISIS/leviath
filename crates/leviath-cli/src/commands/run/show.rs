@@ -85,9 +85,23 @@ pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
     }
     let spec = runstate::run_file::redacted_spec(reader.spec().clone());
     Ok(match args.json {
-        true => to_json(&spec),
+        true => to_json(&SpecJson {
+            warnings: spec.warnings().iter().map(ToString::to_string).collect(),
+            spec: &spec,
+        }),
         false => view::spec_toml(&spec),
     })
+}
+
+/// The spec as JSON, with what may keep the run from ever finishing, one
+/// line each, as `lev run --json` gives them. Left out when there is
+/// nothing to say.
+#[derive(serde::Serialize)]
+struct SpecJson<'a> {
+    #[serde(flatten)]
+    spec: &'a leviath_runtime::spec::run_spec::RunSpec,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 /// The run `given` names: an exact id, or a prefix only one run's id starts

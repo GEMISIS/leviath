@@ -245,7 +245,9 @@ no flag it prints the run's spec: the graph it runs, its inputs, and the machine
 | `--json` | Print JSON |
 
 `--deltas` takes `3..7`, `3..` for every step from 3 on, `..7`, or `..` for them all. Run
-`lev run show <run> --deltas ..` to list the steps there are.
+`lev run show <run> --deltas ..` to list the steps there are. What may keep the run from ever
+finishing is printed on stderr first. The JSON spec also carries it as a `warnings` list, one line
+each, as `lev run --json` does.
 
 ```bash
 lev run show release-notes-1790848768-495da0e423db
