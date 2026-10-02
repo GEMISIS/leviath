@@ -606,8 +606,12 @@ impl Dashboard {
             // ── Graph transition details ──
             // A linear blueprint's chain is a graph too, but "Transitions:
             // -> next" on every stage would be noise; this block is for the
-            // ones that branch.
-            if let Some(graph) = agent.graph.as_ref().filter(|g| g.is_branching) {
+            // ones that branch, and for a lone stage, which ends the run.
+            if let Some(graph) = agent
+                .graph
+                .as_ref()
+                .filter(|g| g.is_branching || g.nodes.len() == 1)
+            {
                 let sel_name = agent
                     .stages
                     .get(self.selected_stage)
@@ -2271,6 +2275,42 @@ regions = []
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
         assert!(text.contains("terminal"));
+    }
+
+    #[test]
+    fn build_context_lines_shows_the_transition_block_for_a_single_stage() {
+        // One stage and no edges: the block says where the run is and that
+        // the stage ends it, as it does for any stage with no way out.
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-one", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(std::sync::Arc::new(make_context_snapshot(4000, 8000)));
+        agent.graph = graph_from(
+            r#"[blueprint]
+name = "g"
+version = "0.1.0"
+
+[[graph.stages]]
+name = "engine"
+
+[graph.layout]
+total_budget_tokens = 0
+regions = []
+"#,
+        );
+        agent.stages = vec![crate::runstate::StageRecord {
+            status: crate::runstate::StageRunStatus::Complete,
+            entered: true,
+            ..crate::runstate::StageRecord::new("engine".to_string(), 0)
+        }]
+        .into();
+        let (lines, _rows) = dash.build_context_lines(&agent, 80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("Stage: engine"), "{text}");
+        assert!(text.contains("Visited 1 time"), "{text}");
+        assert!(text.contains("terminal"), "{text}");
     }
 
     #[test]
