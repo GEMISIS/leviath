@@ -113,10 +113,8 @@ pub(crate) fn history_in(dir: &Path) -> Option<RunHistory> {
     let mut transitions = Vec::new();
     for delta in reader.deltas(state.seq + 1, reader.last_seq()).ok()? {
         delta.apply(&mut state);
-        for change in &delta.changes {
-            if let Change::LastTransition(Some(taken)) = change {
-                transitions.push((taken.from.to_string(), taken.to.to_string()));
-            }
+        for taken in delta.transitions() {
+            transitions.push((taken.from.to_string(), taken.to.to_string()));
         }
         if delta
             .changes

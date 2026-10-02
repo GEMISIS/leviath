@@ -762,8 +762,11 @@ async fn run_spawn(control: &ControlClient, cmd: NewRunCommand) -> SpawnOutcome 
         },
     };
     match response {
-        Ok(ControlResponse::Spawned { run_id }) => SpawnOutcome {
-            message: format!("Started {run_id}"),
+        Ok(ControlResponse::Spawned { run_id, warnings }) => SpawnOutcome {
+            message: std::iter::once(format!("Started {run_id}"))
+                .chain(crate::commands::run::request::warnings_report(&warnings))
+                .collect::<Vec<_>>()
+                .join("\n"),
             ok: true,
             run_id: Some(run_id),
             refused: None,

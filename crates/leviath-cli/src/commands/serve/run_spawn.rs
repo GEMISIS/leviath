@@ -37,9 +37,14 @@ pub(super) async fn spawn_run(
         Err(issues) => return Ok(refusal(issues)),
     };
     match spawn_core::start(&state, request).await {
-        Ok(Verdict::Accepted(run_id)) => {
-            Ok((StatusCode::CREATED, Json(SpawnedResp { run_id })).into_response())
-        }
+        Ok(Verdict::Accepted(started)) => Ok((
+            StatusCode::CREATED,
+            Json(SpawnedResp {
+                run_id: started.run_id,
+                warnings: IssuesResp::from(started.warnings).issues,
+            }),
+        )
+            .into_response()),
         Ok(Verdict::Rejected(issues)) => Ok(refusal(issues)),
         Err(e) => Err(as_api_error(&e)),
     }

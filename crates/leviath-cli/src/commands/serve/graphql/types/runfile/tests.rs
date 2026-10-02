@@ -529,7 +529,7 @@ fn fan_out(worker: WorkerSource, failure: WorkerFailure) -> FanOutState {
     FanOutState {
         stage: stage("analyze"),
         config,
-        max_workers: 4,
+        max_workers: Some(4),
         queued: vec![WorkItemState {
             id: "item-1".into(),
             inputs: input_values(),
@@ -716,6 +716,9 @@ fn delta() -> CoreDelta {
                 model: ModelRef::parse("mock/gpt-mock").expect("a model"),
                 spend: spend(),
                 finish_reason: Some("stop".into()),
+                kind: Default::default(),
+                stage: None,
+                iteration: 0,
             },
             RunEvent::Failover {
                 from: ModelRef::parse("mock/a").expect("a model"),
@@ -1014,6 +1017,7 @@ impl Probe {
             inputs: input_values(),
             launch: spec().launch,
             workdir: "/work".into(),
+            warnings: Default::default(),
         })
     }
 
@@ -1260,10 +1264,10 @@ fn each_move_counts_against_the_edge_it_took() {
             seq: i as u64 + 1,
             at: 1,
             changes: vec![
-                Change::LastTransition(record),
+                Change::LastTransition(record.clone()),
                 Change::AcceptsMessages(true),
             ],
-            events: Vec::new(),
+            events: record.into_iter().map(RunEvent::Transition).collect(),
         })
         .collect();
     let graph = RunGraph::from(&crate::commands::serve::core::inspect::graph_of(
@@ -1313,4 +1317,33 @@ fn numbers_saturate_rather_than_wrap() {
     assert_eq!(super::saturating(u32::MAX), i32::MAX);
     assert_eq!(super::big(u64::MAX).0, i64::MAX);
     assert_eq!(super::saturating(7), 7);
+}
+
+/// Each kind of billed call reads as its own GraphQL kind, and a move as a
+/// move.
+#[test]
+fn every_call_kind_reads_as_its_graphql_kind() {
+    use super::delta::{InferenceCallKind, StepEvent};
+    use leviath_runtime::state::journal::CallKind;
+    for (kind, read) in [
+        (CallKind::Stage, InferenceCallKind::Stage),
+        (CallKind::Compaction, InferenceCallKind::Compaction),
+        (CallKind::Title, InferenceCallKind::Title),
+        (CallKind::Routing, InferenceCallKind::Routing),
+    ] {
+        assert_eq!(InferenceCallKind::from(kind), read);
+    }
+    let taken = leviath_runtime::state::TransitionRecord {
+        from: leviath_runtime::spec::names::StageName::new("a").unwrap(),
+        to: leviath_runtime::spec::names::StageName::new("b").unwrap(),
+        edge: None,
+        reason: leviath_runtime::state::TransitionReason::Forced,
+        visit: "v".into(),
+    };
+    let StepEvent::Transition(step) =
+        StepEvent::from(&leviath_runtime::state::RunEvent::Transition(taken))
+    else {
+        panic!("a move reads as a move")
+    };
+    assert_eq!(step.transition.to_stage, "b");
 }

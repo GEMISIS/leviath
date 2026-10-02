@@ -105,11 +105,37 @@ const CODER: &str = r#"{"source": {"blueprint": {"name": "coder"}}, "inputs": {"
 async fn a_spawn_request_starts_a_run() {
     let (state, seen, _dir) = answering(ControlResponse::Spawned {
         run_id: "run-1".into(),
+        warnings: Default::default(),
     });
     let (status, body) = send(state, post("/api/runs", CODER)).await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(body, serde_json::json!({ "run_id": "run-1" }));
+    assert_eq!(
+        body,
+        serde_json::json!({ "run_id": "run-1", "warnings": [] })
+    );
     assert!(carried(&seen).inputs.contains_key("task"));
+}
+
+/// A run that may never finish still starts, and the answer says why, each
+/// warning in the shape a refusal's issues take.
+#[tokio::test]
+async fn a_spawn_that_may_never_finish_starts_and_says_so() {
+    let warned = leviath_runtime::spec::issues::SpawnIssue::new(
+        leviath_runtime::spec::issues::SpecPath::root()
+            .field("graph")
+            .field("edges"),
+        leviath_runtime::spec::issues::IssueCode::MayNeverFinish,
+        "this run can never finish",
+    );
+    let (state, _seen, _dir) = answering(ControlResponse::Spawned {
+        run_id: "run-1".into(),
+        warnings: warned.into(),
+    });
+    let (status, body) = send(state, post("/api/runs", CODER)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["warnings"][0]["at"], "graph.edges");
+    assert_eq!(body["warnings"][0]["code"], "may_never_finish");
+    assert_eq!(body["warnings"][0]["message"], "this run can never finish");
 }
 
 /// Four problems this server finds and one the daemon does, in one answer,
@@ -217,6 +243,7 @@ async fn a_daemon_that_refuses_or_is_away_is_said_so() {
 async fn a_multipart_spawn_carries_its_files_as_attachments() {
     let (state, seen, _dir) = answering(ControlResponse::Spawned {
         run_id: "run-2".into(),
+        warnings: Default::default(),
     });
     let request = multipart(
         "/api/runs",

@@ -225,11 +225,7 @@ fn cause_of(step: &Pair<'_>) -> Option<ContextCause> {
             _ => None,
         })
         .collect();
-    let moved = step
-        .delta
-        .changes
-        .iter()
-        .any(|c| matches!(c, Change::LastTransition(Some(_))));
+    let moved = !step.delta.transitions().is_empty();
     if moved {
         causes.push(ContextCause::Transform);
     }

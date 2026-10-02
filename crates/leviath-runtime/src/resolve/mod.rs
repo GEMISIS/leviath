@@ -126,6 +126,8 @@ pub async fn resolve(
         env,
         &mut issues,
     );
+    regions::required_messages(&src.graph, &mut issues);
+    inputs::check_blueprints(&src.graph, &checked, env, &mut issues).await;
     let (launch, placement) = launch::decide(request, caller, &src.graph, &limits, &mut issues);
     let auto_answers = launch::auto_answers(&launch, env, &mut issues);
     if !graph_ok {

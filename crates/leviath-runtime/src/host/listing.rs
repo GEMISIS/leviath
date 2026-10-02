@@ -143,6 +143,10 @@ impl WorldHost {
                 }),
             read_paths: metadata.and_then(|m| m.read_paths),
             has_final_output: has_output,
+            may_never_finish: world
+                .get::<crate::insert::RunSpecC>(entity)
+                .map(|spec| spec.0.warnings().iter().map(ToString::to_string).collect())
+                .unwrap_or_default(),
         }
     }
 

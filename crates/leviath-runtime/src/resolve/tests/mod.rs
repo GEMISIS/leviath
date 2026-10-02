@@ -164,8 +164,15 @@ impl ResolveEnv for Fake {
         }
     }
 
-    fn path_exists(&self, _workdir: &Path, path: &WorkdirPath, _kind: PathKind) -> bool {
-        self.existing.contains(path.as_str())
+    /// `existing` names files as they are and directories with a trailing `/`.
+    fn path_exists(&self, _workdir: &Path, path: &WorkdirPath, kind: PathKind) -> bool {
+        let file = self.existing.contains(path.as_str());
+        let dir = self.existing.contains(&format!("{path}/"));
+        match kind {
+            PathKind::File => file,
+            PathKind::Dir => dir,
+            PathKind::Any => file || dir,
+        }
     }
 
     async fn model(

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::context::{ContextDiff, ToolCallState};
 use super::journal::{
-    ArtifactState, AttemptState, ContextCommitState, ContextNoteState, SettledState,
+    ArtifactState, AttemptState, CallKind, ContextCommitState, ContextNoteState, SettledState,
     ToolOutcomeState,
 };
 use super::*;
@@ -121,9 +121,10 @@ pub enum TransitionReason {
 /// Something that happened during a step that the state does not keep.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum RunEvent {
-    /// A model request finished.
+    /// A model request finished and was billed: one per call, whatever
+    /// kind of call it was.
     Inference {
-        /// The attempt's id.
+        /// The id of the attempt that answered, when it was recorded.
         attempt: String,
         /// The model that answered.
         model: ModelRef,
@@ -131,7 +132,17 @@ pub enum RunEvent {
         spend: Spend,
         /// Why the model stopped, as the provider said it.
         finish_reason: Option<String>,
+        /// Which kind of call it was.
+        kind: CallKind,
+        /// The stage it was made for. `None` for a call no stage owns (the
+        /// title call).
+        stage: Option<StageName>,
+        /// The iteration it was made in.
+        iteration: u32,
     },
+    /// The run took an edge. One per edge taken, so two moves inside one
+    /// step are both kept; `last_transition` holds only the latest.
+    Transition(TransitionRecord),
     /// A request moved to another model.
     Failover {
         /// The model that failed.
@@ -262,6 +273,21 @@ impl StateDelta {
             changes,
             events,
         }
+    }
+
+    /// Every edge this step took, oldest first: its `Transition` events.
+    ///
+    /// Not the `last_transition` it set. The event is journaled as the edge is
+    /// taken and can land a step before the state that shows the move, so the
+    /// change is a second sighting of a move already counted.
+    pub fn transitions(&self) -> Vec<&TransitionRecord> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Transition(t) => Some(t),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether the step changed nothing and recorded nothing.

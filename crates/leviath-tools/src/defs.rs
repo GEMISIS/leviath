@@ -623,7 +623,8 @@ impl BuiltinTools {
                         },
                         "max_workers": {
                             "type": "integer",
-                            "description": "How many run at once. Optional; the rest queue and start as slots free up."
+                            "minimum": 1,
+                            "description": "How many run at once, at least 1; the rest queue and start as slots free up. Leave it out to start every item at once."
                         }
                     },
                     "required": ["items"]

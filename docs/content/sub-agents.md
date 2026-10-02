@@ -141,14 +141,15 @@ workspace. Every item starts one worker, they all run at once, and the call retu
 report covering all of them. Three things are worth knowing:
 
 **Each item's `inputs` are everything its worker gets.** They are the inputs the worker's blueprint
-declares, each checked against its type. A worker that runs a stage of this blueprint has every
-item checked before any worker starts. A worker that runs another blueprint is checked as it starts,
-and a bad item fails that worker alone. A worker is a separate agent
+declares, each checked against its type before any worker starts. That is this blueprint's inputs
+for a stage worker, and the named blueprint's otherwise. One item that does not fit refuses the
+whole call, with every problem at its item's path, and nothing starts. A worker is a separate agent
 with a clean context window and never sees the caller's conversation, so a reference to "the topic
 above" reaches nobody.
 
-**Put all the work in one call.** The engine paces the concurrency itself (`max_workers`, default
-30), so a hundred items in one call is fine and a second call would only wait for the first. One
+**Put all the work in one call.** The engine paces the concurrency itself (`max_workers`, no cap
+unless you set one), so a hundred items in one call is fine and a second call would only wait for
+the first. One
 `fan_out` call per turn is the rule. It has to be the only tool call in its turn, because it waits
 for its workers.
 
@@ -195,7 +196,7 @@ name = "fix"
 worker = { stage = "fix_one" }   # which worker to run, see below
 split_prompt = "..."             # tells the stage what to split the work into
 merge_stage = "verify"           # stage the parent resumes at once workers finish
-max_workers = 8                  # how many run at once, default 30; 0 is unlimited
+max_workers = 8                  # how many run at once; leave it out for no cap
 on_worker_failure = "continue"
 max_attempts = 3                 # times to ask again if it never calls fan_out
 ```
@@ -207,8 +208,8 @@ The `[graph.stages.mode.fan_out]` table is what makes the stage a fan-out stage.
 | `worker` | required | What each item runs: `{ stage = "x" }`, `{ blueprint = { name = "x" } }`, or `{ query = "..." }` |
 | `merge_stage` | unset | Stage that reconciles worker results before the parent moves on |
 | `results_region` | `conversation` | Where the consolidated worker report lands |
-| `max_items` | unset | Most work items the split may produce. `0` or unset means however many it produces |
-| `max_workers` | `30` | How many workers run at once. `0` means unlimited |
+| `max_items` | unset | Most work items the split may produce, at least 1. Unset means however many it produces |
+| `max_workers` | unset | How many workers run at once, at least 1. Unset means every item at once |
 | `on_worker_failure` | `"continue"` | `continue` merges what succeeded. `fail_all` fails the whole fan-out if any worker fails |
 | `split_prompt` | `""` | Added to the stage's system prompt. It says what to split the work into |
 | `max_attempts` | `3` | How many times the stage is asked again if it ends without calling `fan_out` |
@@ -387,10 +388,10 @@ Split a hundred ways and every worker gets a hundredth of the space. Past some p
 too small to be worth reading, and `max_items` is how you stop the split getting there. Without it,
 whatever the split produces is what runs.
 
-Both caps take `0` to mean no cap. `max_workers = 0` starts every work item the moment the split
-has produced it; `max_items = 0` is the same as leaving the key out. A negative value, or a value
-that is not a whole number, is a validation error rather than a quiet fallback. So a typo shows up
-in `lev validate`, not as a fan-out wider than the blueprint appeared to allow.
+Leave either cap out for no cap. Without `max_workers`, every work item starts the moment the split
+has produced it. `0` is refused for both, as is a negative value or one that is not a whole number.
+So a typo shows up in `lev validate`, not as a fan-out wider or narrower than the blueprint
+appeared to allow. A `fan_out` call's own `max_workers` argument follows the same rule.
 
 ## `max_workers` is not the knob you might think
 
@@ -403,9 +404,9 @@ Four different settings limit concurrency, and they are easy to confuse. All fou
 | `[limits.max_concurrent_inferences_by_provider]` | Model requests in flight | Per provider, daemon-wide |
 | `[rate_limits.<provider>]` | Requests per minute | Per provider |
 
-So `max_workers = 30` (the default) starts up to thirty sub-agents, but if the model pool only allows
-eight requests at once (also the default), the rest wait for a slot. That is fine and costs nothing;
-it is also why an unlimited fan-out is safe to run. See
+So `max_workers = 30` starts up to thirty sub-agents, but if the model pool only allows eight
+requests at once (the default), the rest wait for a slot. That is fine and costs nothing. It is
+also why a fan-out with no `max_workers`, which starts every item at once, is safe to run. See
 [inference pools](/docs/engine#inference-pools).
 
 Both caps can be read and changed over the [HTTP API](/docs/api#fan-out-limits): the blueprint

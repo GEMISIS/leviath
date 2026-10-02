@@ -136,11 +136,16 @@ pub(super) fn describe_blueprint(h: &SubAgentHandle, args: &Value) -> String {
 
 /// What `validate_spawn` says of a spawn that would start.
 pub(super) fn valid(summary: &SpawnSummary) -> String {
-    format!(
-        "Valid: spawn_agent with these arguments would start the run below. Nothing was \
-         started.\n{}",
-        pretty(&serde_json::to_value(summary).expect("a summary is plain data"))
-    )
+    let warned = crate::commands::run::request::warnings_report(&summary.warnings);
+    warned
+        .into_iter()
+        .chain(std::iter::once(format!(
+            "Valid: spawn_agent with these arguments would start the run below. Nothing was \
+             started.\n{}",
+            pretty(&serde_json::to_value(summary).expect("a summary is plain data"))
+        )))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `run_history`'s arguments.

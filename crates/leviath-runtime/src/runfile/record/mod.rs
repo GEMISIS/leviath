@@ -276,6 +276,9 @@ pub enum RunRecord {
     /// run spent getting them, which is the half a retry or a failover otherwise
     /// leaves no trace of at all.
     InferenceAttempt(Box<AttemptRecord>),
+    /// The run took an edge, sent as it is taken so a step that moves the run
+    /// twice keeps both moves.
+    Transition(crate::state::TransitionRecord),
     /// One provider judged unusable, and the model being tried instead.
     InferenceFailover(FailoverRecord),
     /// One committed transaction against the context window: what moved it, the

@@ -56,6 +56,9 @@ fn inference() -> RunEvent {
         model: ModelRef::parse("anthropic/m").unwrap(),
         spend: Default::default(),
         finish_reason: None,
+        kind: Default::default(),
+        stage: None,
+        iteration: 0,
     }
 }
 

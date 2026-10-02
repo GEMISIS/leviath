@@ -401,6 +401,12 @@ The model picks among a stage's edges by their hints when its work there is done
 condition such as `error` or `stuck` fires on its own when that happens. [Multi-stage
 workflows](/docs/stages) explains choosing, gates and stuck detection.
 
+A graph whose run could reach a stage and never get from there to an end still runs, with a loud
+warning everywhere the run shows up. See [a run has to be able to
+end](/docs/stages#a-run-has-to-be-able-to-end). Two other shapes are refused outright: a fan-out
+into a stage of this graph that does not set `allow_as_worker = true`, and a `require_modifications`
+gate on a stage with no tool that changes files.
+
 ## Short forms
 
 A few values have a short form in TOML and JSON. Each reads into the same typed value as its long
@@ -431,7 +437,9 @@ lev validate ./summarizer/agent.toml
 ```
 
 Without `-o` it prints the new file. An existing output file is left alone unless you pass
-`--force`. When the manifest cannot be read, every problem is listed at once.
+`--force`. When the manifest cannot be read, every problem is listed at once. A setting the new
+format spells differently gets a `note:` line on stderr. A fan-out's `max_workers = 0` is one: it
+meant no cap, and a graph says no cap by leaving `max_workers` out.
 
 Here is a small manifest and what it becomes. Before:
 

@@ -49,8 +49,9 @@ fn usage(model: &str, cost: Option<f64>, reported: Option<bool>) -> RunRecord {
 
 fn events_of(records: &[RunRecord]) -> Vec<RunEvent> {
     let mut events = Vec::new();
+    let mut answered = Answered::default();
     for r in records {
-        push_events(&mut events, r);
+        push_events(&mut events, &mut answered, r);
     }
     events
 }
@@ -65,17 +66,23 @@ fn a_model_call_and_its_usage_become_one_inference_event() {
         attempt("mock", "m", json!("succeeded"), "stop"),
         usage("m", Some(0.5), Some(true)),
     ]);
-    assert_eq!(events.len(), 2, "the answer, and the call kept whole");
+    assert_eq!(events.len(), 2, "the call kept whole, then its bill");
     let RunEvent::Inference {
         attempt,
         model,
         spend,
         finish_reason,
-    } = &events[0]
+        kind,
+        stage,
+        iteration,
+    } = &events[1]
     else {
         unreachable!()
     };
-    let RunEvent::Attempt(whole) = &events[1] else {
+    assert_eq!(*kind, crate::state::journal::CallKind::Stage);
+    assert_eq!(stage.as_ref().map(|s| s.as_str()), Some("plan"));
+    assert_eq!(*iteration, 1);
+    let RunEvent::Attempt(whole) = &events[0] else {
         unreachable!()
     };
     assert_eq!(whole.id, "a1");
@@ -107,11 +114,87 @@ fn usage_with_no_call_to_attach_to_stands_on_its_own() {
             _ => None,
         })
         .collect();
-    assert_eq!(spends, vec![(0, 0, 0), (0, 0, 1), (0, 1, 0)]);
-    let RunEvent::Inference { finish_reason, .. } = &events[0] else {
+    assert_eq!(spends, vec![(0, 0, 1), (0, 1, 0)]);
+    let RunEvent::Inference {
+        attempt,
+        finish_reason,
+        ..
+    } = &events[1]
+    else {
         unreachable!()
     };
+    assert_eq!(attempt, "", "billed to no attempt");
     assert_eq!(*finish_reason, None);
+}
+
+/// The worker that made a call records its attempt, and the system that read
+/// the answer records its bill, so the two can land in different steps. Each
+/// call is still one `Inference`, never a second one with nothing spent, and
+/// a title call is a title call with no stage.
+#[test]
+fn an_attempt_and_its_bill_in_different_steps_are_one_call() {
+    let mut answered = Answered::default();
+    let first = journal_events_with(
+        &attempt("mock", "m", json!("succeeded"), "stop"),
+        &mut answered,
+    );
+    assert!(
+        first
+            .iter()
+            .all(|e| !matches!(e, RunEvent::Inference { .. })),
+        "{first:?}"
+    );
+    let mut title = usage("m", None, None);
+    if let RunRecord::InferenceUsage {
+        kind,
+        stage,
+        iteration,
+        ..
+    } = &mut title
+    {
+        *kind = crate::runfile::record::InferenceKind::Title;
+        stage.clear();
+        *iteration = 0;
+    }
+    let second = journal_events_with(&title, &mut answered);
+    let [
+        RunEvent::Inference {
+            attempt,
+            kind,
+            stage,
+            finish_reason,
+            ..
+        },
+    ] = second.as_slice()
+    else {
+        panic!("one call: {second:?}")
+    };
+    assert_eq!(attempt, "a1");
+    assert_eq!(finish_reason.as_deref(), Some("stop"));
+    assert_eq!(*kind, crate::state::journal::CallKind::Title);
+    assert_eq!(*stage, None);
+    // The attempt is billed once.
+    let third = journal_events_with(&usage("m", None, None), &mut answered);
+    let RunEvent::Inference { attempt, .. } = &third[0] else {
+        unreachable!()
+    };
+    assert_eq!(attempt, "");
+}
+
+/// Each edge a run takes is its own event, whatever else the step holds.
+#[test]
+fn a_transition_is_an_event_of_its_own() {
+    let taken = crate::state::TransitionRecord {
+        from: crate::spec::names::StageName::new("a").unwrap(),
+        to: crate::spec::names::StageName::new("b").unwrap(),
+        edge: None,
+        reason: crate::state::TransitionReason::Forced,
+        visit: "v1".into(),
+    };
+    assert_eq!(
+        journal_events(&RunRecord::Transition(taken.clone())),
+        vec![RunEvent::Transition(taken)]
+    );
 }
 
 #[test]

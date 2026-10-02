@@ -139,10 +139,10 @@ impl FanOut {
         &self.config.split_prompt
     }
 
-    /// How many workers run at once. Zero means as many as the daemon's
-    /// inference pool will carry.
-    async fn max_workers(&self) -> i32 {
-        count(self.config.max_workers)
+    /// How many workers run at once. Null means every item starts at once,
+    /// and the daemon's inference pool paces their model calls.
+    async fn max_workers(&self) -> Option<i32> {
+        self.config.max_workers.map(count)
     }
 
     /// The most work items the split may produce. Null means however many it

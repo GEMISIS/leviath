@@ -60,6 +60,7 @@ fn summary() -> SpawnSummary {
             capture_model_input: false,
         },
         workdir: std::path::PathBuf::from("/work"),
+        warnings: Default::default(),
     }
 }
 

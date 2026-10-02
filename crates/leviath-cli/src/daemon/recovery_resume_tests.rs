@@ -358,7 +358,7 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
         s.fan_out = Some(FanOutState {
             stage: s.cursor.stage.clone(),
             config,
-            max_workers: 4,
+            max_workers: Some(4),
             queued: Vec::new(),
             active: vec![
                 ("w1".to_string(), id(&finished)),

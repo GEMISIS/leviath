@@ -463,7 +463,7 @@ fn fan_out_infos(graph: &RunGraph) -> Vec<FanOutInfo> {
                     worker_stage,
                     worker_query,
                     merge_stage: fan_out.merge_stage.as_ref().map(ToString::to_string),
-                    max_workers: (fan_out.max_workers > 0).then_some(fan_out.max_workers as usize),
+                    max_workers: fan_out.max_workers.map(|n| n as usize),
                     max_items: fan_out.max_items.filter(|&n| n > 0).map(|n| n as usize),
                     on_worker_failure: match fan_out.on_worker_failure {
                         WorkerFailure::Continue => "continue",
@@ -1181,11 +1181,11 @@ system_prompt = "Plan the work"
 
 [[graph.stages]]
 name = "spread"
-mode = { fan_out = { worker = { stage = "worker" }, merge_stage = "gather", split_prompt = "split it", results_region = "findings", on_worker_failure = "fail_all", max_workers = 0, max_items = 12 } }
+mode = { fan_out = { worker = { stage = "worker" }, merge_stage = "gather", split_prompt = "split it", results_region = "findings", on_worker_failure = "fail_all", max_items = 12 } }
 
 [[graph.stages]]
 name = "wide"
-mode = { fan_out = { worker = { blueprint = { name = "researcher" } }, split_prompt = "split it" } }
+mode = { fan_out = { worker = { blueprint = { name = "researcher" } }, split_prompt = "split it", max_workers = 4 } }
 
 [[graph.stages]]
 name = "asked"
@@ -1243,21 +1243,21 @@ system_prompt = "Gather"
                 {
                     "stage": "wide",
                     "worker_agent": "researcher",
-                    "max_workers": 30,
+                    "max_workers": 4,
                     "max_items": null,
                     "on_worker_failure": "continue",
                 },
                 {
                     "stage": "asked",
                     "worker_query": "someone who reads papers",
-                    "max_workers": 30,
+                    "max_workers": null,
                     "max_items": null,
                     "on_worker_failure": "continue",
                 },
                 {
                     "stage": "local",
                     "worker_agent": reader,
-                    "max_workers": 30,
+                    "max_workers": null,
                     "max_items": null,
                     "on_worker_failure": "continue",
                 },

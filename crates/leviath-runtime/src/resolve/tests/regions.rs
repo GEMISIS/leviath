@@ -23,13 +23,14 @@ async fn inputs_fill_their_slots_in_the_graph() {
     g.stages[1].mode = StageMode::FanOut(FanOutDef {
         worker: WorkerSource::Stage(n("plan")),
         merge_stage: None,
-        max_workers: 4,
+        max_workers: Some(4),
         on_worker_failure: WorkerFailure::Continue,
         split_prompt: String::new(),
         results_region: None,
         max_items: None,
         max_attempts: None,
     });
+    g.stages[0].allow_as_worker = true;
     g.stages[0].model.models = vec![model("mock/old"), model("mock/new")];
     g.inputs.extend([
         slot_input(
@@ -78,7 +79,7 @@ async fn inputs_fill_their_slots_in_the_graph() {
         [model("mock/new"), model("mock/old")]
     );
     assert_eq!(graph.stages[0].max_iterations, Some(7));
-    assert!(matches!(&graph.stages[1].mode, StageMode::FanOut(f) if f.max_workers == 2));
+    assert!(matches!(&graph.stages[1].mode, StageMode::FanOut(f) if f.max_workers == Some(2)));
     let output = graph.output.as_ref().unwrap();
     assert_eq!(output.format.as_deref(), Some("json"));
     assert_eq!(output.instructions.as_deref(), Some("terse"));
@@ -123,7 +124,7 @@ async fn a_required_region_left_empty_is_refused() {
     g.layout.regions[0].required = true;
     g.inputs.push(text_input("diff", "system"));
     let mut own = g.layout.clone();
-    own.regions[0].required_message = Some("hand the reviewer a diff".into());
+    own.regions[0].required_message = Some("hand the reviewer a diff for {region}".into());
     own.regions.push(own.regions[0].clone());
     own.regions[2].name = n("scratch");
     g.stages[1].layout = Some(own);
@@ -141,7 +142,41 @@ async fn a_required_region_left_empty_is_refused() {
         "required region \"system\" was not filled"
     );
     assert_eq!(issues.0[0].known, ["diff"]);
-    assert_eq!(issues.0[1].message, "hand the reviewer a diff");
+    assert_eq!(issues.0[1].message, "hand the reviewer a diff for scratch");
+}
+
+/// A required input left out is reported in the words of the required region
+/// it fills, as 0.6.4 refused such a spawn with the region's
+/// `required_message`. An input that fills no such region keeps the input
+/// check's own words.
+#[tokio::test]
+async fn a_missing_input_says_its_regions_required_message() {
+    let mut g = graph();
+    g.layout.regions[0].required = true;
+    g.layout.regions[0].required_message = Some("BRIEF-NEEDED for {region}".into());
+    g.inputs.push(InputDecl {
+        required: true,
+        ..text_input("brief", "system")
+    });
+    g.inputs.push(InputDecl {
+        required: true,
+        ty: InputType::Model,
+        binds: vec![InputSlot::StageModel(n("plan"))],
+        ..text_input("mdl", "system")
+    });
+    let issues = spawn(&raw(g), &Fake::default()).await.unwrap_err();
+    let said: Vec<(String, String)> = issues
+        .iter()
+        .map(|i| (i.path.to_string(), i.message.clone()))
+        .collect();
+    assert!(
+        said.contains(&("inputs.brief".into(), "BRIEF-NEEDED for system".into())),
+        "{said:?}"
+    );
+    assert!(
+        said.contains(&("inputs.mdl".into(), "this input is required".into())),
+        "{said:?}"
+    );
 }
 
 /// An input given for a required region that fails its own check is one
@@ -259,4 +294,90 @@ async fn a_path_that_must_exist_is_looked_for_in_the_workdir() {
         ["workdir Unresolvable"],
         "no workdir, nothing to look in"
     );
+}
+
+/// Something of the other kind at the path is named for what it is: a file
+/// given for a directory input is not a missing path, and neither is a
+/// directory given for a file.
+#[tokio::test]
+async fn a_path_of_the_wrong_kind_says_what_is_there() {
+    let request = |kind: PathKind, given: &str| {
+        let mut g = graph();
+        g.inputs.push(InputDecl {
+            ty: InputType::Path {
+                kind,
+                must_exist: true,
+            },
+            ..text_input("target", "system")
+        });
+        raw(g).input("target", RawInput::Text(given.into()))
+    };
+    let env = Fake {
+        existing: ["notes.txt".to_string(), "src/".to_string()].into(),
+        ..Fake::default()
+    };
+    let issues = spawn(&request(PathKind::Dir, "notes.txt"), &env)
+        .await
+        .unwrap_err();
+    assert_eq!(found(&issues), ["inputs.target WrongType"]);
+    assert_eq!(issues.0[0].message, "this path is a file, not a directory");
+    let issues = spawn(&request(PathKind::File, "src"), &env)
+        .await
+        .unwrap_err();
+    assert_eq!(issues.0[0].message, "this path is a directory, not a file");
+    let issues = spawn(&request(PathKind::Any, "nope"), &env)
+        .await
+        .unwrap_err();
+    assert_eq!(found(&issues), ["inputs.target Unresolvable"]);
+    assert!(spawn(&request(PathKind::Any, "src"), &env).await.is_ok());
+}
+
+/// A `blueprint` input is held to what its type says: a blueprint this
+/// machine has installed. A name nothing installs is refused at its input,
+/// at a check as at a spawn.
+#[tokio::test]
+async fn a_blueprint_input_must_name_an_installed_blueprint() {
+    let mut g = graph();
+    g.inputs.push(InputDecl {
+        ty: InputType::Blueprint,
+        ..text_input("helper", "system")
+    });
+    let request = raw(g).input("helper", RawInput::Text("no-such-bp".into()));
+    let issues = spawn(&request, &Fake::default()).await.unwrap_err();
+    assert_eq!(found(&issues), ["inputs.helper Unknown"]);
+    assert_eq!(issues.0[0].message, "no such blueprint");
+    let mut env = Fake::default();
+    env.blueprints.insert(
+        "no-such-bp".into(),
+        crate::spec::env::LoadedBlueprint {
+            graph: graph(),
+            reference: crate::spec::names::BlueprintRef::parse("no-such-bp").unwrap(),
+            version: "1.0.0".into(),
+            base_dir: std::path::PathBuf::from("/agents/no-such-bp"),
+        },
+    );
+    assert!(
+        spawn(&request, &env).await.is_ok(),
+        "an installed one passes"
+    );
+}
+
+/// A missing piece that is not an input keeps the words it was found with.
+#[tokio::test]
+async fn only_a_missing_input_takes_a_regions_words() {
+    let mut g = graph();
+    g.layout.regions[0].required = true;
+    g.layout.regions[0].required_message = Some("NEVER SAID".into());
+    g.stages.clear();
+    let issues = spawn(&raw(g), &Fake::default()).await.unwrap_err();
+    let missing: Vec<&str> = issues
+        .iter()
+        .filter(|i| i.code == IssueCode::Missing)
+        .map(|i| i.message.as_str())
+        .collect();
+    assert!(
+        missing.contains(&"a run needs at least one stage"),
+        "{missing:?}"
+    );
+    assert!(!missing.contains(&"NEVER SAID"), "{missing:?}");
 }

@@ -43,8 +43,26 @@ pub(crate) struct RunFileStep {
 pub(crate) struct RunFileLane {
     writers: HashMap<String, RunFileWriter>,
     events: HashMap<String, Vec<RunEvent>>,
+    /// Per run, the attempts that answered and are not yet billed.
+    answered: HashMap<String, Answered>,
     owner: OwnerFrame,
     policy: CheckpointPolicy,
+}
+
+/// Model attempts that answered, waiting for the usage record that bills
+/// them. An attempt is recorded by the worker that made the call, and its
+/// usage by the system that reads the answer, so the two can land in
+/// different steps; the call becomes one `Inference` when its usage lands.
+#[derive(Debug, Default)]
+pub struct Answered(Vec<AnsweredAttempt>);
+
+/// One attempt that answered: who answered, and how it said it stopped.
+#[derive(Debug)]
+struct AnsweredAttempt {
+    provider: String,
+    model: String,
+    id: String,
+    finish_reason: Option<String>,
 }
 
 impl RunFileLane {
@@ -54,6 +72,7 @@ impl RunFileLane {
         Self {
             writers: HashMap::new(),
             events: HashMap::new(),
+            answered: HashMap::new(),
             owner: OwnerFrame {
                 machine_id: machine_id.to_string(),
                 world_id: world_id.to_string(),
@@ -68,6 +87,7 @@ impl RunFileLane {
     pub(crate) fn forget(&mut self, run_id: &str) {
         self.writers.remove(run_id);
         self.events.remove(run_id);
+        self.answered.remove(run_id);
     }
 
     /// Keep what `record` says happened, for the run's next step: the next
@@ -75,7 +95,8 @@ impl RunFileLane {
     /// noted on its own.
     pub(crate) fn note(&mut self, run_id: &str, record: &RunRecord) {
         let buffered = self.events.entry(run_id.to_string()).or_default();
-        push_events(buffered, record);
+        let answered = self.answered.entry(run_id.to_string()).or_default();
+        push_events(buffered, answered, record);
     }
 
     /// The runs with something noted that no step has written yet.
@@ -326,21 +347,30 @@ fn model_ref(provider: &str, model: &str) -> Option<ModelRef> {
     })
 }
 
-/// The events a journal record becomes in a run file's step.
+/// The events a journal record becomes in a run file's step, read on its
+/// own: a usage record is billed to no attempt.
 pub fn journal_events(record: &RunRecord) -> Vec<RunEvent> {
+    journal_events_with(record, &mut Answered::default())
+}
+
+/// The events a journal record becomes in a run file's step. `answered`
+/// carries the attempts that answered from one record to the next, for the
+/// usage record that bills them.
+pub fn journal_events_with(record: &RunRecord, answered: &mut Answered) -> Vec<RunEvent> {
     let mut events = Vec::new();
-    push_events(&mut events, record);
+    push_events(&mut events, answered, record);
     events
 }
 
 /// Add the events `record` describes to `events`.
-pub(crate) fn push_events(events: &mut Vec<RunEvent>, record: &RunRecord) {
+pub(crate) fn push_events(events: &mut Vec<RunEvent>, answered: &mut Answered, record: &RunRecord) {
     use super::recorded;
     match record {
         RunRecord::InferenceAttempt(a) => {
-            push_attempt(events, a);
+            push_attempt(events, answered, a);
             events.push(RunEvent::Attempt(Box::new(recorded::attempt(a))));
         }
+        RunRecord::Transition(taken) => events.push(RunEvent::Transition(taken.clone())),
         RunRecord::ToolBatch {
             calls,
             requested_by,
@@ -422,13 +452,16 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, record: &RunRecord) {
             execution_id,
             ..
         } => events.push(RunEvent::ContextCommitted(Box::new(ContextCommitState {
-            cause: recorded::cause(*cause),
+            cause: (*cause).into(),
             execution_id: (!execution_id.is_empty()).then(|| execution_id.clone()),
             revision_before: revision_before.clone(),
             revision_after: revision_after.clone(),
             regions: regions.iter().map(recorded::region_commit).collect(),
         }))),
         RunRecord::InferenceUsage {
+            kind,
+            stage,
+            iteration,
             provider,
             model,
             prompt_tokens,
@@ -442,6 +475,7 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, record: &RunRecord) {
             let Some(used) = model_ref(provider, model) else {
                 return;
             };
+            let attempt = answered.take(provider, model);
             let reported = *cost_reported_by_provider == Some(true);
             let spend = Spend {
                 prompt_tokens: *prompt_tokens as u64,
@@ -453,7 +487,15 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, record: &RunRecord) {
                 computed_calls: u32::from(cost_usd.is_some() && !reported),
                 unpriced_calls: u32::from(cost_usd.is_none()),
             };
-            add_spend(events, used, spend);
+            events.push(RunEvent::Inference {
+                attempt: attempt.as_ref().map(|a| a.id.clone()).unwrap_or_default(),
+                model: used,
+                spend,
+                finish_reason: attempt.and_then(|a| a.finish_reason),
+                kind: (*kind).into(),
+                stage: crate::spec::names::StageName::new(stage).ok(),
+                iteration: u32::try_from(*iteration).unwrap_or(u32::MAX),
+            });
         }
         RunRecord::InferenceFailover(f) => {
             if let (Some(from), Some(to)) = (
@@ -501,20 +543,21 @@ fn push_done(
     });
 }
 
-/// A model call's spend-bearing event: an answer, or a line saying it failed.
-fn push_attempt(events: &mut Vec<RunEvent>, a: &crate::runfile::record::AttemptRecord) {
+/// A model attempt: one that answered waits in `answered` for the usage
+/// record that bills it, and one that failed is a line saying so.
+fn push_attempt(
+    events: &mut Vec<RunEvent>,
+    answered: &mut Answered,
+    a: &crate::runfile::record::AttemptRecord,
+) {
     use crate::runfile::record::AttemptOutcome;
     match &a.outcome {
-        AttemptOutcome::Succeeded => {
-            events.extend(
-                model_ref(&a.provider, &a.model).map(|model| RunEvent::Inference {
-                    attempt: a.id.clone(),
-                    model,
-                    spend: Spend::default(),
-                    finish_reason: (!a.finish_reason.is_empty()).then(|| a.finish_reason.clone()),
-                }),
-            )
-        }
+        AttemptOutcome::Succeeded => answered.0.push(AnsweredAttempt {
+            provider: a.provider.clone(),
+            model: a.model.clone(),
+            id: a.id.clone(),
+            finish_reason: (!a.finish_reason.is_empty()).then(|| a.finish_reason.clone()),
+        }),
         AttemptOutcome::Failed { kind, .. } => events.push(RunEvent::Log(format!(
             "model call {} on {}/{} failed: {kind}",
             a.id, a.provider, a.model
@@ -522,23 +565,15 @@ fn push_attempt(events: &mut Vec<RunEvent>, a: &crate::runfile::record::AttemptR
     }
 }
 
-/// Put a call's spend on the model call it belongs to: the latest one on the
-/// same model with nothing spent yet, or a new one when there is none.
-fn add_spend(events: &mut Vec<RunEvent>, used: ModelRef, spend: Spend) {
-    let open = events.iter_mut().rev().find_map(|e| match e {
-        RunEvent::Inference {
-            model, spend: s, ..
-        } if *model == used && *s == Spend::default() => Some(s),
-        _ => None,
-    });
-    match open {
-        Some(slot) => *slot = spend,
-        None => events.push(RunEvent::Inference {
-            attempt: String::new(),
-            model: used,
-            spend,
-            finish_reason: None,
-        }),
+impl Answered {
+    /// The latest attempt on `provider`/`model` that answered, taken out:
+    /// the one a usage record on that model bills.
+    fn take(&mut self, provider: &str, model: &str) -> Option<AnsweredAttempt> {
+        let at = self
+            .0
+            .iter()
+            .rposition(|a| a.provider == provider && a.model == model)?;
+        Some(self.0.remove(at))
     }
 }
 

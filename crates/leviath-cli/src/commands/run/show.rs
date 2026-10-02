@@ -60,6 +60,10 @@ pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
     if let Some(note) = torn_note(id, reader.cut_bytes()) {
         eprintln!("{note}");
     }
+    // On stderr, beside the torn-step note, so `--json` stays one document.
+    for line in super::request::warnings_report(&reader.spec().warnings()) {
+        eprintln!("{line}");
+    }
     let last = reader.last_seq();
     if let Some(range) = &args.deltas {
         let (from, to) = range_of(range, last)?;

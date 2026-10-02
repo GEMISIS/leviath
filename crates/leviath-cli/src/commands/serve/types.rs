@@ -352,9 +352,8 @@ pub(super) struct FanOutInfo {
     /// The stage that reconciles the workers' results, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) merge_stage: Option<String>,
-    /// How many workers run at once. `null` is unlimited (`max_workers = 0` in
-    /// the manifest); a stage that names no cap gets the default, and that
-    /// default is what appears here.
+    /// How many workers run at once. `null` is no cap: the stage leaves
+    /// `max_workers` out, and every item starts at once.
     pub(super) max_workers: Option<usize>,
     /// How many work items the split may produce at all. `null` is unlimited
     /// (`max_items = 0`, or no key).
@@ -471,6 +470,9 @@ impl From<leviath_core::output::FinalOutput> for FinalOutputResp {
 pub(super) struct SpawnedResp {
     /// The new run's id, minted by the daemon.
     pub(super) run_id: String,
+    /// What may keep the run from ever finishing: stages it can reach and
+    /// never leave. The run started anyway. Empty for most runs.
+    pub(super) warnings: Vec<IssueResp>,
 }
 
 /// One problem with a spawn request, as the API serves it: the issue itself,

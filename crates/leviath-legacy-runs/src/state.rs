@@ -472,7 +472,7 @@ fn fan_out(f: &FanOutFile, stage: &StageDef, report: &mut Report) -> FanOutState
     FanOutState {
         stage: stage.name.clone(),
         config,
-        max_workers: n32(f.max_workers),
+        max_workers: (f.max_workers < usize::MAX).then_some(n32(f.max_workers)),
         queued,
         active,
         done: f.summaries.clone(),

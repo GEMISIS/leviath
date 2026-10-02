@@ -4084,8 +4084,8 @@ input FanOutInput {
 	"""
 	Filter on `FanOutOutput.maxWorkers`.
 	
-	How many workers run at once. Zero means as many as the daemon's
-	inference pool will carry.
+	How many workers run at once. Null means every item starts at once,
+	and the daemon's inference pool paces their model calls.
 	"""
 	maxWorkers: IntFilter
 	"""
@@ -4220,10 +4220,10 @@ type FanOutOutput {
 	"The prompt that produces the work items."
 	splitPrompt: String!
 	"""
-	How many workers run at once. Zero means as many as the daemon's
-	inference pool will carry.
+	How many workers run at once. Null means every item starts at once,
+	and the daemon's inference pool paces their model calls.
 	"""
-	maxWorkers: Int!
+	maxWorkers: Int
 	"""
 	The most work items the split may produce. Null means however many it
 	produces. This bounds what there is at all, where `maxWorkers` bounds how
@@ -4263,8 +4263,8 @@ type FanOutProgressOutput {
 	mergeStage: String
 	"What one worker failing does to the rest."
 	onWorkerFailure: WorkerFailurePolicy!
-	"How many workers run at once."
-	maxWorkers: Int!
+	"How many workers run at once. Null means every item at once."
+	maxWorkers: Int
 	"Items not started yet."
 	queued: [FanOutItemStateOutput!]!
 	"Items running, each with its worker's run id as `detail`."
@@ -5046,6 +5046,18 @@ type InferenceAttemptOutput {
 	failover: InferenceFailoverOutput
 }
 
+"Which kind of model call an inference was."
+enum InferenceCallKind {
+	"A turn of the stage's own work."
+	STAGE
+	"A summary of a region."
+	COMPACTION
+	"The call that named the run."
+	TITLE
+	"A call asking the model which edge to take."
+	ROUTING
+}
+
 """
 Filter on `InferenceFailoverOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -5150,9 +5162,9 @@ type InferenceFailoverOutput {
 	at: Timestamp!
 }
 
-"A model call finished."
+"A model call finished and was billed. One per call."
 type InferenceStepOutput {
-	"The attempt's id."
+	"The id of the attempt that answered. Empty when none was recorded."
 	attempt: String!
 	"The model that answered, as `provider/model`."
 	model: String!
@@ -5160,6 +5172,15 @@ type InferenceStepOutput {
 	spend: StateSpendOutput!
 	"Why the model stopped, in the provider's words."
 	finishReason: String
+	"Which kind of call it was."
+	kind: InferenceCallKind!
+	"""
+	The stage it was made for. Null for the title call, which no stage
+	owns.
+	"""
+	stage: String
+	"The iteration it was made in."
+	iteration: Int!
 }
 
 "An input a run graph declares: what a spawn of it may, or must, supply."
@@ -13977,6 +13998,8 @@ enum SpawnIssueCode {
 	UNAVAILABLE
 	"A resumed run names something that has changed since it started."
 	CHANGED
+	"A warning, never a refusal: stages the run can reach and never leave."
+	MAY_NEVER_FINISH
 }
 
 "One problem with a spawn request."
@@ -14110,6 +14133,12 @@ type SpawnSummaryOutput {
 	launch: LaunchPolicyOutput!
 	"The directory its tools would work in."
 	workdir: String!
+	"""
+	What may keep the run from ever finishing: stages it can reach and
+	never leave, each named. Warnings, never refusals: the run would
+	start. Empty for most runs.
+	"""
+	warnings: [SpawnIssueOutput!]!
 }
 
 """
@@ -14119,6 +14148,12 @@ written.
 type SpawnedOutput {
 	"The new run's id."
 	runId: ID!
+	"""
+	What may keep the run from ever finishing: stages it can reach and
+	never leave, each named. The run started anyway; show these loudly.
+	Empty for most runs.
+	"""
+	warnings: [SpawnIssueOutput!]!
 	"""
 	The run as its record stands. Null in the moment between the daemon
 	starting it and writing its first record; read `runId` then, and ask
@@ -15682,7 +15717,7 @@ type StatusChangeOutput {
 }
 
 "Something that happened during a step that the state alone does not show."
-union StepEvent = InferenceStepOutput | FailoverStepOutput | ToolStartedStepOutput | ToolFinishedStepOutput | AnsweredStepOutput | MessageStepOutput | LogStepOutput | AttemptStepOutput | DispatchedStepOutput | CompletedStepOutput | ArtifactsStepOutput | SettledStepOutput | ContextCommittedStepOutput | ContextNotedStepOutput
+union StepEvent = InferenceStepOutput | FailoverStepOutput | ToolStartedStepOutput | ToolFinishedStepOutput | AnsweredStepOutput | MessageStepOutput | LogStepOutput | AttemptStepOutput | DispatchedStepOutput | CompletedStepOutput | ArtifactsStepOutput | SettledStepOutput | ContextCommittedStepOutput | ContextNotedStepOutput | TransitionStepOutput
 
 "A part's bytes, stored once in the run file by digest."
 type StoredBlobOutput {
@@ -17933,6 +17968,15 @@ enum TransitionReason {
 	WORKER
 	"A routing script chose the edge."
 	ROUTER
+}
+
+"""
+The run took an edge. One per edge taken, so a step that moved the run
+twice lists both moves.
+"""
+type TransitionStepOutput {
+	"The move."
+	transition: StageTransitionOutput!
 }
 
 "What happens to the context on the way through an edge."

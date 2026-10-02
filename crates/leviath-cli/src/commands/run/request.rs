@@ -202,6 +202,20 @@ pub(crate) fn issues_report(issues: &SpawnIssues) -> String {
     lines.join("\n")
 }
 
+/// What may keep a run from ever finishing, as a block that is hard to miss:
+/// a banner, then one line per warning. No lines for a run with none.
+pub(crate) fn warnings_report(warnings: &SpawnIssues) -> Vec<String> {
+    let mut lines: Vec<String> = warnings.iter().map(|w| format!("  {w}")).collect();
+    if !lines.is_empty() {
+        lines.insert(0, "!!! WARNING: THIS RUN MAY NEVER FINISH !!!".to_string());
+        lines.push(
+            "  It starts anyway. Watch it, and stop it with `lev cancel <run>` if it loops."
+                .to_string(),
+        );
+    }
+    lines
+}
+
 /// Read a command line into the request it asks for.
 ///
 /// Inputs are read before the task on purpose: a value that does not read has
@@ -413,9 +427,15 @@ pub(crate) fn read_request_file(file: &Path) -> anyhow::Result<SpawnRequest> {
         true => toml::from_str(&text).map_err(|e| e.to_string()),
         false => serde_json::from_str(&text).map_err(|e| e.to_string()),
     };
+    // The TOML and JSON readers stop at the first thing in a file that does
+    // not fit its shape, so that is the one there is to report; the message
+    // says so, since a person fixing it will meet the next one on the rerun.
     parsed.map_err(|e| {
         anyhow::anyhow!(
-            "--request '{}' is not a spawn request: {e}\n  `lev schema spawn-request` prints what one holds",
+            "--request '{}' is not a spawn request: {e}\n  `lev schema spawn-request` prints what one holds\n  \
+             This is the first problem in the file's shape: the reader stops there, so fix it and \
+             run again for the next. Once the file reads, `--check` lists every problem with the \
+             request at once.",
             file.display()
         )
     })

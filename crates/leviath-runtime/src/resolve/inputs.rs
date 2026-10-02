@@ -6,7 +6,7 @@ use super::attach::{self, Files};
 use crate::spec::env::{Caller, ResolveEnv};
 use crate::spec::graph::{OutputDef, RunGraph, StageMode};
 use crate::spec::inputs::{
-    CheckCtx, InputDecl, InputSlot, InputType, InputValue, InputValues, check_inputs,
+    CheckCtx, InputDecl, InputSlot, InputType, InputValue, InputValues, PathKind, check_inputs,
 };
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::ModelRef;
@@ -19,6 +19,10 @@ pub(super) struct Checked {
     pub(super) values: InputValues,
     /// Whether every input passed.
     pub(super) ok: bool,
+    /// Every input that reads on its own, whether or not another failed: what
+    /// the checks that need more than the value are made on, so one input's
+    /// problem never hides another's.
+    pub(super) passing: InputValues,
 }
 
 /// Check the request's inputs against the graph's declarations, then the
@@ -54,19 +58,21 @@ pub(super) fn check(
             .collect(),
         Caller::TopLevel | Caller::Child { .. } => graph.inputs.clone(),
     };
-    let checked = match check_inputs(&decls, &request.inputs, &cx) {
-        Ok(values) => Checked { values, ok: true },
+    let mut checked = match check_inputs(&decls, &request.inputs, &cx) {
+        Ok(values) => Checked {
+            passing: values.clone(),
+            values,
+            ok: true,
+        },
         Err(found) => {
             issues.absorb(found);
-            Checked::default()
+            Checked {
+                passing: each_passing(&decls, request, &cx),
+                ..Checked::default()
+            }
         }
     };
-    // Another input's problem must not hide this one's, so each input that
-    // reads on its own is held to its file and its path either way.
-    let passed = match checked.ok {
-        true => checked.values.clone(),
-        false => each_passing(&decls, request, &cx),
-    };
+    let passed = std::mem::take(&mut checked.passing);
     for decl in &graph.inputs {
         let at = SpecPath::root().field("inputs").key(decl.name.as_str());
         match (&decl.ty, passed.get(decl.name.as_str())) {
@@ -95,25 +101,56 @@ pub(super) fn check(
                 if let Some(dir) = workdir
                     && !env.path_exists(dir, path, *kind)
                 {
-                    issues.push(
-                        SpawnIssue::new(
-                            at,
+                    // Something there of the other kind is worth naming: a
+                    // file given for a directory is not a missing path.
+                    let (code, message) = match (kind, env.path_exists(dir, path, PathKind::Any)) {
+                        (PathKind::Dir, true) => {
+                            (IssueCode::WrongType, "this path is a file, not a directory")
+                        }
+                        (PathKind::File, true) => {
+                            (IssueCode::WrongType, "this path is a directory, not a file")
+                        }
+                        _ => (
                             IssueCode::Unresolvable,
                             "nothing is at this path in the workdir",
-                        )
-                        .expected(decl.ty.describe())
-                        .got(format!("\"{path}\""))
-                        .hint(format!(
-                            "the path is read from the run's workdir, {}",
-                            dir.display()
-                        )),
+                        ),
+                    };
+                    issues.push(
+                        SpawnIssue::new(at, code, message)
+                            .expected(decl.ty.describe())
+                            .got(format!("\"{path}\""))
+                            .hint(format!(
+                                "the path is read from the run's workdir, {}",
+                                dir.display()
+                            )),
                     );
                 }
             }
             _ => {}
         }
     }
+    checked.passing = passed;
     checked
+}
+
+/// Hold each `blueprint` input to what its type promises: a blueprint this
+/// machine has installed. Asked of every input that read, so a check finds
+/// the name a spawn would not.
+pub(super) async fn check_blueprints(
+    graph: &RunGraph,
+    checked: &Checked,
+    env: &dyn ResolveEnv,
+    issues: &mut SpawnIssues,
+) {
+    for decl in &graph.inputs {
+        let Some(InputValue::Blueprint(reference)) = checked.passing.get(decl.name.as_str()) else {
+            continue;
+        };
+        if let Err(mut issue) = env.blueprint(reference).await {
+            issue.path = SpecPath::root().field("inputs").key(decl.name.as_str());
+            issues.push(issue);
+        }
+    }
 }
 
 /// Every input that reads when checked on its own, with its value.
@@ -165,7 +202,7 @@ pub(super) fn apply_slots(graph: &mut RunGraph, values: &InputValues) {
                         _ => None,
                     });
                     for fan in fans {
-                        fan.max_workers = count;
+                        fan.max_workers = Some(count);
                     }
                 }
                 InputSlot::OutputFormat => {

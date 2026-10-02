@@ -339,6 +339,10 @@ pub enum ControlResponse {
     Spawned {
         /// The new run's id.
         run_id: String,
+        /// What may keep the run from ever finishing. The run started
+        /// anyway; a caller shows these loudly.
+        #[serde(default, skip_serializing_if = "SpawnIssues::is_empty")]
+        warnings: SpawnIssues,
     },
     /// A spawn or a dry run was refused: every problem with the request, each
     /// with its path and how to fix it.
@@ -538,8 +542,9 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::Spawn { request, reply });
             match rx.await {
-                Ok(Ok(run_id)) => ControlResponse::Spawned {
-                    run_id: run_id.to_string(),
+                Ok(Ok(spawned)) => ControlResponse::Spawned {
+                    run_id: spawned.run_id.to_string(),
+                    warnings: spawned.warnings,
                 },
                 Ok(Err(issues)) => ControlResponse::Rejected { issues },
                 Err(_) => ControlResponse::Error {
@@ -1051,6 +1056,7 @@ mod tests {
             empty_output: false,
             read_paths: None,
             has_final_output: false,
+            may_never_finish: Vec::new(),
         }
     }
 
@@ -1084,6 +1090,15 @@ mod tests {
         .into()
     }
 
+    /// The warning a run that can never finish starts with.
+    fn looping() -> SpawnIssues {
+        SpawnIssues(vec![crate::spec::issues::SpawnIssue::new(
+            crate::spec::issues::SpecPath::root().field("edges"),
+            crate::spec::issues::IssueCode::MayNeverFinish,
+            "this run can never finish",
+        )])
+    }
+
     /// A fake host: drains ControlOps and replies with scripted values.
     fn spawn_fake_host(mut rx: mpsc::UnboundedReceiver<ControlOp>) {
         tokio::spawn(async move {
@@ -1091,9 +1106,17 @@ mod tests {
                 match op {
                     ControlOp::Spawn { request, reply } => {
                         // A sentinel task makes the fake host refuse the spawn.
+                        // `loops` starts with a warning, as a run whose
+                        // graph cannot finish does.
                         let result = match task_of(&request).as_str() {
                             "FAIL" => Err(refused()),
-                            id => Ok(crate::spec::names::RunId::new(id).unwrap()),
+                            id => Ok(crate::spec::summary::Spawned {
+                                run_id: crate::spec::names::RunId::new(id).unwrap(),
+                                warnings: match id {
+                                    "loops" => looping(),
+                                    _ => SpawnIssues::default(),
+                                },
+                            }),
                         };
                         let _ = reply.send(result);
                     }
@@ -1484,8 +1507,35 @@ mod tests {
         assert_eq!(
             resp,
             ControlResponse::Spawned {
-                run_id: "run-9".to_string()
+                run_id: "run-9".to_string(),
+                warnings: SpawnIssues::default(),
             }
+        );
+    }
+
+    /// A run that started with warnings carries them back over the socket;
+    /// one with none leaves the field out of the wire form.
+    #[tokio::test]
+    async fn a_spawn_carries_its_warnings_back() {
+        let resp = round_trip(&ControlRequest::Spawn {
+            request: Box::new(request("loops")),
+        })
+        .await;
+        assert_eq!(
+            resp,
+            ControlResponse::Spawned {
+                run_id: "loops".to_string(),
+                warnings: looping(),
+            }
+        );
+        let quiet = serde_json::to_value(ControlResponse::Spawned {
+            run_id: "r".to_string(),
+            warnings: SpawnIssues::default(),
+        })
+        .unwrap();
+        assert_eq!(
+            quiet,
+            serde_json::json!({"result": "spawned", "run_id": "r"})
         );
     }
 
@@ -2240,7 +2290,8 @@ mod tests {
         assert_eq!(
             spawned,
             ControlResponse::Spawned {
-                run_id: "r-c".to_string()
+                run_id: "r-c".to_string(),
+                warnings: SpawnIssues::default(),
             }
         );
 
@@ -3020,7 +3071,8 @@ mod tests {
         assert_eq!(
             response,
             ControlResponse::Spawned {
-                run_id: "run-x".to_string()
+                run_id: "run-x".to_string(),
+                warnings: SpawnIssues::default(),
             }
         );
         late.await.unwrap();

@@ -36,6 +36,62 @@ available_tools = ["read_file", "list_dir", "bash", "write_file", "edit_file", "
     assert_eq!(file.run_graph(), expected);
 }
 
+/// A fan-out the manifest let run every item at once (`max_workers = 0`)
+/// leaves `max_workers` out of the graph, and the conversion says so. Any
+/// other cap is kept as written.
+#[test]
+fn a_fan_out_with_no_cap_leaves_max_workers_out_and_says_so() {
+    let old = |workers: u32| {
+        format!(
+            "[agent]\nname = \"f\"\n\n[stages.split]\nmode = \"fan_out\"\nworker_agent = \
+             \"helper\"\nmax_workers = {workers}\n"
+        )
+    };
+    let (text, notes) = migrate_noted(&old(0)).unwrap();
+    assert!(!text.contains("max_workers"), "{text}");
+    assert_eq!(
+        notes,
+        vec![
+            "stages.split.mode.fan_out.max_workers: max_workers = 0 (no cap) is left out, which \
+             is how a graph says no cap"
+                .to_string()
+        ]
+    );
+    let (text, notes) = migrate_noted(&old(5)).unwrap();
+    assert!(text.contains("max_workers = 5"), "{text}");
+    assert!(notes.is_empty(), "{notes:?}");
+}
+
+/// A temperature is written the way the manifest wrote it: `0.2`, not the
+/// `0.20000000298023224` a single-precision number widens to.
+#[test]
+fn a_temperature_is_written_as_it_was_given() {
+    let old = r#"
+[agent]
+name = "warm"
+
+[compaction]
+provider = "openai"
+model = "gpt-mini"
+temperature = 0.2
+
+[stages.main]
+system_prompt = "work"
+
+[stages.main.model]
+provider = "openai"
+model = "gpt-mini"
+
+[stages.main.model.parameters]
+temperature = 0.3
+"#;
+    let text = migrate(old).unwrap();
+    assert!(text.contains("temperature = 0.2\n"), "{text}");
+    assert!(text.contains("temperature = 0.3"), "{text}");
+    assert!(!text.contains("0.2000"), "{text}");
+    assert!(!text.contains("0.3000"), "{text}");
+}
+
 #[test]
 fn a_manifest_that_does_not_parse_is_reported() {
     let problems = migrate("[stages.main]\n").unwrap_err();

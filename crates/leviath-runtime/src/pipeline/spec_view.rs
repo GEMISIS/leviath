@@ -351,7 +351,7 @@ pub(crate) fn stage_setup(spec: &RunSpec, idx: usize) -> StageSetup {
     let params = &stage.model.params;
     StageSetup {
         inference_config: InferenceConfig {
-            temperature: params.temperature,
+            temperature: params.temperature.map(|t| t as f32),
             max_output_tokens: params.max_output_tokens.clone(),
             extra_params: params
                 .extra
@@ -418,19 +418,12 @@ pub(crate) fn stage_inference(
 /// the same test the modification gate applies.
 pub(crate) fn any_stage_can_modify(graph: &RunGraph) -> bool {
     graph.stages.iter().any(|stage| {
-        grants_all_builtins(stage)
-            || named_tools(stage).any(|t| {
-                let canonical = leviath_tools::canonical_tool_name(t);
-                crate::spec::graph::MODIFYING_TOOLS.contains(&canonical)
-                    || edges_from(graph, stage)
-                        .iter()
-                        .filter_map(|e| e.gate.as_ref())
-                        .any(|g| {
-                            g.tools.iter().any(|x| {
-                                leviath_tools::canonical_tool_name(x.as_str()) == canonical
-                            })
-                        })
-            })
+        let gate_tools: Vec<_> = edges_from(graph, stage)
+            .iter()
+            .filter_map(|e| e.gate.as_ref())
+            .flat_map(|g| g.tools.iter().cloned())
+            .collect();
+        stage.can_change_files(&gate_tools)
     })
 }
 

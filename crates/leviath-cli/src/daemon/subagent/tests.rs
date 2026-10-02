@@ -364,6 +364,7 @@ fn summary() -> leviath_runtime::spec::summary::SpawnSummary {
             false,
         ),
         workdir: std::path::PathBuf::from("/w"),
+        warnings: Default::default(),
     }
 }
 
@@ -533,7 +534,20 @@ fn fake_host_full(
                     seen_task.lock().unwrap().push(SeenSpawn::of(&request));
                     let answer = spawn_result
                         .clone()
-                        .map(|id| leviath_runtime::spec::names::RunId::new(id).unwrap())
+                        .map(|id| leviath_runtime::spec::summary::Spawned {
+                            // A child whose id says it loops starts with the
+                            // warning a graph that cannot finish gets.
+                            warnings: match id.starts_with("loops") {
+                                true => leviath_runtime::spec::issues::SpawnIssue::new(
+                                    leviath_runtime::spec::issues::SpecPath::root(),
+                                    leviath_runtime::spec::issues::IssueCode::MayNeverFinish,
+                                    "this run can never finish",
+                                )
+                                .into(),
+                                false => Default::default(),
+                            },
+                            run_id: leviath_runtime::spec::names::RunId::new(id).unwrap(),
+                        })
                         .map_err(|e| {
                             leviath_runtime::spec::issues::SpawnIssue::new(
                                 leviath_runtime::spec::issues::SpecPath::root(),
@@ -711,6 +725,18 @@ async fn spawn_sends_the_typed_inputs_and_reports_the_child_id() {
         leviath_runtime::spec::inputs::RawInput::Int(2)
     );
     assert_eq!(seen[0].max_depth, Some(2));
+}
+
+/// A child that may never finish is still started, and the agent that
+/// started it is told so in the tool's answer.
+#[tokio::test]
+async fn spawn_tells_the_agent_when_its_child_may_never_finish() {
+    let bp = temp_blueprint();
+    let (h, _seen, _t) = fake_host(Ok("loops-1".to_string()), vec![], false);
+    let out = handle(&h, &tc("spawn_agent", bp_args(&bp, "go"))).await;
+    assert!(out.starts_with("Spawned sub-agent 'loops-1'."), "{out}");
+    assert!(out.contains("THIS RUN MAY NEVER FINISH"), "{out}");
+    assert!(out.contains("this run can never finish"), "{out}");
 }
 
 /// A child of an unattended parent is unattended. Spawned attended it stops
@@ -1741,4 +1767,16 @@ fn a_single_transition_is_not_plural() {
     one.transitions.truncate(1);
     let out = reads::render_history("r", reads::View::Transitions, &one);
     assert!(out.starts_with("'r' took 1 edge:"), "{out}");
+}
+
+/// A warning that names no fix of its own gets one.
+#[test]
+fn a_warning_with_no_hint_says_what_to_do() {
+    use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpecPath};
+    let issue = SpawnIssue::new(SpecPath::root(), IssueCode::MayNeverFinish, "it loops");
+    let said = super::args::refusal("spawn_agent", &issue.into());
+    assert!(
+        said.contains("give the stages named a way to end the run"),
+        "{said}"
+    );
 }

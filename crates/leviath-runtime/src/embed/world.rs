@@ -342,7 +342,9 @@ impl AgentWorld {
     /// Start the run `request` asks for. Returns its id once the run is live
     /// in the world: resolved, bound and placed. A request that cannot run
     /// comes back with every reason at once, each naming the place in the
-    /// request it is about.
+    /// request it is about. A run its graph may keep from ever finishing
+    /// still starts; [`validate`](Self::validate) answers with those
+    /// warnings, and the world's log says them as the run starts.
     pub async fn spawn(&self, request: SpawnRequest) -> Result<RunId, SpawnIssues> {
         self.ask(|reply| ControlOp::Spawn {
             request: Box::new(request),
@@ -350,6 +352,7 @@ impl AgentWorld {
         })
         .await
         .unwrap_or_else(|_| Err(closed()))
+        .map(|spawned| spawned.run_id)
     }
 
     /// What `request` would run, without running it: the same checks

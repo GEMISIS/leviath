@@ -168,7 +168,7 @@ pub(crate) fn busy() -> RunState {
     s.fan_out = Some(FanOutState {
         stage: stage("split"),
         config: crate::spec::graph::FanOutDef::same_graph(stage("split")),
-        max_workers: 2,
+        max_workers: Some(2),
         queued: vec![WorkItemState {
             id: "i1".into(),
             inputs: InputValues(
@@ -382,6 +382,9 @@ fn deltas_and_events_survive_the_binary_codec() {
                 model: model.clone(),
                 spend: Spend::default(),
                 finish_reason: Some("stop".into()),
+                kind: Default::default(),
+                stage: None,
+                iteration: 0,
             },
             RunEvent::Failover {
                 from: model.clone(),
@@ -411,4 +414,52 @@ fn deltas_and_events_survive_the_binary_codec() {
     };
     let bin = postcard::to_stdvec(&d).unwrap();
     assert_eq!(postcard::from_bytes::<StateDelta>(&bin).unwrap(), d);
+}
+
+/// A step lists every edge it took from its `Transition` events, two in one
+/// step included. A `last_transition` change alone is the state catching up
+/// with a move an earlier step's event already counted.
+#[test]
+fn a_step_lists_every_edge_it_took() {
+    let taken = |from: &str, to: &str| TransitionRecord {
+        from: stage(from),
+        to: stage(to),
+        edge: None,
+        reason: TransitionReason::Forced,
+        visit: "v".into(),
+    };
+    let step = |changes: Vec<Change>, events: Vec<RunEvent>| StateDelta {
+        seq: 1,
+        at: 0,
+        changes,
+        events,
+    };
+    let both = step(
+        vec![Change::LastTransition(Some(taken("fix", "a")))],
+        vec![
+            RunEvent::Transition(taken("a", "fix")),
+            RunEvent::Log("between".into()),
+            RunEvent::Transition(taken("fix", "a")),
+        ],
+    );
+    let names = |d: &StateDelta| -> Vec<String> {
+        d.transitions()
+            .iter()
+            .map(|t| format!("{}->{}", t.from, t.to))
+            .collect()
+    };
+    assert_eq!(names(&both), ["a->fix", "fix->a"]);
+    let converted = step(
+        vec![
+            Change::Title(Some("t".into())),
+            Change::LastTransition(Some(taken("a", "b"))),
+        ],
+        vec![],
+    );
+    assert!(names(&converted).is_empty());
+    assert!(
+        step(vec![], vec![RunEvent::Log("x".into())])
+            .transitions()
+            .is_empty()
+    );
 }

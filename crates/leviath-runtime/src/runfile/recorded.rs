@@ -136,22 +136,37 @@ pub(crate) fn question_kind(kind: &InteractionKind) -> QuestionKind {
     }
 }
 
+/// Which kind of model call a usage record was for.
+impl From<super::record::InferenceKind> for crate::state::journal::CallKind {
+    fn from(k: super::record::InferenceKind) -> Self {
+        use super::record::InferenceKind as K;
+        match k {
+            K::Stage => Self::Stage,
+            K::Compaction => Self::Compaction,
+            K::Title => Self::Title,
+            K::Routing => Self::Routing,
+        }
+    }
+}
+
 /// What caused a context change.
-pub(crate) fn cause(c: ContextCause) -> CauseState {
-    match c {
-        ContextCause::Seed => CauseState::Seed,
-        ContextCause::Message => CauseState::Message,
-        ContextCause::ModelReply => CauseState::ModelReply,
-        ContextCause::ToolResult => CauseState::ToolResult,
-        ContextCause::ProducedPart => CauseState::ProducedPart,
-        ContextCause::Compaction => CauseState::Compaction,
-        ContextCause::Transform => CauseState::Transform,
-        ContextCause::ContextTool => CauseState::ContextTool,
-        ContextCause::Hook => CauseState::Hook,
-        ContextCause::FanOut => CauseState::FanOut,
-        ContextCause::Interaction => CauseState::Interaction,
-        ContextCause::Resume => CauseState::Resume,
-        ContextCause::Framework => CauseState::Framework,
+impl From<ContextCause> for CauseState {
+    fn from(c: ContextCause) -> Self {
+        match c {
+            ContextCause::Seed => Self::Seed,
+            ContextCause::Message => Self::Message,
+            ContextCause::ModelReply => Self::ModelReply,
+            ContextCause::ToolResult => Self::ToolResult,
+            ContextCause::ProducedPart => Self::ProducedPart,
+            ContextCause::Compaction => Self::Compaction,
+            ContextCause::Transform => Self::Transform,
+            ContextCause::ContextTool => Self::ContextTool,
+            ContextCause::Hook => Self::Hook,
+            ContextCause::FanOut => Self::FanOut,
+            ContextCause::Interaction => Self::Interaction,
+            ContextCause::Resume => Self::Resume,
+            ContextCause::Framework => Self::Framework,
+        }
     }
 }
 

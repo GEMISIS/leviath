@@ -237,11 +237,22 @@ async fn spawn(
         return EntryContent::text("[error] the daemon is shutting down");
     }
     match rx.await {
-        Ok(Ok(child_id)) if wait_flag => wait(h, child_id.as_str()).await,
-        Ok(Ok(child_id)) => EntryContent::text(format!("Spawned sub-agent '{child_id}'.")),
+        Ok(Ok(child)) if wait_flag => wait(h, child.run_id.as_str()).await,
+        Ok(Ok(child)) => EntryContent::text(spawned_text(&child)),
         Ok(Err(issues)) => EntryContent::text(refusal("spawn_agent", &issues)),
         Err(_) => EntryContent::text("[error] the daemon dropped the spawn request"),
     }
+}
+
+/// What `spawn_agent` answers when it does not wait: the child's id, and
+/// anything that may keep the child from ever finishing.
+fn spawned_text(child: &leviath_runtime::spec::summary::Spawned) -> String {
+    std::iter::once(format!("Spawned sub-agent '{}'.", child.run_id))
+        .chain(crate::commands::run::request::warnings_report(
+            &child.warnings,
+        ))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `validate_spawn`: everything `spawn_agent` would check, with nothing

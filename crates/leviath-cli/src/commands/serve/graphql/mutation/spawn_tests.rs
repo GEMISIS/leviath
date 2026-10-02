@@ -157,6 +157,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
             record("coder-1");
             ControlResponse::Spawned {
                 run_id: "coder-1".to_string(),
+                warnings: Default::default(),
             }
         });
         let answer = run(
@@ -251,6 +252,7 @@ async fn a_raw_graph_is_sent_whole_and_a_run_not_yet_written_is_null() {
             );
             ControlResponse::Spawned {
                 run_id: "raw-1".to_string(),
+                warnings: Default::default(),
             }
         });
         let answer = run(
@@ -562,6 +564,7 @@ fn brief() -> leviath_runtime::spec::summary::SpawnSummary {
             capture_model_input: false,
         },
         workdir: "/work".into(),
+        warnings: Default::default(),
     }
 }
 
@@ -853,4 +856,12 @@ async fn a_value_that_does_not_read_is_listed_beside_the_daemons_issues() {
         .filter_map(|issue| issue["path"].as_str())
         .collect();
     assert_eq!(paths, ["launch.max_depth"], "{answer}");
+}
+
+#[test]
+fn a_warning_reads_as_its_own_code() {
+    assert_eq!(
+        super::SpawnIssueCode::from(leviath_runtime::spec::issues::IssueCode::MayNeverFinish),
+        super::SpawnIssueCode::MayNeverFinish
+    );
 }

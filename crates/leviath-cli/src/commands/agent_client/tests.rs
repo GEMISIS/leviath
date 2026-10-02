@@ -319,11 +319,54 @@ fn free_text_event() -> WorldEvent {
     }
 }
 
+/// The warning a run whose graph cannot finish starts with.
+pub(super) fn looping() -> leviath_runtime::spec::issues::SpawnIssues {
+    leviath_runtime::spec::issues::SpawnIssue::new(
+        leviath_runtime::spec::issues::SpecPath::root()
+            .field("graph")
+            .field("edges"),
+        leviath_runtime::spec::issues::IssueCode::MayNeverFinish,
+        "this run can never finish",
+    )
+    .into()
+}
+
+/// A responder that spawns `RUN_ID` as a run that may never finish.
+pub(super) fn spawn_looping(req: ControlRequest) -> ControlResponse {
+    match req {
+        ControlRequest::Spawn { .. } => ControlResponse::Spawned {
+            run_id: RUN_ID.to_string(),
+            warnings: looping(),
+        },
+        _ => ControlResponse::Ok { ok: true },
+    }
+}
+
+/// A run its first prompt starts that may never finish says so in the
+/// session, before anything the run writes.
+#[tokio::test]
+async fn a_first_prompt_says_when_its_run_may_never_finish() {
+    let daemon = ScriptedDaemon::new(vec![completed("complete")], spawn_looping);
+    let (mut h, _bp) = opened_session(daemon, false).await;
+    h.send(r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"go"}]}}"#)
+        .await;
+    let chunk = h
+        .recv_until(|m| update_kind(m).as_deref() == Some("agent_message_chunk"))
+        .await;
+    assert_eq!(
+        chunk.params.unwrap()["update"]["content"]["text"],
+        "!!! WARNING: THIS RUN MAY NEVER FINISH !!!\n"
+    );
+    let _ = h.recv_until(is_result).await;
+    h.close_input().await;
+}
+
 /// A responder that spawns `RUN_ID` and says yes to everything else.
 fn spawn_ok(req: ControlRequest) -> ControlResponse {
     match req {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
+            warnings: Default::default(),
         },
         _ => ControlResponse::Ok { ok: true },
     }
@@ -604,6 +647,7 @@ async fn empty_cwd_defaults_to_the_launch_directory() {
                 .map(|w| w.to_string_lossy().into_owned());
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
+                warnings: Default::default(),
             }
         }
         _ => ControlResponse::Ok { ok: true },
@@ -900,6 +944,7 @@ async fn a_second_prompt_that_cannot_be_delivered_ends_the_turn() {
     let daemon = ScriptedDaemon::new(vec![completed("complete")], |req| match req {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
+            warnings: Default::default(),
         },
         ControlRequest::Message { .. } => ControlResponse::Ok { ok: false },
         _ => ControlResponse::Ok { ok: true },
@@ -1187,6 +1232,7 @@ async fn a_cancel_notification_between_turns_cancels_the_run() {
     let daemon = ScriptedDaemon::new(vec![completed("complete")], move |req| match req {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
+            warnings: Default::default(),
         },
         ControlRequest::Cancel { .. } => {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1231,6 +1277,7 @@ async fn a_cancel_notification_mid_turn_cancels_the_run() {
     let daemon = ScriptedDaemon::new(vec![status_event()], move |req| match req {
         ControlRequest::Spawn { .. } => ControlResponse::Spawned {
             run_id: RUN_ID.to_string(),
+            warnings: Default::default(),
         },
         ControlRequest::Cancel { .. } => {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1351,6 +1398,7 @@ async fn output_is_flushed_on_the_poll_tick_between_events() {
                     ControlRequest::Spawn { .. } => {
                         let mut out = serde_json::to_string(&ControlResponse::Spawned {
                             run_id: RUN_ID.to_string(),
+                            warnings: Default::default(),
                         })
                         .unwrap();
                         out.push('\n');
@@ -1417,6 +1465,7 @@ async fn a_closed_event_stream_ends_the_turn() {
                 if let ControlRequest::Spawn { .. } = req {
                     let mut out = serde_json::to_string(&ControlResponse::Spawned {
                         run_id: RUN_ID.to_string(),
+                        warnings: Default::default(),
                     })
                     .unwrap();
                     out.push('\n');
@@ -1504,6 +1553,7 @@ fn restarting_daemon(
                     ControlRequest::Spawn { .. } => {
                         let out = say(ControlResponse::Spawned {
                             run_id: RUN_ID.to_string(),
+                            warnings: Default::default(),
                         });
                         let _ = write_half.write_all(out.as_bytes()).await;
                     }
@@ -1575,6 +1625,7 @@ async fn a_daemon_that_never_comes_back_ends_the_turn() {
                 _ => {
                     let mut out = serde_json::to_string(&ControlResponse::Spawned {
                         run_id: RUN_ID.to_string(),
+                        warnings: Default::default(),
                     })
                     .unwrap();
                     out.push('\n');
@@ -1819,6 +1870,7 @@ async fn prompt_files_reach_the_daemon_as_parts() {
             cap.lock().unwrap().push(spawned_task_and_parts(&request));
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
+                warnings: Default::default(),
             }
         }
         ControlRequest::Message { content, parts, .. } => {
@@ -1858,6 +1910,7 @@ async fn linked_files_inside_the_working_directory_reach_the_daemon_as_parts() {
             cap.lock().unwrap().push(spawned_task_and_parts(&request));
             ControlResponse::Spawned {
                 run_id: RUN_ID.to_string(),
+                warnings: Default::default(),
             }
         }
         _ => ControlResponse::Ok { ok: true },

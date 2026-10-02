@@ -114,6 +114,7 @@ fn spawned(seen: &Seen) -> SpawnRequest {
 async fn the_old_body_starts_a_run_and_answers_in_the_old_shape() {
     let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
         run_id: "compat-probe-1".into(),
+        warnings: Default::default(),
     }));
     let work = tempfile::tempdir().unwrap();
     std::fs::write(work.path().join("brief.txt"), "the brief").unwrap();
@@ -173,7 +174,10 @@ async fn the_old_body_starts_a_run_and_answers_in_the_old_shape() {
 
 #[tokio::test]
 async fn a_plain_body_asks_for_nothing_it_did_not_name() {
-    let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned { run_id: "r".into() }));
+    let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
+        run_id: "r".into(),
+        warnings: Default::default(),
+    }));
     let (status, _) = send(
         state,
         spawn(serde_json::json!({"blueprint": "compat-probe", "task": "go", "yolo": true})),
@@ -255,6 +259,7 @@ async fn a_body_that_cannot_be_a_run_is_refused_before_the_daemon() {
     for (body, want) in cases {
         let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
             run_id: "never".into(),
+            warnings: Default::default(),
         }));
         let (status, answer) = send(state, spawn(body.clone())).await;
         assert_eq!(status, want, "{body} -> {answer}");
@@ -275,6 +280,7 @@ async fn a_file_over_the_ceiling_is_refused_wherever_it_is_named() {
     for extra in bodies {
         let (mut state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
             run_id: "never".into(),
+            warnings: Default::default(),
         }));
         let mut limits = ServeLimits::default();
         limits.request_limits.max_upload_bytes = 8;

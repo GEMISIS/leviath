@@ -164,6 +164,23 @@ async fn a_spawn_opens_a_session_bound_to_its_run() {
     h.close_input().await;
 }
 
+/// A run that may never finish still starts, and the spawn's answer carries
+/// why, in the shape a refusal's issues take.
+#[tokio::test]
+async fn a_spawn_carries_the_runs_warnings() {
+    let (daemon, _seen) = recording(vec![], |req| super::tests::spawn_looping(req.clone()));
+    let mut h = Harness::start(daemon, AgentClientArgs::default());
+    h.send(&call(1, extensions::SPAWN, coder(serde_json::json!({}))))
+        .await;
+    let result = h.recv().await.result.expect("spawned");
+    assert_eq!(result["warnings"][0]["code"], "may_never_finish");
+    assert_eq!(
+        result["warnings"][0]["message"],
+        "this run can never finish"
+    );
+    h.close_input().await;
+}
+
 /// A whole graph runs as the host wrote it, named after its title.
 #[tokio::test]
 async fn a_spawn_can_carry_a_graph_of_its_own() {
@@ -330,6 +347,7 @@ async fn a_dry_run_answers_with_the_summary_or_the_daemons_issues() {
         ),
         launch: LaunchPolicy::top_level(&LaunchRequest::default(), 3, true),
         workdir: "/w".into(),
+        warnings: Default::default(),
     };
     let answer = valid.clone();
     let daemon = ScriptedDaemon::new(vec![], move |req| match req {

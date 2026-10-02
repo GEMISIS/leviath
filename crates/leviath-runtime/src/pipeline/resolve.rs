@@ -7,10 +7,9 @@
 //! comes from the CLI's config file - the user's default provider/model -
 //! arrives as a plain [`ModelDefaults`] value.
 
-use crate::spec::graph::{ModelChoice, RunGraph, ToolGroup};
+use crate::spec::graph::{ModelChoice, ToolGroup};
 use crate::spec::names::ModelRef;
 
-use super::ResolvedStage;
 use crate::providers::ProviderRegistry;
 use leviath_providers::{Provider, Tool};
 use std::sync::Arc;
@@ -180,7 +179,7 @@ pub fn model_key(model: &str) -> &str {
 /// host-wide `fallback_order`. Deduplicated, because the same pair reaching the
 /// list twice would spend a failover step going nowhere. Never empty: with
 /// nothing registered it yields the blueprint's own first entry, and
-/// `resolve_stages` rejects that unusable case with a clear error.
+/// `resolve_stage_route` rejects that unusable case with a clear error.
 pub(crate) fn resolve_stage_candidates(
     model_cfg: &ModelChoice,
     model_override: Option<&str>,
@@ -331,7 +330,7 @@ fn resolve_candidates_in_order(
         // which is what a fallback list is for, but an unroutable name is worth
         // seeing: it is equally a typo or a model no configured provider
         // carries. A gateway whose catalogue was never read is not among them:
-        // `resolve_stages` refuses the stage before it gets that far
+        // `resolve_stage_route` refuses the stage before it gets that far
         // (`unknown_open_route`).
         if !routed {
             tracing::warn!(
@@ -425,7 +424,7 @@ fn resolve_candidates_in_order(
     }
 
     // The head keeps whatever `resolve_stage_model` has always produced, up to
-    // and including an unregistered provider that `resolve_stages` then
+    // and including an unregistered provider that `resolve_stage_route` then
     // rejects with a readable error. The *tail* is different: every entry in
     // it is somewhere the runtime will actually dispatch to, so an
     // unregistered one is not a fallback but a phantom that parks the run on
@@ -435,7 +434,7 @@ fn resolve_candidates_in_order(
     // A pair whose provider is here and says it does not carry that model is a
     // phantom of the same kind: the failover step lands on it, the API refuses
     // the id, and the run has spent a step going nowhere. The head is not
-    // filtered here - `resolve_stages` refuses it outright, because a stage
+    // filtered here - `resolve_stage_route` refuses it outright, because a stage
     // silently running the next model down is the thing being fixed.
     let tail: Vec<Candidate> = candidates
         .split_off(1)
@@ -450,8 +449,8 @@ fn resolve_candidates_in_order(
 /// from every other resolution failure without parsing the rest.
 const UNREAD_REFUSAL: &str = "cannot be told yet: the model list of";
 
-/// Whether `error` is [`resolve_stages`] refusing a stage because a model list
-/// it needed has not been read.
+/// Whether `error` is a stage's route refused because a model list it needed
+/// has not been read.
 ///
 /// That refusal is the one resolution failure that fixes itself: the list
 /// arrives and the same blueprint resolves. A daemon resuming a run after a
@@ -717,9 +716,8 @@ pub fn tool_source(name: &str, owners: &ToolOwners) -> ToolGroup {
 ///
 /// The two travel together because a connector grant needs both: the defs to
 /// filter, and the ownership to know what a server's name covers. Passed as one
-/// value rather than two adjacent `&`s - `resolve_stages` was already at the
-/// argument-count limit, and two references of different types next to each
-/// other is exactly the pair a reader transposes.
+/// value rather than two adjacent `&`s: two references of different types
+/// next to each other is exactly the pair a reader transposes.
 #[derive(Clone, Copy)]
 pub struct ToolCatalog<'a> {
     /// Every tool definition available to the run.
@@ -896,37 +894,13 @@ pub fn filter_tools_for_stage(
     tools
 }
 
-/// Rewrite the `submit_output` definition in `tools` to describe the shape this
-/// stage is meant to produce.
-///
-/// This is the entire mechanism for arbitrary output formats. There is no
-/// per-format code path anywhere: what makes a model emit a2ui, a house schema,
-/// or something invented after this was written is that the format label, the
-/// author's instructions, and a literal example are pasted into the description
-/// the model reads. A stage that declares nothing keeps the generic wording.
-///
-/// A no-op when the stage does not offer the tool, which is most stages.
-fn apply_output_shape(tools: &mut [Tool], spec: Option<&leviath_core::output::OutputSpec>) {
-    let Some(spec) = spec else { return };
-    let described = leviath_core::describe_spec(spec);
-    if described.is_empty() {
-        return;
-    }
-    for tool in tools
-        .iter_mut()
-        .filter(|t| t.name == leviath_tools::SUBMIT_OUTPUT_TOOL)
-    {
-        tool.description = leviath_tools::submit_output_description(&described);
-    }
-}
-
 /// Every provider a stage could have used, in the order they were tried, for
 /// the error message when none of them is configured.
 ///
 /// A `--model provider/model` override is the whole list on its own: it names
 /// exactly one provider and skips the blueprint's fallbacks entirely.
 ///
-/// Public because [`resolve_stages`] is not the only place that has to explain
+/// Public because a stage's route is not the only place that has to explain
 /// an unusable resolution: `lev doctor` runs the same chain against an empty
 /// [`ModelChoice`] to report what the user's config alone would pick, and it
 /// must name the same providers in the same order rather than reimplement this.
@@ -1118,86 +1092,6 @@ pub(crate) fn resolve_stage_route(
     })
 }
 
-/// Resolve every stage's provider/model + effective tool set from the
-/// graph, or report the first stage that has no usable model.
-///
-/// `unattended` is the run's `--yolo` setting: it decides whether a stage's
-/// human-in-the-loop tools are advertised at all (see
-/// [`filter_tools_for_stage`]).
-///
-/// `output_request` is the shape whoever launched the run asked for, if any. It
-/// is resolved here, alongside the model and tool choices, because this is the
-/// one place that can see all three levels at once - and because a caller's
-/// request only exists at launch.
-pub fn resolve_stages(
-    graph: &RunGraph,
-    model_override: Option<&str>,
-    defaults: &ModelDefaults,
-    registry: &ProviderRegistry,
-    catalog: ToolCatalog<'_>,
-    unattended: bool,
-    output_request: Option<&leviath_core::output::OutputSpec>,
-) -> Result<Vec<ResolvedStage>, String> {
-    // The compaction model is sent the run's context too. Judged only when
-    // its provider is registered: one that is not is never called.
-    if let Some(compaction) = &graph.compaction
-        && let Some(provider) = compaction
-            .model
-            .provider
-            .as_ref()
-            .filter(|p| registry.has(p.as_str()))
-        && let Some(refusal) = registry.retention_refusal_with(
-            &defaults.retention,
-            provider.as_str(),
-            compaction.model.model.as_str(),
-        )
-    {
-        return Err(format!("the blueprint's compaction model is {refusal}"));
-    }
-    let graph_output = graph.output.as_ref().map(super::spec_view::output_spec);
-    graph
-        .stages
-        .iter()
-        .map(|stage| {
-            let route = resolve_stage_route(
-                stage.name.as_str(),
-                &stage.model,
-                &graph.stage_inputs(stage),
-                model_override,
-                defaults,
-                registry,
-            )?;
-            // An empty tool list exposes no tools; otherwise filter the full
-            // set by name (alias-resolved) and by group. A name matching
-            // nothing (a typo, or an MCP tool whose server isn't installed)
-            // is simply omitted. An unattended run also loses the tools that
-            // block on a person.
-            let granted = crate::bind::host::stage_grants(stage, catalog.owners);
-            let required: Vec<String> = stage
-                .required_tools
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-            let mut tools = filter_tools_for_stage(catalog, &granted, &required, unattended);
-            let stage_output = stage.output.as_ref().map(super::spec_view::output_spec);
-            let output = leviath_core::resolve_output_spec(
-                graph_output.as_ref(),
-                stage_output.as_ref(),
-                output_request,
-            );
-            apply_output_shape(&mut tools, output.as_ref());
-            Ok(ResolvedStage {
-                provider_name: route.provider_name,
-                model: route.model,
-                tools,
-                fallbacks: route.fallbacks,
-                output,
-                notes: route.notes,
-            })
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     /// A catalog over `defs` with no MCP servers behind it, which is what every
@@ -1213,6 +1107,103 @@ mod tests {
     }
 
     use super::*;
+    use crate::pipeline::ResolvedStage;
+    use crate::spec::graph::RunGraph;
+
+    /// Rewrite the `submit_output` definition in `tools` to describe the shape this
+    /// stage is meant to produce.
+    ///
+    /// This is the entire mechanism for arbitrary output formats. There is no
+    /// per-format code path anywhere: what makes a model emit a2ui, a house schema,
+    /// or something invented after this was written is that the format label, the
+    /// author's instructions, and a literal example are pasted into the description
+    /// the model reads. A stage that declares nothing keeps the generic wording.
+    ///
+    /// A no-op when the stage does not offer the tool, which is most stages.
+    fn apply_output_shape(tools: &mut [Tool], spec: Option<&leviath_core::output::OutputSpec>) {
+        let Some(spec) = spec else { return };
+        let described = leviath_core::describe_spec(spec);
+        if described.is_empty() {
+            return;
+        }
+        for tool in tools
+            .iter_mut()
+            .filter(|t| t.name == leviath_tools::SUBMIT_OUTPUT_TOOL)
+        {
+            tool.description = leviath_tools::submit_output_description(&described);
+        }
+    }
+
+    /// Every stage's route and tool set, composed the way a stage plan is: the
+    /// tests' way to drive [`resolve_stage_route`] and [`filter_tools_for_stage`]
+    /// over a whole graph.
+    ///
+    /// `unattended` is the run's `--yolo` setting: it decides whether a stage's
+    /// human-in-the-loop tools are advertised at all (see
+    /// [`filter_tools_for_stage`]).
+    ///
+    /// `output_request` is the shape whoever launched the run asked for, if any. It
+    /// is resolved here, alongside the model and tool choices, because this is the
+    /// one place that can see all three levels at once - and because a caller's
+    /// request only exists at launch.
+    fn resolve_stages(
+        graph: &RunGraph,
+        model_override: Option<&str>,
+        defaults: &ModelDefaults,
+        registry: &ProviderRegistry,
+        catalog: ToolCatalog<'_>,
+        unattended: bool,
+        output_request: Option<&leviath_core::output::OutputSpec>,
+    ) -> Result<Vec<ResolvedStage>, String> {
+        let graph_output = graph
+            .output
+            .as_ref()
+            .map(super::super::spec_view::output_spec);
+        graph
+            .stages
+            .iter()
+            .map(|stage| {
+                let route = resolve_stage_route(
+                    stage.name.as_str(),
+                    &stage.model,
+                    &graph.stage_inputs(stage),
+                    model_override,
+                    defaults,
+                    registry,
+                )?;
+                // An empty tool list exposes no tools; otherwise filter the full
+                // set by name (alias-resolved) and by group. A name matching
+                // nothing (a typo, or an MCP tool whose server isn't installed)
+                // is simply omitted. An unattended run also loses the tools that
+                // block on a person.
+                let granted = crate::bind::host::stage_grants(stage, catalog.owners);
+                let required: Vec<String> = stage
+                    .required_tools
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                let mut tools = filter_tools_for_stage(catalog, &granted, &required, unattended);
+                let stage_output = stage
+                    .output
+                    .as_ref()
+                    .map(super::super::spec_view::output_spec);
+                let output = leviath_core::resolve_output_spec(
+                    graph_output.as_ref(),
+                    stage_output.as_ref(),
+                    output_request,
+                );
+                apply_output_shape(&mut tools, output.as_ref());
+                Ok(ResolvedStage {
+                    provider_name: route.provider_name,
+                    model: route.model,
+                    tools,
+                    fallbacks: route.fallbacks,
+                    output,
+                    notes: route.notes,
+                })
+            })
+            .collect()
+    }
     use crate::spec::graph::{RegionLayoutDef, StageDef};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1913,51 +1904,6 @@ mod tests {
             None,
         )
         .expect("a declared agreement makes OpenAI zero");
-    }
-
-    /// The compaction model is held to the same rule as the stages, since a
-    /// summary sends the run's context; one on a provider that is not
-    /// registered is never called and so is not judged.
-    #[test]
-    fn resolve_stages_refuses_a_retaining_compaction_model() {
-        let stage = st("plan".to_string(), model_cfg(vec![("ollama", "q")]));
-        let layout = crate::test_graph::layout(vec![], 1000);
-        let mut bp = bp_new(vec![stage], layout);
-        bp.compaction = Some(crate::spec::graph::CompactionDef {
-            model: entry("openai", "gpt-5.5"),
-            system_prompt: None,
-            user_prompt_template: None,
-            max_summary_tokens: 1000,
-            temperature: 0.0,
-        });
-        let defaults = ModelDefaults {
-            retention: leviath_providers::retention::RetentionSettings {
-                zero_requested: true,
-                ..Default::default()
-            },
-            ..ModelDefaults::default()
-        };
-        let registry = registry_publishing(&[("openai", &["gpt-5.5"]), ("ollama", &["q"])]);
-        let err = resolve_stages(&bp, None, &defaults, &registry, catalog(&[]), false, None)
-            .expect_err("the compaction model keeps an abuse log");
-        assert!(
-            err.starts_with("the blueprint's compaction model is openai/gpt-5.5, which does not"),
-            "{err}"
-        );
-
-        let only_local = registry_publishing(&[("ollama", &["q"])]);
-        resolve_stages(&bp, None, &defaults, &only_local, catalog(&[]), false, None)
-            .expect("an unregistered compaction provider is never called");
-        resolve_stages(
-            &bp,
-            None,
-            &ModelDefaults::default(),
-            &registry,
-            catalog(&[]),
-            false,
-            None,
-        )
-        .expect("not asked for, not refused");
     }
 
     /// And when the provider can say *why*, the spawn error says that instead.

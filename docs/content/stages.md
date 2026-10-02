@@ -77,6 +77,21 @@ Check any graph before you run it:
 lev validate .             # checks the graph is well formed
 ```
 
+### A run has to be able to end
+
+A run ends in a stage that no normal edge leaves, or in one with `allow_complete = true`. A graph
+in which the run can reach a stage and never get from there to such an end may loop for ever. So
+can a stage with an edge back to itself and no `max_revisits`.
+
+That graph is still allowed to run, because a loop is sometimes what you meant. It is never
+quiet about it. `lev validate` prints a banner at the top of its report naming the stages that
+cannot reach an end, and so does `lev run --check`. A spawn answers with the same list as
+`warnings` beside the new run's id, on the CLI, REST, GraphQL, ACP and the `spawn_agent` tool. The
+first lines of the run's log say it, `lev ps` marks the run `(may never finish)` and lists why
+under the table, and `lev run show` repeats it. Stop such a run with `lev cancel <run>`.
+
+`lev validate --deny-warnings` fails on these, for a build that should never ship a loop.
+
 ## Transitions
 
 Every edge is one of two kinds:
@@ -277,6 +292,10 @@ gate = { require_modifications = true, max_attempts = 3 }
 | `message` | generated | The nudge shown when the gate blocks |
 | `region` | unset | An **alternative** way to satisfy `require_modifications`: the gate also passes if this region is non-empty. See below |
 | `tools` | `[]` | Extra tool names to count as modifying, beyond `write_file` and `edit_file` |
+
+A `require_modifications` gate on a stage that has no tool able to change a file is refused when
+the graph is checked. It could never be met: grant the stage `write_file` or `edit_file`, name the
+tool that writes in the gate's `tools`, or drop the requirement.
 
 `require_region_entries` re-runs the stage with the gate's message until the count is met. That is
 how a stage whose model cannot call tools keeps going until its set is complete. An image model

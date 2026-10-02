@@ -19,6 +19,9 @@ pub(crate) fn every_event() -> Vec<RunEvent> {
             model: model.clone(),
             spend: crate::state::Spend::default(),
             finish_reason: Some("stop".into()),
+            kind: Default::default(),
+            stage: None,
+            iteration: 0,
         },
         RunEvent::Failover {
             from: model.clone(),

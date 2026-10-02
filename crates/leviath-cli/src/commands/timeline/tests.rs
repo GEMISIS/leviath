@@ -18,7 +18,7 @@ fn meta(run_id: &str, started: i64, ended: i64) -> RunMeta {
 }
 
 fn usage(
-    kind: InferenceKind,
+    kind: CallKind,
     stage: &str,
     iteration: usize,
     model: &str,
@@ -50,44 +50,23 @@ fn tool_done(at: i64) -> Moment {
 fn journal() -> Vec<Moment> {
     vec![
         usage(
-            InferenceKind::Title,
+            CallKind::Title,
             "",
             0,
             "anthropic/claude-sonnet-5",
             30,
             1_003,
         ),
-        usage(
-            InferenceKind::Stage,
-            "gather",
-            1,
-            "x-ai/grok-4.6",
-            600,
-            1_010,
-        ),
+        usage(CallKind::Stage, "gather", 1, "x-ai/grok-4.6", 600, 1_010),
         tool_done(1_012),
-        usage(
-            InferenceKind::Stage,
-            "gather",
-            2,
-            "x-ai/grok-4.6",
-            500,
-            1_030,
-        ),
-        usage(
-            InferenceKind::Routing,
-            "gather",
-            2,
-            "x-ai/grok-4.6",
-            3,
-            1_040,
-        ),
+        usage(CallKind::Stage, "gather", 2, "x-ai/grok-4.6", 500, 1_030),
+        usage(CallKind::Routing, "gather", 2, "x-ai/grok-4.6", 3, 1_040),
         // A status change that is not "waiting" while not waiting: nothing to close.
         status(RunStatus::Running, 1_040),
         status(RunStatus::WaitingInput, 1_045),
         // A child's title call journaled while parked is not this run's time.
         usage(
-            InferenceKind::Title,
+            CallKind::Title,
             "",
             0,
             "anthropic/claude-sonnet-5",
@@ -96,7 +75,7 @@ fn journal() -> Vec<Moment> {
         ),
         status(RunStatus::Running, 1_345),
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "polish",
             3,
             "google/gemini-3.1-pro-preview",
@@ -104,7 +83,7 @@ fn journal() -> Vec<Moment> {
             1_545,
         ),
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "polish",
             4,
             "google/gemini-3.1-pro-preview",
@@ -112,7 +91,7 @@ fn journal() -> Vec<Moment> {
             1_745,
         ),
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "polish",
             5,
             "google/gemini-3.1-pro-preview",
@@ -121,7 +100,7 @@ fn journal() -> Vec<Moment> {
         ),
         // Large but a different stage: the run of repeats ends here.
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "summary",
             6,
             "anthropic/claude-sonnet-5",
@@ -130,7 +109,7 @@ fn journal() -> Vec<Moment> {
         ),
         // Small and consecutive: ordinary, never a warning.
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "summary",
             7,
             "anthropic/claude-sonnet-5",
@@ -138,7 +117,7 @@ fn journal() -> Vec<Moment> {
             2_050,
         ),
         usage(
-            InferenceKind::Stage,
+            CallKind::Stage,
             "summary",
             8,
             "anthropic/claude-sonnet-5",
@@ -200,7 +179,7 @@ fn a_run_with_no_records_is_all_other_time() {
 #[test]
 fn a_clock_that_went_backwards_never_makes_a_negative_total() {
     let records = [
-        usage(InferenceKind::Stage, "gather", 1, "m", 10, 900),
+        usage(CallKind::Stage, "gather", 1, "m", 10, 900),
         tool_done(890),
     ];
     let t = analyze(&meta("r", 1_000, 950), &records);
@@ -289,7 +268,7 @@ where
         write_journal(
             "child-1",
             &[usage(
-                InferenceKind::Stage,
+                CallKind::Stage,
                 "gather",
                 1,
                 "anthropic/claude-sonnet-5",
@@ -333,6 +312,9 @@ fn write_journal(run_id: &str, moments: &[Moment]) {
                 }),
             ),
             Moment::Call {
+                kind,
+                stage,
+                iteration,
                 model,
                 prompt_tokens,
                 completion_tokens,
@@ -352,6 +334,9 @@ fn write_journal(run_id: &str, moments: &[Moment]) {
                         ..Spend::default()
                     },
                     finish_reason: None,
+                    kind: *kind,
+                    stage: leviath_runtime::spec::names::StageName::new(stage).ok(),
+                    iteration: *iteration as u32,
                 }],
                 None,
             ),
@@ -429,7 +414,10 @@ async fn a_run_file_reads_as_a_timeline() {
     crate::runstate::with_isolated_runs_dir_async("timeline-run-file", |_d| async {
         let dir = recorded(&crate::runstate::runs_dir());
         let run_id = dir.file_name().unwrap().to_string_lossy().into_owned();
-        let call = |completion_tokens| RunEvent::Inference {
+        // Each call says what kind it was and where it was made, so a title
+        // call is a row of its own and a call is placed by its own record,
+        // not by the step that happened to carry it.
+        let call = |completion_tokens, kind, stage: Option<&str>, iteration| RunEvent::Inference {
             attempt: "a".to_string(),
             model: ModelRef::parse("anthropic/claude-sonnet-5").unwrap(),
             spend: Spend {
@@ -438,9 +426,23 @@ async fn a_run_file_reads_as_a_timeline() {
                 ..Spend::default()
             },
             finish_reason: None,
+            kind,
+            stage: stage.map(|s| leviath_runtime::spec::names::StageName::new(s).unwrap()),
+            iteration,
         };
-        step_with(&dir, 100, vec![call(10)], |s| s.status = State::Active);
-        step_with(&dir, 110, vec![call(20)], |s| s.cursor.iteration = 1);
+        step_with(
+            &dir,
+            100,
+            vec![call(10, CallKind::Stage, Some("analyze"), 1)],
+            |s| s.status = State::Active,
+        );
+        step_with(&dir, 105, vec![call(3, CallKind::Title, None, 0)], |_| {});
+        step_with(
+            &dir,
+            110,
+            vec![call(20, CallKind::Stage, Some("analyze"), 2)],
+            |s| s.cursor.iteration = 1,
+        );
         let done = RunEvent::ToolFinished {
             call_id: "c1".to_string(),
             result: leviath_runtime::state::ToolResultState {
@@ -455,14 +457,20 @@ async fn a_run_file_reads_as_a_timeline() {
         });
         step_with(&dir, 150, Vec::new(), |s| s.status = State::Active);
         let timeline = load(&run_id).expect("the run file reads");
-        assert_eq!(timeline.calls.len(), 2);
+        assert_eq!(timeline.calls.len(), 3);
         assert_eq!(timeline.calls[0].stage, "analyze");
-        assert_eq!(
-            timeline.calls[1].iteration, 0,
-            "made before the step moved it"
-        );
-        assert_eq!(timeline.calls[1].completion_tokens, 20);
+        assert_eq!(timeline.calls[0].iteration, 1);
+        assert_eq!(timeline.calls[1].kind, "title");
+        assert_eq!(timeline.calls[1].stage, "");
+        assert_eq!(timeline.calls[2].iteration, 2);
+        assert_eq!(timeline.calls[2].completion_tokens, 20);
         assert_eq!(timeline.calls[0].model, "claude-sonnet-5");
+        let rows: Vec<(&str, usize)> = timeline
+            .stages
+            .iter()
+            .map(|s| (s.name.as_str(), s.calls))
+            .collect();
+        assert_eq!(rows, vec![("analyze", 2), ("(title)", 1)]);
         assert_eq!(timeline.totals.waiting, 30);
         assert_eq!(timeline.totals.tools, 5);
 

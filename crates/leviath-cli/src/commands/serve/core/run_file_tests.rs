@@ -36,12 +36,19 @@ pub(crate) fn recorded() -> String {
 pub(crate) fn step(
     run_id: &str,
     at: i64,
-    events: Vec<RunEvent>,
+    mut events: Vec<RunEvent>,
     edit: impl FnOnce(&mut RunState),
 ) -> u64 {
     let mut writer = RunFileWriter::open(&path(run_id), Default::default()).unwrap();
     let mut next = writer.state().clone();
     edit(&mut next);
+    // A move journals its edge as the live lane does, beside the state that
+    // shows it.
+    if next.last_transition != writer.state().last_transition
+        && let Some(taken) = next.last_transition.clone()
+    {
+        events.push(RunEvent::Transition(taken));
+    }
     writer
         .record(next, at, events)
         .unwrap()

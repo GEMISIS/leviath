@@ -62,7 +62,7 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
     let manifest = manifest_path(&args.path);
     let text = std::fs::read_to_string(&manifest)
         .with_context(|| format!("could not read '{}'", manifest.display()))?;
-    let blueprint = convert(&text).map_err(|problems| {
+    let (blueprint, notes) = convert(&text).map_err(|problems| {
         let mut lines = vec![format!(
             "'{}' does not convert: {} problem(s)",
             manifest.display(),
@@ -71,6 +71,9 @@ pub(crate) fn migrate(args: &MigrateArgs) -> anyhow::Result<Option<String>> {
         lines.extend(problems.iter().map(|p| format!("  {p}")));
         anyhow::anyhow!(lines.join("\n"))
     })?;
+    for note in notes {
+        eprintln!("note: {note}");
+    }
     let Some(out) = &args.output else {
         return Ok(Some(blueprint));
     };
@@ -104,13 +107,13 @@ fn manifest_path(path: &Path) -> PathBuf {
 /// The text of an `agent.leviath` as an `agent.toml`, or every problem with
 /// it.
 #[cfg(feature = "legacy-runs")]
-pub(crate) fn convert(manifest: &str) -> Result<String, Vec<String>> {
-    leviath_legacy_runs::migrate(manifest)
+pub(crate) fn convert(manifest: &str) -> Result<(String, Vec<String>), Vec<String>> {
+    leviath_legacy_runs::migrate_noted(manifest)
 }
 
 /// Without the old-format reader there is nothing to convert with.
 #[cfg(not(feature = "legacy-runs"))]
-pub(crate) fn convert(_manifest: &str) -> Result<String, Vec<String>> {
+pub(crate) fn convert(_manifest: &str) -> Result<(String, Vec<String>), Vec<String>> {
     Err(vec![
         "this build of lev cannot read agent.leviath files (it was built without the \
          legacy-runs feature)"
@@ -152,6 +155,28 @@ conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000 }
         let path = dir.join(MANIFEST_FILE);
         std::fs::write(&path, OLD_CODER).unwrap();
         path
+    }
+
+    /// A fan-out a manifest gave `max_workers = 0` (no cap) has no
+    /// `max_workers` in its blueprint, which is how a graph says no cap, and
+    /// the conversion says so.
+    #[tokio::test]
+    async fn a_fan_out_with_no_cap_converts_to_one_that_leaves_it_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = OLD_CODER.replace(
+            "[stages.review]\nmode = \"autonomous\"",
+            "[stages.review]\nmode = \"fan_out\"\nworker_agent = \"helper\"\nmax_workers = 0",
+        );
+        assert_ne!(text, OLD_CODER);
+        std::fs::write(dir.path().join(MANIFEST_FILE), text).unwrap();
+        let printed = migrate(&MigrateArgs {
+            path: dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .unwrap()
+        .expect("printed");
+        assert!(printed.contains("fan_out"), "{printed}");
+        assert!(!printed.contains("max_workers"), "{printed}");
     }
 
     /// A manifest converts to a blueprint that loads as the same run, named

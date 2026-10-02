@@ -112,13 +112,7 @@ impl From<&leviath_runtime::spec::graph::ModelParams> for ModelParameters {
             .map(|(key, value)| (key.clone(), value.to_json()))
             .collect();
         Self {
-            // Through its shortest decimal form, so the `0.2` the blueprint
-            // wrote is served as `0.2` rather than as the nearest `f32` widened.
-            temperature: parameters.temperature.map(|t| {
-                t.to_string()
-                    .parse::<f64>()
-                    .expect("an f32 prints as a number")
-            }),
+            temperature: parameters.temperature,
             max_output_tokens: parameters
                 .max_output_tokens
                 .as_ref()

@@ -83,7 +83,10 @@ fn walked(runs: &Path) -> String {
             .record(
                 state.clone(),
                 100 + at as i64,
-                vec![RunEvent::Log(format!("step {at}"))],
+                vec![
+                    RunEvent::Log(format!("step {at}")),
+                    RunEvent::Transition(state.last_transition.clone().expect("a move")),
+                ],
             )
             .expect("the step is written");
     }

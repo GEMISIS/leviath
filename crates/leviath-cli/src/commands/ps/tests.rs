@@ -35,7 +35,43 @@ fn entry(run_id: &str, status: AgentStatus) -> RunListEntry {
         empty_output: false,
         read_paths: None,
         has_final_output: false,
+        may_never_finish: Vec::new(),
     }
+}
+
+/// A run whose graph has no way out says so in its row, ahead of any note
+/// about its result, and again under the table with each warning in full.
+#[test]
+fn a_run_that_may_never_finish_is_marked_in_its_row_and_under_the_table() {
+    let mut e = entry("loopy", AgentStatus::Active);
+    e.may_never_finish = vec!["graph.edges: may never finish: it loops".to_string()];
+    e.empty_output = true;
+    assert_eq!(status_cell(&e), "active (may never finish)");
+    let out = format_runs(
+        &[e.clone(), entry("calm", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
+    assert!(
+        out.contains(
+            "!!! may never finish (stop one with lev cancel <run>):\n  loopy: graph.edges: may \
+             never finish: it loops"
+        ),
+        "{out}"
+    );
+    let calm = format_runs(
+        &[entry("calm", AgentStatus::Active)],
+        &[],
+        &healthy_daemon(),
+        0,
+    );
+    assert!(!calm.contains("may never finish"), "{calm}");
+    // Once it has stopped, the warning is behind it.
+    e.status = AgentStatus::Cancelled;
+    assert_eq!(status_cell(&e), "cancelled (no output)");
+    let stopped = format_runs(&[e], &[], &healthy_daemon(), 0);
+    assert!(!stopped.contains("may never finish"), "{stopped}");
 }
 
 #[test]

@@ -13,7 +13,7 @@ use leviath_runtime::runfile::{RunFileErrorKind, RunFileReader};
 use leviath_runtime::spec::graph::EdgeCondition;
 use leviath_runtime::spec::names::Digest;
 use leviath_runtime::spec::run_spec::RunSpec;
-use leviath_runtime::state::{Change, RunState, StateDelta, TransitionReason, TransitionRecord};
+use leviath_runtime::state::{RunState, StateDelta, TransitionReason, TransitionRecord};
 use serde::Serialize;
 
 use super::super::types::AppState;
@@ -147,13 +147,7 @@ pub(crate) fn graph_of(spec: &RunSpec, state: &RunState, deltas: &[StateDelta]) 
     let graph = &spec.graph;
     let mut taken = vec![0u32; graph.edges.len()];
     let mut unjoined: Vec<GraphEdge> = Vec::new();
-    let moves = deltas
-        .iter()
-        .flat_map(|delta| delta.changes.iter())
-        .filter_map(|change| match change {
-            Change::LastTransition(Some(record)) => Some(record),
-            _ => None,
-        });
+    let moves = deltas.iter().flat_map(StateDelta::transitions);
     for record in moves {
         let found = graph.edges.iter().position(|edge| {
             edge.from == record.from

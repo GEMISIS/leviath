@@ -259,6 +259,10 @@ pub(crate) struct SpawnedRun {
     pub workdir: String,
     /// Whether the run was started unattended.
     pub yolo: bool,
+    /// What may keep the run from ever finishing, one line each. Left out
+    /// when there is nothing to say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Render a spawn outcome for printing: JSON when `json`, else the sentence.
@@ -300,6 +304,14 @@ pub(crate) async fn send_spawn(
     let spawned = spawn_once(client, &run).await?;
     println!("{}", spawn_report(&spawned, json));
     Ok(())
+}
+
+/// Say what may keep a run from finishing, on stderr where `--json` leaves
+/// stdout alone.
+fn warn_after(warnings: &leviath_runtime::spec::issues::SpawnIssues) {
+    for line in crate::commands::run::request::warnings_report(warnings) {
+        eprintln!("{line}");
+    }
 }
 
 /// Every warning a run's blueprint and this machine call for, before the
@@ -369,12 +381,16 @@ pub async fn send_spawn_batch(
 /// One spawn exchange with the daemon, warnings and printing left to callers.
 async fn spawn_once(client: &ControlClient, run: &LocalRun) -> anyhow::Result<SpawnedRun> {
     match client.spawn(run.request.clone()).await {
-        Ok(ControlResponse::Spawned { run_id }) => Ok(SpawnedRun {
-            run_id,
-            blueprint_path: run.manifest.to_string_lossy().into_owned(),
-            workdir: run.workdir.clone(),
-            yolo: run.yolo,
-        }),
+        Ok(ControlResponse::Spawned { run_id, warnings }) => {
+            warn_after(&warnings);
+            Ok(SpawnedRun {
+                run_id,
+                blueprint_path: run.manifest.to_string_lossy().into_owned(),
+                workdir: run.workdir.clone(),
+                yolo: run.yolo,
+                warnings: warnings.iter().map(ToString::to_string).collect(),
+            })
+        }
         Ok(ControlResponse::Rejected { issues }) => bail!(
             "the daemon refused the run.\n{}",
             crate::commands::run::request::issues_report(&issues)
@@ -435,6 +451,22 @@ mod tests {
             write_half.write_all(b"\n").await.unwrap();
         });
         (id, handle)
+    }
+
+    /// A run that may never finish starts, and its warnings go to stderr
+    /// and into the JSON report.
+    #[tokio::test]
+    async fn a_spawn_that_may_never_finish_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, server) = fake_daemon(
+            dir.path(),
+            r#"{"result":"spawned","run_id":"loops-1","warnings":[{"path":[{"Field":"edges"}],"code":"may_never_finish","message":"it loops","expected":null,"got":null,"hint":null,"known":[]}]}"#,
+        );
+        let spawned = spawn_once(&ControlClient::new(id), &LocalRun::default())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(spawned.warnings, vec!["edges: may never finish: it loops"]);
     }
 
     async fn send(response_line: &'static str) -> anyhow::Result<()> {
@@ -562,12 +594,14 @@ mod tests {
                 blueprint_path: "/b".into(),
                 workdir: "/w".into(),
                 yolo: false,
+                warnings: vec![],
             },
             SpawnedRun {
                 run_id: "a-1-2".into(),
                 blueprint_path: "/b".into(),
                 workdir: "/w".into(),
                 yolo: false,
+                warnings: vec![],
             },
         ];
         assert_eq!(batch_report(&runs, false), "spawned a-1-1\nspawned a-1-2");
@@ -582,6 +616,7 @@ mod tests {
             blueprint_path: "/agents/coder/agent.toml".to_string(),
             workdir: "/work".to_string(),
             yolo: true,
+            warnings: vec!["edges: may never finish: it loops".to_string()],
         }
     }
 

@@ -451,8 +451,12 @@ curl -X POST http://localhost:3000/api/runs \
 A run that starts answers `201` with its id:
 
 ```json
-{"run_id": "coder-1790848889-ecc01e84ab94"}
+{"run_id": "coder-1790848889-ecc01e84ab94", "warnings": []}
 ```
+
+`warnings` lists what may keep the run from ever finishing: stages it can reach and never leave,
+each an issue with the code `may_never_finish`. The run started anyway. Show these to whoever
+started it; see [a run has to be able to end](/docs/stages#a-run-has-to-be-able-to-end).
 
 The body is JSON, or `multipart/form-data` when it carries files; see
 [attaching files](#attaching-files). Every key is checked, so a misspelled one is a refusal rather
@@ -554,12 +558,13 @@ a summary of the run it would be:
              "since": {"text": "v0.6.0"}},
   "launch": {"unattended": "all", "allow": [], "max_depth": 0, "seed_commands": true,
              "capture_model_input": false},
-  "workdir": "/home/you/project"
+  "workdir": "/home/you/project",
+  "warnings": []
 }
 ```
 
 Each stage shows the model it resolved to on this machine, and each input its value after
-defaults. A request that would be refused answers `422` with the same issues `POST /api/runs` would
+defaults. `warnings` is the list a spawn of it would answer with. A request that would be refused answers `422` with the same issues `POST /api/runs` would
 give. See [check before you start](/docs/starting-a-run#check-before-you-start).
 
 ### The request's schema, and a blueprint's inputs
@@ -1159,7 +1164,7 @@ stage, resolved the way the daemon will apply them:
       "stage": "split_review",
       "worker_stage": "review_worker",
       "merge_stage": "deep_review",
-      "max_workers": 30,
+      "max_workers": 8,
       "max_items": 30,
       "on_worker_failure": "continue",
       "results_region": "worker_findings"
@@ -1170,15 +1175,15 @@ stage, resolved the way the daemon will apply them:
 }
 ```
 
-`max_workers` is the default (30) when the manifest names none, and `null` when the stage is
-unlimited. `max_items` is `null` when there is no ceiling. Whichever of `worker_agent`,
+`max_workers` is `null` when the stage names none, which starts every item at once. `max_items` is
+`null` when there is no ceiling. Whichever of `worker_agent`,
 `worker_stage` or `worker_query` the stage uses is the one present. A blueprint that never fans out
 has an empty list. `blueprints.fan_outs` in the `capabilities` list on `GET /api/config` says the
 daemon reports this.
 
-Changing a cap is a manifest write: `PUT /api/blueprints/{name}` with the manifest text, the stage's
-`max_workers` or `max_items` set to the number you want, or to `0` for no cap at all. `POST
-/api/blueprints/validate` will tell you first if the value is not a whole number or is negative,
+Changing a cap is a manifest write: `PUT /api/blueprints/{name}` with the manifest text, and the
+stage's `max_workers` or `max_items` set to the number you want or left out for no cap. `POST
+/api/blueprints/validate` will tell you first if the value is `0`, negative or not a whole number,
 which are errors rather than quiet fallbacks. The workers still share the daemon's inference pool
 (`[limits] max_concurrent_inferences`, 8 by default), so an unlimited fan-out queues at the model
 rather than running away.

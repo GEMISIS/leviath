@@ -158,7 +158,7 @@ pub(crate) fn as_agent_toml(text: &str) -> Result<(String, bool), Vec<String>> {
         .is_ok_and(|table| table.contains_key("agent") && !table.contains_key("blueprint"));
     match old {
         true => crate::commands::blueprint::convert(text)
-            .map(|converted| (converted, true))
+            .map(|(converted, _notes)| (converted, true))
             .map_err(|problems| {
                 problems
                     .into_iter()

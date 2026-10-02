@@ -249,6 +249,7 @@ async fn an_agent_reads_validates_fixes_spawns_and_reads_its_childs_history() {
             .await
             .expect("spawn replied")
             .expect("the parent starts")
+            .run_id
             .to_string();
 
         // Bounded: the whole exchange is a handful of scripted turns.

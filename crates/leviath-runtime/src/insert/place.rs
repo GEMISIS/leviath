@@ -311,22 +311,26 @@ fn runtime_region(name: &str, max_tokens: usize) -> leviath_core::Region {
     leviath_core::Region::new(name.to_string(), kind, max_tokens)
 }
 
-/// Spawn-time notes, on a new run: each stage's plan notes, tagged with the
-/// stage's position, so they are the first lines of that stage's log.
+/// Spawn-time notes, on a new run: what may keep the run from finishing,
+/// first in its entry stage's log, then each stage's plan notes, tagged with
+/// the stage's position, so they are the first lines of that stage's log.
 pub(crate) fn io_buffer(spec: &RunSpec, state: &RunState) -> crate::pipeline::StageIoBuffer {
     let logs = match state.seq {
-        0 => spec
-            .graph
-            .stages
-            .iter()
-            .enumerate()
-            .flat_map(|(i, stage)| {
+        0 => {
+            let entry = crate::pipeline::spec_view::entry_index(&spec.graph);
+            let warnings: Vec<(usize, String)> = spec
+                .warnings()
+                .iter()
+                .map(|w| (entry, format!("[warning] {w}")))
+                .collect();
+            let notes = spec.graph.stages.iter().enumerate().flat_map(|(i, stage)| {
                 spec.stage(stage.name.as_str())
                     .into_iter()
                     .flat_map(|p| p.notes.iter().cloned())
                     .map(move |line| (i, line))
-            })
-            .collect(),
+            });
+            warnings.into_iter().chain(notes).collect()
+        }
         _ => Vec::new(),
     };
     crate::pipeline::StageIoBuffer {
@@ -340,11 +344,7 @@ pub(crate) fn io_buffer(spec: &RunSpec, state: &RunState) -> crate::pipeline::St
 pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
     let blueprint = spec.origin.blueprint_name().map(str::to_string);
     let digest = spec.origin.digest().map(ToString::to_string);
-    let task = spec
-        .seeded
-        .get("task")
-        .map(|s| s.text.clone())
-        .unwrap_or_default();
+    let task = task_text(spec);
     RunMetadata {
         run_id: spec.run_id.to_string(),
         agent_name: blueprint
@@ -469,7 +469,7 @@ pub(crate) fn spec_components(
                 system_prompt: c.system_prompt.clone(),
                 user_prompt_template: c.user_prompt_template.clone(),
                 max_summary_tokens: c.max_summary_tokens as usize,
-                temperature: c.temperature,
+                temperature: c.temperature as f32,
             },
         ));
     }
@@ -501,10 +501,7 @@ pub(crate) fn spec_components(
 /// and has done nothing yet: a child is listed under its parent, a run with no
 /// task has nothing to be named after, and a resumed run already had its turn.
 pub(crate) fn title_request(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, state: &RunState) {
-    let has_task = spec
-        .seeded
-        .get("task")
-        .is_some_and(|s| !s.text.trim().is_empty());
+    let has_task = !task_text(spec).trim().is_empty();
     let wanted = entity.contains::<crate::title::TitleCandidates>()
         && state.seq == 0
         && state.title.is_none()
@@ -512,6 +509,22 @@ pub(crate) fn title_request(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, sta
         && has_task;
     if wanted {
         entity.insert(crate::title::PendingTitle);
+    }
+}
+
+/// What the run was asked to do, as text: its `task` input, whatever region
+/// that fills, or for a graph that takes no `task` input, what seeded its
+/// `task` region. Empty for a task that is a file, which has no words to be
+/// named after.
+fn task_text(spec: &RunSpec) -> String {
+    match spec.inputs.get("task") {
+        Some(crate::spec::inputs::InputValue::Text(text)) => text.clone(),
+        Some(_) => String::new(),
+        None => spec
+            .seeded
+            .get("task")
+            .map(|s| s.text.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -698,7 +711,7 @@ pub(crate) fn fan_out(
     };
     let restored = crate::fanout::FanOutState {
         config: f.config.clone(),
-        max_workers: f.max_workers as usize,
+        max_workers: f.max_workers.map(|n| n as usize),
         pending: f
             .queued
             .iter()

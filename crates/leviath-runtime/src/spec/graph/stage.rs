@@ -119,6 +119,31 @@ pub struct StageDef {
     pub hooks: StageHooks,
 }
 
+impl StageDef {
+    /// Whether the stage has a tool that changes files the framework sees: a
+    /// built-in that writes, every built-in through a group, or one of
+    /// `extra`, the tools a gate counts as writing, when the stage names it.
+    pub fn can_change_files(&self, extra: &[ToolName]) -> bool {
+        let groups = self.tools.iter().any(|t| {
+            matches!(
+                t,
+                ToolSelector::Group(ToolGroup::All) | ToolSelector::Group(ToolGroup::Builtin)
+            )
+        });
+        groups
+            || self.tools.iter().any(|t| match t {
+                ToolSelector::Tool(name) => {
+                    let canonical = leviath_tools::canonical_tool_name(name.as_str());
+                    super::MODIFYING_TOOLS.contains(&canonical)
+                        || extra
+                            .iter()
+                            .any(|x| leviath_tools::canonical_tool_name(x.as_str()) == canonical)
+                }
+                ToolSelector::Group(_) => false,
+            })
+    }
+}
+
 /// The models a stage may run on, best first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -153,9 +178,10 @@ impl Default for ModelChoice {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelParams {
-    /// Sampling temperature.
+    /// Sampling temperature. Kept as the number written, so a `0.2` reads
+    /// back as `0.2`.
     #[serde(default)]
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     /// The cap on one reply's length.
     #[serde(default)]
     pub max_output_tokens: Option<OutputCap>,
@@ -416,9 +442,10 @@ pub struct FanOutDef {
     /// The stage the merged results go to.
     #[serde(default)]
     pub merge_stage: Option<StageName>,
-    /// The most workers at once.
-    #[serde(default = "default_max_workers")]
-    pub max_workers: u32,
+    /// The most workers at once, at least one. Left out, every item starts
+    /// at once and the inference pool paces the model calls.
+    #[serde(default)]
+    pub max_workers: Option<u32>,
     /// What one worker's failure does to the rest.
     #[serde(default)]
     pub on_worker_failure: WorkerFailure,
@@ -428,24 +455,15 @@ pub struct FanOutDef {
     /// The region the workers' results land in.
     #[serde(default)]
     pub results_region: Option<RegionName>,
-    /// The most work items one fan-out may have.
+    /// The most work items one fan-out may have, at least one. Left out,
+    /// every item the split makes runs.
     #[serde(default)]
     pub max_items: Option<u32>,
-    /// How many times a failed worker is retried.
+    /// How many times the stage is asked again to call `fan_out` when it
+    /// ends without starting any workers, before it is let through with
+    /// none. `0` lets it through at once.
     #[serde(default)]
     pub max_attempts: Option<u32>,
-}
-
-/// The most workers a fan-out runs at once when it does not say.
-///
-/// Thirty, so a fan-out that splits ten ways runs in one wave rather than
-/// three. The inference pool caps concurrent model requests either way, so a
-/// wide fan-out over a narrow pool queues at the provider rather than at the
-/// stage.
-pub const DEFAULT_MAX_WORKERS: u32 = 30;
-
-fn default_max_workers() -> u32 {
-    DEFAULT_MAX_WORKERS
 }
 
 impl FanOutDef {
@@ -464,7 +482,7 @@ impl FanOutDef {
         Self {
             worker: WorkerSource::Stage(stage),
             merge_stage: None,
-            max_workers: default_max_workers(),
+            max_workers: None,
             on_worker_failure: WorkerFailure::Continue,
             split_prompt: String::new(),
             results_region: None,

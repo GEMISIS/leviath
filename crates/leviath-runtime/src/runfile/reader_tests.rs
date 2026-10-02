@@ -158,12 +158,15 @@ pub(crate) fn write_run(
 ) -> RunFileWriter {
     let mut w = RunFileWriter::create(path, &spec(), &code(), &states[0], policy).unwrap();
     for (i, s) in states.iter().enumerate().skip(1) {
-        w.record(
-            s.clone(),
-            i as i64,
-            vec![RunEvent::Log(format!("step {i}"))],
-        )
-        .unwrap();
+        let mut events = vec![RunEvent::Log(format!("step {i}"))];
+        // A move journals its edge beside the state that shows it, as the
+        // live lane does.
+        if s.last_transition != states[i - 1].last_transition
+            && let Some(taken) = s.last_transition.clone()
+        {
+            events.push(RunEvent::Transition(taken));
+        }
+        w.record(s.clone(), i as i64, events).unwrap();
     }
     w
 }

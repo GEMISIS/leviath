@@ -76,7 +76,7 @@ pub(crate) enum StageKind {
     FanOut {
         worker: WorkerRef,
         merge: Option<String>,
-        max_workers: usize,
+        max_workers: Option<usize>,
     },
     Output,
 }
@@ -383,7 +383,7 @@ impl StageGraph {
                     StageKind::FanOut {
                         worker,
                         merge,
-                        max_workers: config.max_workers as usize,
+                        max_workers: config.max_workers.map(|n| n as usize),
                     }
                 }
             };
@@ -1043,7 +1043,7 @@ to = "merge"
             NodeKind::Stage(StageKind::FanOut {
                 worker: WorkerRef::Stage("worker".to_string()),
                 merge: Some("merge".to_string()),
-                max_workers: 3,
+                max_workers: Some(3),
             })
         );
         assert_eq!(g.node("split").unwrap().kind_label(), "fan-out");
@@ -1120,20 +1120,16 @@ to = "c"
             NodeKind::Stage(StageKind::FanOut {
                 worker: WorkerRef::Agent("thumbnailer".to_string()),
                 merge: None,
-                max_workers: 30,
+                max_workers: None,
             })
         );
         assert!(g.outgoing("c").next().is_none());
-        let default_workers = leviath_runtime::spec::graph::FanOutDef::same_graph(
-            leviath_runtime::spec::names::StageName::new("x").unwrap(),
-        )
-        .max_workers as usize;
         assert_eq!(
             g.node("c").unwrap().kind,
             NodeKind::Stage(StageKind::FanOut {
                 worker: WorkerRef::Query("anything that reads logs".to_string()),
                 merge: None,
-                max_workers: default_workers,
+                max_workers: None,
             })
         );
         // External nodes come after every stage, and are not stages.

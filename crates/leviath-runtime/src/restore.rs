@@ -274,6 +274,7 @@ pub fn held_entry(
         broken_scripts: flags.broken_scripts,
         read_paths: md.read_paths,
         has_final_output: state.final_output.is_some(),
+        may_never_finish: spec.warnings().iter().map(ToString::to_string).collect(),
     }
 }
 

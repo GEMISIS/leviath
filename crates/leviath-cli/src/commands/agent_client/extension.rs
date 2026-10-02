@@ -59,14 +59,21 @@ impl Server {
             .map(|dir| dir.to_string_lossy().into_owned())
             .unwrap_or_default();
         match self.control.spawn(request).await {
-            Ok(ControlResponse::Spawned { run_id }) => {
+            Ok(ControlResponse::Spawned { run_id, warnings }) => {
                 let session_id = new_session_id(&label);
                 self.session = Some(ActiveSession {
                     session_id: session_id.clone(),
                     cwd,
                     run: SessionRun::Running(run_id.clone()),
                 });
-                let result = SpawnResult { session_id, run_id };
+                let result = SpawnResult {
+                    session_id,
+                    run_id,
+                    warnings: warnings
+                        .iter()
+                        .map(|w| serde_json::to_value(w).expect("an issue is plain data"))
+                        .collect(),
+                };
                 self.write(&JsonRpcMessage::response(id, &result)).await;
             }
             Ok(ControlResponse::Rejected { issues }) => self.reject(id, &issues).await,

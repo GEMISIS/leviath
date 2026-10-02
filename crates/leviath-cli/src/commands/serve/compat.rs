@@ -81,11 +81,14 @@ pub(super) struct SpawnAgentReq {
 }
 
 /// What `POST /api/agents` answers: the new run's id, twice, under the two
-/// names older clients read.
+/// names older clients read, and what may keep the run from ever finishing
+/// (left out when nothing may, so an older client sees the shape it knows).
 #[derive(Debug, Serialize)]
 pub(super) struct SpawnAgentResp {
     pub(super) agent_id: String,
     pub(super) run_id: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) warnings: Vec<String>,
 }
 
 /// `POST /api/agents`: start a run from the old body.
@@ -135,9 +138,10 @@ pub(super) async fn spawn_agent(
         .into_request_for(source)
         .map_err(|message| err(StatusCode::BAD_REQUEST, message))?;
     match spawn_core::start(&state, request).await {
-        Ok(Verdict::Accepted(run_id)) => Ok(Json(SpawnAgentResp {
-            agent_id: run_id.clone(),
-            run_id,
+        Ok(Verdict::Accepted(started)) => Ok(Json(SpawnAgentResp {
+            agent_id: started.run_id.clone(),
+            run_id: started.run_id,
+            warnings: started.warnings.iter().map(ToString::to_string).collect(),
         })),
         Ok(Verdict::Rejected(issues)) => Err(refusal(&issues)),
         Err(e) => Err(as_api_error(&e)),

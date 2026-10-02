@@ -298,7 +298,7 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
     parent.fan_out = Some(FanOutState {
         stage: parent.cursor.stage.clone(),
         config: crate::spec::graph::FanOutDef::same_graph(parent.cursor.stage.clone()),
-        max_workers: 8,
+        max_workers: Some(8),
         queued: Vec::new(),
         active: ids
             .iter()

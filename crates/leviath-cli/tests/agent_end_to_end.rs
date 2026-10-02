@@ -262,6 +262,7 @@ async fn an_agent_runs_a_tool_and_the_file_lands_on_disk() {
         .await
         .expect("spawn replied")
         .expect("the run starts")
+        .run_id
         .to_string();
 
     // Wake-driven and bounded: no sleeps, no polling, no wall-clock margin.
@@ -437,6 +438,7 @@ async fn a_run_that_takes_an_edge_records_the_move_in_its_run_file() {
         .await
         .expect("spawn replied")
         .expect("the run starts")
+        .run_id
         .to_string();
     host.world_mut().run_until_idle(64).await;
     // A closed control channel ends the serve loop, which writes every

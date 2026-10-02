@@ -595,6 +595,11 @@ pub(crate) fn collect_transition_choice(
                             how,
                         );
                         let taken = transition_record(&from, &state, edge_name, reason);
+                        super::transition::journal_transition(
+                            persist.as_deref(),
+                            metadata,
+                            taken.as_ref(),
+                        );
                         let mut ec = commands.entity(outcome.entity);
                         ec.remove::<AwaitingTransitionResponse>();
                         taken.into_iter().for_each(|t| {

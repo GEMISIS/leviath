@@ -58,8 +58,13 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> (Source, RunGraph) 
     };
     let shown = blueprint_path.display().to_string();
     match read_blueprint(&old.blueprint.text, blueprint_path) {
-        Ok((blueprint, graph)) => match crate::recorded::missing_stage(old, &graph) {
-            None => (Source::Blueprint(Box::new(blueprint)), graph),
+        Ok((blueprint, graph, notes)) => match crate::recorded::missing_stage(old, &graph) {
+            None => {
+                for note in notes {
+                    report.note(note);
+                }
+                (Source::Blueprint(Box::new(blueprint)), graph)
+            }
             Some(stage) => recorded(
                 old,
                 format!(
@@ -72,15 +77,20 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> (Source, RunGraph) 
     }
 }
 
-/// The blueprint in `text`, read from `path`, and its run graph.
-fn read_blueprint(text: &str, path: PathBuf) -> Result<(Blueprint, RunGraph), ConvertError> {
+/// The blueprint in `text`, read from `path`, its run graph, and what
+/// converting it had to change.
+fn read_blueprint(
+    text: &str,
+    path: PathBuf,
+) -> Result<(Blueprint, RunGraph, Vec<String>), ConvertError> {
     let blueprint = parse_manifest(text).map_err(|e| ConvertError::Unreadable {
         path,
         why: e.to_string(),
     })?;
-    let mut graph = crate::old::graph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
+    let (mut graph, notes) =
+        crate::old::graph::from_blueprint_noted(&blueprint).map_err(ConvertError::Graph)?;
     read_manifest_tables(&mut graph, text).map_err(ConvertError::Graph)?;
-    Ok((blueprint, graph))
+    Ok((blueprint, graph, notes))
 }
 
 /// The graph the run recorded, its blueprint unread for `why`.
