@@ -247,7 +247,7 @@ fn recording_terminator(seen: Arc<Mutex<Vec<String>>>) -> ForceTerminator {
 
 /// A [`Reloader`] that pages any run id in as a fresh agent.
 fn paging_reloader() -> Reloader {
-    Box::new(|world, run_id| Some(world.spawn_agent((agent_state(run_id),))))
+    Box::new(|world, run_id, _| Ok(world.spawn_agent((agent_state(run_id),))))
 }
 
 async fn ask<T>(host: &mut WorldHost, make: impl FnOnce(oneshot::Sender<T>) -> ControlOp) -> T {
@@ -1353,10 +1353,10 @@ async fn result_reports_the_submitted_answer() {
 #[tokio::test]
 async fn a_paused_run_with_a_call_still_out_is_not_parked() {
     let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id| {
+    host.set_reloader(Box::new(|world, run_id, _| {
         let mut state = agent_state(run_id);
         state.status = AgentStatus::Paused;
-        Some(world.spawn_agent((state,)))
+        Ok(world.spawn_agent((state,)))
     }));
     let e = spawn(&mut host, "run-a", "agent-a");
     assert!(
@@ -1387,10 +1387,10 @@ async fn a_paused_run_with_a_call_still_out_is_not_parked() {
 #[tokio::test]
 async fn a_paused_run_holding_a_landed_response_is_not_parked() {
     let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id| {
+    host.set_reloader(Box::new(|world, run_id, _| {
         let mut state = agent_state(run_id);
         state.status = AgentStatus::Paused;
-        Some(world.spawn_agent((state,)))
+        Ok(world.spawn_agent((state,)))
     }));
     let e = spawn(&mut host, "run-a", "agent-a");
     assert!(
@@ -1435,10 +1435,10 @@ async fn a_paused_run_holding_a_landed_response_is_not_parked() {
 #[tokio::test]
 async fn a_paused_run_waiting_to_choose_its_next_stage_is_not_parked() {
     let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id| {
+    host.set_reloader(Box::new(|world, run_id, _| {
         let mut state = agent_state(run_id);
         state.status = AgentStatus::Paused;
-        Some(world.spawn_agent((state,)))
+        Ok(world.spawn_agent((state,)))
     }));
     let e = spawn(&mut host, "run-a", "agent-a");
     assert!(
@@ -1472,10 +1472,10 @@ async fn a_persisted_paused_root_is_parked_and_pages_back_in() {
     let mut host = host_with(vec![]);
     // A reloader that restores the run the way `reload_run` does: paused,
     // ready to be resumed.
-    host.set_reloader(Box::new(|world, run_id| {
+    host.set_reloader(Box::new(|world, run_id, _| {
         let mut state = agent_state(run_id);
         state.status = AgentStatus::Paused;
-        Some(world.spawn_agent((state,)))
+        Ok(world.spawn_agent((state,)))
     }));
     // Parking runs the same teardown hook a reap does (sandbox + tool
     // state); record that it fired.
@@ -2476,7 +2476,7 @@ async fn cancel_closes_the_runs_open_interactions() {
 async fn cancel_falls_back_to_the_force_terminator_when_the_world_cannot_hold_the_run() {
     let mut host = host_with(vec![]);
     // A reloader that always declines - the deleted-blueprint case.
-    host.set_reloader(Box::new(|_world, _run_id| None));
+    host.set_reloader(Box::new(|_world, _run_id, _| Err(NotPlaced::Missing)));
     let terminated = Arc::new(Mutex::new(Vec::new()));
     host.set_force_terminator(recording_terminator(terminated.clone()));
 
@@ -3939,8 +3939,8 @@ async fn emit_events_never_unloads_waiting_agents() {
 #[tokio::test]
 async fn resuming_a_run_that_had_to_be_loaded_reports_success() {
     let mut host = host_with(vec![]);
-    host.set_reloader(Box::new(|world, run_id| {
-        Some(world.spawn_agent((agent_state(run_id),)))
+    host.set_reloader(Box::new(|world, run_id, _| {
+        Ok(world.spawn_agent((agent_state(run_id),)))
     }));
 
     assert!(
@@ -3969,22 +3969,30 @@ async fn resuming_a_run_that_had_to_be_loaded_reports_success() {
 async fn resolve_or_reload_pages_in_and_registers() {
     let mut host = host_with(vec![]);
     // No reloader installed → a miss stays a miss.
-    assert!(host.resolve_or_reload("ghost").is_none());
+    assert_eq!(
+        host.resolve_or_reload("ghost", PageIn::Address),
+        Err(NotPlaced::Missing)
+    );
 
     // A reloader that declines (run not resumable from disk) → still a miss,
     // and nothing gets registered.
-    host.set_reloader(Box::new(|_world, _run_id| None));
-    assert!(host.resolve_or_reload("gone").is_none());
+    host.set_reloader(Box::new(|_world, _run_id, _| Err(NotPlaced::Missing)));
+    assert_eq!(
+        host.resolve_or_reload("gone", PageIn::Address),
+        Err(NotPlaced::Missing)
+    );
     assert!(
         host.live_entity("gone").is_none(),
         "a declined reload registers nothing"
     );
 
     // With a reloader that resolves → an unloaded run is paged in and registered.
-    host.set_reloader(Box::new(|world, run_id| {
-        Some(world.spawn_agent((agent_state(run_id),)))
+    host.set_reloader(Box::new(|world, run_id, _| {
+        Ok(world.spawn_agent((agent_state(run_id),)))
     }));
-    let paged = host.resolve_or_reload("paged").expect("reloaded");
+    let paged = host
+        .resolve_or_reload("paged", PageIn::Address)
+        .expect("reloaded");
     assert_eq!(
         host.live_entity("paged"),
         Some(paged),
@@ -3992,7 +4000,7 @@ async fn resolve_or_reload_pages_in_and_registers() {
     );
 
     // A live run is returned without invoking the reloader (no re-spawn).
-    assert_eq!(host.resolve_or_reload("paged"), Some(paged));
+    assert_eq!(host.resolve_or_reload("paged", PageIn::Address), Ok(paged));
 }
 
 #[tokio::test]
@@ -5021,4 +5029,192 @@ async fn subagent_history_reads_a_live_run_off_the_world() {
     })
     .await;
     assert!(looped.is_err());
+}
+
+/// A listing row for `run_id`, paused, held for the machine having changed.
+fn held_row(run_id: &str) -> RunListEntry {
+    RunListEntry {
+        started_at: None,
+        active: None,
+        splits_degraded: 0,
+        broken_scripts: Vec::new(),
+        run_id: run_id.to_string(),
+        title: None,
+        status: AgentStatus::Paused,
+        wait_reason: Some(WaitReason::NeedsSetup {
+            blocker: leviath_core::run_meta::SetupBlocker::MachineChanged,
+            remedy: "put 'openai' back".to_string(),
+        }),
+        stage: "s".to_string(),
+        stage_index: None,
+        num_stages: None,
+        iteration: 0,
+        tool_calls: 0,
+        last_progress_at: None,
+        unattended: false,
+        yolo_profile: None,
+        empty_output: false,
+        read_paths: None,
+        has_final_output: false,
+    }
+}
+
+/// A reloader over a pretend runs directory: `done` finished, `cut` was
+/// cancelled (it comes back paused only to be resumed), `held` cannot be
+/// taken back on this machine, and anything else is not there. Records what
+/// each call was for.
+fn disk_reloader(asked: Arc<Mutex<Vec<(String, PageIn)>>>) -> Reloader {
+    Box::new(move |world, run_id, purpose| {
+        asked.lock().unwrap().push((run_id.to_string(), purpose));
+        match (run_id, purpose) {
+            ("done", _) => Err(NotPlaced::Stopped(AgentStatus::Complete)),
+            ("cut", PageIn::Address) => Err(NotPlaced::Stopped(AgentStatus::Cancelled)),
+            ("cut", PageIn::Resume) => {
+                let mut state = agent_state(run_id);
+                state.status = AgentStatus::Paused;
+                Ok(world.spawn_agent((state,)))
+            }
+            ("held", _) => Err(NotPlaced::Held(Box::new(held_row(run_id)))),
+            ("unsaid", _) => Err(NotPlaced::Held(Box::new(RunListEntry {
+                wait_reason: None,
+                ..held_row(run_id)
+            }))),
+            _ => Err(NotPlaced::Missing),
+        }
+    })
+}
+
+/// A run that has stopped stays stopped: a message says how it ended rather
+/// than that no such run exists, and neither a message nor a pause loads it
+/// back into the world.
+#[tokio::test]
+async fn a_stopped_run_is_not_loaded_back_for_a_message_or_a_pause() {
+    let mut host = host_with(vec![]);
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    host.set_reloader(disk_reloader(asked.clone()));
+    for (run, says) in [
+        ("done", "has finished"),
+        ("cut", "was cancelled"),
+        ("nowhere", "no run 'nowhere'"),
+    ] {
+        let refused = ask(&mut host, |reply| ControlOp::Message {
+            agent_id: run.to_string(),
+            content: "hi".to_string(),
+            target_region: None,
+            parts: Vec::new(),
+            reply,
+        })
+        .await;
+        let why = refused.expect_err("nobody will read it");
+        assert!(why.contains(says), "{run}: {why}");
+        let paused = ask(&mut host, |reply| ControlOp::Pause {
+            run_id: run.to_string(),
+            reply,
+        })
+        .await;
+        assert!(!paused, "{run} is not pausable");
+        assert!(host.live_entity(run).is_none(), "{run} stays out");
+    }
+    assert!(host.list().is_empty(), "no row for a stopped run");
+    assert!(
+        asked
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, purpose)| *purpose == PageIn::Address)
+    );
+}
+
+/// Resuming a cancelled run brings it back and carries it on, and its
+/// finished row goes, so it is listed once.
+#[tokio::test]
+async fn resuming_a_cancelled_run_lists_it_once() {
+    let mut host = host_with(vec![]);
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    host.set_reloader(disk_reloader(asked.clone()));
+    let mut finished = held_row("cut");
+    finished.status = AgentStatus::Cancelled;
+    finished.wait_reason = None;
+    host.record_finished(finished, 100);
+
+    let resumed = ask(&mut host, |reply| ControlOp::Resume {
+        run_id: "cut".to_string(),
+        reply,
+    })
+    .await;
+    assert!(resumed);
+    assert_eq!(
+        asked.lock().unwrap()[0],
+        ("cut".to_string(), PageIn::Resume)
+    );
+    let live = host.live_entity("cut").expect("back in the world");
+    assert_eq!(host.world.agent_status(live), Some(AgentStatus::Active));
+    assert!(host.finished().is_empty());
+    assert_eq!(host.list().len(), 1);
+}
+
+/// A run held because this machine cannot take it back is listed, paused,
+/// with why; a message to it is refused with the same reason; a resume that
+/// still cannot bind it keeps it held; and a cancel ends it on disk and
+/// moves its row to the finished ones.
+#[tokio::test]
+async fn a_held_run_is_listed_refuses_messages_and_can_be_cancelled() {
+    let mut host = host_with(vec![]);
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    host.set_reloader(disk_reloader(asked.clone()));
+    let terminated = Arc::new(Mutex::new(Vec::new()));
+    host.set_force_terminator(recording_terminator(terminated.clone()));
+    host.hold(held_row("held"));
+    assert_eq!(host.list(), vec![held_row("held")]);
+
+    let refused = ask(&mut host, |reply| ControlOp::Message {
+        agent_id: "held".to_string(),
+        content: "hi".to_string(),
+        target_region: None,
+        parts: Vec::new(),
+        reply,
+    })
+    .await;
+    let why = refused.expect_err("a held run reads no messages");
+    assert!(why.contains("put 'openai' back"), "{why}");
+    let unsaid = ask(&mut host, |reply| ControlOp::Message {
+        agent_id: "unsaid".to_string(),
+        content: "hi".to_string(),
+        target_region: None,
+        parts: Vec::new(),
+        reply,
+    })
+    .await;
+    let why = unsaid.expect_err("a held run reads no messages, said or not");
+    assert!(why.contains("cannot go on"), "{why}");
+    host.parked.remove("unsaid");
+
+    let resumed = ask(&mut host, |reply| ControlOp::Resume {
+        run_id: "held".to_string(),
+        reply,
+    })
+    .await;
+    assert!(!resumed, "still held");
+    assert_eq!(host.list(), vec![held_row("held")]);
+
+    let cancelled = ask(&mut host, |reply| ControlOp::Cancel {
+        run_id: "held".to_string(),
+        reply,
+    })
+    .await;
+    assert!(cancelled);
+    assert_eq!(*terminated.lock().unwrap(), vec!["held".to_string()]);
+    assert!(host.list().is_empty());
+    let finished = host.finished();
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].status, AgentStatus::Cancelled);
+    assert_eq!(finished[0].wait_reason, None);
+
+    // A run the force terminator cannot find leaves nothing behind.
+    let missing = ask(&mut host, |reply| ControlOp::Cancel {
+        run_id: "never-existed".to_string(),
+        reply,
+    })
+    .await;
+    assert!(!missing);
 }

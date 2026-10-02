@@ -781,6 +781,26 @@
               "Point"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`held`.",
+            "properties": {
+              "Held": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SpawnIssues"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "Held"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1716,6 +1736,71 @@
         "description": "The checked inputs of one run, by name.",
         "type": "object"
       },
+      "IssueCode": {
+        "description": "What kind of problem an issue is.",
+        "oneOf": [
+          {
+            "const": "missing",
+            "description": "Something required was not given.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "A key or name that nothing declares.",
+            "type": "string"
+          },
+          {
+            "const": "wrong_type",
+            "description": "A value of the wrong type.",
+            "type": "string"
+          },
+          {
+            "const": "out_of_range",
+            "description": "A number outside its declared range, or a list or text of the wrong length.",
+            "type": "string"
+          },
+          {
+            "const": "invalid",
+            "description": "A value that does not have the shape its type requires (a bad name, a\nmalformed URL, a path that leaves the workdir).",
+            "type": "string"
+          },
+          {
+            "const": "duplicate",
+            "description": "The same name declared twice.",
+            "type": "string"
+          },
+          {
+            "const": "dangling",
+            "description": "A reference to a stage, region, edge or input that is not declared.",
+            "type": "string"
+          },
+          {
+            "const": "conflict",
+            "description": "Two settings that cannot both hold.",
+            "type": "string"
+          },
+          {
+            "const": "not_allowed",
+            "description": "Something the request is not allowed to ask for.",
+            "type": "string"
+          },
+          {
+            "const": "unresolvable",
+            "description": "This machine cannot provide what the request names (an unknown model, a\nmissing MCP server, a seed file that is not there).",
+            "type": "string"
+          },
+          {
+            "const": "unavailable",
+            "description": "A resumed run names something this machine no longer has.",
+            "type": "string"
+          },
+          {
+            "const": "changed",
+            "description": "A resumed run names something that has changed since it started.",
+            "type": "string"
+          }
+        ]
+      },
       "MessageState": {
         "description": "A message waiting to be delivered.",
         "properties": {
@@ -1901,6 +1986,52 @@
           "body"
         ],
         "type": "object"
+      },
+      "PathSeg": {
+        "description": "One step of a [`SpecPath`].",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "A field of a struct: `stages`, `model`.",
+            "properties": {
+              "Field": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Field"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A named member of a collection: the `plan` in `stages.plan`.",
+            "properties": {
+              "Key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A position in a list: the `2` in `items[2]`.",
+            "properties": {
+              "Index": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "Index"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "PendingBatch": {
         "description": "Tool calls in flight.",
@@ -2754,8 +2885,79 @@
             "const": "provider_failed",
             "description": "The provider was reached and failed: a server error, a reply that\nstopped part-way, or one that could not be read. Nothing about the\nsetup is known to be wrong; a resume tries again once it recovers.",
             "type": "string"
+          },
+          {
+            "const": "machine_changed",
+            "description": "The run names something this machine no longer has, or has changed\nsince the run started: a provider, its configuration, or an MCP\nserver's tools. Putting it back the way it was lets the run go on.",
+            "type": "string"
           }
         ]
+      },
+      "SpawnIssue": {
+        "description": "One problem with a spawn.",
+        "properties": {
+          "code": {
+            "$ref": "#/$defs/IssueCode",
+            "description": "What kind of problem it is."
+          },
+          "expected": {
+            "description": "What would have been accepted, when that is one thing: `an integer`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "got": {
+            "description": "What arrived instead: `text \"five\"`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hint": {
+            "description": "How to fix it, when there is more to say than `expected`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "known": {
+            "description": "The valid choices, when the problem is picking one: declared inputs,\ninstalled models, a stage's edges.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "description": "One sentence saying what is wrong.",
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/$defs/SpecPath",
+            "description": "Where the problem is."
+          }
+        },
+        "required": [
+          "path",
+          "code",
+          "message",
+          "known"
+        ],
+        "type": "object"
+      },
+      "SpawnIssues": {
+        "description": "Every problem found with a spawn. Empty means none.",
+        "items": {
+          "$ref": "#/$defs/SpawnIssue"
+        },
+        "type": "array"
+      },
+      "SpecPath": {
+        "description": "Where in a request (or spec) an issue is.",
+        "items": {
+          "$ref": "#/$defs/PathSeg"
+        },
+        "type": "array"
       },
       "Spend": {
         "description": "Tokens and cost.",
@@ -8784,6 +8986,71 @@
         "description": "The checked inputs of one run, by name.",
         "type": "object"
       },
+      "IssueCode": {
+        "description": "What kind of problem an issue is.",
+        "oneOf": [
+          {
+            "const": "missing",
+            "description": "Something required was not given.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "A key or name that nothing declares.",
+            "type": "string"
+          },
+          {
+            "const": "wrong_type",
+            "description": "A value of the wrong type.",
+            "type": "string"
+          },
+          {
+            "const": "out_of_range",
+            "description": "A number outside its declared range, or a list or text of the wrong length.",
+            "type": "string"
+          },
+          {
+            "const": "invalid",
+            "description": "A value that does not have the shape its type requires (a bad name, a\nmalformed URL, a path that leaves the workdir).",
+            "type": "string"
+          },
+          {
+            "const": "duplicate",
+            "description": "The same name declared twice.",
+            "type": "string"
+          },
+          {
+            "const": "dangling",
+            "description": "A reference to a stage, region, edge or input that is not declared.",
+            "type": "string"
+          },
+          {
+            "const": "conflict",
+            "description": "Two settings that cannot both hold.",
+            "type": "string"
+          },
+          {
+            "const": "not_allowed",
+            "description": "Something the request is not allowed to ask for.",
+            "type": "string"
+          },
+          {
+            "const": "unresolvable",
+            "description": "This machine cannot provide what the request names (an unknown model, a\nmissing MCP server, a seed file that is not there).",
+            "type": "string"
+          },
+          {
+            "const": "unavailable",
+            "description": "A resumed run names something this machine no longer has.",
+            "type": "string"
+          },
+          {
+            "const": "changed",
+            "description": "A resumed run names something that has changed since it started.",
+            "type": "string"
+          }
+        ]
+      },
       "MessageState": {
         "description": "A message waiting to be delivered.",
         "properties": {
@@ -8923,6 +9190,52 @@
           "body"
         ],
         "type": "object"
+      },
+      "PathSeg": {
+        "description": "One step of a [`SpecPath`].",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "A field of a struct: `stages`, `model`.",
+            "properties": {
+              "Field": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Field"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A named member of a collection: the `plan` in `stages.plan`.",
+            "properties": {
+              "Key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A position in a list: the `2` in `items[2]`.",
+            "properties": {
+              "Index": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "Index"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "PendingBatch": {
         "description": "Tool calls in flight.",
@@ -9220,8 +9533,79 @@
             "const": "provider_failed",
             "description": "The provider was reached and failed: a server error, a reply that\nstopped part-way, or one that could not be read. Nothing about the\nsetup is known to be wrong; a resume tries again once it recovers.",
             "type": "string"
+          },
+          {
+            "const": "machine_changed",
+            "description": "The run names something this machine no longer has, or has changed\nsince the run started: a provider, its configuration, or an MCP\nserver's tools. Putting it back the way it was lets the run go on.",
+            "type": "string"
           }
         ]
+      },
+      "SpawnIssue": {
+        "description": "One problem with a spawn.",
+        "properties": {
+          "code": {
+            "$ref": "#/$defs/IssueCode",
+            "description": "What kind of problem it is."
+          },
+          "expected": {
+            "description": "What would have been accepted, when that is one thing: `an integer`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "got": {
+            "description": "What arrived instead: `text \"five\"`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hint": {
+            "description": "How to fix it, when there is more to say than `expected`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "known": {
+            "description": "The valid choices, when the problem is picking one: declared inputs,\ninstalled models, a stage's edges.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "description": "One sentence saying what is wrong.",
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/$defs/SpecPath",
+            "description": "Where the problem is."
+          }
+        },
+        "required": [
+          "path",
+          "code",
+          "message",
+          "known"
+        ],
+        "type": "object"
+      },
+      "SpawnIssues": {
+        "description": "Every problem found with a spawn. Empty means none.",
+        "items": {
+          "$ref": "#/$defs/SpawnIssue"
+        },
+        "type": "array"
+      },
+      "SpecPath": {
+        "description": "Where in a request (or spec) an issue is.",
+        "items": {
+          "$ref": "#/$defs/PathSeg"
+        },
+        "type": "array"
       },
       "Spend": {
         "description": "Tokens and cost.",
@@ -9974,6 +10358,17 @@
       "flags": {
         "$ref": "#/$defs/Flags",
         "description": "What the run did that its caller should know."
+      },
+      "held": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SpawnIssues"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Why the run is held rather than running: what it names that this\nmachine no longer has, or that changed since it started, as found the\nlast time it was brought back. `None` once it is back."
       },
       "inbox": {
         "description": "Messages waiting for the run to accept them.",

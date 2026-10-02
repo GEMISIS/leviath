@@ -109,6 +109,24 @@ fn a_run_names_its_blueprint_file_and_why_it_waits() {
     );
 }
 
+/// A held run is listed as waiting on the machine being put back, whatever
+/// it was waiting on when it was held.
+#[test]
+fn a_held_run_says_the_machine_changed() {
+    let mut state = initial();
+    state.status = RunStatus::Waiting;
+    state.wait_reason = Some(crate::state::WaitState::UserPrompt);
+    let issues: crate::spec::issues::SpawnIssues = crate::spec::issues::SpawnIssue::new(
+        crate::spec::issues::SpecPath::root(),
+        crate::spec::issues::IssueCode::Changed,
+        "an MCP server's tools changed",
+    )
+    .into();
+    state.held = Some(issues.clone());
+    let meta = summary_of(&spec(), &state, 5);
+    assert_eq!(meta.waiting_on, Some(crate::restore::held_reason(&issues)));
+}
+
 /// A run file whose state does not decode lists nothing, and says why.
 #[test]
 fn a_run_file_whose_state_does_not_decode_is_an_error() {

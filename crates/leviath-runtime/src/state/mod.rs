@@ -77,6 +77,10 @@ pub struct RunState {
     /// How many of its blueprint's `read_paths` this machine grants, as
     /// fixed when it was placed. `None` for a blueprint that declares none.
     pub read_paths: Option<ReadPathCounts>,
+    /// Why the run is held rather than running: what it names that this
+    /// machine no longer has, or that changed since it started, as found the
+    /// last time it was brought back. `None` once it is back.
+    pub held: Option<crate::spec::issues::SpawnIssues>,
 }
 
 /// How many `read_paths` a run's blueprint declares, and how many of them
@@ -121,6 +125,7 @@ impl RunState {
             title_error: None,
             read_paths: None,
             point: PointProgress::default(),
+            held: None,
         }
     }
 }

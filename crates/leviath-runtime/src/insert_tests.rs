@@ -939,6 +939,34 @@ fn a_paused_run_keeps_its_batch_in_flight() {
     assert_eq!(read.phase, PipelinePhase::Paused);
 }
 
+/// A run paused until the machine is fixed keeps that reason when it is
+/// placed again: the marker the reason is read from goes on with it, so
+/// reading it back, as the step its placing records does, says the same.
+#[test]
+fn a_run_paused_until_the_machine_is_fixed_keeps_its_reason() {
+    use crate::state::WaitState;
+    let spec = Arc::new(two_stage_spec());
+    let mut state = mid_run();
+    state.status = RunStatus::Paused;
+    state.phase = PipelinePhase::Paused;
+    let reason = WaitState::NeedsSetup {
+        blocker: leviath_core::run_meta::SetupBlocker::ProviderFailed,
+        remedy: "`lev resume` this run".to_string(),
+    };
+    state.wait_reason = Some(reason.clone());
+    let mut world = World::new();
+    let e = insert(&mut world, spec, Bindings::new(), &state);
+    let marker = world
+        .get::<crate::pipeline::PausedForSetup>(e)
+        .expect("the marker is placed");
+    assert_eq!(
+        marker.blocker,
+        leviath_core::run_meta::SetupBlocker::ProviderFailed
+    );
+    let read = crate::state::inspect::inspect(&world, e).unwrap();
+    assert_eq!(read.wait_reason, Some(reason));
+}
+
 /// A run stopped at a checkpoint is placed to ask it again over the document
 /// it showed, at the checkpoint and round it had reached.
 #[test]

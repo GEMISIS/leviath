@@ -525,12 +525,15 @@ pub fn build_host(parts: HostParts) -> WorldHost {
     for (run_id, entity) in recovered.reloaded {
         host.register(run_id, entity);
     }
+    for entry in recovered.held {
+        host.hold(entry);
+    }
 
     // Reload-on-demand: an op targeting an unloaded run pages it back in from
     // its run file, against the machine as it stands now.
     let reload_starter = starter.clone();
-    host.set_reloader(Box::new(move |world, run_id| {
-        crate::daemon::recovery::reload_run(world, &reload_starter, run_id)
+    host.set_reloader(Box::new(move |world, run_id, purpose| {
+        crate::daemon::recovery::reload_run(world, &reload_starter, run_id, purpose)
     }));
 
     // Last resort for a cancel the world can't service: force the run's on-disk
@@ -1674,9 +1677,14 @@ binds = [{{ region = "task" }}]
 
     /// A host over the fake `anthropic` provider, keeping its runs in `runs`.
     fn fake_host(runs: &std::path::Path) -> WorldHost {
+        host_over(runs, fake_registry())
+    }
+
+    /// A host over `providers`, keeping its runs in `runs`.
+    fn host_over(runs: &std::path::Path, providers: ProviderRegistry) -> WorldHost {
         build_host(HostParts {
             config: Config::default(),
-            providers: fake_registry(),
+            providers,
             runs_dir: runs.to_path_buf(),
             shared_mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
             mcp_tool_defs: vec![],
@@ -1719,6 +1727,31 @@ binds = [{{ region = "task" }}]
                 assert_eq!(
                     status_of(&mut host, &run_id).await,
                     Some(AgentStatus::Active)
+                );
+            },
+        )
+        .await;
+    }
+
+    /// A run this machine can no longer take back is held at startup: listed,
+    /// paused, rather than ended.
+    #[tokio::test]
+    async fn build_host_holds_a_run_this_machine_cannot_take_back() {
+        crate::config::with_isolated_config_path_async(
+            "build_host_holds_a_run_this_machine_cannot_take_back",
+            |_| async move {
+                let agent = tempfile::tempdir().unwrap();
+                let manifest = agent.path().join("agent.toml");
+                std::fs::write(&manifest, crate::test_support::inline_coder_manifest()).unwrap();
+                let runs = tempfile::tempdir().unwrap();
+                let run_id =
+                    run_on_disk(Config::default(), fake_registry(), runs.path(), &manifest);
+
+                let mut host = host_over(runs.path(), ProviderRegistry::new());
+
+                assert_eq!(
+                    status_of(&mut host, &run_id).await,
+                    Some(AgentStatus::Paused)
                 );
             },
         )

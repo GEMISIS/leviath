@@ -82,6 +82,8 @@ pub enum Change {
     ReadPaths(Option<ReadPathCounts>),
     /// `point`.
     Point(PointProgress),
+    /// `held`.
+    Held(Option<crate::spec::issues::SpawnIssues>),
 }
 
 /// An edge a run took, and why.
@@ -252,6 +254,7 @@ impl StateDelta {
             title_error => TitleError,
             read_paths => ReadPaths,
             point => Point,
+            held => Held,
         );
         Self {
             seq: prev.seq + 1,
@@ -297,6 +300,7 @@ impl StateDelta {
                 Change::TitleError(v) => state.title_error = v,
                 Change::ReadPaths(v) => state.read_paths = v,
                 Change::Point(v) => state.point = v,
+                Change::Held(v) => state.held = v,
             }
         }
         state.seq = self.seq;

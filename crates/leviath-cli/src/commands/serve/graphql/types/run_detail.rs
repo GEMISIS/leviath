@@ -57,6 +57,9 @@ pub(crate) enum SetupBlocker {
     ProviderTimedOut,
     /// The provider failed.
     ProviderFailed,
+    /// The run names something this machine no longer has, or has changed
+    /// since it started.
+    MachineChanged,
 }
 
 impl From<&leviath_core::run_meta::SetupBlocker> for SetupBlocker {
@@ -71,6 +74,7 @@ impl From<&leviath_core::run_meta::SetupBlocker> for SetupBlocker {
             Core::ProviderUnreachable => Self::ProviderUnreachable,
             Core::ProviderTimedOut => Self::ProviderTimedOut,
             Core::ProviderFailed => Self::ProviderFailed,
+            Core::MachineChanged => Self::MachineChanged,
         }
     }
 }

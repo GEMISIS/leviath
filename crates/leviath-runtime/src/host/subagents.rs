@@ -66,7 +66,7 @@ impl WorldHost {
                     return;
                 }
                 // Page the target in if it was unloaded, so delivery finds it.
-                self.resolve_or_reload(&run_id);
+                let _ = self.resolve_or_reload(&run_id, PageIn::Address);
                 let ok = self
                     .world
                     .send_message(AgentMessage {
@@ -281,9 +281,9 @@ impl WorldHost {
         }
         // Both ends as entities: the host already maps run ids to them, and
         // comparing entities avoids re-reading an id component per node.
-        let (Some(target), Some(root)) = (
-            self.resolve_or_reload(run_id),
-            self.resolve_or_reload(ancestor),
+        let (Ok(target), Ok(root)) = (
+            self.resolve_or_reload(run_id, PageIn::Address),
+            self.resolve_or_reload(ancestor, PageIn::Address),
         ) else {
             return false;
         };
@@ -328,7 +328,7 @@ impl WorldHost {
     /// Reports whether anything took, which is what tells a caller a
     /// still-running tree apart from one that was already finished.
     pub(super) fn pause_tree(&mut self, run_id: &str) -> bool {
-        let Some(root) = self.resolve_or_reload(run_id) else {
+        let Ok(root) = self.resolve_or_reload(run_id, PageIn::Address) else {
             return false;
         };
         let mut acted = false;
@@ -353,7 +353,7 @@ impl WorldHost {
         // paused and all report false - while the run is, in fact, going again.
         // Loading it back is the act of resuming it, so it counts as one.
         let was_unloaded = self.live_entity(run_id).is_none();
-        let Some(root) = self.resolve_or_reload(run_id) else {
+        let Ok(root) = self.resolve_or_reload(run_id, PageIn::Resume) else {
             return false;
         };
         let mut acted = was_unloaded;
@@ -371,7 +371,7 @@ impl WorldHost {
     }
 
     pub(super) fn cancel_tree(&mut self, run_id: &str) -> bool {
-        let Some(root) = self.resolve_or_reload(run_id) else {
+        let Ok(root) = self.resolve_or_reload(run_id, PageIn::Address) else {
             return false;
         };
         let mut cancelled = false;
@@ -389,6 +389,22 @@ impl WorldHost {
             }
         }
         cancelled
+    }
+
+    /// Cancel a run the world cannot hold, on its file. A run held out of
+    /// the world for this machine moves from the held rows to the finished
+    /// ones, cancelled.
+    pub(super) fn force_cancel(&mut self, run_id: &str) -> bool {
+        let forced = self
+            .force_terminator
+            .as_mut()
+            .is_some_and(|terminate| terminate(run_id));
+        if forced && let Some(mut entry) = self.parked.remove(run_id) {
+            entry.status = AgentStatus::Cancelled;
+            entry.wait_reason = None;
+            self.record_finished(entry, chrono::Utc::now().timestamp());
+        }
+        forced
     }
 
     /// A sender for [`SubAgentOp`]s. The daemon hands a clone to each agent's tool

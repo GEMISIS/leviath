@@ -190,6 +190,10 @@ pub enum SetupBlocker {
     /// stopped part-way, or one that could not be read. Nothing about the
     /// setup is known to be wrong; a resume tries again once it recovers.
     ProviderFailed,
+    /// The run names something this machine no longer has, or has changed
+    /// since the run started: a provider, its configuration, or an MCP
+    /// server's tools. Putting it back the way it was lets the run go on.
+    MachineChanged,
 }
 
 impl std::fmt::Display for SetupBlocker {
@@ -203,6 +207,7 @@ impl std::fmt::Display for SetupBlocker {
             Self::ProviderUnreachable => f.write_str("unreachable"),
             Self::ProviderTimedOut => f.write_str("timed out"),
             Self::ProviderFailed => f.write_str("failed"),
+            Self::MachineChanged => f.write_str("changed"),
         }
     }
 }
@@ -317,6 +322,10 @@ impl std::fmt::Display for WaitReason {
                     | SetupBlocker::ProviderFailed),
                 ..
             } => write!(f, "provider {blocker}"),
+            Self::NeedsSetup {
+                blocker: SetupBlocker::MachineChanged,
+                ..
+            } => f.write_str("machine changed"),
             Self::NeedsSetup { blocker, .. } => write!(f, "needs {blocker}"),
         }
     }
@@ -1463,6 +1472,7 @@ mod tests {
                 "timed out",
             ),
             (SetupBlocker::ProviderFailed, "provider_failed", "failed"),
+            (SetupBlocker::MachineChanged, "machine_changed", "changed"),
         ] {
             assert_eq!(serde_json::to_value(blocker).unwrap(), wire);
             assert_eq!(blocker.to_string(), label);
@@ -1471,11 +1481,12 @@ mod tests {
             // The row renders the kind, not the sentence: a remedy is a
             // sentence and this is a table cell. A blocker that describes the
             // provider says what happened to it rather than what is needed.
-            let lead = match blocker {
+            let cell = match blocker {
                 SetupBlocker::ProviderUnreachable
                 | SetupBlocker::ProviderTimedOut
-                | SetupBlocker::ProviderFailed => "provider",
-                _ => "needs",
+                | SetupBlocker::ProviderFailed => format!("provider {label}"),
+                SetupBlocker::MachineChanged => "machine changed".to_string(),
+                _ => format!("needs {label}"),
             };
             assert_eq!(
                 WaitReason::NeedsSetup {
@@ -1483,7 +1494,7 @@ mod tests {
                     remedy: "a whole sentence that would not fit".to_string(),
                 }
                 .to_string(),
-                format!("{lead} {label}")
+                cell
             );
         }
     }

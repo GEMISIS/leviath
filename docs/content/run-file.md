@@ -155,13 +155,16 @@ same kind a spawn gets. Each one is at the place in the spec that depends on wha
 run was started, then the `openai` provider's base URL was changed and the daemon restarted:
 
 ```text
-ERROR leviath_cli::daemon::recovery: a run could not be resumed on this machine run_id=release-notes-1790848481-4774f2f3b6fa issues=2 problems with this spawn:
+ERROR leviath_cli::daemon::recovery: a run cannot be resumed on this machine as it stands; holding it run_id=release-notes-1790848481-4774f2f3b6fa issues=2 problems with this spawn:
 1. stages.gather.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
 2. stages.write.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
 ```
 
-The daemon writes that to `daemon.log`, and records it in the run file as the run's last step.
-The run ends with status `error`, and `lev ps --all` lists it that way.
+The daemon writes that to `daemon.log`, and records the issues in the run file as the run's
+`held` state. Nothing else about the run changes. It is **held**, not ended: `lev ps` lists it as
+paused, its reason reads `machine changed`, and `lev ps --json` and the API carry each problem in
+the reason's remedy. A question it was waiting on is not lost; it is asked again when the run
+comes back.
 
 | What changed | Code | Path |
 |---|---|---|
@@ -171,9 +174,12 @@ The run ends with status `error`, and `lev ps --all` lists it that way.
 | An MCP server's tools changed | `changed` | `stages.<stage>.tools`, naming tools removed, changed and added |
 | A script's bytes are missing from the file | `missing` | `code[<n>]` |
 
-A run that ended this way stays ended. If you want a run to survive a config change, put the
-provider or server back the way it was before you restart the daemon. Otherwise start a new run.
-Its spec records the machine as it is now.
+Put the provider or server back the way it was, then restart the daemon, and the run carries on
+from where it stopped. `lev resume` tries again without a restart, against the providers
+`config.toml` names now. A key that only lives in the daemon's environment needs the restart. A
+message to a held run is refused with the same reason, and `lev cancel` ends it. If you would
+rather not put the machine back, cancel the held run and start a new one: its spec records the
+machine as it is now.
 
 ## Runs from older versions
 

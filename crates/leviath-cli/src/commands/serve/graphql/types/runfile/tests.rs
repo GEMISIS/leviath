@@ -629,7 +629,21 @@ fn state() -> CoreState {
             round: 2,
             asking: Some("the plan".into()),
         },
+        held: Some(held()),
     }
+}
+
+/// What a held run is held for.
+fn held() -> leviath_runtime::spec::issues::SpawnIssues {
+    leviath_runtime::spec::issues::SpawnIssue::new(
+        leviath_runtime::spec::issues::SpecPath::root()
+            .field("stages")
+            .key("ask")
+            .field("provider"),
+        leviath_runtime::spec::issues::IssueCode::Unavailable,
+        "provider 'openai' is no longer configured on this machine",
+    )
+    .into()
 }
 
 /// A context change of every kind.
@@ -692,6 +706,8 @@ fn delta() -> CoreDelta {
                 granted: 1,
             })),
             Change::Point(s.point.clone()),
+            Change::Held(Some(held())),
+            Change::Held(None),
         ],
         events: vec![
             RunEvent::Inference {
@@ -1106,9 +1122,12 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];
-    assert_eq!(step["changes"].as_array().map(Vec::len), Some(25));
+    assert_eq!(step["changes"].as_array().map(Vec::len), Some(27));
     assert_eq!(step["changes"][24]["checkpoint"]["document"], "the plan");
     assert_eq!(full["checkpoint"]["round"], 2);
+    assert_eq!(step["changes"][25]["held"][0]["code"], "UNAVAILABLE");
+    assert_eq!(step["changes"][26]["held"], serde_json::Value::Null);
+    assert_eq!(full["held"][0]["path"], "stages.ask.provider");
     assert_eq!(
         step["events"].as_array().map(Vec::len),
         Some(7 + 8 + 6 + 5 + 13)

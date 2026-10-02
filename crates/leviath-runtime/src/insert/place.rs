@@ -522,13 +522,24 @@ pub(crate) fn title_request(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, sta
     }
 }
 
-/// `final_output` and `last_transition`, when the run has them.
+/// `final_output`, `last_transition` and a wait on the machine being fixed,
+/// when the run has them.
+///
+/// A run parked until the machine is fixed keeps that reason: the marker is
+/// what the wait reason is read from, so a run placed without it would list
+/// as plainly paused and record that over the reason it had.
 pub(crate) fn optional_state(entity: &mut EntityWorldMut<'_>, state: &RunState) {
     if let Some(out) = final_output(state) {
         entity.insert(out);
     }
     if let Some(t) = &state.last_transition {
         entity.insert(LastTransition(t.clone()));
+    }
+    if let Some(crate::state::WaitState::NeedsSetup { blocker, remedy }) = &state.wait_reason {
+        entity.insert(crate::pipeline::PausedForSetup {
+            blocker: *blocker,
+            remedy: remedy.clone(),
+        });
     }
 }
 

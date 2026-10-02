@@ -84,16 +84,17 @@ checkpoints. A reload reads the spec and the last state from it. It then checks 
 machine: the providers it was started on, its MCP servers, and its code. A run that still fits is
 placed back in the world where it stopped.
 
-A run that no longer fits ends in `error`, with every problem recorded in its file. A provider whose
-key, base URL or model list changed since the run started is the usual cause. The daemon log names
-the run and each problem:
+A run that no longer fits is held, with every problem recorded in its file. A provider whose key,
+base URL or model list changed since the run started is the usual cause. The daemon log names the
+run and each problem:
 
 ```
-ERROR leviath_cli::daemon::recovery: a run could not be resumed on this machine run_id=release-notes-1790848481-4774f2f3b6fa issues=2 problems with this spawn:
+ERROR leviath_cli::daemon::recovery: a run cannot be resumed on this machine as it stands; holding it run_id=release-notes-1790848481-4774f2f3b6fa issues=2 problems with this spawn:
 1. stages.gather.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
 ```
 
-That run stays ended, so start a new one. See
+A held run is listed as paused, with the reason `machine changed`. Put the provider or server
+back and restart the daemon, or `lev resume` it, and it carries on where it stopped. See
 [when the machine changed](/docs/run-file#when-the-machine-changed). A run directory from an older
 Leviath is converted to a run file the first time the daemon loads it. Its old files move to a
 `legacy/` directory inside it.
