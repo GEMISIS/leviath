@@ -1466,13 +1466,7 @@ budget = 10000
     .expect("spawn succeeds");
 
     let state = cli.take(entity).expect("tool state registered");
-    assert!(
-        state
-            .stage_required
-            .lock()
-            .unwrap()
-            .contains("ask_user_text")
-    );
+    assert!(state.stage_required_by_index[0].contains("ask_user_text"));
     assert_eq!(state.stage_required_by_index.len(), 1);
     // And what the stage lets each tool be handed, by canonical name.
     assert_eq!(
@@ -1782,7 +1776,7 @@ async fn build_agent_spawns_registers_and_wires_tools() {
     assert!(md.run_id.starts_with("coder-"), "{}", md.run_id);
     assert_eq!(md.agent_name, "coder");
     // Tool state was registered: a tool batch dispatches (not "no tool state").
-    let out = leviath_runtime::pipeline::ToolService::exec_for(
+    let out = crate::daemon::tool_service::tests::run_judged(
         cli.as_ref(),
         entity,
         vec![leviath_providers::ToolCall {
@@ -1791,8 +1785,7 @@ async fn build_agent_spawns_registers_and_wires_tools() {
             arguments: serde_json::json!({"path": "."}),
             thought_signature: None,
         }],
-        leviath_runtime::pipeline::noop_progress(),
-    )()
+    )
     .await;
     assert_eq!(out[0].0, "c1");
     assert!(!out[0].1.contains("no tool state"));
@@ -1903,7 +1896,7 @@ async fn build_agent_applies_yolo_allow_and_max_depth() {
     );
 
     // The config deny stands: read_file is refused, not executed.
-    let out = leviath_runtime::pipeline::ToolService::exec_for(
+    let out = crate::daemon::tool_service::tests::run_judged(
         cli.as_ref(),
         entity,
         vec![leviath_providers::ToolCall {
@@ -1912,8 +1905,7 @@ async fn build_agent_applies_yolo_allow_and_max_depth() {
             arguments: serde_json::json!({"path": "/no/such/file"}),
             thought_signature: None,
         }],
-        leviath_runtime::pipeline::noop_progress(),
-    )()
+    )
     .await;
     let result = out[0].1.clone();
     assert!(
@@ -1923,7 +1915,7 @@ async fn build_agent_applies_yolo_allow_and_max_depth() {
 
     // `--yolo` still does its job for a tool the config did not deny:
     // `list_dir` runs unattended with no approval prompt.
-    let out = leviath_runtime::pipeline::ToolService::exec_for(
+    let out = crate::daemon::tool_service::tests::run_judged(
         cli.as_ref(),
         entity,
         vec![leviath_providers::ToolCall {
@@ -1932,8 +1924,7 @@ async fn build_agent_applies_yolo_allow_and_max_depth() {
             arguments: serde_json::json!({"path": "."}),
             thought_signature: None,
         }],
-        leviath_runtime::pipeline::noop_progress(),
-    )()
+    )
     .await;
     let result = out[0].1.clone();
     assert!(
@@ -1997,7 +1988,7 @@ budget = 10000
     )
     .expect("spawn succeeds");
 
-    let out = leviath_runtime::pipeline::ToolService::exec_for(
+    let out = crate::daemon::tool_service::tests::run_judged(
         cli.as_ref(),
         entity,
         vec![leviath_providers::ToolCall {
@@ -2006,8 +1997,7 @@ budget = 10000
             arguments: serde_json::json!({"path": "/no/such/file"}),
             thought_signature: None,
         }],
-        leviath_runtime::pipeline::noop_progress(),
-    )()
+    )
     .await;
     assert!(
         out[0].1.contains("[denied]"),

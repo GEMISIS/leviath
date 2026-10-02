@@ -1,11 +1,27 @@
 //! How the driver decides a tick changed nothing: per-phase marker counts,
-//! the per-agent progress digest, and whether anything is still in flight.
-//! Moved out of `world.rs` whole; nothing here changed but the file it lives
-//! in.
+//! the per-agent progress digest, and whether anything is still in flight -
+//! and how what is still in flight is stopped when the world shuts down.
 
 use super::*;
 
 impl PipelineWorld {
+    /// Cancel every job still in flight, so shutdown does not wait on one.
+    ///
+    /// A batch parked on an approval prompt is waiting on a person, and with no
+    /// interaction timeout that is for ever. Cancelling drops the batch
+    /// instead. Its calls are not marked done and its assistant turn is
+    /// already journalled with the batch pending, so the run reloads on the
+    /// next daemon start exactly where it was: parked, and asking again.
+    pub(super) fn abort_in_flight_work(&mut self) {
+        let mut agents = self.world.query::<&crate::pipeline::InFlightWork>();
+        for in_flight in agents.iter(&self.world) {
+            for token in &in_flight.0 {
+                token.cancel();
+            }
+        }
+        crate::inference_call::drop_held_calls(&mut self.world);
+    }
+
     pub(super) fn count<F: QueryFilter>(&mut self) -> usize {
         let mut q = self.world.query_filtered::<(), F>();
         q.iter(&self.world).count()
@@ -69,6 +85,7 @@ impl PipelineWorld {
             self.count::<With<AwaitingCompaction>>(),
             self.count::<With<crate::title::PendingTitle>>(),
             self.count::<With<crate::title::AwaitingTitle>>(),
+            self.count::<With<crate::pipeline::lane_batch::PendingBatch>>(),
         ];
         Fingerprint {
             markers,

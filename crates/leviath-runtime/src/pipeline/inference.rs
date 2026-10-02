@@ -840,7 +840,9 @@ pub(crate) fn dispatch_inference(
                     stage: state.current_stage.clone(),
                     provider: si.provider_name.clone(),
                     model: si.model.clone(),
-                    lane: lane.waking(),
+                    // The world records each attempt as it settles the trip,
+                    // so the handle is a system's, which does not wake it.
+                    lane: lane.clone(),
                     digest: crate::runfile::record::RequestDigest {
                         system_hash,
                         messages: request.messages.len(),
@@ -871,41 +873,21 @@ pub(crate) fn dispatch_inference(
                     hydration,
                     journal,
                 };
-                let cancel = crate::cancel::CancelToken::new();
-                // Supervised: this agent is about to become `AwaitingInference`,
-                // which the driver reads as "busy". A job that died without
-                // reporting would leave it waiting on a completion that can no
-                // longer come, so the supervisor reports one in its place.
-                let lost_outcomes = stage.outcomes.clone();
-                let lost_wake = stage.wake.clone();
-                crate::lane_supervisor::spawn_supervised(
-                    &stage.runtime,
-                    "inference",
-                    run_inference_job(
-                        job,
-                        stage.outcomes.clone(),
-                        stage.wake.clone(),
-                        retry_policy_for(config, retry_tuning),
-                        cancel.clone(),
-                    ),
-                    move |message| {
-                        let _ = lost_outcomes.send(InferenceOutcome {
-                            entity,
-                            result: Err(leviath_providers::ProviderError::Other(message)),
-                            attempt_id: String::new(),
-                            // The job never got to measure itself.
-                            latency: std::time::Duration::ZERO,
-                            // ...and never reached a provider, so it billed
-                            // nothing and needs no rates.
-                            pricing: None,
-                        });
-                        lost_wake.notify_one();
-                    },
+                // The call is held on the agent, permit and all, and its first
+                // trip goes out now. Whether a failed trip is tried again is
+                // decided by the collect system, and the next trip is sent by
+                // `fire_due_calls` when its backoff is over.
+                let (call, cancel) = crate::inference_call::start_call(
+                    &stage,
+                    job,
+                    retry_policy_for(config, retry_tuning),
+                    crate::inference_call::CallLane::Stage,
                 );
                 par_commands.command_scope(|mut commands| {
                     track_in_flight(&mut commands, entity, in_flight, cancel);
                     commands
                         .entity(entity)
+                        .insert(call)
                         .remove::<ReadyToInfer>()
                         // Dispatched: whatever it was waiting for, it isn't
                         // waiting any more.

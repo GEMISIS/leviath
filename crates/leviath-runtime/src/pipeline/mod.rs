@@ -23,7 +23,7 @@ use crate::components::{
     MessageInbox,
 };
 use crate::fanout::FanOutWaiting;
-use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
+use crate::inference_bridge::{InferenceJob, InferenceOutcome};
 use crate::inference_pool::InferencePools;
 use crate::interaction_hub::InteractionHub;
 use crate::persistence::{RunMetadata, TokenTotals, build_run_meta};
@@ -104,6 +104,7 @@ mod compaction;
 pub(crate) use compaction::{
     AwaitingCompaction, CompactionResults, PendingEdgeCompact, apply_edge_transform,
     collect_compaction, compaction_request, dispatch_compaction, dispatch_edge_compact,
+    spawn_summary_job,
 };
 pub use compaction::{CompactionSettings, is_stage_specific};
 mod tool_results;
@@ -116,6 +117,11 @@ pub(crate) use tool_results::{
 mod gate;
 pub(crate) use gate::taint_block_message;
 pub use gate::{GateScriptRules, PolicyGate, ToolSensitivities};
+pub(crate) mod lane_batch;
+pub(crate) use lane_batch::{dispatch_lane_batches, settle_write_ledgers};
+pub(crate) mod tool_verdicts;
+pub use crate::approval_prompt::{declined_result, unanswered_approval_result};
+pub use tool_verdicts::{DecideCtx, DecidedCall, Decision, ToolGrants, ToolVerdict, WriteLedger};
 mod tools;
 pub(crate) use tools::{
     AwaitingTools, ContextToolResults, LandedResults, RecoveredResults, ToolServiceRes, ToolStage,

@@ -126,8 +126,13 @@ pub(crate) fn production_runner(
         ) {
             return Err(refusal);
         }
-        if let Some(refusal) = crate::tools::write_budget_refusal(name, args, workdir, &ctx.writes)
-        {
+        if let Some(refusal) = crate::tools::write_budget_refusal(
+            name,
+            args,
+            workdir,
+            &ctx.writes,
+            ctx.writes.written(),
+        ) {
             return Err(refusal);
         }
         let policy = resolve(name, is_builtin, args);

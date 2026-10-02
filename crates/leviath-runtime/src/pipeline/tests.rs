@@ -8,6 +8,7 @@ use crate::insert::RunSpecC;
 use crate::spec::graph::EdgeCarry;
 use crate::spec::graph::EdgeCondition;
 use crate::test_graph::{self as tg, spec_of, spec_with};
+use crate::test_support::Exploding;
 
 /// `edge`, renamed `name`.
 fn named(name: &str, edge: crate::spec::graph::EdgeDef) -> crate::spec::graph::EdgeDef {
@@ -1107,6 +1108,113 @@ async fn dispatch_uses_the_configured_retry_schedule() {
     assert!(outcome.result.is_ok());
 }
 
+/// A failed trip is decided on in the world: collect leaves the agent waiting
+/// with its call held, and once the backoff is over the next trip answers and
+/// the turn is applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_waits_on_a_retried_trip_and_applies_the_answer() {
+    let (mut world, rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    world.resource_mut::<Providers>().0.register(
+        "cfg".to_string(),
+        Arc::new(crate::inference_call::tests::Flaky::failing(1)),
+    );
+    world.insert_resource(InferenceRetryTuning {
+        max_attempts: 3,
+        base_delay_ms: 1,
+    });
+    world.insert_resource(InferenceResults(rx));
+    let e = world
+        .spawn((
+            agent_state(),
+            window(),
+            stage("m", vec![], None),
+            ReadyToInfer,
+        ))
+        .id();
+    run(&mut world);
+    let mut schedule = Schedule::default();
+    schedule.add_systems((crate::inference_call::fire_due_calls, collect_inference).chain());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut waited = false;
+    while world.get::<ProcessResponse>(e).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the turn never landed"
+        );
+        schedule.run(&mut world);
+        waited |= world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_some_and(|c| c.waiting());
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(waited, "the failed trip waited in the world");
+    assert!(
+        world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_none()
+    );
+    assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 1);
+}
+
+/// The routing lane's collect waits on a failed trip the same way: the agent
+/// stays mid-route with its call held rather than failing the stage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collect_choice_waits_on_a_retried_trip() {
+    let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+    world.resource_mut::<Providers>().0.register(
+        "cfg".to_string(),
+        Arc::new(crate::inference_call::tests::Flaky::failing(1)),
+    );
+    let (ttx, trx) = mpsc::unbounded_channel();
+    world.resource_mut::<InferenceStage>().transition_outcomes = ttx;
+    world.insert_resource(TransitionResults(trx));
+    let bp = blueprint(vec![stage_named("a", None, false, None)]);
+    let e = spawn_choosing_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+    let mut schedule = Schedule::default();
+    schedule.add_systems(dispatch_transition_choice);
+    schedule.run(&mut world);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        run_collect_transition(&mut world);
+        if world
+            .get::<crate::inference_call::InferenceCall>(e)
+            .is_some_and(|c| c.waiting())
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the trip never came back"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(world.get::<AwaitingTransitionResponse>(e).is_some());
+    assert_eq!(
+        world.get::<AgentState>(e).unwrap().status,
+        AgentStatus::Active
+    );
+}
+
+/// Settle `outcome` against the call its agent holds, as the collect systems
+/// do, for a test that reads the lane directly and still wants what the world
+/// records when a trip comes back.
+fn settle(world: &mut World, outcome: &mut InferenceOutcome) -> crate::inference_call::Next {
+    let mut state = bevy_ecs::system::SystemState::<(
+        Query<&mut crate::inference_call::InferenceCall>,
+        Option<Res<InferenceStage>>,
+        Commands,
+    )>::new(world);
+    let (mut calls, stage, mut commands) = state.get_mut(world).expect("the params");
+    let next = crate::inference_call::settle_call(
+        calls.get_mut(outcome.entity).ok(),
+        outcome,
+        stage.as_deref(),
+        &mut commands,
+    );
+    state.apply(world);
+    next
+}
+
 /// A dispatched job journals its attempt, carrying the run, the stage and the
 /// name the run calls the provider by - none of which the retry loop knows on
 /// its own, which is why the dispatch system hands them over with the request.
@@ -1126,7 +1234,9 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     ));
 
     run(&mut world);
-    assert!(rx.recv().await.expect("outcome").result.is_ok());
+    let mut outcome = rx.recv().await.expect("outcome");
+    settle(&mut world, &mut outcome);
+    assert!(outcome.result.is_ok());
 
     // One journal carries every kind of record the run makes - a usage record
     // lands on this one from the response system, a context change from the
@@ -1143,8 +1253,8 @@ async fn a_dispatched_call_journals_the_attempt_it_makes() {
     })
     .expect("the journal is still open");
 
-    // The attempt record is appended before the outcome is reported, so the
-    // outcome arriving means the append has already been sent.
+    // The world appends the attempt record when it settles the trip, so the
+    // settling above means the append has already been sent.
     let records = crate::inference_bridge::journaled_attempts(&mut journal);
     assert_eq!(records.len(), 1, "{records:?}");
     let record = &records[0];
@@ -1203,7 +1313,9 @@ async fn a_captured_run_journals_the_request_it_sent_and_the_window_it_came_from
     ));
 
     run(&mut world);
-    assert!(rx.recv().await.expect("outcome").result.is_ok());
+    let mut outcome = rx.recv().await.expect("outcome");
+    settle(&mut world, &mut outcome);
+    assert!(outcome.result.is_ok());
 
     let records = crate::inference_bridge::journaled_attempts(&mut journal);
     assert_eq!(records.len(), 1, "{records:?}");
@@ -1424,48 +1536,12 @@ impl StageInference {
     }
 }
 
-/// A provider whose `infer` panics, standing in for any bug that kills a lane
-/// task before it can report - the case that would otherwise leave the agent
-/// waiting on an outcome that never arrives.
-struct Exploding;
-#[async_trait::async_trait]
-impl Provider for Exploding {
-    async fn infer(
-        &self,
-        _r: &InferenceRequest,
-    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-        panic!("provider adapter blew up")
-    }
-    async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-        1
-    }
-    fn max_context_tokens(&self, _m: &str) -> usize {
-        100_000
-    }
-    fn name(&self) -> &str {
-        "exploding"
-    }
-    fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-        leviath_providers::ModelCapabilities::default()
-    }
-}
-
 /// Register [`Exploding`] under `"exploding"` in an already-built test world.
 fn register_exploding(world: &mut World) {
     world
         .resource_mut::<Providers>()
         .0
         .register("exploding".to_string(), Arc::new(Exploding));
-}
-
-#[tokio::test]
-async fn exploding_provider_metadata_is_exercised() {
-    // Keep the mock's non-`infer` trait methods measured.
-    let p = Exploding;
-    assert_eq!(p.name(), "exploding");
-    assert_eq!(p.count_tokens("t", "m").await, 1);
-    assert_eq!(p.max_context_tokens("m"), 100_000);
-    let _ = p.capabilities("m");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1563,6 +1639,7 @@ fn collect_applies_ok_and_advances_to_process_response() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1596,6 +1673,7 @@ fn collect_holds_a_success_that_lands_on_a_paused_agent() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1646,6 +1724,7 @@ fn collect_holds_a_failure_that_lands_on_a_paused_agent() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1690,6 +1769,7 @@ fn collect_choice_parks_without_a_stage_log_to_write_to() {
             "refused",
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect_transition(&mut world);
@@ -1746,6 +1826,7 @@ fn collect_parks_a_run_whose_provider_is_unreachable() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1807,6 +1888,7 @@ fn a_run_with_no_stage_log_still_parks_on_an_unreachable_provider() {
             "reading response body: error decoding response body".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1829,6 +1911,7 @@ fn collect_marks_error_on_failure() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1884,6 +1967,7 @@ fn an_unusable_provider_fails_over_instead_of_killing_the_run() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1925,6 +2009,7 @@ fn failover_is_recorded_in_the_stage_log() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -1963,6 +2048,7 @@ fn a_failover_is_journaled_with_the_provider_it_left_and_the_one_it_took() {
             "[timeout] the provider went quiet".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2005,6 +2091,7 @@ fn a_failover_on_an_unclassified_failure_journals_an_empty_kind() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2043,6 +2130,7 @@ fn an_exhausted_fallback_list_pauses_on_credits_instead_of_dying() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2099,6 +2187,7 @@ fn an_unattended_run_out_of_credits_parks_instead_of_losing_its_work() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2138,6 +2227,7 @@ fn a_credits_pause_records_the_remedy_on_the_run() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2168,6 +2258,7 @@ fn the_credits_pause_copes_without_a_stage_log_buffer() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2198,6 +2289,7 @@ fn an_exhausted_fallback_list_still_terminates_on_a_dead_key() {
             detail: "HTTP 401 Unauthorized".to_string(),
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2227,6 +2319,7 @@ fn an_ordinary_error_does_not_burn_a_fallback() {
             "HTTP 400: bad request".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2261,6 +2354,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
             attempt_id: String::new(),
             result: Err(credits_exhausted()),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
         run_collect(&mut world);
@@ -2282,6 +2376,7 @@ fn provider_fatal_failures_trip_the_breaker_and_a_success_clears_it() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -2329,6 +2424,7 @@ fn a_success_between_failures_clears_the_count_end_to_end() {
             attempt_id: String::new(),
             result,
             pricing: None,
+            attempt: None,
         })
         .unwrap();
         run_collect(world);
@@ -2392,6 +2488,7 @@ fn a_slow_provider_keeps_its_place_where_a_refused_one_loses_it() {
                 attempt_id: String::new(),
                 result: Err(fail_with(label)),
                 pricing: None,
+                attempt: None,
             })
             .unwrap();
             run_collect(&mut world);
@@ -2438,6 +2535,7 @@ fn an_ordinary_error_does_not_count_against_the_provider() {
             "HTTP 400: bad request".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2464,6 +2562,7 @@ fn collect_works_without_the_breaker_installed() {
         attempt_id: String::new(),
         result: Err(credits_exhausted()),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2492,6 +2591,7 @@ fn an_unusable_provider_without_a_stage_component_still_terminates() {
             detail: "HTTP 401 Unauthorized".to_string(),
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2731,6 +2831,7 @@ fn collect_inference_logs_a_produced_part_the_run_dropped() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -2780,6 +2881,7 @@ fn collect_inference_buffers_output_token_line_and_stage_tokens() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3042,6 +3144,7 @@ fn collect_does_not_learn_the_cost_of_the_bytes_a_request_sent() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3070,6 +3173,7 @@ fn collect_learns_the_drift_between_what_was_believed_and_what_was_charged() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3105,6 +3209,7 @@ fn collect_folds_a_worse_call_into_an_existing_calibration() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3140,6 +3245,7 @@ fn collect_learns_from_a_refused_request_too() {
             max: 1_350,
         }),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3166,6 +3272,7 @@ fn collect_calibrates_nothing_when_there_was_no_estimate() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3282,6 +3389,7 @@ fn collect_inference_drops_a_response_for_a_cancelled_run() {
         attempt_id: String::new(),
         result: Ok(resp("too late")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3317,6 +3425,7 @@ fn collect_inference_skips_empty_output_but_logs_tokens() {
         attempt_id: String::new(),
         result: Ok(resp("   ")), // whitespace-only ⇒ no output line
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3344,6 +3453,7 @@ fn collect_inference_error_buffers_error_line() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -3371,6 +3481,7 @@ fn collect_inference_tolerates_cursor_beyond_ledger() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -4057,7 +4168,7 @@ fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
     // Run the tool dispatch so the gate blocks the outbound call and records
     // an audit event, then persist.
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
 
@@ -4090,7 +4201,7 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
     let first = next_snapshot(&mut prx);
@@ -4141,7 +4252,7 @@ fn dispatch_persistence_resends_the_taint_audit_on_the_terminal_snapshot() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
     // This is the snapshot the lane would coalesce away: it carried the audit,
@@ -4536,6 +4647,7 @@ fn collect_drops_outcome_for_non_awaiting_agent() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -4571,6 +4683,7 @@ fn collect_inference_accumulates_token_totals() {
         attempt_id: String::new(),
         result: Ok(r),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -5838,7 +5951,7 @@ async fn dispatch_tools_enqueues_runnable_job_and_advances() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -5913,7 +6026,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<AwaitingTools>(e).is_some());
 
@@ -6058,7 +6171,7 @@ async fn a_dispatched_batch_records_what_it_belongs_to() {
         ReadyForTools,
     ));
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let mut batch = None;
@@ -6129,7 +6242,7 @@ async fn dispatch_journals_a_batch_it_resolved_itself() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(jrx.try_recv().is_err(), "nothing went to the lane");
@@ -6176,7 +6289,7 @@ async fn dispatch_logs_an_all_inline_batch_it_would_otherwise_swallow() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<ReadyToInfer>(e).is_some(), "nothing to await");
@@ -6219,7 +6332,7 @@ async fn dispatch_all_inline_without_a_buffer_still_advances() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
 }
@@ -6241,7 +6354,7 @@ async fn dispatch_without_run_metadata_is_unjournaled() {
         ReadyForTools,
     ));
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let job = jrx.try_recv().expect("job still enqueued");
@@ -6280,7 +6393,7 @@ async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -6380,7 +6493,7 @@ async fn dispatch_tools_skips_non_active_agent() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<ReadyForTools>(e).is_some()); // cancelled ⇒ not enqueued
@@ -6468,7 +6581,7 @@ fn a_fan_out_call_is_read_inline_and_never_reaches_the_lane() {
     let e = ready_for_tools(&mut world, vec![call]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
@@ -6507,7 +6620,7 @@ fn parking_on_a_fan_out_writes_no_result_for_it_yet() {
     let e = ready_for_tools(&mut world, vec![fan, note]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let w = world.get::<ContextWindow>(e).unwrap();
@@ -6547,7 +6660,7 @@ fn a_malformed_fan_out_call_is_refused_and_the_agent_carries_on() {
     let e = ready_for_tools(&mut world, vec![call]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<crate::fanout::PendingFanOut>(e).is_none());
@@ -6574,7 +6687,7 @@ fn a_second_fan_out_call_in_one_turn_is_refused() {
     let e = ready_for_tools(&mut world, vec![first, second]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert_eq!(
@@ -6598,7 +6711,7 @@ fn a_fan_out_call_sharing_a_turn_with_lane_work_is_refused() {
     let e = ready_for_tools(&mut world, vec![call, tc("c2", "read_file")]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -6656,7 +6769,7 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing was queued: the whole point is that it is answered inline.
@@ -6778,7 +6891,7 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(start_stage_seeds);
+    s.add_systems((start_stage_seeds, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The stage is held, and the calls went out.
@@ -6968,7 +7081,7 @@ async fn dispatch_tools_applies_all_context_inline() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // All-context batch: nothing enqueued, applied inline, ready to infer.
@@ -7025,7 +7138,7 @@ async fn dispatch_records_a_submitted_output_inline() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing reached the lane, and the agent goes back to work rather than
@@ -7084,7 +7197,7 @@ async fn a_submitted_artifact_is_stored_when_the_world_has_a_store() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     let recorded = world
         .get::<crate::persistence::FinalOutput>(e)
@@ -7168,7 +7281,7 @@ async fn the_blueprint_overwrite_policy_wins_over_the_operators() {
             ))
             .id();
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
         let recorded = world
             .get::<crate::persistence::FinalOutput>(e)
@@ -7224,7 +7337,7 @@ async fn artifacts_are_checked_against_the_run_workdir() {
             .id();
 
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
 
         assert_eq!(
@@ -7274,7 +7387,7 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert_eq!(
@@ -7333,7 +7446,7 @@ async fn dispatch_tools_refuses_a_tool_the_stage_never_offered() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7376,7 +7489,7 @@ async fn dispatch_tools_tells_a_toolless_stage_to_answer_directly() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7413,7 +7526,7 @@ async fn dispatch_tools_matches_an_offered_tool_through_its_alias() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7440,7 +7553,7 @@ async fn dispatch_tools_honours_the_stage_tool_filter() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7463,7 +7576,7 @@ async fn dispatch_tools_treats_an_empty_tool_filter_as_no_narrowing() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7494,7 +7607,7 @@ async fn dispatch_tools_refuses_an_unoffered_context_tool() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7520,7 +7633,7 @@ async fn dispatch_tools_partitions_context_and_lane() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Context result stashed; the non-context call went to the lane.
@@ -7595,7 +7708,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7642,7 +7755,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7690,7 +7803,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7745,7 +7858,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7828,7 +7941,7 @@ async fn dispatch_tools_gate_blocks_outbound_leak_but_allows_inbound() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -7866,7 +7979,7 @@ async fn dispatch_tools_holds_batch_for_an_interactive_gate_prompt() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // Blocked + interactive ⇒ held for a prompt, not dispatched or [blocked].
     assert_eq!(
@@ -7913,7 +8026,7 @@ async fn dispatch_tools_gates_a_submission_over_tainted_context() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "nothing reaches the lane");
@@ -7956,7 +8069,7 @@ async fn dispatch_tools_prompts_for_a_tainted_submission_and_applies_it_once_app
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert_eq!(
         world
@@ -8014,7 +8127,7 @@ async fn dispatch_tools_auto_approves_a_gate_block_under_yolo() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // No gate prompt was raised; the call went to the lane.
     assert!(
@@ -8076,7 +8189,7 @@ async fn dispatch_tools_under_yolo_submits_over_tainted_context_and_records_it()
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -8133,7 +8246,7 @@ async fn dispatch_tools_executes_a_gate_approved_call_and_blocks_a_denied_one() 
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The approved call was enqueued to the lane; the denied one was not.
@@ -8173,7 +8286,7 @@ async fn dispatch_tools_falls_through_for_a_resolved_agents_unprompted_call() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // Inbound read_file is gate-allowed ⇒ reaches the lane.
     let job = jrx.try_recv().expect("allowed call enqueued");
@@ -8208,7 +8321,7 @@ async fn dispatch_tools_gate_allows_outbound_via_allowlist() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Allowlisted ⇒ the outbound call reaches the lane instead of `[blocked]`.
@@ -8239,7 +8352,7 @@ async fn dispatch_tools_gate_allows_outbound_via_scripted_rule() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The scripted rule allows it ⇒ reaches the lane, not `[blocked]`.
@@ -10080,6 +10193,7 @@ fn collect_choice_errors_when_system_prompt_overflows() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15016,6 +15130,7 @@ fn a_routing_call_is_billed_to_the_stage_it_leaves_and_cuts_the_visit() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: Some(leviath_providers::ModelPricing::flat(1_000_000.0, 0.0)),
+        attempt: None,
     })
     .unwrap();
 
@@ -15059,6 +15174,7 @@ fn a_self_transition_starts_a_second_visit_of_the_same_stage() {
         attempt_id: String::new(),
         result: Ok(resp("a")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15095,6 +15211,7 @@ fn collect_choice_holds_an_outcome_that_lands_on_a_paused_agent() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15155,6 +15272,7 @@ fn collect_choice_parks_a_run_the_provider_could_not_be_reached_for() {
             "the provider never answered",
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15220,6 +15338,7 @@ fn collect_choice_still_fails_a_stage_on_an_error_nobody_can_resume_past() {
             "not JSON".to_string(),
         )),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15251,6 +15370,7 @@ fn collect_choice_enters_chosen_stage() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15297,6 +15417,7 @@ fn a_routing_call_is_counted_against_the_run() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15337,6 +15458,7 @@ fn collect_choice_does_not_resurrect_or_complete_a_cancelled_run() {
             attempt_id: String::new(),
             result: Ok(resp(choice)),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
 
@@ -15377,6 +15499,7 @@ fn collect_choice_applies_the_chosen_edge_transform() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15412,6 +15535,7 @@ fn collect_choice_holds_the_stage_when_the_chosen_edge_is_gated() {
         attempt_id: String::new(),
         result: Ok(resp("review")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15456,6 +15580,7 @@ fn collect_choice_records_a_forced_gate_and_enters_the_stage() {
             attempt_id: String::new(),
             result: Ok(resp("review")),
             pricing: None,
+            attempt: None,
         })
         .unwrap();
     }
@@ -15485,6 +15610,7 @@ fn collect_choice_done_completes() {
         attempt_id: String::new(),
         result: Ok(resp("DONE")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15511,6 +15637,7 @@ fn collect_choice_unknown_target_falls_back_to_first_stage() {
         attempt_id: String::new(),
         result: Ok(resp("ghost")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15532,6 +15659,7 @@ fn collect_choice_marks_error_on_failure() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15556,6 +15684,7 @@ fn collect_choice_drops_stale_outcome() {
         attempt_id: String::new(),
         result: Ok(resp("x")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     // No matching AwaitingTransitionResponse agent ⇒ silently dropped.
@@ -15588,6 +15717,7 @@ fn collect_inference_records_activity_with_provider_and_latency() {
         attempt_id: String::new(),
         result: Ok(resp("hi")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15627,6 +15757,7 @@ fn collect_inference_records_a_failed_call_without_stage_inference() {
         attempt_id: String::new(),
         result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15835,6 +15966,7 @@ fn collect_choice_emits_a_stage_transition_event() {
         attempt_id: String::new(),
         result: Ok(resp("b")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
 
@@ -15876,7 +16008,7 @@ async fn dispatch_tools_announces_lane_calls() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -19521,7 +19653,7 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing went to the async lane, so the window is the only record.
@@ -19555,7 +19687,7 @@ async fn dispatch_tools_records_a_real_submission_with_the_blueprint_present() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let recorded = world
@@ -19918,7 +20050,7 @@ async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -19957,7 +20089,7 @@ async fn dispatch_tools_escalates_the_refusal_with_the_cut_offs_in_a_row() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     let text = conversation_text(&world, e);
     assert!(text.contains("That is 2 replies in a row"), "{text}");
@@ -20064,7 +20196,7 @@ async fn a_refused_cut_off_call_assembles_as_an_object_the_provider_accepts() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let assembled = world.get::<ContextWindow>(e).unwrap().assemble();
@@ -20500,6 +20632,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20520,6 +20653,7 @@ fn collect_records_a_cut_off_reply_in_the_stage_ledger() {
         attempt_id: String::new(),
         result: Ok(resp("done")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20548,6 +20682,7 @@ fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
         attempt_id: String::new(),
         result: Ok(response),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20567,6 +20702,7 @@ fn collect_warns_in_the_stage_log_about_an_unrecognised_stop() {
         attempt_id: String::new(),
         result: Ok(resp("done")),
         pricing: None,
+        attempt: None,
     })
     .unwrap();
     run_collect(&mut world);
@@ -20742,7 +20878,7 @@ mod typed_tool_results {
         call.arguments = serde_json::json!({});
         let e = ready_for_tools(&mut world, vec![call]);
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
         assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
         let conv = world
@@ -21131,7 +21267,7 @@ async fn a_recovered_batch_runs_only_what_had_not_finished() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<AwaitingTools>(e).is_some());
     assert!(
@@ -21208,7 +21344,7 @@ fn a_recovered_batch_resolved_inline_applies_its_recovered_results() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "nothing went to the lane");

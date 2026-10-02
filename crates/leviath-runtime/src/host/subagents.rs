@@ -10,8 +10,14 @@ use super::*;
 use crate::fanout::FanOutWaiting;
 
 impl WorldHost {
-    /// Service one [`SubAgentOp`] from a tool lane, replying on its oneshot.
+    /// Service one [`SubAgentOp`] from a tool lane, replying on its oneshot
+    /// once the run it names is in the world (see `host::paging`).
     pub(super) fn handle_subagent(&mut self, op: SubAgentOp) {
+        self.page_first(super::paging::Deferred::Sub(op));
+    }
+
+    /// Service one sub-agent op whose run, if it names one, has been paged in.
+    pub(super) fn handle_subagent_now(&mut self, op: SubAgentOp) {
         match op {
             SubAgentOp::Spawn {
                 request,
@@ -66,7 +72,7 @@ impl WorldHost {
                     return;
                 }
                 // Page the target in if it was unloaded, so delivery finds it.
-                let _ = self.resolve_or_reload(&run_id, PageIn::Address);
+                let _ = self.resolve_or_reload(&run_id);
                 let ok = self
                     .world
                     .send_message(AgentMessage {
@@ -292,8 +298,8 @@ impl WorldHost {
         // Both ends as entities: the host already maps run ids to them, and
         // comparing entities avoids re-reading an id component per node.
         let (Ok(target), Ok(root)) = (
-            self.resolve_or_reload(run_id, PageIn::Address),
-            self.resolve_or_reload(ancestor, PageIn::Address),
+            self.resolve_or_reload(run_id),
+            self.resolve_or_reload(ancestor),
         ) else {
             return false;
         };
@@ -338,7 +344,7 @@ impl WorldHost {
     /// Reports whether anything took, which is what tells a caller a
     /// still-running tree apart from one that was already finished.
     pub(super) fn pause_tree(&mut self, run_id: &str) -> bool {
-        let Ok(root) = self.resolve_or_reload(run_id, PageIn::Address) else {
+        let Ok(root) = self.resolve_or_reload(run_id) else {
             return false;
         };
         let mut acted = false;
@@ -361,9 +367,11 @@ impl WorldHost {
         // Whether this run had to come back from disk. Paging in a stopped run
         // restores it ready to work, so the `resume` calls below find nothing
         // paused and all report false - while the run is, in fact, going again.
-        // Loading it back is the act of resuming it, so it counts as one.
-        let was_unloaded = self.live_entity(run_id).is_none();
-        let root = match self.resolve_or_reload(run_id, PageIn::Resume) {
+        // Loading it back is the act of resuming it, so it counts as one. The
+        // page-in ran just before this op (see `host::paging`), and how it went
+        // is kept while the op is handled.
+        let was_unloaded = self.paged.get(run_id).is_some_and(Result::is_ok);
+        let root = match self.resolve_or_reload(run_id) {
             Ok(root) => root,
             // Still held: the bind was tried again and still fails, so say
             // what to put back.
@@ -387,7 +395,7 @@ impl WorldHost {
     }
 
     pub(super) fn cancel_tree(&mut self, run_id: &str) -> bool {
-        let Ok(root) = self.resolve_or_reload(run_id, PageIn::Address) else {
+        let Ok(root) = self.resolve_or_reload(run_id) else {
             return false;
         };
         let mut cancelled = false;

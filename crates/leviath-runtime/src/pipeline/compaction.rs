@@ -33,15 +33,30 @@ pub(crate) const EVICTION_THRESHOLD: f32 = 0.9;
 /// which returns the agent to `ReadyToInfer` with its context untouched - the
 /// same place a genuine summarization failure leaves it.
 fn spawn_supervised_compaction(stage: &InferenceStage, entity: Entity, job: CompactionJob) {
-    let lost_outcomes = stage.compaction_outcomes.clone();
+    spawn_summary_job(stage, &stage.compaction_outcomes, "compaction", entity, job);
+}
+
+/// Spawn a summarization job under the lane supervisor, reporting into
+/// `outcomes`: compaction's own lane, or the content-summary lane a child's
+/// summarized region waits on. A job that dies without reporting is reported
+/// as an error named after `lane`, which each lane's collect system already
+/// treats as a failed summary.
+pub(crate) fn spawn_summary_job(
+    stage: &InferenceStage,
+    outcomes: &tokio::sync::mpsc::UnboundedSender<CompactionOutcome>,
+    lane: &'static str,
+    entity: Entity,
+    job: CompactionJob,
+) {
+    let lost_outcomes = outcomes.clone();
     let lost_wake = stage.wake.clone();
     crate::lane_supervisor::spawn_supervised(
         &stage.runtime,
-        "compaction",
+        lane,
         run_compaction_job(
             job,
             std::time::Duration::from_secs(leviath_providers::DEFAULT_INFERENCE_TIMEOUT_SECS),
-            stage.compaction_outcomes.clone(),
+            outcomes.clone(),
             stage.wake.clone(),
         ),
         move |message| {

@@ -119,10 +119,20 @@ async fn a_bound_run_is_registered_with_the_tool_service_once_placed() {
     let bindings = env.bind(&s, &code).await.unwrap();
     assert_eq!(
         bindings.len(),
-        5,
-        "the compiled hooks, the mime registry, the title chain, the record and the registration"
+        6,
+        "the compiled hooks, the mime registry, the title chain, the record, the grants and \
+         write ledger, and the registration"
     );
     let (world, entity) = place(s, bindings);
+    // What the run has been granted and has written are kept in the world.
+    assert_eq!(
+        world.get::<leviath_runtime::pipeline::ToolGrants>(entity),
+        Some(&Default::default())
+    );
+    assert_eq!(
+        world.get::<leviath_runtime::pipeline::WriteLedger>(entity),
+        Some(&leviath_runtime::pipeline::WriteLedger { written: 0 })
+    );
     assert!(
         world
             .get::<leviath_runtime::components::StageHookScripts>(entity)

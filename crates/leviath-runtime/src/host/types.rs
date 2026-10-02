@@ -15,7 +15,6 @@ use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::request::SpawnRequest;
 use crate::spec::run_spec::RunSpec;
 use crate::spec::summary::SpawnSummary;
-use crate::world::AgentId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -261,13 +260,12 @@ pub(crate) fn host_refusal(message: impl Into<String>) -> SpawnIssues {
 
 /// The daemon-installed function that pages a previously-unloaded run back into
 /// the world from its on-disk state: given a run id and what it is wanted
-/// for, it reads the run's file, binds its spec and places it, and returns the
-/// new entity, or why the run was not placed. Used for reload-on-demand - a
-/// control/sub-agent op targeting a run that isn't currently in memory pages it
-/// in first via the host's internal resolve-or-reload step. Installed with
-/// [`super::WorldHost::set_reloader`].
-pub(crate) type Reloader =
-    Box<dyn FnMut(&mut PipelineWorld, &str, PageIn) -> Result<AgentId, NotPlaced> + Send>;
+/// for, it returns the job that reads the run's file and binds its spec off
+/// the serve loop, which resolves to how to place the run, or why it will not
+/// be. Used for reload-on-demand - a control/sub-agent op targeting a run that
+/// isn't currently in memory pages it in first, and waits for it (see
+/// `host::paging`). Installed with [`super::WorldHost::set_reloader`].
+pub type Reloader = Box<dyn FnMut(&str, PageIn) -> super::PageJob + Send>;
 
 /// What an op pages a run in for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

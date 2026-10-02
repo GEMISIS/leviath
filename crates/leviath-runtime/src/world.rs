@@ -70,7 +70,7 @@ use crate::tool_bridge::ToolLane;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fingerprint {
     /// How many agents hold each phase marker.
-    markers: [usize; 12],
+    markers: [usize; 13],
     /// Per-agent run progress that no marker reflects (see
     /// [`PipelineWorld::agent_digest`]).
     agents: u64,
@@ -384,6 +384,10 @@ impl PipelineWorld {
         world.insert_resource(crate::blob_store::MimeRegistryHandle::default());
         world.insert_resource(crate::blob_store::MimeLimits::default());
         world.insert_resource(Providers(providers));
+        world.insert_resource(crate::fanout::WorkerStarts::new(
+            runtime.clone(),
+            wake.clone(),
+        ));
         world.insert_resource(InferenceStage {
             // The wake goes into the pools, not just the bridges: freeing a slot
             // has to re-drive dispatch, or the agents parked on a full pool never
@@ -412,9 +416,10 @@ impl PipelineWorld {
         world.insert_resource(crate::gate_prompt::GatePromptStage {
             outcomes: gp_tx,
             wake: wake.clone(),
-            runtime: gp_runtime,
+            runtime: gp_runtime.clone(),
         });
         world.insert_resource(crate::gate_prompt::GatePromptResults(gp_rx));
+        crate::approval_prompt::install(&mut world, gp_runtime, wake.clone());
         world.insert_resource(InferenceResults(inf_rx));
         world.insert_resource(TransitionResults(trans_rx));
         world.insert_resource(CompactionResults(compact_rx));
@@ -445,7 +450,14 @@ impl PipelineWorld {
                 // the async lanes. Ahead of everything else so a cancel frees its
                 // inference permit and tool-lane capacity on the very next tick,
                 // rather than whenever the provider or tool happens to answer.
-                abort_terminal_work,
+                // Beside it, the calls waiting out a backoff: an ended agent's
+                // gives its permit back, and a due one sends its next trip.
+                (
+                    abort_terminal_work,
+                    crate::inference_call::fire_due_calls,
+                    crate::title_bridge::fire_due_titles,
+                )
+                    .chain(),
                 deliver_messages,
                 collect_compaction,
                 // Apply any completed Summarize context-transform summaries into
@@ -508,8 +520,16 @@ impl PipelineWorld {
                 // again before each batch has to be looked at here, or a tool
                 // that arrived since its turn was built is refused for another
                 // one.
-                (rescan_before_dispatch, run_tool_call_hooks, dispatch_tools).chain(),
-                collect_tools,
+                // Then a batch with lane work is decided call by call and sent.
+                (
+                    rescan_before_dispatch,
+                    run_tool_call_hooks,
+                    dispatch_tools,
+                    crate::approval_prompt::collect_approvals,
+                    crate::pipeline::dispatch_lane_batches,
+                )
+                    .chain(),
+                (collect_tools, crate::pipeline::settle_write_ledgers).chain(),
                 // Apply any resolved stage-boundary interaction-point answers
                 // before the stage decides its transition.
                 crate::interaction_points::collect_interaction_point,
@@ -855,22 +875,6 @@ impl PipelineWorld {
             .resource::<crate::telemetry::Telemetry>()
             .0
             .force_flush();
-    }
-
-    /// Cancel every job still in flight, so shutdown does not wait on one.
-    ///
-    /// A batch parked on an approval prompt is waiting on a person, and with no
-    /// interaction timeout that is for ever. Cancelling drops the batch
-    /// instead. Its calls are not marked done and its assistant turn is
-    /// already journalled with the batch pending, so the run reloads on the
-    /// next daemon start exactly where it was: parked, and asking again.
-    fn abort_in_flight_work(&mut self) {
-        let mut agents = self.world.query::<&crate::pipeline::InFlightWork>();
-        for in_flight in agents.iter(&self.world) {
-            for token in &in_flight.0 {
-                token.cancel();
-            }
-        }
     }
 
     /// A point-in-time read of what the world is holding and what it is waiting
@@ -2069,6 +2073,7 @@ mod tests {
                     attempt_id: String::new(),
                     result: Ok(text("t1")),
                     pricing: None,
+                    attempt: None,
                 },
                 lane: crate::pipeline::HeldLane::Stage,
             });
@@ -2124,6 +2129,7 @@ mod tests {
                     attempt_id: String::new(),
                     result: Ok(text("t1")),
                     pricing: None,
+                    attempt: None,
                 },
                 lane: crate::pipeline::HeldLane::TransitionChoice,
             });

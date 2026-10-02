@@ -6,11 +6,6 @@
 
 use super::*;
 
-/// Build one agent's [`AgentToolState`] from the shared executors + config.
-///
-/// `stage_perms_by_index` holds every stage's `[tool_permissions]` (in stage
-/// order); the entry stage's map seeds `stage_perms`, and the pipeline's
-/// `sync_stage` swaps in the right one as the agent changes stage.
 /// Everything [`build_tool_state`] assembles an agent's tool state from.
 ///
 /// A struct rather than twenty-one positional parameters, and the reason is
@@ -83,17 +78,14 @@ pub(crate) struct ToolStateParts<'a> {
     pub(crate) workdir: std::path::PathBuf,
 }
 
+/// Build one agent's [`AgentToolState`] from the shared executors + config.
+///
+/// `stage_perms_by_index` holds every stage's `[tool_permissions]` (in stage
+/// order); a call is judged by the map of the stage the world says the run is
+/// in. The entry stage's `tool_accepts` seeds the limits a batch runs under,
+/// and the pipeline's `sync_stage` swaps in the right ones as the agent
+/// changes stage.
 pub(crate) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState> {
-    let entry_perms = parts
-        .stage_perms_by_index
-        .get(parts.entry_index)
-        .cloned()
-        .unwrap_or_default();
-    let entry_required = parts
-        .stage_required_by_index
-        .get(parts.entry_index)
-        .cloned()
-        .unwrap_or_default();
     let entry_limits = parts
         .stage_tool_accepts_by_index
         .get(parts.entry_index)
@@ -114,12 +106,7 @@ pub(crate) fn build_tool_state(parts: ToolStateParts<'_>) -> Arc<AgentToolState>
                 .into_keys()
                 .collect(),
         ),
-        run_allows: Arc::new(Mutex::new(HashSet::new())),
-        stage_allows: Arc::new(StdMutex::new(HashSet::new())),
-        stage_allows_index: Arc::new(StdMutex::new(None)),
-        stage_perms: Arc::new(StdMutex::new(entry_perms)),
         stage_perms_by_index: Arc::new(parts.stage_perms_by_index),
-        stage_required: Arc::new(StdMutex::new(entry_required)),
         stage_required_by_index: Arc::new(parts.stage_required_by_index),
         stage_tool_accepts: Arc::new(StdMutex::new(entry_limits)),
         stage_tool_accepts_by_index: Arc::new(parts.stage_tool_accepts_by_index),

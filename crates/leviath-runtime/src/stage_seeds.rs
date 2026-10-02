@@ -27,7 +27,7 @@ use bevy_ecs::prelude::*;
 
 use crate::components::ContextWindow;
 use crate::insert::RunSpecC;
-use crate::pipeline::{ReadyToInfer, StageJustEntered, ToolServiceRes, ToolStage};
+use crate::pipeline::{ReadyToInfer, StageJustEntered};
 use crate::spec::graph::{RegionLayoutDef, Seed, SeedRefresh, SeedToolCall};
 
 /// One dispatched stage-entry seed call, and where its answer belongs.
@@ -105,12 +105,7 @@ type StageSeedQuery<'w, 's> = Query<
 ///
 /// Ordered with the other `StageJustEntered` systems, before `sync_tool_stages`
 /// consumes that marker.
-pub(crate) fn start_stage_seeds(
-    agents: StageSeedQuery,
-    service: Res<ToolServiceRes>,
-    stage: Res<ToolStage>,
-    mut commands: Commands,
-) {
+pub(crate) fn start_stage_seeds(agents: StageSeedQuery, mut commands: Commands) {
     crate::tick_scope::clear();
     for (entity, spec) in agents.iter() {
         crate::tick_scope::enter(entity);
@@ -130,22 +125,12 @@ pub(crate) fn start_stage_seeds(
                 thought_signature: None,
             })
             .collect();
-        let exec = service
-            .0
-            .exec_for(entity, calls, crate::pipeline::noop_progress());
-        stage.stats.enqueued();
-        // A failed send means the lane is gone, which only happens at shutdown.
-        // The hold stays on: releasing it would start the stage against a region
-        // that was never refreshed, and a shutting-down daemon has nowhere to
-        // run the stage anyway.
-        let _ = stage.jobs.send(crate::tool_bridge::ToolJob {
-            entity,
-            exec,
-            cancel: crate::cancel::CancelToken::new(),
-        });
+        // Decided call by call in the world and sent like a turn's batch (see
+        // `dispatch_lane_batches`), under the stage's own hold.
         commands
             .entity(entity)
             .remove::<ReadyToInfer>()
+            .insert(crate::pipeline::lane_batch::PendingBatch::seeds(calls))
             .insert(PendingStageSeeds { sites });
     }
 }

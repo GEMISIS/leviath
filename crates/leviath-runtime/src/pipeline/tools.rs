@@ -104,6 +104,43 @@ pub trait ToolService: Send + Sync {
     fn scan_stale(&self, _entity: Entity) -> bool {
         false
     }
+
+    /// Decide `call` for `entity` before its batch runs. Called in the world,
+    /// once per call, in the order the model made them; `ctx` is what the run
+    /// has been granted and what it has written so far. Default: run it,
+    /// charging nothing, for a service that applies no policy.
+    fn decide(
+        &self,
+        _entity: Entity,
+        _call: &leviath_providers::ToolCall,
+        _ctx: &super::tool_verdicts::DecideCtx<'_>,
+    ) -> super::tool_verdicts::ToolVerdict {
+        super::tool_verdicts::ToolVerdict::Run { charge: 0 }
+    }
+
+    /// Build the closure that runs a decided batch: each call with what the
+    /// world decided for it. `written` is the run's write total as the batch
+    /// starts. Default: run every call through [`exec_for`](Self::exec_for),
+    /// which is all a service that never refuses or asks needs.
+    fn exec_decided(
+        &self,
+        entity: Entity,
+        calls: Vec<super::tool_verdicts::DecidedCall>,
+        _written: u64,
+        progress: ToolProgress,
+    ) -> BoxedToolExec {
+        self.exec_for(
+            entity,
+            calls.into_iter().map(|d| d.call).collect(),
+            progress,
+        )
+    }
+
+    /// What `entity`'s run has written by the end of its last batch, as its
+    /// executors measured it. `None` for a service that keeps no write total.
+    fn written(&self, _entity: Entity) -> Option<u64> {
+        None
+    }
 }
 
 /// The tool service, as a world resource.
@@ -173,7 +210,7 @@ impl LandedResults {
     }
 
     /// `progress`, also keeping each result here as it lands.
-    fn keeping(&self, progress: ToolProgress) -> ToolProgress {
+    pub(super) fn keeping(&self, progress: ToolProgress) -> ToolProgress {
         let landed = self.0.clone();
         Arc::new(move |call_id, result| {
             landed
@@ -392,7 +429,6 @@ type DispatchToolsQuery = (
     Option<&'static mut crate::taint::TaintGate>,
     Option<&'static crate::gate_prompt::GateResolved>,
     Option<&'static crate::components::GateAutoApprove>,
-    Option<&'static InFlightWork>,
     Option<&'static StageCursor>,
     // Nested rather than two more members: `QueryData` is implemented up to a
     // fixed arity and this tuple had reached it. Grouping the two run-context
@@ -421,32 +457,32 @@ type DispatchToolsQuery = (
 /// the exec waits on, and a batch the dispatcher resolved entirely journals it
 /// on its way out. Two copies of the field list would be two chances for one of
 /// them to stop carrying something.
-struct BatchDispatch<'a> {
+pub(super) struct BatchDispatch<'a> {
     /// The calls, in the order the model asked for them.
-    calls: &'a [crate::components::ToolCall],
+    pub(super) calls: &'a [crate::components::ToolCall],
     /// The execution id minted for each, by provider call id.
-    executions: &'a std::collections::HashMap<String, String>,
+    pub(super) executions: &'a std::collections::HashMap<String, String>,
     /// The results the dispatcher already has, by provider call id. A call with
     /// one here never reaches the lane and no completion record will follow it.
-    inline: &'a [(String, String)],
+    pub(super) inline: &'a [(String, String)],
     /// Results carried from before a restart, which are journaled the same
     /// way, so a second crash still sees them as done.
-    recovered: &'a [crate::tool_bridge::ToolResult],
+    pub(super) recovered: &'a [crate::tool_bridge::ToolResult],
     /// The stage the batch was dispatched in.
-    stage_index: usize,
+    pub(super) stage_index: usize,
     /// The stage-local iteration that produced it.
-    iteration: usize,
+    pub(super) iteration: usize,
     /// The stay in the stage it was dispatched during.
-    visit_id: &'a str,
+    pub(super) visit_id: &'a str,
     /// The provider attempt whose answer asked for the calls.
-    requested_by: &'a str,
+    pub(super) requested_by: &'a str,
     /// The assistant text of the turn that issued them.
-    response: &'a str,
+    pub(super) response: &'a str,
 }
 
 impl BatchDispatch<'_> {
     /// The record.
-    fn record(&self) -> crate::runfile::record::RunRecord {
+    pub(super) fn record(&self) -> crate::runfile::record::RunRecord {
         crate::runfile::record::RunRecord::ToolBatch {
             calls: self
                 .calls
@@ -520,8 +556,6 @@ pub(crate) struct DaemonServices<'w> {
     pub gate_stage: Option<Res<'w, crate::gate_prompt::GatePromptStage>>,
     /// Where what a run does is recorded, for its run file.
     pub persist: Option<Res<'w, super::JournalSender>>,
-    /// Where world events are broadcast.
-    pub sink: Option<Res<'w, crate::host::WorldEventSink>>,
 }
 
 /// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
@@ -541,8 +575,6 @@ pub(crate) struct DaemonServices<'w> {
 pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
     recovered_results: Query<&RecoveredResults>,
-    service: Res<ToolServiceRes>,
-    stage: Res<ToolStage>,
     daemon: DaemonServices,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
@@ -553,7 +585,6 @@ pub(crate) fn dispatch_tools(
         hub,
         gate_stage,
         persist,
-        sink,
     } = daemon;
     crate::tick_scope::clear();
     let default_policy = leviath_core::PolicyConfig::default();
@@ -574,7 +605,6 @@ pub(crate) fn dispatch_tools(
         mut gate,
         resolved,
         auto_gate,
-        in_flight,
         cursor,
         (metadata, stage_progress, mut io_buffer),
         validators,
@@ -1013,23 +1043,21 @@ pub(crate) fn dispatch_tools(
             continue;
         }
 
-        // What the journal is told about this batch, once, whoever runs it.
-        // Built here because both paths below need it and neither can see the
-        // other's copy: a batch with lane work waits on an ack, one without goes
-        // straight into the file.
-        let dispatch = BatchDispatch {
-            calls: &result.tool_calls,
-            executions: &executions,
-            inline: &context_results,
-            recovered: &recovered,
-            stage_index: cursor.map_or(0, |c| c.index),
-            iteration: state.iteration,
-            visit_id: &state.current_visit,
-            requested_by: &result.attempt_id,
-            response: &result.response,
-        };
-
         if lane_calls.is_empty() {
+            // What the journal is told about this batch. A batch with lane
+            // work is journaled by `dispatch_lane_batches`, which holds it
+            // while each call is decided.
+            let dispatch = BatchDispatch {
+                calls: &result.tool_calls,
+                executions: &executions,
+                inline: &context_results,
+                recovered: &recovered,
+                stage_index: cursor.map_or(0, |c| c.index),
+                iteration: state.iteration,
+                visit_id: &state.current_visit,
+                requested_by: &result.attempt_id,
+                response: &result.response,
+            };
             // Every call resolved without the lane: context tools, refusals,
             // gate denials. Journaled all the same, so the run's executions are
             // every call the model made rather than only the ones something ran
@@ -1083,102 +1111,16 @@ pub(crate) fn dispatch_tools(
                 .insert(ReadyToInfer);
             continue;
         }
-
-        // Journal the batch before it can run: a `ToolBatch` record with the
-        // dispatcher's inline results pre-filled and every lane call pending,
-        // plus a per-call progress hook that records each completion. Worlds
-        // without a persistence lane or run metadata (tests, unpersisted
-        // agents) dispatch unjournaled with a no-op progress.
-        let (progress, ack) = match (persist.as_ref(), metadata) {
-            (Some(persist), Some(md)) => {
-                let ack_rx = persist.record_acked(&md.run_id, dispatch.record());
-                journal_artifacts(persist, &md.run_id, &produced);
-                // The calls finish off the tick, so their records wake the
-                // world: one that lands while the rest of the batch runs is
-                // in the run's file before the batch ends.
-                let sender = persist.waking();
-                let run_id = md.run_id.clone();
-                let iteration = state.iteration;
-                let minted = executions.clone();
-                let progress: ToolProgress = Arc::new(move |call_id: &str, result| {
-                    sender.record(
-                        &run_id,
-                        crate::runfile::record::RunRecord::ToolCallDone {
-                            iteration,
-                            call_id: call_id.to_string(),
-                            // The attempt this completes, so a completion cannot
-                            // be attached to a different attempt that shared the
-                            // provider's id.
-                            execution_id: minted.get(call_id).cloned().unwrap_or_default(),
-                            result: result.clone(),
-                            // The completion says only that the call finished:
-                            // its verdict is not known here.
-                            outcome: None,
-                            at: chrono::Utc::now().timestamp(),
-                        },
-                    );
-                });
-                // The run id travels with the ack: an ack only exists when the
-                // batch was journaled for a known run, so pairing them here
-                // leaves the waiter below no impossible case to handle.
-                (progress, Some((ack_rx, md.run_id.clone())))
-            }
-            _ => (noop_progress(), None),
-        };
-        // The attempt ids this batch is running under, so the completion system
-        // can say which attempt finished rather than which provider id did.
-        commands
-            .entity(entity)
-            .insert(crate::components::BatchExecutions {
-                ids: executions.clone(),
-            });
-        // Announce each lane-bound call before it starts executing. Inline
-        // results (context tools, refusals, blocks) never reach the lane and
-        // are deliberately not announced.
-        if let (Some(sink), Some(md)) = (sink.as_ref(), metadata) {
-            for call in &lane_calls {
-                let _ = sink.0.send(crate::host::WorldEvent::ToolCallStarted {
-                    run_id: md.run_id.clone(),
-                    agent_id: state.agent_id.clone(),
-                    call_id: call.id.clone(),
-                    execution_id: executions.get(&call.id).cloned().unwrap_or_default(),
-                    tool: call.name.clone(),
-                });
-            }
-        }
-        // What a tool may read by name: every stored part the window holds
-        // right now, offered whole so a stale offer never outlives the entry
-        // it came from.
-        let offered: Vec<leviath_core::mime::Part> = window
-            .regions
-            .iter()
-            .flat_map(|r| r.content.iter())
-            .flat_map(|e| e.content.stored().cloned())
-            .collect();
-        service.0.offer_parts(entity, offered);
-        let landed = LandedResults::default();
-        let exec = service
-            .0
-            .exec_for(entity, lane_calls, landed.keeping(progress));
-        let exec = match ack {
-            Some((ack, run_id)) => barrier_then(exec, ack, BATCH_JOURNAL_ACK_TIMEOUT, run_id),
-            None => exec,
-        };
-        let cancel = crate::cancel::CancelToken::new();
-        // The lane is alive for the world's lifetime; a failed send would
-        // only happen during shutdown, where dropping the job is fine.
-        stage.stats.enqueued();
-        let _ = stage.jobs.send(ToolJob {
-            entity,
-            exec,
-            cancel: cancel.clone(),
-        });
-        track_in_flight(&mut commands, entity, in_flight, cancel);
-        commands
-            .entity(entity)
-            .remove::<ReadyForTools>()
-            .insert(AwaitingTools)
-            .insert(landed)
-            .insert(ContextToolResults(context_results));
+        // Lane work: decided call by call in the world, journaled and sent by
+        // `dispatch_lane_batches`, which the batch is handed to here.
+        commands.entity(entity).remove::<ReadyForTools>().insert(
+            super::lane_batch::PendingBatch::new(
+                lane_calls,
+                context_results,
+                executions,
+                recovered,
+                produced,
+            ),
+        );
     }
 }
