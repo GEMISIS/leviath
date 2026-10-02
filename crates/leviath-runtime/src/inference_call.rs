@@ -60,6 +60,17 @@ pub(crate) enum Due {
 }
 
 impl RetryClock {
+    /// Make the waiting trip due now, or (with `expired`) make the whole
+    /// allowance run out now too, so a test need not sleep out a backoff.
+    #[cfg(test)]
+    pub(crate) fn make_due(&mut self, expired: bool) {
+        let now = Instant::now();
+        if expired {
+            self.deadline = now;
+        }
+        self.due = Some(now);
+    }
+
     /// A clock for a call starting now under `policy`.
     pub(crate) fn start(policy: &RetryPolicy) -> Self {
         let started = Instant::now();

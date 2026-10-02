@@ -1357,13 +1357,14 @@ mod tests {
 
         let mut fire = Schedule::default();
         fire.add_systems(crate::title_bridge::fire_due_titles);
-        let answered = loop {
-            fire.run(&mut world);
-            if let Ok(outcome) = title_rx.try_recv() {
-                break outcome;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        };
+        // The retry is made due now rather than slept out, so the one pass
+        // that fires it is the same on every machine.
+        world
+            .get_mut::<crate::title_bridge::TitleCall>(e)
+            .unwrap()
+            .make_due(false);
+        fire.run(&mut world);
+        let answered = title_rx.recv().await.expect("the retry reports");
         tx.send(answered).unwrap();
         run_collect(&mut world);
         assert_eq!(
@@ -1407,13 +1408,15 @@ mod tests {
         let e = world.spawn(call).id();
         let mut fire = Schedule::default();
         fire.add_systems(crate::title_bridge::fire_due_titles);
-        let expired = loop {
-            fire.run(&mut world);
-            if let Ok(outcome) = title_rx.try_recv() {
-                break outcome;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        };
+        // Before its backoff is over a pass sends nothing.
+        fire.run(&mut world);
+        assert!(title_rx.try_recv().is_err(), "not due yet");
+        world
+            .get_mut::<crate::title_bridge::TitleCall>(e)
+            .unwrap()
+            .make_due(true);
+        fire.run(&mut world);
+        let expired = title_rx.recv().await.expect("the call reports");
         assert_eq!(expired.entity, e);
         let err = expired.result.expect_err("out of time").to_string();
         assert!(err.contains("deadline"), "{err}");

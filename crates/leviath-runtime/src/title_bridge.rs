@@ -109,6 +109,12 @@ struct TitleAttempt {
 }
 
 impl TitleCall {
+    /// See [`RetryClock::make_due`].
+    #[cfg(test)]
+    pub(crate) fn make_due(&mut self, expired: bool) {
+        self.clock.make_due(expired);
+    }
+
     /// Hold `job` as a call retried under `policy`, and send its first trip.
     pub(crate) fn start(
         job: TitleJob,
