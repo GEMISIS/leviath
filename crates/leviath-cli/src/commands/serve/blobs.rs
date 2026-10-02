@@ -255,7 +255,7 @@ pub(super) async fn get_blob(
         .ok_or_else(|| {
             err(
                 StatusCode::NOT_FOUND,
-                format!("run '{id}' holds no blob {sha256}"),
+                format!("run '{id}' has no stored part {sha256} in its blob directory"),
             )
         })?;
     // What the context says about it, when it says anything: the type it
@@ -796,21 +796,13 @@ mod tests {
             let disposition = headers[header::CONTENT_DISPOSITION].to_str().unwrap();
             let expected = format!("{}.png", orphan_sha.chars().take(12).collect::<String>());
             assert!(disposition.contains(&expected), "{disposition}");
-            // A part the run file holds but cannot decode is an error, not a
+            // A part whose path does not read as a file is an error, not a
             // miss.
             let half = leviath_runtime::spec::names::Digest::of(b"half a part");
-            let file = runstate::run_dir(run_id).join(leviath_core::files::RUN_FILE);
-            let mut bytes = std::fs::read(&file).unwrap();
-            bytes.extend(
-                leviath_runtime::runfile::codec::encode(
-                    leviath_runtime::runfile::codec::FrameKind::Blob,
-                    &half,
-                )
-                .unwrap(),
-            );
-            std::fs::write(&file, bytes).unwrap();
+            std::fs::create_dir_all(crate::blobs::blob_path(run_id, half.as_str())).unwrap();
             let (status, _, _) = call(&format!("/api/runs/{run_id}/blobs/{half}")).await;
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            let file = runstate::run_dir(run_id).join(leviath_core::files::RUN_FILE);
             // A run with no record answers nothing about its parts.
             std::fs::remove_file(&file).unwrap();
             let (status, _, _) = call(&format!("/api/runs/{run_id}/blobs")).await;

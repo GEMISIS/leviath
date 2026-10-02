@@ -22,6 +22,7 @@ use leviath_legacy_runs::{BlueprintSource, ConvertError, is_legacy, meta};
 use leviath_runtime::spec::inputs::InputValue;
 use leviath_runtime::spec::launch::Unattended;
 use leviath_runtime::spec::run_spec::SpecOrigin;
+use leviath_runtime::state::StageFile;
 use leviath_runtime::state::{PipelinePhase, RunEvent, RunStatus};
 
 /// Every field no old run records, which every conversion must name.
@@ -88,7 +89,33 @@ fn the_stage_logs_and_the_answer_stay_where_a_run_keeps_them() {
     std::fs::create_dir_all(run.path("stages/0")).unwrap();
     run.write("stages/0/logs.log", "[tool] web_search: found\n");
     run.write("stages/0/output.log", "the gather stage said this\n");
-    let (report, _) = run.converted();
+    std::fs::create_dir_all(run.path("stages/1")).unwrap();
+    run.write("stages/1/taint_audit.json", "[]");
+    std::fs::create_dir_all(run.path("stages/notes")).unwrap();
+    let (report, file) = run.converted();
+    // The run file names each of them where it is.
+    let files = &file.last.files;
+    let dir = run.path("");
+    let logs = files.stage_file(0, StageFile::Logs).unwrap();
+    assert_eq!((logs.path.as_str(), logs.bytes), ("stages/0/logs.log", 25));
+    assert_eq!(
+        files
+            .stage_file(0, StageFile::Output)
+            .unwrap()
+            .read(&dir)
+            .unwrap(),
+        b"the gather stage said this\n"
+    );
+    assert_eq!(
+        files
+            .stage_file(1, StageFile::TaintAudit)
+            .unwrap()
+            .read(&dir)
+            .unwrap(),
+        b"[]"
+    );
+    assert_eq!(files.stage_file(1, StageFile::Logs), None);
+    assert_eq!(files.stages.len(), 2);
     assert_eq!(
         std::fs::read_to_string(run.path("stages/0/logs.log")).unwrap(),
         "[tool] web_search: found\n"
@@ -124,7 +151,10 @@ fn a_finished_run_keeps_its_answer_and_its_blueprint_pin() {
     assert_eq!(file.last.status, RunStatus::Complete);
     assert_eq!(file.last.phase, PipelinePhase::Done);
     let answer = file.last.final_output.as_ref().unwrap();
-    assert!(answer.content.contains("atoms"));
+    let named = file.last.files.final_output.as_ref().unwrap();
+    let content = String::from_utf8(named.read(&run.path("")).unwrap()).unwrap();
+    assert!(content.contains("atoms"));
+    assert_eq!(answer.bytes, content.len() as u64);
     assert_eq!(answer.stage.as_str(), "engine");
     let SpecOrigin::Blueprint {
         blueprint, version, ..
@@ -259,5 +289,5 @@ fn the_file_reader_sees_only_the_frames_written() {
     run.convert().unwrap();
     let file = RunFile::read(&run.path("run.lvr"));
     assert!(file.code.is_empty());
-    assert!(file.blobs.is_empty());
+    assert!(file.last.blobs.is_empty());
 }

@@ -124,8 +124,11 @@ pub(crate) struct LegacyRun {
     /// The run's metadata as `meta.json` holds it: what every earlier
     /// release listed it as.
     pub(crate) listed: RunMeta,
-    pub(crate) blobs: Vec<(Digest, Vec<u8>)>,
-    /// Stored parts whose file names are not a digest, which are left out.
+    /// The stored parts under `blobs/`, by digest, with their sizes. They
+    /// stay where they are, and the run file names them.
+    pub(crate) blobs: Vec<(Digest, u64)>,
+    /// Files under `blobs/` whose names are not a digest, which the run file
+    /// does not name.
     pub(crate) stray_blobs: Vec<String>,
 }
 
@@ -172,7 +175,7 @@ impl LegacyRun {
         };
         let header = (**header).clone();
         let folded = journal::fold(&records).expect("a journal that starts with its header folds");
-        let (blobs, stray_blobs) = blobs(&dir.join(BLOBS_DIR))?;
+        let (blobs, stray_blobs) = blobs(&dir.join(BLOBS_DIR));
         Ok(Self {
             stages: json_file(&dir.join(STAGES_FILE))?.unwrap_or_default(),
             fanout: json_file(&dir.join(FANOUT_FILE))?,
@@ -271,32 +274,26 @@ fn records_without_journal(dir: &Path, meta: RunMeta) -> Result<Vec<JournalRecor
     Ok(records)
 }
 
-/// The run's stored parts, by digest, and the names of any file there that
-/// is not one.
-type Blobs = (Vec<(Digest, Vec<u8>)>, Vec<String>);
+/// The run's stored parts, by digest with their sizes, and the names of any
+/// file there that is not one.
+type Blobs = (Vec<(Digest, u64)>, Vec<String>);
 
-fn blobs(dir: &Path) -> Result<Blobs, ConvertError> {
+fn blobs(dir: &Path) -> Blobs {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok((Vec::new(), Vec::new()));
+        return (Vec::new(), Vec::new());
     };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
     let mut found = Vec::new();
     let mut stray = Vec::new();
-    for name in names {
-        match Digest::new(name.as_str()) {
-            Ok(digest) => {
-                let path = dir.join(&name);
-                let bytes = std::fs::read(&path).map_err(ConvertError::io(path))?;
-                found.push((digest, bytes));
-            }
-            Err(_) => stray.push(name),
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match (Digest::new(name.as_str()), entry.metadata()) {
+            (Ok(digest), Ok(meta)) if meta.is_file() => found.push((digest, meta.len())),
+            _ => stray.push(name),
         }
     }
-    Ok((found, stray))
+    found.sort();
+    stray.sort();
+    (found, stray)
 }
 
 /// The directories the run's agent may be installed in: the one its run

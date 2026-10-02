@@ -115,12 +115,6 @@ fn resume_one(
         run.state.status = RunStatus::Paused;
         run.state.phase = leviath_runtime::state::PipelinePhase::Paused;
     }
-    crate::daemon::starter::store_blobs(
-        starter.blob_store.as_ref(),
-        &run_id,
-        &run.blobs,
-        &run.state.context,
-    );
     starter.mcp_pool.lease_servers(
         &crate::daemon::starter::mcp_configs(&run.spec.graph),
         &run_id,

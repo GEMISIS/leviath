@@ -2927,7 +2927,7 @@ mod tests {
                 spec,
                 state,
                 code: Default::default(),
-                blobs: Default::default(),
+                answer: None,
                 asked: 0,
             },
             crate::spec::env::Bindings::new(),

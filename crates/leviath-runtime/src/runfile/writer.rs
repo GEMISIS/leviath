@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use super::codec::{self, FrameKind};
 use super::error::{RunFileError, RunFileErrorKind};
-use super::frames::{BlobFrame, CodeFrame, OwnerFrame};
+use super::frames::{CodeFrame, OwnerFrame};
 use super::reader::RunFileReader;
 use crate::spec::env::CodeFiles;
 use crate::spec::names::Digest;
@@ -62,7 +62,6 @@ pub struct RunFileWriter {
     len: u64,
     state: RunState,
     code: BTreeSet<Digest>,
-    blobs: BTreeSet<Digest>,
     policy: CheckpointPolicy,
     since_checkpoint: u32,
     delta_bytes: u64,
@@ -110,7 +109,6 @@ impl RunFileWriter {
             len: buf.len() as u64,
             state: initial.clone(),
             code: code.keys().cloned().collect(),
-            blobs: BTreeSet::new(),
             policy,
             since_checkpoint: 0,
             delta_bytes: 0,
@@ -136,7 +134,6 @@ impl RunFileWriter {
             delta_bytes: 0,
             state,
             code: reader.code_digests().cloned().collect(),
-            blobs: reader.blob_digests().cloned().collect(),
             policy,
             owner: None,
         })
@@ -168,11 +165,6 @@ impl RunFileWriter {
         self.state.seq
     }
 
-    /// Whether the file holds the blob `digest`.
-    pub fn has_blob(&self, digest: &Digest) -> bool {
-        self.blobs.contains(digest)
-    }
-
     /// Whether the file holds the code `digest`.
     pub fn has_code(&self, digest: &Digest) -> bool {
         self.code.contains(digest)
@@ -196,20 +188,6 @@ impl RunFileWriter {
                 Err(RunFileError::io(&self.path, &e))
             }
         }
-    }
-
-    /// Store a part's bytes, once. `false` when the file already held them.
-    pub fn add_blob(&mut self, digest: &Digest, bytes: &[u8]) -> Result<bool, RunFileError> {
-        if self.blobs.contains(digest) {
-            return Ok(false);
-        }
-        let payload = BlobFrame {
-            digest: digest.clone(),
-            bytes: bytes.to_vec(),
-        };
-        self.append(&frame(FrameKind::Blob, &payload), false)?;
-        self.blobs.insert(digest.clone());
-        Ok(true)
     }
 
     /// Store some code, once. `false` when the file already held it.

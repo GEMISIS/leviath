@@ -142,7 +142,6 @@ impl Run {
 pub struct RunFile {
     pub spec: RunSpec,
     pub code: Vec<(Digest, Vec<u8>)>,
-    pub blobs: Vec<(Digest, Vec<u8>)>,
     pub states: Vec<RunState>,
     pub deltas: Vec<StateDelta>,
     /// The last state, found walking backwards from the end.
@@ -159,7 +158,6 @@ impl RunFile {
         let mut file = Self {
             spec: frames[0].decode(&bytes).unwrap(),
             code: Vec::new(),
-            blobs: Vec::new(),
             states: Vec::new(),
             deltas: Vec::new(),
             last: codec::last_of(&bytes, end, FrameKind::State)
@@ -171,7 +169,6 @@ impl RunFile {
         for f in &frames[1..] {
             match f.kind {
                 FrameKind::Code => file.code.push(f.decode(&bytes).unwrap()),
-                FrameKind::Blob => file.blobs.push(f.decode(&bytes).unwrap()),
                 FrameKind::State => file.states.push(f.decode(&bytes).unwrap()),
                 FrameKind::Delta => file.deltas.push(f.decode(&bytes).unwrap()),
                 other => panic!("unexpected frame {other:?}"),

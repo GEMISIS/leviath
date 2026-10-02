@@ -5,22 +5,17 @@ use serde::{Deserialize, Serialize};
 use crate::spec::names::Digest;
 
 /// Code the run uses, stored once by its digest.
+///
+/// Code is the one kind of bytes the file holds itself: the spec names the
+/// scripts the run was resolved against, and a resume binds exactly those,
+/// whatever has become of the files they were read from. Everything else a
+/// run keeps beside its file and names (see [`crate::state::files`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeFrame {
     /// The sha256 of `bytes`. First, so a reader can index the frame by
     /// reading only the start of its payload.
     pub digest: Digest,
     /// The code.
-    pub bytes: Vec<u8>,
-}
-
-/// A stored part's bytes, stored once by their digest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct BlobFrame {
-    /// The sha256 of `bytes`. First, for the same reason as
-    /// [`CodeFrame::digest`].
-    pub digest: Digest,
-    /// The bytes.
     pub bytes: Vec<u8>,
 }
 

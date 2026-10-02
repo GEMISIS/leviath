@@ -702,10 +702,10 @@ async fn a_busy_run_reads_every_field_from_its_components() {
         })
     );
     let out = s.final_output.unwrap();
-    assert_eq!(
-        (out.content.as_str(), out.stage.as_str()),
-        ("the answer", "plan")
-    );
+    assert_eq!((out.bytes, out.stage.as_str()), (10, "plan"));
+    // The files beside the run file are the persistence lane's to name.
+    assert_eq!(s.files, super::super::RunFiles::default());
+    assert!(s.blobs.is_empty());
     assert_eq!(out.artifacts.len(), 1);
     assert_eq!(
         (

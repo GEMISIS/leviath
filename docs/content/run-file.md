@@ -1,6 +1,6 @@
 ---
 title: The run file
-description: What a run's one file holds (spec, steps, state checkpoints), how a run resumes from it, and what happens when the machine changed.
+description: What a run's file holds (spec, steps, state checkpoints), the files it names beside it, how a run resumes from it, and what happens when the machine changed.
 group: Concepts
 group_order: 2
 order: 14
@@ -9,9 +9,10 @@ order: 14
 # The run file
 
 A run that lives only in memory is lost when the machine restarts, and a run spread over many
-files can come back half-restored. Leviath writes each run to one file, `run.lvr`, in the run's
+files can come back half-restored. Leviath records each run in one file, `run.lvr`, in the run's
 directory under `~/.leviath/runs/<run-id>/`. Everything needed to resume the run, or to look at
-any point of its history, is in that file.
+any point of its history, is in that file or named by it. Its answer, its logs and the files it
+stored are kept beside it as plain files, so the run file stays small and they stay easy to open.
 
 ```bash
 lev run show release-notes-1790848443-51af34ec01cd             # the spec it started from
@@ -27,14 +28,14 @@ thing.
 | Part | Written | What it holds |
 |---|---|---|
 | The **spec** | once, first | Everything decided when the run was resolved |
-| **Code and files** | once each | Scripts the spec names, and stored files, by digest |
+| **Code** | once each | The scripts the spec names, by digest |
 | **Deltas** | one per step | What changed in that step, and what happened |
 | **State checkpoints** | every so often | The run's whole state, written out in full |
 
 ```mermaid
 flowchart LR
   H["Header: LVR2 and the format's fingerprint"] --> S["Spec"]
-  S --> C["Code and stored files"]
+  S --> C["Code"]
   C --> D1["Deltas 1 to k"]
   D1 --> K1["State at step k"]
   K1 --> D2["Deltas k+1 to n"]
@@ -91,16 +92,42 @@ and replaying a few deltas after it. Each frame ends with its own length, so a r
 last checkpoint by walking back from the end of the file rather than reading all of it.
 
 On a scripted run of 120 tool-calling turns that compacted its context every ten, the file came to
-67 KB. Every frame is compressed, and code and files are stored once each however often they are
-used.
+67 KB. Every frame is compressed, and code is stored once however often it is used.
+
+Code is the only content the file holds itself. A resume binds exactly the scripts the run was
+resolved against, whatever has become of the files they were read from, so the spec's code travels
+with the spec.
 
 ### Beside the file
 
-A run's directory also holds two logs per stage, and a `blobs/` directory when its tools stored
-files. `stages/<n>/output.log` is what the model wrote in stage `n`, and `stages/<n>/logs.log` is
-that stage's tool activity and events. A stage that wrote no text has only `logs.log`. All of
-these are for reading while the run works. The run file holds its own copy of every stored file,
-so resuming needs nothing else.
+The rest of what a run keeps is in plain files in its directory, and the run file names each of
+them rather than holding a copy:
+
+| File | What it holds |
+|---|---|
+| `final_output` | The answer the run handed back |
+| `stages/<n>/output.log` | What the model wrote in stage `n` |
+| `stages/<n>/logs.log` | Stage `n`'s tool activity and events |
+| `stages/<n>/taint_audit.json` | The taint gate's decisions in stage `n` |
+| `blobs/<sha256>` | A file the run was given or a tool stored, named by its digest |
+
+The state's `files` names the answer and each stage's files. Each name is a path relative to the
+run's directory and the file's size when the step was written. For a file written whole, the answer
+and an audit, it also carries the sha256 of its contents. A log is only appended to, so it may be
+longer than its recorded size, but never shorter.
+
+The state's `blobs` lists each stored file once: its digest, its type, its size, its name, the
+region it first appeared in, and the tool whose result carried it. A stage that wrote no text has
+no `output.log`, and a run with no answer names no `final_output`.
+
+Every reader finds these files through those names: `lev result`, the dashboard, the HTTP API,
+GraphQL, `lev rage` and the `run_history` tool. A name that leaves the run's directory is never
+followed. A file that is not as the run wrote it (changed, or shorter than recorded) is still read,
+and the daemon log says so. A stored file the run names that is missing from `blobs/` is refused by
+its digest, and a run that names one is not resumed until it is put back. The error names the file.
+
+On a run given a 2 MB image that handed back a 59 KB answer, `run.lvr` came to 12 KB. With the
+image copied in, it came to 2.1 MB.
 
 A crash can cut a frame short. Every frame carries a checksum, so the next open finds a torn frame
 at the end and cuts it off. The run resumes from its last complete step. `lev run show` leaves the
@@ -189,15 +216,16 @@ The daemon converts such a directory the first time it loads it, when it starts 
 asks for the run:
 
 - the spec is rebuilt from the run's metadata and the blueprint it ran;
-- its code and stored files are copied in;
+- its code is copied in;
 - each journal step that maps onto a delta becomes one;
-- the state it was last in becomes the last checkpoint.
+- the state it was last in becomes the last checkpoint, naming the files beside it.
 
 The old files move into `legacy/` inside the run's directory rather than being deleted, and a
-directory that already holds a run file is never converted twice. Two stay where they are, because a
-new run writes them in the same place and form: the stage logs under `stages/` and the answer in
-`final_output`. So `lev logs`, the dashboard and the API read a converted run's logs as they did. The whole directory is saved in
-the home's backup first. See [upgrading from an earlier release](/docs/daemon#upgrading-from-an-earlier-release).
+directory that already holds a run file is never converted twice. Three stay where they are,
+because a new run keeps them in the same place and form: the stage logs and audits under
+`stages/`, the answer in `final_output`, and the stored files under `blobs/`. The new run file names
+each of them, so the dashboard, `lev result` and the API read a converted run's logs and answer as
+they read a new run's. The whole directory is saved in the home's backup first. See [upgrading from an earlier release](/docs/daemon#upgrading-from-an-earlier-release).
 An old run did not record everything a run file holds. Each value the conversion had to fill in goes
 to the run's own log, with the value used and why, and `daemon.log` gets one line for the whole pass.
 

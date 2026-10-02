@@ -580,7 +580,7 @@ fn flags() -> Flags {
 
 fn answer() -> FinalOutputState {
     FinalOutputState {
-        content: "done".into(),
+        bytes: 4,
         format: Some("markdown".into()),
         stage: stage("review"),
         submitted_at: 99,
@@ -631,6 +631,37 @@ fn state() -> CoreState {
             asking: Some("the plan".into()),
         },
         held: Some(held()),
+        files: files(),
+        blobs: vec![blob()],
+    }
+}
+
+/// Files beside a run file, one of each kind.
+fn files() -> leviath_runtime::state::RunFiles {
+    use leviath_runtime::state::{FileRef, StageFile};
+    let mut files = leviath_runtime::state::RunFiles {
+        final_output: Some(FileRef::whole("final_output", b"done")),
+        stages: Vec::new(),
+    };
+    files.set_stage_file(0, StageFile::Output, FileRef::log("stages/0/output.log", 3));
+    files.set_stage_file(0, StageFile::Logs, FileRef::log("stages/0/logs.log", 9));
+    files.set_stage_file(
+        0,
+        StageFile::TaintAudit,
+        FileRef::whole("stages/0/taint_audit.json", b"[]"),
+    );
+    files
+}
+
+/// A stored part, named with where it came from.
+fn blob() -> leviath_runtime::state::BlobFile {
+    leviath_runtime::state::BlobFile {
+        digest: leviath_runtime::spec::names::Digest::of(b"png"),
+        mime_type: "image/png".into(),
+        size: 3,
+        name: Some("chart.png".into()),
+        region: Some(named!(RegionName, "notes")),
+        tool: Some("make_chart".into()),
     }
 }
 
@@ -709,6 +740,8 @@ fn delta() -> CoreDelta {
             Change::Point(s.point.clone()),
             Change::Held(Some(held())),
             Change::Held(None),
+            Change::Files(files()),
+            Change::Blobs(vec![blob()]),
         ],
         events: vec![
             RunEvent::Inference {
@@ -1120,14 +1153,22 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(entry["toolCalls"][0]["arguments"]["path"], "a.rs");
     assert_eq!(full["fanOut"]["workerKind"], "BLUEPRINT");
     assert_eq!(full["fanOut"]["active"][0]["detail"], "worker-2");
-    assert_eq!(full["answer"]["content"], "done");
+    assert_eq!(full["answer"]["bytes"], 4);
+    assert_eq!(full["files"]["finalOutput"]["path"], "final_output");
+    assert_eq!(
+        full["files"]["stages"][0]["taintAudit"]["path"],
+        "stages/0/taint_audit.json"
+    );
+    assert_eq!(full["blobs"][0]["tool"], "make_chart");
     assert_eq!(full["lastTransition"]["fromStage"], "analyze");
     assert_eq!(full["totals"]["spend"]["pricedUsd"], "0.25");
     let wedged = &json["states"][12];
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];
-    assert_eq!(step["changes"].as_array().map(Vec::len), Some(27));
+    assert_eq!(step["changes"].as_array().map(Vec::len), Some(29));
+    assert_eq!(step["changes"][27]["files"]["stages"][0]["index"], 0);
+    assert_eq!(step["changes"][28]["blobs"][0]["mimeType"], "image/png");
     assert_eq!(step["changes"][24]["checkpoint"]["document"], "the plan");
     assert_eq!(full["checkpoint"]["round"], 2);
     assert_eq!(step["changes"][25]["held"][0]["code"], "UNAVAILABLE");

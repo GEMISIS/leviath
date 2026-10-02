@@ -40,8 +40,6 @@ pub enum FrameKind {
     Spec = 1,
     /// Code the run uses, by digest.
     Code = 2,
-    /// A stored part's bytes, by digest.
-    Blob = 3,
     /// A [`StateDelta`](crate::state::StateDelta).
     Delta = 4,
     /// A full [`RunState`](crate::state::RunState) checkpoint.
@@ -55,7 +53,6 @@ impl FrameKind {
         Some(match b {
             1 => Self::Spec,
             2 => Self::Code,
-            3 => Self::Blob,
             4 => Self::Delta,
             5 => Self::State,
             6 => Self::Owner,
@@ -322,7 +319,7 @@ mod tests {
         assert_eq!(all[0].decode::<String>(&f).unwrap(), "spec");
         let state = last_of(&f, end, FrameKind::State).unwrap().unwrap();
         assert_eq!(state.decode::<String>(&f).unwrap(), "s1");
-        assert_eq!(last_of(&f, end, FrameKind::Blob).unwrap(), None);
+        assert_eq!(last_of(&f, end, FrameKind::Owner).unwrap(), None);
         assert_eq!(
             frame_before(&f, end).unwrap().decode::<String>(&f).unwrap(),
             "d2"
@@ -495,7 +492,6 @@ mod tests {
         let every = [
             FrameKind::Spec,
             FrameKind::Code,
-            FrameKind::Blob,
             FrameKind::Delta,
             FrameKind::State,
             FrameKind::Owner,

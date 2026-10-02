@@ -145,7 +145,7 @@ fn resumable(depth: u8, created_at: i64, status: RunStatus, phase: PipelinePhase
         spec: std::sync::Arc::new(spec),
         state,
         code: Default::default(),
-        blobs: Default::default(),
+        answer: None,
         asked: 0,
     }
 }
@@ -204,12 +204,15 @@ fn children_come_back_first_then_active_runs_then_the_newest() {
     assert_eq!(order, vec![(1, 0), (0, 5), (0, 2), (0, 1)]);
 }
 
-/// A run comes back with the files its file holds and a count of the
-/// questions it put to a person: the ones answered in its history, the ones
-/// still open, and the calls in flight that may ask one.
+/// A run comes back with its answer, read from the file its run file names,
+/// and a count of the questions it put to a person: the ones answered in its
+/// history, the ones still open, and the calls in flight that may ask one.
+/// A stored part it names whose file is gone, or an answer whose file
+/// changed, is refused by name rather than read as nothing.
 #[test]
-fn a_run_comes_back_with_its_files_and_the_questions_it_asked() {
-    use crate::runfile::{CheckpointPolicy, RunFileWriter};
+fn a_run_comes_back_with_its_answer_and_the_questions_it_asked() {
+    use crate::runfile::{CheckpointPolicy, RunFileErrorKind, RunFileWriter};
+    use crate::state::files::FileRef;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(leviath_core::files::RUN_FILE);
     let first = scripted_run(1).remove(0);
@@ -222,7 +225,6 @@ fn a_run_comes_back_with_its_files_and_the_questions_it_asked() {
     )
     .unwrap();
     let digest = crate::spec::names::Digest::of(b"bytes");
-    writer.add_blob(&digest, b"bytes").unwrap();
     let mut next = first.clone();
     next.interactions.push(crate::state::OpenInteraction {
         id: "q-2".into(),
@@ -238,6 +240,23 @@ fn a_run_comes_back_with_its_files_and_the_questions_it_asked() {
         }],
         done: Default::default(),
     });
+    next.final_output = Some(crate::state::FinalOutputState {
+        bytes: 10,
+        format: None,
+        stage: next.cursor.stage.clone(),
+        submitted_at: 1,
+        truncated: false,
+        artifacts: Vec::new(),
+    });
+    next.files.final_output = Some(FileRef::whole("final_output", b"the answer"));
+    next.blobs.push(crate::state::BlobFile {
+        digest: digest.clone(),
+        mime_type: "image/png".into(),
+        size: 5,
+        name: None,
+        region: None,
+        tool: None,
+    });
     writer
         .record(
             next,
@@ -248,9 +267,34 @@ fn a_run_comes_back_with_its_files_and_the_questions_it_asked() {
             }],
         )
         .unwrap();
+    let kind = |dir: &std::path::Path| read_for_resume(dir).unwrap_err().kind;
+    assert_eq!(
+        kind(dir.path()),
+        RunFileErrorKind::MissingBlob(digest.clone())
+    );
+    let blobs = dir.path().join(leviath_core::files::BLOBS_DIR);
+    std::fs::create_dir_all(&blobs).unwrap();
+    std::fs::write(blobs.join(digest.as_str()), b"bytes").unwrap();
+    let unread = read_for_resume(dir.path()).unwrap_err();
+    assert!(matches!(unread.kind, RunFileErrorKind::Beside(_)));
+    assert!(
+        unread
+            .to_string()
+            .contains("names a file beside it that does not read"),
+        "{unread}"
+    );
+    std::fs::write(dir.path().join("final_output"), b"the answer").unwrap();
     let run = read_for_resume(dir.path()).unwrap().expect("a run file");
-    assert_eq!(run.blobs[&digest], b"bytes");
+    assert_eq!(run.answer.as_deref(), Some("the answer"));
     assert_eq!(run.asked, 3);
+    // Placed, the run holds its answer again.
+    let mut world = World::new();
+    let entity = resume(&mut world, run, crate::spec::env::Bindings::new());
+    let out = &world
+        .get::<crate::persistence::FinalOutput>(entity)
+        .unwrap()
+        .0;
+    assert_eq!(out.content, "the answer");
 }
 
 /// A run file for `run` under `runs`, in `state`, whose stage requires an
@@ -294,14 +338,23 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
     };
     let mut answered = ended(RunStatus::Complete);
     answered.final_output = Some(FinalOutputState {
-        content: "the answer".into(),
+        bytes: 10,
         format: None,
         stage: answered.cursor.stage.clone(),
         submitted_at: 1,
         truncated: false,
         artifacts: Vec::new(),
     });
+    let unread = answered.clone();
+    answered.files.final_output = Some(crate::state::files::FileRef::whole(
+        "final_output",
+        b"the answer",
+    ));
     on_disk(runs.path(), "w-answer", &answered, false);
+    std::fs::write(runs.path().join("w-answer/final_output"), b"the answer").unwrap();
+    // A worker whose answer's file is gone, and one whose run file names none.
+    on_disk(runs.path(), "w-lost", &answered, false);
+    on_disk(runs.path(), "w-unnamed", &unread, false);
     let mut replied = ended(RunStatus::Complete);
     let mut early = crate::runfile::reader_tests::entry("first", EntryKind::AssistantTurn(vec![]));
     early.timestamp = 1;
@@ -327,6 +380,8 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
 
     let ids = [
         "w-answer",
+        "w-lost",
+        "w-unnamed",
         "w-reply",
         "w-silent",
         "w-required",
@@ -366,9 +421,28 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
             ("i-w-silent".to_string(), String::new()),
         ]
     );
+    // The reason a file does not read is the operating system's words.
+    let failed: Vec<(String, String)> = fan_out
+        .failed
+        .iter()
+        .map(|(item, why)| {
+            (
+                item.clone(),
+                why.split(": final_output").next().unwrap().to_string(),
+            )
+        })
+        .collect();
     assert_eq!(
-        pairs(&fan_out.failed),
+        failed,
         [
+            (
+                "i-w-lost".to_string(),
+                "worker's answer cannot be read".to_string()
+            ),
+            (
+                "i-w-unnamed".to_string(),
+                "worker handed back an answer its run file names no file for".to_string()
+            ),
             (
                 "i-w-required".to_string(),
                 "worker finished without the final output its stage requires".to_string()

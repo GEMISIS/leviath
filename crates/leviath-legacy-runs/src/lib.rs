@@ -5,12 +5,13 @@
 //! `fanout.json`, `interactions.json`, the blueprint it ran
 //! (`blueprint.leviath`), and stored parts under `blobs/`. [`convert`] reads
 //! all of them and writes one LVR2 run file in their place: the run's
-//! [`RunSpec`](leviath_runtime::spec::run_spec::RunSpec), its code and blobs,
-//! a state at the start, one delta per journal step that maps onto one, and
-//! the state the run was last in. The old files move into `legacy/` beside it
-//! rather than being deleted, except the per-stage logs (`stages/`) and the
-//! answer (`final_output`), which a run in the new layout writes in the same
-//! place and form, and so stay where every reader looks for them.
+//! [`RunSpec`](leviath_runtime::spec::run_spec::RunSpec), its code, a state
+//! at the start, one delta per journal step that maps onto one, and the
+//! state the run was last in. The old files move into `legacy/` beside it
+//! rather than being deleted, except the per-stage logs and audits
+//! (`stages/`), the answer (`final_output`) and the stored parts (`blobs/`),
+//! which a run in the new layout keeps in the same place and form: they stay
+//! where they are, and the run file names each of them.
 //!
 //! An old run did not record everything a run file holds. Whatever the
 //! conversion had to fill in is named in the [`ConvertReport`], with the value
@@ -137,7 +138,7 @@ pub fn convert(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<ConvertReport, Co
     let mut report = report::Report::default();
     let built = spec::build(&old, env.stages, &mut report)?;
     let (start, deltas, last) = history::build(&old, &built.spec, &mut report);
-    let bytes = write::encode(&old, &built, &start, &deltas, &last);
+    let bytes = write::encode(&built, &start, &deltas, &last);
     let written = write::install(run_dir, &bytes)?;
     let source = old.blueprint.source;
     Ok(report.finish(built.spec.run_id, source, deltas.len(), written))

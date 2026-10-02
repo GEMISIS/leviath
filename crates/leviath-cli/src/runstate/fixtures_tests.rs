@@ -302,7 +302,7 @@ fn state_of(meta: &RunMeta, spec: &RunSpec, base: Option<RunState>) -> RunState 
         });
     }
     state.final_output = meta.final_output.as_ref().map(|out| FinalOutputState {
-        content: " ".repeat(out.bytes),
+        bytes: out.bytes as u64,
         format: out.format.clone(),
         stage: StageName::new(out.stage.as_str()).unwrap_or_else(|_| state.cursor.stage.clone()),
         submitted_at: out.submitted_at,
@@ -361,6 +361,23 @@ fn write(dir: &Path, spec: &RunSpec, state: RunState, at: i64) -> anyhow::Result
     delta.seq = writer.seq() + 1;
     writer.append_delta(&delta)?;
     Ok(())
+}
+
+/// Name, in the run file in `dir`, the files `edit` names beside it, as one
+/// more step: what the persistence lane does as it writes them. A directory
+/// with no run file is left alone.
+pub(crate) fn name_files(dir: &Path, edit: impl FnOnce(&mut leviath_runtime::state::RunFiles)) {
+    let Ok(mut writer) =
+        RunFileWriter::open(&super::run_file::path_in(dir), CheckpointPolicy::default())
+    else {
+        return;
+    };
+    let mut next = writer.state().clone();
+    edit(&mut next.files);
+    let at = writer.state().seq as i64 + 1;
+    writer
+        .record(next, at, Vec::new())
+        .expect("a test's run file takes a step");
 }
 
 /// Create the run directory and lay down the run `meta` describes.

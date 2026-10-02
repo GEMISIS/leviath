@@ -104,6 +104,10 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
         point: point_of(world, entity),
         // A run in the world is not held.
         held: None,
+        // The persistence lane names the files it writes beside the run
+        // file, as it writes them.
+        files: super::RunFiles::default(),
+        blobs: Vec::new(),
     })
 }
 
@@ -682,7 +686,7 @@ fn flags_of(world: &World, entity: Entity, agent: &AgentState) -> Flags {
 
 fn final_output_of(o: &leviath_core::output::FinalOutput) -> Option<FinalOutputState> {
     Some(FinalOutputState {
-        content: o.content.clone(),
+        bytes: o.content.len() as u64,
         format: o.format.clone(),
         stage: StageName::new(o.stage.as_str()).ok()?,
         submitted_at: o.submitted_at,

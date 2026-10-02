@@ -247,7 +247,7 @@ fn frames_whose_heads_do_not_decode_are_refused() {
         kind(read(&[spec_frame(), bad_varint])),
         RunFileErrorKind::Codec(CodecError::Decode(_))
     ));
-    let bad_digest = codec::encode(FrameKind::Blob, &("not a digest", 1u8)).unwrap();
+    let bad_digest = codec::encode(FrameKind::Code, &("not a digest", 1u8)).unwrap();
     assert!(matches!(
         kind(read(&[spec_frame(), bad_digest])),
         RunFileErrorKind::Codec(CodecError::Decode(_))
@@ -350,7 +350,11 @@ fn a_file_with_no_checkpoint_opens_but_has_no_state() {
         RunFileErrorKind::MissingCode(Digest::of(b"code"))
     );
     assert_eq!(r.code(&Digest::of(b"code")).unwrap(), None);
-    assert_eq!(r.blob(&Digest::of(b"x")).unwrap(), None);
+    // A stored part is read from beside the file, and is missing there.
+    assert_eq!(
+        r.blob(&Digest::of(b"x")).unwrap_err().kind,
+        RunFileErrorKind::MissingBlob(Digest::of(b"x"))
+    );
 }
 
 #[test]
@@ -393,9 +397,6 @@ fn every_step_of_a_written_run_reads_back_as_the_state_it_was() {
         d.apply(&mut replayed);
     }
     assert_eq!(replayed, r.state_at(12).unwrap());
-    // Every image the run showed was stored once.
-    let images: Vec<_> = r.blob_digests().collect();
-    assert!(images.is_empty(), "the writer alone stores no blobs");
 }
 
 #[test]
@@ -482,18 +483,16 @@ fn every_error_names_its_file_and_what_is_wrong() {
     assert!(err.source().is_none());
 }
 
-/// The shape the legacy converter writes: code and blob payloads as a
-/// `(digest, bytes)` tuple, the first state at step 0 straight after them,
-/// a delta per step, and a closing state.
+/// The shape the legacy converter writes: code payloads as a `(digest,
+/// bytes)` tuple, the first state at step 0 straight after them, a delta per
+/// step, and a closing state.
 #[test]
 fn a_converted_run_reads_like_a_written_one() {
     let states = scripted_run(3);
     let code_digest = Digest::of(b"code");
-    let blob_digest = Digest::of(b"png");
     let mut frames = vec![
         spec_frame(),
         codec::encode(FrameKind::Code, &(code_digest.clone(), b"code".to_vec())).unwrap(),
-        codec::encode(FrameKind::Blob, &(blob_digest.clone(), b"png".to_vec())).unwrap(),
         codec::encode(FrameKind::State, &states[0]).unwrap(),
     ];
     let mut at = states[0].clone();
@@ -506,25 +505,47 @@ fn a_converted_run_reads_like_a_written_one() {
     frames.push(codec::encode(FrameKind::State, &at).unwrap());
     let r = read(&frames).unwrap();
     assert_eq!(r.code(&code_digest).unwrap(), Some(b"code".to_vec()));
-    assert_eq!(r.blob(&blob_digest).unwrap(), Some(b"png".to_vec()));
     assert_eq!(r.latest_state().unwrap(), at);
     assert_eq!(r.state_at(0).unwrap(), states[0]);
     assert_eq!(r.checkpoints(), 2);
 }
 
 #[test]
-fn code_or_a_blob_whose_frame_holds_only_its_digest_is_named() {
+fn code_whose_frame_holds_only_its_digest_is_named() {
     let only_digest = |kind| codec::encode(kind, &Digest::of(b"code")).unwrap();
-    let r = read(&[
-        spec_frame(),
-        only_digest(FrameKind::Code),
-        only_digest(FrameKind::Blob),
-    ])
-    .unwrap();
+    let r = read(&[spec_frame(), only_digest(FrameKind::Code)]).unwrap();
     let decode = |e: RunFileError| matches!(e.kind, RunFileErrorKind::Codec(CodecError::Decode(_)));
     assert!(decode(r.code(&Digest::of(b"code")).unwrap_err()));
     assert!(decode(r.code_files().unwrap_err()));
-    assert!(decode(r.blob(&Digest::of(b"code")).unwrap_err()));
+}
+
+/// A stored part reads from `blobs/` beside the run file; one whose file is
+/// missing is refused naming the part, and one whose path does not read as a
+/// file is an I/O error.
+#[test]
+fn a_stored_part_reads_from_beside_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.lvr");
+    write_run(&path, &scripted_run(1), CheckpointPolicy::default());
+    let r = RunFileReader::open(&path).unwrap();
+    assert_eq!(r.dir(), dir.path());
+    let here = Digest::of(b"here");
+    let blobs = dir.path().join(leviath_core::files::BLOBS_DIR);
+    assert_eq!(
+        r.blob(&here).unwrap_err().to_string(),
+        format!(
+            "run file {}: names the stored part {here}, and blobs/{here} beside it is missing",
+            path.display()
+        )
+    );
+    std::fs::create_dir_all(blobs.join(here.as_str())).unwrap();
+    assert!(matches!(
+        r.blob(&here).unwrap_err().kind,
+        RunFileErrorKind::Io(_)
+    ));
+    std::fs::remove_dir(blobs.join(here.as_str())).unwrap();
+    std::fs::write(super::reader::blob_path(dir.path(), &here), b"here").unwrap();
+    assert_eq!(r.blob(&here).unwrap(), b"here");
 }
 
 /// Read-only, so the torn tail cannot be cut off it.

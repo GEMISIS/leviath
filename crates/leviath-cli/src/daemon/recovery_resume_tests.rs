@@ -329,14 +329,25 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
         s.status = RunStatus::Complete;
         s.phase = PipelinePhase::Done;
         s.final_output = Some(FinalOutputState {
-            content: "w1 found it".to_string(),
+            bytes: 11,
             format: None,
             stage: s.cursor.stage.clone(),
             submitted_at: 1,
             truncated: false,
             artifacts: Vec::new(),
         });
+        s.files.final_output = Some(leviath_runtime::state::FileRef::whole(
+            leviath_core::FINAL_OUTPUT_FILE,
+            b"w1 found it",
+        ));
     });
+    std::fs::write(
+        runs.path()
+            .join(finished.as_str())
+            .join(leviath_core::FINAL_OUTPUT_FILE),
+        "w1 found it",
+    )
+    .unwrap();
     change(runs.path(), &failed, |s| {
         s.status = RunStatus::Error("w2 broke".to_string());
         s.phase = PipelinePhase::Done;

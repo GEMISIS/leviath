@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::codec::{self, FrameKind};
 use super::super::error::RunFileErrorKind;
-use super::super::frames::BlobFrame;
+use super::super::frames::CodeFrame;
 use super::super::reader::{RunFileReader, read_file};
 use super::super::reader_tests::{initial, scripted_run, spec, spec_frame, write_run};
 use super::super::writer::CheckpointPolicy;
@@ -71,12 +71,12 @@ fn checkpoint(seq: u64) -> Vec<u8> {
     codec::encode(FrameKind::State, &state).unwrap()
 }
 
-fn blob() -> Vec<u8> {
-    let frame = BlobFrame {
+fn code_frame() -> Vec<u8> {
+    let frame = CodeFrame {
         digest: Digest::of(b"x"),
         bytes: b"x".to_vec(),
     };
-    codec::encode(FrameKind::Blob, &frame).unwrap()
+    codec::encode(FrameKind::Code, &frame).unwrap()
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn a_long_file_is_read_from_its_end_further_back_as_needed() {
             policy,
         )
         .unwrap();
-        writer.add_blob(&Digest::of(&filler), &filler).unwrap();
+        writer.add_code(&Digest::of(&filler), &filler).unwrap();
         for (i, state) in states.iter().enumerate().take(steps).skip(1) {
             writer
                 .record(state.clone(), i as i64, vec![RunEvent::Log(format!("{i}"))])
@@ -183,16 +183,16 @@ fn a_file_the_ends_do_not_settle_is_read_whole() {
             vec![spec_frame(), checkpoint(0), delta(1, 5), delta(3, 6)],
         ),
         (
-            "blob-last",
-            vec![spec_frame(), checkpoint(0), delta(1, 5), blob()],
+            "code-last",
+            vec![spec_frame(), checkpoint(0), delta(1, 5), code_frame()],
         ),
         (
-            "checkpoint-after-a-blob",
+            "checkpoint-after-code",
             vec![
                 spec_frame(),
                 checkpoint(0),
                 delta(1, 5),
-                blob(),
+                code_frame(),
                 checkpoint(1),
             ],
         ),
@@ -237,8 +237,8 @@ fn a_file_the_ends_do_not_settle_is_read_whole() {
                     found: 3
                 })
             ),
-            ("blob-last", Ok(5)),
-            ("checkpoint-after-a-blob", Ok(5)),
+            ("code-last", Ok(5)),
+            ("checkpoint-after-code", Ok(5)),
             ("checkpoint-after-another-step", Ok(created)),
             ("checkpoint-step-does-not-decode", Ok(created)),
             ("first-checkpoint", Ok(created)),

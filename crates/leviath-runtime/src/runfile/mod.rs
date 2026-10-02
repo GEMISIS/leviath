@@ -1,12 +1,13 @@
 //! The run file: one file per run holding everything about it.
 //!
 //! A run file starts with the run's [`RunSpec`](crate::spec::run_spec::RunSpec),
-//! the state it started from. The code and blobs it uses follow, stored once
-//! each by digest. Then come [`StateDelta`](crate::state::StateDelta)s, one
+//! the state it started from. The code it uses follows, stored once by
+//! digest. Then come [`StateDelta`](crate::state::StateDelta)s, one
 //! per step, with a full [`RunState`](crate::state::RunState) checkpoint
 //! every so often. The last checkpoint plus the deltas after it is where the
 //! run is now; any earlier point is the spec's state with the deltas up to
-//! it applied.
+//! it applied. The run's answer, logs, audits and stored parts are files
+//! beside it that its state names (see [`crate::state::files`]).
 //!
 //! [`codec`] is the byte layout, [`writer`] and [`reader`] write and read
 //! it, [`tail`] reads only where a run is now, and [`view`] renders what it holds as TOML. [`record`] is what the
@@ -32,7 +33,7 @@ pub mod writer;
 
 pub use error::{RunFileError, RunFileErrorKind};
 pub use lane::{Answered, journal_events, journal_events_with};
-pub use reader::RunFileReader;
+pub use reader::{RunFileReader, blob_path, read_blob};
 pub use summary::{context_snapshot, stage_records, summary, summary_of};
 pub use tail::{RunFileTail, read_spec};
 pub use writer::{CheckpointPolicy, RunFileWriter};
@@ -47,7 +48,6 @@ pub fn frame_schemas() -> serde_json::Value {
         "state": schemars::schema_for!(crate::state::RunState),
         "delta": schemars::schema_for!(crate::state::StateDelta),
         "code": schemars::schema_for!(frames::CodeFrame),
-        "blob": schemars::schema_for!(frames::BlobFrame),
         "owner": schemars::schema_for!(frames::OwnerFrame),
     })
 }

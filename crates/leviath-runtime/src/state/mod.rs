@@ -13,11 +13,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod context;
 mod delta;
+pub mod files;
 pub mod inspect;
 pub mod journal;
 
 pub use context::{ContextDiff, ContextState, EntryKind, EntryMeta, EntryState, RegionState};
 pub use delta::{Change, RunEvent, StateDelta, TransitionReason, TransitionRecord};
+pub use files::{BlobFile, FileRef, RunFiles, StageFile, StageFiles};
 
 use crate::spec::names::{EdgeName, ModelRef, RunId, StageName};
 use context::ToolCallState;
@@ -81,6 +83,10 @@ pub struct RunState {
     /// machine no longer has, or that changed since it started, as found the
     /// last time it was brought back. `None` once it is back.
     pub held: Option<crate::spec::issues::SpawnIssues>,
+    /// The answer, logs and audits it keeps beside its run file.
+    pub files: RunFiles,
+    /// Every stored part it holds, beside its run file under `blobs/`.
+    pub blobs: Vec<BlobFile>,
 }
 
 /// How many `read_paths` a run's blueprint declares, and how many of them
@@ -126,6 +132,8 @@ impl RunState {
             read_paths: None,
             point: PointProgress::default(),
             held: None,
+            files: RunFiles::default(),
+            blobs: Vec::new(),
         }
     }
 }
@@ -514,8 +522,9 @@ impl From<&WaitState> for leviath_core::run_meta::WaitReason {
 /// A run's final output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FinalOutputState {
-    /// The output.
-    pub content: String,
+    /// Its size in bytes. The output itself is in `final_output` beside the
+    /// run file, which [`RunFiles::final_output`] names.
+    pub bytes: u64,
     /// Its format label.
     pub format: Option<String>,
     /// The stage that handed it back.

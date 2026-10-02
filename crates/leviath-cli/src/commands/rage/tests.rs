@@ -333,14 +333,65 @@ api_token = "{EXTRA_VALUE}"
         },
         millis: 1,
     };
-    crate::runstate::run_file::tests::step_with(&run_dir, 5, vec![call, done], |_| {});
-    write(&run_dir.join("blobs").join("aa11"), [0u8, 159, 146, 150]);
-    write(&run_dir.join("blobs").join("bb22"), b"small text blob");
+    write(
+        &run_dir.join("blobs").join(binary_blob()),
+        [0u8, 159, 146, 150],
+    );
+    write(&run_dir.join("blobs").join(text_blob()), b"small text blob");
+    // A file in the blob directory that the run file does not name.
+    write(&run_dir.join("blobs").join("stray"), b"not a part");
+    // The run file names each file beside it, as the lane does.
+    crate::runstate::run_file::tests::step_with(&run_dir, 5, vec![call, done], |s| {
+        use leviath_runtime::state::{FileRef, StageFile};
+        s.files.final_output = Some(FileRef::whole("final_output", b"done"));
+        let out = format!("out {ENV_SECRET}\n");
+        s.files.set_stage_file(
+            0,
+            StageFile::Output,
+            FileRef::log("stages/0/output.log", out.len() as u64),
+        );
+        s.files
+            .set_stage_file(0, StageFile::Logs, FileRef::log("stages/0/logs.log", 9));
+        s.files.set_stage_file(
+            0,
+            StageFile::TaintAudit,
+            FileRef::whole("stages/0/taint_audit.json", b"[]"),
+        );
+        // A name that leaves the run's directory is never followed.
+        s.files.set_stage_file(
+            1,
+            StageFile::Logs,
+            FileRef::log("../../config/config.toml", 1),
+        );
+        for (bytes, size) in [
+            (&[0u8, 159, 146, 150][..], 4),
+            (&b"small text blob"[..], 15),
+        ] {
+            s.blobs.push(leviath_runtime::state::BlobFile {
+                digest: leviath_runtime::spec::names::Digest::of(bytes),
+                mime_type: "application/octet-stream".into(),
+                size,
+                name: None,
+                region: None,
+                tool: None,
+            });
+        }
+    });
     // The child's run file is corrupt; the listed child's is clean.
     write(&runs.join(CHILD_RUN).join("run.lvr"), b"not a run file");
     // A blueprint file too large to be one, left out by size.
     write(&demo.join("NOTES.md"), vec![b'x'; 300 * 1024]);
     blueprint
+}
+
+/// The digest of the planted binary part.
+fn binary_blob() -> String {
+    leviath_runtime::spec::names::Digest::of(&[0u8, 159, 146, 150]).to_string()
+}
+
+/// The digest of the planted text part.
+fn text_blob() -> String {
+    leviath_runtime::spec::names::Digest::of(b"small text blob").to_string()
 }
 
 fn selection(about: About) -> Selection {
@@ -448,7 +499,7 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             &format!("runs/{ROOT_RUN}/run.json"),
             &format!("runs/{ROOT_RUN}/run.lvr"),
             &format!("runs/{ROOT_RUN}/request.json"),
-            &format!("runs/{ROOT_RUN}/blobs/aa11"),
+            &format!("runs/{ROOT_RUN}/blobs/{}", binary_blob()),
             &format!("runs/{ROOT_RUN}/blueprint/agent.toml"),
             &format!("runs/{ROOT_RUN}/blueprint/tools/helper.rhai"),
             &format!("runs/{LISTED_CHILD}/summary.json"),
@@ -501,7 +552,13 @@ async fn no_planted_secret_survives_and_no_credential_file_is_copied() {
             "{run}"
         );
         // The binary blob came through byte for byte.
-        assert_eq!(member(&members, "blobs/aa11"), &[0u8, 159, 146, 150]);
+        assert_eq!(
+            member(&members, &format!("blobs/{}", binary_blob())),
+            &[0u8, 159, 146, 150]
+        );
+        // Only what the run file names goes in, and nothing outside the run.
+        assert!(!member_names.iter().any(|n| n.ends_with("blobs/stray")));
+        assert!(!member_names.iter().any(|n| n.contains("../")));
         // The manifest accounts for what was left out.
         let manifest: serde_json::Value =
             serde_json::from_slice(member(&members, "manifest.json")).unwrap();
@@ -852,31 +909,52 @@ fn tail_text_keeps_the_end_and_says_so() {
 
 #[test]
 fn blobs_respect_the_caps() {
+    use collect::BlobParts;
     let dir = tempfile::tempdir().unwrap();
     let blobs = dir.path().join("blobs");
-    write(&blobs.join("a"), "12");
-    write(&blobs.join("b"), "123456");
-    write(&blobs.join("c"), "12");
+    let named: Vec<leviath_runtime::state::BlobFile> = ["12", "123456", "12x"]
+        .iter()
+        .map(|bytes| {
+            let digest = leviath_runtime::spec::names::Digest::of(bytes.as_bytes());
+            write(&blobs.join(digest.as_str()), bytes);
+            leviath_runtime::state::BlobFile {
+                digest,
+                mime_type: "text/plain".into(),
+                size: bytes.len() as u64,
+                name: None,
+                region: None,
+                tool: None,
+            }
+        })
+        .collect();
     let mut bundle = Bundle::default();
     let mut budget = 3;
-    collect::copy_blobs(dir.path(), "runs/r", true, 4, &mut budget, &mut bundle);
+    let parts = BlobParts {
+        include: true,
+        per_part: 4,
+    };
+    collect::copy_blobs(
+        dir.path(),
+        "runs/r",
+        &named,
+        parts,
+        &mut budget,
+        &mut bundle,
+    );
     let copied: Vec<&str> = bundle.members.iter().map(|m| m.path.as_str()).collect();
-    assert_eq!(copied, vec!["runs/r/blobs/a"]);
+    assert_eq!(copied, vec![format!("runs/r/{}", named[0].path())]);
     assert_eq!(
         bundle.skipped.len(),
         2,
         "one over the part cap, one over the budget"
     );
-    // No blobs directory: nothing to say.
+    // A run that names no parts: nothing to say, even when left out.
     let mut none = Bundle::default();
-    collect::copy_blobs(
-        &dir.path().join("nowhere"),
-        "runs/r",
-        true,
-        4,
-        &mut 10,
-        &mut none,
-    );
+    let left_out = BlobParts {
+        include: false,
+        per_part: 4,
+    };
+    collect::copy_blobs(dir.path(), "runs/r", &[], left_out, &mut 10, &mut none);
     assert!(none.members.is_empty() && none.skipped.is_empty());
 }
 

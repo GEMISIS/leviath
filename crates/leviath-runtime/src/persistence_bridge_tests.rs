@@ -172,6 +172,8 @@ async fn every_file_beside_the_run_file_is_private_to_this_user() {
     j.output_appends = vec![(0, "said".to_string())];
     let outcome = write_snapshot(dir.path(), &j, None).await;
     assert!(outcome.dir_made && outcome.files.is_none());
+    assert_eq!(outcome.named.stages.len(), 1);
+    assert!(outcome.named.final_output.is_some());
     let run_dir = dir.path().join("run-perms");
     for path in [
         run_dir.join(leviath_core::FINAL_OUTPUT_FILE),
@@ -261,7 +263,10 @@ async fn a_stage_log_that_cannot_be_opened_is_not_a_loss() {
     let dir = tempfile::tempdir().unwrap();
     let stage = dir.path().join("r").join("stages").join("0");
     std::fs::create_dir_all(stage.join("logs.log")).unwrap();
-    append_stage_line(&dir.path().join("r"), 0, "logs.log", "x", "r").await;
+    let mut named = RunFiles::default();
+    let lines = [(0, "x".to_string())];
+    append_lines(&dir.path().join("r"), &[], &lines, "r", &mut named).await;
+    assert_eq!(named, RunFiles::default(), "a log not written is not named");
 }
 
 /// A world with no runs dir writes nothing and still acks every append.
@@ -543,10 +548,62 @@ async fn a_lost_write_keeps_the_first_loss() {
     j.final_output = Some("x".to_string());
     j.taint_audit = Some((0, "[]".to_string()));
     let outcome = write_snapshot(dir.path(), &j, None).await;
+    // A file that was not placed is not named.
+    assert_eq!(outcome.named, RunFiles::default());
     let lost = outcome.files.expect("both were lost");
     assert!(
         lost.path.extension().is_some_and(|e| e == "tmp"),
         "{lost:?}"
+    );
+}
+
+/// The answer, the stage logs and the taint audit are written beside the
+/// run file and named by the step that follows them, with their sizes and,
+/// for a file written whole, its digest; none of their bytes go into the run
+/// file. Lines that arrive after the step are named when the lane stops.
+#[tokio::test]
+async fn the_files_beside_a_run_are_named_by_its_step_and_never_copied_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let answer = "an answer long enough to find in the run file ".repeat(40);
+    let mut first = *stepped("run-1");
+    first.final_output = Some(answer.clone());
+    first.taint_audit = Some((1, "[\"audit\"]".to_string()));
+    first.output_appends = vec![(0, "said".to_string())];
+    first.log_appends = vec![(0, "a line".to_string()), (0, "another".to_string())];
+    run_lane(
+        dir.path(),
+        vec![
+            PersistMsg::Snapshot(Box::new(first)),
+            PersistMsg::StageLines {
+                run_id: "run-1".to_string(),
+                output_appends: vec![],
+                log_appends: vec![(0, "later".to_string())],
+            },
+        ],
+    )
+    .await;
+    let run_dir = dir.path().join("run-1");
+    let path = run_dir.join(leviath_core::files::RUN_FILE);
+    let files = crate::runfile::RunFileReader::open(&path)
+        .unwrap()
+        .latest_state()
+        .unwrap()
+        .files;
+    let named = files.final_output.as_ref().unwrap();
+    assert_eq!(named.read(&run_dir).unwrap(), answer.as_bytes());
+    assert_eq!(
+        named.sha256,
+        Some(crate::spec::names::Digest::of(answer.as_bytes()))
+    );
+    let audit = files.stage_file(1, StageFile::TaintAudit).unwrap();
+    assert_eq!(audit.read(&run_dir).unwrap(), b"[\"audit\"]");
+    assert_eq!(files.stage_file(0, StageFile::Output).unwrap().bytes, 5);
+    // The line that came after the step is named as the lane stops.
+    assert_eq!(files.stage_file(0, StageFile::Logs).unwrap().bytes, 21);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(
+        !bytes.windows(20).any(|w| w == &answer.as_bytes()[..20]),
+        "the answer is not copied into the run file"
     );
 }
 
