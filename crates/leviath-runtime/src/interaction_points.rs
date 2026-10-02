@@ -14,12 +14,13 @@
 //!   agent `ReadyForInteractionPoint`.
 //! - `dispatch_interaction_point` spawns an async task that asks through the
 //!   shared [`InteractionHub`] (so the dashboard surfaces the prompt via
-//!   `reflect_interaction_status`),
-//!   resolves the answer, and reports a `PointOutcome` on the lane.
-//! - `collect_interaction_point` applies the outcome: approve ⇒ proceed to the
-//!   transition, abort ⇒ cancel the run, a directive ⇒ inject it and re-run
-//!   inference in-stage, an edit ⇒ inject the edited text and re-present the
-//!   point. Directive/edit loops are bounded by [`MAX_REVISION_ROUNDS`].
+//!   `reflect_interaction_status`) and hands the answer back on the lane as
+//!   given. The task decides nothing.
+//! - `collect_interaction_point` decides what the answer means and applies it:
+//!   approve ⇒ proceed to the transition, abort ⇒ cancel the run, a directive
+//!   ⇒ inject it and re-run inference in-stage, an edit ⇒ ask for the edited
+//!   text, then inject it and re-present the point. Directive/edit loops are
+//!   bounded by [`MAX_REVISION_ROUNDS`].
 //!
 //! The routing is deterministic (code); only the input capture is a user
 //! interaction.
@@ -72,6 +73,11 @@ pub(crate) struct InteractionPointCursor(pub usize);
 /// Absent ⇒ 0. Reset on approve (advancing points) and on entering a new stage.
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct InteractionPointRounds(pub usize);
+
+/// The option label of an edit the person chose, held while the edited text
+/// is asked for. Read when that text comes back on the lane.
+#[derive(Component, Debug, Clone)]
+pub(crate) struct PendingPointEdit(pub String);
 
 /// The authoritative document to present as the point's `body` on the next
 /// dispatch, overriding the last inference response. Set when the user edits the
@@ -132,12 +138,27 @@ pub(crate) enum PointOutcome {
     Unanswered,
 }
 
-/// One resolved interaction-point answer, reported on the lane.
+/// What comes back on the interaction-point lane.
+///
+/// An answer arrives as the person gave it: what it means is decided by
+/// `collect_interaction_point`, in the world, never by the task that asked.
+pub(crate) enum PointReply {
+    /// The person's answer to the point.
+    Answer(InteractionResponse),
+    /// What the person wrote when an edit option asked them to edit the
+    /// document. Empty when they sent nothing.
+    Edited(String),
+    /// A decision a system made without asking anybody: an unattended run's
+    /// checkpoint.
+    Decided(PointOutcome),
+}
+
+/// One reply on the interaction-point lane.
 pub(crate) struct InteractionPointOutcome {
-    /// The agent the answer is for.
+    /// The agent the reply is for.
     pub entity: Entity,
-    /// The routed decision.
-    pub decision: PointOutcome,
+    /// The answer, or the decision already made.
+    pub reply: PointReply,
 }
 
 /// The sending side of the interaction-point lane + the handle/wake needed to
@@ -280,9 +301,11 @@ fn route_answer(point: &InteractionPointDef, user_text: String) -> Routed {
     }
 }
 
-/// Intermediate routing result before the edit branch's second ask.
+/// What an answer means for a point, before the edit branch's second ask.
 #[derive(Debug, PartialEq, Eq)]
 enum Routed {
+    /// A point declaring `unattended = "ask"` got no answer.
+    Unanswered,
     Approve {
         user_text: String,
     },
@@ -296,11 +319,57 @@ enum Routed {
     },
 }
 
-// ─── The async ask task ──────────────────────────────────────────────────────
+/// What `resp` means for `point`: the whole decision, made in the world.
+///
+/// A point that declared it needs a person, and did not get one, stops the
+/// run. Routing an empty answer normally lands in the final `else` of
+/// `route_answer`, which is `Approve` - so a `--yolo` run in CI waited out the
+/// interaction timeout and then approved the plan nobody read. A timeout is
+/// not a person. The default `auto_approve` policy never takes that arm.
+///
+/// With no point to read (the stage is no longer an interactive one) the
+/// answer approves, as the transition it was holding would have gone ahead.
+fn decide(point: Option<&InteractionPointDef>, resp: &InteractionResponse) -> Routed {
+    let Some(point) = point else {
+        return Routed::Approve {
+            user_text: resolve_answer(resp, &[]),
+        };
+    };
+    if point.unattended == UnattendedPoint::Ask && is_unanswered(resp) {
+        return Routed::Unanswered;
+    }
+    route_answer(point, resolve_answer(resp, &point.options))
+}
 
-/// Ask an interaction point through the hub, resolve + route the answer (doing
-/// the edit branch's second "edit this text" ask when needed), and report the
-/// [`PointOutcome`] on the lane, waking the tick loop.
+impl Routed {
+    /// The decision this is, or the option label of an edit that still needs
+    /// the edited text asked for.
+    fn outcome(self) -> Result<PointOutcome, String> {
+        match self {
+            Routed::Unanswered => Ok(PointOutcome::Unanswered),
+            Routed::Approve { user_text } => Ok(PointOutcome::Approve { user_text }),
+            Routed::Abort => Ok(PointOutcome::Abort),
+            Routed::Directive {
+                user_text,
+                directive,
+            } => Ok(PointOutcome::Directive {
+                user_text,
+                directive,
+            }),
+            Routed::Edit { user_text } => Err(user_text),
+        }
+    }
+}
+
+/// The hub id a point's request is asked under: the run id first, so two
+/// runs at the same point (same name, same round) never collide in the shared
+/// hub, then the point and the round.
+fn point_request_id(agent_id: &str, point: &str, round: usize) -> String {
+    leviath_core::interaction::request_id(agent_id, "point", &format!("{point}-{round}"))
+}
+
+// ─── The async ask tasks ─────────────────────────────────────────────────────
+
 /// The point being asked: whose run, which point, on what text, and how many
 /// times it has come round already.
 ///
@@ -323,6 +392,9 @@ pub(crate) struct PointAsk {
     pub round: usize,
 }
 
+/// Ask an interaction point through the hub and hand the answer back on the
+/// lane as given, waking the tick loop. Pure I/O: what the answer means is
+/// `collect_interaction_point`'s to decide.
 async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointOutcome>) {
     let PointAsk {
         entity,
@@ -337,59 +409,51 @@ async fn run_interaction_point(ask: PointAsk, lane: PromptLane<InteractionPointO
         outcomes,
         wake,
     } = lane;
-    // The run id leads, so concurrent runs at the same point (same name, same
-    // round) never collide in the shared hub.
-    let ask_id = leviath_core::interaction::request_id(
-        &agent_id,
-        "point",
-        &format!("{}-{round}", point.name),
-    );
-    let backend = hub.backend_for(agent_id);
-    let req = build_point_request(&point, &stage, ask_id.clone(), &body);
-    let resp = backend.ask(req).await;
-
-    // A point that declared it needs a person, and did not get one. Routing an
-    // empty answer normally lands in the final `else` of `route_answer`, which
-    // is `Approve` - so a `--yolo` run in CI waited out the interaction timeout
-    // and then approved the plan nobody read. A timeout is not a person.
-    //
-    // The default `auto_approve` policy never takes this arm, so a point that
-    // does not claim to need a person behaves exactly as before.
-    if point.unattended == UnattendedPoint::Ask && is_unanswered(&resp) {
-        let _ = outcomes.send(InteractionPointOutcome {
-            entity,
-            decision: PointOutcome::Unanswered,
-        });
-        wake.notify_one();
-        return;
-    }
-
-    let user_text = resolve_answer(&resp, &point.options);
-
-    let decision = match route_answer(&point, user_text) {
-        Routed::Approve { user_text } => PointOutcome::Approve { user_text },
-        Routed::Abort => PointOutcome::Abort,
-        Routed::Directive {
-            user_text,
-            directive,
-        } => PointOutcome::Directive {
-            user_text,
-            directive,
-        },
-        Routed::Edit { user_text } => {
-            let edit_req = InteractionRequest::edit_text(
-                format!("{ask_id}-edit"),
-                "Edit the document - your changes replace it, then submit:",
-                &stage,
-                body,
-            );
-            let edited = backend.ask(edit_req).await.value.unwrap_or_default();
-            PointOutcome::Edit { user_text, edited }
-        }
-    };
-
-    let _ = outcomes.send(InteractionPointOutcome { entity, decision });
+    let ask_id = point_request_id(&agent_id, &point.name, round);
+    let req = build_point_request(&point, &stage, ask_id, &body);
+    let resp = hub.backend_for(agent_id).ask(req).await;
+    let _ = outcomes.send(InteractionPointOutcome {
+        entity,
+        reply: PointReply::Answer(resp),
+    });
     wake.notify_one();
+}
+
+/// The second question an edit option asks: the document, to edit.
+pub(crate) struct PointEditAsk {
+    /// The agent parked on the point.
+    pub entity: Entity,
+    /// That agent's run id.
+    pub agent_id: String,
+    /// The stage the point belongs to, which the request names.
+    pub stage: String,
+    /// The hub id, the point's own with `-edit` after it.
+    pub id: String,
+    /// The document as it was put to the person.
+    pub body: String,
+}
+
+/// Ask for the edited document and hand back what the person wrote. Pure I/O,
+/// like [`run_interaction_point`].
+async fn run_point_edit(ask: PointEditAsk, lane: PromptLane<InteractionPointOutcome>) {
+    let req = InteractionRequest::edit_text(
+        ask.id,
+        "Edit the document - your changes replace it, then submit:",
+        &ask.stage,
+        ask.body,
+    );
+    let edited = lane
+        .hub
+        .backend_for(ask.agent_id)
+        .ask(req)
+        .await
+        .value
+        .unwrap_or_default();
+    let _ = lane.outcomes.send(InteractionPointOutcome {
+        entity: ask.entity,
+        reply: PointReply::Edited(edited),
+    });
+    lane.wake.notify_one();
 }
 
 /// Re-arm an agent that was blocked at an interaction point when the daemon stopped,
@@ -633,9 +697,9 @@ pub(crate) fn dispatch_interaction_point(
             );
             let _ = stage.outcomes.send(InteractionPointOutcome {
                 entity,
-                decision: PointOutcome::Approve {
+                reply: PointReply::Decided(PointOutcome::Approve {
                     user_text: String::new(),
-                },
+                }),
             });
             stage.wake.notify_one();
             commands
@@ -680,20 +744,25 @@ type CollectInteractionPointQuery = (
     Option<&'static InteractionPointCursor>,
     Option<&'static InteractionPointRounds>,
     Option<&'static mut StageIoBuffer>,
+    Option<&'static PointBody>,
+    Option<&'static PendingPointEdit>,
 );
 
-/// Collect: apply each resolved interaction-point outcome - approve advances
-/// (or transitions when all points are done), abort cancels, a directive injects
-/// the directive and re-infers in-stage, an edit injects the edited text and
-/// re-presents; both revision paths are bounded by [`MAX_REVISION_ROUNDS`].
+/// Collect: decide what each answer means and apply it - approve advances (or
+/// transitions when all points are done), abort cancels, a directive injects
+/// the directive and re-infers in-stage, an edit asks for the edited text and
+/// then injects it and re-presents; both revision paths are bounded by
+/// [`MAX_REVISION_ROUNDS`].
 pub(crate) fn collect_interaction_point(
     mut results: ResMut<InteractionPointResults>,
     mut agents: Query<CollectInteractionPointQuery, With<AwaitingInteractionPoint>>,
+    lane: Option<Res<InteractionPointStage>>,
+    hub: Option<Res<InteractionHub>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
     while let Ok(out) = results.0.try_recv() {
-        let Ok((mut state, mut window, bp, cursor, pc, rounds, io_buf)) =
+        let Ok((mut state, mut window, bp, cursor, pc, rounds, io_buf, body, pending_edit)) =
             agents.get_mut(out.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -720,9 +789,54 @@ pub(crate) fn collect_interaction_point(
             ),
             None => (String::new(), 0),
         };
+        let point = stage_points(bp, cursor).and_then(|p| p.get(idx));
+
+        let decision = match out.reply {
+            PointReply::Decided(decision) => decision,
+            PointReply::Edited(edited) => PointOutcome::Edit {
+                user_text: pending_edit.map(|p| p.0.clone()).unwrap_or_default(),
+                edited,
+            },
+            PointReply::Answer(resp) => match decide(point, &resp).outcome() {
+                Ok(decision) => decision,
+                // An edit option: ask for the edited document and keep the
+                // point open until it comes back. With no lane to ask on (a
+                // world without a hub) the point is put again as it was.
+                Err(user_text) => match (&lane, &hub) {
+                    (Some(lane), Some(hub)) => {
+                        lane.runtime.spawn(run_point_edit(
+                            PointEditAsk {
+                                entity: out.entity,
+                                agent_id: state.agent_id.clone(),
+                                stage: stage_name(bp, cursor),
+                                id: format!(
+                                    "{}-edit",
+                                    point_request_id(&state.agent_id, &name, round)
+                                ),
+                                body: body.map(|b| b.0.clone()).unwrap_or_default(),
+                            },
+                            PromptLane {
+                                hub: (*hub).clone(),
+                                outcomes: lane.outcomes.clone(),
+                                wake: lane.wake.clone(),
+                            },
+                        ));
+                        commands
+                            .entity(out.entity)
+                            .insert(PendingPointEdit(user_text));
+                        continue;
+                    }
+                    _ => PointOutcome::Edit {
+                        user_text,
+                        edited: String::new(),
+                    },
+                },
+            },
+        };
 
         let mut e = commands.entity(out.entity);
-        e.remove::<AwaitingInteractionPoint>();
+        e.remove::<AwaitingInteractionPoint>()
+            .remove::<PendingPointEdit>();
 
         // Mark all points satisfied so the gate lets the transition proceed
         // (the cursor is reset when the next stage is entered).
@@ -731,7 +845,7 @@ pub(crate) fn collect_interaction_point(
                 .insert(ResolveTransition);
         };
 
-        match out.decision {
+        match decision {
             PointOutcome::Abort => {
                 state.status = AgentStatus::Cancelled;
             }
@@ -1296,8 +1410,8 @@ mod tests {
         let outcome = rx.try_recv().expect("an outcome was published");
         assert_eq!(outcome.entity, e);
         assert!(matches!(
-            outcome.decision,
-            PointOutcome::Approve { ref user_text } if user_text.is_empty()
+            outcome.reply,
+            PointReply::Decided(PointOutcome::Approve { ref user_text }) if user_text.is_empty()
         ));
         for _ in 0..8 {
             tokio::task::yield_now().await;
@@ -1374,6 +1488,7 @@ mod tests {
             let (tx, mut rx) = unbounded_channel();
             let mut point = plan_point();
             point.unattended = policy;
+            let routed_by = point.clone();
             let task = tokio::spawn(run_interaction_point(
                 PointAsk {
                     entity: Entity::from_raw_u32(1).unwrap(),
@@ -1406,7 +1521,14 @@ mod tests {
             task.await.unwrap();
 
             let out = rx.try_recv().expect("an outcome was published");
-            assert_eq!(out.decision, expected, "{policy:?}");
+            let PointReply::Answer(resp) = out.reply else {
+                panic!("the task hands back the answer as given");
+            };
+            assert_eq!(
+                decide(Some(&routed_by), &resp).outcome(),
+                Ok(expected),
+                "{policy:?}"
+            );
         }
     }
 
@@ -1534,9 +1656,9 @@ mod tests {
         let e = spawn_awaiting(&mut world, vec![plan_point()]);
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Approve {
+            reply: PointReply::Decided(PointOutcome::Approve {
                 user_text: "Approve".to_string(),
-            },
+            }),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1561,9 +1683,9 @@ mod tests {
         );
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Approve {
+            reply: PointReply::Decided(PointOutcome::Approve {
                 user_text: String::new(),
-            },
+            }),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1608,7 +1730,7 @@ mod tests {
         let e = spawn_awaiting(&mut world, vec![plan_point()]);
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Unanswered,
+            reply: PointReply::Decided(PointOutcome::Unanswered),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1636,7 +1758,7 @@ mod tests {
         let e = spawn_awaiting(&mut world, vec![plan_point()]);
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Abort,
+            reply: PointReply::Decided(PointOutcome::Abort),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1673,7 +1795,7 @@ mod tests {
 
             tx.send(InteractionPointOutcome {
                 entity: e,
-                decision,
+                reply: PointReply::Decided(decision),
             })
             .unwrap();
             run_collect(&mut world);
@@ -1702,10 +1824,10 @@ mod tests {
         let e = spawn_awaiting(&mut world, vec![plan_point()]);
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Directive {
+            reply: PointReply::Decided(PointOutcome::Directive {
                 user_text: "Revise".to_string(),
                 directive: "do it".to_string(),
-            },
+            }),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1720,10 +1842,10 @@ mod tests {
             .insert(AwaitingInteractionPoint);
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Directive {
+            reply: PointReply::Decided(PointOutcome::Directive {
                 user_text: String::new(),
                 directive: "again".to_string(),
-            },
+            }),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1745,10 +1867,10 @@ mod tests {
             .id();
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Edit {
+            reply: PointReply::Decided(PointOutcome::Edit {
                 user_text: "Add detail".to_string(),
                 edited: "the revised plan".to_string(),
-            },
+            }),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1780,9 +1902,9 @@ mod tests {
         for e in [first_try, revised] {
             tx.send(InteractionPointOutcome {
                 entity: e,
-                decision: PointOutcome::Approve {
+                reply: PointReply::Decided(PointOutcome::Approve {
                     user_text: "Approve".to_string(),
-                },
+                }),
             })
             .unwrap();
         }
@@ -1805,10 +1927,10 @@ mod tests {
         let e = spawn_awaiting(&mut world, vec![plan_point()]);
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Edit {
+            reply: PointReply::Decided(PointOutcome::Edit {
                 user_text: "Add detail".to_string(),
                 edited: "the edited plan".to_string(),
-            },
+            }),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1825,10 +1947,10 @@ mod tests {
             .insert(AwaitingInteractionPoint);
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Edit {
+            reply: PointReply::Decided(PointOutcome::Edit {
                 user_text: String::new(),
                 edited: String::new(),
-            },
+            }),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1845,10 +1967,10 @@ mod tests {
             .insert(AwaitingInteractionPoint);
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Edit {
+            reply: PointReply::Decided(PointOutcome::Edit {
                 user_text: String::new(),
                 edited: String::new(), // empty edit ⇒ no injection branch
-            },
+            }),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1869,11 +1991,10 @@ mod tests {
                 AwaitingInteractionPoint,
             ))
             .id();
+        // An answer, so there is no point to read it against: it approves.
         tx.send(InteractionPointOutcome {
             entity: e,
-            decision: PointOutcome::Approve {
-                user_text: String::new(),
-            },
+            reply: PointReply::Answer(InteractionResponse::text("x", "ok")),
         })
         .unwrap();
         run_collect(&mut world);
@@ -1886,7 +2007,7 @@ mod tests {
         tx.send(InteractionPointOutcome {
             entity: Entity::from_raw_u32(999)
                 .expect("a small literal index is always a valid entity id"),
-            decision: PointOutcome::Abort,
+            reply: PointReply::Decided(PointOutcome::Abort),
         })
         .unwrap();
         run_collect(&mut world); // no panic
@@ -1898,6 +2019,7 @@ mod tests {
         point: InteractionPointDef,
         answer: impl FnOnce(&InteractionHub, String),
     ) -> PointOutcome {
+        let routed_by = point.clone();
         let hub = InteractionHub::new();
         let (tx, mut rx) = unbounded_channel();
         let task = {
@@ -1925,7 +2047,12 @@ mod tests {
         let id = hub.pending()[0].1.id.clone();
         answer(&hub, id);
         task.await.unwrap();
-        rx.recv().await.unwrap().decision
+        let PointReply::Answer(resp) = rx.recv().await.unwrap().reply else {
+            panic!("the task hands back the answer as given");
+        };
+        decide(Some(&routed_by), &resp)
+            .outcome()
+            .expect("these answers decide without a second ask")
     }
 
     #[tokio::test]
@@ -2022,52 +2149,79 @@ mod tests {
         );
     }
 
+    /// An edit option asks a second question, for the edited document. The
+    /// task that asked the point decides nothing: the collect system reads the
+    /// answer as an edit, asks for the text, holds the point open, and applies
+    /// what comes back.
     #[tokio::test]
-    async fn run_point_edit_does_second_ask() {
-        // Selecting the edit option triggers a second (edit_text) ask; answer both.
+    async fn an_edit_option_asks_for_the_document_and_applies_it() {
         let hub = InteractionHub::new();
-        let (tx, mut rx) = unbounded_channel();
-        let task = {
-            let hub = hub.clone();
-            tokio::spawn(run_interaction_point(
-                PointAsk {
-                    entity: Entity::from_raw_u32(1)
-                        .expect("a small literal index is always a valid entity id"),
-                    agent_id: "run".to_string(),
-                    stage: "plan".to_string(),
-                    point: plan_point(),
-                    body: "body".to_string(),
-                    round: 0,
-                },
-                PromptLane {
-                    hub,
-                    outcomes: tx,
-                    wake: Arc::new(Notify::new()),
-                },
+        let (tx, rx) = unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(hub.clone());
+        world.insert_resource(InteractionPointStage {
+            outcomes: tx.clone(),
+            wake: Arc::new(Notify::new()),
+            runtime: Handle::current(),
+        });
+        world.insert_resource(InteractionPointResults(rx));
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Waiting),
+                window(),
+                blueprint_with(vec![plan_point()]),
+                StageCursor { index: 0 },
+                AwaitingInteractionPoint,
+                PointBody("the plan".to_string()),
             ))
-        };
-        // Answer the point with the edit option.
+            .id();
+        let mut answer = InteractionResponse::text("ignored", "");
+        answer.choice_index = Some(2); // Add detail ⇒ edit
+        tx.send(InteractionPointOutcome {
+            entity: e,
+            reply: PointReply::Answer(answer),
+        })
+        .unwrap();
+        run_collect(&mut world);
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_some());
+        assert_eq!(world.get::<PendingPointEdit>(e).unwrap().0, "Add detail");
+
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
-        let id = hub.pending()[0].1.id.clone();
-        let mut r = InteractionResponse::text(&id, "");
-        r.choice_index = Some(2); // Add detail ⇒ edit
-        hub.answer(r);
-        // Then answer the edit request with the edited text.
+        let pending = hub.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1.id, "run-1-point-plan_approval-0-edit");
+        assert_eq!(pending[0].1.stage_name, "plan");
+        assert!(hub.answer(InteractionResponse::text(
+            "run-1-point-plan_approval-0-edit",
+            "edited body"
+        )));
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
-        let edit_id = hub.pending()[0].1.id.clone();
-        hub.answer(InteractionResponse::text(&edit_id, "edited body"));
-        task.await.unwrap();
-        assert_eq!(
-            rx.recv().await.unwrap().decision,
-            PointOutcome::Edit {
-                user_text: "Add detail".to_string(),
-                edited: "edited body".to_string(),
-            }
-        );
+        run_collect(&mut world);
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_none());
+        assert!(world.get::<PendingPointEdit>(e).is_none());
+        assert_eq!(world.get::<PlanBodyOverride>(e).unwrap().0, "edited body");
+        assert!(world.get::<ReadyForInteractionPoint>(e).is_some());
+    }
+
+    /// With no hub to ask on, an edit option puts the point again unchanged.
+    #[test]
+    fn an_edit_option_with_no_lane_puts_the_point_again() {
+        let (mut world, tx) = collect_world();
+        let e = spawn_awaiting(&mut world, vec![plan_point()]);
+        let mut answer = InteractionResponse::text("ignored", "");
+        answer.choice_index = Some(2);
+        tx.send(InteractionPointOutcome {
+            entity: e,
+            reply: PointReply::Answer(answer),
+        })
+        .unwrap();
+        run_collect(&mut world);
+        assert!(world.get::<ReadyForInteractionPoint>(e).is_some());
+        assert!(world.get::<PlanBodyOverride>(e).is_none());
     }
 
     // ── restore (restart persistence) ──
