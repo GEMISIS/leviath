@@ -604,11 +604,24 @@ pub(crate) fn phase(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, state: &Run
         _ => match (&state.pending, &state.point.asking) {
             (Some(batch), _) => pending_batch(entity, batch),
             (None, Some(body)) => open_point(entity, body),
+            // A new run (no step taken yet) whose entry stage has an
+            // `on_stage_enter` hook: the hook runs before the first request.
+            (None, None) if state.seq == 0 && enters_with_hook(spec, state) => {
+                entity.insert(crate::pipeline::EnteringEntryStage);
+            }
             (None, None) => {
                 entity.insert(ReadyToInfer);
             }
         },
     }
+}
+
+/// Whether the stage the run is in declares an `on_stage_enter` hook.
+fn enters_with_hook(spec: &RunSpec, state: &RunState) -> bool {
+    spec.graph.stages[stage_index(spec, state)]
+        .hooks
+        .on_stage_enter
+        .is_some()
 }
 
 /// `point`: where the run is among its stage's checkpoints. Nothing is

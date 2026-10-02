@@ -110,31 +110,54 @@ fn apply_modify(window: &mut ContextWindow, value: &serde_json::Value) -> Result
     Ok(())
 }
 
+/// What `run_stage_enter_hooks` selects.
+///
+/// `&'static` is bevy's `WorldQuery` convention, not a claim about
+/// lifetimes: the borrow is bound when the query is fetched.
+type StageEnterHookQuery = (
+    Entity,
+    Option<&'static StageJustEntered>,
+    &'static StageCursor,
+    &'static crate::insert::RunSpecC,
+    Option<&'static StageHookScripts>,
+    &'static mut ContextWindow,
+    &'static mut AgentState,
+);
+
+/// The agents `run_stage_enter_hooks` runs for: those entering a stage by a
+/// transition, and new runs in their entry stage.
+type Entering = Or<(With<StageJustEntered>, With<EnteringEntryStage>)>;
+
 /// Run every entering agent's `on_stage_enter` hook.
 ///
 /// Ordered before `sync_tool_stages` (which clears [`StageJustEntered`]) and
-/// therefore before the stage's first inference is built.
+/// therefore before the stage's first inference is built. A new run's entry
+/// stage is entered by placing the run, not by a transition, and is marked
+/// [`EnteringEntryStage`] instead: its hook runs here too, and the marker is
+/// swapped for [`ReadyToInfer`] so the first request follows it.
 pub(crate) fn run_stage_enter_hooks(
-    mut agents: Query<(
-        Entity,
-        &StageJustEntered,
-        &crate::insert::RunSpecC,
-        &StageHookScripts,
-        &mut ContextWindow,
-        &mut AgentState,
-    )>,
+    mut agents: Query<StageEnterHookQuery, Entering>,
+    mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, entered, spec, scripts, mut window, mut state) in agents.iter_mut() {
+    for (entity, entered, cursor, spec, scripts, mut window, mut state) in agents.iter_mut() {
         crate::tick_scope::enter(entity);
-        let Some(stage) = spec.0.graph.stages.get(entered.index) else {
+        let index = entered.map_or(cursor.index, |e| e.index);
+        if entered.is_none() {
+            commands
+                .entity(entity)
+                .remove::<EnteringEntryStage>()
+                .insert(ReadyToInfer);
+        }
+        let Some(stage) = spec.0.graph.stages.get(index) else {
             continue;
         };
-        let Some(script) = scripts.script_for(stage, "on_stage_enter") else {
+        let Some(script) = scripts.and_then(|s| s.script_for(stage, "on_stage_enter")) else {
             continue;
         };
+        let name = stage.name.as_str().to_string();
 
-        let ctx = stage_ctx(&entered.name, entered.index, &window);
+        let ctx = stage_ctx(&name, index, &window);
         let outcome = match run(&script, "on_stage_enter", ctx) {
             Ok(o) => o,
             Err(e) => {
@@ -158,7 +181,7 @@ pub(crate) fn run_stage_enter_hooks(
             HookOutcome::Cancel(reason) => {
                 let why = reason.unwrap_or_else(|| "no reason given".to_string());
                 state.status = AgentStatus::Error {
-                    message: format!("on_stage_enter refused stage '{}': {why}", entered.name),
+                    message: format!("on_stage_enter refused stage '{name}': {why}"),
                 };
             }
             // Retrying entry into a stage the agent is already in has no
@@ -168,8 +191,7 @@ pub(crate) fn run_stage_enter_hooks(
                 state.status = AgentStatus::Error {
                     message: format!(
                         "on_stage_enter returned 'retry', which this hook cannot honour \
-                         (stage '{}' is already entered)",
-                        entered.name
+                         (stage '{name}' is already entered)"
                     ),
                 };
             }

@@ -2331,6 +2331,84 @@ mod tests {
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
     }
 
+    /// A provider that answers "done" and keeps every request it was sent.
+    struct Recorder(Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl Provider for Recorder {
+        async fn infer(
+            &self,
+            req: &InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            let sent = serde_json::to_string(req).expect("a request serializes");
+            self.0.lock().unwrap().push(sent);
+            Ok(text("done"))
+        }
+        async fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "script"
+        }
+        fn capabilities(&self, _m: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+    }
+
+    /// `on_stage_enter` fires on entering a stage, before its first
+    /// inference, and the entry stage is entered too: a new run's first
+    /// request carries what the hook wrote, as every later stage's does.
+    #[tokio::test]
+    async fn on_stage_enter_fires_on_the_entry_stage_before_its_first_request() {
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let mut registry = ProviderRegistry::new();
+        registry.register("script".to_string(), recorder.clone());
+        let mut world = build_world(registry);
+        let mut graph = blueprint();
+        graph.stages[0].hooks.on_stage_enter =
+            Some(crate::spec::graph::CodeRef::File("h.rhai".to_string()));
+        let e = world
+            .spawn_from_graph(
+                "agent-enter".to_string(),
+                graph,
+                "do the task",
+                vec![crate::pipeline::ResolvedStage {
+                    provider_name: "script".to_string(),
+                    model: "m".to_string(),
+                    tools: vec![],
+                    fallbacks: Vec::new(),
+                    output: None,
+                    notes: Vec::new(),
+                }],
+                hints(true),
+            )
+            .unwrap();
+        let script = leviath_scripting::stage_hook::compile(
+            "h.rhai",
+            r#"fn on_stage_enter(ctx) { #{ action: "modify", value: #{ conversation: "ENTRY-HOOK-RAN" } } }"#,
+            &["on_stage_enter"],
+        )
+        .expect("the hook compiles");
+        world
+            .world_mut()
+            .entity_mut(e.entity())
+            .insert(crate::components::StageHookScripts(
+                std::collections::HashMap::from([("h.rhai".to_string(), Arc::new(script))]),
+            ));
+
+        world.run_until_idle(20).await;
+
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+        let sent = recorder.0.lock().unwrap().clone();
+        assert!(
+            sent.first().is_some_and(|r| r.contains("ENTRY-HOOK-RAN")),
+            "the first request carries what the hook wrote: {sent:?}"
+        );
+    }
+
     /// The run `run_id` under `runs` as its run file lists it, once it has
     /// reached `status`; `None` if it does not within two seconds. The
     /// persistence worker writes on its own task, so this polls, with a short

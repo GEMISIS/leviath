@@ -194,6 +194,19 @@ pub struct ReadyToInfer;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AwaitingInference;
 
+/// A new run, placed in its entry stage, whose `on_stage_enter` hook has not
+/// run yet.
+///
+/// No transition enters the entry stage, so it never carries
+/// [`StageJustEntered`]; this stands in for it for the hook alone. It is
+/// placed instead of [`ReadyToInfer`], and the hook system swaps it for
+/// `ReadyToInfer` once the hook has run, so the stage's first request is built
+/// from what the hook wrote. The other stage-entry systems do not see it: the
+/// spawn already seeded the window and told the tool service which stage the
+/// run is in.
+#[derive(Component, Debug, Clone, Copy)]
+pub(crate) struct EnteringEntryStage;
+
 /// Transient tag: the agent just entered a stage (index + name). The
 /// [`sync_tool_stages`] system reads it to notify the [`ToolService`] of the
 /// stage change, then removes it. Carries the data so the tool service need not

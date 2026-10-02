@@ -1421,3 +1421,26 @@ fn a_worker_starts_in_its_worker_stage() {
     spec.placement.worker_stage = Some(crate::spec::names::StageName::new("z").unwrap());
     assert_eq!(initial_state(&spec).cursor.stage.as_str(), "a");
 }
+
+/// A new run whose entry stage has an `on_stage_enter` hook waits for it
+/// before its first request; a resumed one entered that stage long ago and
+/// goes straight back to asking.
+#[test]
+fn only_a_new_run_waits_for_its_entry_stage_hook() {
+    use crate::pipeline::EnteringEntryStage;
+    let mut spec = crate::spec::run_spec::tests::spec();
+    spec.graph.stages[0].hooks.on_stage_enter = Some(crate::spec::graph::CodeRef::Inline(
+        "fn on_stage_enter(ctx) { () }".into(),
+    ));
+    let spec = Arc::new(spec);
+    let fresh = initial_state(&spec);
+    let mut resumed = fresh.clone();
+    resumed.seq = 3;
+    let mut world = World::new();
+    let new_run = insert(&mut world, spec.clone(), Bindings::new(), &fresh);
+    assert!(world.get::<EnteringEntryStage>(new_run).is_some());
+    assert!(world.get::<ReadyToInfer>(new_run).is_none());
+    let old_run = insert(&mut world, spec, Bindings::new(), &resumed);
+    assert!(world.get::<EnteringEntryStage>(old_run).is_none());
+    assert!(world.get::<ReadyToInfer>(old_run).is_some());
+}

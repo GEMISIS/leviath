@@ -16686,6 +16686,7 @@ fn spawn_hooked(world: &mut World, src: &str) -> Entity {
             hooked_bp(),
             agent_state(),
             conv_window(),
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -16864,6 +16865,7 @@ fn an_agent_without_hooks_is_untouched() {
             hooked_bp(),
             agent_state(),
             conv_window(),
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -16884,6 +16886,7 @@ fn an_out_of_range_stage_index_is_skipped() {
             hooked_bp(),
             agent_state(),
             conv_window(),
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 99,
                 name: "gone".to_string(),
@@ -16912,6 +16915,7 @@ fn a_stage_that_declares_no_hook_does_not_run_one() {
             spec_of(blueprint(vec![stage])),
             agent_state(),
             conv_window(),
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -16944,6 +16948,7 @@ fn a_region_write_that_does_not_fit_errors() {
             hooked_bp(),
             agent_state(),
             window,
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
@@ -16980,6 +16985,7 @@ fn writing_an_empty_string_clears_the_region() {
             hooked_bp(),
             agent_state(),
             window,
+            StageCursor { index: 0 },
             StageJustEntered {
                 index: 0,
                 name: "main".to_string(),
