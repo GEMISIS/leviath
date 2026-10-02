@@ -136,6 +136,11 @@ impl StageLookup for Machine {
         assert!(!stage.name.as_str().is_empty());
         Ok(StageTools { tools, code: found })
     }
+
+    fn default_max_depth(&self, graph: &RunGraph) -> u8 {
+        assert!(graph.max_child_depth.is_none());
+        3
+    }
 }
 
 fn convert_on(run: &Run, machine: &Machine) -> (leviath_legacy_runs::ConvertReport, RunFile) {
@@ -205,6 +210,8 @@ fn a_lookup_gives_each_stage_its_window_and_its_tools() {
     );
     let main = file.spec.stage("main").unwrap();
     assert_eq!(main.context_window, 200_000);
+    // A run that recorded no child-run limit ran under the operator's.
+    assert_eq!(file.spec.launch.max_depth, 3);
     assert!(main.notes.iter().any(|n| n == "chosen on this machine"));
     // A run nobody answers is not offered the tools that only ask a person.
     let names: Vec<&str> = main.tools.iter().map(|t| t.name.as_str()).collect();
@@ -295,4 +302,33 @@ fn the_graph_of_an_old_run_reads_without_converting_it() {
     assert!(format!("{env:?}").contains("stages: false"));
     // A directory that is no run has no graph.
     assert!(graph(&run.dir.join("stages"), &env).is_err());
+}
+
+/// A run whose installed agent was migrated to an `agent.toml` (its old
+/// manifest moved under `legacy/`) is read from the old manifest there, and
+/// its workers are pinned to the `agent.toml`.
+#[test]
+fn a_migrated_install_is_read_from_legacy_and_pins_its_agent_toml() {
+    let run = Run::fixture("interaction-worker");
+    let agents = run.dir.parent().unwrap().join("agents");
+    let waiter = agents.join("waiter");
+    std::fs::create_dir_all(waiter.join("legacy")).unwrap();
+    std::fs::copy(
+        fixtures_dir().join("agents/waiter/agent.leviath"),
+        waiter.join("legacy/agent.leviath"),
+    )
+    .unwrap();
+    std::fs::write(waiter.join("agent.toml"), "migrated").unwrap();
+    let env = ConvertEnv {
+        agents_dir: Some(agents),
+        stages: None,
+    };
+    let report = convert(&run.dir, &env).unwrap();
+    let leviath_legacy_runs::BlueprintSource::Installed(path) = &report.blueprint else {
+        panic!("the worker kept no blueprint copy");
+    };
+    assert!(path.ends_with("waiter/legacy/agent.leviath"));
+    let file = RunFile::read(&run.path("run.lvr"));
+    assert_eq!(file.spec.origin.digest(), Some(&Digest::of(b"migrated")));
+    assert!(report.defaulted("origin.blueprint.digest").is_none());
 }

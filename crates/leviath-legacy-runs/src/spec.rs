@@ -69,23 +69,31 @@ pub(crate) fn build(
         ));
     }
     let (blueprint, graph) = graph(old, report)?;
-    let digest = match meta.blueprint_digest.as_deref().map(Digest::new) {
-        Some(Ok(d)) => d,
-        _ => {
-            let d = Digest::of(old.blueprint.text.as_bytes());
+    // The pin names the installed blueprint a fan-out worker of this run is
+    // started from. The old manifest's digest can never match a file this
+    // build reads, so the pin is the `agent.toml` it was migrated to.
+    let digest = match &old.blueprint.migrated {
+        Some(bytes) => {
+            let d = Digest::of(bytes);
+            report.note(format!(
+                "origin.blueprint.digest is the installed agent.toml's ({d}), which the run's workers are started from"
+            ));
+            Some(d)
+        }
+        None => {
             report.fill(
                 "origin.blueprint.digest",
-                &d,
-                "the run did not record its blueprint's digest; this is the digest of the blueprint read",
+                "None",
+                "no agent.toml is installed for the run's blueprint, so a worker it starts takes whichever one is installed then",
             );
-            d
+            None
         }
     };
     let origin = SpecOrigin::Blueprint {
         blueprint: BlueprintRef {
             name: BlueprintName::new(meta.agent_name.as_str())
                 .map_err(ConvertError::name("agent_name"))?,
-            digest: Some(digest),
+            digest,
         },
         version: blueprint.version.clone(),
     };
@@ -135,7 +143,7 @@ pub(crate) fn build(
         code,
         requested_output: meta.output_request.as_ref().map(|o| output(o, report)),
         requested_model,
-        launch: launch(&graph, meta, report),
+        launch: launch(&graph, meta, lookup, report),
         auto_answers,
         placement: placement(meta, report)?,
         delivery: delivery(meta, report),
@@ -361,7 +369,12 @@ fn requested_model(meta: &RunMeta, report: &mut Report) -> Option<ModelRef> {
         .ok()
 }
 
-fn launch(graph: &RunGraph, meta: &RunMeta, report: &mut Report) -> LaunchPolicy {
+fn launch(
+    graph: &RunGraph,
+    meta: &RunMeta,
+    lookup: Option<&dyn StageLookup>,
+    report: &mut Report,
+) -> LaunchPolicy {
     let unattended = match (&meta.yolo_profile, meta.yolo) {
         (Some(p), _) => match ProfileName::new(p.as_str()) {
             Ok(p) => Unattended::Profile(p),
@@ -377,8 +390,13 @@ fn launch(graph: &RunGraph, meta: &RunMeta, report: &mut Report) -> LaunchPolicy
         (None, true) => Unattended::All,
         (None, false) => Unattended::Off,
     };
+    // A run that recorded no limit ran under its graph's, else the
+    // operator's default.
     let tree = match meta.max_child_depth {
-        0 => graph.max_child_depth.map_or(0, usize::from),
+        0 => graph
+            .max_child_depth
+            .or_else(|| lookup.map(|l| l.default_max_depth(graph)))
+            .map_or(0, usize::from),
         n => n,
     };
     let max_depth = u8::try_from(tree.saturating_sub(meta.depth)).unwrap_or(u8::MAX);

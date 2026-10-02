@@ -155,6 +155,14 @@ async fn an_old_run_found_on_resume_converts_against_the_daemon() {
     let main = run.spec().stage("main").unwrap();
     assert_eq!(main.context_window, 64_000);
     assert!(main.tools.iter().any(|t| t.name.as_str() == "shell"));
+    // It recorded no child-run limit, so it has the operator's default.
+    use leviath_runtime::spec::env::ResolveEnv;
+    let default = starter
+        .env_for_graph(&run.spec().graph, starter.config.current())
+        .limits()
+        .default_max_depth;
+    assert!(default > 0);
+    assert_eq!(run.spec().launch.max_depth, default);
 }
 
 /// A stage this machine cannot serve, or whose tools it cannot give, is

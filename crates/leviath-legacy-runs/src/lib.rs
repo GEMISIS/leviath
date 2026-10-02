@@ -96,6 +96,10 @@ pub trait StageLookup: Send + Sync {
         base: Option<&Path>,
         workdir: Option<&Path>,
     ) -> Result<StageTools, String>;
+    /// How deep a tree of child runs goes for a run whose graph sets no
+    /// limit: the operator's default, which a run that recorded none ran
+    /// under.
+    fn default_max_depth(&self, graph: &RunGraph) -> u8;
 }
 
 /// Whether `run_dir` holds a run in the old layout that [`convert`] would

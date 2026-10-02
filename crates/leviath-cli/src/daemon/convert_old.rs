@@ -49,6 +49,11 @@ impl leviath_legacy_runs::StageLookup for Lookup<'_> {
         crate::daemon::block_on::block_on(env.tools(graph, stage, code, base, workdir))
             .map_err(|i| i.to_string())
     }
+
+    fn default_max_depth(&self, graph: &RunGraph) -> u8 {
+        use leviath_runtime::spec::env::ResolveEnv;
+        (self.0)(graph).limits().default_max_depth
+    }
 }
 
 /// Convert every run directory under `runs_dir` that is still in the older

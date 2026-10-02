@@ -96,8 +96,10 @@ fn matches_bundled(agent: &BundledAgent, agents_dir: &Path) -> bool {
         }
     }
     // Every declared file was found and matched, so equal counts means the two
-    // sets are equal - which is what catches a file the user added.
-    installed_file_count(&dest) == agent.files.len()
+    // sets are equal - which is what catches a file the user added. The old
+    // install an upgrade kept under `legacy/` is not part of the blueprint.
+    let kept = installed_file_count(&dest.join(crate::blueprint_upgrade::LEGACY_DIR));
+    installed_file_count(&dest) - kept == agent.files.len()
 }
 
 /// How many files are under `dir`, recursively.

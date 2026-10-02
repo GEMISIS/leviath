@@ -70,6 +70,9 @@ pub(crate) struct BlueprintFile {
     pub(crate) source: BlueprintSource,
     /// The directory its scripts are read from, when one exists.
     pub(crate) script_dir: Option<PathBuf>,
+    /// The bytes of the `agent.toml` the installed agent was migrated to,
+    /// when there is one: what a fan-out worker of the run is resolved from.
+    pub(crate) migrated: Option<Vec<u8>>,
 }
 
 /// Everything an old run directory holds.
@@ -222,20 +225,30 @@ fn blobs(dir: &Path) -> Result<Blobs, ConvertError> {
     Ok((found, stray))
 }
 
-/// The installed copy of the run's agent: its manifest path and directory.
+/// The directories the run's agent may be installed in: the one its run
+/// named, then the installed agents directory's.
 fn installed(meta: &RunMeta, env: &ConvertEnv<'_>) -> Vec<PathBuf> {
     let from_path = PathBuf::from(&meta.agent_path);
     let from_path = match from_path.extension().is_some_and(|e| e == "leviath") {
-        true => from_path,
-        false => from_path.join(MANIFEST_FILENAME),
+        true => from_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default(),
+        false => from_path,
     };
     let mut out = vec![from_path];
-    out.extend(
-        env.agents_dir
-            .iter()
-            .map(|d| d.join(&meta.agent_name).join(MANIFEST_FILENAME)),
-    );
+    out.extend(env.agents_dir.iter().map(|d| d.join(&meta.agent_name)));
     out
+}
+
+/// Where an installed agent directory keeps its old manifest: beside its
+/// files, or under `legacy/` once the blueprint was migrated to an
+/// `agent.toml`.
+fn manifests_in(dir: &Path) -> [PathBuf; 2] {
+    [
+        dir.join(MANIFEST_FILENAME),
+        dir.join(crate::write::LEGACY_DIR).join(MANIFEST_FILENAME),
+    ]
 }
 
 fn blueprint(
@@ -243,30 +256,37 @@ fn blueprint(
     meta: &RunMeta,
     env: &ConvertEnv<'_>,
 ) -> Result<BlueprintFile, ConvertError> {
-    let candidates = installed(meta, env);
-    let script_dir = candidates
+    let dirs = installed(meta, env);
+    let found = dirs.iter().find_map(|d| {
+        manifests_in(d)
+            .into_iter()
+            .find(|p| p.is_file())
+            .map(|p| (d.clone(), p))
+    });
+    let script_dir = found.as_ref().map(|(d, _)| d.clone());
+    let migrated = dirs
         .iter()
-        .find(|p| p.is_file())
-        .and_then(|p| p.parent())
-        .map(Path::to_path_buf);
+        .find_map(|d| std::fs::read(d.join(leviath_blueprint::FILE_NAME)).ok());
     let snapshot = dir.join(BLUEPRINT_SNAPSHOT_FILE);
     if let Ok(text) = std::fs::read_to_string(&snapshot) {
         return Ok(BlueprintFile {
             text,
             source: BlueprintSource::Snapshot,
             script_dir,
+            migrated,
         });
     }
-    for path in &candidates {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            return Ok(BlueprintFile {
-                text,
-                source: BlueprintSource::Installed(path.clone()),
-                script_dir,
-            });
-        }
+    if let Some((_, path)) = &found
+        && let Ok(text) = std::fs::read_to_string(path)
+    {
+        return Ok(BlueprintFile {
+            text,
+            source: BlueprintSource::Installed(path.clone()),
+            script_dir,
+            migrated,
+        });
     }
     let mut tried = vec![snapshot];
-    tried.extend(candidates);
+    tried.extend(dirs.iter().flat_map(|d| manifests_in(d)));
     Err(ConvertError::NoBlueprint { tried })
 }
