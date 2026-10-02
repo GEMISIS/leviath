@@ -295,6 +295,31 @@
         ],
         "type": "object"
       },
+      "CallKind": {
+        "description": "Which kind of model call an inference was: the stage's own work, or one\nthe runtime made around it.",
+        "oneOf": [
+          {
+            "const": "stage",
+            "description": "A turn of the stage's own work.",
+            "type": "string"
+          },
+          {
+            "const": "compaction",
+            "description": "A summary of a region, when the context filled or an edge compacted.",
+            "type": "string"
+          },
+          {
+            "const": "title",
+            "description": "The call that named the run.",
+            "type": "string"
+          },
+          {
+            "const": "routing",
+            "description": "A call asking the model which edge to take.",
+            "type": "string"
+          }
+        ]
+      },
       "CaptureState": {
         "description": "Whether a request's body was kept.",
         "oneOf": [
@@ -1178,7 +1203,7 @@
         "properties": {
           "max_attempts": {
             "default": null,
-            "description": "How many times a failed worker is retried.",
+            "description": "How many times the stage is asked again to call `fan_out` when it\nends without starting any workers, before it is let through with\nnone. `0` lets it through at once.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -1188,7 +1213,7 @@
           },
           "max_items": {
             "default": null,
-            "description": "The most work items one fan-out may have.",
+            "description": "The most work items one fan-out may have, at least one. Left out,\nevery item the split makes runs.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -1197,11 +1222,14 @@
             ]
           },
           "max_workers": {
-            "default": 30,
-            "description": "The most workers at once.",
+            "default": null,
+            "description": "The most workers at once, at least one. Left out, every item starts\nat once and the inference pool paces the model calls.",
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "merge_stage": {
             "default": null,
@@ -1331,10 +1359,13 @@
             "type": "array"
           },
           "max_workers": {
-            "description": "The most workers at once.",
+            "description": "The most workers at once; `None` runs every item at once.",
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "origin": {
             "$ref": "#/$defs/FanOutOrigin",
@@ -1366,7 +1397,6 @@
         "required": [
           "stage",
           "config",
-          "max_workers",
           "queued",
           "active",
           "done",
@@ -2287,12 +2317,12 @@
         "oneOf": [
           {
             "additionalProperties": false,
-            "description": "A model request finished.",
+            "description": "A model request finished and was billed: one per call, whatever\nkind of call it was.",
             "properties": {
               "Inference": {
                 "properties": {
                   "attempt": {
-                    "description": "The attempt's id.",
+                    "description": "The id of the attempt that answered, when it was recorded.",
                     "type": "string"
                   },
                   "finish_reason": {
@@ -2302,6 +2332,16 @@
                       "null"
                     ]
                   },
+                  "iteration": {
+                    "description": "The iteration it was made in.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "kind": {
+                    "$ref": "#/$defs/CallKind",
+                    "description": "Which kind of call it was."
+                  },
                   "model": {
                     "$ref": "#/$defs/ModelRef",
                     "description": "The model that answered."
@@ -2309,18 +2349,40 @@
                   "spend": {
                     "$ref": "#/$defs/Spend",
                     "description": "Its spend."
+                  },
+                  "stage": {
+                    "description": "The stage it was made for. `None` for a call no stage owns (the\ntitle call).",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
                   "attempt",
                   "model",
-                  "spend"
+                  "spend",
+                  "kind",
+                  "iteration"
                 ],
                 "type": "object"
               }
             },
             "required": [
               "Inference"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The run took an edge. One per edge taken, so two moves inside one\nstep are both kept; `last_transition` holds only the latest.",
+            "properties": {
+              "Transition": {
+                "$ref": "#/$defs/TransitionRecord"
+              }
+            },
+            "required": [
+              "Transition"
             ],
             "type": "object"
           },
@@ -3864,8 +3926,8 @@
             ]
           },
           "temperature": {
-            "description": "Its sampling temperature.",
-            "format": "float",
+            "description": "Its sampling temperature. Kept as the number written, so a `0.2`\nreads back as `0.2`.",
+            "format": "double",
             "type": "number"
           },
           "user_prompt_template": {
@@ -4307,7 +4369,7 @@
         "properties": {
           "max_attempts": {
             "default": null,
-            "description": "How many times a failed worker is retried.",
+            "description": "How many times the stage is asked again to call `fan_out` when it\nends without starting any workers, before it is let through with\nnone. `0` lets it through at once.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -4317,7 +4379,7 @@
           },
           "max_items": {
             "default": null,
-            "description": "The most work items one fan-out may have.",
+            "description": "The most work items one fan-out may have, at least one. Left out,\nevery item the split makes runs.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -4326,11 +4388,14 @@
             ]
           },
           "max_workers": {
-            "default": 30,
-            "description": "The most workers at once.",
+            "default": null,
+            "description": "The most workers at once, at least one. Left out, every item starts\nat once and the inference pool paces the model calls.",
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "merge_stage": {
             "default": null,
@@ -4426,7 +4491,7 @@
           },
           "region": {
             "default": null,
-            "description": "The region the gate's message lands in.",
+            "description": "For `require_modifications`: a region whose holding something counts\nas the stage's change, so a stage that writes its work there passes\nwithout writing a file.",
             "type": [
               "string",
               "null"
@@ -4476,7 +4541,7 @@
           },
           "tools": {
             "default": [],
-            "description": "Tools the stage must have called.",
+            "description": "For `require_modifications`: tools that count as changing a file,\nbeside `write_file` and `edit_file`. Only a tool the stage has counts.",
             "items": {
               "description": "A tool name.",
               "type": "string"
@@ -5281,8 +5346,8 @@
           },
           "temperature": {
             "default": null,
-            "description": "Sampling temperature.",
-            "format": "float",
+            "description": "Sampling temperature. Kept as the number written, so a `0.2` reads\nback as `0.2`.",
+            "format": "double",
             "type": [
               "number",
               "null"
@@ -8246,7 +8311,7 @@
         "properties": {
           "max_attempts": {
             "default": null,
-            "description": "How many times a failed worker is retried.",
+            "description": "How many times the stage is asked again to call `fan_out` when it\nends without starting any workers, before it is let through with\nnone. `0` lets it through at once.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -8256,7 +8321,7 @@
           },
           "max_items": {
             "default": null,
-            "description": "The most work items one fan-out may have.",
+            "description": "The most work items one fan-out may have, at least one. Left out,\nevery item the split makes runs.",
             "format": "uint32",
             "minimum": 0,
             "type": [
@@ -8265,11 +8330,14 @@
             ]
           },
           "max_workers": {
-            "default": 30,
-            "description": "The most workers at once.",
+            "default": null,
+            "description": "The most workers at once, at least one. Left out, every item starts\nat once and the inference pool paces the model calls.",
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "merge_stage": {
             "default": null,
@@ -8399,10 +8467,13 @@
             "type": "array"
           },
           "max_workers": {
-            "description": "The most workers at once.",
+            "description": "The most workers at once; `None` runs every item at once.",
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "origin": {
             "$ref": "#/$defs/FanOutOrigin",
@@ -8434,7 +8505,6 @@
         "required": [
           "stage",
           "config",
-          "max_workers",
           "queued",
           "active",
           "done",

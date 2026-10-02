@@ -804,7 +804,7 @@ async fn spawn_and_wait(
         Err(e) => return DaemonOutcome::Failed(format!("could not build the spawn request: {e}")),
     };
     let spawned = match client.spawn(request).await {
-        Ok(ControlResponse::Spawned { run_id }) => Ok(run_id),
+        Ok(ControlResponse::Spawned { run_id, .. }) => Ok(run_id),
         Ok(ControlResponse::Rejected { issues }) => {
             Err(format!("the daemon refused the spawn: {issues}"))
         }

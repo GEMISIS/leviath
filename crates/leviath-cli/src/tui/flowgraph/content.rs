@@ -562,7 +562,7 @@ mod tests {
             NodeKind::Stage(StageKind::FanOut {
                 worker: WorkerRef::Agent("researcher".into()),
                 merge: None,
-                max_workers: 4,
+                max_workers: Some(4),
             }),
         );
         n.is_entry = true;

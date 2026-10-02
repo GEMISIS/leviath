@@ -11,7 +11,7 @@ use bevy_ecs::entity::Entity;
 
 use crate::spec::env::Caller;
 use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
-use crate::spec::names::RunId;
+
 use crate::spec::request::SpawnRequest;
 use crate::spec::run_spec::RunSpec;
 use crate::spec::summary::SpawnSummary;
@@ -129,6 +129,11 @@ pub struct RunListEntry {
     /// `lev result <run-id>` fetches it.
     #[serde(default)]
     pub has_final_output: bool,
+    /// What may keep this run from ever finishing, one line each: stages its
+    /// graph can reach and never leave. Read off the run's spec, so it is the
+    /// same list its spawn answered with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub may_never_finish: Vec<String>,
 }
 
 /// Everything one [`ControlOp::List`] answers with: the live runs, the runs that
@@ -324,7 +329,7 @@ pub enum SubAgentOp {
         /// The run id of the agent doing the spawning.
         parent_run_id: String,
         /// Reply: the child's run id, or every reason it was refused.
-        reply: oneshot::Sender<Result<RunId, SpawnIssues>>,
+        reply: oneshot::Sender<Result<crate::spec::summary::Spawned, SpawnIssues>>,
     },
     /// Resolve a child run of `parent_run_id` from `request` without starting
     /// it: the same checks [`SubAgentOp::Spawn`] makes, as the same
@@ -427,7 +432,7 @@ pub enum ControlOp {
         /// variants' payloads.
         request: Box<SpawnRequest>,
         /// Reply channel.
-        reply: oneshot::Sender<Result<RunId, SpawnIssues>>,
+        reply: oneshot::Sender<Result<crate::spec::summary::Spawned, SpawnIssues>>,
     },
     /// Resolve a top-level run without starting it. Reply is a summary of the
     /// run it would be, or every reason it would be refused.

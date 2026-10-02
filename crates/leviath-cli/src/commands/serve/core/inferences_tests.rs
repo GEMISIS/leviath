@@ -18,6 +18,9 @@ fn called(id: &str, on: &str, finish: Option<&str>) -> RunEvent {
         model: model(on),
         spend: Default::default(),
         finish_reason: finish.map(str::to_string),
+        kind: Default::default(),
+        stage: None,
+        iteration: 0,
     }
 }
 

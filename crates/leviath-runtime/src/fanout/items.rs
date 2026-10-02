@@ -1,10 +1,10 @@
 //! What a fan-out hands each worker, and the request that starts one.
 //!
 //! A `fan_out` call lists work items. Each carries typed inputs for the graph
-//! its worker runs, and a same-graph worker's items are checked against that
-//! graph's declared inputs before any worker starts, so a mistyped item is
-//! refused with the path of the value that did not fit. A worker running a
-//! blueprint of its own has its inputs checked when that blueprint is resolved.
+//! its worker runs, and every item is checked against that graph's declared
+//! inputs before any worker starts: this graph's for a stage worker, the named
+//! blueprint's when the spawner can read it. A mistyped item refuses the whole
+//! call, with the path of the value that did not fit.
 //!
 //! Kept apart from [`super`], which starts, tracks and merges workers: this
 //! is the shape of the work and the request each worker is spawned from.
@@ -25,10 +25,6 @@ use std::path::Path;
 /// The input a worker's work item fills when a graph declares none of its
 /// own: the conventional `task` text.
 pub(crate) const TASK_INPUT: &str = "task";
-
-/// The most workers at once for a `fan_out` called outside a fan-out stage,
-/// which has no `max_workers` of its own: the same default a stage gets.
-const CALLED_MAX_WORKERS: u32 = crate::spec::graph::stage::DEFAULT_MAX_WORKERS;
 
 /// The label a worker's request carries its work item's id under, so the
 /// host can name the worker after the item it runs.
@@ -65,7 +61,8 @@ pub(crate) struct FanOutRequest {
     pub agent: Option<String>,
     /// The work, one entry per worker.
     pub items: Vec<WorkItem>,
-    /// A per-call concurrency cap, when the caller asked for one.
+    /// A per-call concurrency cap, when the caller asked for one. At least
+    /// one: a call asking for none is refused.
     pub max_workers: Option<usize>,
 }
 
@@ -110,6 +107,12 @@ pub(crate) fn parse_fan_out_call(arguments: &serde_json::Value) -> Result<FanOut
         .get("max_workers")
         .and_then(serde_json::Value::as_u64)
         .map(|n| n as usize);
+    if max_workers == Some(0) {
+        return Err(
+            "fan_out `max_workers` must be at least 1; leave it out to run every item at once"
+                .to_string(),
+        );
+    }
     Ok(FanOutRequest {
         agent,
         items,
@@ -147,7 +150,7 @@ pub(crate) fn config_for(
         (None, Some(worker)) => FanOutDef {
             worker,
             merge_stage: None,
-            max_workers: CALLED_MAX_WORKERS,
+            max_workers: None,
             on_worker_failure: WorkerFailure::Continue,
             split_prompt: String::new(),
             results_region: None,
@@ -163,7 +166,7 @@ pub(crate) fn config_for(
         }
     };
     if let Some(max_workers) = request.max_workers {
-        config.max_workers = clamp(max_workers);
+        config.max_workers = Some(clamp(max_workers));
     }
     Ok(config)
 }
@@ -193,10 +196,9 @@ fn clamp(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// The most workers a fan-out runs at once; `None` when it sets no limit
-/// (`max_workers = 0`).
+/// The most workers a fan-out runs at once; `None` when it sets no limit.
 pub(crate) fn worker_cap(config: &FanOutDef) -> Option<usize> {
-    (config.max_workers > 0).then_some(config.max_workers as usize)
+    config.max_workers.map(|n| n as usize)
 }
 
 /// Check every item's inputs against the worker graph's declarations.
@@ -292,7 +294,7 @@ mod tests {
         FanOutDef {
             worker: WorkerSource::Stage(StageName::new("w").unwrap()),
             merge_stage: Some(StageName::new("merge").unwrap()),
-            max_workers,
+            max_workers: (max_workers > 0).then_some(max_workers),
             on_worker_failure: WorkerFailure::FailAll,
             split_prompt: "split".into(),
             results_region: None,
@@ -495,7 +497,7 @@ mod tests {
             config.worker,
             WorkerSource::Blueprint(BlueprintRef::parse("researcher").unwrap())
         );
-        assert_eq!(config.max_workers, CALLED_MAX_WORKERS);
+        assert_eq!(config.max_workers, None);
         assert_eq!(config.on_worker_failure, WorkerFailure::Continue);
         assert_eq!(config.max_items, None);
         let err = config_for(&request(None, None), None, None).unwrap_err();
@@ -514,7 +516,7 @@ mod tests {
             config.worker,
             WorkerSource::Blueprint(BlueprintRef::parse("other").unwrap())
         );
-        assert_eq!(config.max_workers, 9);
+        assert_eq!(config.max_workers, Some(9));
         assert_eq!(config.max_items, Some(5));
         assert_eq!(clamp(usize::MAX), u32::MAX);
         assert_eq!(worker_cap(&stage_def(0)), None);

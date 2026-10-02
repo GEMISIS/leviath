@@ -253,11 +253,11 @@ fn fan_out_gates_carry_and_layout_refs_are_checked() {
     g.stages[0].mode = StageMode::FanOut(FanOutDef {
         worker: WorkerSource::Stage(StageName::new("nobody").unwrap()),
         merge_stage: Some(StageName::new("nowhere").unwrap()),
-        max_workers: 0,
+        max_workers: Some(0),
         on_worker_failure: WorkerFailure::Continue,
         split_prompt: String::new(),
         results_region: Some(RegionName::new("ghost").unwrap()),
-        max_items: None,
+        max_items: Some(0),
         max_attempts: None,
     });
     g.edges[0].carry = EdgeCarry::Custom {
@@ -308,6 +308,7 @@ fn fan_out_gates_carry_and_layout_refs_are_checked() {
             "graph.stages.plan.mode.fan_out.worker Dangling",
             "graph.stages.plan.mode.fan_out.results_region Dangling",
             "graph.stages.plan.mode.fan_out.max_workers OutOfRange",
+            "graph.stages.plan.mode.fan_out.max_items OutOfRange",
             "graph.stages.build.reset Dangling",
             "graph.stages.build.output_routing Dangling",
             "graph.stages.build.tool_routing.default_region Dangling",
@@ -473,6 +474,8 @@ fn every_bundled_blueprint_reads_as_a_valid_graph() {
         graph
             .validate(&SpecPath::root())
             .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let warned = graph.warnings(&SpecPath::root()).len();
+        assert_eq!(warned, 0, "{name} may never finish");
         let bin = postcard::to_stdvec(&graph).unwrap();
         assert_eq!(
             postcard::from_bytes::<RunGraph>(&bin).unwrap(),
@@ -684,4 +687,51 @@ fn an_output_artifact_with_a_bad_mime_type_is_reported() {
     let def = OutputDef::from_output_spec(&good).unwrap();
     assert_eq!(def.artifacts[0].mime_type.as_str(), "image/png");
     assert!(def.artifacts[0].required);
+}
+
+/// The two refusals a graph shares with 0.6.4's validation: a gate that asks
+/// for a file change on a stage that cannot change a file, and a fan-out into a
+/// stage that never agreed to be a worker. Both are reported with 0.6.4's
+/// wording, at the field that is wrong.
+#[test]
+fn a_gate_no_tool_can_satisfy_and_an_unwilling_worker_are_refused() {
+    let mut g = minimal();
+    g.edges[0].gate = Some(GateDef {
+        require_modifications: true,
+        ..GateDef::default()
+    });
+    g.stages[0].tools = vec![ToolSelector::Tool(ToolName::new("list_dir").unwrap())];
+    g.stages.push(stage("split"));
+    g.stages.push(stage("work"));
+    g.stages[2].mode = StageMode::FanOut(FanOutDef::same_graph(StageName::new("work").unwrap()));
+    let issues = g.validate(&SpecPath::root().field("graph")).unwrap_err();
+    let got: Vec<String> = issues.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        got,
+        vec![
+            "graph.stages.split.mode.fan_out.worker: conflict: fan_out worker_stage 'work' must \
+             set allow_as_worker = true. set allow_as_worker = true on stage 'work', or fan out \
+             to a blueprint instead"
+                .to_string(),
+            "graph.edges[0].gate.require_modifications: conflict: gate requires modifications, \
+             but the stage has no file-modifying tool in available_tools. grant 'plan' \
+             write_file or edit_file, name the tool that changes files in the gate's `tools`, or \
+             drop require_modifications"
+                .to_string(),
+        ]
+    );
+    // Either fix clears its refusal.
+    g.stages[3].allow_as_worker = true;
+    g.stages[0]
+        .tools
+        .push(ToolSelector::Tool(ToolName::new("edit_file").unwrap()));
+    assert_eq!(codes(&g), Vec::<String>::new());
+    // A tool the gate names counts when the stage has it, and so does every
+    // built-in.
+    g.stages[0].tools = vec![ToolSelector::Tool(ToolName::new("patch").unwrap())];
+    g.edges[0].gate.as_mut().unwrap().tools = vec![ToolName::new("patch").unwrap()];
+    assert_eq!(codes(&g), Vec::<String>::new());
+    g.stages[0].tools = vec![ToolSelector::Group(ToolGroup::Builtin)];
+    g.edges[0].gate.as_mut().unwrap().tools.clear();
+    assert_eq!(codes(&g), Vec::<String>::new());
 }

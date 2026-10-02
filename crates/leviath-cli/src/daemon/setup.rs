@@ -592,7 +592,7 @@ mod tests {
             reply,
         });
         host.finish_starts().await;
-        rx.await.unwrap()
+        rx.await.unwrap().map(|spawned| spawned.run_id)
     }
 
     /// A config whose registry actually has `anthropic` in it, so a spawn of a
@@ -1392,7 +1392,7 @@ binds = [{ region = "task" }]
                 drop(ctl_tx);
                 host.serve(ctl_rx).await;
                 let new = rx.await.unwrap().expect("the new run starts");
-                for run_id in [new.as_str(), mid.as_str()] {
+                for run_id in [new.run_id.as_str(), mid.as_str()] {
                     assert_eq!(
                         model_of(&mut host, run_id).as_deref(),
                         Some("anthropic/claude-opus-5"),
@@ -1548,7 +1548,12 @@ binds = [{{ region = "task" }}]
         manifest: &std::path::Path,
     ) -> (
         ControlOp,
-        oneshot::Receiver<Result<RunId, leviath_runtime::spec::issues::SpawnIssues>>,
+        oneshot::Receiver<
+            Result<
+                leviath_runtime::spec::summary::Spawned,
+                leviath_runtime::spec::issues::SpawnIssues,
+            >,
+        >,
     ) {
         let (reply, reply_rx) = oneshot::channel();
         let op = ControlOp::Spawn {

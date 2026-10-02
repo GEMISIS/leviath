@@ -585,6 +585,11 @@ pub(crate) fn collect_transition_choice(
                         // and never reaches an LLM choice.
                         let name = graph.stages[idx].name.to_string();
                         let taken = transition_record(&from, &state, edge_name, reason);
+                        super::transition::journal_transition(
+                            persist.as_deref(),
+                            metadata,
+                            taken.as_ref(),
+                        );
                         emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
                         let mut ec = commands.entity(outcome.entity);
                         ec.remove::<AwaitingTransitionResponse>();

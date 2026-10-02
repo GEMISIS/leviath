@@ -391,7 +391,7 @@ impl From<&leviath_runtime::spec::graph::CompactionDef> for CompactionConfig {
             system_prompt: compaction.system_prompt.clone(),
             user_prompt_template: compaction.user_prompt_template.clone(),
             max_summary_tokens: count(compaction.max_summary_tokens),
-            temperature: f64::from(compaction.temperature),
+            temperature: compaction.temperature,
         }
     }
 }

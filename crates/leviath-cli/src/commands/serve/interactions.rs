@@ -426,6 +426,7 @@ mod tests {
     async fn submit_interaction_unexpected_is_500() {
         let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
             run_id: "x".to_string(),
+            warnings: Default::default(),
         });
         assert_eq!(
             status_of(

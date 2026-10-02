@@ -15,7 +15,7 @@
 
 use clap::Args;
 use leviath_core::run_meta::{RunMeta, RunStatus};
-use leviath_runtime::runfile::record::InferenceKind;
+use leviath_runtime::state::journal::CallKind;
 use serde::Serialize;
 
 /// Arguments for `lev timeline`.
@@ -174,7 +174,7 @@ pub(crate) enum Moment {
     /// A model call landed.
     Call {
         /// Which kind of call it was.
-        kind: InferenceKind,
+        kind: CallKind,
         /// The stage the run was in.
         stage: String,
         /// The stage-local iteration.
@@ -226,7 +226,9 @@ fn run_file_moments(reader: &leviath_runtime::runfile::RunFileReader) -> Option<
         .map(|(state, deltas)| moments_of(reader.spec(), state, deltas))
 }
 
-/// The steps `deltas` took from `state`, the run's start, as moments.
+/// The steps `deltas` took from `state`, the run's start, as moments. A call
+/// carries its own kind, stage and iteration, so a title call is its own
+/// row and a call is placed where it was made, whatever step recorded it.
 fn moments_of(
     spec: &leviath_runtime::spec::run_spec::RunSpec,
     mut state: leviath_runtime::state::RunState,
@@ -235,15 +237,20 @@ fn moments_of(
     use leviath_runtime::state::{Change, RunEvent};
     let mut moments = Vec::new();
     for delta in deltas {
-        let before = state.cursor.clone();
         delta.apply(&mut state);
-        let iteration = before.iteration as usize;
         for event in &delta.events {
             match event {
-                RunEvent::Inference { model, spend, .. } => moments.push(Moment::Call {
-                    kind: InferenceKind::Stage,
-                    stage: before.stage.to_string(),
+                RunEvent::Inference {
+                    model,
+                    spend,
+                    kind,
+                    stage,
                     iteration,
+                    ..
+                } => moments.push(Moment::Call {
+                    kind: *kind,
+                    stage: stage.as_ref().map(ToString::to_string).unwrap_or_default(),
+                    iteration: *iteration as usize,
                     model: model.model.to_string(),
                     prompt_tokens: spend.prompt_tokens as usize,
                     completion_tokens: spend.completion_tokens as usize,
@@ -372,7 +379,7 @@ fn summarize_stages(calls: &[CallSpan]) -> Vec<StageSummary> {
 fn repeated_large_replies(calls: &[CallSpan]) -> Vec<String> {
     let stage_calls: Vec<&CallSpan> = calls
         .iter()
-        .filter(|c| c.kind == InferenceKind::Stage.label())
+        .filter(|c| c.kind == CallKind::Stage.label())
         .collect();
     let mut warnings = Vec::new();
     let mut i = 0;

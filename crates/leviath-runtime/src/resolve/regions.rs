@@ -19,7 +19,7 @@ use super::seeds::Seeded;
 use crate::spec::env::Caller;
 use crate::spec::graph::{RegionDef, RegionKind, RegionLayoutDef, RunGraph};
 use crate::spec::inputs::{InputSlot, InputValue};
-use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+use crate::spec::issues::{IssueCode, PathSeg, SpawnIssue, SpawnIssues, SpecPath};
 use crate::spec::names::RegionName;
 use crate::spec::request::SpawnRequest;
 use crate::spec::run_spec::SeededContent;
@@ -70,6 +70,40 @@ pub(super) fn layouts<'a>(
         }
     }
     all
+}
+
+/// A region's `required_message`, with `{region}` naming the region.
+fn said_for(message: &str, region: &RegionName) -> String {
+    leviath_core::text::interpolate(message, &[("region", region.as_str())])
+}
+
+/// Say a missing input the way the required region it fills asks to be
+/// told: the region's `required_message`, when it has one. An input that
+/// fills no such region keeps the input check's own words.
+pub(super) fn required_messages(graph: &RunGraph, issues: &mut SpawnIssues) {
+    for issue in issues.0.iter_mut().filter(|i| i.code == IssueCode::Missing) {
+        let [PathSeg::Field(inputs), PathSeg::Key(name)] = issue.path.0.as_slice() else {
+            continue;
+        };
+        let said = graph
+            .inputs
+            .iter()
+            .filter(|d| inputs == "inputs" && d.name.as_str() == name)
+            .flat_map(|d| &d.binds)
+            .filter_map(|slot| match slot {
+                InputSlot::Region(binding) => region_def(graph, &binding.region),
+                _ => None,
+            })
+            .find_map(|r| {
+                r.required_message
+                    .as_deref()
+                    .filter(|_| r.required)
+                    .map(|m| said_for(m, &r.name))
+            });
+        if let Some(said) = said {
+            issue.message = said;
+        }
+    }
 }
 
 /// A region by name, from any layout.
@@ -280,10 +314,10 @@ pub(super) fn require_filled(
             if !region.required || !at_spawn || filled || !seen.insert(region.name.clone()) {
                 continue;
             }
-            let message = region
-                .required_message
-                .clone()
-                .unwrap_or_else(|| format!("required region \"{}\" was not filled", region.name));
+            let message = match &region.required_message {
+                Some(said) => said_for(said, &region.name),
+                None => format!("required region \"{}\" was not filled", region.name),
+            };
             issues.push(
                 SpawnIssue::new(path.field("regions").index(i), IssueCode::Missing, message)
                     .hint("supply an input bound to it, or attach a file to it")

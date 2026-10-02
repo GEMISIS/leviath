@@ -26,22 +26,41 @@ use leviath_runtime::spec::names::{
 use crate::old::blueprint::{self as bp, Blueprint};
 use crate::old::layout::{BudgetSpec, ContextLayout, RegionSeed};
 
+/// A temperature the manifest parser kept as `f32`, as the number it was
+/// written as: `0.2` rather than the `0.20000000298023224` a widening cast
+/// gives.
+fn written(t: f32) -> f64 {
+    t.to_string().parse().unwrap_or(f64::from(t))
+}
+
 /// Read a parsed blueprint as a run graph, reporting every field that does
 /// not fit.
+#[cfg(test)]
 pub(crate) fn from_blueprint(blueprint: &Blueprint) -> Result<RunGraph, SpawnIssues> {
+    from_blueprint_noted(blueprint).map(|(graph, _)| graph)
+}
+
+/// As [`from_blueprint`], with a line for each setting written differently
+/// in the graph than in the manifest, so whoever converts it can say so.
+pub(crate) fn from_blueprint_noted(
+    blueprint: &Blueprint,
+) -> Result<(RunGraph, Vec<String>), SpawnIssues> {
     let mut c = Conv {
         issues: SpawnIssues::new(),
         inputs: BTreeMap::new(),
+        notes: Vec::new(),
     };
     let mut graph = c.graph(blueprint);
     graph.inputs = c.inputs.into_values().collect();
-    c.issues.into_result(graph)
+    c.issues.into_result((graph, c.notes))
 }
 
 struct Conv {
     issues: SpawnIssues,
     /// Caller inputs found in region seeds, by input name.
     inputs: BTreeMap<String, InputDecl>,
+    /// Settings the graph spells differently from the manifest.
+    notes: Vec<String>,
 }
 
 fn at() -> SpecPath {
@@ -80,6 +99,19 @@ impl Conv {
                 u32::MAX
             }
         }
+    }
+
+    /// A fan-out's `max_workers`. A manifest wrote `0` for no cap, which a
+    /// graph writes by leaving the setting out.
+    fn workers(&mut self, at: &SpecPath, n: usize) -> Option<u32> {
+        if n == 0 {
+            self.notes.push(format!(
+                "{}: max_workers = 0 (no cap) is left out, which is how a graph says no cap",
+                at.field("max_workers")
+            ));
+            return None;
+        }
+        Some(self.small(at.field("max_workers"), n))
     }
 
     fn opt_small(&mut self, path: SpecPath, n: Option<usize>) -> Option<u32> {
@@ -349,11 +381,7 @@ impl Conv {
             models,
             allow_user_default: m.allow_user_default,
             params: ModelParams {
-                temperature: m
-                    .parameters
-                    .get("temperature")
-                    .and_then(|v| v.as_f64())
-                    .map(|t| t as f32),
+                temperature: m.parameters.get("temperature").and_then(|v| v.as_f64()),
                 max_output_tokens,
                 extra,
             },
@@ -446,7 +474,7 @@ impl Conv {
                 .merge_stage
                 .as_ref()
                 .and_then(|m| self.name(p.field("merge_stage"), m)),
-            max_workers: self.small(p.field("max_workers"), f.max_workers),
+            max_workers: self.workers(p, f.max_workers),
             on_worker_failure: match f.on_worker_failure {
                 bp::WorkerFailurePolicy::Continue => WorkerFailure::Continue,
                 bp::WorkerFailurePolicy::FailAll => WorkerFailure::FailAll,
@@ -771,7 +799,7 @@ impl Conv {
             system_prompt: c.system_prompt.clone(),
             user_prompt_template: c.user_prompt_template.clone(),
             max_summary_tokens: self.small(p.field("max_summary_tokens"), c.max_summary_tokens),
-            temperature: c.temperature,
+            temperature: written(c.temperature),
         }
     }
 

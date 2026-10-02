@@ -160,16 +160,42 @@ impl<'a> Validator<'a> {
                 }
                 if let super::WorkerSource::Stage(worker) = &fan.worker {
                     self.need_stage(at.field("worker"), worker.as_str());
+                    if self
+                        .g()
+                        .stage(worker.as_str())
+                        .is_some_and(|w| !w.allow_as_worker)
+                    {
+                        self.issue(
+                            at.field("worker"),
+                            IssueCode::Conflict,
+                            format!(
+                                "fan_out worker_stage '{worker}' must set allow_as_worker = true"
+                            ),
+                        )
+                        .hint = Some(format!(
+                            "set allow_as_worker = true on stage '{worker}', or fan out to a \
+                             blueprint instead"
+                        ));
+                    }
                 }
                 if let Some(r) = &fan.results_region {
                     self.need_region(at.field("results_region"), r, all);
                 }
-                if fan.max_workers == 0 {
+                if fan.max_workers == Some(0) {
                     self.issue(
                         at.field("max_workers"),
                         IssueCode::OutOfRange,
                         "a fan-out needs at least one worker",
-                    );
+                    )
+                    .hint = Some("leave max_workers out to run every item at once".into());
+                }
+                if fan.max_items == Some(0) {
+                    self.issue(
+                        at.field("max_items"),
+                        IssueCode::OutOfRange,
+                        "a fan-out needs room for at least one item",
+                    )
+                    .hint = Some("leave max_items out to take every item the split makes".into());
                 }
             }
             StageMode::InteractivePoints(points) => {
@@ -228,6 +254,24 @@ impl<'a> Validator<'a> {
                 for r in named {
                     self.need_region(g.clone(), r, &all);
                 }
+            }
+            if let Some(gate) = edge.gate.as_ref().filter(|g| g.require_modifications)
+                && self
+                    .g()
+                    .stage(edge.from.as_str())
+                    .is_some_and(|s| !s.can_change_files(&gate.tools))
+            {
+                self.issue(
+                    at.field("gate").field("require_modifications"),
+                    IssueCode::Conflict,
+                    "gate requires modifications, but the stage has no file-modifying tool in \
+                     available_tools",
+                )
+                .hint = Some(format!(
+                    "grant '{}' write_file or edit_file, name the tool that changes files in the \
+                     gate's `tools`, or drop require_modifications",
+                    edge.from
+                ));
             }
             if edge.when == super::EdgeCondition::Stuck && edge.stuck.is_none() {
                 self.issue(

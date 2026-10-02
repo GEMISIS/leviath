@@ -155,7 +155,7 @@ pub(crate) use resolve::resolve_stage_route;
 pub use resolve::{
     HeadSource, ModelDefaults, ToolCatalog, ToolOwners, bare_user_model, expand_connector_grants,
     filter_tools_for_stage, is_unread_catalog_refusal, model_key, providers_tried,
-    resolve_stage_model, resolve_stages, tool_source,
+    resolve_stage_model, tool_source,
 };
 mod stall;
 pub use stall::{DEFAULT_STALL_TIMEOUT_SECS, PausedForSetup, StallTimeout};

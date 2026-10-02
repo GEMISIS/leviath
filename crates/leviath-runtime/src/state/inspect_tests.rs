@@ -239,7 +239,7 @@ fn a_choice_names_its_edges_as_the_graph_does() {
 fn fan_out(world: &mut World, e: Entity) {
     let state = crate::fanout::FanOutState {
         config: serde_json::from_value(json!({"worker": {"stage": "plan"}})).unwrap(),
-        max_workers: 2,
+        max_workers: Some(2),
         pending: vec![
             crate::fanout::WorkItem {
                 id: "i1".into(),
@@ -278,7 +278,7 @@ fn a_fan_out_reads_with_its_items_as_typed_inputs() {
     assert_eq!(s.phase, PipelinePhase::FanOut);
     let f = s.fan_out.unwrap();
     assert_eq!(f.stage.as_str(), "plan");
-    assert_eq!(f.max_workers, 2);
+    assert_eq!(f.max_workers, Some(2));
     assert!(f.paused);
     assert_eq!(f.queued.len(), 3);
     assert_eq!(

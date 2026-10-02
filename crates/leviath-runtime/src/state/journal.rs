@@ -183,6 +183,36 @@ pub struct SettledState {
     pub asked_at: i64,
 }
 
+/// Which kind of model call an inference was: the stage's own work, or one
+/// the runtime made around it.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CallKind {
+    /// A turn of the stage's own work.
+    #[default]
+    Stage,
+    /// A summary of a region, when the context filled or an edge compacted.
+    Compaction,
+    /// The call that named the run.
+    Title,
+    /// A call asking the model which edge to take.
+    Routing,
+}
+
+impl CallKind {
+    /// The kind as one lowercase word: `stage`, `title`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stage => "stage",
+            Self::Compaction => "compaction",
+            Self::Title => "title",
+            Self::Routing => "routing",
+        }
+    }
+}
+
 /// What changed a run's context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum CauseState {

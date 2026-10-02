@@ -47,6 +47,11 @@ pub struct SpawnResult {
     pub session_id: String,
     /// The run's id, as `lev` and the HTTP API name it.
     pub run_id: String,
+    /// What may keep the run from ever finishing, each in the shape a
+    /// refused request's issues take. The run started anyway; a host shows
+    /// these to its user. Left out when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -66,12 +71,19 @@ mod tests {
 
     #[test]
     fn a_spawn_result_is_camel_case() {
-        let result = SpawnResult {
+        let mut result = SpawnResult {
             session_id: "s".into(),
             run_id: "r".into(),
+            warnings: vec![],
         };
         let text = serde_json::to_string(&result).unwrap();
         assert_eq!(text, r#"{"sessionId":"s","runId":"r"}"#);
         assert_eq!(serde_json::from_str::<SpawnResult>(&text).unwrap(), result);
+        result.warnings = vec![serde_json::json!({"message": "it loops"})];
+        let text = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            text,
+            r#"{"sessionId":"s","runId":"r","warnings":[{"message":"it loops"}]}"#
+        );
     }
 }

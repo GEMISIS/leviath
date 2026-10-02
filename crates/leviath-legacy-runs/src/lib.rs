@@ -47,7 +47,7 @@ use leviath_runtime::spec::graph::{RunGraph, StageDef};
 use leviath_runtime::spec::names::ModelRef;
 
 pub use error::ConvertError;
-pub use migrate::{migrate, migrate_file};
+pub use migrate::{migrate, migrate_file, migrate_noted};
 pub use report::{BlueprintSource, ConvertReport, Defaulted};
 
 /// Where the conversion looks for what an old run directory does not hold.

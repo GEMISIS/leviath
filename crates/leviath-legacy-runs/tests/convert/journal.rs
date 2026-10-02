@@ -126,6 +126,61 @@ fn every_kind_of_record_reads_as_an_event_or_a_change() {
     assert!(logged(&events, "a model call in stage main"));
 }
 
+/// Why the window changed reads back from a converted run the way it did
+/// from the old one: a committed change as a commit, and a change recorded
+/// one region at a time as a note on that region.
+#[test]
+fn the_causes_of_context_changes_carry_over() {
+    let run = Run::fixture("finished");
+    run.append(json!([
+        {"ContextChange": {"region": "notes", "cause": "context_tool", "entries_added": 2,
+            "entries_removed": 1, "token_delta": 40, "at": 20}},
+        {"ContextTransaction": {"revision_before": "cw1-a", "revision_after": "cw1-b",
+            "cause": "tool_result", "regions": [{"region": "plan", "digest_before": "d1",
+            "digest_after": "d2", "tokens_before": 1, "tokens_after": 5, "entries_before": 0,
+            "entries_after": 1, "entries_added": 1}], "execution_id": "x1", "at": 21}}
+    ]));
+    let events = events(&run);
+    let noted: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::ContextNoted(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(noted.len(), 1, "{events:?}");
+    assert_eq!(noted[0].region, "notes");
+    assert_eq!(
+        noted[0].cause,
+        leviath_runtime::state::journal::CauseState::ContextTool
+    );
+    assert_eq!(
+        (
+            noted[0].entries_added,
+            noted[0].entries_removed,
+            noted[0].token_delta
+        ),
+        (2, 1, 40)
+    );
+    let committed: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::ContextCommitted(c) => Some(c),
+            _ => None,
+        })
+        .filter(|c| c.execution_id.as_deref() == Some("x1"))
+        .collect();
+    assert_eq!(committed.len(), 1, "{events:?}");
+    assert_eq!(committed[0].regions[0].region, "plan");
+    // The fixture's own commits came across too: the run was a model reply
+    // and a tool result before this.
+    let causes = events
+        .iter()
+        .filter(|e| matches!(e, RunEvent::ContextCommitted(_)))
+        .count();
+    assert_eq!(causes, 4);
+}
+
 #[test]
 fn a_journal_that_starts_with_a_full_checkpoint_seeds_from_it() {
     let run = Run::fixture("finished");

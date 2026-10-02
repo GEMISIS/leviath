@@ -231,8 +231,8 @@
           ]
         },
         "temperature": {
-          "description": "Its sampling temperature.",
-          "format": "float",
+          "description": "Its sampling temperature. Kept as the number written, so a `0.2`\nreads back as `0.2`.",
+          "format": "double",
           "type": "number"
         },
         "user_prompt_template": {
@@ -596,7 +596,7 @@
       "properties": {
         "max_attempts": {
           "default": null,
-          "description": "How many times a failed worker is retried.",
+          "description": "How many times the stage is asked again to call `fan_out` when it\nends without starting any workers, before it is let through with\nnone. `0` lets it through at once.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -606,7 +606,7 @@
         },
         "max_items": {
           "default": null,
-          "description": "The most work items one fan-out may have.",
+          "description": "The most work items one fan-out may have, at least one. Left out,\nevery item the split makes runs.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -615,11 +615,14 @@
           ]
         },
         "max_workers": {
-          "default": 30,
-          "description": "The most workers at once.",
+          "default": null,
+          "description": "The most workers at once, at least one. Left out, every item starts\nat once and the inference pool paces the model calls.",
           "format": "uint32",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "merge_stage": {
           "default": null,
@@ -715,7 +718,7 @@
         },
         "region": {
           "default": null,
-          "description": "The region the gate's message lands in.",
+          "description": "For `require_modifications`: a region whose holding something counts\nas the stage's change, so a stage that writes its work there passes\nwithout writing a file.",
           "type": [
             "string",
             "null"
@@ -765,7 +768,7 @@
         },
         "tools": {
           "default": [],
-          "description": "Tools the stage must have called.",
+          "description": "For `require_modifications`: tools that count as changing a file,\nbeside `write_file` and `edit_file`. Only a tool the stage has counts.",
           "items": {
             "description": "A tool name.",
             "type": "string"
@@ -1523,8 +1526,8 @@
         },
         "temperature": {
           "default": null,
-          "description": "Sampling temperature.",
-          "format": "float",
+          "description": "Sampling temperature. Kept as the number written, so a `0.2` reads\nback as `0.2`.",
+          "format": "double",
           "type": [
             "number",
             "null"

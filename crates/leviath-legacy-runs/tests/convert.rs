@@ -168,7 +168,7 @@ fn a_fan_out_parent_keeps_its_queue_and_its_workers() {
     assert_eq!(file.last.status, RunStatus::Waiting);
     let fan = file.last.fan_out.as_ref().unwrap();
     assert_eq!(fan.stage.as_str(), "main");
-    assert_eq!(fan.max_workers, 1);
+    assert_eq!(fan.max_workers, Some(1));
     assert_eq!(fan.queued[0].id, "beta");
     assert_eq!(
         fan.queued[0].inputs.get("task"),

@@ -9,7 +9,9 @@
 //! happened.
 
 use leviath_runtime::runfile::record::RunRecord;
-use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter, journal_events};
+use leviath_runtime::runfile::{
+    Answered, CheckpointPolicy, RunFileReader, RunFileWriter, journal_events_with,
+};
 use leviath_runtime::spec::env::CodeFiles;
 use leviath_runtime::spec::names::{RunId, StageName};
 use leviath_runtime::state::RunState;
@@ -53,8 +55,9 @@ pub(crate) fn started_at(
     .expect("the run file is written")
 }
 
-/// When `record` happened.
-fn at_of(record: &RunRecord) -> i64 {
+/// When `record` happened. A move carries no time of its own: it happened
+/// when the step before it did.
+fn at_of(record: &RunRecord, before: i64) -> i64 {
     match record {
         RunRecord::InferenceAttempt(a) => a.at,
         RunRecord::InferenceFailover(f) => f.at,
@@ -64,6 +67,7 @@ fn at_of(record: &RunRecord) -> i64 {
         | RunRecord::ArtifactsProduced { at, .. }
         | RunRecord::Interaction { at, .. }
         | RunRecord::ContextTransaction { at, .. } => *at,
+        RunRecord::Transition(_) => before,
     }
 }
 
@@ -209,15 +213,18 @@ pub(crate) fn stay(id: &str, entered_at: i64) -> leviath_runtime::state::StageRe
 /// Record `records` as further steps of the run file `writer` is writing.
 pub(crate) fn append(writer: &mut RunFileWriter, records: &[RunRecord]) {
     let stages = writer_stages(writer);
+    let mut answered = Answered::default();
+    let mut before = 0;
     for record in records {
-        let at = at_of(record);
+        let at = at_of(record, before);
+        before = at;
         let mut state = writer.state().clone();
         place(&mut state, &stages, record);
         writer
             .record(state.clone(), at, Vec::new())
             .expect("a step");
         writer
-            .record(state, at, journal_events(record))
+            .record(state, at, journal_events_with(record, &mut answered))
             .expect("a step");
     }
 }
@@ -251,5 +258,14 @@ fn a_usage_record_happens_when_it_says() {
         cost_reported_by_provider: None,
         at: 42,
     };
-    assert_eq!(at_of(&usage), 42);
+    assert_eq!(at_of(&usage, 7), 42);
+    // A move happens when the step before it did.
+    let moved = RunRecord::Transition(leviath_runtime::state::TransitionRecord {
+        from: StageName::new("a").unwrap(),
+        to: StageName::new("b").unwrap(),
+        edge: None,
+        reason: leviath_runtime::state::TransitionReason::Forced,
+        visit: "v".into(),
+    });
+    assert_eq!(at_of(&moved, 7), 7);
 }

@@ -427,12 +427,38 @@ fn a_declared_fan_out_keeps_its_settings() {
     );
     let (report, file) = run.converted();
     let fan = file.last.fan_out.as_ref().unwrap();
-    assert_eq!(fan.config.max_workers, 3);
+    assert_eq!(fan.config.max_workers, Some(3));
     assert!(
         !report
             .notes
             .iter()
             .any(|n| n.contains("resumes with that stage"))
+    );
+}
+
+/// An old run whose fan-out had no cap (`max_workers = 0`) keeps no cap, the
+/// way a graph writes it, and the conversion report says so.
+#[test]
+fn a_fan_out_with_no_cap_converts_to_one_and_says_so() {
+    let run = Run::fixture("fanout-parent");
+    let text = std::fs::read_to_string(run.path("blueprint.leviath")).unwrap();
+    run.write(
+        "blueprint.leviath",
+        &text.replace(
+            "mode = \"autonomous\"",
+            "mode = \"fan_out\"\nworker_agent = \"waiter\"\nmax_workers = 0",
+        ),
+    );
+    let (report, file) = run.converted();
+    let fan = file.last.fan_out.as_ref().unwrap();
+    assert_eq!(fan.config.max_workers, None);
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("max_workers = 0 (no cap) is left out")),
+        "{:?}",
+        report.notes
     );
 }
 

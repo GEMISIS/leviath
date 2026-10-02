@@ -559,7 +559,7 @@ fn fan_out_of(waiting: &crate::fanout::FanOutWaiting, stage: &StageName) -> FanO
     FanOutState {
         stage: stage.clone(),
         config: s.config.clone(),
-        max_workers: s.max_workers as u32,
+        max_workers: s.max_workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
         queued: s
             .pending
             .into_iter()

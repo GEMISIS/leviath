@@ -198,6 +198,7 @@ async fn a_refusal_names_what_it_could_mean() {
 async fn an_answer_to_another_question_is_internal() {
     let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
+        warnings: Default::default(),
     });
     let failure = act(&state_with(control), "run-a", Action::Pause)
         .await

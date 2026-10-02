@@ -327,6 +327,11 @@ fn status_cell(entry: &RunListEntry) -> String {
         // explaining, so a bare `paused` would be the worst answer here: it
         // reads as a deliberate pause somebody can undo whenever they like.
         (AgentStatus::Paused, Some(reason)) => format!("paused: {reason}"),
+        // A run whose graph has no way out: worth more than any note about
+        // its result, because it is the reason there may never be one.
+        (status, _) if !entry.may_never_finish.is_empty() => {
+            format!("{status} (may never finish)")
+        }
         (status, _) if entry.empty_output => format!("{status} (no output)"),
         // A script the run needed and could not use is the quietest failure of
         // the lot: a broken output validator is skipped rather than fatal, so
@@ -621,6 +626,20 @@ pub(crate) fn format_runs(
         out.push_str(&format!(
             "\n\npaused until something is fixed:\n{}",
             parked.join("\n")
+        ));
+    }
+    let looping: Vec<String> = runs
+        .iter()
+        .flat_map(|e| {
+            e.may_never_finish
+                .iter()
+                .map(move |w| format!("  {}: {w}", e.run_id))
+        })
+        .collect();
+    if !looping.is_empty() {
+        out.push_str(&format!(
+            "\n\n!!! may never finish (stop one with lev cancel <run>):\n{}",
+            looping.join("\n")
         ));
     }
     if let Some(footer) = providers_footer(health) {

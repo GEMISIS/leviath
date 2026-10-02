@@ -402,7 +402,7 @@ fn fan_out(split: &str) -> StageMode {
     StageMode::FanOut(FanOutDef {
         worker: WorkerSource::Stage(StageName::new("build").unwrap()),
         merge_stage: None,
-        max_workers: 2,
+        max_workers: Some(2),
         on_worker_failure: WorkerFailure::Continue,
         split_prompt: split.to_string(),
         results_region: None,

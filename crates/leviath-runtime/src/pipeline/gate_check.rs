@@ -170,15 +170,7 @@ pub(crate) fn gate_blocks(
     if !gate.require_modifications {
         return GateDecision::Pass;
     }
-    let can_modify = super::spec_view::grants_all_builtins(stage)
-        || super::spec_view::named_tools(stage).any(|t| {
-            let canonical = leviath_tools::canonical_tool_name(t);
-            crate::spec::graph::MODIFYING_TOOLS.contains(&canonical)
-                || gate
-                    .tools
-                    .iter()
-                    .any(|extra| leviath_tools::canonical_tool_name(extra.as_str()) == canonical)
-        });
+    let can_modify = stage.can_change_files(&gate.tools);
     if !can_modify {
         return GateDecision::Pass;
     }

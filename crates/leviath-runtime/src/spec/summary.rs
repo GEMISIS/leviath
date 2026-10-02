@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::inputs::InputValues;
+use super::issues::SpawnIssues;
 use super::launch::LaunchPolicy;
-use super::names::{ModelId, ProviderName, StageName, ToolName};
+use super::names::{ModelId, ProviderName, RunId, StageName, ToolName};
 use super::run_spec::{RunSpec, SpecOrigin};
 
 /// A resolved run, in brief.
@@ -31,6 +32,20 @@ pub struct SpawnSummary {
     pub launch: LaunchPolicy,
     /// The directory its tools would work in.
     pub workdir: PathBuf,
+    /// What may keep it from ever finishing: stages it can reach and never
+    /// leave. Warnings, never refusals; empty for most runs.
+    #[serde(default)]
+    pub warnings: SpawnIssues,
+}
+
+/// A run that was started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Spawned {
+    /// The new run's id.
+    pub run_id: RunId,
+    /// What may keep it from ever finishing, as [`SpawnSummary::warnings`].
+    #[serde(default)]
+    pub warnings: SpawnIssues,
 }
 
 /// One stage of a resolved run, in brief.
@@ -71,6 +86,7 @@ impl SpawnSummary {
             inputs: spec.inputs.clone(),
             launch: spec.launch.clone(),
             workdir: spec.placement.workdir.clone(),
+            warnings: spec.warnings(),
         }
     }
 }

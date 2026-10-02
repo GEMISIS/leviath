@@ -52,7 +52,11 @@ pub(crate) fn graph(
         path: blueprint_path,
         why: e.to_string(),
     })?;
-    let mut graph = crate::old::graph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
+    let (mut graph, notes) =
+        crate::old::graph::from_blueprint_noted(&blueprint).map_err(ConvertError::Graph)?;
+    for note in notes {
+        report.note(note);
+    }
     read_manifest_tables(&mut graph, &old.blueprint.text).map_err(ConvertError::Graph)?;
     Ok((blueprint, graph))
 }

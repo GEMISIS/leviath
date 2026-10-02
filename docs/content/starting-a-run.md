@@ -365,7 +365,9 @@ release-notes would run (blueprint release-notes@a4adce5110b52cc26e95bb6ef879985
 ```
 
 `max_items` was never sent, so it shows its default. A check costs no tokens and starts nothing,
-so run it whenever a request is new.
+so run it whenever a request is new. A run that may never finish is reported in a banner above
+the summary, naming the stages it cannot get out of. See [a run has to be able to
+end](/docs/stages#a-run-has-to-be-able-to-end).
 
 ## Reading the problems
 
@@ -429,8 +431,10 @@ numbered list in its tool result. The Agent Client Protocol puts them in the `da
 | `unresolvable` | Something this machine cannot provide: a blueprint, a model, an MCP server. |
 | `unavailable` | A resumed run names something this machine no longer has. |
 | `changed` | A resumed run names something that changed since it started. |
+| `may_never_finish` | A warning, never a refusal: stages the run can reach and never leave. |
 
-The last two only come from a resume. [The run file](/docs/run-file#when-the-machine-changed)
+`unavailable` and `changed` only come from a resume. `may_never_finish` only comes in a spawn's
+or a check's `warnings`, beside a run that starts. [The run file](/docs/run-file#when-the-machine-changed)
 shows one.
 
 Read `path` first. It names the field to change, and `known` usually holds the value you meant.

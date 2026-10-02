@@ -1169,6 +1169,7 @@ async fn cancel_run_unknown_run_is_404() {
 async fn cancel_run_unexpected_response_is_500() {
     let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
+        warnings: Default::default(),
     });
     assert_eq!(
         cancel(control, "a").await,
@@ -1270,6 +1271,7 @@ async fn pause_run_refused_is_404() {
 async fn pause_run_unexpected_response_is_500() {
     let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
+        warnings: Default::default(),
     });
     assert_eq!(
         post_run_action(control, "a", "pause").await,
@@ -1315,6 +1317,7 @@ async fn resume_run_refused_is_404() {
 async fn resume_run_unexpected_response_is_500() {
     let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
+        warnings: Default::default(),
     });
     assert_eq!(
         post_run_action(control, "a", "resume").await,

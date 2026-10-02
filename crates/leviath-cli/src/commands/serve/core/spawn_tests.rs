@@ -81,13 +81,14 @@ fn carried(seen: &Arc<Mutex<Option<ControlRequest>>>) -> Request {
 async fn a_spawn_reaches_the_daemon_with_this_servers_defaults() {
     let (client, seen, _dir, _task) = recording(ControlResponse::Spawned {
         run_id: "run-1".into(),
+        warnings: Default::default(),
     });
     let limits = ServeLimits {
         no_remote_seed_commands: true,
         ..ServeLimits::default()
     };
     let started = start(&state(client, limits), named("coder")).await.unwrap();
-    assert!(matches!(started, Verdict::Accepted(ref id) if id == "run-1"));
+    assert!(matches!(started, Verdict::Accepted(ref s) if s.run_id == "run-1"));
     let sent = carried(&seen);
     assert_eq!(sent.workdir, Some(std::env::current_dir().unwrap()));
     assert!(
@@ -245,7 +246,10 @@ async fn a_dry_run_answers_with_the_run_or_every_reason_against_it() {
         .unwrap();
     assert!(matches!(answer, Verdict::Rejected(_)));
 
-    let (client, _seen, _dir, _task) = recording(ControlResponse::Spawned { run_id: "x".into() });
+    let (client, _seen, _dir, _task) = recording(ControlResponse::Spawned {
+        run_id: "x".into(),
+        warnings: Default::default(),
+    });
     let failure = validate(&state(client, ServeLimits::default()), named("coder"))
         .await
         .unwrap_err();
@@ -277,8 +281,10 @@ async fn a_blueprint_from_a_configured_directory_is_sent_as_that_directory() {
         let agents = agents.clone();
         let elsewhere = elsewhere.clone();
         async move {
-            let (client, seen, _dir, _task) =
-                recording(ControlResponse::Spawned { run_id: "r".into() });
+            let (client, seen, _dir, _task) = recording(ControlResponse::Spawned {
+                run_id: "r".into(),
+                warnings: Default::default(),
+            });
             let mut app = state(client, ServeLimits::default());
             app.config = crate::commands::serve::testutil::fixed_config(crate::config::Config {
                 agent_paths: vec![elsewhere],
@@ -318,6 +324,7 @@ async fn a_whole_graph_is_sent_as_written() {
     });
     let (client, seen, _dir, _task) = recording(ControlResponse::Spawned {
         run_id: "raw-1".into(),
+        warnings: Default::default(),
     });
     let request = Request::new(SpawnSource::Raw(Box::new(graph.clone())));
     let started = start(&state(client, ServeLimits::default()), request)
@@ -383,6 +390,7 @@ async fn the_write_paths_report_a_daemon_that_will_not_answer() {
     // for each one, and the fake serves a single connection.
     let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
+        warnings: Default::default(),
     });
     state.control = control;
     let failure = send_message(&state, "run-a", "hi".to_string(), None, Vec::new())
@@ -392,6 +400,7 @@ async fn the_write_paths_report_a_daemon_that_will_not_answer() {
 
     let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
+        warnings: Default::default(),
     });
     state.control = control;
     let failure = answer_interaction(
@@ -404,6 +413,7 @@ async fn the_write_paths_report_a_daemon_that_will_not_answer() {
 
     let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Spawned {
         run_id: "x".to_string(),
+        warnings: Default::default(),
     });
     state.control = control;
     let failure = open_interactions(&state)

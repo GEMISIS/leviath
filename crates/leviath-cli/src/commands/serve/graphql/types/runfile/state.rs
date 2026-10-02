@@ -507,8 +507,8 @@ pub(crate) struct FanOutProgress {
     pub(crate) merge_stage: Option<String>,
     /// What one worker failing does to the rest.
     pub(crate) on_worker_failure: WorkerFailurePolicy,
-    /// How many workers run at once.
-    pub(crate) max_workers: i32,
+    /// How many workers run at once. Null means every item at once.
+    pub(crate) max_workers: Option<i32>,
     /// Items not started yet.
     pub(crate) queued: Vec<FanOutItemState>,
     /// Items running, each with its worker's run id as `detail`.
@@ -553,7 +553,7 @@ impl From<&FanOutState> for FanOutProgress {
                 WorkerFailure::Continue => WorkerFailurePolicy::Continue,
                 WorkerFailure::FailAll => WorkerFailurePolicy::FailAll,
             },
-            max_workers: saturating(f.max_workers),
+            max_workers: f.max_workers.map(saturating),
             queued: f
                 .queued
                 .iter()

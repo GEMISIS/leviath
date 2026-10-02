@@ -354,6 +354,7 @@ fn escape(
 pub(crate) fn resolve_transition(
     mut agents: Query<ResolveTransitionQuery, With<ResolveTransition>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
+    persist: Option<Res<crate::pipeline::PersistenceStage>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -516,6 +517,7 @@ pub(crate) fn resolve_transition(
                         state.status = AgentStatus::Active;
                         let name = graph.stages[idx].name.to_string();
                         let taken = transition_record(&from, &state, next.edge.clone(), reason);
+                        journal_transition(persist.as_deref(), metadata, taken.as_ref());
                         emit_stage_transition(&sink, metadata, &state.agent_id, from, &name, visit);
                         let mut ec = commands.entity(entity);
                         ec.remove::<ResolveTransition>().remove::<StageOutcome>();
@@ -576,6 +578,27 @@ pub(crate) fn transition_record(
         reason,
         visit: state.current_visit.clone(),
     }))
+}
+
+/// Send a move the run just made to the persistence lane, so the step that
+/// records it keeps every edge the run took, however many it took in one
+/// tick. A run with no lane, or no record of its own, keeps no journal.
+pub(crate) fn journal_transition(
+    persist: Option<&crate::pipeline::PersistenceStage>,
+    metadata: Option<&crate::persistence::RunMetadata>,
+    taken: Option<&LastTransition>,
+) {
+    if let (Some(persist), Some(md), Some(taken)) = (persist, metadata, taken) {
+        let _ = persist
+            .0
+            .send(crate::persistence_bridge::PersistMsg::Append {
+                run_id: md.run_id.clone(),
+                record: Box::new(crate::runfile::record::RunRecord::Transition(
+                    taken.0.clone(),
+                )),
+                ack: None,
+            });
+    }
 }
 
 /// Enter the stage at `idx`: update the cursor + current-stage name, reset
@@ -940,6 +963,11 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
     let Some((stage_inf, setup, name, taken)) = attach else {
         return;
     };
+    journal_transition(
+        world.get_resource::<crate::pipeline::PersistenceStage>(),
+        world.get::<crate::persistence::RunMetadata>(entity),
+        taken.as_ref(),
+    );
     let mut em = world.entity_mut(entity);
     taken.into_iter().for_each(|t| {
         em.insert(t);

@@ -63,11 +63,14 @@ pub(crate) fn check_report(summary: &SpawnSummary, json: bool) -> String {
     if json {
         return serde_json::to_string_pretty(summary).expect("a summary serializes");
     }
-    let mut lines = vec![format!(
+    // What may keep the run from finishing goes first, where it cannot be
+    // scrolled past.
+    let mut lines = super::request::warnings_report(&summary.warnings);
+    lines.push(format!(
         "{} would run ({})",
         summary.title,
         origin(&summary.origin)
-    )];
+    ));
     lines.push(format!("  starts in: {}", summary.entry_stage));
     lines.push(format!("  workdir:   {}", summary.workdir.display()));
     let launch = &summary.launch;

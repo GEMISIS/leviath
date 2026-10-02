@@ -47,6 +47,8 @@ pub(crate) enum SpawnIssueCode {
     Unavailable,
     /// A resumed run names something that has changed since it started.
     Changed,
+    /// A warning, never a refusal: stages the run can reach and never leave.
+    MayNeverFinish,
 }
 
 impl From<IssueCode> for SpawnIssueCode {
@@ -64,6 +66,7 @@ impl From<IssueCode> for SpawnIssueCode {
             IssueCode::Unresolvable => Self::Unresolvable,
             IssueCode::Unavailable => Self::Unavailable,
             IssueCode::Changed => Self::Changed,
+            IssueCode::MayNeverFinish => Self::MayNeverFinish,
         }
     }
 }
@@ -203,6 +206,8 @@ impl From<&SpawnIssues> for SpawnRejected {
 pub(crate) struct Spawned {
     /// Its id.
     pub(crate) run_id: String,
+    /// What may keep it from ever finishing.
+    pub(crate) warnings: SpawnIssues,
 }
 
 /// A run that was started: its id, and the run itself once its record is
@@ -213,6 +218,13 @@ impl Spawned {
     /// The new run's id.
     async fn run_id(&self) -> ID {
         ID(self.run_id.clone())
+    }
+
+    /// What may keep the run from ever finishing: stages it can reach and
+    /// never leave, each named. The run started anyway; show these loudly.
+    /// Empty for most runs.
+    async fn warnings(&self) -> Vec<SpawnIssue> {
+        self.warnings.iter().map(SpawnIssue::from).collect()
     }
 
     /// The run as its record stands. Null in the moment between the daemon
@@ -289,7 +301,10 @@ pub(crate) async fn spawn_run(
         Err(issues) => return Ok(SpawnRunResult::Rejected(SpawnRejected::from(&issues))),
     };
     Ok(match spawn_core::start(state, request).await.gql()? {
-        Verdict::Accepted(run_id) => SpawnRunResult::Spawned(Spawned { run_id }),
+        Verdict::Accepted(started) => SpawnRunResult::Spawned(Spawned {
+            run_id: started.run_id,
+            warnings: started.warnings,
+        }),
         Verdict::Rejected(issues) => SpawnRunResult::Rejected(SpawnRejected::from(&issues)),
     })
 }

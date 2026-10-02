@@ -239,7 +239,7 @@ fn coding_graph() -> crate::spec::graph::RunGraph {
         system_prompt: compaction.system_prompt,
         user_prompt_template: compaction.user_prompt_template,
         max_summary_tokens: u32::try_from(compaction.max_summary_tokens).unwrap(),
-        temperature: compaction.temperature,
+        temperature: f64::from(compaction.temperature),
     });
     graph
 }
@@ -710,7 +710,7 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
     let config = crate::spec::graph::FanOutDef {
         worker: crate::spec::graph::WorkerSource::Stage(sn("build")),
         merge_stage: Some(sn("build")),
-        max_workers: 3,
+        max_workers: Some(3),
         on_worker_failure: crate::spec::graph::WorkerFailure::FailAll,
         split_prompt: "split".into(),
         results_region: Some(crate::spec::names::RegionName::new("task").unwrap()),
@@ -723,7 +723,7 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
     state.fan_out = Some(FanOutState {
         stage: sn("plan"),
         config: config.clone(),
-        max_workers: 3,
+        max_workers: Some(3),
         queued: vec![WorkItemState {
             id: "q1".into(),
             inputs: crate::spec::inputs::InputValues(
@@ -769,7 +769,7 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
         .unwrap()
         .to_state();
     assert_eq!(restored.config, config);
-    assert_eq!(restored.max_workers, 3);
+    assert_eq!(restored.max_workers, Some(3));
     assert_eq!(restored.pending[0].id, "q1");
     assert_eq!(
         restored.pending[0].inputs["topic"],
@@ -809,7 +809,7 @@ fn a_tool_started_fan_out_keeps_the_calls_worker() {
         state.fan_out = Some(FanOutState {
             stage: sn("build"),
             config: config.clone(),
-            max_workers: 5,
+            max_workers: Some(5),
             queued: vec![],
             active: vec![],
             done: vec![],
@@ -829,7 +829,7 @@ fn a_tool_started_fan_out_keeps_the_calls_worker() {
             .get::<crate::fanout::FanOutWaiting>(e)
             .unwrap()
             .to_state();
-        assert_eq!(restored.max_workers, 5);
+        assert_eq!(restored.max_workers, Some(5));
         assert_eq!(restored.config, config);
     }
 }
@@ -1302,6 +1302,49 @@ fn a_new_named_run_asks_for_a_title_only_when_the_host_wants_one() {
     let mut named = initial_state(&spec);
     named.title = Some("Named".into());
     assert!(!asks(spec, chain(), Some(named)));
+}
+
+/// A run is named after the task it was given, whatever region its `task`
+/// input fills: the researcher puts it in `query`, the data analyst in
+/// `subject`. A task that is a file has no text to be named after.
+#[test]
+fn a_run_is_titled_from_its_task_input_whatever_region_it_fills() {
+    use crate::spec::inputs::InputValue;
+    use crate::title::{PendingTitle, TitleCandidates};
+    let given = |value: InputValue| {
+        let mut spec = two_stage_spec();
+        spec.placement.parent = None;
+        spec.seeded.clear();
+        spec.seeded.insert(
+            crate::spec::names::RegionName::new("query").unwrap(),
+            crate::spec::run_spec::SeededContent {
+                text: "how do tides work".into(),
+                parts: vec![],
+            },
+        );
+        spec.inputs
+            .0
+            .insert(crate::spec::names::InputName::new("task").unwrap(), value);
+        let spec = Arc::new(spec);
+        let mut world = World::new();
+        let chain = Bindings::new().with(TitleCandidates(vec![("p".into(), "m".into())]));
+        let e = insert(&mut world, spec.clone(), chain, &initial_state(&spec));
+        let task = world
+            .get::<crate::persistence::RunMetadata>(e)
+            .unwrap()
+            .task
+            .clone();
+        (world.get::<PendingTitle>(e).is_some(), task)
+    };
+    assert_eq!(
+        given(InputValue::Text("how do tides work".into())),
+        (true, "how do tides work".to_string())
+    );
+    assert_eq!(
+        given(InputValue::File("tides.png".into())),
+        (false, String::new()),
+        "a media-first run stays untitled"
+    );
 }
 
 /// A binding can fill a field of a component insertion placed, and does

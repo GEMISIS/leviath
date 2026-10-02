@@ -75,7 +75,7 @@ async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
         StageMode::FanOut(FanOutDef {
             worker: WorkerSource::Blueprint(BlueprintRef::parse(worker).unwrap()),
             merge_stage: None,
-            max_workers: 2,
+            max_workers: Some(2),
             on_worker_failure: WorkerFailure::Continue,
             split_prompt: String::new(),
             results_region: None,

@@ -5158,7 +5158,7 @@
       },
       "SpawnSummary": {
         "type": "object",
-        "description": "A resolved run, in brief: its title, where its graph came from, its entry stage, each stage's provider, model and tools, its checked inputs, its launch policy and its workdir."
+        "description": "A resolved run, in brief: its title, where its graph came from, its entry stage, each stage's provider, model and tools, its checked inputs, its launch policy, its workdir, and its warnings: stages it could reach and never leave, each a SpawnIssue with code may_never_finish. A run with warnings still starts."
       },
       "RunSpec": {
         "type": "object",
@@ -5182,12 +5182,20 @@
       "SpawnedResp": {
         "type": "object",
         "required": [
-          "run_id"
+          "run_id",
+          "warnings"
         ],
         "properties": {
           "run_id": {
             "type": "string",
             "description": "The new run's id."
+          },
+          "warnings": {
+            "type": "array",
+            "description": "What may keep the run from ever finishing: stages it can reach and never leave, each with code may_never_finish. The run started anyway. Empty for most runs.",
+            "items": {
+              "$ref": "#/components/schemas/SpawnIssue"
+            }
           }
         }
       },
@@ -5226,7 +5234,8 @@
               "not_allowed",
               "unresolvable",
               "unavailable",
-              "changed"
+              "changed",
+              "may_never_finish"
             ]
           },
           "message": {

@@ -169,6 +169,10 @@ pub(crate) struct SpawnSummary {
     pub(crate) launch: LaunchPolicy,
     /// The directory its tools would work in.
     pub(crate) workdir: String,
+    /// What may keep the run from ever finishing: stages it can reach and
+    /// never leave, each named. Warnings, never refusals: the run would
+    /// start. Empty for most runs.
+    pub(crate) warnings: Vec<crate::commands::serve::graphql::mutation::spawn::SpawnIssue>,
 }
 
 impl From<&CoreSummary> for SpawnSummary {
@@ -181,6 +185,11 @@ impl From<&CoreSummary> for SpawnSummary {
             inputs: entries(&summary.inputs),
             launch: LaunchPolicy::from(&summary.launch),
             workdir: summary.workdir.display().to_string(),
+            warnings: summary
+                .warnings
+                .iter()
+                .map(crate::commands::serve::graphql::mutation::spawn::SpawnIssue::from)
+                .collect(),
         }
     }
 }

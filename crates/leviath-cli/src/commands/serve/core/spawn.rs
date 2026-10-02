@@ -40,6 +40,15 @@ pub(crate) enum Verdict<T> {
     Rejected(SpawnIssues),
 }
 
+/// A run that started: its id, and what may keep it from ever finishing.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Started {
+    /// The new run's id.
+    pub(crate) run_id: String,
+    /// What may keep it from ever finishing. Empty for most runs.
+    pub(crate) warnings: SpawnIssues,
+}
+
 /// Start the run `request` asks for.
 ///
 /// `Ok(Rejected)` is a request that cannot run as written; `Err` is a server
@@ -47,17 +56,17 @@ pub(crate) enum Verdict<T> {
 pub(crate) async fn start(
     state: &AppState,
     mut request: Request,
-) -> Result<Verdict<String>, ServeError> {
+) -> Result<Verdict<Started>, ServeError> {
     if let Some(issues) = refused(state, &mut request).await? {
         return Ok(Verdict::Rejected(issues));
     }
     match state.control.spawn(request).await {
-        Ok(ControlResponse::Spawned { run_id }) => {
+        Ok(ControlResponse::Spawned { run_id, warnings }) => {
             // No spawned frame from here. The daemon emits one for every run
             // the world gains, however it was launched, so a second one would
             // make exactly the runs that arrived over the network appear twice.
             tracing::info!(run_id = %run_id, "spawned a run via the API");
-            Ok(Verdict::Accepted(run_id))
+            Ok(Verdict::Accepted(Started { run_id, warnings }))
         }
         Ok(ControlResponse::Rejected { issues }) => Ok(Verdict::Rejected(issues)),
         Ok(other) => Err(daemon_refusal(&other)),

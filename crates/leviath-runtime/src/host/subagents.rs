@@ -136,16 +136,12 @@ impl WorldHost {
         };
         let state = live.unwrap_or(recorded);
         let transitions = deltas
-            .into_iter()
+            .iter()
             .flat_map(|delta| {
-                let seq = delta.seq;
                 delta
-                    .changes
+                    .transitions()
                     .into_iter()
-                    .filter_map(move |change| match change {
-                        crate::state::Change::LastTransition(Some(t)) => Some((seq, t)),
-                        _ => None,
-                    })
+                    .map(|t| (delta.seq, t.clone()))
             })
             .collect();
         Ok(RunHistory {

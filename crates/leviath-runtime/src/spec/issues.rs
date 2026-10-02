@@ -119,6 +119,9 @@ pub enum IssueCode {
     Unavailable,
     /// A resumed run names something that has changed since it started.
     Changed,
+    /// A warning, never a refusal: the graph has stages from which the run
+    /// can never reach an end.
+    MayNeverFinish,
 }
 
 impl IssueCode {
@@ -137,6 +140,7 @@ impl IssueCode {
             Self::Unresolvable => "unresolvable",
             Self::Unavailable => "unavailable",
             Self::Changed => "changed",
+            Self::MayNeverFinish => "may never finish",
         }
     }
 }

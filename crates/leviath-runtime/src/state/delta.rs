@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::context::{ContextDiff, ToolCallState};
 use super::journal::{
-    ArtifactState, AttemptState, ContextCommitState, ContextNoteState, SettledState,
+    ArtifactState, AttemptState, CallKind, ContextCommitState, ContextNoteState, SettledState,
     ToolOutcomeState,
 };
 use super::*;
@@ -119,9 +119,10 @@ pub enum TransitionReason {
 /// Something that happened during a step that the state does not keep.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum RunEvent {
-    /// A model request finished.
+    /// A model request finished and was billed: one per call, whatever
+    /// kind of call it was.
     Inference {
-        /// The attempt's id.
+        /// The id of the attempt that answered, when it was recorded.
         attempt: String,
         /// The model that answered.
         model: ModelRef,
@@ -129,7 +130,17 @@ pub enum RunEvent {
         spend: Spend,
         /// Why the model stopped, as the provider said it.
         finish_reason: Option<String>,
+        /// Which kind of call it was.
+        kind: CallKind,
+        /// The stage it was made for. `None` for a call no stage owns (the
+        /// title call).
+        stage: Option<StageName>,
+        /// The iteration it was made in.
+        iteration: u32,
     },
+    /// The run took an edge. One per edge taken, so two moves inside one
+    /// step are both kept; `last_transition` holds only the latest.
+    Transition(TransitionRecord),
     /// A request moved to another model.
     Failover {
         /// The model that failed.
@@ -258,6 +269,31 @@ impl StateDelta {
             at,
             changes,
             events,
+        }
+    }
+
+    /// Every edge this step took, oldest first: its `Transition` events, or
+    /// for a step with none (a step converted from an old run's journal),
+    /// the `last_transition` it set.
+    pub fn transitions(&self) -> Vec<&TransitionRecord> {
+        let taken: Vec<&TransitionRecord> = self
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Transition(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        match taken.is_empty() {
+            false => taken,
+            true => self
+                .changes
+                .iter()
+                .filter_map(|c| match c {
+                    Change::LastTransition(Some(t)) => Some(t),
+                    _ => None,
+                })
+                .collect(),
         }
     }
 

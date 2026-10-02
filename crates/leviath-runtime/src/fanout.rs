@@ -136,7 +136,7 @@ pub enum FanOutOrigin {
 #[derive(Component)]
 pub struct FanOutWaiting {
     config: FanOutDef,
-    max_workers: usize,
+    max_workers: Option<usize>,
     pending: VecDeque<WorkItem>,
     active: Vec<ActiveWorker>,
     summaries: Vec<(String, String)>,
@@ -162,8 +162,8 @@ pub struct FanOutWaiting {
 pub struct FanOutState {
     /// The fan-out configuration.
     pub config: FanOutDef,
-    /// The concurrency cap; `usize::MAX` for a stage with `max_workers = 0`.
-    pub max_workers: usize,
+    /// The concurrency cap; `None` runs every item at once.
+    pub max_workers: Option<usize>,
     /// Work items not yet started.
     pub pending: Vec<WorkItem>,
     /// In-flight workers as `(item_id, run_id)`.
@@ -575,9 +575,7 @@ pub(crate) fn begin_fan_out(
     items: Vec<WorkItem>,
     origin: FanOutOrigin,
 ) {
-    // Unlimited (`max_workers = 0`) is the largest cap there is, rather than a
-    // separate flag: the start loop compares against it and nothing else.
-    let max_workers = items::worker_cap(&config).unwrap_or(usize::MAX);
+    let max_workers = items::worker_cap(&config);
     // A caller decides its own item count, so without a cap a model that returns
     // five hundred items spawns five hundred runs. The cap also fixes each
     // worker's share of the results region: past some number of ways to divide
@@ -682,7 +680,7 @@ pub(crate) fn fan_out_collect(world: &mut World) {
         // other run frozen; the rest of the queue starts on the next pass of
         // the same wake, after the other systems have had their turn.
         let mut started_this_pass = 0usize;
-        while !w.paused && w.active.len() < w.max_workers {
+        while !w.paused && w.max_workers.is_none_or(|cap| w.active.len() < cap) {
             if started_this_pass >= MAX_WORKER_STARTS_PER_PASS {
                 break;
             }
@@ -1234,7 +1232,7 @@ mod tests {
         FanOutDef {
             worker: WorkerSource::Stage(StageName::new("w").unwrap()),
             merge_stage: merge.map(|m| StageName::new(m).unwrap()),
-            max_workers,
+            max_workers: (max_workers > 0).then_some(max_workers),
             on_worker_failure: policy,
             split_prompt: "split".to_string(),
             results_region: None,
@@ -1651,6 +1649,18 @@ mod tests {
         assert_eq!(request.max_workers, None);
     }
 
+    /// A call asking for no workers at all is refused, with how to ask for no
+    /// cap instead: leave `max_workers` out.
+    #[test]
+    fn parse_fan_out_call_refuses_zero_workers() {
+        let err = parse_fan_out_call(&serde_json::json!({"items": [], "max_workers": 0}))
+            .expect_err("zero workers is not a cap");
+        assert_eq!(
+            err,
+            "fan_out `max_workers` must be at least 1; leave it out to run every item at once"
+        );
+    }
+
     /// A blank agent is the same as none: a fan-out stage names its worker in
     /// the blueprint, and an empty string would otherwise override it with
     /// nothing.
@@ -1888,7 +1898,7 @@ mod tests {
             Some("merge")
         );
         assert_eq!(w.config.max_items, Some(2));
-        assert_eq!(w.max_workers, 7);
+        assert_eq!(w.max_workers, Some(7));
     }
 
     /// The tool is recognised by name and nothing else is.
@@ -1925,7 +1935,7 @@ mod tests {
             w.config.worker,
             WorkerSource::Blueprint(BlueprintRef::parse("researcher").unwrap())
         );
-        assert_eq!(w.max_workers, 3);
+        assert_eq!(w.max_workers, Some(3));
         assert_eq!(
             w.config.merge_stage, None,
             "an ordinary stage has no merge stage to fall into"
@@ -2447,13 +2457,12 @@ mod tests {
         assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
     }
 
-    /// `max_workers = 0` is unlimited: every item starts within the same wake
-    /// (at most `MAX_WORKER_STARTS_PER_PASS` per pass, so the tick is never
-    /// held for the whole queue), and the persisted state carries the cap as
-    /// the largest number there is, which round-trips through JSON like any
-    /// other.
+    /// A fan-out that leaves `max_workers` out has no cap: every item starts
+    /// within the same wake (at most `MAX_WORKER_STARTS_PER_PASS` per pass, so
+    /// the tick is never held for the whole queue), and the persisted state
+    /// carries no cap, which round-trips through JSON like any other.
     #[test]
-    fn collect_with_max_workers_zero_starts_every_item_at_once() {
+    fn collect_with_no_max_workers_starts_every_item_at_once() {
         let mut world = World::new();
         install(&mut world, TestSpawner::ok());
         let e = spawn_parent(
@@ -2472,11 +2481,11 @@ mod tests {
         fan_out_collect(&mut world);
         assert_eq!(world.get::<SubAgentChildren>(e).unwrap().children.len(), 5);
         let state = world.get::<FanOutWaiting>(e).unwrap().to_state();
-        assert_eq!(state.max_workers, usize::MAX);
+        assert_eq!(state.max_workers, None);
         assert!(state.pending.is_empty());
         let json = serde_json::to_string(&state).unwrap();
         let back: FanOutState = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.max_workers, usize::MAX);
+        assert_eq!(back.max_workers, None);
     }
 
     #[test]

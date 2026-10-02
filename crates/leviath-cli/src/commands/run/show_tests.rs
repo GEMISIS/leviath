@@ -170,3 +170,29 @@ async fn a_torn_last_step_is_left_out_and_said_so() {
     );
     assert!(torn_note("r-1", 0).is_none());
 }
+
+/// A run whose graph may never finish is shown with that said first, on
+/// stderr, whichever view is asked for.
+#[tokio::test]
+async fn a_run_that_may_never_finish_still_shows() {
+    use crate::daemon::starter::testing::{manifest_in, run_on_disk};
+    runstate::with_isolated_runs_dir_async("run-show-loop", |_d| async move {
+        let runs = runstate::runs_dir();
+        let agent = tempfile::tempdir().unwrap().keep();
+        let looping = format!(
+            "{}\n[[graph.edges]]\nname = \"again\"\nfrom = \"review\"\nto = \"review\"\n",
+            crate::test_support::inline_coder_manifest()
+        );
+        let manifest = manifest_in(&agent, &looping);
+        let mut registry = leviath_runtime::ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            std::sync::Arc::new(crate::test_support::FakeProvider::new().context_window(100_000)),
+        );
+        let id = run_on_disk(crate::config::Config::default(), registry, &runs, &manifest);
+        let reader = runstate::run_file::open_in(&runstate::run_dir(&id)).unwrap();
+        assert!(!reader.spec().warnings().is_empty());
+        assert!(render(&args(&id)).unwrap().starts_with("[spec]"));
+    })
+    .await;
+}

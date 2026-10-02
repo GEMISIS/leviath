@@ -68,40 +68,44 @@ impl Replay<'_> {
         }
     }
 
+    /// One record: the events it carries, and what it changes of the state.
+    /// A record is one or the other, so each half passes over the kinds that
+    /// belong to the other.
     fn record(&mut self, r: &JournalRecord) {
-        let (moved, events) = match r {
+        let events = self.events(r);
+        let moved = match r {
             JournalRecord::Header { meta, .. } => {
                 self.meta = (**meta).clone();
-                (false, Vec::new())
+                false
             }
             JournalRecord::ContextCheckpoint { snapshot, at } => {
                 self.at = *at;
                 self.context = snapshot.clone();
-                (true, Vec::new())
+                true
             }
             JournalRecord::ContextDiff { delta, at } => {
                 self.at = *at;
                 journal::apply_delta(&mut self.context, delta);
-                (true, Vec::new())
+                true
             }
             JournalRecord::Progress { meta, delta, at } => {
                 self.at = *at;
                 self.meta = (**meta).clone();
                 journal::apply_delta(&mut self.context, delta);
-                (true, Vec::new())
+                true
             }
             JournalRecord::Checkpoint { meta, context, at } => {
                 self.at = *at;
                 self.meta = (**meta).clone();
                 self.context = context.clone();
-                (true, Vec::new())
+                true
             }
             JournalRecord::StatusChanged { status, at } => {
                 self.at = *at;
                 self.meta.status = status.clone();
-                (false, Vec::new())
+                false
             }
-            other => (false, self.events(other)),
+            _ => false,
         };
         self.step(moved, events);
     }
@@ -123,6 +127,9 @@ impl Replay<'_> {
                 }
             }
             JournalRecord::InferenceUsage {
+                kind,
+                stage,
+                iteration,
                 provider,
                 model: name,
                 prompt_tokens,
@@ -131,7 +138,6 @@ impl Replay<'_> {
                 cache_write_tokens,
                 cost_usd,
                 cost_reported_by_provider,
-                kind,
                 at,
                 ..
             } => {
@@ -160,6 +166,9 @@ impl Replay<'_> {
                     model,
                     spend,
                     finish_reason: attempt.map(|a| a.finish_reason),
+                    kind: (*kind).into(),
+                    stage: leviath_runtime::spec::names::StageName::new(stage).ok(),
+                    iteration: u32::try_from(*iteration).unwrap_or(u32::MAX),
                 }]
             }
             JournalRecord::InferenceFailover(f) => {
@@ -267,7 +276,48 @@ impl Replay<'_> {
                 self.at = *at;
                 vec![RunEvent::Log(format!("a model call in stage {stage}"))]
             }
-            // Why a region changed is in the context deltas beside it.
+            // What changed the window, kept as the live lane keeps it, so a
+            // converted run reads its context changes the way it always did.
+            JournalRecord::ContextTransaction {
+                revision_before,
+                revision_after,
+                cause,
+                regions,
+                execution_id,
+                at,
+            } => {
+                self.at = *at;
+                leviath_runtime::runfile::journal_events(
+                    &leviath_runtime::runfile::record::RunRecord::ContextTransaction {
+                        revision_before: revision_before.clone(),
+                        revision_after: revision_after.clone(),
+                        cause: *cause,
+                        regions: regions.clone(),
+                        execution_id: execution_id.clone(),
+                        at: *at,
+                    },
+                )
+            }
+            JournalRecord::ContextChange {
+                region,
+                cause,
+                entries_added,
+                entries_removed,
+                token_delta,
+                at,
+            } => {
+                self.at = *at;
+                vec![RunEvent::ContextNoted(
+                    leviath_runtime::state::journal::ContextNoteState {
+                        region: region.clone(),
+                        cause: (*cause).into(),
+                        entries_added: crate::context::n32(*entries_added),
+                        entries_removed: crate::context::n32(*entries_removed),
+                        token_delta: *token_delta,
+                    },
+                )]
+            }
+            // A change of state carries no event; `record` reads it.
             _ => Vec::new(),
         }
     }

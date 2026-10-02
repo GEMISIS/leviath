@@ -126,8 +126,9 @@ pub struct CompactionDef {
     pub user_prompt_template: Option<String>,
     /// The longest summary, in tokens.
     pub max_summary_tokens: u32,
-    /// Its sampling temperature.
-    pub temperature: f32,
+    /// Its sampling temperature. Kept as the number written, so a `0.2`
+    /// reads back as `0.2`.
+    pub temperature: f64,
 }
 
 /// Where tools run.

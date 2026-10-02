@@ -79,6 +79,13 @@ impl RunSpec {
         }
     }
 
+    /// What may keep the run from ever finishing, read off its graph: the
+    /// warnings a spawn answers with and every view of the run repeats.
+    pub fn warnings(&self) -> crate::spec::issues::SpawnIssues {
+        self.graph
+            .warnings(&crate::spec::issues::SpecPath::root().field("graph"))
+    }
+
     /// The digest the graph's reference to some code resolved to.
     pub fn code_digest(&self, code: &CodeRef) -> Option<&Digest> {
         self.code.iter().find(|(c, _)| c == code).map(|(_, d)| d)

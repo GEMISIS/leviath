@@ -13,6 +13,7 @@ use leviath_core::policy::ToolPolicy;
 use serde::{Deserialize, Serialize};
 
 pub mod edge;
+mod ends;
 pub mod policy;
 pub mod region;
 pub mod stage;

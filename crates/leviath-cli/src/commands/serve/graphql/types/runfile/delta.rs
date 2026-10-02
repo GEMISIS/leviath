@@ -7,6 +7,7 @@
 
 use async_graphql::{ID, SimpleObject, Union};
 use leviath_graphql_derive::mirror;
+use leviath_runtime::state::journal::CallKind;
 use leviath_runtime::state::{Change, RunEvent as CoreEvent, StateDelta as CoreDelta};
 
 use super::super::super::scalars::{BigInt, Timestamp};
@@ -352,11 +353,35 @@ impl From<&Change> for StateChange {
     }
 }
 
-/// A model call finished.
+/// Which kind of model call an inference was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, async_graphql::Enum)]
+pub(crate) enum InferenceCallKind {
+    /// A turn of the stage's own work.
+    Stage,
+    /// A summary of a region.
+    Compaction,
+    /// The call that named the run.
+    Title,
+    /// A call asking the model which edge to take.
+    Routing,
+}
+
+impl From<CallKind> for InferenceCallKind {
+    fn from(kind: CallKind) -> Self {
+        match kind {
+            CallKind::Stage => Self::Stage,
+            CallKind::Compaction => Self::Compaction,
+            CallKind::Title => Self::Title,
+            CallKind::Routing => Self::Routing,
+        }
+    }
+}
+
+/// A model call finished and was billed. One per call.
 #[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct InferenceStep {
-    /// The attempt's id.
+    /// The id of the attempt that answered. Empty when none was recorded.
     pub(crate) attempt: String,
     /// The model that answered, as `provider/model`.
     pub(crate) model: String,
@@ -364,6 +389,22 @@ pub(crate) struct InferenceStep {
     pub(crate) spend: StateSpend,
     /// Why the model stopped, in the provider's words.
     pub(crate) finish_reason: Option<String>,
+    /// Which kind of call it was.
+    pub(crate) kind: InferenceCallKind,
+    /// The stage it was made for. Null for the title call, which no stage
+    /// owns.
+    pub(crate) stage: Option<String>,
+    /// The iteration it was made in.
+    pub(crate) iteration: i32,
+}
+
+/// The run took an edge. One per edge taken, so a step that moved the run
+/// twice lists both moves.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct TransitionStep {
+    /// The move.
+    pub(crate) transition: StageTransition,
 }
 
 /// A model call moved to a fallback model.
@@ -457,6 +498,8 @@ pub(crate) enum StepEvent {
     ContextCommitted(ContextCommittedStep),
     /// One region changed, with its cause.
     ContextNoted(ContextNotedStep),
+    /// The run took an edge.
+    Transition(TransitionStep),
 }
 
 impl From<&CoreEvent> for StepEvent {
@@ -467,11 +510,20 @@ impl From<&CoreEvent> for StepEvent {
                 model,
                 spend,
                 finish_reason,
+                kind,
+                stage,
+                iteration,
             } => Self::Inference(InferenceStep {
                 attempt: attempt.clone(),
                 model: model.to_string(),
                 spend: StateSpend::from(spend),
                 finish_reason: finish_reason.clone(),
+                kind: InferenceCallKind::from(*kind),
+                stage: stage.as_ref().map(ToString::to_string),
+                iteration: super::saturating(*iteration),
+            }),
+            CoreEvent::Transition(taken) => Self::Transition(TransitionStep {
+                transition: StageTransition::from(taken),
             }),
             CoreEvent::Failover { from, to, reason } => Self::Failover(FailoverStep {
                 from_model: from.to_string(),

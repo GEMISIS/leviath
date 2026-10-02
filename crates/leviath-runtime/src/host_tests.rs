@@ -292,6 +292,21 @@ impl TestStarter {
             _ => "r1".to_string(),
         };
         let mut spec = (*spec(blueprint()).0).clone();
+        // A run named for a loop gets one: an edge from its only stage back
+        // to itself, which nothing caps.
+        if name.starts_with("loops") {
+            let stage = spec.graph.stages[0].name.clone();
+            spec.graph.edges.push(crate::spec::graph::EdgeDef {
+                name: crate::spec::names::EdgeName::new("again").unwrap(),
+                from: stage.clone(),
+                to: stage,
+                when: crate::spec::graph::EdgeCondition::Always,
+                hint: None,
+                carry: crate::spec::graph::EdgeCarry::Direct,
+                gate: None,
+                stuck: None,
+            });
+        }
         spec.run_id = crate::spec::names::RunId::new(name).unwrap();
         spec
     }
@@ -1661,6 +1676,39 @@ async fn pause_resume_cancel_by_run_id() {
     );
 }
 
+/// A run whose graph can never finish still starts. The spawn answers with
+/// why, the listing row repeats it, and it is the first line of the entry
+/// stage's log.
+#[tokio::test]
+async fn a_run_that_may_never_finish_starts_and_says_so_everywhere() {
+    let mut host = host_with(vec![]);
+    host.set_starter(TestStarter::new(Starts::Place));
+    let spawned = ask(&mut host, |reply| ControlOp::Spawn {
+        request: named("loops-1"),
+        reply,
+    })
+    .await
+    .expect("a run that may never finish still starts");
+    assert_eq!(spawned.run_id.as_str(), "loops-1");
+    let said: Vec<String> = spawned.warnings.iter().map(ToString::to_string).collect();
+    assert_eq!(said.len(), 2, "{said:?}");
+    assert!(said[0].contains("has an edge back to itself"), "{said:?}");
+    let row = host
+        .list()
+        .into_iter()
+        .find(|e| e.run_id == "loops-1")
+        .expect("listed");
+    assert_eq!(row.may_never_finish, said);
+    let entity = host.live_entity("loops-1").unwrap().entity();
+    let logs = &host
+        .world
+        .world()
+        .get::<crate::pipeline::StageIoBuffer>(entity)
+        .expect("a new run starts with its notes")
+        .logs;
+    assert_eq!(logs[0], (0, format!("[warning] {}", said[0])));
+}
+
 #[tokio::test]
 async fn spawn_op_places_the_started_run_and_registers_it() {
     let mut host = host_with(vec![]);
@@ -1672,7 +1720,7 @@ async fn spawn_op_places_the_started_run_and_registers_it() {
         reply,
     })
     .await;
-    assert_eq!(result.unwrap().as_str(), "r1");
+    assert_eq!(result.unwrap().run_id.as_str(), "r1");
     assert_eq!(
         *starter.callers.lock().unwrap(),
         vec![crate::spec::env::Caller::TopLevel]
@@ -1890,7 +1938,7 @@ async fn subagent_spawn_links_child_and_registers() {
         reply,
     })
     .await;
-    assert_eq!(result.unwrap().as_str(), "child");
+    assert_eq!(result.unwrap().run_id.as_str(), "child");
 
     // The child was started as the parent's, under the parent's policy.
     let callers = starter.callers.lock().unwrap().clone();
@@ -2954,7 +3002,7 @@ async fn serve_places_a_top_level_start() {
     let result = rx.await.unwrap();
     drop(op_tx); // close the channel so serve() returns
     handle.await.unwrap();
-    assert_eq!(result.unwrap().as_str(), "rp");
+    assert_eq!(result.unwrap().run_id.as_str(), "rp");
 }
 
 #[tokio::test]
@@ -2976,7 +3024,7 @@ async fn serve_places_a_subagent_start() {
             reply: stx,
         })
         .unwrap();
-    assert_eq!(srx.await.unwrap().unwrap().as_str(), "child");
+    assert_eq!(srx.await.unwrap().unwrap().run_id.as_str(), "child");
     shutdown.notify_one();
     drop(op_tx);
     handle.await.unwrap();
@@ -3811,6 +3859,7 @@ async fn a_run_is_listed_once_however_often_it_is_recorded() {
         empty_output: false,
         read_paths: None,
         has_final_output: false,
+        may_never_finish: Vec::new(),
     };
     host.record_finished(entry(AgentStatus::Cancelled), 100);
     host.record_finished(entry(AgentStatus::Complete), 200);
@@ -3847,6 +3896,7 @@ async fn the_listing_of_finished_runs_is_capped() {
                 empty_output: false,
                 read_paths: None,
                 has_final_output: false,
+                may_never_finish: Vec::new(),
             },
             100,
         );
@@ -4463,14 +4513,14 @@ async fn pausing_a_fan_out_parent_holds_its_worker_queue() {
                         crate::spec::names::StageName::new("work").unwrap(),
                     ),
                     merge_stage: None,
-                    max_workers: 1,
+                    max_workers: Some(1),
                     on_worker_failure: Default::default(),
                     split_prompt: String::new(),
                     results_region: None,
                     max_items: None,
                     max_attempts: None,
                 },
-                max_workers: 1,
+                max_workers: Some(1),
                 pending: vec![crate::fanout::WorkItem::default()],
                 active: vec![("item-1".to_string(), "worker-fo".to_string())],
                 summaries: Vec::new(),
@@ -4546,14 +4596,14 @@ async fn wait_reason_counts_outstanding_fan_out_workers() {
                         crate::spec::names::StageName::new("work").unwrap(),
                     ),
                     merge_stage: None,
-                    max_workers: 2,
+                    max_workers: Some(2),
                     on_worker_failure: Default::default(),
                     split_prompt: String::new(),
                     results_region: None,
                     max_items: None,
                     max_attempts: None,
                 },
-                max_workers: 2,
+                max_workers: Some(2),
                 pending: vec![
                     crate::fanout::WorkItem::default(),
                     crate::fanout::WorkItem::default(),

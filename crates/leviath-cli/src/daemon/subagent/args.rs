@@ -296,5 +296,6 @@ fn default_fix(issue: &SpawnIssue) -> &'static str {
         (IssueCode::NotAllowed, _) => "leave it out; this run may not ask for it",
         (IssueCode::Unavailable, _) => "try again shortly, or pick another",
         (IssueCode::Changed, _) => "start a fresh run",
+        (IssueCode::MayNeverFinish, _) => "give the stages named a way to end the run",
     }
 }

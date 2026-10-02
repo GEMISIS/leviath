@@ -295,7 +295,7 @@ async fn a_real_run_reaches_a_websocket_subscriber() {
         .spawn(request)
         .await
         .expect("the daemon answered the spawn");
-    let ControlResponse::Spawned { run_id } = reply else {
+    let ControlResponse::Spawned { run_id, .. } = reply else {
         panic!("the spawn was refused: {reply:?}");
     };
 

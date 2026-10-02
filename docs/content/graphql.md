@@ -1038,13 +1038,15 @@ mutation Spawn($since: String!) {
     }
     output: { format: "markdown", instructions: "one page, no preamble" }
   }) {
-    ... on SpawnedOutput { runId run { status } }
+    ... on SpawnedOutput { runId warnings { path message } run { status } }
     ... on SpawnRejectedOutput { issues { path code message expected got hint known } }
   }
 }
 ```
 
-The answer is a union. `SpawnedOutput` carries the new run's id. `SpawnRejectedOutput` carries
+The answer is a union. `SpawnedOutput` carries the new run's id, and `warnings`: stages the run
+can reach and never leave, each with the code `MAY_NEVER_FINISH`. The run started anyway.
+`SpawnRejectedOutput` carries
 every problem with the request at once, each at its own path, so one retry can fix them all. A
 refused request is an answer, not a GraphQL error. An issue's `path` names the runtime's request
 field in snake case, such as `inputs.max_items` or `launch.max_depth`.

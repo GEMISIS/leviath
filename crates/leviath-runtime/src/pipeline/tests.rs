@@ -130,7 +130,7 @@ fn stage_from_setup(name: &str, setup: &StageSetup) -> crate::spec::graph::Stage
     let mut s = tg::stage(name);
     s.system_prompt = setup.system_prompt.clone();
     let cfg = &setup.inference_config;
-    s.model.params.temperature = cfg.temperature;
+    s.model.params.temperature = cfg.temperature.map(f64::from);
     s.model.params.max_output_tokens = cfg.max_output_tokens.clone();
     for (k, v) in &cfg.extra_params {
         s.model.params.extra.insert(k.clone(), param_scalar(v));
@@ -3528,14 +3528,14 @@ fn dispatch_persistence_reads_a_parent_parked_on_its_fan_out() {
                     crate::spec::names::StageName::new("w").unwrap(),
                 ),
                 merge_stage: None,
-                max_workers: 1,
+                max_workers: Some(1),
                 on_worker_failure: Default::default(),
                 split_prompt: String::new(),
                 results_region: None,
                 max_items: None,
                 max_attempts: None,
             },
-            max_workers: 1,
+            max_workers: Some(1),
             pending: vec![],
             active: vec![],
             summaries: vec![],
@@ -5664,6 +5664,61 @@ fn refresh_advertised_tools_updates_live_and_catalog() {
     assert_eq!(override_names(&world, entity, 1), vec!["other"]);
     // Marker consumed.
     assert!(world.get::<ToolsNeedRefresh>(entity).is_none());
+}
+
+/// A stage told the shape of its answer keeps being told it after its tools
+/// are looked up again: the fresh list comes from the catalog, which knows the
+/// tool and not the shape, so `submit_output` keeps the description its plan
+/// gave it. A stage that never had the tool has nothing to keep.
+#[test]
+fn a_refresh_keeps_the_output_shape_in_submit_outputs_description() {
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(Arc::new(RefreshService(vec![
+        "submit_output",
+        "new_tool",
+    ]))));
+    let mut told = stage_inf(&["submit_output"]);
+    told.tools[0].description = "Submit a2ui: follow this example".to_string();
+    let shaped = world
+        .spawn((
+            StageCursor { index: 0 },
+            told,
+            overrides(&[]),
+            ToolsNeedRefresh,
+        ))
+        .id();
+    let plain = world
+        .spawn((
+            StageCursor { index: 0 },
+            stage_inf(&["old"]),
+            overrides(&[]),
+            ToolsNeedRefresh,
+        ))
+        .id();
+    run_refresh(&mut world);
+    let described = |e: Entity| -> Vec<(String, String)> {
+        world
+            .get::<StageInference>(e)
+            .unwrap()
+            .tools
+            .iter()
+            .map(|t| (t.name.clone(), t.description.clone()))
+            .collect()
+    };
+    assert_eq!(
+        described(shaped),
+        vec![
+            (
+                "submit_output".to_string(),
+                "Submit a2ui: follow this example".to_string()
+            ),
+            ("new_tool".to_string(), String::new()),
+        ]
+    );
+    assert_eq!(
+        described(plain)[0],
+        ("submit_output".to_string(), String::new())
+    );
 }
 
 #[test]
@@ -11099,7 +11154,7 @@ fn enforce_max_iterations_leaves_a_fan_out_stage_alone() {
                 crate::spec::names::BlueprintRef::parse("w").unwrap(),
             ),
             merge_stage: None,
-            max_workers: 4,
+            max_workers: Some(4),
             on_worker_failure: crate::spec::graph::WorkerFailure::Continue,
             split_prompt: "split".to_string(),
             results_region: None,

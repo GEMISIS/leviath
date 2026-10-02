@@ -61,6 +61,9 @@ pub(crate) struct ValidateReport {
     pub warnings: usize,
     /// How many are notes: things worth seeing that are not problems.
     pub notes: usize,
+    /// Stages a run of this blueprint could reach and never leave, one line
+    /// each. The blueprint still runs; `--deny-warnings` fails on these too.
+    pub may_never_finish: Vec<String>,
 }
 
 impl ValidateReport {
@@ -68,19 +71,22 @@ impl ValidateReport {
     fn linted(
         blueprint: BlueprintSummary,
         findings: Vec<LintFinding>,
+        may_never_finish: Vec<String>,
         deny_warnings: bool,
     ) -> Self {
         let count = |want: LintSeverity| findings.iter().filter(|f| f.severity == want).count();
         let (errors, warnings) = (count(LintSeverity::Error), count(LintSeverity::Warning));
+        let warned = warnings + may_never_finish.len();
         Self {
             // Mirrors the exit-status rule exactly: notes never fail a build.
-            valid: errors == 0 && !(deny_warnings && warnings > 0),
+            valid: errors == 0 && !(deny_warnings && warned > 0),
             blueprint: Some(blueprint),
             error: None,
             errors,
             warnings,
             notes: count(LintSeverity::Note),
             findings,
+            may_never_finish,
         }
     }
 
@@ -94,6 +100,7 @@ impl ValidateReport {
             errors: 1,
             warnings: 0,
             notes: 0,
+            may_never_finish: Vec::new(),
         }
     }
 
@@ -180,9 +187,18 @@ fn execute_reporting_outcome(
         }
     };
 
+    // A blueprint whose runs may never finish is valid, and said so at the
+    // top of the report where it cannot be missed.
+    let never = checked
+        .graph
+        .warnings(&leviath_runtime::spec::issues::SpecPath::root().field("graph"));
+    let may_never_finish: Vec<String> = never.iter().map(ToString::to_string).collect();
     // The human report is several separate printers. JSON is one document, so
     // it is built after the lint and emitted once, and none of these run.
     if !args.json {
+        for line in crate::commands::run::request::warnings_report(&never) {
+            println!("{line}");
+        }
         for line in toml_blueprint::success_lines(&checked) {
             println!("{line}");
         }
@@ -201,12 +217,16 @@ fn execute_reporting_outcome(
             let report = ValidateReport::linted(
                 BlueprintSummary::of(&checked),
                 findings,
+                may_never_finish,
                 args.deny_warnings,
             );
             report.print();
-            (report.errors, report.warnings)
+            (report.errors, report.warnings + never.len())
         }
-        false => print_findings(&findings),
+        false => {
+            let (errors, warnings) = print_findings(&findings);
+            (errors, warnings + never.len())
+        }
     };
 
     if errors > 0 || (args.deny_warnings && warnings > 0) {
@@ -1373,7 +1393,8 @@ tools = ["submit_output"]
 
     #[test]
     fn json_report_of_a_clean_manifest_is_valid_and_names_its_stages() {
-        let report = ValidateReport::linted(summary(&clean_manifest()), Vec::new(), false);
+        let report =
+            ValidateReport::linted(summary(&clean_manifest()), Vec::new(), Vec::new(), false);
         assert!(report.valid);
         assert_eq!(report.error, None);
         let summary = report.blueprint.expect("a checked blueprint has a summary");
@@ -1393,7 +1414,8 @@ tools = ["submit_output"]
             finding(LintSeverity::Warning, "b"),
             finding(LintSeverity::Note, "c"),
         ];
-        let report = ValidateReport::linted(summary(&clean_manifest()), findings, false);
+        let report =
+            ValidateReport::linted(summary(&clean_manifest()), findings, Vec::new(), false);
         assert_eq!((report.errors, report.warnings, report.notes), (1, 1, 1));
         // An error is fatal whatever --deny-warnings says.
         assert!(!report.valid);
@@ -1402,8 +1424,49 @@ tools = ["submit_output"]
     #[test]
     fn json_report_is_valid_with_a_warning_until_deny_warnings() {
         let warning = || vec![finding(LintSeverity::Warning, "b")];
-        assert!(ValidateReport::linted(summary(&clean_manifest()), warning(), false).valid);
-        assert!(!ValidateReport::linted(summary(&clean_manifest()), warning(), true).valid);
+        assert!(
+            ValidateReport::linted(summary(&clean_manifest()), warning(), Vec::new(), false).valid
+        );
+        assert!(
+            !ValidateReport::linted(summary(&clean_manifest()), warning(), Vec::new(), true).valid
+        );
+    }
+
+    /// A blueprint whose runs can never finish is still valid: 0.6.4 refused
+    /// it, and now it is warned about, at the top of the report and in the
+    /// JSON, and `--deny-warnings` fails on it.
+    #[test]
+    fn a_blueprint_that_never_finishes_is_valid_and_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let looping = format!(
+            "{}\n[[graph.edges]]\nname = \"again\"\nfrom = \"main\"\nto = \"main\"\n",
+            clean_manifest()
+        );
+        write_manifest(dir.path(), &looping);
+        for json in [false, true] {
+            let mut args = args_for(dir.path());
+            args.json = json;
+            let outcome = execute_reporting_outcome(&args, None, None).unwrap();
+            assert_eq!(format!("{outcome:?}"), "Success");
+            args.deny_warnings = true;
+            let outcome = execute_reporting_outcome(&args, None, None).unwrap();
+            assert_eq!(
+                format!("{outcome:?}"),
+                "LintFailed { errors: 0, warnings: 2 }"
+            );
+        }
+        let report = ValidateReport::linted(
+            summary(&clean_manifest()),
+            Vec::new(),
+            vec!["graph.edges: may never finish: it loops".to_string()],
+            true,
+        );
+        assert!(!report.valid);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["may_never_finish"],
+            serde_json::json!(["graph.edges: may never finish: it loops"])
+        );
     }
 
     #[test]
@@ -1411,7 +1474,7 @@ tools = ["submit_output"]
         // Notes never fail a build. This is the rule most likely to drift, since
         // the JSON `valid` flag restates it in a second place.
         let notes = vec![finding(LintSeverity::Note, "c")];
-        assert!(ValidateReport::linted(summary(&clean_manifest()), notes, true).valid);
+        assert!(ValidateReport::linted(summary(&clean_manifest()), notes, Vec::new(), true).valid);
     }
 
     #[test]
@@ -1427,6 +1490,7 @@ tools = ["submit_output"]
         let report = ValidateReport::linted(
             summary(&clean_manifest()),
             vec![finding(LintSeverity::Error, "unknown-tool")],
+            Vec::new(),
             false,
         );
         let value: serde_json::Value =
@@ -1449,6 +1513,7 @@ tools = ["submit_output"]
     fn json_report_names_the_accepted_inputs() {
         let report = ValidateReport::linted(
             summary(&toml_blueprint::tests::named_inputs_manifest()),
+            Vec::new(),
             Vec::new(),
             false,
         );

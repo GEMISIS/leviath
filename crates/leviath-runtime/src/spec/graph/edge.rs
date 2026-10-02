@@ -104,10 +104,13 @@ pub struct GateDef {
     /// What the model is told when the gate holds it back.
     #[serde(default)]
     pub message: Option<String>,
-    /// The region the gate's message lands in.
+    /// For `require_modifications`: a region whose holding something counts
+    /// as the stage's change, so a stage that writes its work there passes
+    /// without writing a file.
     #[serde(default)]
     pub region: Option<RegionName>,
-    /// Tools the stage must have called.
+    /// For `require_modifications`: tools that count as changing a file,
+    /// beside `write_file` and `edit_file`. Only a tool the stage has counts.
     #[serde(default)]
     pub tools: Vec<ToolName>,
     /// How many times the gate holds the run back before letting it through.

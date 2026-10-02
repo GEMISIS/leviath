@@ -130,6 +130,22 @@ fn every_word_crosses_over() {
         (ContextCause::Resume, CauseState::Resume),
         (ContextCause::Framework, CauseState::Framework),
     ] {
-        assert_eq!(cause(c), state);
+        assert_eq!(CauseState::from(c), state);
+    }
+}
+
+/// Each kind of billed call keeps its kind in the run file.
+#[test]
+fn every_kind_of_call_is_kept_as_itself() {
+    use crate::runfile::record::InferenceKind;
+    use crate::state::journal::CallKind;
+    for (kind, kept) in [
+        (InferenceKind::Stage, CallKind::Stage),
+        (InferenceKind::Compaction, CallKind::Compaction),
+        (InferenceKind::Title, CallKind::Title),
+        (InferenceKind::Routing, CallKind::Routing),
+    ] {
+        assert_eq!(CallKind::from(kind), kept);
+        assert_eq!(kept.label(), kind.label());
     }
 }

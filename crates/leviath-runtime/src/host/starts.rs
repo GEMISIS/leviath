@@ -13,7 +13,7 @@
 use super::*;
 use crate::spec::env::Caller;
 use crate::spec::issues::SpawnIssues;
-use crate::spec::names::RunId;
+
 use crate::spec::request::SpawnRequest;
 use crate::spec::summary::SpawnSummary;
 use crate::state::RunState;
@@ -26,7 +26,7 @@ pub(super) struct Started {
     /// The run that asked for it, for a child run.
     parent: Option<String>,
     /// Who is waiting to hear how it went.
-    reply: oneshot::Sender<Result<RunId, SpawnIssues>>,
+    reply: oneshot::Sender<Result<crate::spec::summary::Spawned, SpawnIssues>>,
     /// The starter that made it, which brings the world up to date before
     /// the run is placed in it.
     starter: Arc<dyn RunStarter>,
@@ -40,7 +40,7 @@ impl WorldHost {
         request: SpawnRequest,
         caller: Caller,
         parent: Option<String>,
-        reply: oneshot::Sender<Result<RunId, SpawnIssues>>,
+        reply: oneshot::Sender<Result<crate::spec::summary::Spawned, SpawnIssues>>,
     ) {
         let Some(starter) = self.starter.clone() else {
             let _ = reply.send(Err(host_refusal("this host cannot start runs")));
@@ -124,6 +124,17 @@ impl WorldHost {
             }
         };
         let run_id = prepared.spec.run_id.clone();
+        let warnings = prepared.spec.warnings();
+        // Said here as well as to the caller, who may not be watching: a run
+        // that loops for ever is found by reading the daemon's log.
+        let said = warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !warnings.is_empty() {
+            tracing::warn!(run_id = %run_id, warnings = %said, "a run started that may never finish");
+        }
         // Insertion runs outside the pipeline schedule, so it is not covered by
         // `run_isolated`'s panic guard: a binding that panics as it is applied
         // would otherwise unwind the serve task and take the daemon with it.
@@ -147,7 +158,7 @@ impl WorldHost {
         if let Some(parent) = parent {
             self.link_child(&parent, entity);
         }
-        let _ = reply.send(Ok(run_id));
+        let _ = reply.send(Ok(crate::spec::summary::Spawned { run_id, warnings }));
     }
 
     /// Place every start still out, waiting for each to come back. For a

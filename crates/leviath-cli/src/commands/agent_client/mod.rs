@@ -631,9 +631,16 @@ impl Server {
             Ok(Ok(request)) => request,
         };
         match self.control.spawn(request).await {
-            Ok(ControlResponse::Spawned { run_id }) => {
-                self.session.as_mut().expect("session present").run =
-                    SessionRun::Running(run_id.clone());
+            Ok(ControlResponse::Spawned { run_id, warnings }) => {
+                let session = self.session.as_mut().expect("session present");
+                session.run = SessionRun::Running(run_id.clone());
+                // Ahead of anything the run says, so a host's user sees why a
+                // run that never stops is not stopping.
+                let session_id = session.session_id.clone();
+                let report = crate::commands::run::request::warnings_report(&warnings);
+                for line in report {
+                    self.emit_chunk(&session_id, &format!("{line}\n")).await;
+                }
                 RunStart::Ready(run_id)
             }
             _ => RunStart::SpawnFailed,
