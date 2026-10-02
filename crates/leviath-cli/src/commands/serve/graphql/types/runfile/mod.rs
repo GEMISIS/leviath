@@ -8,6 +8,7 @@
 
 pub(crate) mod context;
 pub(crate) mod delta;
+pub(crate) mod files;
 pub(crate) mod graph;
 pub(crate) mod journal;
 pub(crate) mod read;

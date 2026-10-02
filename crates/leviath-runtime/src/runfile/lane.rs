@@ -5,12 +5,15 @@
 //! [`RunFileWriter`] per live run, which diffs the state against the last
 //! step and appends the delta. The journal records the lane already carries
 //! (model calls, tool calls, answers, messages, failovers) become the
-//! [`RunEvent`]s of the next delta.
+//! [`RunEvent`]s of the next delta. The files the lane writes beside the run
+//! file (the answer, the stage logs, the taint audit) and the stored parts
+//! the run's tools wrote under `blobs/` are named in the step's
+//! [`RunFiles`] and blob list, never copied in.
 //!
 //! [`inspect`]: crate::state::inspect::inspect
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::runfile::record::RunRecord;
@@ -20,9 +23,10 @@ use super::error::RunFileError;
 use super::frames::OwnerFrame;
 use super::writer::{CheckpointPolicy, RunFileWriter};
 use crate::spec::env::CodeFiles;
-use crate::spec::names::{Digest, ModelId, ModelRef, ProviderName};
+use crate::spec::names::{ModelId, ModelRef, ProviderName};
 use crate::spec::run_spec::RunSpec;
-use crate::state::context::{PartBody, ToolCallState};
+use crate::state::context::ToolCallState;
+use crate::state::files::{RunFiles, StageFile};
 use crate::state::journal::{ContextCommitState, SettledState};
 use crate::state::{RunEvent, RunState, RunStatus, Spend, ToolResultState};
 
@@ -43,6 +47,8 @@ pub(crate) struct RunFileStep {
 pub(crate) struct RunFileLane {
     writers: HashMap<String, RunFileWriter>,
     events: HashMap<String, Vec<RunEvent>>,
+    /// Per run, the files written beside its run file since its last step.
+    written: HashMap<String, RunFiles>,
     /// Per run, the attempts that answered and are not yet billed.
     answered: HashMap<String, Answered>,
     owner: OwnerFrame,
@@ -72,6 +78,7 @@ impl RunFileLane {
         Self {
             writers: HashMap::new(),
             events: HashMap::new(),
+            written: HashMap::new(),
             answered: HashMap::new(),
             owner: OwnerFrame {
                 machine_id: machine_id.to_string(),
@@ -87,7 +94,18 @@ impl RunFileLane {
     pub(crate) fn forget(&mut self, run_id: &str) {
         self.writers.remove(run_id);
         self.events.remove(run_id);
+        self.written.remove(run_id);
         self.answered.remove(run_id);
+    }
+
+    /// Note that the files `named` names were written beside `run_id`'s run
+    /// file, for its next step to name.
+    pub(crate) fn wrote(&mut self, run_id: &str, named: RunFiles) {
+        if named == RunFiles::default() {
+            return;
+        }
+        let slot = self.written.entry(run_id.to_string()).or_default();
+        overlay(slot, named);
     }
 
     /// Keep what `record` says happened, for the run's next step: the next
@@ -99,14 +117,28 @@ impl RunFileLane {
         push_events(buffered, answered, record);
     }
 
-    /// The runs with something noted that no step has written yet.
+    /// The runs with something noted that no step has written yet: an
+    /// event, or a file written beside a run whose file is closed (one that
+    /// finished). A live run's files are named by its next step.
     pub(crate) fn noted(&self) -> Vec<String> {
-        let mut runs: Vec<String> = self
+        let events = self
             .events
             .iter()
             .filter(|(_, events)| !events.is_empty())
-            .map(|(run_id, _)| run_id.clone())
-            .collect();
+            .map(|(run_id, _)| run_id);
+        let files = self
+            .written
+            .keys()
+            .filter(|run_id| !self.writers.contains_key(*run_id));
+        let mut runs: Vec<String> = events.chain(files).cloned().collect();
+        runs.sort();
+        runs.dedup();
+        runs
+    }
+
+    /// The runs with files written beside them that no step has named yet.
+    pub(crate) fn unnamed(&self) -> Vec<String> {
+        let mut runs: Vec<String> = self.written.keys().cloned().collect();
         runs.sort();
         runs
     }
@@ -126,8 +158,9 @@ impl RunFileLane {
         run_id: &str,
     ) -> Result<Option<u64>, RunFileError> {
         let events = self.events.remove(run_id).unwrap_or_default();
+        let written = self.written.remove(run_id).unwrap_or_default();
         let slot = self.writers.remove(run_id);
-        if events.is_empty() {
+        if events.is_empty() && written == RunFiles::default() {
             if let Some(writer) = slot {
                 self.writers.insert(run_id.to_string(), writer);
             }
@@ -148,6 +181,7 @@ impl RunFileLane {
             };
             opened.and_then(|mut writer| {
                 let mut state = writer.state().clone();
+                name_files(&mut state, writer.state(), written);
                 fold_finished(&mut state, &events, Started::Elsewhere);
                 let finished = matches!(
                     state.status,
@@ -189,13 +223,14 @@ impl RunFileLane {
         let run_dir = runs_dir.join(&step.run_id);
         let slot = self.writers.remove(&step.run_id);
         let events = self.events.remove(&step.run_id).unwrap_or_default();
+        let written = self.written.remove(&step.run_id).unwrap_or_default();
         let owner = OwnerFrame {
             at: step.at,
             ..self.owner.clone()
         };
         let policy = self.policy;
         let run_id = step.run_id.clone();
-        let job = move || write_step(slot, &run_dir, step, events, owner, policy);
+        let job = move || write_step(slot, &run_dir, step, (events, written), owner, policy);
         // Nothing on the blocking side panics: frames always encode and every
         // failure is a returned error.
         let (writer, written) = tokio::task::spawn_blocking(job)
@@ -213,7 +248,7 @@ fn write_step(
     slot: Option<RunFileWriter>,
     run_dir: &Path,
     mut step: RunFileStep,
-    events: Vec<RunEvent>,
+    (events, written): (Vec<RunEvent>, RunFiles),
     owner: OwnerFrame,
     policy: CheckpointPolicy,
 ) -> (Option<RunFileWriter>, Result<Option<u64>, RunFileError>) {
@@ -224,7 +259,8 @@ fn write_step(
     );
     fold_finished(&mut step.state, &events, Started::InThisState);
     let result = writer_for(slot, &path, &step, owner, policy).and_then(|mut writer| {
-        store_new_blobs(&mut writer, run_dir, &step.state)?;
+        name_files(&mut step.state, writer.state(), written);
+        warn_missing_blobs(run_dir, writer.state(), &step.state);
         let seq = writer.record(step.state, step.at, events)?;
         Ok((writer, seq))
     });
@@ -263,37 +299,46 @@ fn writer_for(
     Ok(writer)
 }
 
-/// Copy into the file every stored part the state names that it does not
-/// hold yet, from the run's blob directory. A part whose bytes are not there
-/// (a world keeping its blobs in memory) is left out and read as missing.
-fn store_new_blobs(
-    writer: &mut RunFileWriter,
-    run_dir: &Path,
-    state: &RunState,
-) -> Result<(), RunFileError> {
-    let blobs = blob_dir(run_dir);
-    let stored = state
-        .context
-        .regions
-        .iter()
-        .flat_map(|r| &r.entries)
-        .flat_map(|e| &e.parts)
-        .filter_map(|p| match &p.body {
-            PartBody::Stored(blob) => Some(&blob.digest),
-            PartBody::Inline(_) => None,
-        });
-    let mut missing: Vec<&Digest> = stored.filter(|d| !writer.has_blob(d)).collect();
-    missing.dedup();
-    for digest in missing {
-        if let Ok(bytes) = std::fs::read(blobs.join(digest.as_str())) {
-            writer.add_blob(digest, &bytes)?;
-        }
-    }
-    Ok(())
+/// Name in `state` the files beside the run file: what `prior`, the last
+/// step written, named, with what was `written` since on top, and every
+/// stored part `state`'s context holds added to its blob list.
+fn name_files(state: &mut RunState, prior: &RunState, written: RunFiles) {
+    state.files = prior.files.clone();
+    overlay(&mut state.files, written);
+    state.blobs = prior.blobs.clone();
+    crate::state::files::note_blobs(&mut state.blobs, &state.context);
 }
 
-fn blob_dir(run_dir: &Path) -> PathBuf {
-    run_dir.join(leviath_core::files::BLOBS_DIR)
+/// `named` on top of `files`: each file it names replaces the one `files`
+/// named in its place.
+fn overlay(files: &mut RunFiles, named: RunFiles) {
+    if let Some(answer) = named.final_output {
+        files.final_output = Some(answer);
+    }
+    for stage in named.stages {
+        let which = [
+            (StageFile::Output, stage.output),
+            (StageFile::Logs, stage.logs),
+            (StageFile::TaintAudit, stage.taint_audit),
+        ];
+        for (which, file) in which {
+            if let Some(file) = file {
+                files.set_stage_file(stage.index, which, file);
+            }
+        }
+    }
+}
+
+/// Say, once per part, when a stored part a step names first has no file
+/// under `blobs/`: a reader of the run is refused it by name.
+fn warn_missing_blobs(run_dir: &Path, prior: &RunState, state: &RunState) {
+    for blob in state.blobs.iter().skip(prior.blobs.len()) {
+        let path = super::reader::blob_path(run_dir, &blob.digest);
+        if !path.is_file() {
+            let shown = path.display().to_string();
+            tracing::warn!(path = %shown, "a stored part the run names has no file beside its run file");
+        }
+    }
 }
 
 /// Where the state a step records stands against a batch the step's events

@@ -178,7 +178,7 @@ fn a_reopened_writer_carries_on_counting_toward_its_next_checkpoint() {
 }
 
 #[test]
-fn blobs_and_code_are_stored_once() {
+fn code_is_stored_once() {
     let (_dir, path) = temp();
     let mut w = RunFileWriter::create(
         &path,
@@ -188,19 +188,13 @@ fn blobs_and_code_are_stored_once() {
         Default::default(),
     )
     .unwrap();
-    let d = Digest::of(b"png");
-    assert!(w.add_blob(&d, b"png").unwrap());
-    assert!(!w.add_blob(&d, b"png").unwrap());
-    assert!(w.has_blob(&d));
     let c = Digest::of(b"code");
     assert!(w.add_code(&c, b"code").unwrap());
     assert!(!w.add_code(&c, b"code").unwrap());
     let r = RunFileReader::open(&path).unwrap();
-    assert_eq!(r.blob(&d).unwrap(), Some(b"png".to_vec()));
     assert_eq!(r.code_files().unwrap(), code());
     // A reopened writer knows what the file already holds.
     let w = RunFileWriter::open(&path, Default::default()).unwrap();
-    assert!(w.has_blob(&d));
     assert!(w.has_code(&c));
 }
 
@@ -235,10 +229,9 @@ fn a_failed_write_leaves_the_file_as_it_was() {
     let before = w.len();
     break_writes(&mut w);
     assert!(matches!(
-        w.add_blob(&Digest::of(b"x"), b"x").unwrap_err().kind,
+        w.add_code(&Digest::of(b"y"), b"y").unwrap_err().kind,
         RunFileErrorKind::Io(_)
     ));
-    assert!(w.add_code(&Digest::of(b"y"), b"y").is_err());
     assert!(w.record(changed(&initial(), "t"), 1, vec![]).is_err());
     assert!(w.checkpoint(&initial()).is_err());
     assert_eq!(std::fs::metadata(&path).unwrap().len(), before);

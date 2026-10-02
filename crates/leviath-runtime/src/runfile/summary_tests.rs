@@ -41,7 +41,7 @@ fn a_run_is_listed_as_of_its_last_step() {
     next.title = Some("A title".to_string());
     next.totals.spend.prompt_tokens = 42;
     next.final_output = Some(FinalOutputState {
-        content: "the answer".to_string(),
+        bytes: 10,
         format: None,
         stage: next.cursor.stage.clone(),
         submitted_at: 7,
@@ -56,7 +56,8 @@ fn a_run_is_listed_as_of_its_last_step() {
     assert_eq!(meta.title.as_deref(), Some("A title"));
     assert_eq!(meta.prompt_tokens, 42);
     assert_eq!(meta.updated_at, 1234);
-    assert_eq!(meta.final_output.unwrap().submitted_at, 7);
+    let answer = meta.final_output.unwrap();
+    assert_eq!((answer.submitted_at, answer.bytes), (7, 10));
 }
 
 /// Why a run has no title, and how many of its read paths were granted, are

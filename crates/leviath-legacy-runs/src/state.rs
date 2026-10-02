@@ -15,9 +15,9 @@ use leviath_runtime::spec::names::{InputName, RunId, StageName};
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::context::ToolCallState;
 use leviath_runtime::state::{
-    Clock, FanOutState, FinalOutputState, Flags, OpenInteraction, PendingBatch, PipelinePhase,
-    RunState, RunStatus, Spend, StageProgress, StageRecord, StageStatus, ToolResultState, Totals,
-    VisitRecord, WorkItemState,
+    BlobFile, Clock, FanOutState, FileRef, FinalOutputState, Flags, OpenInteraction, PendingBatch,
+    PipelinePhase, RunFiles, RunState, RunStatus, Spend, StageFile, StageProgress, StageRecord,
+    StageStatus, ToolResultState, Totals, VisitRecord, WorkItemState,
 };
 
 use crate::context::{self, Losses, n32};
@@ -243,6 +243,8 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
         .into_iter()
         .collect();
     state.final_output = final_output(old, stage, report);
+    state.files = files(old);
+    state.blobs = blobs(old, &state.context);
     if let Some(why) = spec.origin.never_resumes()
         && !matches!(
             state.status,
@@ -532,16 +534,19 @@ fn final_output(
     report: &mut Report,
 ) -> Option<FinalOutputState> {
     let d = old.meta().final_output.as_ref()?;
-    let content = old.final_output.clone().unwrap_or_else(|| {
-        report.fill(
-            "final_output.content",
-            "\"\"",
-            "the run recorded a final output but its file is missing",
-        );
-        String::new()
-    });
+    let bytes = match &old.final_output {
+        Some(content) => content.len() as u64,
+        None => {
+            report.fill(
+                "final_output.bytes",
+                "0",
+                "the run recorded a final output but its file is missing",
+            );
+            0
+        }
+    };
     Some(FinalOutputState {
-        content,
+        bytes,
         format: d.format.clone(),
         stage: StageName::new(d.stage.as_str()).unwrap_or_else(|_| stage.name.clone()),
         submitted_at: d.submitted_at,
@@ -558,4 +563,62 @@ fn final_output(
             })
             .collect(),
     })
+}
+
+/// The files the old run keeps beside its run file, as the run file names
+/// them: the answer, and each stage's logs and taint audit, where they are.
+fn files(old: &LegacyRun) -> RunFiles {
+    let mut files = RunFiles {
+        final_output: old
+            .final_output
+            .as_ref()
+            .map(|content| FileRef::whole(leviath_core::FINAL_OUTPUT_FILE, content.as_bytes())),
+        stages: Vec::new(),
+    };
+    let stages = old.dir.join(leviath_runtime::state::files::STAGES_DIR);
+    let mut indexes: Vec<u32> = std::fs::read_dir(stages)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse().ok())
+        .collect();
+    indexes.sort_unstable();
+    for index in indexes {
+        for which in [StageFile::Output, StageFile::Logs, StageFile::TaintAudit] {
+            let path = which.path(index);
+            let named = match which {
+                StageFile::TaintAudit => std::fs::read(old.dir.join(&path))
+                    .ok()
+                    .map(|bytes| FileRef::whole(path, &bytes)),
+                _ => std::fs::metadata(old.dir.join(&path))
+                    .ok()
+                    .filter(std::fs::Metadata::is_file)
+                    .map(|meta| FileRef::log(path, meta.len())),
+            };
+            if let Some(file) = named {
+                files.set_stage_file(index, which, file);
+            }
+        }
+    }
+    files
+}
+
+/// The stored parts the old run keeps under `blobs/`: each one its context
+/// holds, with where it came from, then any other there by digest.
+fn blobs(old: &LegacyRun, context: &leviath_runtime::state::ContextState) -> Vec<BlobFile> {
+    let mut named = Vec::new();
+    leviath_runtime::state::files::note_blobs(&mut named, context);
+    for (digest, size) in &old.blobs {
+        if !named.iter().any(|b| b.digest == *digest) {
+            named.push(BlobFile {
+                digest: digest.clone(),
+                mime_type: "application/octet-stream".to_string(),
+                size: *size,
+                name: None,
+                region: None,
+                tool: None,
+            });
+        }
+    }
+    named
 }

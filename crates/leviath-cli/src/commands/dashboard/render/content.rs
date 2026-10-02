@@ -461,19 +461,23 @@ impl Dashboard {
             // The file each view reads: a stage's log, the run's file for
             // its window, or the run's answer for the Final view and the
             // Output view's fallback to it.
+            // A file the run file does not name yet is shown as the run file,
+            // which is where it will be named.
             let run_dir = runstate::run_dir(&agent.id);
-            let path = match (self.stage_content_mode, showing_final_output) {
+            use leviath_runtime::state::StageFile;
+            let named = match (self.stage_content_mode, showing_final_output) {
                 (_, true) | (StageContentMode::FinalOutput, _) => {
                     runstate::final_output_path(&run_dir)
                 }
                 (StageContentMode::Output, false) => {
-                    runstate::stage_dir(&agent.id, self.selected_stage).join("output.log")
+                    runstate::stage_file_path(&run_dir, self.selected_stage, StageFile::Output)
                 }
                 (StageContentMode::Logs, false) => {
-                    runstate::stage_dir(&agent.id, self.selected_stage).join("logs.log")
+                    runstate::stage_file_path(&run_dir, self.selected_stage, StageFile::Logs)
                 }
-                (StageContentMode::Context, false) => runstate::run_file::path_in(&run_dir),
+                (StageContentMode::Context, false) => None,
             };
+            let path = named.unwrap_or_else(|| runstate::run_file::path_in(&run_dir));
             let raw = path.to_string_lossy().to_string();
             // Display-only `~` abbreviation of the OS home directory;
             // deliberately NOT the LEVIATH_HOME-aware resolver (see the

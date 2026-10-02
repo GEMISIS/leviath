@@ -113,7 +113,7 @@ pub(crate) fn build(
     let meta = old.meta();
     for name in &old.stray_blobs {
         report.note(format!(
-            "blobs/{name} was left out: a stored part is named by its digest"
+            "blobs/{name} is not named in the run file: a stored part is a file named by its digest"
         ));
     }
     let (source, graph) = graph(old, report);

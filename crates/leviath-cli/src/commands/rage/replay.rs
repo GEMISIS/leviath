@@ -51,19 +51,15 @@ impl RunJson {
     }
 
     /// These values written as a run file in `scratch`, with the code
-    /// `reader` holds and, when `blobs` is set, its stored parts. The bytes of
-    /// the new file; the file itself is removed.
+    /// `reader` holds. It names the files beside it as the original does,
+    /// and the bundle carries them at those paths. The bytes of the new file;
+    /// the file itself is removed.
     pub(super) fn rewrite(
         &self,
         reader: &RunFileReader,
-        blobs: bool,
         scratch: &Path,
     ) -> Result<Vec<u8>, String> {
         let path = scratch.join(format!("lev-rage-{}.lvr", self.spec.run_id));
-        let parts: Vec<_> = match blobs {
-            true => reader.blob_digests().cloned().collect(),
-            false => Vec::new(),
-        };
         let written = reader
             .code_files()
             .and_then(|code| {
@@ -79,15 +75,6 @@ impl RunJson {
                 self.steps
                     .iter()
                     .try_for_each(|step| writer.append_delta(step))
-                    .and_then(|()| {
-                        parts.iter().try_for_each(|digest| {
-                            reader.blob(digest).and_then(|bytes| {
-                                writer
-                                    .add_blob(digest, &bytes.unwrap_or_default())
-                                    .map(drop)
-                            })
-                        })
-                    })
             })
             .map_err(Box::<dyn std::error::Error>::from)
             .and_then(|()| std::fs::read(&path).map_err(Box::<dyn std::error::Error>::from));

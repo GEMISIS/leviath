@@ -535,7 +535,7 @@ fn mid_run() -> RunState {
     state.children = vec![RunId::new("child-1").unwrap()];
     state.title = Some("Fix it".into());
     state.final_output = Some(FinalOutputState {
-        content: "done".into(),
+        bytes: 4,
         format: Some("text".into()),
         stage: sn("plan"),
         submitted_at: 4,
@@ -641,10 +641,12 @@ fn a_mid_run_state_is_placed_exactly() {
         .0;
     assert_eq!((flags.gates_forced, flags.modified_file_count), (2, 1));
     assert_eq!(flags.broken_scripts, vec!["x.rhai".to_string()]);
+    // The answer is placed without its content, which is in the file beside
+    // the run file that a resume reads.
     let out = &world.get::<crate::persistence::FinalOutput>(e).unwrap().0;
     assert_eq!(
         (out.content.as_str(), out.stage.as_str(), out.truncated),
-        ("done", "plan", true)
+        ("", "plan", true)
     );
     assert_eq!(out.artifacts.len(), 1);
     assert_eq!(out.artifacts[0].mime_type.as_str(), "image/png");

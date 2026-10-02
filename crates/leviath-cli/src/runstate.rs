@@ -3,8 +3,14 @@
 //! Each run lives under `~/.leviath/runs/<run-id>/` with:
 //! - `run.lvr` - the run file: its spec, its steps and its state (see
 //!   `run_file` for how it is read)
+//! - `final_output` - the answer it handed back
 //! - `stages/<idx>/output.log` - readable agent output for that stage
 //! - `stages/<idx>/logs.log`   - operational events + tool activity
+//! - `stages/<idx>/taint_audit.json` - the taint gate's decisions
+//! - `blobs/<sha256>` - its stored parts
+//!
+//! The run file names every other file there, and each is found through
+//! what it names (see `beside`), never by a path worked out here.
 //!
 //! The dashboard's activity log is persisted separately at:
 //! - `~/.leviath/dashboard.log` - never cleared, appended across sessions
@@ -27,11 +33,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use leviath_runtime::state::StageFile;
+
+mod beside;
 mod dashboard_log;
 #[cfg(test)]
 mod fixtures_tests;
 mod force;
 pub(crate) mod run_file;
+pub(crate) use beside::{final_output_path, stage_file_path};
 pub(crate) use run_file::RunHistory;
 #[cfg(test)]
 mod run_file_tests;
@@ -189,12 +199,13 @@ pub(crate) fn run_file_stamp(run_id: &str) -> Option<FileStamp> {
 }
 
 /// The stamps of the two files a run's answer is read from: its run file,
-/// which says whether it has one, and the sidecar that holds it.
+/// which says whether it has one and names the file that holds it, and that
+/// file.
 pub(crate) fn answer_stamps(run_id: &str) -> (Option<FileStamp>, Option<FileStamp>) {
     let dir = run_dir(run_id);
     (
         file_stamp(&run_file::path_in(&dir)),
-        file_stamp(&final_output_path(&dir)),
+        final_output_path(&dir).and_then(|path| file_stamp(&path)),
     )
 }
 
@@ -337,24 +348,21 @@ pub(crate) fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
 
 /// Read a run's final output, content included.
 ///
-/// The run's metadata says whether there is one and how big it is; this
-/// fetches the bytes from the sidecar beside it, or from the run file when
-/// there is no sidecar. Returns `None` when the run produced no answer, or
-/// when neither holds it.
+/// The run's file says whether there is one, how big it is, and which file
+/// beside it holds it. Returns `None` when the run produced no answer, or
+/// when the file it names does not read.
 pub(crate) fn read_final_output(run_id: &str) -> Option<leviath_core::FinalOutput> {
-    let meta = read_meta(run_id).ok()?;
-    read_final_output_in(&run_dir(run_id), &meta)
+    read_meta_and_answer(run_id).ok()?.1
 }
 
 /// [`read_final_output`] for a run directory the caller already resolved,
-/// with the metadata it already read. The daemon's recovery works from its
-/// configured runs directory rather than the home one, which is what this
-/// entry point is for.
+/// with the metadata it already read.
+#[cfg(test)]
 pub(crate) fn read_final_output_in(
     dir: &std::path::Path,
     meta: &RunMeta,
 ) -> Option<leviath_core::FinalOutput> {
-    answer_in(dir, meta, &|| run_file_answer(dir))
+    answer_in(dir, meta, &beside::named_files(dir))
 }
 
 /// A run's record and its answer, with its run file read once for both.
@@ -365,24 +373,21 @@ pub(crate) fn read_meta_and_answer(
     let dir = run_dir(run_id);
     let tail = run_file::tail_in(&dir)?;
     let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
-    let recorded = tail.state.final_output.map(|out| out.content);
-    let answer = answer_in(&dir, &meta, &|| recorded.clone());
+    let answer = answer_in(&dir, &meta, &tail.state.files);
     Ok((meta, answer))
 }
 
-/// The answer `meta` says the run in `dir` handed back: the sidecar's bytes,
-/// or else what `recorded` finds in the run file.
+/// The answer `meta` says the run in `dir` handed back, from the file
+/// `files` names for it.
 fn answer_in(
     dir: &std::path::Path,
     meta: &RunMeta,
-    recorded: &dyn Fn() -> Option<String>,
+    files: &leviath_runtime::state::RunFiles,
 ) -> Option<leviath_core::FinalOutput> {
     let descriptor = meta.final_output.clone()?;
-    let content = std::fs::read_to_string(final_output_path(dir))
-        .ok()
-        .or_else(recorded)?;
+    let bytes = beside::read_named(dir, files.final_output.as_ref()?)?;
     Some(leviath_core::FinalOutput {
-        content,
+        content: String::from_utf8_lossy(&bytes).into_owned(),
         format: descriptor.format,
         stage: descriptor.stage,
         submitted_at: descriptor.submitted_at,
@@ -391,32 +396,20 @@ fn answer_in(
     })
 }
 
-/// The answer as the run file holds it, for a run with no sidecar.
-fn run_file_answer(dir: &std::path::Path) -> Option<String> {
-    run_file::tail_in(dir)
-        .ok()?
-        .state
-        .final_output
-        .map(|out| out.content)
-}
-
-/// Where a run's answer lives, beside its run file.
-pub(crate) fn final_output_path(dir: &std::path::Path) -> PathBuf {
-    dir.join(leviath_core::FINAL_OUTPUT_FILE)
-}
-
-/// Write a run's answer to its sidecar, atomically.
-///
-/// Raw content with no wrapper: serving it is a read, and `lev result --raw` is
-/// a copy. The run's record is what says it exists.
-///
-/// Test-only; the runtime's persistence lane writes a live run's.
+/// Write a run's answer beside its run file, and name it there, as the
+/// runtime's persistence lane does for a live run.
 #[cfg(test)]
 pub(crate) fn write_final_output(dir: &std::path::Path, content: &str) -> anyhow::Result<()> {
-    // `write_private`: an answer carries what the run found. A mode on the
-    // file itself keeps it private even where the run directory's own mode
-    // is loosened. It writes a sibling and renames it into place.
-    leviath_sys::write_private(&final_output_path(dir), content.as_bytes()).map_err(Into::into)
+    let name = leviath_core::FINAL_OUTPUT_FILE;
+    leviath_sys::write_private(&dir.join(name), content.as_bytes())
+        .expect("a test's run directory takes its answer");
+    fixtures_tests::name_files(dir, |files| {
+        files.final_output = Some(leviath_runtime::state::FileRef::whole(
+            name,
+            content.as_bytes(),
+        ));
+    });
+    Ok(())
 }
 
 /// Whether an on-disk run status means the run has finished and should be left
@@ -794,6 +787,7 @@ pub(crate) fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
 // ─── Per-stage persistence ────────────────────────────────────────────────────
 
 /// Directory for per-stage files within a run.
+#[cfg(test)]
 pub(crate) fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
     run_dir(run_id).join("stages").join(stage_idx.to_string())
 }
@@ -817,40 +811,51 @@ fn ensure_stage_dir(run_id: &str, stage_idx: usize) {
     let _ = leviath_sys::create_private_dir_all(&dir);
 }
 
-/// Append a line of readable agent output to the per-stage output log.
+/// Append a line of readable agent output to the per-stage output log, and
+/// name the log in the run's file when it has one.
 ///
 /// Test-only; the runtime's persistence lane writes a live run's.
 #[cfg(test)]
 pub(crate) fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
-    use std::io::Write;
-    ensure_stage_dir(run_id, stage_idx);
-    let path = stage_dir(run_id, stage_idx).join("output.log");
-    if let Ok(mut file) = leviath_sys::open_private_append(&path) {
-        let _ = writeln!(file, "{}", text);
-    }
+    append_stage_line(run_id, stage_idx, StageFile::Output, text);
 }
 
-/// Append a line of operational/tool-activity log to the per-stage logs file.
+/// Append a line of operational/tool-activity log to the per-stage logs
+/// file, and name the log in the run's file when it has one.
 ///
 /// Test-only; the runtime's persistence lane writes a live run's.
 #[cfg(test)]
 pub(crate) fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
+    append_stage_line(run_id, stage_idx, StageFile::Logs, text);
+}
+
+#[cfg(test)]
+fn append_stage_line(run_id: &str, stage_idx: usize, which: StageFile, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
-    let path = stage_dir(run_id, stage_idx).join("logs.log");
+    let index = stage_idx as u32;
+    let path = run_dir(run_id).join(which.path(index));
     if let Ok(mut file) = leviath_sys::open_private_append(&path) {
         let _ = writeln!(file, "{}", text);
     }
+    let len = std::fs::metadata(&path).map_or(0, |m| m.len());
+    fixtures_tests::name_files(&run_dir(run_id), |files| {
+        files.set_stage_file(
+            index,
+            which,
+            leviath_runtime::state::FileRef::log(which.path(index), len),
+        );
+    });
 }
 
 /// Read the last `max_bytes` of the readable output log for a specific stage.
 pub(crate) fn tail_stage_output(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
-    tail_file(&stage_dir(run_id, stage_idx).join("output.log"), max_bytes)
+    beside::tail_stage_file(&run_dir(run_id), stage_idx, StageFile::Output, max_bytes)
 }
 
 /// Read the last `max_bytes` of the operational log for a specific stage.
 pub(crate) fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
-    tail_file(&stage_dir(run_id, stage_idx).join("logs.log"), max_bytes)
+    beside::tail_stage_file(&run_dir(run_id), stage_idx, StageFile::Logs, max_bytes)
 }
 
 /// Which stage's logs to read.
@@ -1459,10 +1464,10 @@ mod tests {
 
     // ─── read_final_output ──────────────────────────────────────────────────
 
-    /// A run's answer is read from the sidecar beside its run file, or from
-    /// the run file when there is no sidecar; a run with none has none.
+    /// A run's answer is read from the file its run file names; a run with
+    /// none, or whose file is not there, has none.
     #[test]
-    fn read_final_output_needs_both_the_descriptor_and_the_sidecar() {
+    fn read_final_output_needs_both_the_descriptor_and_the_named_file() {
         with_isolated_runs_dir("read-final-output", |_| {
             // No run at all.
             assert!(read_final_output("no-such-run").is_none());
@@ -1472,7 +1477,7 @@ mod tests {
             create_run(&meta).expect("run dir");
             assert!(read_final_output("run-silent").is_none());
 
-            // No sidecar: the answer is the run file's own.
+            // No file named: no answer, though the record claims one.
             let answer = leviath_core::output::FinalOutput::new(
                 "the answer",
                 Some("markdown".to_string()),
@@ -1482,22 +1487,27 @@ mod tests {
             let mut claimed = fixtures::run_meta("run-claimed");
             claimed.final_output = Some(answer.descriptor());
             create_run(&claimed).expect("run dir");
-            let from_file = read_final_output("run-claimed").expect("the run file holds it");
-            assert_eq!(from_file.content.len(), answer.content.len());
-            // The record and the answer read together say the same.
-            let (record, together) = read_meta_and_answer("run-claimed").expect("it reads");
-            assert_eq!(record.run_id, "run-claimed");
-            assert_eq!(together, Some(from_file));
+            assert!(read_final_output("run-claimed").is_none());
 
-            // A sidecar is read first.
-            write_final_output(&run_dir("run-claimed"), &answer.content).expect("sidecar");
+            // Written and named, it reads.
+            write_final_output(&run_dir("run-claimed"), &answer.content).expect("the answer");
             let read = read_final_output("run-claimed").expect("both halves are there");
             assert_eq!(read.content, "the answer");
             assert_eq!(read.format.as_deref(), Some("markdown"));
             assert_eq!(read.stage, "present");
+            // The record and the answer read together say the same.
+            let (record, together) = read_meta_and_answer("run-claimed").expect("it reads");
+            assert_eq!(record.run_id, "run-claimed");
+            assert_eq!(together, Some(read));
+            assert!(read_final_output_in(&run_dir("run-claimed"), &record).is_some());
 
-            // A record that claims an answer, read against a directory that
-            // holds neither half, has none.
+            // Named and gone, it does not.
+            std::fs::remove_file(run_dir("run-claimed").join(leviath_core::FINAL_OUTPUT_FILE))
+                .unwrap();
+            assert!(read_final_output("run-claimed").is_none());
+
+            // A record that claims an answer, read against a directory with
+            // no run file naming one, has none.
             let empty = tempfile::tempdir().unwrap();
             assert!(read_final_output_in(empty.path(), &claimed).is_none());
         });
@@ -2103,6 +2113,7 @@ mod tests {
     fn append_and_tail_stage_output() {
         with_isolated_runs_dir("append-and-tail-stage-output", |_d| {
             let run_id = "test-stage-output-unit";
+            create_run(&fixtures::run_meta(run_id)).unwrap();
             append_stage_output(run_id, 0, "line 1");
             append_stage_output(run_id, 0, "line 2");
             let output = tail_stage_output(run_id, 0, 4096);
@@ -2115,6 +2126,7 @@ mod tests {
     fn append_and_tail_stage_log() {
         with_isolated_runs_dir("append-and-tail-stage-log", |_d| {
             let run_id = "test-stage-log-unit";
+            create_run(&fixtures::run_meta(run_id)).unwrap();
             append_stage_log(run_id, 0, "event A");
             append_stage_log(run_id, 0, "event B");
             let log = tail_stage_log(run_id, 0, 4096);
@@ -2487,6 +2499,7 @@ mod tests {
     fn append_stage_output_multiple_stages() {
         with_isolated_runs_dir("append-stage-output-multiple-stages", |_d| {
             let run_id = "test-multi-stage-out";
+            create_run(&fixtures::run_meta(run_id)).unwrap();
             append_stage_output(run_id, 0, "stage 0 output");
             append_stage_output(run_id, 1, "stage 1 output");
             append_stage_output(run_id, 2, "stage 2 output");

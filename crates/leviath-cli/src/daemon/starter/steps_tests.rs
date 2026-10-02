@@ -376,82 +376,50 @@ impl leviath_core::mime::BlobStore for Refusing {
     }
 }
 
-/// A run's attached files go to the store typed as the parts naming them
-/// say, once each; a file no part names is not written, and a store that
-/// refuses one is logged, not fatal.
+/// A run's attached files go to its blob directory, where its tools and
+/// every reader find them, and never into its run file; a store that
+/// refuses one refuses the run.
 #[tokio::test]
-async fn a_runs_files_are_stored_as_its_parts_say() {
+async fn a_runs_files_are_stored_beside_its_run_file_never_in_it() {
     let dir = tempfile::tempdir().unwrap();
     let runs = tempfile::tempdir().unwrap();
-    let starter = starter(Config::default(), registry(), runs.path());
-    let mut request = task_request(&coder(dir.path()), "look at this");
-    request.attachments = vec![crate::daemon::requests::attachment(
-        leviath_core::mime::InboundPart::from_bytes(
-            "hero.png",
-            b"\x89PNG\r\n\x1a\n0000IHDR".to_vec(),
-        ),
-    )];
-    let env = starter.env_for(&request, starter.config.current());
+    let mut starter = starter(Config::default(), registry(), runs.path());
+    let image = b"\x89PNG\r\n\x1a\n0000IHDR a picture worth finding".to_vec();
+    let request = || {
+        let mut request = task_request(&coder(dir.path()), "look at this");
+        request.attachments = vec![crate::daemon::requests::attachment(
+            leviath_core::mime::InboundPart::from_bytes("hero.png", image.clone()),
+        )];
+        request
+    };
+    let env = starter.env_for(&request(), starter.config.current());
     let prepared = starter
-        .start_with(env, request, Caller::TopLevel)
+        .start_with(env, request(), Caller::TopLevel)
         .await
         .expect("the run starts");
     let run_id = prepared.spec.run_id.to_string();
-    let reader = RunFileReader::open(
-        &runs
-            .path()
+    let digest = leviath_runtime::spec::names::Digest::of(&image);
+    assert!(
+        starter.blob_store.has(&run_id, digest.as_str()),
+        "the image is where the run's tools read it"
+    );
+    let file = std::fs::read(
+        runs.path()
             .join(&run_id)
             .join(leviath_core::files::RUN_FILE),
     )
     .unwrap();
-    let digests: Vec<_> = reader.blob_digests().cloned().collect();
-    assert_eq!(digests.len(), 1, "the image is in the run file");
     assert!(
-        starter.blob_store.has(&run_id, digests[0].as_str()),
-        "and where the run's tools read it"
+        !file.windows(image.len()).any(|w| w == image.as_slice()),
+        "and not in the run file"
     );
 
-    let bytes = reader.blob(&digests[0]).unwrap().unwrap();
-    let stray = leviath_runtime::spec::names::Digest::of(b"nothing names this");
-    let context = &prepared.state.context;
-    let store = leviath_core::mime::MemoryBlobStore::new();
-    let blobs = std::collections::BTreeMap::from([
-        (digests[0].clone(), bytes.clone()),
-        (stray.clone(), b"x".to_vec()),
-    ]);
-    store_blobs(&store, "r", &blobs, context);
-    store_blobs(&store, "r", &blobs, context);
-    assert_eq!(
-        leviath_core::mime::BlobStore::list(&store, "r")
-            .unwrap()
-            .len(),
-        1
-    );
-    crate::test_support::with_tracing(|| {
-        store_blobs(&Refusing, "r", &blobs, context);
-    });
-
-    // An inline part names no file, and a part whose type does not read
-    // stores its file as plain bytes.
-    let mut context = context.clone();
-    let parts = context
-        .regions
-        .iter_mut()
-        .flat_map(|r| r.entries.iter_mut())
-        .find(|e| !e.parts.is_empty())
-        .map(|e| &mut e.parts)
-        .expect("the image is a part of an entry");
-    let mut inline = parts[0].clone();
-    inline.body = leviath_runtime::state::context::PartBody::Inline("hi".to_string());
-    parts[0].mime_type = "not a type".to_string();
-    parts.insert(0, inline);
-    let fresh = leviath_core::mime::MemoryBlobStore::new();
-    store_blobs(&fresh, "r", &blobs, &context);
-    assert!(leviath_core::mime::BlobStore::has(
-        &fresh,
-        "r",
-        digests[0].as_str()
-    ));
+    starter.blob_store = Arc::new(Refusing);
+    let env = starter.env_for(&request(), starter.config.current());
+    let Err(refused) = starter.start_with(env, request(), Caller::TopLevel).await else {
+        panic!("a file that cannot be stored refuses the run");
+    };
+    assert!(refused.to_string().contains("full"), "{refused}");
 }
 
 /// A run that resolves and then cannot be bound (here, a grant in the

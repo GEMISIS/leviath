@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter};
+use leviath_runtime::runfile::RunFileReader;
 use leviath_runtime::spec::names::Digest;
 use leviath_runtime::spec::request::SpawnSource;
 use leviath_runtime::spec::run_spec::SpecOrigin;
@@ -12,27 +12,29 @@ use super::super::scrub::Scrubber;
 use super::request_of;
 use crate::runstate::run_file::tests::{recorded, say, step};
 
-/// A recorded run with two steps, the second carrying a planted secret, and
-/// one stored part.
+/// A recorded run with two steps, the second carrying a planted secret and
+/// naming one stored part.
 fn a_run(runs: &Path) -> std::path::PathBuf {
     let dir = recorded(runs);
     step(&dir, 10, |s| say(s, "hello"));
     step(&dir, 20, |s| {
-        say(s, "the key is sk-ant-api03-PLANTEDPLANTEDPLANTED")
+        say(s, "the key is sk-ant-api03-PLANTEDPLANTEDPLANTED");
+        s.blobs.push(leviath_runtime::state::BlobFile {
+            digest: Digest::of(b"a part"),
+            mime_type: "text/plain".into(),
+            size: 6,
+            name: None,
+            region: None,
+            tool: None,
+        });
     });
-    let mut writer = RunFileWriter::open(
-        &crate::runstate::run_file::path_in(&dir),
-        CheckpointPolicy::default(),
-    )
-    .unwrap();
-    writer.add_blob(&Digest::of(b"a part"), b"a part").unwrap();
     dir
 }
 
 /// The members `copy_run_file` adds for the run in `dir`.
-fn copied(dir: &Path, scrubber: &Scrubber, blobs: bool, scratch: &Path) -> Bundle {
+fn copied(dir: &Path, scrubber: &Scrubber, scratch: &Path) -> Bundle {
     let mut bundle = Bundle::default();
-    copy_run_file(dir, "runs/r", scrubber, &mut bundle, blobs, scratch);
+    copy_run_file(dir, "runs/r", scrubber, &mut bundle, scratch);
     bundle
 }
 
@@ -46,13 +48,14 @@ fn member<'a>(bundle: &'a Bundle, path: &str) -> &'a [u8] {
 }
 
 /// The rewritten file reads back as a run, every step there, the secret out
-/// of it and its part in it; `request.json` starts the same run again.
+/// of it and its part named in it, never copied in; `request.json` starts
+/// the same run again.
 #[test]
 fn the_run_file_is_rewritten_without_its_secrets() {
     let runs = tempfile::tempdir().unwrap();
     let dir = a_run(runs.path());
     let scratch = tempfile::tempdir().unwrap();
-    let bundle = copied(&dir, &Scrubber::new(Vec::new()), true, scratch.path());
+    let bundle = copied(&dir, &Scrubber::new(Vec::new()), scratch.path());
     let original = RunFileReader::open(&crate::runstate::run_file::path_in(&dir)).unwrap();
     let bytes = member(&bundle, "runs/r/run.lvr").to_vec();
     let rewritten = RunFileReader::from_bytes(Path::new("run.lvr"), bytes).unwrap();
@@ -61,7 +64,10 @@ fn the_run_file_is_rewritten_without_its_secrets() {
     let steps = serde_json::to_string(&rewritten.deltas(1, rewritten.last_seq()).unwrap()).unwrap();
     assert!(steps.contains("hello"), "{steps}");
     assert!(!steps.contains("PLANTED"), "{steps}");
-    assert_eq!(rewritten.blob_digests().count(), 1);
+    let named = rewritten.latest_state().unwrap().blobs;
+    assert_eq!(named[0].digest, Digest::of(b"a part"));
+    let bytes = member(&bundle, "runs/r/run.lvr");
+    assert!(!bytes.windows(6).any(|w| w == b"a part"));
     assert!(
         std::fs::read_dir(scratch.path()).unwrap().next().is_none(),
         "the scratch file is removed"
@@ -74,12 +80,6 @@ fn the_run_file_is_rewritten_without_its_secrets() {
         serde_json::from_slice(member(&bundle, "runs/r/request.json")).unwrap();
     assert_eq!(request["source"]["blueprint"]["name"], "coder");
     assert!(request["inputs"].is_object(), "{request}");
-
-    // Without its parts, the file carries none.
-    let bundle = copied(&dir, &Scrubber::new(Vec::new()), false, scratch.path());
-    let bytes = member(&bundle, "runs/r/run.lvr").to_vec();
-    let rewritten = RunFileReader::from_bytes(Path::new("run.lvr"), bytes).unwrap();
-    assert_eq!(rewritten.blob_digests().count(), 0);
 }
 
 /// A file that cannot be rewritten is left out and says why; its values
@@ -89,7 +89,7 @@ fn a_run_file_that_cannot_be_rewritten_is_left_out_saying_why() {
     let runs = tempfile::tempdir().unwrap();
     let dir = a_run(runs.path());
     let nowhere = runs.path().join("no-such-scratch");
-    let bundle = copied(&dir, &Scrubber::new(Vec::new()), true, &nowhere);
+    let bundle = copied(&dir, &Scrubber::new(Vec::new()), &nowhere);
     let skipped = &bundle.skipped[0];
     assert_eq!(skipped.path, "runs/r/run.lvr");
     assert!(
@@ -105,7 +105,6 @@ fn a_run_file_that_cannot_be_rewritten_is_left_out_saying_why() {
     let bundle = copied(
         &dir,
         &Scrubber::new(vec!["read_file".to_string()]),
-        true,
         scratch.path(),
     );
     assert!(
@@ -135,7 +134,7 @@ fn a_run_file_that_does_not_read_is_left_out() {
         .unwrap(),
     );
     std::fs::write(&file, bytes).unwrap();
-    let bundle = copied(&dir, &Scrubber::new(Vec::new()), true, runs.path());
+    let bundle = copied(&dir, &Scrubber::new(Vec::new()), runs.path());
     assert!(bundle.members.is_empty());
     assert!(bundle.skipped[0].reason.contains("could not be read"));
 }

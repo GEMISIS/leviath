@@ -444,6 +444,9 @@ pub struct RunHistory {
     pub last_seq: u64,
     /// Every edge it took, oldest first, with the step that recorded it.
     pub transitions: Vec<(u64, crate::state::TransitionRecord)>,
+    /// Its answer, read from the file its run file names: `None` when it
+    /// names none, and why not when that file does not read.
+    pub answer: Option<Result<String, String>>,
 }
 
 /// A control operation addressed to the host, each carrying a oneshot channel the

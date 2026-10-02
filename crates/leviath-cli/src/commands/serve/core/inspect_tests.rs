@@ -167,16 +167,14 @@ async fn a_file_whose_steps_do_not_decode_is_an_error() {
         assert_eq!(graph(&run_id).unwrap_err().code(), "INTERNAL");
         assert_eq!(blobs(&run_id).unwrap_err().code(), "INTERNAL");
         assert_eq!(deltas(&run_id, None, None).unwrap().len(), 0);
-        garbage(&run_id, b"not a run file");
-        let sha = Digest::of(b"x");
-        assert_eq!(blob(&run_id, sha.as_str()).unwrap_err().code(), "INTERNAL");
     })
     .await;
 }
 
-/// A step or a part that does not decode is an error on every read of it.
+/// A step that does not decode, or a part whose path does not read as a
+/// file, is an error on every read of it.
 #[tokio::test]
-async fn a_step_or_a_part_that_does_not_decode_is_an_error() {
+async fn a_step_or_a_part_that_does_not_read_is_an_error() {
     crate::runstate::with_isolated_runs_dir_async("inspect-bad-frames", |_d| async move {
         let run_id = recorded();
         super::super::run_file::tests::bad_step(&run_id, 1);
@@ -184,21 +182,12 @@ async fn a_step_or_a_part_that_does_not_decode_is_an_error() {
         assert_eq!(graph(&run_id).unwrap_err().code(), "INTERNAL");
 
         let run_id = recorded();
-        let digest = Digest::of(b"half a part");
-        let path = run_file::path(&run_id);
-        let mut bytes = std::fs::read(&path).unwrap();
-        bytes.extend(
-            leviath_runtime::runfile::codec::encode(
-                leviath_runtime::runfile::codec::FrameKind::Blob,
-                &digest,
-            )
-            .unwrap(),
-        );
-        garbage(&run_id, &bytes);
-        assert_eq!(
-            blob(&run_id, digest.as_str()).unwrap_err().code(),
-            "INTERNAL"
-        );
+        let digest = Digest::of(b"not a file");
+        let path = leviath_runtime::runfile::blob_path(&crate::runstate::run_dir(&run_id), &digest);
+        std::fs::create_dir_all(path).unwrap();
+        let err = blob(&run_id, digest.as_str()).unwrap_err();
+        assert_eq!(err.code(), "INTERNAL");
+        assert!(err.to_string().contains(digest.as_str()), "{err}");
     })
     .await;
 }
@@ -309,21 +298,15 @@ async fn the_window_and_ledger_are_read_as_of_the_last_step() {
 }
 
 #[tokio::test]
-async fn parts_are_read_from_the_run_file_or_the_blob_directory() {
+async fn parts_are_read_from_the_blob_directory() {
     crate::runstate::with_isolated_runs_dir_async("inspect-blobs", |_d| async move {
         let run_id = recorded();
         assert!(blobs(&run_id).unwrap().is_empty());
         assert_eq!(blobs("ghost").unwrap_err().code(), "NOT_FOUND");
 
-        let in_file = b"kept in the run file";
-        let digest = Digest::of(in_file);
-        let mut writer = RunFileWriter::open(&run_file::path(&run_id), Default::default()).unwrap();
-        writer.add_blob(&digest, in_file).unwrap();
-        drop(writer);
-        assert_eq!(
-            blob(&run_id, digest.as_str()).unwrap().unwrap(),
-            in_file.to_vec()
-        );
+        // A part the run file names is not in it: its bytes are beside it.
+        let digest = Digest::of(b"named, never copied in");
+        assert!(blob(&run_id, digest.as_str()).unwrap().is_none());
 
         let on_disk = b"kept beside it";
         let sha = Digest::of(on_disk);
@@ -338,12 +321,12 @@ async fn parts_are_read_from_the_run_file_or_the_blob_directory() {
         assert!(blob(&run_id, "not-a-hash").unwrap().is_none());
         assert!(blob("ghost", sha.as_str()).unwrap().is_none());
 
-        // The window names three parts: one whose bytes are in the file, one
-        // beside it, and one nowhere.
+        // The window names two parts: one whose bytes are beside the file,
+        // and one whose file is gone.
         let lost = Digest::of(b"lost");
         step(&run_id, 10, Vec::new(), |s| {
             let region = &mut s.context.regions[0];
-            for (d, n) in [(&digest, in_file.len()), (&sha, on_disk.len()), (&lost, 4)] {
+            for (d, n) in [(&sha, on_disk.len()), (&lost, 4)] {
                 region.entries.push(stored_entry(d, n));
             }
         });
@@ -352,11 +335,7 @@ async fn parts_are_read_from_the_run_file_or_the_blob_directory() {
             listed.into_iter().map(|b| (b.sha256, b.stored)).collect();
         assert_eq!(
             stored,
-            vec![
-                (digest.to_string(), true),
-                (sha.to_string(), true),
-                (lost.to_string(), false),
-            ]
+            vec![(sha.to_string(), true), (lost.to_string(), false)]
         );
     })
     .await;

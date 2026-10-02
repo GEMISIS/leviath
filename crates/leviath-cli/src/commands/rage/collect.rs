@@ -491,26 +491,18 @@ fn copy_run(
             format!("the run's record could not be read: {e}"),
         ),
     }
-    let final_output = dir.join(leviath_core::FINAL_OUTPUT_FILE);
-    if final_output.is_file() {
-        copy_text(
-            &final_output,
-            &format!("{dest}/{}", leviath_core::FINAL_OUTPUT_FILE),
-            RUN_FILE_CAP,
-            scrubber,
-            bundle,
-        );
-    }
-    copy_stages(&dir, &dest, scrubber, bundle);
-    copy_run_file(
-        &dir,
-        &dest,
-        scrubber,
-        bundle,
-        include_blobs,
-        &std::env::temp_dir(),
-    );
-    copy_blobs(&dir, &dest, include_blobs, BLOB_CAP, blob_budget, bundle);
+    // The files beside the run file, as the run file names them: under the
+    // same paths in the bundle, so the run's directory unpacks whole.
+    let named = crate::runstate::run_file::tail_in(&dir)
+        .map(|tail| (tail.state.files, tail.state.blobs))
+        .unwrap_or_default();
+    copy_named(&dir, &dest, &named.0, scrubber, bundle);
+    copy_run_file(&dir, &dest, scrubber, bundle, &std::env::temp_dir());
+    let parts = BlobParts {
+        include: include_blobs,
+        per_part: BLOB_CAP,
+    };
+    copy_blobs(&dir, &dest, &named.1, parts, blob_budget, bundle);
 }
 
 /// The directory a run's `agent_path` names. The daemon records the
@@ -525,31 +517,38 @@ fn blueprint_dir_of(agent_path: &str) -> PathBuf {
     }
 }
 
-/// `stages/<n>/`: the per-stage logs and taint audit.
-fn copy_stages(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle) {
-    for stage in sorted_entries(&dir.join("stages")) {
-        let index = file_name(&stage);
-        for name in ["output.log", "logs.log"] {
-            let path = stage.join(name);
-            if path.is_file() {
-                tail_text(
-                    &path,
-                    &format!("{dest}/stages/{index}/{name}"),
-                    RUN_FILE_CAP,
-                    scrubber,
-                    bundle,
-                );
+/// The answer and each stage's logs and taint audit, each at the path the
+/// run file names it by. A path that leaves the run's directory is not
+/// followed.
+fn copy_named(
+    dir: &Path,
+    dest: &str,
+    files: &leviath_runtime::state::RunFiles,
+    scrubber: &Scrubber,
+    bundle: &mut Bundle,
+) {
+    use leviath_runtime::state::StageFile;
+    let stage_files = files.stages.iter().flat_map(|stage| {
+        [StageFile::Output, StageFile::Logs, StageFile::TaintAudit]
+            .into_iter()
+            .filter_map(|which| stage.get(which).map(|file| (Some(which), file)))
+    });
+    let named = files.final_output.iter().map(|file| (None, file));
+    for (which, file) in named.chain(stage_files) {
+        let member = format!("{dest}/{}", file.path);
+        let path = match file.path_in(dir) {
+            Ok(path) => path,
+            Err(e) => {
+                bundle.skip(member, e.to_string());
+                continue;
             }
-        }
-        let audit = stage.join("taint_audit.json");
-        if audit.is_file() {
-            copy_json(
-                &audit,
-                &format!("{dest}/stages/{index}/taint_audit.json"),
-                RUN_FILE_CAP,
-                scrubber,
-                bundle,
-            );
+        };
+        match which {
+            None => copy_text(&path, &member, RUN_FILE_CAP, scrubber, bundle),
+            Some(StageFile::TaintAudit) => {
+                copy_json(&path, &member, RUN_FILE_CAP, scrubber, bundle)
+            }
+            Some(_) => tail_text(&path, &member, RUN_FILE_CAP, scrubber, bundle),
         }
     }
 }
@@ -558,14 +557,14 @@ fn copy_stages(dir: &Path, dest: &str, scrubber: &Scrubber, bundle: &mut Bundle)
 /// and `request.json`, the request that starts the run again. The webhook's
 /// signing secret is replaced before anything is read, and the rewritten file
 /// is built from the scrubbed values, so it holds nothing `run.json` does not.
-/// Its stored parts go in with it when `blobs` is set. `scratch` is where the
-/// file is rewritten before it is read into the bundle.
+/// Its stored parts are not in it: they go in beside it, under `blobs/`.
+/// `scratch` is where the file is rewritten before it is read into the
+/// bundle.
 pub(super) fn copy_run_file(
     dir: &Path,
     dest: &str,
     scrubber: &Scrubber,
     bundle: &mut Bundle,
-    blobs: bool,
     scratch: &Path,
 ) {
     let skipped = format!("{dest}/{RUN_FILE}");
@@ -590,7 +589,7 @@ pub(super) fn copy_run_file(
         .map_err(|e| format!("a value with a secret taken out no longer reads: {e}"))
         .and_then(|scrubbed| {
             scrubbed
-                .rewrite(&reader, blobs, scratch)
+                .rewrite(&reader, scratch)
                 .map(|bytes| (scrubbed, bytes))
         });
     match rewritten {
@@ -606,28 +605,38 @@ pub(super) fn copy_run_file(
     bundle.text(format!("{dest}/run.json"), text, redactions, false);
 }
 
-/// `blobs/`: the run's stored parts, each within `per_part`, all within
-/// what is left of `budget`.
+/// Whether a run's stored parts go in the bundle, and the most bytes one
+/// may take.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BlobParts {
+    /// Whether they go in at all.
+    pub(super) include: bool,
+    /// The most bytes one part may take.
+    pub(super) per_part: u64,
+}
+
+/// `blobs/`: the stored parts the run file names, each within `per_part`,
+/// all within what is left of `budget`. A part whose file is missing is
+/// named as missing.
 pub(super) fn copy_blobs(
     dir: &Path,
     dest: &str,
-    include: bool,
-    per_part: u64,
+    named: &[leviath_runtime::state::BlobFile],
+    parts: BlobParts,
     budget: &mut u64,
     bundle: &mut Bundle,
 ) {
-    let blobs = dir.join(BLOBS_DIR);
-    if !blobs.is_dir() {
+    if named.is_empty() {
         return;
     }
-    if !include {
+    if !parts.include {
         bundle.skip(format!("{dest}/{BLOBS_DIR}/"), "left out (--no-blobs)");
         return;
     }
-    for path in sorted_entries(&blobs) {
-        let member = format!("{dest}/{BLOBS_DIR}/{}", file_name(&path));
-        let cap = per_part.min(*budget);
-        match read_capped(&path, cap) {
+    for blob in named {
+        let member = format!("{dest}/{}", blob.path());
+        let cap = parts.per_part.min(*budget);
+        match read_capped(&leviath_runtime::runfile::blob_path(dir, &blob.digest), cap) {
             Ok(bytes) => {
                 *budget = budget.saturating_sub(bytes.len() as u64);
                 bundle.bytes(member, bytes, 0);

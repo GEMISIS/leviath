@@ -8,7 +8,6 @@ use leviath_runtime::runfile::fingerprint;
 use leviath_runtime::state::{RunState, StateDelta};
 
 use crate::ConvertError;
-use crate::legacy::LegacyRun;
 use crate::spec::Built;
 
 /// Where the old files go, inside the run directory.
@@ -17,24 +16,25 @@ pub(crate) const LEGACY_DIR: &str = "legacy";
 /// Where the run file is written before the old files move.
 const PARTIAL: &str = "run.lvr.converting";
 
-/// The files of an old run that a run in the new layout writes too, under
-/// the same names and in the same form: the per-stage logs and the answer's
-/// sidecar. They stay where they are, so every reader of a run finds them in
-/// one place whichever layout the run started in.
+/// The files of an old run that a run in the new layout keeps too, under
+/// the same names and in the same form: the per-stage logs and audits, the
+/// answer, and the stored parts. They stay where they are, and the run file
+/// names each of them, as it does for a new run.
 const KEPT: &[&str] = &[
     "stages",
     leviath_core::FINAL_OUTPUT_FILE,
+    leviath_core::files::BLOBS_DIR,
     PARTIAL,
     LEGACY_DIR,
 ];
 
 /// The run file's bytes.
 ///
-/// The spec comes first, then each piece of code and each stored part once
-/// by digest (a `(digest, bytes)` pair), then the state the run started in,
-/// one delta per step, and the state it was last in.
+/// The spec comes first, then each piece of code once by digest (a
+/// `(digest, bytes)` pair), then the state the run started in, one delta per
+/// step, and the state it was last in. Stored parts stay in `blobs/`, named
+/// by the last state.
 pub(crate) fn encode(
-    old: &LegacyRun,
     built: &Built,
     start: &RunState,
     deltas: &[StateDelta],
@@ -44,9 +44,6 @@ pub(crate) fn encode(
     out.extend(frame(FrameKind::Spec, &built.spec));
     for code in &built.code {
         out.extend(frame(FrameKind::Code, code));
-    }
-    for blob in &old.blobs {
-        out.extend(frame(FrameKind::Blob, blob));
     }
     out.extend(frame(FrameKind::State, start));
     for delta in deltas {

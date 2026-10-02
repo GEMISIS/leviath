@@ -468,11 +468,11 @@ async fn an_old_run_directory_is_converted_on_first_load() {
 }
 
 /// A finished run converted from the older layout still hands back its
-/// answer: the sidecar stays where a run keeps it, and the run file holds
-/// the same bytes.
+/// answer: the file stays where a run keeps it, and the run file names it
+/// rather than holding a copy.
 #[cfg(feature = "legacy-runs")]
 #[test]
-fn a_converted_run_answers_from_its_run_file() {
+fn a_converted_run_answers_from_the_file_its_run_file_names() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("leviath-legacy-runs")
@@ -494,10 +494,9 @@ fn a_converted_run_answers_from_its_run_file() {
     let meta = crate::runstate::read_meta_from(&dir).expect("the run file reads");
     let answer = crate::runstate::read_final_output_in(&dir, &meta).expect("the answer");
     assert_eq!(answer.content, kept);
-    // Without the sidecar, the run file gives the same answer.
+    // Without the file, there is no answer: the run file holds no copy.
     std::fs::remove_file(&sidecar).unwrap();
-    let answer = crate::runstate::read_final_output_in(&dir, &meta).expect("the answer");
-    assert_eq!(answer.content, kept);
+    assert!(crate::runstate::read_final_output_in(&dir, &meta).is_none());
 }
 
 /// An old run whose blueprint is gone converts from what it recorded, lists

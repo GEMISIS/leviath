@@ -549,11 +549,13 @@ pub(crate) fn optional_state(entity: &mut EntityWorldMut<'_>, state: &RunState) 
     }
 }
 
-/// `final_output`, when the run has handed one back.
+/// `final_output`, when the run has handed one back, without its content:
+/// that is in the file beside the run file its state names, which only a
+/// resume reads (see [`crate::restore::resume`]).
 pub(crate) fn final_output(state: &RunState) -> Option<FinalOutput> {
     state.final_output.as_ref().map(|out| {
         FinalOutput(leviath_core::output::FinalOutput {
-            content: out.content.clone(),
+            content: String::new(),
             format: out.format.clone(),
             stage: out.stage.to_string(),
             submitted_at: out.submitted_at,

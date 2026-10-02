@@ -392,6 +392,7 @@ fn history() -> leviath_runtime::host::RunHistory {
         state,
         last_seq: 9,
         transitions: vec![(3, edge("plan", "build")), (5, edge("build", "plan"))],
+        answer: Some(Ok("the answer".to_string())),
     }
 }
 
@@ -1767,6 +1768,24 @@ fn a_single_transition_is_not_plural() {
     one.transitions.truncate(1);
     let out = reads::render_history("r", reads::View::Transitions, &one);
     assert!(out.starts_with("'r' took 1 edge:"), "{out}");
+}
+
+/// The summary carries the run's answer, read from the file its run file
+/// names, or why that file does not read.
+#[test]
+fn a_summary_carries_the_answer_or_why_it_does_not_read() {
+    let mut run = history();
+    let out = reads::render_history("r", reads::View::Summary, &run);
+    let read: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(read["answer"], "the answer");
+    run.answer = Some(Err("final_output is missing".to_string()));
+    let out = reads::render_history("r", reads::View::Summary, &run);
+    let read: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(read["answer"]["unreadable"], "final_output is missing");
+    run.answer = None;
+    let out = reads::render_history("r", reads::View::Summary, &run);
+    let read: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(read["answer"].is_null());
 }
 
 /// A warning that names no fix of its own gets one.

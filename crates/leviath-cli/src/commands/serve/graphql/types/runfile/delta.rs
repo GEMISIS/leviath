@@ -224,6 +224,21 @@ change_member!(
     }
 );
 
+change_member!(
+    /// The run's answer, logs or audits beside its run file changed.
+    FilesChange {
+        /// The files it names now.
+        files: super::files::StateFiles
+    }
+);
+change_member!(
+    /// The run stored a part beside its run file.
+    BlobsChange {
+        /// Every stored part it names now.
+        blobs: Vec<super::files::StateBlob>
+    }
+);
+
 /// One part of a run's state that a step changed, with its new value.
 #[derive(Debug, Union)]
 pub(crate) enum StateChange {
@@ -277,6 +292,10 @@ pub(crate) enum StateChange {
     Checkpoint(CheckpointChange),
     /// Whether the run is held, and for what.
     Held(HeldChange),
+    /// The files beside the run file.
+    Files(FilesChange),
+    /// The stored parts beside the run file.
+    Blobs(BlobsChange),
 }
 
 impl From<&Change> for StateChange {
@@ -361,6 +380,12 @@ impl From<&Change> for StateChange {
             }),
             Change::Held(held) => Self::Held(HeldChange {
                 held: super::state::held_issues(held.as_ref()),
+            }),
+            Change::Files(files) => Self::Files(FilesChange {
+                files: super::files::StateFiles::from(files),
+            }),
+            Change::Blobs(blobs) => Self::Blobs(BlobsChange {
+                blobs: blobs.iter().map(super::files::StateBlob::from).collect(),
             }),
         }
     }

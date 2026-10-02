@@ -1,6 +1,11 @@
+use std::path::PathBuf;
+
 use super::*;
 use crate::runfile::reader::RunFileReader;
 use crate::runfile::reader_tests::{image, initial, scripted_run, spec};
+use crate::spec::names::Digest;
+use crate::state::context::PartBody;
+use crate::state::files::FileRef;
 use crate::state::journal::{
     AttemptOutcomeState, AttemptState, CauseState, QuestionKind, RetryState, ToolOutcomeState,
 };
@@ -454,31 +459,102 @@ async fn a_finished_run_closes_its_file_and_a_new_lane_carries_one_on() {
     assert_eq!(r.deltas(3, 3).unwrap()[0].events.len(), 1);
 }
 
+/// A stored part is named in the run file, by its digest and where it came
+/// from, and its bytes are never copied in: a reader reads them from
+/// `blobs/` beside the file, and a part whose file is missing is refused by
+/// name.
 #[tokio::test]
-async fn stored_parts_are_copied_in_from_the_run_s_blobs_when_they_are_there() {
+async fn stored_parts_are_named_and_never_copied_in() {
     let runs = tempfile::tempdir().unwrap();
     let dir = run_dir(runs.path(), "r1");
     let blobs = dir.join(leviath_core::files::BLOBS_DIR);
     std::fs::create_dir_all(&blobs).unwrap();
-    std::fs::write(blobs.join(Digest::of(b"here").as_str()), b"here").unwrap();
+    let big = vec![7u8; 256 * 1024];
+    std::fs::write(blobs.join(Digest::of(&big).as_str()), &big).unwrap();
     let mut s = initial();
     let mut shown =
         crate::runfile::reader_tests::entry("look", crate::state::context::EntryKind::Text);
-    shown.parts = vec![
-        image(b"here"),
-        image(b"here"),
-        image(b"gone"),
-        inline_part(),
-    ];
+    shown.parts = vec![image(&big), image(&big), image(b"gone"), inline_part()];
     s.context.regions[1].entries.push(shown);
     let mut lane = RunFileLane::new("m", "w");
     lane.record(runs.path(), step("r1", s)).await.unwrap();
     let r = file(runs.path(), "r1");
+    assert!(r.len() < 64 * 1024, "the file holds {} bytes", r.len());
+    let named: Vec<Digest> = r
+        .latest_state()
+        .unwrap()
+        .blobs
+        .into_iter()
+        .map(|b| b.digest)
+        .collect();
+    assert_eq!(named, vec![Digest::of(&big), Digest::of(b"gone")]);
+    assert_eq!(r.blob(&Digest::of(&big)).unwrap(), big);
+    let missing = r.blob(&Digest::of(b"gone")).unwrap_err();
     assert_eq!(
-        r.blob(&Digest::of(b"here")).unwrap(),
-        Some(b"here".to_vec())
+        missing.kind,
+        crate::runfile::RunFileErrorKind::MissingBlob(Digest::of(b"gone"))
     );
-    assert_eq!(r.blob(&Digest::of(b"gone")).unwrap(), None);
+    assert!(missing.to_string().contains("is missing"), "{missing}");
+}
+
+/// The files the lane writes beside a run file are named by the run's next
+/// step, each on top of what the step before named; a finished run's file is
+/// opened again for them, and a live run's waits for its next step.
+#[tokio::test]
+async fn files_written_beside_a_run_are_named_by_its_next_step() {
+    let runs = tempfile::tempdir().unwrap();
+    run_dir(runs.path(), "r1");
+    let states = scripted_run(2);
+    let mut lane = RunFileLane::new("m", "w");
+    lane.wrote("r1", RunFiles::default());
+    assert!(lane.written.is_empty());
+    lane.record(runs.path(), step("r1", states[0].clone()))
+        .await
+        .unwrap();
+    let mut named = RunFiles::default();
+    named.set_stage_file(0, StageFile::Logs, FileRef::log("stages/0/logs.log", 4));
+    lane.wrote("r1", named);
+    // A live run's files wait for its next step.
+    assert!(lane.noted().is_empty());
+    let mut more = RunFiles {
+        final_output: Some(FileRef::whole("final_output", b"answer")),
+        ..RunFiles::default()
+    };
+    more.set_stage_file(0, StageFile::Logs, FileRef::log("stages/0/logs.log", 9));
+    more.set_stage_file(0, StageFile::Output, FileRef::log("stages/0/output.log", 2));
+    more.set_stage_file(
+        0,
+        StageFile::TaintAudit,
+        FileRef::whole("stages/0/taint_audit.json", b"[]"),
+    );
+    lane.wrote("r1", more);
+    let mut done = states[1].clone();
+    done.status = RunStatus::Complete;
+    lane.record(runs.path(), step("r1", done)).await.unwrap();
+    let files = file(runs.path(), "r1").latest_state().unwrap().files;
+    assert_eq!(files.final_output.as_ref().unwrap().bytes, 6);
+    assert_eq!(files.stage_file(0, StageFile::Logs).unwrap().bytes, 9);
+    assert_eq!(files.stage_file(0, StageFile::Output).unwrap().bytes, 2);
+    assert!(files.stage_file(0, StageFile::TaintAudit).is_some());
+    // The run finished, so its file is closed: a log line after that is
+    // named by a step of its own, on top of what was named before.
+    assert!(lane.writers.is_empty());
+    let mut late = RunFiles::default();
+    late.set_stage_file(0, StageFile::Logs, FileRef::log("stages/0/logs.log", 12));
+    lane.wrote("r1", late);
+    assert_eq!(lane.noted(), ["r1"]);
+    assert_eq!(lane.flush(runs.path(), "r1").await.unwrap(), Some(2));
+    let files = file(runs.path(), "r1").latest_state().unwrap().files;
+    assert_eq!(files.stage_file(0, StageFile::Logs).unwrap().bytes, 12);
+    assert_eq!(files.final_output.unwrap().bytes, 6);
+    // A deleted run's files are forgotten with it.
+    let gone = RunFiles {
+        final_output: Some(FileRef::whole("final_output", b"x")),
+        ..RunFiles::default()
+    };
+    lane.wrote("r1", gone);
+    lane.forget("r1");
+    assert!(lane.written.is_empty());
 }
 
 fn inline_part() -> crate::state::context::PartState {
@@ -509,8 +585,8 @@ async fn a_step_that_cannot_be_written_is_an_error_and_closes_the_file() {
             .await
             .is_err()
     );
-    // A file whose writes fail, with and without a blob to store.
-    let dir = run_dir(runs.path(), "r1");
+    // A file whose writes fail.
+    run_dir(runs.path(), "r1");
     lane.record(runs.path(), step("r1", initial()))
         .await
         .unwrap();
@@ -521,23 +597,6 @@ async fn a_step_that_cannot_be_written_is_an_error_and_closes_the_file() {
     };
     assert!(lane.record(runs.path(), step("r1", changed)).await.is_err());
     assert!(lane.writers.is_empty());
-    let blobs = dir.join(leviath_core::files::BLOBS_DIR);
-    std::fs::create_dir_all(&blobs).unwrap();
-    std::fs::write(blobs.join(Digest::of(b"img").as_str()), b"img").unwrap();
-    lane.record(runs.path(), step("r1", initial()))
-        .await
-        .unwrap();
-    crate::runfile::writer::break_writes(lane.writers.get_mut("r1").unwrap());
-    let mut with_image = initial();
-    let mut shown =
-        crate::runfile::reader_tests::entry("look", crate::state::context::EntryKind::Text);
-    shown.parts = vec![image(b"img")];
-    with_image.context.regions[1].entries.push(shown);
-    assert!(
-        lane.record(runs.path(), step("r1", with_image))
-            .await
-            .is_err()
-    );
 }
 
 /// A call that came back in its batch record ends there, with the parts its

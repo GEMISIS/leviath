@@ -84,6 +84,10 @@ pub enum Change {
     Point(PointProgress),
     /// `held`.
     Held(Option<crate::spec::issues::SpawnIssues>),
+    /// `files`.
+    Files(RunFiles),
+    /// `blobs`.
+    Blobs(Vec<BlobFile>),
 }
 
 /// An edge a run took, and why.
@@ -266,6 +270,8 @@ impl StateDelta {
             read_paths => ReadPaths,
             point => Point,
             held => Held,
+            files => Files,
+            blobs => Blobs,
         );
         Self {
             seq: prev.seq + 1,
@@ -327,6 +333,8 @@ impl StateDelta {
                 Change::ReadPaths(v) => state.read_paths = v,
                 Change::Point(v) => state.point = v,
                 Change::Held(v) => state.held = v,
+                Change::Files(v) => state.files = v,
+                Change::Blobs(v) => state.blobs = v,
             }
         }
         state.seq = self.seq;

@@ -127,14 +127,27 @@ impl WorldHost {
             .state_at(at.unwrap_or(last_seq))
             .and_then(|state| reader.deltas(0, last_seq).map(|deltas| (state, deltas)))
             .map_err(|e| e.to_string())?;
-        // Now, for a run the world holds, is what the world holds.
+        // Now, for a run the world holds, is what the world holds, with the
+        // files beside its run file as its file last named them.
         let live = match at {
             Some(_) => None,
             None => self.live_entity(run_id).and_then(|agent| {
                 crate::state::inspect::inspect(self.world.world(), agent.entity())
             }),
         };
-        let state = live.unwrap_or(recorded);
+        let state = match live {
+            Some(mut state) => {
+                state.files = recorded.files;
+                state.blobs = recorded.blobs;
+                state
+            }
+            None => recorded,
+        };
+        let answer = state.files.final_output.as_ref().map(|file| {
+            file.read(reader.dir())
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .map_err(|e| e.to_string())
+        });
         let transitions = deltas
             .iter()
             .flat_map(|delta| {
@@ -149,6 +162,7 @@ impl WorldHost {
             state,
             last_seq,
             transitions,
+            answer,
         })
     }
 

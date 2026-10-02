@@ -3464,6 +3464,7 @@ mod tests {
         // write in `leviath_sys::tty`.)
         crate::runstate::with_isolated_runs_dir("yank_with_real_content_reports_success", |_d| {
             let run_id = "test-yank-real-content";
+            crate::runstate::create_run(&crate::test_support::fixtures::run_meta(run_id)).unwrap();
             crate::runstate::append_stage_output(run_id, 0, "some real output");
 
             let mut dash = make_test_dashboard();

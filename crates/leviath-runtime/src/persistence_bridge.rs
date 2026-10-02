@@ -4,8 +4,9 @@
 //! meaningfully changes and sends it to this single-worker lane.
 //! [`persistence_worker`] writes each job under `<runs_dir>/<run_id>/` **one at
 //! a time**, so writes for a given run never race or land out of order: the
-//! run's state as a step in its run file, the answer's bytes beside it, and the
-//! readable per-stage logs.
+//! answer's bytes, the readable per-stage logs and the taint audit beside the
+//! run file, then the run's state as a step in its run file, naming each of
+//! those files as it now stands.
 //!
 //! Every error is logged and counted in
 //! [`crate::persist_stats::PersistLaneStats`], and the lane
@@ -23,6 +24,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::persist_stats::PersistLaneStats;
+use crate::state::files::{FileRef, RunFiles, StageFile};
 
 use leviath_core::run_meta::RunMeta;
 use tokio::io::AsyncWriteExt;
@@ -217,7 +219,8 @@ pub(crate) async fn persistence_worker(
                         continue;
                     }
                     let written = last_output.get(&job.run_id).copied();
-                    let outcome = write_snapshot(&runs_dir, &job, written).await;
+                    let mut outcome = write_snapshot(&runs_dir, &job, written).await;
+                    run_files.wrote(&job.run_id, std::mem::take(&mut outcome.named));
                     if let Some(lost) = &outcome.files {
                         stats.snapshot_failed(&job.run_id, &lost.path, &lost.message);
                     }
@@ -267,12 +270,9 @@ pub(crate) async fn persistence_worker(
                         continue;
                     }
                     let dir = runs_dir.join(&run_id);
-                    for (idx, line) in &output_appends {
-                        append_stage_line(&dir, *idx, "output.log", line, &run_id).await;
-                    }
-                    for (idx, line) in &log_appends {
-                        append_stage_line(&dir, *idx, "logs.log", line, &run_id).await;
-                    }
+                    let mut named = RunFiles::default();
+                    append_lines(&dir, &output_appends, &log_appends, &run_id, &mut named).await;
+                    run_files.wrote(&run_id, named);
                 }
             }
         }
@@ -287,6 +287,11 @@ pub(crate) async fn persistence_worker(
                 false => run_files.forget(&run_id),
             }
         }
+    }
+    // The world is stopping: name the files written since each live run's
+    // last step, so a log's size in its run file is the size it was left at.
+    for run_id in run_files.unnamed() {
+        flush_run_file(&mut run_files, &runs_dir, &run_id, &stats).await;
     }
 }
 
@@ -492,6 +497,8 @@ struct WriteOutcome {
     /// sidecar or the taint audit. Counted, not fatal - the next snapshot
     /// writes each of them again.
     files: Option<Lost>,
+    /// The files this write placed, as the run's next step names them.
+    named: RunFiles,
 }
 
 /// Write what one job carries besides its run-file step under
@@ -528,56 +535,93 @@ async fn write_snapshot(
     // nothing to identify the answer by, and skipping on an unidentifiable key
     // is how the sidecar goes missing in the first place.
     let mut wrote_output = None;
+    let mut named = RunFiles::default();
     if let Some(content) = &job.final_output
         && (submitted.is_none() || written_output != submitted)
     {
-        write_bytes_atomic(
-            &dir.join(leviath_core::FINAL_OUTPUT_FILE),
+        let path = leviath_core::FINAL_OUTPUT_FILE;
+        if write_bytes_atomic(
+            &dir.join(path),
             content.clone().into_bytes(),
             &job.run_id,
             &mut files,
         )
-        .await;
+        .await
+        {
+            named.final_output = Some(FileRef::whole(path, content.as_bytes()));
+        }
         wrote_output = submitted;
     }
 
-    // Append-only per-stage output + logs.
-    for (idx, line) in &job.output_appends {
-        append_stage_line(&dir, *idx, "output.log", line, &job.run_id).await;
-    }
-    for (idx, line) in &job.log_appends {
-        append_stage_line(&dir, *idx, "logs.log", line, &job.run_id).await;
-    }
+    append_lines(
+        &dir,
+        &job.output_appends,
+        &job.log_appends,
+        &job.run_id,
+        &mut named,
+    )
+    .await;
     // Per-stage taint audit (whole-file, atomic).
     if let Some((idx, json)) = &job.taint_audit {
-        let stage_dir = dir.join("stages").join(idx.to_string());
-        let _ = create_private_dir(&stage_dir).await;
-        write_bytes_atomic(
-            &stage_dir.join("taint_audit.json"),
-            json.clone().into_bytes(),
-            &job.run_id,
-            &mut files,
-        )
-        .await;
+        let index = u32::try_from(*idx).unwrap_or(u32::MAX);
+        let path = StageFile::TaintAudit.path(index);
+        let target = dir.join(&path);
+        let _ = create_private_dir(target.parent().unwrap_or(&dir)).await;
+        if write_bytes_atomic(&target, json.clone().into_bytes(), &job.run_id, &mut files).await {
+            named.set_stage_file(
+                index,
+                StageFile::TaintAudit,
+                FileRef::whole(path, json.as_bytes()),
+            );
+        }
     }
     WriteOutcome {
         dir_made: true,
         output: wrote_output,
         files,
+        named,
     }
 }
 
-/// Append one line (with a trailing newline) to `stages/<idx>/<file>` under the
-/// run dir, creating the stage directory if needed.
+/// Append each stage's output and log lines, in order, and name in `named`
+/// each log as long as the appends left it.
+async fn append_lines(
+    dir: &Path,
+    output: &[(usize, String)],
+    logs: &[(usize, String)],
+    run_id: &str,
+    named: &mut RunFiles,
+) {
+    let streams = [(StageFile::Output, output), (StageFile::Logs, logs)];
+    for (which, lines) in streams {
+        for (idx, line) in lines {
+            let index = u32::try_from(*idx).unwrap_or(u32::MAX);
+            if let Some(len) = append_stage_line(dir, index, which, line, run_id).await {
+                named.set_stage_file(index, which, FileRef::log(which.path(index), len));
+            }
+        }
+    }
+}
+
+/// Append one line (with a trailing newline) to the stage's log `which` under
+/// the run dir, creating the stage directory if needed. Returns the log's
+/// length after the append, or `None` when it could not be opened.
 ///
-/// A failed `create_dir_all` just makes the subsequent open fail, and the append
-/// result is deliberately not reported: these are the readable logs beside the
-/// run, not the record of what it did, and a line that does not reach `logs.log`
-/// leaves nothing claiming otherwise. The run file is what a run is failed for.
-async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &str, run_id: &str) {
-    let stage_dir = run_dir.join("stages").join(stage_idx.to_string());
-    let _ = create_private_dir(&stage_dir).await;
-    match open_private_append(&stage_dir.join(file)).await {
+/// A failed `create_dir_all` just makes the subsequent open fail, and a failed
+/// write is deliberately not reported: these are the readable logs beside the
+/// run, not the record of what it did. The run file names each log as long as
+/// the lane last found it, so a log that lost lines reads as shorter than that.
+/// The run file is what a run is failed for.
+async fn append_stage_line(
+    run_dir: &Path,
+    index: u32,
+    which: StageFile,
+    line: &str,
+    run_id: &str,
+) -> Option<u64> {
+    let path = run_dir.join(which.path(index));
+    let _ = create_private_dir(path.parent().unwrap_or(run_dir)).await;
+    match open_private_append(&path).await {
         Ok(mut handle) => {
             let mut bytes = line.as_bytes().to_vec();
             bytes.push(b'\n');
@@ -585,9 +629,11 @@ async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &
             // tokio::fs::File buffers; flush so a reader (dashboard / a sync test)
             // sees the line before the handle is dropped.
             let _ = handle.flush().await;
+            handle.metadata().await.ok().map(|meta| meta.len())
         }
         Err(e) => {
             tracing::warn!(run_id = %run_id, error = %e, "persistence: stage log open failed");
+            None
         }
     }
 }
@@ -596,8 +642,14 @@ async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &
 /// filesystem, so a reader never sees a half-written file).
 ///
 /// A failure is logged and left in `lost` for the caller to count. The lane
-/// carries on with the rest of the snapshot either way.
-async fn write_bytes_atomic(path: &Path, bytes: Vec<u8>, run_id: &str, lost: &mut Option<Lost>) {
+/// carries on with the rest of the snapshot either way. Returns whether the
+/// file is in place.
+async fn write_bytes_atomic(
+    path: &Path,
+    bytes: Vec<u8>,
+    run_id: &str,
+    lost: &mut Option<Lost>,
+) -> bool {
     let tmp = path.with_extension("tmp");
     // `write_private`, not a plain write: these files carry the run's answer
     // and its security decisions. A plain write lands them at the umask
@@ -614,12 +666,16 @@ async fn write_bytes_atomic(path: &Path, bytes: Vec<u8>, run_id: &str, lost: &mu
     if let Err(e) = written.map_err(vanished_task).and_then(|r| r) {
         tracing::warn!(run_id = %run_id, error = %e, "persistence: temp write failed");
         keep_first(lost, Lost::at(&tmp, &e));
-        return;
+        return false;
     }
-    if let Err(e) = tokio::fs::rename(&tmp, path).await {
-        tracing::warn!(run_id = %run_id, error = %e, "persistence: rename failed");
-        keep_first(lost, Lost::at(path, &e));
-        let _ = tokio::fs::remove_file(&tmp).await;
+    match tokio::fs::rename(&tmp, path).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(run_id = %run_id, error = %e, "persistence: rename failed");
+            keep_first(lost, Lost::at(path, &e));
+            let _ = tokio::fs::remove_file(&tmp).await;
+            false
+        }
     }
 }
 
