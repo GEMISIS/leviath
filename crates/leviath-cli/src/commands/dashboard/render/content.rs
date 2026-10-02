@@ -3131,8 +3131,13 @@ regions = []
             .unwrap();
         let buf = rendered_buffer(&terminal);
         assert!(buf.contains("Logs"), "{buf}");
-        // A stage that has logged nothing yet shows where its log will be.
-        assert!(buf.contains("run-logs-fph/stages/0/"), "{buf}");
+        // A stage that has logged nothing yet shows where its log will be,
+        // in the separators of the platform it runs on.
+        let sep = std::path::MAIN_SEPARATOR;
+        assert!(
+            buf.contains(&format!("run-logs-fph{sep}stages{sep}0{sep}")),
+            "{buf}"
+        );
         assert!(!buf.contains("run.lvr"), "{buf}");
     }
 
