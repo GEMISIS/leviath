@@ -229,11 +229,28 @@ pub fn resume(
 }
 
 /// Why a run is held, as the listings say it: the machine changed, and what
-/// to put back, one problem after another.
+/// to put back, one problem after another. A problem found at several places
+/// (one provider gone from every stage) is said once, naming each place.
 pub fn held_reason(
     issues: &crate::spec::issues::SpawnIssues,
 ) -> leviath_core::run_meta::WaitReason {
-    let problems: Vec<String> = issues.iter().map(ToString::to_string).collect();
+    let mut found: Vec<(Vec<String>, String)> = Vec::new();
+    for issue in issues.iter() {
+        let place = issue.path.to_string();
+        let said = issue.to_string();
+        let what = said
+            .strip_prefix(&format!("{place}: "))
+            .unwrap_or(&said)
+            .to_string();
+        match found.iter_mut().find(|(_, w)| *w == what) {
+            Some((places, _)) => places.push(place),
+            None => found.push((vec![place], what)),
+        }
+    }
+    let problems: Vec<String> = found
+        .iter()
+        .map(|(places, what)| format!("{}: {what}", places.join(", ")))
+        .collect();
     leviath_core::run_meta::WaitReason::NeedsSetup {
         blocker: leviath_core::run_meta::SetupBlocker::MachineChanged,
         remedy: format!(

@@ -93,11 +93,13 @@ ERROR leviath_cli::daemon::recovery: a run cannot be resumed on this machine as 
 1. stages.gather.provider: changed: provider 'openai' is configured differently from when the run started: the run was started against a different configuration. put 'openai' back the way it was (its kind, base URL and model list), or start a new run. Known: openai
 ```
 
-A held run is listed as paused, with the reason `machine changed`. Put the provider or server
-back and restart the daemon, or `lev resume` it, and it carries on where it stopped. See
+A held run is listed as paused, with the reason `machine changed`. The same problem at several
+stages is one line naming each stage. Put the provider or server back and restart the daemon, or
+`lev resume` it, and it carries on where it stopped. A `lev resume` while it still does not fit
+leaves it paused and says what to put back. See
 [when the machine changed](/docs/run-file#when-the-machine-changed). A run directory from an older
 Leviath is converted to a run file the first time the daemon loads it. Its old files move to a
-`legacy/` directory inside it. See [upgrading from an earlier release](#upgrading-from-an-earlier-release).
+`legacy/` directory inside it, except its stage logs and its answer, which stay where they are. See [upgrading from an earlier release](#upgrading-from-an-earlier-release).
 
 The tricky part is tool calls that were mid-batch when it went down. Some of those already had real
 effects: a file written, a shell command run. Re-running them would do the damage twice. So the

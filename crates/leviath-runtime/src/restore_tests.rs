@@ -64,6 +64,47 @@ fn held_issues() -> crate::spec::issues::SpawnIssues {
     .into()
 }
 
+/// One problem found at several places (a provider gone from every stage)
+/// is said once, naming each place; a different problem has a line of its
+/// own.
+#[test]
+fn a_problem_held_at_several_places_is_said_once() {
+    use crate::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+    let gone = |stage: &str| {
+        SpawnIssue::new(
+            SpecPath::root()
+                .field("stages")
+                .key(stage)
+                .field("provider"),
+            IssueCode::Unavailable,
+            "provider 'openai' is no longer configured on this machine",
+        )
+    };
+    let mut issues = SpawnIssues::new();
+    for issue in [
+        gone("ask"),
+        gone("red"),
+        SpawnIssue::new(
+            SpecPath::root().field("stages").key("ask").field("tools"),
+            IssueCode::Changed,
+            "MCP server 'tiny' offers a different tool list",
+        ),
+        gone("blue"),
+    ] {
+        issues.push(issue);
+    }
+    let leviath_core::run_meta::WaitReason::NeedsSetup { remedy, .. } = held_reason(&issues) else {
+        panic!("a held run needs the machine put back");
+    };
+    assert_eq!(
+        remedy,
+        "stages.ask.provider, stages.red.provider, stages.blue.provider: unavailable: provider \
+         'openai' is no longer configured on this machine; stages.ask.tools: changed: MCP \
+         server 'tiny' offers a different tool list; put that back, then `lev resume` this run \
+         or restart the daemon"
+    );
+}
+
 /// A held run is listed paused, saying the machine changed and what to put
 /// back; once it is resumed it is held no longer.
 #[test]
