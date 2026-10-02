@@ -173,14 +173,29 @@ pub(crate) struct FileStamp {
     pub(crate) len: u64,
 }
 
-/// The stamp of a run's file (`<run_dir>/run.lvr`), or `None` when it has
-/// none.
-pub(crate) fn run_file_stamp(run_id: &str) -> Option<FileStamp> {
-    let meta = std::fs::metadata(run_file::path_in(&run_dir(run_id))).ok()?;
+/// The stamp of the file at `path`, or `None` when there is none.
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
     Some(FileStamp {
         mtime: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
         len: meta.len(),
     })
+}
+
+/// The stamp of a run's file (`<run_dir>/run.lvr`), or `None` when it has
+/// none.
+pub(crate) fn run_file_stamp(run_id: &str) -> Option<FileStamp> {
+    file_stamp(&run_file::path_in(&run_dir(run_id)))
+}
+
+/// The stamps of the two files a run's answer is read from: its run file,
+/// which says whether it has one, and the sidecar that holds it.
+pub(crate) fn answer_stamps(run_id: &str) -> (Option<FileStamp>, Option<FileStamp>) {
+    let dir = run_dir(run_id);
+    (
+        file_stamp(&run_file::path_in(&dir)),
+        file_stamp(&final_output_path(&dir)),
+    )
 }
 
 /// A run's context-window history: the full window (+ metadata) at each recorded
@@ -339,10 +354,33 @@ pub(crate) fn read_final_output_in(
     dir: &std::path::Path,
     meta: &RunMeta,
 ) -> Option<leviath_core::FinalOutput> {
+    answer_in(dir, meta, &|| run_file_answer(dir))
+}
+
+/// A run's record and its answer, with its run file read once for both.
+/// See [`read_meta`] and [`read_final_output`].
+pub(crate) fn read_meta_and_answer(
+    run_id: &str,
+) -> anyhow::Result<(RunMeta, Option<leviath_core::FinalOutput>)> {
+    let dir = run_dir(run_id);
+    let tail = run_file::tail_in(&dir)?;
+    let meta = leviath_runtime::runfile::summary_of(&tail.spec, &tail.state, tail.updated_at);
+    let recorded = tail.state.final_output.map(|out| out.content);
+    let answer = answer_in(&dir, &meta, &|| recorded.clone());
+    Ok((meta, answer))
+}
+
+/// The answer `meta` says the run in `dir` handed back: the sidecar's bytes,
+/// or else what `recorded` finds in the run file.
+fn answer_in(
+    dir: &std::path::Path,
+    meta: &RunMeta,
+    recorded: &dyn Fn() -> Option<String>,
+) -> Option<leviath_core::FinalOutput> {
     let descriptor = meta.final_output.clone()?;
     let content = std::fs::read_to_string(final_output_path(dir))
         .ok()
-        .or_else(|| run_file_answer(dir))?;
+        .or_else(recorded)?;
     Some(leviath_core::FinalOutput {
         content,
         format: descriptor.format,
@@ -355,9 +393,9 @@ pub(crate) fn read_final_output_in(
 
 /// The answer as the run file holds it, for a run with no sidecar.
 fn run_file_answer(dir: &std::path::Path) -> Option<String> {
-    leviath_runtime::runfile::RunFileReader::open(&dir.join(leviath_core::files::RUN_FILE))
-        .and_then(|reader| reader.latest_state())
+    run_file::tail_in(dir)
         .ok()?
+        .state
         .final_output
         .map(|out| out.content)
 }
@@ -436,8 +474,12 @@ pub(crate) fn looks_abandoned(
 /// own configured `runs_dir` rather than the home-resolved one): its run file
 /// as of its last step.
 pub(crate) fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
-    let reader = run_file::open_in(dir)?;
-    Ok(leviath_runtime::runfile::summary(&reader)?)
+    let tail = run_file::tail_in(dir)?;
+    Ok(leviath_runtime::runfile::summary_of(
+        &tail.spec,
+        &tail.state,
+        tail.updated_at,
+    ))
 }
 
 /// Inner implementation of `list_runs`, parameterised so a missing runs
@@ -1442,6 +1484,10 @@ mod tests {
             create_run(&claimed).expect("run dir");
             let from_file = read_final_output("run-claimed").expect("the run file holds it");
             assert_eq!(from_file.content.len(), answer.content.len());
+            // The record and the answer read together say the same.
+            let (record, together) = read_meta_and_answer("run-claimed").expect("it reads");
+            assert_eq!(record.run_id, "run-claimed");
+            assert_eq!(together, Some(from_file));
 
             // A sidecar is read first.
             write_final_output(&run_dir("run-claimed"), &answer.content).expect("sidecar");

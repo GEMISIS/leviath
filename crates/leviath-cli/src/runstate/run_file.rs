@@ -9,12 +9,17 @@
 //! daemon is still appending to can end in a half-written frame; the reader
 //! drops that tail from what it holds, and opening the file the way the daemon
 //! does would cut it off the file underneath the writer.
+//!
+//! What a run is now (its record, its context window, its stage ledger, its
+//! answer) is read from the two ends of the file, its spec and its last
+//! checkpoint, with [`RunFileTail`]: listings read that for every run they
+//! show. Only a reader of the steps themselves opens the whole file.
 
 use std::path::{Path, PathBuf};
 
 use leviath_core::run_meta::{ContextSnapshot, StageRecord};
-use leviath_runtime::runfile::RunFileReader;
 use leviath_runtime::runfile::history::RunPoint;
+use leviath_runtime::runfile::{RunFileReader, RunFileTail};
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::{Change, RunState};
 
@@ -25,9 +30,17 @@ pub(crate) fn path_in(dir: &Path) -> PathBuf {
 
 /// The run file in `dir`, read from its bytes.
 pub(crate) fn open_in(dir: &Path) -> anyhow::Result<RunFileReader> {
-    let path = path_in(dir);
-    let bytes = std::fs::read(&path)?;
-    Ok(RunFileReader::from_bytes(&path, bytes)?)
+    Ok(RunFileReader::read(&path_in(dir))?)
+}
+
+/// The run in `dir` as of its last step, read from the two ends of its file.
+pub(crate) fn tail_in(dir: &Path) -> anyhow::Result<RunFileTail> {
+    Ok(RunFileTail::read(&path_in(dir))?)
+}
+
+/// The spec of the run in `dir`, read from the front of its file.
+pub(crate) fn spec_in(dir: &Path) -> anyhow::Result<RunSpec> {
+    Ok(leviath_runtime::runfile::read_spec(&path_in(dir))?)
 }
 
 /// The run file in `dir` and the state of its last step, or `None` when the
@@ -40,17 +53,17 @@ pub(crate) fn latest_in(dir: &Path) -> Option<(RunFileReader, RunState)> {
 
 /// The run's context window as of its last step.
 pub(crate) fn context_in(dir: &Path) -> Option<ContextSnapshot> {
-    let (reader, state) = latest_in(dir)?;
+    let tail = tail_in(dir).ok()?;
     Some(leviath_runtime::runfile::context_snapshot(
-        reader.spec(),
-        &state,
+        &tail.spec,
+        &tail.state,
     ))
 }
 
 /// The run's per-stage ledger as of its last step.
 pub(crate) fn stages_in(dir: &Path) -> Option<Vec<StageRecord>> {
-    let (_, state) = latest_in(dir)?;
-    Some(leviath_runtime::runfile::stage_records(&state))
+    let tail = tail_in(dir).ok()?;
+    Some(leviath_runtime::runfile::stage_records(&tail.state))
 }
 
 /// What a run's file says about how it got where it is: the window at every
