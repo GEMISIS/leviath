@@ -40,5 +40,6 @@ pub(crate) mod tool_inventory;
 pub(crate) mod tools;
 pub(crate) mod tui;
 pub mod ui_state;
+pub(crate) mod upgrade_warnings;
 pub mod workdir_guard;
 pub(crate) mod yolo;

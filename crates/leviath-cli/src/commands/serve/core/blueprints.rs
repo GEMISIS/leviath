@@ -152,20 +152,24 @@ pub(crate) fn digest_of(text: &str) -> String {
 /// `text` as an `agent.toml`: itself when it is one, or the `agent.toml` an
 /// `agent.leviath` converts to, which is what older clients still send. An
 /// `agent.leviath` that does not convert is every problem the conversion
-/// found. `Ok(true)` says the text was converted.
-pub(crate) fn as_agent_toml(text: &str) -> Result<(String, bool), Vec<String>> {
+/// found. A converted text comes with a warning for each key the conversion
+/// dropped; one that was not converted with `None`.
+pub(crate) fn as_agent_toml(text: &str) -> Result<(String, Option<Vec<String>>), Vec<String>> {
     let old = toml::from_str::<toml::Table>(text)
         .is_ok_and(|table| table.contains_key("agent") && !table.contains_key("blueprint"));
     match old {
         true => crate::commands::blueprint::convert(text)
-            .map(|(converted, _notes)| (converted, true))
+            .map(|m| {
+                let dropped = m.dropped.iter().map(ToString::to_string).collect();
+                (m.text, Some(dropped))
+            })
             .map_err(|problems| {
                 problems
                     .into_iter()
                     .map(|p| format!("agent.leviath does not convert to agent.toml: {p}"))
                     .collect()
             }),
-        false => Ok((text.to_string(), false)),
+        false => Ok((text.to_string(), None)),
     }
 }
 

@@ -61,6 +61,22 @@ pub(super) fn timeout_for(req: &ControlRequest) -> std::time::Duration {
     }
 }
 
+/// How long a request waits before asking a starting daemon again.
+const STARTUP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What a client tells its [`StartupWatch`] while a daemon starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupEvent<'a> {
+    /// The daemon is still starting, and this is what it is doing.
+    Progress(&'a super::StartupProgress),
+    /// The daemon it was waiting on is ready.
+    Ready,
+}
+
+/// Who a client tells, while a request waits on a starting daemon, what the
+/// daemon is doing.
+pub type StartupWatch = std::sync::Arc<dyn Fn(StartupEvent<'_>) + Send + Sync>;
+
 /// How long a long-lived client keeps trying to reach a daemon that has just
 /// stopped answering before it reports the daemon unreachable. Opted into with
 /// [`ControlClient::with_reconnect_grace`]; a client has none by default.
@@ -235,6 +251,9 @@ fn pipe_busy(_: &std::io::Error) -> bool {
 /// on a different build is reported as such.
 #[derive(Clone)]
 pub struct ControlClient {
+    /// Who is told while the daemon is still starting. `None` waits it out
+    /// in silence.
+    watch: Option<StartupWatch>,
     id: ControlId,
     /// Shared across clones - see [`Link`].
     link: std::sync::Arc<std::sync::Mutex<Link>>,
@@ -263,6 +282,7 @@ impl ControlClient {
             token_dir: None,
             grace: std::time::Duration::ZERO,
             own: DaemonIdentity::this_process(DaemonIdentity::unknown_build()),
+            watch: None,
         }
     }
 
@@ -317,6 +337,7 @@ impl ControlClient {
             token_dir: Some(dir.to_path_buf()),
             grace: std::time::Duration::ZERO,
             own: DaemonIdentity::this_process(DaemonIdentity::unknown_build()),
+            watch: None,
         }
     }
 
@@ -458,7 +479,56 @@ impl ControlClient {
     /// with the remedy in the message; that is the one failure a restart of
     /// the daemon does not fix, because the process that needs restarting is
     /// this one.
+    ///
+    /// A daemon that is still starting answers with what it is doing instead
+    /// (see [`StartupProgress`](super::StartupProgress)), having done nothing
+    /// with the request. That is shown to the [`StartupWatch`] and the request
+    /// sent again until the daemon is ready, however long that takes: a
+    /// daemon that answers is not one that stopped answering.
     pub async fn request(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
+        let mut waited = false;
+        loop {
+            match self.request_once(req).await? {
+                ControlResponse::Starting { progress } => {
+                    waited = true;
+                    self.tell(StartupEvent::Progress(&progress));
+                    tokio::time::sleep(STARTUP_POLL).await;
+                }
+                response => {
+                    if waited {
+                        self.tell(StartupEvent::Ready);
+                    }
+                    return Ok(response);
+                }
+            }
+        }
+    }
+
+    /// Wait until the daemon is ready, telling the [`StartupWatch`] how its
+    /// start-up goes. Asks the status of no run, which a ready daemon answers
+    /// at once.
+    pub async fn wait_until_started(&self) -> std::io::Result<()> {
+        self.request(&ControlRequest::Status {
+            run_id: String::new(),
+        })
+        .await
+        .map(drop)
+    }
+
+    /// Tell whoever watches how the daemon's start-up goes.
+    fn tell(&self, event: StartupEvent<'_>) {
+        self.watch.iter().for_each(|watch| watch(event));
+    }
+
+    /// Show a starting daemon's progress to `watch` while a request waits on
+    /// it.
+    pub fn with_startup_watch(mut self, watch: StartupWatch) -> Self {
+        self.watch = Some(watch);
+        self
+    }
+
+    /// One send of `req`, under its deadline.
+    async fn request_once(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
         // The daemon services control ops from a single loop, so one op that
         // takes a long time (or a wedged world) delays every other client. With
         // no deadline, `lev cancel` and the dashboard simply hung - no output, no

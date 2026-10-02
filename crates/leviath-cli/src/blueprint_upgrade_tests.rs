@@ -7,6 +7,14 @@ fn old_probe() -> String {
     std::fs::read_to_string(path).unwrap()
 }
 
+/// What a blueprint that migrates with nothing to say comes to.
+fn migrated_clean() -> Outcome {
+    Outcome::Migrated {
+        notes: Vec::new(),
+        dropped: Vec::new(),
+    }
+}
+
 /// The backup of the home at `home`.
 fn backup(home: &Path) -> crate::home_backup::Backup {
     crate::home_backup::Backup::of_home(home)
@@ -30,10 +38,15 @@ fn an_old_blueprint_is_migrated_beside_its_files() {
     let probe = agents.join("probe");
     old_blueprint(&probe, old_probe().as_bytes());
 
-    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
+    let done = upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
     assert_eq!(done.len(), 1);
     assert_eq!(done[0].name(), "probe");
-    assert_eq!(done[0].outcome, Outcome::Migrated(Vec::new()));
+    assert_eq!(done[0].outcome, migrated_clean());
     assert!(leviath_blueprint::load(&probe).is_ok());
     assert!(probe.join("legacy/agent.leviath").is_file());
     assert!(!probe.join(OLD_MANIFEST).exists());
@@ -46,7 +59,15 @@ fn an_old_blueprint_is_migrated_beside_its_files() {
     );
     assert!(saved.join("tools/x.rhai").is_file());
     assert!(!saved.join(leviath_blueprint::FILE_NAME).exists());
-    assert!(upgrade_all(Some(&agents), &[], &backup(home.path())).is_empty());
+    assert!(
+        upgrade_all(
+            Some(&agents),
+            &[],
+            &backup(home.path()),
+            &StartupBoard::default()
+        )
+        .is_empty()
+    );
 }
 
 /// A blueprint that cannot be backed up first is not changed.
@@ -58,7 +79,12 @@ fn a_blueprint_that_cannot_be_backed_up_is_left_alone() {
     old_blueprint(&dir, b"old");
     std::fs::write(home.path().join(crate::home_backup::BACKUPS_DIR), "a file").unwrap();
 
-    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
+    let done = upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
     let Outcome::Failed(problems) = &done[0].outcome else {
         panic!("{:?}", done[0].outcome);
     };
@@ -80,7 +106,12 @@ fn an_old_install_of_a_bundled_blueprint_is_replaced() {
     let dir = agents.join(bundled.name);
     old_blueprint(&dir, b"[agent]\nname = \"whatever\"\n");
 
-    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
+    let done = upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
     assert_eq!(done[0].outcome, Outcome::Reinstalled);
     assert!(dir.join("legacy/agent.leviath").is_file());
     assert!(dir.join("legacy/tools/x.rhai").is_file());
@@ -107,7 +138,12 @@ fn a_bundled_blueprint_that_cannot_be_replaced_is_left_alone() {
     let staging = format!(".{}.upgrading-{}", bundled.name, std::process::id());
     std::fs::write(agents.join(staging), b"x").unwrap();
 
-    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
+    let done = upgrade_all(
+        Some(&agents),
+        &[],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
     let Outcome::Failed(problems) = &done[0].outcome else {
         panic!("the replacement could not be staged");
     };
@@ -135,7 +171,12 @@ fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
     let lone = home.path().join("lone");
     old_blueprint(&lone, old_probe().as_bytes());
 
-    let done = upgrade_all(None, &[mine.clone(), lone.clone()], &backup(home.path()));
+    let done = upgrade_all(
+        None,
+        &[mine.clone(), lone.clone()],
+        &backup(home.path()),
+        &StartupBoard::default(),
+    );
     let outcome = |dir: &Path| {
         done.iter()
             .find(|d| d.dir == dir)
@@ -150,41 +191,78 @@ fn a_blueprint_that_cannot_be_migrated_is_left_as_it_was() {
         assert!(dir.join(OLD_MANIFEST).is_file());
         assert!(!dir.join(leviath_blueprint::FILE_NAME).exists());
     }
-    assert_eq!(outcome(&named), Outcome::Migrated(Vec::new()));
-    assert_eq!(outcome(&lone), Outcome::Migrated(Vec::new()));
+    assert_eq!(outcome(&named), migrated_clean());
+    assert_eq!(outcome(&lone), migrated_clean());
 }
 
 /// A key the old parser read nothing from (`max_stored` on a region, as the
-/// old docs taught) does not stop the upgrade: the new file leaves it out and
-/// the outcome names it.
+/// old docs taught) does not stop the upgrade: the new file leaves it out,
+/// the outcome warns about it with its value, and the warning is kept beside
+/// the blueprint for `lev list` and `lev validate`.
 #[cfg(feature = "legacy-runs")]
 #[test]
-fn a_key_the_old_parser_ignored_is_left_out_with_a_note() {
+fn a_key_the_old_parser_ignored_is_dropped_with_a_warning() {
     let home = tempfile::tempdir().unwrap();
     let agents = home.path().join("agents");
     let probe = agents.join("probe");
     let text = old_probe().replace("seed = \"task\" }", "seed = \"task\", max_stored = 4 }");
     old_blueprint(&probe, text.as_bytes());
     old_blueprint(&agents.join("logged"), text.as_bytes());
-    let done = upgrade_all(Some(&agents), &[], &backup(home.path()));
-    let notes: Vec<&String> = done
+    // One whose note cannot be kept is still upgraded; the log says so.
+    let stuck = agents.join("stuck");
+    old_blueprint(&stuck, text.as_bytes());
+    std::fs::create_dir_all(crate::upgrade_warnings::path(&stuck)).unwrap();
+    let done = crate::test_support::with_tracing(|| {
+        upgrade_all(
+            Some(&agents),
+            &[],
+            &backup(home.path()),
+            &StartupBoard::default(),
+        )
+    });
+    let dropped: Vec<&String> = done
         .iter()
         .flat_map(|d| match &d.outcome {
-            Outcome::Migrated(notes) => notes.iter(),
+            Outcome::Migrated { dropped, .. } => dropped.iter(),
             other => panic!("{other:?}"),
         })
         .collect();
-    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert_eq!(dropped.len(), 3, "{dropped:?}");
+    assert!(stuck.join(leviath_blueprint::FILE_NAME).is_file());
+    assert!(crate::upgrade_warnings::read(&stuck).is_empty());
     assert!(
-        notes.iter().all(|n| n.contains("`max_stored`")),
-        "{notes:?}"
+        dropped
+            .iter()
+            .all(|n| n.contains("`max_stored = 4` was dropped") && n.contains("never read it")),
+        "{dropped:?}"
+    );
+    assert_eq!(
+        crate::upgrade_warnings::read(&probe),
+        vec![dropped[1].clone()]
     );
     let new = std::fs::read_to_string(probe.join(leviath_blueprint::FILE_NAME)).unwrap();
     assert!(!new.contains("max_stored"), "{new}");
     // The daemon's log names each note.
     let logged = home.path().join("again");
     old_blueprint(&logged.join("probe"), text.as_bytes());
-    crate::test_support::with_tracing(|| upgrade_logged(Some(&logged), &[], &backup(home.path())));
+    let mut upgrade = Upgrade::default();
+    crate::test_support::with_tracing(|| {
+        upgrade_logged(
+            Some(&logged),
+            &[],
+            &backup(home.path()),
+            &StartupBoard::default(),
+            &mut upgrade,
+        )
+    });
+    assert_eq!(upgrade.blueprints, 1);
+    assert_eq!(upgrade.warnings.len(), 1, "{:?}", upgrade.warnings);
+    assert!(
+        upgrade.warnings[0]
+            .starts_with("blueprint 'probe': region 'task': `max_stored = 4` was dropped"),
+        "{:?}",
+        upgrade.warnings
+    );
     assert!(
         logged
             .join("probe")
@@ -203,7 +281,31 @@ fn the_daemon_upgrades_and_a_command_only_says_so() {
     old_blueprint(&agents.join(crate::bundled::BUNDLED_AGENTS[0].name), b"old");
     old_blueprint(&agents.join("broken"), b"not toml [");
     old_blueprint(&agents.join("probe"), old_probe().as_bytes());
-    crate::test_support::with_tracing(|| upgrade_logged(Some(&agents), &[], &backup(home.path())));
+    let mut upgrade = Upgrade::default();
+    let board = StartupBoard::default();
+    crate::test_support::with_tracing(|| {
+        upgrade_logged(
+            Some(&agents),
+            &[],
+            &backup(home.path()),
+            &board,
+            &mut upgrade,
+        )
+    });
+    // Three found and done, each counted by what came of it.
+    let now = board.current();
+    assert_eq!(
+        (now.step.as_str(), now.done, now.total),
+        ("upgrading blueprints", 3, 3)
+    );
+    let saving = now.detail.unwrap_or_default();
+    assert!(saving.contains(crate::home_backup::BACKUPS_DIR), "{saving}");
+    assert_eq!((upgrade.blueprints, upgrade.blueprints_failed), (2, 1));
+    assert!(
+        upgrade.warnings[0].starts_with("blueprint 'broken' at "),
+        "{:?}",
+        upgrade.warnings
+    );
 
     let waiting = agents.join("waiting");
     old_blueprint(&waiting, b"not toml [");
@@ -232,11 +334,21 @@ fn only_a_daemon_over_its_homes_runs_upgrades() {
     let probe = agents.join(crate::bundled::BUNDLED_AGENTS[0].name);
     old_blueprint(&probe, b"old");
 
-    upgrade_at_start(&home.path().join("elsewhere"), &runs, Some(&agents), &[]);
+    let board = StartupBoard::default();
+    let mut upgrade = Upgrade::default();
+    let elsewhere = home.path().join("elsewhere");
+    upgrade_at_start(
+        &elsewhere,
+        &runs,
+        (Some(&agents), &[]),
+        &board,
+        &mut upgrade,
+    );
     assert!(probe.join(OLD_MANIFEST).is_file());
 
-    upgrade_at_start(&runs, &runs, Some(&agents), &[]);
+    upgrade_at_start(&runs, &runs, (Some(&agents), &[]), &board, &mut upgrade);
     assert!(probe.join("legacy").join(OLD_MANIFEST).is_file());
+    assert_eq!(upgrade.blueprints, 1);
 }
 
 /// A rename stand-in that fails on the calls whose numbers (from 1) are in

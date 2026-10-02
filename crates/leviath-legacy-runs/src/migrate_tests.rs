@@ -47,7 +47,7 @@ fn a_fan_out_with_no_cap_leaves_max_workers_out_and_says_so() {
              \"helper\"\nmax_workers = {workers}\n"
         )
     };
-    let (text, notes) = migrate_noted(&old(0)).unwrap();
+    let Migrated { text, notes, .. } = migrate_noted(&old(0)).unwrap();
     assert!(!text.contains("max_workers"), "{text}");
     assert_eq!(
         notes,
@@ -57,7 +57,7 @@ fn a_fan_out_with_no_cap_leaves_max_workers_out_and_says_so() {
                 .to_string()
         ]
     );
-    let (text, notes) = migrate_noted(&old(5)).unwrap();
+    let Migrated { text, notes, .. } = migrate_noted(&old(5)).unwrap();
     assert!(text.contains("max_workers = 5"), "{text}");
     assert!(notes.is_empty(), "{notes:?}");
 }
@@ -138,7 +138,7 @@ fn a_bare_model_keeps_no_provider() {
 /// wrote the manifest, so the conversion leaves it out and names it in a
 /// note, wherever it sits, rather than refusing the blueprint.
 #[test]
-fn a_key_nothing_reads_is_left_out_with_a_note() {
+fn a_key_nothing_reads_is_left_out_and_named_with_its_value() {
     let old = r#"
 [agent]
 name = "t"
@@ -153,26 +153,34 @@ log = { kind = "pinned", max_tokens = 100, max_stored = 5 }
 [stages.main]
 system_prompt = "p"
 "#;
-    let (text, notes) = migrate_noted(old).unwrap();
+    let Migrated {
+        name,
+        text,
+        notes,
+        dropped,
+    } = migrate_noted(old).unwrap();
+    assert_eq!(name, "t");
     assert!(!text.contains("max_stored"), "{text}");
     assert!(!text.contains("colour"), "{text}");
+    assert!(notes.is_empty(), "{notes:?}");
+    let notes: Vec<String> = dropped.iter().map(ToString::to_string).collect();
     assert_eq!(notes.len(), 3, "{notes:?}");
     assert!(
         notes
             .iter()
-            .any(|p| p.contains("`nudge`") && p.contains("[agent.nudge]")),
+            .any(|p| p.contains("`nudge = ") && p.contains("[agent.nudge]")),
         "{notes:?}"
     );
     assert!(
         notes
             .iter()
-            .any(|p| p.contains("region 'log'") && p.contains("`max_stored`")),
+            .any(|p| p.contains("region 'log'") && p.contains("`max_stored = 5`")),
         "{notes:?}"
     );
     assert!(
         notes
             .iter()
-            .any(|p| p.contains("[agent]") && p.contains("`colour`")),
+            .any(|p| p.contains("[agent]") && p.contains("`colour = \"blue\"`")),
         "{notes:?}"
     );
 }

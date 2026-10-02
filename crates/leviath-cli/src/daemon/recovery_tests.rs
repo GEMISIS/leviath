@@ -443,7 +443,12 @@ async fn an_old_run_directory_is_converted_on_first_load() {
     std::fs::write(runs.join("broken").join("meta.json"), "not json").unwrap();
 
     crate::test_support::with_tracing(|| {
-        crate::daemon::convert_old::convert_all(&runs, Some(&fixtures.join("agents")), None);
+        crate::daemon::convert_old::convert_all(
+            &runs,
+            Some(&fixtures.join("agents")),
+            None,
+            &leviath_runtime::control_socket::StartupBoard::default(),
+        );
     });
 
     let old = runs.join("old");
@@ -464,7 +469,12 @@ async fn an_old_run_directory_is_converted_on_first_load() {
     crate::daemon::convert_old::convert_one(&old, None, None);
     assert!(read_run(&old).is_some());
     // A runs directory that is not there converts nothing.
-    crate::daemon::convert_old::convert_all(&runs.join("gone"), None, None);
+    crate::daemon::convert_old::convert_all(
+        &runs.join("gone"),
+        None,
+        None,
+        &leviath_runtime::control_socket::StartupBoard::default(),
+    );
 }
 
 /// A finished run converted from the older layout still hands back its

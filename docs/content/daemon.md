@@ -160,8 +160,35 @@ Before it changes any of them, the daemon saves it under `~/.leviath/backups/<ve
 A run's files are hard links rather than copies, so the backup costs no extra disk space while the
 run's own `legacy/` folder holds the same files. Its stage logs are copied instead, because they
 stay in the run's directory, where a resumed run adds to them. One backup is kept per release, and Leviath never
-deletes anything in it. An item that cannot be saved is left exactly as it was. The daemon log names
-the backup, and the next `lev ps` prints where it is, once.
+deletes anything in it. An item that cannot be saved is left exactly as it was.
+
+On a large home this takes a while: about 18 seconds for a thousand runs. The daemon answers
+meanwhile, so any `lev` command waiting on it shows what it is doing and how far along it is.
+That covers the command that started it, `lev ps`, `lev dash` before it opens, and `lev daemon`
+in the foreground:
+
+```text
+leviath: saving everything it changes to ~/.leviath/backups/<version>-1790000000 first
+leviath daemon starting: converting runs [##########--------------] 412/982
+```
+
+On a terminal the line is redrawn in place. Through a pipe or a log, each step gets one plain line
+and no escape codes, and `--json` output on stdout is untouched. When the daemon is ready, the
+first command to see it prints a summary once:
+
+```text
+Upgraded this home for Leviath <version>: 19 blueprints upgraded, 982 old runs converted. Everything it changed was saved first to ~/.leviath/backups/<version>-1790000000; Leviath never deletes it.
+warning: blueprint 'researcher': region 'log': `max_stored = 5` was dropped: Leviath 0.6.4 and earlier accepted it but never read it, so it never changed a run
+```
+
+There is one warning for each key an upgraded blueprint held that Leviath 0.6.4 and earlier
+accepted but never read. A key dropped from the blueprints of old runs is warned about once, with
+how many runs held it. The summary is in the daemon log too, and when the daemon was started with
+nobody waiting, the next `lev ps` prints it.
+
+An upgraded blueprint keeps its warnings beside it, in `legacy/upgrade-warnings.json`, and
+`lev list` and `lev validate` show them under it until you edit its `agent.toml` or delete that
+file.
 
 A run converts once. One that cannot be converted is left as it was and listed, with the reason, in
 `~/.leviath/runs.unconverted`. Later starts of the same release leave it alone, and the next release
@@ -173,9 +200,9 @@ finished ends in `error`, saying why.
 
 ## What the front-ends do while it restarts
 
-A daemon restart used to break whatever was talking to it. `lev serve` answered 503 for the
-second the socket was gone, and the ACP bridge ended its turn with half an answer. Now the
-long-lived front-ends ride the restart out: `lev serve`, `lev dash`, and `lev agent-client`.
+The long-lived front-ends ride a daemon restart out: `lev serve`, `lev dash`, and
+`lev agent-client`. Without that, `lev serve` would answer 503 for the second the socket is gone,
+and the ACP bridge would end its turn with half an answer.
 
 A request that arrives while the daemon is down waits up to ten seconds for it to come back. The
 new daemon serves it. The wait is per outage, not per request: a daemon that is really gone costs
@@ -406,7 +433,7 @@ These are the commands that talk to it:
 | `lev interactions` | List the questions runs are waiting on, or show one |
 | `lev respond <id>` | Answer one of them |
 | `lev pause <run-id>` | Pause a run |
-| `lev resume <run-id>` | Resume a paused run |
+| `lev resume <run-id>` | Resume a paused or cancelled run |
 | `lev cancel <run-id>` | Cancel a run |
 | `lev context <run-id>` | Show a run's context-window history |
 

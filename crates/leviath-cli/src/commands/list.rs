@@ -60,6 +60,13 @@ pub(crate) struct AgentInfo {
     /// the listing is where someone looks before running an agent they just
     /// installed or copied over from another machine.
     read_paths: Option<String>,
+    /// The keys upgrading this blueprint from `agent.leviath` dropped, until
+    /// its owner edits it (see [`crate::upgrade_warnings`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    upgrade_warnings: Vec<String>,
+    /// How to dismiss them, when there are any.
+    #[serde(skip)]
+    dismiss: String,
 }
 
 /// One agent in `lev list --json`, with the source the prose report puts in a
@@ -95,11 +102,14 @@ fn read_agent_info(manifest_path: &Path, config: &Config, cwd: &Path) -> Option<
     let blueprint = crate::commands::run::locate::loaded_at(manifest_path)?;
     let name = blueprint.reference.name.to_string();
     let read_paths = read_path_summary(&blueprint.graph, &name, config, cwd);
+    let dir = manifest_path.parent().unwrap_or(manifest_path);
     Some(AgentInfo {
         description: blueprint.graph.description.unwrap_or_default(),
         name,
         version: blueprint.version,
         read_paths,
+        upgrade_warnings: crate::upgrade_warnings::read(dir),
+        dismiss: crate::upgrade_warnings::dismiss_hint(dir),
     })
 }
 
@@ -164,6 +174,23 @@ fn print_agent(info: &AgentInfo) {
     if let Some(read_paths) = &info.read_paths {
         println!("      {read_paths}");
     }
+    for line in agent_warning_lines(info) {
+        println!("{line}");
+    }
+}
+
+/// The warning lines under an agent's listing: each key its upgrade dropped,
+/// and how to dismiss them.
+fn agent_warning_lines(info: &AgentInfo) -> Vec<String> {
+    let mut lines: Vec<String> = info
+        .upgrade_warnings
+        .iter()
+        .map(|w| format!("      warning: {w}"))
+        .collect();
+    if !lines.is_empty() {
+        lines.push(format!("      ({})", info.dismiss));
+    }
+    lines
 }
 
 /// Run `lev list`: show the installed agents.
@@ -477,6 +504,38 @@ read_paths = ["/data/runs"]
     fn info_with_config(dir: &Path, config: &Config) -> AgentInfo {
         super::read_agent_info(&dir.join("agent.toml"), config, Path::new("/work"))
             .expect("manifest parses")
+    }
+
+    /// A blueprint an upgrade dropped keys from lists each one as a warning,
+    /// with how to dismiss them, in prose and JSON, until its file changes.
+    #[test]
+    fn an_upgraded_blueprint_lists_what_it_dropped_until_it_is_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        write_read_paths_manifest(dir.path(), "cto");
+        let clean = info_with_config(dir.path(), &Config::default());
+        assert!(agent_warning_lines(&clean).is_empty());
+        std::fs::create_dir_all(dir.path().join("legacy")).unwrap();
+        let dropped = "region 'log': `max_stored = 5` was dropped".to_string();
+        crate::upgrade_warnings::record(dir.path(), std::slice::from_ref(&dropped)).unwrap();
+        let info = info_with_config(dir.path(), &Config::default());
+        print_agent(&info);
+        let lines = agent_warning_lines(&info);
+        assert_eq!(lines[0], format!("      warning: {dropped}"));
+        assert!(lines[1].contains("upgrade-warnings.json"), "{lines:?}");
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["upgrade_warnings"][0], dropped.as_str());
+        assert!(json.get("dismiss").is_none());
+        let toml = dir.path().join("agent.toml");
+        let edited = std::fs::read_to_string(&toml).unwrap() + "\n# checked\n";
+        std::fs::write(&toml, edited).unwrap();
+        let info = info_with_config(dir.path(), &Config::default());
+        assert!(info.upgrade_warnings.is_empty());
+        assert!(
+            serde_json::to_value(&info)
+                .unwrap()
+                .get("upgrade_warnings")
+                .is_none()
+        );
     }
 
     /// The reported bug, in the listing: an agent whose declarations nothing
