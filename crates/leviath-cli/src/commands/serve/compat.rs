@@ -10,19 +10,19 @@
 //! and goes through the same checks as one sent to `POST /api/runs`. Its
 //! `task` is the `task` input. Each of its `regions` is the input the
 //! blueprint declares for that region: the input of that name, or else the
-//! one input that seeds that region with its value alone. A region no input
-//! fills at all is left out, as older servers left it, and the answer's
-//! `warnings` say so. Any other region (one only a template fills, or one
-//! several inputs fill) is sent under its own name, so the refusal names it
-//! the way any unknown input is named. `POST /api/runs` takes inputs by name
-//! and refuses one the blueprint does not declare.
+//! one text input that seeds that region with its value alone. Any other
+//! region (one no input fills, one only a template or a typed input fills,
+//! or one several inputs fill) is left out, as older servers left a region
+//! they did not seed, and the answer's `warnings` say so, naming the inputs
+//! that do fill it. `POST /api/runs` takes inputs by name and refuses one the
+//! blueprint does not declare.
 //!
 //! These routes are kept for older clients and will be removed.
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use leviath_runtime::spec::inputs::{InputDecl, InputSlot};
+use leviath_runtime::spec::inputs::{InputDecl, InputSlot, InputType};
 use leviath_runtime::spec::issues::{IssueCode, SpawnIssues};
 use leviath_runtime::spec::names::BlueprintRef;
 use leviath_runtime::spec::request::SpawnSource;
@@ -133,13 +133,15 @@ pub(super) async fn spawn_agent(
     let mut regions = HashMap::new();
     let mut left_out = Vec::new();
     for (region, text) in std::mem::take(&mut body.regions) {
-        let Some(input) = input_for_region(&declared, &region) else {
-            left_out.push(format!(
-                "regions.{region}: no input of blueprint '{}' fills region '{region}', so its \
-                 text was left out",
-                body.blueprint
-            ));
-            continue;
+        let input = match input_for_region(&declared, &region) {
+            Ok(input) => input,
+            Err(why) => {
+                left_out.push(format!(
+                    "regions.{region}: {why} in blueprint '{}', so its text was left out",
+                    body.blueprint
+                ));
+                continue;
+            }
         };
         let (kept, named) =
             super::upload::inline_parts(&text, Some(&region), &workdir, max_upload)?;
@@ -201,29 +203,39 @@ fn launch_of(
 }
 
 /// The input that takes an old request's text for `region`: the input of
-/// that name, or else the one input that seeds the region with its value
-/// alone. `None` when no input fills the region at all, so the text has
-/// nowhere to go. Anything else keeps the region's name, which validation
-/// then names as an input the blueprint does not declare.
-fn input_for_region(declared: &[InputDecl], region: &str) -> Option<String> {
+/// that name, or else the one text input that seeds the region with its
+/// value alone. Otherwise the text has nowhere to go as it stands, and the
+/// error says why: no input fills the region, or the inputs that do take
+/// something other than its text.
+fn input_for_region(declared: &[InputDecl], region: &str) -> Result<String, String> {
     if declared.iter().any(|input| input.name.as_str() == region) {
-        return Some(region.to_string());
+        return Ok(region.to_string());
     }
     let filling: Vec<(&InputDecl, bool)> = declared
         .iter()
         .flat_map(|input| {
             input.binds.iter().filter_map(move |slot| match slot {
-                InputSlot::Region(binding) if binding.region.as_str() == region => {
-                    Some((input, binding.template.is_none()))
-                }
+                InputSlot::Region(binding) if binding.region.as_str() == region => Some((
+                    input,
+                    binding.template.is_none() && matches!(input.ty, InputType::Text { .. }),
+                )),
                 _ => None,
             })
         })
         .collect();
     match filling.as_slice() {
-        [] => None,
-        [(one, true)] => Some(one.name.to_string()),
-        _ => Some(region.to_string()),
+        [] => Err(format!("no input fills region '{region}'")),
+        [(one, true)] => Ok(one.name.to_string()),
+        _ => {
+            let names: Vec<String> = filling
+                .iter()
+                .map(|(input, _)| format!("'{}'", input.name))
+                .collect();
+            Err(format!(
+                "region '{region}' is filled from input {} rather than from text alone",
+                names.join(", ")
+            ))
+        }
     }
 }
 
