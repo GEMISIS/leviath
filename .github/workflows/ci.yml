@@ -48,7 +48,8 @@ jobs:
   # Every job carries a `timeout-minutes`. The default is 360, and a hung
   # `cargo test` (this suite spawns daemons, opens sockets, drives websockets)
   # used to hold a runner for six hours - up to 39 of them in the coverage
-  # matrix. The numbers are roughly double the longest run seen.
+  # matrix. The numbers are roughly double the longest run seen, except this
+  # job's: 45 minutes, where its macOS leg takes about 30 to compile and run.
   #
   # Four legs, not three. `ubuntu-24.04-arm` is here because the release builds
   # ship `aarch64-unknown-linux-{gnu,musl}` and nothing had ever run them on an
@@ -66,7 +67,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -77,16 +78,15 @@ jobs:
         with:
           # Same key as Clippy: both compile every target on this OS.
           shared-key: build-${{ matrix.os }}
-      # Two steps, so the two largest compiles never run side by side:
-      # leviath-cli's library peaks near 6 GB of rustc memory and its
-      # unit-test crate near 9 GB. Built in one invocation they compile at
-      # once, and the 7 GB macOS runner swapped until the job timed out.
+      # `cargo test --no-run`, not `cargo build --all-targets`: the two
+      # resolve dependency features differently, so a Build step that does
+      # not ask for exactly what `cargo test` asks for leaves the Test step to
+      # compile leviath-cli and its unit tests a second time. On the macOS
+      # runner (7 GB) that compile takes over twenty minutes: the library and
+      # its unit-test crate build side by side at about 6 GB and 9 GB of rustc
+      # memory each.
       - name: Build
-        # bash on every OS, so the first command failing fails the step.
-        shell: bash
-        run: |
-          cargo build --workspace --lib --bins
-          cargo build --all-targets
+        run: cargo test --no-run
       - name: Test
         run: cargo test
       # GitHub's native per-job `badge.svg?job=...` filter was observed to
