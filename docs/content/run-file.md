@@ -130,7 +130,10 @@ What the run was doing comes back with it:
 | Paused | It stays paused, and runs a batch it had in flight once resumed |
 
 Each call in a batch is recorded as done the moment it finishes, so a restart part way through
-a batch runs only the calls that had not finished. A fan-out worker that finished while the daemon
+a batch never runs a finished call again. After a clean stop, which stopped every command it had
+running, the calls that had not finished run again. If the daemon died instead, a command it
+started may still be running, so such a call is not run again: its result says it was interrupted,
+and the model checks whether it took effect before running it again. A fan-out worker that finished while the daemon
 was down is read from its own run file, and counts as done or failed as it ended.
 
 A run that has finished stays finished. It reads no more messages, and there is no way yet to send

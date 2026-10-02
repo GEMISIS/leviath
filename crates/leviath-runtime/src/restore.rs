@@ -146,6 +146,77 @@ fn last_reply(state: &crate::state::RunState) -> String {
         .unwrap_or_default()
 }
 
+/// The result a call gets when the daemon died while it was running. Its
+/// effect may or may not have landed (the command may even still be running),
+/// so it is not run again: the model is told to check before it runs
+/// side-effecting work again.
+pub const INTERRUPTED_TOOL_RESULT: &str = "[error] interrupted: the daemon restarted while this tool call was executing and its \
+     result was lost. Verify whether it took effect before re-running side-effecting work.";
+
+/// The file a daemon keeps in its runs directory while it runs, and removes
+/// when it stops cleanly. Finding it when starting means the last daemon died.
+const SESSION_MARK: &str = ".daemon-running";
+
+/// Start a daemon's session over `runs_dir`, and say whether the last one
+/// died without stopping cleanly (it left its mark behind).
+pub fn begin_session(runs_dir: &std::path::Path) -> bool {
+    let mark = runs_dir.join(SESSION_MARK);
+    let crashed = mark.exists();
+    let _ = std::fs::create_dir_all(runs_dir);
+    let _ = std::fs::write(&mark, b"");
+    crashed
+}
+
+/// End a daemon's session over `runs_dir` cleanly: every call it had running
+/// was stopped, so a restart may run them again.
+pub fn end_session(runs_dir: &std::path::Path) {
+    let _ = std::fs::remove_file(runs_dir.join(SESSION_MARK));
+}
+
+/// Settle the calls a run had running when the daemon died: each call of its
+/// batch that had not finished gets [`INTERRUPTED_TOOL_RESULT`] (naming the
+/// run's children for a call that starts one), so it is not run again. A
+/// batch stopped on a question to a person is left to ask it again: the
+/// question is asked before anything else in a batch runs, so nothing in it
+/// was running.
+pub fn interrupt_in_flight(state: &mut crate::state::RunState) {
+    let children: Vec<String> = state.children.iter().map(ToString::to_string).collect();
+    let Some(batch) = state.pending.as_mut() else {
+        return;
+    };
+    let asking = batch.calls.iter().any(|call| {
+        !batch.done.contains_key(&call.id)
+            && crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS
+                .contains(&leviath_tools::canonical_tool_name(&call.name))
+    });
+    if asking {
+        return;
+    }
+    for call in &batch.calls {
+        batch
+            .done
+            .entry(call.id.clone())
+            .or_insert_with(|| crate::state::ToolResultState {
+                text: interrupted_result(&call.name, &children),
+                is_error: true,
+            });
+    }
+}
+
+/// The stand-in for one interrupted call: the base text, and for a call that
+/// starts sub-agents in a run that has some, the child runs to check before
+/// starting more.
+fn interrupted_result(tool_name: &str, children: &[String]) -> String {
+    match leviath_tools::is_subagent_tool(tool_name) && !children.is_empty() {
+        true => format!(
+            "{INTERRUPTED_TOOL_RESULT} This run already has child agent runs: {}; check them \
+             with check_agent before spawning again.",
+            children.join(", ")
+        ),
+        false => INTERRUPTED_TOOL_RESULT.to_string(),
+    }
+}
+
 /// Place a run read back by [`read_for_resume`] into the world, with the live
 /// handles binding its spec produced.
 pub fn resume(world: &mut World, run: Resumable, bindings: crate::spec::env::Bindings) -> Entity {

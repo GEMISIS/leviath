@@ -833,6 +833,11 @@ impl PipelineWorld {
         if let Some(task) = self.persist_task.take() {
             let _ = task.await;
         }
+        // Everything this world had running was stopped above, so a restart
+        // may run it again: the session ended cleanly.
+        if let Some(runs_dir) = &self.runs_dir {
+            crate::restore::end_session(runs_dir);
+        }
         // Push any buffered telemetry export out before the process goes away;
         // the final fixed point above already emitted the last events. The
         // resource always exists - `new()` installs the no-op default.

@@ -150,12 +150,21 @@ pub(crate) fn resume_all(
     runs_dir: &Path,
 ) -> Recovered {
     convert_old_runs(runs_dir, starter.agents_dir.as_deref());
-    let Ok(entries) = std::fs::read_dir(runs_dir) else {
-        return Recovered::default();
-    };
-    let found: Vec<Resumable> = entries
+    // A daemon that died may have left a command it ran still running, so a
+    // call that was in flight is not run again: it comes back interrupted.
+    let crashed = leviath_runtime::restore::begin_session(runs_dir);
+    // A directory that does not read holds nothing to bring back.
+    let found: Vec<Resumable> = std::fs::read_dir(runs_dir)
+        .into_iter()
+        .flatten()
         .flatten()
         .filter_map(|e| read_run(&e.path()))
+        .map(|mut run| {
+            if crashed {
+                leviath_runtime::restore::interrupt_in_flight(&mut run.state);
+            }
+            run
+        })
         .collect();
     starter.refresh_world(world);
     let mut placed: Vec<Placed> = Vec::new();

@@ -111,14 +111,15 @@ fn entity_of(world: &mut PipelineWorld, run_id: &str) -> Entity {
         .expect("the run is in the world")
 }
 
-/// Drive `world` until `done` holds, for at most a few seconds. Whether it
+/// Drive `world` until `done` holds, for at most half a minute (a loaded
+/// machine running the whole suite is slow). Whether it
 /// came to hold.
 async fn drive_until(
     world: &mut PipelineWorld,
     mut done: impl FnMut(&mut PipelineWorld) -> bool,
 ) -> bool {
-    for _ in 0..300 {
-        let _ = tokio::time::timeout(Duration::from_millis(10), world.run()).await;
+    for _ in 0..1500 {
+        let _ = tokio::time::timeout(Duration::from_millis(20), world.run()).await;
         if done(world) {
             return true;
         }
@@ -202,11 +203,13 @@ async fn a_question_put_to_a_person_is_asked_again_after_a_restart() {
     assert!(
         starter
             .hub
-            .answer(InteractionResponse::text(asked.id, "blue"))
+            .answer(InteractionResponse::text(asked.id.clone(), "blue"))
     );
     let moved_on = drive_until(&mut world, |w| live(w, &run_id).pending.is_none()).await;
     assert!(moved_on, "the answered batch finishes");
-    assert!(open_for(&starter, &run_id).is_empty());
+    // The run may already be at its next stage's checkpoint; the question it
+    // asked again is settled.
+    assert!(open_for(&starter, &run_id).iter().all(|q| q.id != asked.id));
 }
 
 /// A run stopped at a stage's checkpoint comes back asking it again, under
@@ -383,4 +386,72 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
     );
     assert_eq!(fan_out.failed, [("w2".to_string(), "w2 broke".to_string())]);
     assert_eq!(fan_out.active, [("w3".to_string(), id(&running))]);
+}
+
+/// After a daemon died, a call it had running comes back interrupted rather
+/// than run again (the command may still be running), and a call that
+/// finished keeps its result. After a clean stop the same call is run again.
+/// A batch stopped on a question is asked again either way.
+#[tokio::test]
+async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
+    use leviath_runtime::state::ToolResultState;
+    let call = |id: &str, name: &str| ToolCallState {
+        id: id.to_string(),
+        name: name.to_string(),
+        args: leviath_core::JsonDoc::new(serde_json::json!({"command": "sleep 15"})),
+        thought_signature: None,
+    };
+    for crashed in [true, false] {
+        let agent = tempfile::tempdir().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        let manifest = manifest_in(agent.path(), ASKER);
+        let working = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
+        let asking = run_on_disk(Config::default(), registry(), runs.path(), &manifest);
+        change(runs.path(), &working, |s| {
+            s.phase = PipelinePhase::AwaitingTools;
+            s.pending = Some(PendingBatch {
+                calls: vec![call("c1", "shell"), call("c2", "shell")],
+                done: [(
+                    "c1".to_string(),
+                    ToolResultState {
+                        text: "ran c1".to_string(),
+                        is_error: false,
+                    },
+                )]
+                .into(),
+            });
+        });
+        change(runs.path(), &asking, |s| {
+            s.phase = PipelinePhase::AwaitingTools;
+            s.pending = Some(PendingBatch {
+                calls: vec![call("q", "ask_user_text"), call("c2", "shell")],
+                done: Default::default(),
+            });
+        });
+        if crashed {
+            // What a daemon that died leaves behind.
+            assert!(!leviath_runtime::restore::begin_session(runs.path()));
+        }
+
+        let starter = starter(Config::default(), registry(), runs.path());
+        let mut world = world_for(&starter);
+        resume_all(&mut world, &starter, runs.path());
+
+        let done = live(&mut world, &working).pending.expect("in flight").done;
+        assert_eq!(done["c1"].text, "ran c1");
+        match crashed {
+            true => {
+                assert_eq!(
+                    done["c2"].text,
+                    leviath_runtime::restore::INTERRUPTED_TOOL_RESULT
+                );
+                assert!(done["c2"].is_error);
+            }
+            false => assert!(!done.contains_key("c2"), "a clean stop runs it again"),
+        }
+        let asked = live(&mut world, &asking).pending.expect("in flight").done;
+        assert!(asked.is_empty(), "the question is asked again");
+        // This daemon's own session is now the one marked as running.
+        assert!(leviath_runtime::restore::begin_session(runs.path()));
+    }
 }

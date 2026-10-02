@@ -297,3 +297,52 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
     let still: Vec<&str> = fan_out.active.iter().map(|(_, r)| r.as_str()).collect();
     assert_eq!(still, ["w-going", "w-gone"]);
 }
+
+/// A call interrupted by a daemon dying gets the stand-in result; one that
+/// starts sub-agents in a run that has some names them, so the model checks
+/// them before starting more. A run with no batch, or one stopped on a
+/// question, is left as it is.
+#[test]
+fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
+    use crate::state::PendingBatch;
+    use crate::state::context::ToolCallState;
+    let call = |id: &str, name: &str| ToolCallState {
+        id: id.to_string(),
+        name: name.to_string(),
+        args: Default::default(),
+        thought_signature: None,
+    };
+    let mut state = crate::runfile::reader_tests::initial();
+    interrupt_in_flight(&mut state);
+    assert!(state.pending.is_none());
+
+    state.children = vec![crate::spec::names::RunId::new("kid-1").unwrap()];
+    state.pending = Some(PendingBatch {
+        calls: vec![call("a", "shell"), call("b", "spawn_agent")],
+        done: Default::default(),
+    });
+    interrupt_in_flight(&mut state);
+    let done = &state.pending.as_ref().unwrap().done;
+    assert_eq!(done["a"].text, INTERRUPTED_TOOL_RESULT);
+    assert!(done["b"].text.starts_with(INTERRUPTED_TOOL_RESULT));
+    assert!(done["b"].text.contains("kid-1"), "{}", done["b"].text);
+
+    state.pending = Some(PendingBatch {
+        calls: vec![call("q", "ask_user_text"), call("a", "shell")],
+        done: Default::default(),
+    });
+    interrupt_in_flight(&mut state);
+    assert!(state.pending.unwrap().done.is_empty());
+}
+
+/// A session marks the runs directory while it runs and clears the mark when
+/// it ends cleanly; finding the mark when starting means the last one died.
+#[test]
+fn a_session_left_marked_was_one_that_died() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = runs.path().join("runs");
+    assert!(!begin_session(&dir), "nothing ran here before");
+    assert!(begin_session(&dir), "the last one never ended");
+    end_session(&dir);
+    assert!(!begin_session(&dir), "the last one ended cleanly");
+}
