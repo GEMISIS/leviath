@@ -92,6 +92,8 @@ pub(crate) struct Dashboard {
     /// A run file's stat, which decides whether `history` is still
     /// current. Injected beside `history_loader` for the same reason.
     pub(super) history_stamp: fn(&str) -> Option<runstate::FileStamp>,
+    /// The selected run's answer, as last read (see `answers`).
+    pub(super) answers: super::answers::AnswerCache,
     /// Scroll offset for detail view content: 0 = bottom (auto-scroll), >0 = scrolled up
     pub(super) detail_scroll: usize,
     /// Selected option index for MultipleChoice/ToolApproval/Confirm input
@@ -3764,6 +3766,28 @@ mod tests {
 
         assert!(dash.agents[0].waiting_prompt.is_none());
         assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    /// The first snapshot lists the runs before any graph is read; a run's
+    /// graph arrives with a later one and is taken by the row already there.
+    #[test]
+    fn a_listed_run_takes_its_graph_from_a_later_snapshot() {
+        let mut dash = make_test_dashboard();
+        let meta = make_run_meta("snap-graph", RunStatus::Complete);
+        dash.apply_run_snapshot(&snapshot_of(std::slice::from_ref(&meta)));
+        assert!(dash.agents[0].graph.is_none());
+
+        let graph = std::sync::Arc::new(crate::tui::flowgraph::model::toml_graph(
+            "[blueprint]\nname = \"g\"\nversion = \"0.1.0\"\n\n[[graph.stages]]\nname = \"main\"\n\n\
+             [graph.layout]\ntotal_budget_tokens = 0\nregions = []\n",
+        ));
+        let mut later = snapshot_of(&[meta]);
+        later.runs[0].graph = Some(graph.clone());
+        dash.apply_run_snapshot(&later);
+        assert!(std::sync::Arc::ptr_eq(
+            dash.agents[0].graph.as_ref().expect("taken"),
+            &graph
+        ));
     }
 
     #[test]

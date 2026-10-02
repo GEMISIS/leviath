@@ -252,6 +252,36 @@ fn frames_whose_heads_do_not_decode_are_refused() {
         kind(read(&[spec_frame(), bad_digest])),
         RunFileErrorKind::Codec(CodecError::Decode(_))
     ));
+    // The last step's head is read whatever the first one says.
+    let bad_last = zstd_frame(FrameKind::Delta, &[0xff; 12]);
+    assert!(matches!(
+        kind(read(&[spec_frame(), delta(1), bad_last])),
+        RunFileErrorKind::Codec(CodecError::Decode(_))
+    ));
+    // Steps that do not run one after another are each read, and one
+    // between them that does not decode is found.
+    let bad_middle = zstd_frame(FrameKind::Delta, &[0xff; 12]);
+    assert!(matches!(
+        kind(read(&[spec_frame(), delta(1), bad_middle, delta(5)])),
+        RunFileErrorKind::Codec(CodecError::Decode(_))
+    ));
+}
+
+#[test]
+fn steps_that_run_one_after_another_are_numbered_without_decompressing_them() {
+    // Indexing a file reads the first and last step's heads; a step between
+    // them is decompressed only when it is read, so a long run opens without
+    // decompressing every step it holds.
+    let state = codec::encode(FrameKind::State, &initial()).unwrap();
+    let unread = zstd_frame(FrameKind::Delta, &[0xff; 12]);
+    let r = read(&[spec_frame(), state, delta(1), unread, delta(3)]).unwrap();
+    assert_eq!(r.last_seq(), 3);
+    assert_eq!(r.state_at(1).unwrap().seq, 1);
+    assert!(matches!(
+        r.latest_state().unwrap_err().kind,
+        RunFileErrorKind::Codec(CodecError::Decode(_))
+    ));
+    assert_eq!(r.deltas(3, 3).unwrap()[0].seq, 3);
 }
 
 #[test]

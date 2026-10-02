@@ -551,7 +551,7 @@ impl Dashboard {
             KeyCode::Char('f') => {
                 let has_answer = self
                     .selected_agent()
-                    .is_some_and(|a| runstate::read_final_output(&a.id).is_some());
+                    .is_some_and(|a| self.final_output_of(&a.id).is_some());
                 if has_answer {
                     self.stage_content_mode = StageContentMode::FinalOutput;
                     self.detail_scroll = 0;

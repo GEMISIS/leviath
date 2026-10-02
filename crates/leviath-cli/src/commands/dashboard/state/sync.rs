@@ -205,6 +205,7 @@ impl Dashboard {
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = context_snapshot.clone();
                 agent.stages = stages;
+                agent.graph = entry.graph.clone();
                 agent.last_progress_at = run.last_progress_at;
 
                 if now_needs_input {

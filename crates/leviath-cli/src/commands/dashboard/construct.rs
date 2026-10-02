@@ -140,6 +140,7 @@ impl Dashboard {
             history: None,
             history_loader: runstate::run_history,
             history_stamp: runstate::run_file_stamp,
+            answers: Default::default(),
             detail_scroll: 0,
             choice_selected: 0,
             selected_stage: 0,

@@ -43,11 +43,10 @@ pub struct ResultArgs {
 
 /// Execute `lev result`.
 pub(crate) async fn execute(args: ResultArgs) -> anyhow::Result<()> {
-    let meta = crate::runstate::read_meta(&args.run_id)
-        .map_err(|e| anyhow::anyhow!("no run '{}': {e}", args.run_id))?;
     // The run's record says whether there is an answer; the answer itself is
-    // read from the run file.
-    let output = crate::runstate::read_final_output(&args.run_id);
+    // read from its sidecar, or from the run file.
+    let (meta, output) = crate::runstate::read_meta_and_answer(&args.run_id)
+        .map_err(|e| anyhow::anyhow!("no run '{}': {e}", args.run_id))?;
     // A missing answer is a failure exit rather than empty output, so
     // `lev result <id> > answer.txt` in a script does not silently write an
     // empty file and carry on.

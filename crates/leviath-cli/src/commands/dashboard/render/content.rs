@@ -204,7 +204,7 @@ impl Dashboard {
         // `GET /api/runs/{id}/result` cannot show different text. Read once
         // per frame: it decides whether the `[f] final` chip is offered and
         // what that view shows.
-        let final_output = runstate::read_final_output(&agent.id);
+        let final_output = self.final_output_of(&agent.id);
         // The Final view of a run without an answer (the selection moved to
         // another run) falls back to Output rather than sitting on an empty
         // pane whose chip is no longer on offer.
@@ -772,10 +772,10 @@ impl Dashboard {
     /// answer only stands in for that stage's otherwise empty Output pane -
     /// every other stage keeps its honest empty state.
     fn final_output_for_selected_stage(&self, agent: &DashboardAgent) -> Option<String> {
-        let final_output = crate::runstate::read_final_output(&agent.id)?;
+        let final_output = self.final_output_of(&agent.id)?;
         let selected_name = agent.stages.get(self.selected_stage)?.name.as_str();
         if final_output.stage == selected_name {
-            Some(final_output.content)
+            Some(final_output.content.clone())
         } else {
             None
         }

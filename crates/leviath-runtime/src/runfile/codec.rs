@@ -189,9 +189,24 @@ impl FrameRef {
         let body = bytes
             .get(self.body..self.body + self.len)
             .ok_or(CodecError::Corrupt(self.offset as u64))?;
-        let raw =
-            zstd::bulk::decompress(body, 1 << 30).map_err(|e| CodecError::Decode(e.to_string()))?;
+        let raw = decompress(body).map_err(|e| CodecError::Decode(e.to_string()))?;
         postcard::from_bytes(&raw).map_err(|e| CodecError::Decode(e.to_string()))
+    }
+}
+
+/// The most bytes one frame's payload decompresses to.
+const MAX_PAYLOAD: u64 = 1 << 30;
+
+/// A frame body, decompressed into a buffer of the size its zstd header
+/// gives, which every body [`encode`] writes carries. Sized from the header
+/// rather than for the largest payload a frame may hold: a buffer that big
+/// would be mapped and handed back on every decode, at more cost than
+/// decoding a small frame. A body whose header gives no size is
+/// decompressed as a stream.
+fn decompress(body: &[u8]) -> std::io::Result<Vec<u8>> {
+    match zstd::zstd_safe::get_frame_content_size(body) {
+        Ok(Some(size)) => zstd::bulk::decompress(body, size.min(MAX_PAYLOAD) as usize),
+        _ => zstd::stream::decode_all(body),
     }
 }
 
@@ -331,6 +346,37 @@ mod tests {
             frame_at(&flipped, HEADER_LEN),
             Err(CodecError::Corrupt(HEADER_LEN as u64))
         );
+    }
+
+    /// A body is decompressed into a buffer the size its header gives, not
+    /// one sized for the largest payload a frame may hold; a body whose
+    /// header gives no size still decodes.
+    #[test]
+    fn a_body_decompresses_to_the_size_it_says() {
+        let raw = postcard::to_stdvec(&"a payload".to_string()).unwrap();
+        let sized = zstd::bulk::compress(&raw, ZSTD_LEVEL).unwrap();
+        let out = decompress(&sized).unwrap();
+        assert_eq!(out, raw);
+        assert_eq!(out.capacity(), raw.len());
+
+        let streamed = zstd::stream::encode_all(raw.as_slice(), ZSTD_LEVEL).unwrap();
+        // The probe's input gives no size.
+        assert_eq!(
+            zstd::zstd_safe::get_frame_content_size(&streamed).unwrap(),
+            None
+        );
+        let mut frame = vec![FrameKind::Spec as u8];
+        frame.extend_from_slice(&(streamed.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&streamed);
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&[FrameKind::Spec as u8]);
+        crc.update(&streamed);
+        frame.extend_from_slice(&crc.finalize().to_le_bytes());
+        frame.extend_from_slice(&(streamed.len() as u32).to_le_bytes());
+        let mut f = header(&FP);
+        f.extend(frame);
+        let read = frame_at(&f, HEADER_LEN).unwrap();
+        assert_eq!(read.decode::<String>(&f).unwrap(), "a payload");
     }
 
     /// A frame cut anywhere (in its kind, its body, its checksum or its

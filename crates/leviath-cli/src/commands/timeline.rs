@@ -202,12 +202,13 @@ pub(crate) enum Moment {
 fn load(run_id: &str) -> anyhow::Result<RunTimeline> {
     use std::borrow::Cow;
     let dir = crate::runstate::run_dir(run_id);
-    let (meta, moments) = crate::runstate::read_meta(run_id)
+    // One read of the run file for both its record and its steps.
+    let (meta, moments) = crate::runstate::run_file::open_in(&dir)
         .map_err(|e| Cow::Owned(e.to_string()))
-        .and_then(|meta| {
-            crate::runstate::run_file::open_in(&dir)
-                .ok()
-                .and_then(|reader| run_file_moments(&reader))
+        .and_then(|reader| {
+            let meta = leviath_runtime::runfile::summary(&reader)
+                .map_err(|e| Cow::Owned(e.to_string()))?;
+            run_file_moments(&reader)
                 .map(|moments| (meta, moments))
                 .ok_or(Cow::Borrowed("its steps do not decode"))
         })

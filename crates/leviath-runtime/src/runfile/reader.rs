@@ -2,9 +2,11 @@
 //!
 //! [`RunFileReader::open`] reads the whole file once and indexes its frames.
 //! Nothing else is decoded until it is asked for, and the index is built by
-//! reading only the first bytes of each frame's payload: every state and
-//! delta starts with its `seq`, and every code and blob frame with its
-//! digest, so indexing a file is a pass over its frame headers.
+//! reading only the first bytes of a frame's payload: every state and delta
+//! starts with its `seq`, and every code and blob frame with its digest.
+//! Reading those first bytes still decompresses the frame's first block, so
+//! the deltas, which are most of a long run's frames, are numbered from the
+//! first and the last of them where that is unambiguous.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -45,8 +47,7 @@ impl RunFileReader {
     /// and logged, the same as the journal before it: everything before it
     /// is whole and is kept.
     pub fn open(path: &Path) -> Result<Self, RunFileError> {
-        let bytes = std::fs::read(path).map_err(|e| RunFileError::io(path, &e))?;
-        let reader = Self::from_bytes(path, bytes)?;
+        let reader = Self::read(path)?;
         if reader.cut > 0 {
             let keep = reader.bytes.len() as u64;
             let cut = reader.cut;
@@ -61,6 +62,12 @@ impl RunFileReader {
         Ok(reader)
     }
 
+    /// Read the run file at `path` without writing to it: a torn tail is
+    /// dropped from what is read, and left on the file for its writer.
+    pub fn read(path: &Path) -> Result<Self, RunFileError> {
+        Self::from_bytes(path, read_file(path)?)
+    }
+
     /// Read a run file from bytes already in memory. `path` names it in
     /// errors. A torn tail is dropped from the bytes but nothing is written.
     pub fn from_bytes(path: &Path, mut bytes: Vec<u8>) -> Result<Self, RunFileError> {
@@ -73,6 +80,7 @@ impl RunFileReader {
             return Err(RunFileError::new(path, RunFileErrorKind::NoSpec));
         };
         let spec: RunSpec = first.decode(&bytes).map_err(err)?;
+        let mut deltas = Vec::new();
         let mut reader = Self {
             path: path.to_path_buf(),
             spec,
@@ -93,17 +101,16 @@ impl RunFileReader {
                         false => reader.blobs.insert(digest, frame),
                     };
                 }
-                FrameKind::State | FrameKind::Delta => {
+                FrameKind::State => {
                     let seq: u64 = peek(&bytes, &frame).map_err(err)?;
-                    match frame.kind == FrameKind::State {
-                        true => reader.states.push((seq, frame)),
-                        false => reader.deltas.push((seq, frame)),
-                    }
+                    reader.states.push((seq, frame));
                 }
+                FrameKind::Delta => deltas.push(frame),
                 FrameKind::Owner => reader.owners.push(frame),
                 FrameKind::Spec => return Err(err(CodecError::Corrupt(frame.offset as u64))),
             }
         }
+        reader.deltas = numbered(&bytes, deltas).map_err(err)?;
         reader.bytes = bytes;
         Ok(reader)
     }
@@ -249,6 +256,28 @@ impl RunFileReader {
     }
 }
 
+/// Each delta frame with its step.
+///
+/// The writer appends one delta per step, in order, so when the first and
+/// the last delta's steps are exactly as far apart as there are deltas
+/// between them, every step in between is known without decompressing its
+/// frame. Any other file (a gap, a step out of place) has every delta's step
+/// read from the delta.
+fn numbered(bytes: &[u8], frames: Vec<FrameRef>) -> Result<Vec<(u64, FrameRef)>, CodecError> {
+    let (Some(first), Some(last)) = (frames.first(), frames.last()) else {
+        return Ok(Vec::new());
+    };
+    let from: u64 = peek(bytes, first)?;
+    let to: u64 = peek(bytes, last)?;
+    if to.checked_sub(from) == Some(frames.len() as u64 - 1) {
+        return Ok((from..).zip(frames).collect());
+    }
+    frames
+        .into_iter()
+        .map(|frame| Ok((peek(bytes, &frame)?, frame)))
+        .collect()
+}
+
 /// Decode the value a frame's payload starts with, reading no more of the
 /// payload than that takes.
 fn peek<T: DeserializeOwned>(bytes: &[u8], frame: &FrameRef) -> Result<T, CodecError> {
@@ -264,6 +293,26 @@ fn peek<T: DeserializeOwned>(bytes: &[u8], frame: &FrameRef) -> Result<T, CodecE
 
 fn decode_error(e: impl std::fmt::Display) -> CodecError {
     CodecError::Decode(e.to_string())
+}
+
+/// The bytes of the run file at `path`. A file that does not start with
+/// [`codec::MAGIC`] is read no further than its header, which is all it
+/// takes to refuse it: a directory of runs can hold files of another format
+/// as big as any run's.
+pub(super) fn read_file(path: &Path) -> Result<Vec<u8>, RunFileError> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|mut file| {
+            file.by_ref()
+                .take(codec::HEADER_LEN as u64)
+                .read_to_end(&mut bytes)
+                .and_then(|_| match bytes.starts_with(codec::MAGIC) {
+                    true => file.read_to_end(&mut bytes),
+                    false => Ok(0),
+                })
+        })
+        .map_err(|e| RunFileError::io(path, &e))?;
+    Ok(bytes)
 }
 
 /// Cut the file at `path` to `len` bytes.
