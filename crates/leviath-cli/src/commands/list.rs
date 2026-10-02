@@ -918,6 +918,43 @@ layout = { total_budget_tokens = 1000, regions = [{ name = "system", kind = "pin
         .await;
     }
 
+    /// An old blueprint on a configured path is named, with the way to
+    /// upgrade it, and left exactly as it was: only the daemon upgrades one.
+    /// The path comes from an isolated config, so nothing in the real home is
+    /// read for it, let alone changed.
+    #[tokio::test]
+    async fn execute_names_an_old_blueprint_and_leaves_it_alone() {
+        crate::config::with_isolated_config_path_async(
+            "list-old-blueprint",
+            |fake_dir| async move {
+                let old = fake_dir.join("old-agents").join("veteran");
+                fs::create_dir_all(&old).unwrap();
+                fs::write(old.join("agent.leviath"), "[agent]\nname = \"veteran\"\n").unwrap();
+                let paths = vec![old.parent().unwrap().to_path_buf()];
+                let config = format!("agent_paths = [{:?}]\n", paths[0].display().to_string());
+                fs::write(fake_dir.join("config.toml"), config).unwrap();
+
+                let lines = crate::blueprint_upgrade::pending_lines(None, &paths);
+                assert_eq!(lines.len(), 1);
+                assert!(
+                    lines[0].contains("'veteran'") && lines[0].contains("lev blueprint migrate")
+                );
+
+                let args = ListArgs {
+                    filter: ListFilter::All,
+                    json: false,
+                };
+                assert!(execute(args).await.is_ok());
+                let left: Vec<String> = fs::read_dir(&old)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(left, ["agent.leviath"]);
+            },
+        )
+        .await;
+    }
+
     // ─── print_agent_listing (fully injectable) ─────────────────────────
 
     // ─── --json ──────────────────────────────────────────────────────────
