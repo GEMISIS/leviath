@@ -546,6 +546,24 @@ pub(super) async fn validate_blueprint(
 /// runs against the built-in tool set alone, which is the most that can be
 /// said about it.
 pub(super) fn validate_manifest_text(manifest: &str, dir: &Path) -> ValidateResponse {
+    use super::core::blueprints::{CONVERTED_NOTE, as_agent_toml};
+    // An `agent.leviath` is judged as the `agent.toml` it would be saved as.
+    let (manifest, converted) = match as_agent_toml(manifest) {
+        Ok(read) => read,
+        Err(problems) => return ValidateResponse::invalid(problems),
+    };
+    let mut verdict = validate_agent_toml(&manifest, dir);
+    if converted {
+        verdict
+            .warnings
+            .get_or_insert_with(Vec::new)
+            .insert(0, CONVERTED_NOTE.to_string());
+    }
+    verdict
+}
+
+/// [`validate_manifest_text`] for the text of an `agent.toml`.
+fn validate_agent_toml(manifest: &str, dir: &Path) -> ValidateResponse {
     let file = match leviath_blueprint::BlueprintFile::parse(manifest) {
         Ok(file) => file,
         Err(e) => return ValidateResponse::invalid(vec![e]),

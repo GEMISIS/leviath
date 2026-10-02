@@ -297,6 +297,31 @@ model providers and mime checks. `include=candidates` also lists the files nothi
 includes dot-prefixed names. `POST /api/fs/dirs` uses the same fence, answers `409` when the
 directory already exists, and is announced as `fs.mkdir`.
 
+### Routes kept for older clients
+
+The `/api/agents` routes earlier releases served still answer, so a client written against them
+keeps working. They are kept for older clients only and will be removed, so write new code against
+`/api/runs`. The spec lists each one as deprecated.
+
+| Old route | What it is now |
+|---|---|
+| `GET /api/agents` | Every run as one array. `?status=` takes a comma-separated list |
+| `POST /api/agents` | Starts a run from the old body, answering `{"agent_id", "run_id"}` |
+| `DELETE /api/agents/{id}` | `POST /api/runs/{id}/cancel` |
+| `GET /api/agents/tree` | `GET /api/runs/tree` |
+| Any other `/api/agents/{id}/...` | The same route under `/api/runs/{id}/...` |
+
+The old body names a blueprint, a `task`, and text for `regions`. It becomes a spawn request and is
+checked like one. The task is the `task` input. Each region's text goes to the input of that name,
+or else to the one input that fills that region. Refusals answer `400` with every problem in one
+message, `403` for something this server does not allow, and `404` for a blueprint that is not
+installed.
+
+A blueprint saved through `POST /api/blueprints` or `PUT /api/blueprints/{name}` may still be an
+`agent.leviath`. It is converted and stored as the `agent.toml` it converts to. One that does not
+convert is refused with what the conversion found. `POST /api/blueprints/validate` judges it the
+same way and adds a warning saying it was converted.
+
 ### The doctor routes
 
 `GET /api/doctor` is `lev doctor --offline`: config, search and resolve, nothing billed.
@@ -484,6 +509,10 @@ input hears about both in one answer.
 | `launch.allow` | The server runs with `--no-remote-yolo` and the list is not empty |
 | `delivery.callback.url` | The URL fails the outbound policy: loopback, private and link-local addresses are refused |
 | `source.blueprint_file` | Always. A blueprint is read from a directory only for a caller on this machine |
+
+A request with no `workdir` runs in the directory `lev serve` was started in. Under
+`--workdir-root` that directory is held to the root like any other, and the refusal says the
+request named none.
 
 The callback check is the one a model-supplied URL gets. `[security] allow_local_network = true`
 lets a webhook reach a local service. A raw graph whose fan-out reads its worker from a directory is
@@ -2106,7 +2135,7 @@ with either way.
 | `run_renamed` | The run acquires a generated title | `title` |
 | `tokens` | The run's token totals move | `prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens` |
 | `context_update` | The context window's usage moves | `total_tokens`, `max_tokens` |
-| `stage_transition` | A new stage is entered | `from`, `to`, `iteration` |
+| `stage_transition` | A new stage is entered | `from`, `to`, `iteration`, `edge` (absent when no declared edge was taken), `reason` |
 | `tool_call_started` | A tool call goes to the async lane | `call_id`, `tool` |
 | `tool_call_finished` | That call returns | `call_id`, `tool`, `ok`, `summary` |
 | `log` | A log or output line is written | `line` |
@@ -2152,6 +2181,10 @@ provider's own error in it and `blocker` is one of `provider_missing`, `credits_
 `providers_unavailable`. [Troubleshooting](/docs/troubleshooting#a-run-says-paused-and-i-did-not-pause-it)
 says what each one asks of you. `ok` on `tool_call_finished` is `false` for a result the engine
 refused or could not run, so a client should not read a finish frame as a success on its own.
+
+`reason` on `stage_transition` says why the run took that edge, spelled as
+`GET /api/runs/{id}/graph` spells it: `Condition`, `Gate`, `ModelChoice`, `Forced`, `Worker` or
+`Router`.
 
 `stage_transition`, `tool_call_started` and `tool_call_finished` used to arrive wrapped as
 `{"type":"world","event":{…}}`. They are flat frames of their own as of API version `0.4.0`,

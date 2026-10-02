@@ -11,6 +11,7 @@ mod blocking;
 mod blueprint_types;
 mod blueprints;
 mod caches;
+mod compat;
 mod config;
 mod config_health;
 mod config_types;
@@ -206,6 +207,40 @@ fn api_router() -> Router<AppState> {
         // Interactions
         .route(
             "/api/runs/{id}/interaction",
+            get(interactions::get_interaction).post(interactions::submit_interaction),
+        )
+        // The `/api/agents` routes older clients call, kept for them and
+        // deprecated in the spec. Each is its `/api/runs` twin, apart from
+        // starting and listing runs, which take and give the old shapes.
+        .route(
+            "/api/agents",
+            get(compat::list_agents).post(compat::spawn_agent),
+        )
+        .route("/api/agents/tree", get(tree::runs_tree))
+        .route(
+            "/api/agents/{id}",
+            get(run_reads::get_run).delete(run_reads::cancel_run),
+        )
+        .route("/api/agents/{id}/children", get(run_reads::run_children))
+        .route("/api/agents/{id}/context", get(run_reads::run_context))
+        .route(
+            "/api/agents/{id}/context/history",
+            get(run_reads::run_context_history),
+        )
+        .route("/api/agents/{id}/files", get(run_reads::run_file))
+        .route("/api/agents/{id}/files/raw", get(blobs::raw_file))
+        .route("/api/agents/{id}/blobs", get(blobs::list_blobs))
+        .route("/api/agents/{id}/blobs/{sha256}", get(blobs::get_blob))
+        .route("/api/agents/{id}/artifacts/{name}", get(blobs::artifact))
+        .route("/api/agents/{id}/logs", get(run_reads::run_logs))
+        .route("/api/agents/{id}/result", get(run_reads::run_result))
+        .route("/api/agents/{id}/stages", get(run_reads::run_stages))
+        .route("/api/agents/{id}/tree-status", get(tree::run_tree_status))
+        .route("/api/agents/{id}/pause", post(run_reads::pause_run))
+        .route("/api/agents/{id}/resume", post(run_reads::resume_run))
+        .route("/api/agents/{id}/message", post(interactions::send_message))
+        .route(
+            "/api/agents/{id}/interaction",
             get(interactions::get_interaction).post(interactions::submit_interaction),
         )
         // MCP servers - read-only surface. Everything that connects to one or
@@ -974,6 +1009,7 @@ mod tests {
     /// The production half of every module that owns a handler, by name.
     const HANDLER_SOURCES: &[(&str, &str)] = &[
         ("run_reads", include_str!("run_reads.rs")),
+        ("compat", include_str!("compat.rs")),
         ("run_spawn", include_str!("run_spawn.rs")),
         ("blobs", include_str!("blobs.rs")),
         ("blueprints", include_str!("blueprints.rs")),

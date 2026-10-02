@@ -54,6 +54,10 @@
     {
       "name": "graphql",
       "description": "One endpoint where the request body names the fields it wants."
+    },
+    {
+      "name": "agents",
+      "description": "The routes older clients call, each kept over the same core as its /api/runs twin. Deprecated: they will be removed."
     }
   ],
   "paths": {
@@ -786,7 +790,7 @@
         "summary": "The full sub-agent tree",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/Ok"
+            "$ref": "#/components/responses/OkArray"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -847,7 +851,7 @@
         "summary": "This run's direct children",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/Ok"
+            "$ref": "#/components/responses/OkArray"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1963,7 +1967,7 @@
         "summary": "Configured MCP servers",
         "responses": {
           "200": {
-            "$ref": "#/components/responses/Ok"
+            "$ref": "#/components/responses/OkArray"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -4191,6 +4195,1207 @@
           }
         }
       }
+    },
+    "/api/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List runs",
+        "description": "Kept for older clients and will be removed; use `/api/runs`. Deprecated: use GET /api/runs, which paginates and supports search. This route returns every run ever recorded as one array, and is kept unchanged for existing clients.",
+        "deprecated": true,
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter to one status."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkArray"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Spawn a run",
+        "description": "Kept for older clients and will be removed; use `/api/runs`. Returns as soon as the daemon accepts the run. Poll GET /api/agents/{id} or subscribe to /ws for what happens next.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpawnAgentReq"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The JSON request, as the application/json body would carry it."
+                  },
+                  "part": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file for the task region. Repeatable. Name the field `part:<region>` for another region; the file's `filename` names the part and its `Content-Type` declares the type."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The new run's identifiers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnAgentResp"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/tree": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The full sub-agent tree",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkArray"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/tree`."
+      }
+    },
+    "/api/agents/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "One run's metadata, with secrets redacted",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}`."
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Cancel a run",
+        "responses": {
+          "204": {
+            "description": "Done. No body."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/cancel`."
+      }
+    },
+    "/api/agents/{id}/children": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "This run's direct children",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkArray"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/children`."
+      }
+    },
+    "/api/agents/{id}/context": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The run's current context window",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/context`."
+      }
+    },
+    "/api/agents/{id}/context/history": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "How the context window changed over the run",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/context/history`. **Breaking change in 0.3.0**: paginated, returning the shared envelope rather than every recorded point as one array. Each point carries a full context window with untruncated region text, on a journal that grows for as long as the run does, so the unpaged form was comfortably the largest response in the API.\n\nThe cursor is the point index. The journal is append-only, so an index is stable once written and new points only ever arrive at the end.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "description": "Points per page. Capped lower than the run listing because each item carries a whole context window."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Continuation token from the previous page's next_cursor."
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            },
+            "description": "`asc` is chronological, and matches what the unpaged response gave. `desc` starts from the most recent point, which is what a view tailing a live run wants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/{id}/files": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": "Byte offset to start reading at. An offset landing mid-character is moved forward to the next boundary, and the response's `offset` says where the window actually began, so concatenating pages reproduces the file. Past the end returns 416."
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Read a file inside the run's workdir, or list files",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/files`. With `path`, reads that file: confined to the run's working directory, 1 MiB per request. A larger file is read a window at a time - pass `offset` and continue from the `next_offset` each response carries, which is how an agent's dataset artifact is fetched in full. Without `path`, lists instead, and the response carries `kind: \"listing\"` so the two shapes can be told apart. Reading a file returns exactly the shape it always has.\n\n`source=modified` lists what the run recorded changing - free, but capped when it was recorded, so check `modified_files_truncated`. `source=workdir` reads the filesystem, **one directory level per request**; pass a directory as `path` to descend. Note `modifying_tool_calls` counts modifying tool calls and not distinct files, so subtracting it from the entry count does not give \"how many more files\".",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workdir-relative path. A file is read; a directory is listed; absent lists the run's files."
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "modified",
+                "workdir"
+              ],
+              "default": "modified"
+            },
+            "description": "`modified` lists what the run recorded changing; `workdir` reads one directory level of the filesystem."
+          },
+          {
+            "name": "hidden",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Include dot-prefixed entries when listing a directory."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "416": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/{id}/files/raw": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "A workdir file's bytes, under its own content type",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/files/raw`. Where `GET /api/agents/{id}/files?path=` wraps text in JSON, this serves the bytes as they are, typed by the mime registry from the file's bytes and name: an image the run wrote comes back as `image/png`, ready for an `<img>`. Confined to the run's working directory. A path the directory does not hold but the run's result lists as an artifact is served from the run's blob store, so a file a model made and nothing wrote to disk answers here too. `download=1` adds a `Content-Disposition: attachment` naming the file. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workdir-relative path, or an absolute path inside the workdir."
+          },
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Ask the browser to save the file rather than show it."
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A single byte range, `bytes=start-end` (an open end or a `-suffix` too), to fetch part of the body for seeking or resuming. A well-formed range is answered 206 with `Content-Range`; one past the end is 416. A malformed or multi-range header is ignored and the whole body served."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file's bytes, under its mime type.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "The requested byte range, when a `Range` header asked for one. Carries `Content-Range: bytes start-end/total`.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "416": {
+            "description": "The `Range` header named bytes the body does not have. Carries `Content-Range: bytes */total`."
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/{id}/blobs": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The stored parts a run holds",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/blobs`. Every stored part the run's context carries, by sha256: its type, name, size, dimensions, the regions carrying it, and whether the bytes are on disk under the run's `blobs/`. A part a user attached, a file `read_file` stored, an image an MCP tool returned, and an artifact the run submitted all appear here.",
+        "responses": {
+          "200": {
+            "description": "The listing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlobListing"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/{id}/blobs/{sha256}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        },
+        {
+          "name": "sha256",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The part's sha256, 64 lowercase hex characters, as the listing and the run's context give it."
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The bytes of one stored part",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/blobs/{sha256}`. Served under the type the part was stored as, so an image renders in a browser. `download=1` adds a `Content-Disposition: attachment` carrying the part's name. A hash that is not 64 hex characters is refused; one the run does not hold is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
+        "parameters": [
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Ask the browser to save the file rather than show it."
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A single byte range, `bytes=start-end` (an open end or a `-suffix` too), to fetch part of the body for seeking or resuming. A well-formed range is answered 206 with `Content-Range`; one past the end is 416. A malformed or multi-range header is ignored and the whole body served."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The bytes, under the part's mime type.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "The requested byte range, when a `Range` header asked for one. Carries `Content-Range: bytes start-end/total`.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "416": {
+            "description": "The `Range` header named bytes the body does not have. Carries `Content-Range: bytes */total`."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/{id}/artifacts/{name}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The artifact's name, as the result route lists it under `final_output.artifacts`."
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The bytes of one file the run handed back",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/artifacts/{name}`. Follows the artifact the way the runtime does: the run's blob store by hash first, so a file a model made and nothing wrote to the working directory is served, then the working directory. Served under the artifact's own mime type; `download=1` adds a `Content-Disposition: attachment` carrying its file name. A run that has not handed back a result, or one with no artifact of that name, is 404. Every response advertises `Accept-Ranges: bytes`; a `Range` header fetches part of the body. Also takes a short-lived signed link in place of the bearer token (`exp` and `sig`, minted by the GraphQL API), which is what a browser needs for an `<img src>` or a download link: a header cannot be set on either. A signed link opens one path, for five minutes, and nothing else.",
+        "parameters": [
+          {
+            "name": "download",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Ask the browser to save the file rather than show it."
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "A single byte range, `bytes=start-end` (an open end or a `-suffix` too). A well-formed range is answered 206 with `Content-Range`; one past the end is 416. A malformed or multi-range header is ignored and the whole body served."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The bytes, under the artifact's mime type.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "The requested byte range, when a `Range` header asked for one. Carries `Content-Range: bytes start-end/total`.",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "416": {
+            "description": "The `Range` header named bytes the body does not have. Carries `Content-Range: bytes */total`."
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/{id}/logs": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The run's logs",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/logs`. A run's logs, by stage. Output is recorded per stage under stages/<idx>/, and the two streams are kept separate rather than interleaved because they share no ordering.",
+        "parameters": [
+          {
+            "name": "tail",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 32768
+            },
+            "description": "Return only the last N bytes (not lines)."
+          },
+          {
+            "name": "stage",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Stage index to read, or `all` to join every stage oldest first. Defaults to the stage the run is on now."
+          },
+          {
+            "name": "stream",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "output",
+                "logs"
+              ],
+              "default": "output"
+            },
+            "description": "`output` for the assistant's readable output, `logs` for the operational stream: tool calls, token counts and errors."
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/{id}/result": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The run's output and token usage",
+        "responses": {
+          "200": {
+            "description": "The result so far. Check `status` before trusting `output`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResultResp"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/result`."
+      }
+    },
+    "/api/agents/{id}/tree-status": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Token roll-ups across this run and its descendants",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/tree-status`."
+      }
+    },
+    "/api/agents/{id}/pause": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Pause a run after its in-flight step",
+        "responses": {
+          "204": {
+            "description": "Done. No body."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/pause`."
+      }
+    },
+    "/api/agents/{id}/resume": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Un-pause a run",
+        "responses": {
+          "204": {
+            "description": "Done. No body."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/resume`."
+      }
+    },
+    "/api/agents/{id}/message": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Inject a message into a running agent's context",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "message"
+                ],
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "description": "The text. A `@path` token attaches that workdir file to the same entry."
+                  },
+                  "target_region": {
+                    "type": "string",
+                    "description": "The region to land in; the conversation when absent."
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/PartRef"
+                    },
+                    "description": "Files already inside the run's working directory to send with the message."
+                  }
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The JSON request, as the application/json body would carry it."
+                  },
+                  "part": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file to send beside the message. Repeatable; `part:<region>` aims one at another region."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted: the daemon holds it, and the work happens after the response."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/message`."
+      }
+    },
+    "/api/agents/{id}/interaction": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The question this run is waiting on, if any",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true,
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/interaction`."
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Answer the pending question",
+        "responses": {
+          "202": {
+            "description": "Accepted: the daemon holds it, and the work happens after the response."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/interaction`. Body: `request_id` (the open request's id) plus one of `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request_id"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "description": "The interaction to answer, from GET."
+                  },
+                  "value": {
+                    "type": "string",
+                    "description": "A free-text or edited answer. A `@path` token attaches that workdir file."
+                  },
+                  "choice_index": {
+                    "type": "integer",
+                    "description": "The chosen option, zero-based, for a multiple-choice or tool-approval prompt."
+                  },
+                  "approved": {
+                    "type": "boolean",
+                    "description": "Whether a tool approval or a confirmation is granted."
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "once",
+                      "stage",
+                      "session"
+                    ],
+                    "description": "How long a grant holds: this call, this stage, or the whole run (`session`)."
+                  },
+                  "feedback": {
+                    "type": "string",
+                    "description": "On a deny, what the model should do instead."
+                  },
+                  "parts": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/PartRef"
+                    },
+                    "description": "Files already inside the run's working directory to send with a text answer."
+                  }
+                }
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "request"
+                ],
+                "properties": {
+                  "request": {
+                    "type": "string",
+                    "description": "The JSON request, as the application/json body would carry it."
+                  },
+                  "part": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "A file to send beside a text answer. Repeatable; `part:<region>` aims one at another region."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/api/agents/{id}/stages": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "The run's per-stage ledger",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/stages`. What each stage spent, in tokens and in dollars, per visit as well as in total, and which regions it carried. Not derivable from the other routes: a stage that ran and wrote nothing to any region leaves no trace in context/history, so `entered` is the only way to tell it from a stage that was never reached, and pricing is the daemon's job - a console multiplying tokens by a rate card of its own produces a fourth answer that disagrees with the run's, the stage's and the provider's.",
+        "responses": {
+          "200": {
+            "description": "Stage records in blueprint order. Empty for a run that has not reached its first stage boundary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStagesResp"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "description": "No run with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "$ref": "#/components/responses/Timeout"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Overloaded"
+          }
+        },
+        "deprecated": true
+      }
     }
   },
   "components": {
@@ -4277,6 +5482,19 @@
           "application/json": {
             "schema": {
               "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "OkArray": {
+        "description": "Success: a JSON array.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
             }
           }
         }
@@ -5354,6 +6572,116 @@
                 }
               }
             }
+          }
+        }
+      },
+      "SpawnAgentReq": {
+        "type": "object",
+        "required": [
+          "blueprint",
+          "task"
+        ],
+        "properties": {
+          "blueprint": {
+            "type": "string",
+            "description": "An installed blueprint name, or a path to one."
+          },
+          "task": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string",
+            "description": "\"provider/model\", or a bare model id."
+          },
+          "max_depth": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "yolo": {
+            "type": "boolean",
+            "default": false,
+            "description": "Run unattended. Refused when the server was started with --no-remote-yolo."
+          },
+          "allow": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "no_seed_commands": {
+            "type": "boolean",
+            "default": false
+          },
+          "capture_model_input": {
+            "type": "boolean",
+            "default": false,
+            "description": "Write this run's exact requests into its journal, once per provider attempt, whatever the machine's own [observability] capture_model_input says. A captured request is the whole prompt and there is no size cap, so the journal grows by roughly the context size per attempt. Read it back on InferenceAttemptOutput.modelInput over GraphQL."
+          },
+          "workdir": {
+            "type": "string",
+            "description": "Confined to --workdir-root when the server sets one."
+          },
+          "regions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Seed content per named context region."
+          },
+          "output_format": {
+            "type": "string",
+            "description": "Ask for the final output in this shape, overriding the blueprint's. Any label works - nothing converts between shapes; the label reaches the model, which produces the bytes. Naming a format the blueprint does not declare retires any Rhai validator and JSON schema it declared (a check written for one shape says nothing about another); the response's warnings array names what was retired. Supply output_schema when the new shape should still be checked."
+          },
+          "output_instructions": {
+            "type": "string",
+            "description": "Extra guidance about that shape. How an unusual format gets explained."
+          },
+          "output_schema": {
+            "type": "object",
+            "description": "A JSON Schema the final output must satisfy. The only thing that inspects the answer's contents, and only because you asked: a failing submission is refused back to the agent to correct."
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "callback_url": {
+            "type": "string",
+            "description": "POSTed on completion or error."
+          },
+          "callback_secret": {
+            "type": "string",
+            "description": "Shared secret for the HMAC-SHA256 signature on that callback."
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PartRef"
+            },
+            "description": "Files already inside the working directory to attach as typed parts. A `multipart/form-data` body carries files instead: a `request` field holding this JSON, then any number of file fields named `part` (bound for the task region) or `part:<region>`, each with a `filename` and a `Content-Type`. A `@path` token inside `task` or a region's text attaches that file too, resolved inside the working directory, and the text keeps the token."
+          }
+        }
+      },
+      "SpawnAgentResp": {
+        "type": "object",
+        "required": [
+          "agent_id",
+          "run_id"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "How this run will differ from what its blueprint declares: today, the Rhai validator or JSON schema that a differing output_format retired. Omitted when there is nothing to say."
           }
         }
       }

@@ -84,6 +84,16 @@ pub(super) async fn blueprint_inputs(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<Vec<leviath_runtime::spec::inputs::InputDecl>>, ApiError> {
+    declared_inputs(&state, &name).await.map(Json)
+}
+
+/// The inputs the blueprint `name` declares, read from the installed
+/// blueprints and the configured `agent_paths`. 404 for a blueprint that is
+/// in none of them, 422 for one whose graph does not hold together.
+pub(super) async fn declared_inputs(
+    state: &AppState,
+    name: &str,
+) -> Result<Vec<leviath_runtime::spec::inputs::InputDecl>, ApiError> {
     let roots = super::blueprints::blueprint_roots(&state.current_config());
     let listed = super::blocking::blocking(move || super::blueprints::discover_in(roots)).await;
     let found = listed
@@ -99,7 +109,7 @@ pub(super) async fn blueprint_inputs(
     // not hold together would offer a form for a run that cannot start.
     let loaded = leviath_blueprint::validate(std::path::Path::new(&found.path))
         .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    Ok(Json(loaded.graph.inputs))
+    Ok(loaded.graph.inputs)
 }
 
 /// The request a body carries: `Ok(Ok)` for a request, `Ok(Err)` for a body
