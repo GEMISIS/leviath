@@ -7,7 +7,8 @@
 
 use anyhow::bail;
 use leviath_core::interaction::{
-    ApprovalScope, InteractionKind, InteractionRequest, InteractionResponse,
+    AnswerOption, ApprovalScope, InteractionKind, InteractionRequest, InteractionResponse,
+    answer_options, how_to_answer,
 };
 use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
 
@@ -52,39 +53,61 @@ pub struct ResumeArgs {
     pub run_id: String,
 }
 
+/// The rule `lev respond --help` closes on: every kind of question is answered
+/// with what it shows.
+const RESPOND_HELP: &str = "\
+Answer with what the question shows. `lev interactions` lists each option
+numbered from 1, beside the word that answers with it:
+  tool approval    allow, allow-stage, allow-run or deny (deny takes --feedback)
+  confirm          yes or no
+  multiple choice  the option, or any start of it that names just one
+  free text, edit  the text itself (\"\" is an answer too)
+The number an option is listed under answers with it as well.
+
+To see an interaction before answering it: lev interactions <REQUEST_ID>";
+
 /// Arguments for `lev respond` - answer an interaction the daemon is holding.
 ///
 /// Answering is all it does, and only with an answer given: an answer can't be
 /// taken back, so naming a question is never enough to answer it.
 /// `lev interactions` lists and shows them.
 #[derive(clap::Args, Debug, Clone)]
-#[command(after_help = "To see an interaction before answering it: lev interactions <REQUEST_ID>")]
+#[command(after_help = RESPOND_HELP)]
 pub struct RespondArgs {
     /// The interaction request id to answer, or enough of its start to name
     /// one open interaction. `lev interactions` lists them.
     pub request_id: String,
-    /// The text answer, for a free-text or edit question. An empty "" is an
-    /// answer too: it acknowledges a review, or keeps an edited document as
-    /// it was.
+    /// The answer, read the way the question asks: an approval takes allow,
+    /// allow-stage, allow-run or deny, a confirm yes or no, a multiple choice
+    /// the option or the start of it, and each of those the number its
+    /// option is listed under. A free-text or edit question takes the text
+    /// as written; an empty "" acknowledges a review, or keeps an edited
+    /// document as it was.
+    #[arg(value_name = "ANSWER")]
     pub value: Option<String>,
-    /// Answer a multiple-choice interaction by 0-based option index.
+    /// Answer with the option at this 0-based position in the listing, for
+    /// any question that lists options. The scripting form of a numbered
+    /// answer: `--choice 0` is the option listed as 1.
     #[arg(long)]
     pub choice: Option<usize>,
-    /// Approve a tool-approval / confirm interaction.
+    /// Approve a tool approval, or say yes to a confirm: the same as `allow`
+    /// or `yes`.
     #[arg(long, conflicts_with = "deny")]
     pub approve: bool,
-    /// Deny a tool-approval / confirm interaction.
+    /// Deny a tool approval, or say no to a confirm: the same as `deny` or
+    /// `no`.
     #[arg(long)]
     pub deny: bool,
-    /// With `--deny`, tell the model what to do instead. Reaches it as part of
+    /// With a deny, tell the model what to do instead. Reaches it as part of
     /// the tool result, so its next turn is a redirect rather than a guess.
-    #[arg(long, requires = "deny", value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT")]
     pub feedback: Option<String>,
-    /// With `--approve`, allow what this call runs for the rest of the run.
+    /// With `--approve`, allow what this call runs for the rest of the run:
+    /// the same as `allow-run`.
     #[arg(long, visible_alias = "run")]
     pub session: bool,
     /// With `--approve`, allow what this call runs until the run leaves the
-    /// current stage.
+    /// current stage: the same as `allow-stage`.
     #[arg(long, conflicts_with = "session")]
     pub stage: bool,
     /// Report the outcome of the answer as JSON.
@@ -121,6 +144,19 @@ struct OpenInteraction<'a> {
     agent_id: &'a str,
     #[serde(flatten)]
     request: &'a InteractionRequest,
+    /// Each option as the listing numbers it, with the word and the command
+    /// that answer with it. Empty for a text question.
+    answer_options: Vec<AnswerOption>,
+}
+
+impl<'a> OpenInteraction<'a> {
+    fn new(agent_id: &'a str, request: &'a InteractionRequest) -> Self {
+        Self {
+            agent_id,
+            request,
+            answer_options: answer_options(request),
+        }
+    }
 }
 
 /// Send `request` and report the boolean outcome: `ok` prints `applied_msg`, a
@@ -171,7 +207,18 @@ pub(crate) fn message_parts(
     attach: &[String],
     cwd: &std::path::Path,
 ) -> anyhow::Result<(String, Vec<leviath_core::mime::InboundPart>)> {
-    let mut parts = crate::commands::run::attach::attach_all(attach, cwd)?;
+    let parts = crate::commands::run::attach::attach_all(attach, cwd)?;
+    with_named_parts(text, parts, cwd)
+}
+
+/// `text` as the model reads it, and `parts` followed by every file a `@path`
+/// in it names. A token that names no file stays text and is reported on
+/// stderr.
+fn with_named_parts(
+    text: &str,
+    mut parts: Vec<leviath_core::mime::InboundPart>,
+    cwd: &std::path::Path,
+) -> anyhow::Result<(String, Vec<leviath_core::mime::InboundPart>)> {
     let (text, named, unresolved) = crate::commands::run::attach::inline_parts(text, None, cwd)?;
     parts.extend(named);
     crate::commands::run::attach::warn_unresolved(&unresolved);
@@ -301,11 +348,23 @@ fn interaction_headline(agent_id: &str, req: &InteractionRequest) -> String {
     )
 }
 
-/// Render one open interaction as a multi-line listing entry.
-fn format_interaction(agent_id: &str, req: &InteractionRequest) -> String {
+/// One option as the listing shows it: its number, its label, and what to
+/// type to answer with it.
+fn format_option(req: &InteractionRequest, option: &AnswerOption) -> String {
+    let prefix = format!("lev respond {} ", req.id);
+    let typed = option
+        .answer
+        .strip_prefix(&prefix)
+        .unwrap_or(&option.answer);
+    format!("\n    [{}] {}  ({typed})", option.number, option.label)
+}
+
+/// The part of a listing entry the full view shares: where it came from, the
+/// question, and its options numbered from 1.
+fn format_interaction_head(agent_id: &str, req: &InteractionRequest) -> String {
     let mut s = format!("{}\n  {}", interaction_headline(agent_id, req), req.prompt);
-    for (i, opt) in req.options.iter().enumerate() {
-        s.push_str(&format!("\n    {i}) {opt}"));
+    for option in answer_options(req) {
+        s.push_str(&format_option(req, &option));
     }
     if let Some(tool) = &req.tool_name {
         s.push_str(&format!("\n    tool: {tool}"));
@@ -313,11 +372,21 @@ fn format_interaction(agent_id: &str, req: &InteractionRequest) -> String {
     s
 }
 
+/// Render one open interaction as a multi-line listing entry, ending in the
+/// line that answers it.
+fn format_interaction(agent_id: &str, req: &InteractionRequest) -> String {
+    format!(
+        "{}\n  answer with: {}",
+        format_interaction_head(agent_id, req),
+        how_to_answer(req)
+    )
+}
+
 /// Render one open interaction in full, for `lev interactions <id>`: all of
 /// what the listing entry says, then what the listing has no room for (the
 /// call's arguments, the document under review), and the line that answers it.
 fn format_interaction_detail(agent_id: &str, req: &InteractionRequest) -> String {
-    let mut s = format_interaction(agent_id, req);
+    let mut s = format_interaction_head(agent_id, req);
     if let Some(arguments) = &req.tool_arguments {
         s.push_str("\n  arguments:");
         let pretty = serde_json::to_string_pretty(arguments).expect("JSON serializes");
@@ -340,25 +409,7 @@ fn format_interaction_detail(agent_id: &str, req: &InteractionRequest) -> String
     s
 }
 
-/// The `lev respond` line that answers `req`, for its kind.
-fn how_to_answer(req: &InteractionRequest) -> String {
-    let id = &req.id;
-    match req.kind {
-        InteractionKind::FreeText | InteractionKind::EditText => {
-            format!("lev respond {id} \"your answer\"")
-        }
-        InteractionKind::MultipleChoice => format!(
-            "lev respond {id} --choice N  (N is 0-{})",
-            req.options.len().saturating_sub(1)
-        ),
-        InteractionKind::Confirm => format!("lev respond {id} --approve  (or --deny)"),
-        InteractionKind::ToolApproval => {
-            format!("lev respond {id} --approve [--stage|--session]  (or --deny [--feedback TEXT])")
-        }
-    }
-}
-
-/// `lev respond` has to be told what the answer is: exactly one of a value,
+/// `lev respond` has to be told what the answer is: exactly one of an answer,
 /// `--choice`, `--approve` or `--deny`. An answer can't be taken back, and one
 /// with nothing in it reads to the run like nobody answered (a checkpoint
 /// approves, a review is "acknowledged"), so none given is refused rather than
@@ -373,49 +424,62 @@ fn check_one_answer(args: &RespondArgs) -> anyhow::Result<()> {
     match given.into_iter().filter(|given| *given).count() {
         1 => Ok(()),
         0 => bail!(
-            "refusing to answer '{id}' without an answer: give a VALUE, --choice N, --approve \
-             or --deny. To see the question first: lev interactions {id}",
+            "refusing to answer '{id}' without an answer: give an ANSWER (allow, deny, yes, \
+             no, an option, its number, or the text). To see the question first: lev \
+             interactions {id}",
             id = args.request_id
         ),
         _ => bail!(
-            "give one answer: a VALUE, --choice, --approve and --deny are each a whole answer"
+            "give one answer: an ANSWER, --choice, --approve and --deny are each a whole answer"
         ),
     }
 }
 
-/// Build the [`InteractionResponse`] implied by the CLI flags. Approve/deny wins,
-/// then an explicit `--choice`, otherwise the text value. [`check_one_answer`]
-/// has already made sure exactly one was given.
-fn build_response(request_id: &str, args: &RespondArgs) -> InteractionResponse {
+/// Build the [`InteractionResponse`] that answers `request` the way the
+/// arguments say. `--approve` and `--deny` answer as they always have,
+/// `--choice` picks an option by its 0-based place in the listing, and the
+/// answer is read the way the question asks for it. [`check_one_answer`] has
+/// already made sure exactly one was given.
+fn build_response(
+    request: &InteractionRequest,
+    args: &RespondArgs,
+) -> Result<InteractionResponse, String> {
+    let request_id = request.id.as_str();
+    let feedback = args.feedback.as_deref();
     if args.approve || args.deny {
         let scope = match (args.session, args.stage) {
             (true, _) => ApprovalScope::Run,
             (_, true) => ApprovalScope::Stage,
             _ => ApprovalScope::Once,
         };
-        match args.feedback.as_deref() {
-            // `requires = "deny"` keeps this off the approve path, so a
-            // feedback here is always a deny.
+        // [`check_flags`] keeps feedback off the approve path, so a feedback
+        // here is always a deny.
+        return Ok(match feedback {
             Some(feedback) => InteractionResponse::deny_with_feedback(request_id, feedback),
             None => InteractionResponse::approval(request_id, args.approve, scope),
-        }
-    } else if let Some(index) = args.choice {
-        InteractionResponse::choice(request_id, index)
-    } else {
-        InteractionResponse::text(request_id, args.value.clone().unwrap_or_default())
+        });
+    }
+    match args.choice {
+        Some(index) => leviath_core::interaction::answer_at(request, index, feedback),
+        None => leviath_core::interaction::parse_answer(
+            request,
+            args.value.as_deref().unwrap_or_default(),
+            feedback,
+        ),
     }
 }
 
-/// Put the files a text answer names on the answer: every `--attach`, then
-/// every `@path` in the value. A choice or an approval has no text for a
-/// file to sit beside, so `--attach` on one is refused rather than dropped.
+/// Put the files a text answer names on the answer: the `--attach` files,
+/// already read, then every `@path` in the value. A choice or an approval has
+/// no text for a file to sit beside, so `--attach` on one is refused rather
+/// than dropped.
 fn attach_answer(
     mut response: InteractionResponse,
-    attach: &[String],
+    attached: Vec<leviath_core::mime::InboundPart>,
     cwd: &std::path::Path,
 ) -> anyhow::Result<InteractionResponse> {
     let Some(value) = response.value.as_deref() else {
-        if !attach.is_empty() {
+        if !attached.is_empty() {
             bail!(
                 "--attach goes with a text answer; a choice or an approval has no text for a \
                  file to sit beside"
@@ -423,18 +487,29 @@ fn attach_answer(
         }
         return Ok(response);
     };
-    let (text, parts) = message_parts(value, attach, cwd)?;
+    let (text, parts) = with_named_parts(value, attached, cwd)?;
     response.value = Some(text);
     response.parts = parts;
     Ok(response)
 }
 
-/// `--feedback` is a deny's message and nothing else. clap's `requires`
-/// catches it on its own; beside `--approve` the parser lets it through, and
-/// a redirect silently dropped on a grant is the one outcome nobody asked for.
-fn check_feedback_flag(args: &RespondArgs) -> anyhow::Result<()> {
-    if args.feedback.is_some() && !args.deny {
-        bail!("--feedback goes with --deny: it tells the model what to do instead of the call");
+/// The flags that only make sense beside one kind of answer.
+///
+/// `--feedback` is a deny's message and nothing else: beside `--approve` a
+/// redirect would be silently dropped on a grant, the one outcome nobody asked
+/// for. A deny written as `deny`, `no` or a number is checked against the
+/// question, since only the question knows which option that is. `--stage`
+/// and `--session` widen `--approve`; an answer written as a word or a number
+/// already names its scope.
+fn check_flags(args: &RespondArgs) -> anyhow::Result<()> {
+    if args.feedback.is_some() && args.approve {
+        bail!("--feedback goes with a deny: it tells the model what to do instead of the call");
+    }
+    if (args.stage || args.session) && (args.value.is_some() || args.choice.is_some()) {
+        bail!(
+            "--stage and --session go with --approve; answer allow-stage or allow-run to \
+             widen a grant"
+        );
     }
     Ok(())
 }
@@ -455,7 +530,7 @@ fn list_interactions(interactions: &[(String, InteractionRequest)], json: bool) 
     if json {
         let open: Vec<OpenInteraction<'_>> = interactions
             .iter()
-            .map(|(agent_id, request)| OpenInteraction { agent_id, request })
+            .map(|(agent_id, request)| OpenInteraction::new(agent_id, request))
             .collect();
         // Nothing open is an empty array, not a sentence: a caller
         // polling this branches on length, not on prose.
@@ -484,7 +559,7 @@ fn show_interaction(
     match json {
         true => println!(
             "{}",
-            serde_json::to_string_pretty(&OpenInteraction { agent_id, request })
+            serde_json::to_string_pretty(&OpenInteraction::new(agent_id, request))
                 .expect("an interaction serializes")
         ),
         false => println!("{}", format_interaction_detail(agent_id, request)),
@@ -563,19 +638,23 @@ async fn answer_interaction(
     // The files the answer carries are read first, so a path that does not
     // exist is the file's error rather than whatever the daemon says next.
     let cwd = std::env::current_dir().unwrap_or_default();
-    let mut response = attach_answer(build_response(typed, args), &args.attach, &cwd)?;
+    let attached = crate::commands::run::attach::attach_all(&args.attach, &cwd)?;
     let open = open_interactions(client).await?;
     let (_, request) = resolve_request_id(typed, &open)?;
     let request_id = request.id.clone();
-    response.request_id = request_id.clone();
-    // The daemon checks this too; checked here as well so the refusal can say
-    // which flag answers the question.
-    if let Err(why) = leviath_core::interaction::check_answer(request, &response) {
-        bail!(
-            "{why}; nothing was answered. Answer with: {}",
-            how_to_answer(request)
-        );
-    }
+    // The daemon checks the answer too; checked here as well so the refusal
+    // can say what answers the question.
+    let response = build_response(request, args)
+        .and_then(|response| {
+            leviath_core::interaction::check_answer(request, &response).map(|()| response)
+        })
+        .map_err(|why| {
+            anyhow::anyhow!(
+                "{why}; nothing was answered. Answer with: {}",
+                how_to_answer(request)
+            )
+        })?;
+    let response = attach_answer(response, attached, &cwd)?;
     // A failed answer stays an error (non-zero exit plus the message on
     // stderr), so `--json` only changes the success line.
     let applied = match args.json {
@@ -596,7 +675,7 @@ async fn answer_interaction(
 /// `lev respond`: answer a pending interaction.
 pub async fn respond(client: &ControlClient, args: &RespondArgs) -> anyhow::Result<()> {
     check_one_answer(args)?;
-    check_feedback_flag(args)?;
+    check_flags(args)?;
     answer_interaction(client, args, &args.request_id).await
 }
 

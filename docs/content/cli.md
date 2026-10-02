@@ -893,9 +893,9 @@ fetched. A part with no name exports as its short hash plus the extension its ty
 
 ### `lev interactions [REQUEST_ID]`
 
-List the questions runs are waiting on. Name one to see it in full: the prompt, its options, the
-tool call's arguments, the document under review, and the `lev respond` line that answers it.
-Reading never answers anything.
+List the questions runs are waiting on, each with its options numbered from 1 and the
+`lev respond` line that answers it. Name one to see it in full, with the tool call's arguments and
+the document under review as well. Reading never answers anything.
 
 ```bash
 lev interactions                    # every open interaction
@@ -903,32 +903,74 @@ lev interactions probe-1789971553   # one, in full
 lev interactions --json             # the whole request for each, for a script
 ```
 
+```
+probe-1789971553-793b8652da33-approve-1  [tool-approval]  agent=probe-1789971553-793b8652da33  stage=work
+  Allow tool call: `shell` - `cargo test`?
+    [1] Allow once  (allow)
+    [2] Allow cargo test for this stage  (allow-stage)
+    [3] Allow cargo test for this run  (allow-run)
+    [4] Deny  (deny)
+    [5] Deny with feedback  (deny --feedback "TEXT")
+    tool: shell
+  answer with: lev respond probe-1789971553-793b8652da33-approve-1 allow|allow-stage|allow-run|deny|deny-feedback  (or 1-5; deny takes --feedback TEXT)
+```
+
+`--json` gives each request an `answer_options` list. Every option there has an `id` (the word
+that answers with it), its `label`, the `number` the listing shows, and `answer`, the whole
+`lev respond` command. An agent keeps the `id`: it does not move when the options are reordered.
+
 `REQUEST_ID` follows the same rules as on `lev respond` below.
 
-### `lev respond <REQUEST_ID> [VALUE]`
+### `lev respond <REQUEST_ID> [ANSWER]`
 
-Answer an interaction the daemon is holding. An answer can't be taken back, so the command needs
-exactly one of `VALUE`, `--choice`, `--approve` or `--deny`. With none it refuses and points at
-`lev interactions`.
+Answer an interaction the daemon is holding, with what the question shows. An answer can't be
+taken back, so the command needs exactly one of `ANSWER`, `--choice`, `--approve` or `--deny`.
+With none it refuses and points at `lev interactions`.
+
+| Question | `ANSWER` |
+|---|---|
+| Tool approval | `allow`, `allow-stage`, `allow-run` or `deny`. `deny` takes `--feedback` |
+| Confirm | `yes` or `no` |
+| Multiple choice | The option, or any start of it that names just one |
+| Free text or edit | The text itself, exactly as written |
+
+Words match in any case. The number `lev interactions` lists an option under answers with it too,
+so `lev respond <id> 2` picks the second option on the screen. Only a question with options reads
+a number that way: for a free-text question, `1` is the text "1".
+
+```bash
+lev respond probe-1789971553 allow-run      # allow, and every later call this covers, this run
+lev respond probe-1789971553 3              # the same, by its number
+lev respond probe-1789971553 deny --feedback "use git log, not git show"
+lev respond pick-1789971553 postgres        # a choice, by its start
+lev respond ask-1789971553 "ship it Friday" # a free-text answer
+```
 
 `REQUEST_ID` can be the start of an id rather than the whole thing, so a prompt is answered
 without copying forty-odd characters. It has to leave exactly one open interaction: a start
 that fits two is refused with both of them listed, and nothing is answered. An id given in
 full always answers that interaction, even where longer ids begin with it.
 
-The answer has to fit the question. Text answers a free-text or edit question, and `""` counts:
-it acknowledges a review or keeps a document unchanged. `--choice` has to name a listed option.
-`--approve` or `--deny` answers a confirm or a tool approval. Anything else is refused with the
-line that would answer it, and the question stays open.
+The answer has to fit the question. `""` is a text answer too: it acknowledges a review or keeps
+a document unchanged. A start of a choice that fits two options is refused with both named. A word
+the question does not offer is refused with every answer that would work, ready to copy, and the
+question stays open:
+
+```
+"maybe" is not an answer to this approval; answer allow, allow-stage, allow-run, deny or
+deny-feedback (or 1-5)
+```
+
+The flags below are the same answers in the older spelling, kept so existing scripts still work.
 
 | Flag | Purpose |
 |---|---|
-| `--choice <INDEX>` | Answer a multiple-choice interaction by zero-based option index |
-| `--approve` | Approve a tool-approval or confirm interaction. Conflicts with `--deny` |
-| `--deny` | Deny it |
-| `--feedback <TEXT>` | With `--deny`, what the model should do instead. An error with anything but `--deny` |
-| `--stage` | With `--approve`, allow what this call runs until the run leaves the current stage |
-| `--session` | With `--approve`, allow what this call runs for the rest of the run (alias `--run`) |
+| `--choice <INDEX>` | The scripting form: the option at this zero-based place in the listing, for any question with options. `--choice 0` is the option listed as 1 |
+| `--approve` | The same as `allow`, or `yes` on a confirm. Conflicts with `--deny` |
+| `--deny` | The same as `deny`, or `no` on a confirm |
+| `--feedback <TEXT>` | With a deny, however it is written, what the model should do instead. An error beside `--approve` |
+| `--stage` | With `--approve`, the same as `allow-stage` |
+| `--session` | With `--approve`, the same as `allow-run` (alias `--run`) |
 | `--attach <PATH[:REGION][:TYPE][:text|native|stand_in]>` | Attach a file to a text answer, as on `lev run --attach`. Repeatable. See below |
 
 The model reads `--feedback` text inside the refused call's tool result.

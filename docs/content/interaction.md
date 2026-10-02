@@ -30,7 +30,7 @@ sequenceDiagram
   participant H as Human
   A->>H: "ask_user_confirm: Delete the branch?"
   Note over A: run pauses, question is open
-  H-->>A: "lev respond <id> --approve"
+  H-->>A: "lev respond <id> yes"
   A->>A: "answer injected, run resumes"
 ```
 
@@ -167,7 +167,8 @@ command for `bash`/`shell`, the path for the file tools). The prompt offers five
 - **Deny**: reject the call. The model sees `[denied] User declined tool call 'bash'.` and
   decides for itself what to try next.
 - **Deny with feedback**: reject the call and say what to do instead. The dashboard opens the
-  response box for the text; `lev respond` takes it as `--feedback`; the API takes `feedback`.
+  response box for the text; `lev respond` takes it as `deny --feedback`; the API takes
+  `feedback`.
   The model sees `[denied] User declined tool call 'bash'. Feedback: <your text>` as the tool
   result, so its next turn starts from your redirect rather than from a guess. The text is in the
   run's record with the rest of the tool result.
@@ -302,28 +303,37 @@ accepts_messages = false   # hold messages until a later stage that accepts them
 
 ## Answering questions
 
-When a run is waiting on a question, `lev interactions` lists what the daemon is holding, and
-`lev interactions <request-id>` shows one in full without answering it. Answer it with
-`lev respond`:
+When a run is waiting on a question, `lev interactions` lists what the daemon is holding, each
+option numbered from 1 beside the word that answers with it. `lev interactions <request-id>` shows
+one in full without answering it. Answer with what the question shows:
 
 ```bash
 lev interactions                         # list open interactions
 lev interactions <request-id>            # show one in full, with the line that answers it
-lev respond <request-id> "your answer"   # free-text / edited value
-lev respond <request-id> --choice 1      # multiple-choice, 0-based index
-lev respond <request-id> --approve       # tool-approval / confirm
-lev respond <request-id> --approve --stage     # and every later call this covers, this stage
-lev respond <request-id> --approve --session   # and every later call this covers, this run
-lev respond <request-id> --deny          # reject
-lev respond <request-id> --deny --feedback "use git log, not git show"   # reject and redirect
+lev respond <request-id> allow           # tool approval: allow, allow-stage, allow-run or deny
+lev respond <request-id> deny --feedback "use git log, not git show"   # reject and redirect
+lev respond <request-id> yes             # confirm: yes or no
+lev respond <request-id> postgres        # multiple choice: the option, or the start of it
+lev respond <request-id> 2               # any of those three, by the number it is listed under
+lev respond <request-id> "your answer"   # free-text / edited value, exactly as written
 lev respond <request-id> "the arm is still wrong, see @marked_up.png"    # a text answer with a file
 lev respond <request-id> "here" --attach sketch.png:sprites                # or attached by flag
 ```
 
+The question's kind decides how the answer is read, so a number answers a free-text question with
+that number as its text. The older flags still work: `--approve` and `--deny` (with `--stage`,
+`--session` or `--feedback`), and `--choice N`, which counts from 0 over the same listing for any
+question with options.
+
 `lev respond` always needs the answer itself. Naming a question is not answering it, and an
 answer with nothing in it reads to the run like nobody answered, so it is refused. So is an answer
-the question can't take, such as text for a tool approval or `--choice 7` on a list of three. The
-refusal names the flag that would answer it, and the question stays open.
+the question can't take. The refusal lists every answer that would work, and the question stays
+open:
+
+```
+"maybe" is not an answer to this approval; answer allow, allow-stage, allow-run, deny or
+deny-feedback (or 1-5)
+```
 
 A request id is opaque, and it names the run that asked: two runs stopped on the same tool call are
 two questions with two ids, and answering one says nothing about the other.
@@ -332,7 +342,7 @@ The id can be cut short. `lev respond` takes the start of one, as long as that s
 one open interaction:
 
 ```bash
-lev respond probe-1789971553 --approve   # the whole id is probe-1789971553-793b8652da33-approve-1
+lev respond probe-1789971553 allow   # the whole id is probe-1789971553-793b8652da33-approve-1
 ```
 
 Since the run comes first in an id, the run's own id is usually short enough on its own. A start

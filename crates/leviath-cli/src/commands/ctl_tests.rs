@@ -431,10 +431,13 @@ fn a_text_answer_carries_its_files_and_a_choice_refuses_them() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("mark.png"), b"\x89PNG\r\n\x1a\nmark").unwrap();
     std::fs::write(dir.path().join("notes.md"), "# n").unwrap();
-    let attach = vec!["notes.md:brief".to_string()];
+    let attach = || {
+        crate::commands::run::attach::attach_all(&["notes.md:brief".to_string()], dir.path())
+            .unwrap()
+    };
     let answered = attach_answer(
         InteractionResponse::text("q1", "the arm is wrong, see @mark.png"),
-        &attach,
+        attach(),
         dir.path(),
     )
     .unwrap();
@@ -448,17 +451,19 @@ fn a_text_answer_carries_its_files_and_a_choice_refuses_them() {
     assert_eq!(answered.parts[1].name, "mark.png");
     assert!(answered.parts[1].region.is_none());
 
-    let bare = attach_answer(InteractionResponse::choice("q1", 1), &[], dir.path()).unwrap();
+    let bare = attach_answer(InteractionResponse::choice("q1", 1), Vec::new(), dir.path()).unwrap();
     assert!(bare.parts.is_empty());
-    let err = attach_answer(InteractionResponse::choice("q1", 1), &attach, dir.path()).unwrap_err();
+    let err =
+        attach_answer(InteractionResponse::choice("q1", 1), attach(), dir.path()).unwrap_err();
     assert!(err.to_string().contains("text answer"), "{err}");
+    std::fs::write(dir.path().join("empty.png"), b"").unwrap();
     let err = attach_answer(
-        InteractionResponse::text("q1", "x"),
-        &["/no/such/file.png".to_string()],
+        InteractionResponse::text("q1", "see @empty.png"),
+        Vec::new(),
         dir.path(),
     )
     .unwrap_err();
-    assert!(err.to_string().contains("file.png"), "{err}");
+    assert!(err.to_string().contains("empty.png"), "{err}");
 }
 
 /// An attachment that cannot be read fails the answer before any daemon
@@ -480,40 +485,174 @@ async fn respond_refuses_a_bad_attachment_before_contacting_the_daemon() {
     assert!(err.to_string().contains("file.png"), "{err}");
 }
 
+/// The open questions the respond tests answer, one of each kind.
+fn approval_q() -> InteractionRequest {
+    InteractionRequest::tool_approval("q1", "bash", serde_json::json!({}), "s", &[])
+}
+fn confirm_q() -> InteractionRequest {
+    InteractionRequest::confirm("q1", "Sure?", "s")
+}
+fn choice_q() -> InteractionRequest {
+    InteractionRequest::multiple_choice(
+        "q1",
+        "Pick",
+        vec!["Postgres".to_string(), "SQLite".to_string()],
+        "s",
+    )
+}
+fn text_q() -> InteractionRequest {
+    InteractionRequest::free_text("q1", "Why?", "s", true)
+}
+
+/// `args` with `answer` as its positional answer.
+fn answering(answer: &str) -> RespondArgs {
+    RespondArgs {
+        value: Some(answer.to_string()),
+        ..respond_args()
+    }
+}
+
 /// `lev respond <id> --deny --feedback TEXT` is a deny carrying the text;
 /// blank text is the plain deny, the same rule every other client follows.
 #[test]
 fn build_response_deny_with_feedback() {
-    let r = build_response(
-        "q1",
-        &RespondArgs {
-            deny: true,
-            feedback: Some("use git log, not git show".to_string()),
-            ..respond_args()
-        },
+    let deny = |feedback: &str| RespondArgs {
+        deny: true,
+        feedback: Some(feedback.to_string()),
+        ..respond_args()
+    };
+    assert_eq!(
+        build_response(&approval_q(), &deny("use git log, not git show")),
+        Ok(InteractionResponse::deny_with_feedback(
+            "q1",
+            "use git log, not git show"
+        ))
     );
     assert_eq!(
-        r,
-        InteractionResponse::deny_with_feedback("q1", "use git log, not git show")
-    );
-    let blank = build_response(
-        "q1",
-        &RespondArgs {
-            deny: true,
-            feedback: Some("  ".to_string()),
-            ..respond_args()
-        },
-    );
-    assert_eq!(
-        blank,
-        InteractionResponse::approval("q1", false, ApprovalScope::Once)
+        build_response(&approval_q(), &deny("  ")),
+        Ok(InteractionResponse::approval(
+            "q1",
+            false,
+            ApprovalScope::Once
+        ))
     );
 }
 
-/// `--feedback` without `--deny` is refused at the parser, with `--deny`
-/// named in the message, and it never combines with `--approve`.
+/// Every kind answered by what it shows: the word, the number it is listed
+/// under, and the old flags, which stay as aliases.
 #[test]
-fn feedback_flag_is_only_valid_with_deny() {
+fn every_kind_is_answered_by_name_number_or_flag() {
+    let yes = |scope| Ok(InteractionResponse::approval("q1", true, scope));
+    let no = Ok(InteractionResponse::approval(
+        "q1",
+        false,
+        ApprovalScope::Once,
+    ));
+    let approve = |session, stage| RespondArgs {
+        approve: true,
+        session,
+        stage,
+        ..respond_args()
+    };
+    let choice = |index| RespondArgs {
+        choice: Some(index),
+        ..respond_args()
+    };
+    let deny = RespondArgs {
+        deny: true,
+        ..respond_args()
+    };
+    let approval = approval_q();
+    for (args, want) in [
+        (answering("allow"), yes(ApprovalScope::Once)),
+        (answering("1"), yes(ApprovalScope::Once)),
+        (approve(false, false), yes(ApprovalScope::Once)),
+        (choice(0), yes(ApprovalScope::Once)),
+        (answering("allow-stage"), yes(ApprovalScope::Stage)),
+        (answering("2"), yes(ApprovalScope::Stage)),
+        (approve(false, true), yes(ApprovalScope::Stage)),
+        (answering("Allow-Run"), yes(ApprovalScope::Run)),
+        (answering("3"), yes(ApprovalScope::Run)),
+        (approve(true, false), yes(ApprovalScope::Run)),
+        (choice(2), yes(ApprovalScope::Run)),
+        (answering("deny"), no.clone()),
+        (answering("4"), no.clone()),
+        (deny.clone(), no.clone()),
+        (choice(3), no.clone()),
+    ] {
+        assert_eq!(build_response(&approval, &args), want, "{args:?}");
+    }
+    let redirect = Ok(InteractionResponse::deny_with_feedback("q1", "use the API"));
+    for answer in ["deny", "deny-feedback", "4", "5"] {
+        let args = RespondArgs {
+            feedback: Some("use the API".to_string()),
+            ..answering(answer)
+        };
+        assert_eq!(build_response(&approval, &args), redirect, "{answer}");
+    }
+
+    let confirm = confirm_q();
+    for (args, want) in [
+        (answering("yes"), yes(ApprovalScope::Once)),
+        (answering("1"), yes(ApprovalScope::Once)),
+        (approve(false, false), yes(ApprovalScope::Once)),
+        (choice(0), yes(ApprovalScope::Once)),
+        (answering("NO"), no.clone()),
+        (answering("2"), no.clone()),
+        (deny, no.clone()),
+        (choice(1), no),
+    ] {
+        assert_eq!(build_response(&confirm, &args), want, "{args:?}");
+    }
+
+    let picked = |index| Ok(InteractionResponse::choice("q1", index));
+    let choices = choice_q();
+    for (args, want) in [
+        (answering("SQLite"), picked(1)),
+        (answering("sq"), picked(1)),
+        (answering("2"), picked(1)),
+        (choice(1), picked(1)),
+        (answering("postgres"), picked(0)),
+    ] {
+        assert_eq!(build_response(&choices, &args), want, "{args:?}");
+    }
+
+    // A text question takes the words as written, a number included, and an
+    // empty "" is an answer the person typed.
+    let text = text_q();
+    for typed in ["hello", "1", ""] {
+        assert_eq!(
+            build_response(&text, &answering(typed)),
+            Ok(InteractionResponse::text("q1", typed))
+        );
+    }
+}
+
+/// A wrong answer is refused with the answers that would work, ready to copy.
+#[test]
+fn a_wrong_answer_is_refused_with_the_right_ones() {
+    assert_eq!(
+        build_response(&approval_q(), &answering("maybe")).unwrap_err(),
+        "\"maybe\" is not an answer to this approval; answer allow, allow-stage, allow-run, \
+         deny or deny-feedback (or 1-5)"
+    );
+    assert_eq!(
+        build_response(&choice_q(), &answering("s")),
+        Ok(InteractionResponse::choice("q1", 1))
+    );
+    let mut close = choice_q();
+    close.options.push("SQL Server".to_string());
+    assert_eq!(
+        build_response(&close, &answering("sql")).unwrap_err(),
+        "\"sql\" could be any of sqlite or sql-server; give more of it, or its number"
+    );
+}
+
+/// `--feedback` goes with a deny however the deny is written; beside
+/// `--approve` it is refused before anything is asked. `--stage` and
+/// `--session` widen `--approve` and nothing else.
+#[test]
+fn flags_that_only_fit_one_answer_are_refused_beside_the_others() {
     use clap::Parser;
     #[derive(Parser, Debug)]
     struct Cli {
@@ -523,17 +662,34 @@ fn feedback_flag_is_only_valid_with_deny() {
     let ok = Cli::try_parse_from(["lev", "q1", "--deny", "--feedback", "why"]).unwrap();
     assert!(ok.respond.deny);
     assert_eq!(ok.respond.feedback.as_deref(), Some("why"));
+    let word = Cli::try_parse_from(["lev", "q1", "deny", "--feedback", "why"]).unwrap();
+    assert_eq!(word.respond.value.as_deref(), Some("deny"));
+    assert!(check_flags(&word.respond).is_ok());
 
-    let alone = Cli::try_parse_from(["lev", "q1", "--feedback", "why"]).unwrap_err();
-    assert!(alone.to_string().contains("--deny"), "{alone}");
-
-    // clap lets `--approve --feedback` through, so the command checks.
     let with_approve =
         Cli::try_parse_from(["lev", "q1", "--approve", "--feedback", "why"]).unwrap();
-    let err = check_feedback_flag(&with_approve.respond).unwrap_err();
-    assert!(err.to_string().contains("--deny"), "{err}");
-    assert!(check_feedback_flag(&ok.respond).is_ok());
-    assert!(check_feedback_flag(&respond_args()).is_ok());
+    let err = check_flags(&with_approve.respond).unwrap_err();
+    assert!(err.to_string().contains("goes with a deny"), "{err}");
+    assert!(check_flags(&ok.respond).is_ok());
+    assert!(check_flags(&respond_args()).is_ok());
+
+    for argv in [
+        ["lev", "q1", "allow", "--stage"],
+        ["lev", "q1", "--choice=0", "--session"],
+    ] {
+        let args = Cli::try_parse_from(argv).unwrap().respond;
+        let err = check_flags(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("allow-stage or allow-run"),
+            "{err}"
+        );
+    }
+    for argv in [
+        ["lev", "q1", "--approve", "--stage"],
+        ["lev", "q1", "--deny", "--session"],
+    ] {
+        assert!(check_flags(&Cli::try_parse_from(argv).unwrap().respond).is_ok());
+    }
 }
 
 /// The check runs before anything is sent: a bad flag combination is an
@@ -553,28 +709,7 @@ async fn respond_refuses_feedback_without_deny_before_contacting_the_daemon() {
     )
     .await
     .unwrap_err();
-    assert!(err.to_string().contains("--deny"), "{err}");
-}
-
-#[test]
-fn build_response_free_text_uses_the_value() {
-    let with_value = build_response(
-        "q1",
-        &RespondArgs {
-            value: Some("hello".to_string()),
-            ..respond_args()
-        },
-    );
-    assert_eq!(with_value, InteractionResponse::text("q1", "hello"));
-    // An empty "" is an answer the person typed, and is sent as one.
-    let empty = build_response(
-        "q1",
-        &RespondArgs {
-            value: Some(String::new()),
-            ..respond_args()
-        },
-    );
-    assert_eq!(empty, InteractionResponse::text("q1", ""));
+    assert!(err.to_string().contains("goes with a deny"), "{err}");
 }
 
 /// Naming an interaction is not answering it. With no answer given the command
@@ -627,69 +762,6 @@ fn a_request_id_is_required() {
 }
 
 #[test]
-fn build_response_choice_selects_index() {
-    let r = build_response(
-        "q1",
-        &RespondArgs {
-            choice: Some(2),
-            ..respond_args()
-        },
-    );
-    assert_eq!(r, InteractionResponse::choice("q1", 2));
-}
-
-#[test]
-fn build_response_approve_and_deny_and_session_scope() {
-    let approved = build_response(
-        "q1",
-        &RespondArgs {
-            approve: true,
-            ..respond_args()
-        },
-    );
-    assert_eq!(
-        approved,
-        InteractionResponse::approval("q1", true, ApprovalScope::Once)
-    );
-    let session = build_response(
-        "q1",
-        &RespondArgs {
-            approve: true,
-            session: true,
-            json: false,
-            ..respond_args()
-        },
-    );
-    assert_eq!(
-        session,
-        InteractionResponse::approval("q1", true, ApprovalScope::Run)
-    );
-    let stage = build_response(
-        "q1",
-        &RespondArgs {
-            approve: true,
-            stage: true,
-            ..respond_args()
-        },
-    );
-    assert_eq!(
-        stage,
-        InteractionResponse::approval("q1", true, ApprovalScope::Stage)
-    );
-    let denied = build_response(
-        "q1",
-        &RespondArgs {
-            deny: true,
-            ..respond_args()
-        },
-    );
-    assert_eq!(
-        denied,
-        InteractionResponse::approval("q1", false, ApprovalScope::Once)
-    );
-}
-
-#[test]
 fn kind_label_covers_every_kind() {
     for (kind, label) in [
         (InteractionKind::FreeText, "free-text"),
@@ -714,9 +786,33 @@ fn format_interaction_renders_options_and_tool() {
     let out = format_interaction("agent-x", &req);
     assert!(out.contains("q1  [choice]  agent=agent-x  stage=plan"));
     assert!(out.contains("Pick"));
-    assert!(out.contains("0) a"));
-    assert!(out.contains("1) b"));
+    assert!(out.contains("\n    [1] a  (a)\n    [2] b  (b)"), "{out}");
     assert!(out.contains("tool: bash"));
+    assert!(
+        out.ends_with("answer with: lev respond q1 a|b  (or the start of one, or 1-2)"),
+        "{out}"
+    );
+}
+
+/// An approval lists its options the way the dashboard numbers them, each
+/// beside what to type, the deny that takes words included.
+#[test]
+fn an_approval_lists_its_options_from_one_beside_their_words() {
+    let out = format_interaction("agent-x", &approval_q());
+    assert!(out.contains("\n    [1] Allow once  (allow)\n"), "{out}");
+    assert!(out.contains("  (allow-stage)\n"), "{out}");
+    assert!(out.contains("  (allow-run)\n"), "{out}");
+    assert!(out.contains("\n    [4] Deny  (deny)\n"), "{out}");
+    assert!(
+        out.contains("\n    [5] Deny with feedback  (deny --feedback \"TEXT\")"),
+        "{out}"
+    );
+    let text = format_interaction("agent-x", &text_q());
+    assert!(!text.contains("[1]"), "{text}");
+    assert!(
+        text.ends_with("answer with: lev respond q1 \"your answer\""),
+        "{text}"
+    );
 }
 
 // ─── naming the interaction to answer ────────────────────────────────────
@@ -926,10 +1022,7 @@ fn open_interaction_serializes_the_agent_id_alongside_the_request() {
         "plan",
     );
     request.tool_name = Some("bash".to_string());
-    let open = OpenInteraction {
-        agent_id: "agent-x",
-        request: &request,
-    };
+    let open = OpenInteraction::new("agent-x", &request);
     let value: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&open).unwrap()).unwrap();
     assert_eq!(value["agent_id"], serde_json::json!("agent-x"));
@@ -937,6 +1030,13 @@ fn open_interaction_serializes_the_agent_id_alongside_the_request() {
     assert_eq!(value["stage_name"], serde_json::json!("plan"));
     assert_eq!(value["options"], serde_json::json!(["a", "b"]));
     assert_eq!(value["tool_name"], serde_json::json!("bash"));
+    assert_eq!(
+        value["answer_options"],
+        serde_json::json!([
+            {"id": "a", "label": "a", "number": 1, "answer": "lev respond q1 a"},
+            {"id": "b", "label": "b", "number": 2, "answer": "lev respond q1 b"},
+        ])
+    );
 }
 
 #[tokio::test]
@@ -981,12 +1081,79 @@ async fn an_answer_of_the_wrong_shape_is_refused_with_the_right_one() {
     })
     .await;
     let err = r.unwrap_err().to_string();
-    assert!(err.contains("nothing was answered"), "{err}");
-    assert!(
-        err.contains("lev respond q1 --choice N  (N is 0-1)"),
-        "{err}"
+    assert_eq!(
+        err,
+        "'q1' has no option 2: counting from 0, its options are 0-1; nothing was answered. \
+         Answer with: lev respond q1 a|b  (or the start of one, or 1-2)"
     );
     assert!(answered_ids(&requests).is_empty());
+}
+
+/// An answer the parser takes and the question still cannot: `--approve` on
+/// a text question is refused by the same check the daemon runs.
+#[tokio::test]
+async fn a_flag_the_question_cannot_take_is_refused_before_sending() {
+    let args = RespondArgs {
+        approve: true,
+        ..respond_args()
+    };
+    let (r, requests) = served(
+        vec![interactions_line(&[("agent-a", "q1")]), APPLIED.to_string()],
+        |c| async move { respond(&c, &args).await },
+    )
+    .await;
+    let err = r.unwrap_err().to_string();
+    assert!(err.starts_with("'q1' is a text question"), "{err}");
+    assert!(answered_ids(&requests).is_empty());
+}
+
+/// `--attach` beside a choice is refused once the question says it is a
+/// choice, and nothing is answered.
+#[tokio::test]
+async fn a_file_beside_a_choice_is_refused_and_answers_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.md");
+    std::fs::write(&notes, "# n").unwrap();
+    let listing = serde_json::to_string(&ControlResponse::Interactions {
+        interactions: vec![("agent-a".to_string(), choice_q())],
+    })
+    .unwrap();
+    let args = RespondArgs {
+        attach: vec![notes.to_string_lossy().to_string()],
+        ..answering("sqlite")
+    };
+    let (r, requests) = served(vec![listing, APPLIED.to_string()], |c| async move {
+        respond(&c, &args).await
+    })
+    .await;
+    assert!(r.unwrap_err().to_string().contains("text answer"));
+    assert!(answered_ids(&requests).is_empty());
+}
+
+/// The agent's round trip: read the listing as JSON, send an option's word
+/// back, and the daemon is handed the decision that word names.
+#[tokio::test]
+async fn an_option_word_from_the_listing_answers_with_that_option() {
+    let listing = serde_json::to_string(&ControlResponse::Interactions {
+        interactions: vec![("agent-a".to_string(), approval_q())],
+    })
+    .unwrap();
+    let open: Vec<(String, InteractionRequest)> = vec![("agent-a".to_string(), approval_q())];
+    let shown = serde_json::to_value(OpenInteraction::new(&open[0].0, &open[0].1)).unwrap();
+    let word = shown["answer_options"][2]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(word, "allow-run");
+    let args = answering(&word);
+    let (r, requests) = served(vec![listing, APPLIED.to_string()], |c| async move {
+        respond(&c, &args).await
+    })
+    .await;
+    r.expect("the word answers");
+    let sent = &requests[1]["response"];
+    assert_eq!(sent["approved"], true);
+    assert_eq!(sent["scope"], "session");
 }
 
 /// The daemon checks every answer as well, and its reason is what the person
@@ -1009,24 +1176,6 @@ async fn a_refusal_from_the_daemon_is_reported_with_its_reason() {
     assert_eq!(
         r.unwrap_err().to_string(),
         "'q1' is a text question: answer it with text"
-    );
-}
-
-#[test]
-fn every_kind_says_how_it_is_answered() {
-    let text = InteractionRequest::free_text("t", "Why?", "s", true);
-    assert_eq!(how_to_answer(&text), "lev respond t \"your answer\"");
-    let edit = InteractionRequest::edit_text("e", "Edit", "s", "doc");
-    assert_eq!(how_to_answer(&edit), "lev respond e \"your answer\"");
-    let confirm = InteractionRequest::confirm("y", "Sure?", "s");
-    assert_eq!(
-        how_to_answer(&confirm),
-        "lev respond y --approve  (or --deny)"
-    );
-    let tool = InteractionRequest::tool_approval("a", "bash", serde_json::json!({}), "s", &[]);
-    assert_eq!(
-        how_to_answer(&tool),
-        "lev respond a --approve [--stage|--session]  (or --deny [--feedback TEXT])"
     );
 }
 
@@ -1134,7 +1283,10 @@ fn the_full_view_shows_arguments_body_and_the_answer_line() {
     assert!(out.contains("  body:\n    line one\n    line two"), "{out}");
     assert!(out.contains("  required: yes"), "{out}");
     assert!(
-        out.ends_with("answer with: lev respond run-approve-1 --approve [--stage|--session]  (or --deny [--feedback TEXT])"),
+        out.ends_with(
+            "answer with: lev respond run-approve-1 allow|allow-stage|allow-run|deny|deny-feedback  \
+             (or 1-5; deny takes --feedback TEXT)"
+        ),
         "{out}"
     );
 

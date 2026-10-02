@@ -25,7 +25,9 @@ use crate::commands::serve::graphql::inputs::KeyValueWrite;
 use crate::commands::serve::graphql::mutation::attachments::AttachmentWrite;
 use crate::commands::serve::graphql::query::Query;
 use crate::commands::serve::graphql::types::interaction::ApprovalScope;
-use crate::commands::serve::testutil::{fake_daemon, no_daemon_client, state_with_agent_paths};
+use crate::commands::serve::testutil::{
+    busy_daemon, fake_daemon, no_daemon_client, state_with_agent_paths,
+};
 use crate::runstate::{RunMeta, RunStatus, create_run};
 
 /// A run on disk in the given state.
@@ -78,49 +80,6 @@ async fn mutate_with_agents(
 async fn mutate(control: ControlClient, query: &str) -> async_graphql::Response {
     let agents = empty_agents();
     mutate_with_agents(control, agents.path(), query).await
-}
-
-/// A fake daemon that answers every request it is asked, not only the first.
-///
-/// The shared helper answers one, which is what a REST handler makes. A bulk
-/// act makes one control request per run it reaches, so a sweep needs a daemon
-/// that keeps answering.
-fn busy_daemon(
-    respond: impl Fn(leviath_runtime::control_socket::ControlRequest) -> ControlResponse
-    + Send
-    + Sync
-    + 'static,
-) -> (
-    ControlClient,
-    tempfile::TempDir,
-    tokio::task::JoinHandle<()>,
-) {
-    use leviath_runtime::control_socket::{ControlRequest, bind_control_listener, control_id};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let dir = tempfile::tempdir().expect("a temp socket dir");
-    let id = control_id(dir.path());
-    let mut listener = bind_control_listener(&id).expect("the listener binds");
-    let respond = std::sync::Arc::new(respond);
-    let handle = tokio::spawn(async move {
-        while let Ok(Some(stream)) = listener.accept().await {
-            let respond = std::sync::Arc::clone(&respond);
-            tokio::spawn(async move {
-                let (read_half, mut write_half) = tokio::io::split(stream);
-                let mut lines = BufReader::new(read_half).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let Ok(request) = serde_json::from_str::<ControlRequest>(&line) else {
-                        return;
-                    };
-                    let mut out =
-                        serde_json::to_string(&respond(request)).expect("the reply serializes");
-                    out.push('\n');
-                    let _ = write_half.write_all(out.as_bytes()).await;
-                }
-            });
-        }
-    });
-    (ControlClient::new(id), dir, handle)
 }
 
 /// The `extensions.code` a response's first error carries.
@@ -970,6 +929,91 @@ async fn each_approval_scope_reaches_the_daemon() {
         .await;
         assert!(answer.errors.is_empty(), "{word}: {:?}", answer.errors);
     }
+}
+
+/// An option named by its word is read against the open ask and reaches the
+/// daemon as the decision it names; a word the ask does not offer is refused
+/// listing the ones it does, and an ask no longer open reads as settled.
+#[tokio::test]
+async fn an_option_word_answers_with_that_option() {
+    use leviath_runtime::control_socket::ControlRequest;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    let (control, _dir, _srv) = busy_daemon(move |request| match request {
+        ControlRequest::ListInteractions => ControlResponse::Interactions {
+            interactions: vec![(
+                "run-1".to_string(),
+                leviath_core::interaction::InteractionRequest::tool_approval(
+                    "ask-1",
+                    "bash",
+                    serde_json::json!({}),
+                    "s",
+                    &[],
+                ),
+            )],
+        },
+        ControlRequest::AnswerInteraction { response } => {
+            sink.lock().unwrap().push(response);
+            ControlResponse::Ok { ok: true }
+        }
+        other => panic!("a listing or an answer, not {other:?}"),
+    });
+    let ask = |id: &str, answer: &str| {
+        format!(
+            "mutation {{ answerInteraction(request: {{ interactionId: \"{id}\", \
+             answer: {{ option: {answer} }} }}) {{ outcome }} }}"
+        )
+    };
+    let answer = mutate(control.clone(), &ask("ask-1", "{ id: \"allow-run\" }")).await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    assert_eq!(data_of(&answer)["answerInteraction"]["outcome"], "ACCEPTED");
+    let answer = mutate(
+        control.clone(),
+        &ask("ask-1", "{ id: \"deny\", feedback: \"read it first\" }"),
+    )
+    .await;
+    assert!(answer.errors.is_empty(), "{:?}", answer.errors);
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].approved, Some(true));
+        assert_eq!(
+            seen[0].scope,
+            Some(leviath_core::interaction::ApprovalScope::Run)
+        );
+        assert_eq!(seen[1].feedback.as_deref(), Some("read it first"));
+    }
+
+    let refused = mutate(control.clone(), &ask("ask-1", "{ id: \"maybe\" }")).await;
+    assert_eq!(code_of(&refused), "\"BAD_USER_INPUT\"");
+    assert!(
+        refused.errors[0]
+            .message
+            .contains("answer allow, allow-stage, allow-run, deny or deny-feedback (or 1-5)"),
+        "{:?}",
+        refused.errors
+    );
+    let gone = mutate(control, &ask("ask-9", "{ id: \"allow\" }")).await;
+    assert!(gone.errors.is_empty(), "{:?}", gone.errors);
+    assert_eq!(
+        data_of(&gone)["answerInteraction"]["outcome"],
+        "ALREADY_SETTLED"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2, "only the two answers landed");
+
+    // The ask is read from the daemon, so a daemon that cannot be reached is
+    // the failure, not a guess at what the word means.
+    let unreachable = mutate(no_daemon_client(), &ask("ask-1", "{ id: \"allow\" }")).await;
+    assert_eq!(code_of(&unreachable), "\"DAEMON_UNAVAILABLE\"");
+}
+
+/// The option write reads back from its own value and refuses a field of the
+/// wrong type.
+#[test]
+fn the_option_write_round_trips() {
+    super::super::filter::testkit::round_trip(&super::interactions::AnswerOptionWrite {
+        id: async_graphql::ID::from("deny"),
+        feedback: Some("read it first".to_string()),
+    });
 }
 
 /// A second answer to one request is not an error: it reads as already

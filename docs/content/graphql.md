@@ -1162,6 +1162,7 @@ The daemon holds these in memory, so it is one read rather than a walk of the ru
   openInteractions(first: 50, orderBy: [{ field: SEQUENCE, direction: ASC }]) {
     results {
       id kind prompt body options isRequired
+      answerOptions { id label number }
       run { id title status }
       toolCall {
         __typename
@@ -1174,13 +1175,19 @@ The daemon holds these in memory, so it is one read rather than a walk of the ru
 }
 ```
 
-The answer is `@oneOf`, so exactly one variant goes in, and which one the request's `kind` decides.
+`answerOptions` lists every option the way `lev interactions` and the dashboard number them. Each
+`id` is the word that answers with it: `allow`, `allow-stage`, `allow-run`, `deny` and
+`deny-feedback` on a tool approval, `yes` and `no` on a confirm, and on a multiple choice a word
+made from the option's own label, so it stays put when the options are reordered.
+
+The answer is `@oneOf`, so exactly one variant goes in. `option` takes one of those words for any
+request that lists options, and the rest are for one kind each.
 
 ```graphql
 mutation {
   answerInteraction(request: {
     interactionId: "coder-1788924523-abc123-approve-1"
-    answer: { deny: { feedback: "read the file instead" } }
+    answer: { option: { id: "deny", feedback: "read the file instead" } }
   }) {
     interactionId
     outcome
@@ -1190,6 +1197,7 @@ mutation {
 
 | Variant | For a request of kind |
 |---|---|
+| `option` | Any kind with `answerOptions`, by `id`, with `feedback` on a deny |
 | `choice` | `MULTIPLE_CHOICE`, zero-based |
 | `text` | `FREE_TEXT` or `EDIT_TEXT` |
 | `approve` | `CONFIRM` or `TOOL_APPROVAL`, with a `scope` |

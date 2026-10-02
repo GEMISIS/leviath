@@ -1672,7 +1672,8 @@
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
-        }
+        },
+        "description": "The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command."
       },
       "post": {
         "tags": [
@@ -1705,7 +1706,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Body: `request_id` (the open request's id) plus one of `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`.",
+        "description": "Body: `request_id` (the open request's id) plus one of `option`, `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). `option` is the `id` of one of the request's `answer_options` (`allow`, `allow-stage`, `allow-run`, `deny`, `yes`, `no`, or a choice's own word); a word the request does not offer is a 400 listing the ones it does. A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1719,6 +1720,10 @@
                   "request_id": {
                     "type": "string",
                     "description": "The interaction to answer, from GET."
+                  },
+                  "option": {
+                    "type": "string",
+                    "description": "The `id` of one of the request's `answer_options`. A whole answer on its own, or beside `feedback` on a deny."
                   },
                   "value": {
                     "type": "string",
@@ -5241,7 +5246,7 @@
           }
         },
         "deprecated": true,
-        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/interaction`."
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/interaction`. The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command."
       },
       "post": {
         "tags": [
@@ -5274,7 +5279,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/interaction`. Body: `request_id` (the open request's id) plus one of `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`.",
+        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/interaction`. Body: `request_id` (the open request's id) plus one of `option`, `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). `option` is the `id` of one of the request's `answer_options` (`allow`, `allow-stage`, `allow-run`, `deny`, `yes`, `no`, or a choice's own word); a word the request does not offer is a 400 listing the ones it does. A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`.",
         "requestBody": {
           "required": true,
           "content": {
@@ -5288,6 +5293,10 @@
                   "request_id": {
                     "type": "string",
                     "description": "The interaction to answer, from GET."
+                  },
+                  "option": {
+                    "type": "string",
+                    "description": "The `id` of one of the request's `answer_options`. A whole answer on its own, or beside `feedback` on a deny."
                   },
                   "value": {
                     "type": "string",

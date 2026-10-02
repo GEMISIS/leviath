@@ -348,22 +348,36 @@ enough. Read the captured requests back on `InferenceAttemptOutput.modelInput` o
 ### Answering a question
 
 `GET /api/runs/{id}/interaction` is the request the run is parked on: its `id`, `kind`, `prompt`
-and `options`, plus `tool_name` and `tool_arguments` on a tool approval. `POST` the answer with
-the request's id as `request_id` and one of three fields. `value` is free text or an edited
-document. `choice_index` is a multiple choice, zero-based. `approved` carries an optional `scope`
-(`once`, `stage` or `session`) for a tool approval or a confirm. It answers `202` once the daemon
-has it and `404` when nothing with that id is open.
+and `options`, plus `tool_name` and `tool_arguments` on a tool approval. `answer_options` lists
+every option the way `lev interactions` numbers them:
+
+```json
+{"id": "allow-run", "label": "Allow cargo test for this run", "number": 3,
+ "answer": "lev respond coder-1788924523-abc123-approve-1 allow-run"}
+```
+
+`POST` the answer with the request's id as `request_id` and one of four fields. `option` is an
+option's `id`: `allow`, `allow-stage`, `allow-run` or `deny` on a tool approval, `yes` or `no` on a
+confirm, or a choice's own word, which stays put when the options are reordered. `value` is free
+text or an edited document. `choice_index` is a multiple choice, zero-based. `approved` carries an
+optional `scope` (`once`, `stage` or `session`) for a tool approval or a confirm. It answers `202`
+once the daemon has it and `404` when nothing with that id is open.
+
+```json
+{"request_id": "coder-1788924523-abc123-approve-1", "option": "allow-run"}
+```
 
 The answer has to fit the question, and a `400` says why when it does not. An answer with none of
-the three reads to the run like nobody answered, so it is refused. So is `value` on a tool
-approval, or a `choice_index` past the last option. An empty `value` is an answer: it acknowledges
+the four reads to the run like nobody answered, so it is refused. So is `value` on a tool
+approval, a `choice_index` past the last option, an `option` the request does not offer (the `400`
+lists the ones it does), or `option` beside any other answer. An empty `value` is an answer: it acknowledges
 a review or keeps an edited document as it was. A refused answer leaves the question open.
 
 A deny may carry `feedback`, a string the model reads as part of the tool result for the refused
 call, so its next turn is a redirect rather than a guess:
 
 ```json
-{"request_id": "coder-1788924523-abc123-approve-1", "approved": false,
+{"request_id": "coder-1788924523-abc123-approve-1", "option": "deny",
  "feedback": "use git log, not git show"}
 ```
 
@@ -371,7 +385,8 @@ The model sees `[denied] User declined tool call 'bash'. Feedback: use git log, 
 Without `feedback` the result is the plain `[denied] User declined tool call 'bash'.` it always was.
 `feedback` beside `approved: true` is a `400`, because there is nothing to redirect. The same text
 is what the tool approval's fifth option, "Deny with feedback", collects in the dashboard, and
-what `lev respond <id> --deny --feedback "..."` sends. Announced as `interaction.feedback`.
+what `lev respond <id> deny --feedback "..."` sends. `"approved": false` with `feedback` is the same
+answer. Announced as `interaction.feedback`.
 
 On `/logs`, `stage` takes a stage index or `all`, and defaults to the current stage. `stream` is
 either `output`, the assistant's own text, or `logs`, which carries tool calls, token counts and

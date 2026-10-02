@@ -26,6 +26,42 @@ type AnswerInteractionResult {
 	outcome: AnswerOutcome!
 }
 
+"One option an open ask lists, as every surface lists it."
+type AnswerOptionOutput {
+	"""
+	The word that answers with this option, and what
+	`answerInteraction(answer: { option: { id } })` takes. Stable: an
+	approval's words are `allow`, `allow-stage`, `allow-run`, `deny` and
+	`deny-feedback`, a confirm's `yes` and `no`, and a choice's is made
+	from its label, so reordering the options does not move it.
+	"""
+	id: ID!
+	"The option as the ask words it."
+	label: String!
+	"""
+	Where it is listed, counting from 1, the same number `lev interactions`
+	and the dashboard show. Never needed to answer.
+	"""
+	number: Int!
+	"The whole `lev respond` command that answers with this option."
+	answer: String!
+}
+
+"One of the options an ask lists, named by its word."
+input AnswerOptionWrite {
+	"""
+	The option's `id` from the ask's `answerOptions`: `allow`,
+	`allow-stage`, `allow-run`, `deny`, `yes`, `no`, or a choice's own
+	word. The option's `number` is taken as well.
+	"""
+	id: ID!
+	"""
+	On a deny, what to tell the model instead. Refused beside any other
+	option.
+	"""
+	feedback: String
+}
+
 "Whether an answer was the one that settled the ask."
 enum AnswerOutcome {
 	"The daemon took this answer."
@@ -5485,11 +5521,18 @@ type IntValueOutput {
 """
 The answer to one pending ask.
 
-Exactly one field, and which one the request's own kind decides: a choice
-for a multiple-choice ask, text for a free-text or edit-text one, an
-approval or a denial for a confirm or a tool approval.
+Exactly one field, and which one the request's own kind decides: an
+option's word for any ask that lists options, a choice for a
+multiple-choice ask, text for a free-text or edit-text one, an approval or
+a denial for a confirm or a tool approval.
 """
 input InteractionAnswerWrite @oneOf {
+	"""
+	For any ask that lists options: the option, by the word its
+	`answerOptions` gives it. Read against the open ask, so a choice's
+	word means the option it was made from wherever that now sits.
+	"""
+	option: AnswerOptionWrite
 	"""
 	For a multiple-choice ask: which option, zero-based into the request's
 	own list.
@@ -5724,6 +5767,12 @@ type InteractionOutput {
 	body: String
 	"The choices, for a multiple-choice ask. Empty once settled."
 	options: [String!]!
+	"""
+	Every option the ask lists, numbered from 1 in its own order, each with
+	the word `answerInteraction` takes for it. Empty for a free-text or
+	edit-text ask, which is answered with `text`, and once settled.
+	"""
+	answerOptions: [AnswerOptionOutput!]!
 	"""
 	The call awaiting approval, typed. Null for every other kind of ask,
 	and null once settled: the journal keeps the tool's name, not its

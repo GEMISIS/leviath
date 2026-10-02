@@ -347,6 +347,11 @@ impl Dashboard {
                 KeyCode::Down if options_len > 0 && self.choice_selected < options_len - 1 => {
                     self.choice_selected += 1;
                 }
+                // The number an option is listed under selects it, the same
+                // number `lev respond` takes.
+                KeyCode::Char(c @ '1'..='9') if (c as usize - '1' as usize) < options_len => {
+                    self.choice_selected = c as usize - '1' as usize;
+                }
                 // Up/Down move the selection here, so the document gets its own
                 // keys. Without these there was no way at all to read a plan
                 // longer than the pane while its approval prompt was open -
@@ -1067,25 +1072,15 @@ impl Dashboard {
                 InteractionKind::ToolApproval if self.deny_feedback_open => {
                     self.deny_feedback_response(&r.id)
                 }
-                InteractionKind::ToolApproval => {
+                InteractionKind::ToolApproval | InteractionKind::Confirm => {
                     let idx = self.choice_selected;
                     let label = r.options.get(idx).cloned().unwrap_or(idx.to_string());
                     let d = truncate(&label, 40);
-                    // The index-to-scope mapping lives with the labels, so the
-                    // two cannot drift; anything it does not recognise denies.
-                    let (approved, scope) = match leviath_core::interaction::approval_choice(idx) {
-                        Some(scope) => (true, scope),
-                        None => (false, ApprovalScope::Once),
-                    };
-                    (InteractionResponse::approval(&r.id, approved, scope), d)
-                }
-                InteractionKind::Confirm => {
-                    let approved = self.choice_selected == 0;
-                    let label = if approved { "Yes" } else { "No" };
-                    (
-                        InteractionResponse::approval(&r.id, approved, ApprovalScope::Once),
-                        label.to_string(),
-                    )
+                    // An option means what its label says, read the way `lev
+                    // respond` reads it; anything unrecognised denies.
+                    let deny = InteractionResponse::approval(&r.id, false, ApprovalScope::Once);
+                    let answer = leviath_core::interaction::answer_at(r, idx, None).unwrap_or(deny);
+                    (answer, d)
                 }
             },
             None => {
@@ -1763,6 +1758,52 @@ mod tests {
         // Up at top stays
         dash.handle_key(key(KeyCode::Up));
         assert_eq!(dash.choice_selected, 0);
+
+        // The number an option is listed under selects it; one past the list,
+        // and 0, select nothing.
+        dash.handle_key(key(KeyCode::Char('3')));
+        assert_eq!(dash.choice_selected, 2);
+        dash.handle_key(key(KeyCode::Char('1')));
+        assert_eq!(dash.choice_selected, 0);
+        dash.handle_key(key(KeyCode::Char('4')));
+        assert_eq!(dash.choice_selected, 0);
+        dash.handle_key(key(KeyCode::Char('0')));
+        assert_eq!(dash.choice_selected, 0);
+        assert!(dash.input_mode, "a number selects; it never answers");
+    }
+
+    /// A gate approval offers no stage scope, so its second row is the run
+    /// grant, and the dashboard sends what that row says rather than what the
+    /// second row of a tool approval would mean.
+    #[test]
+    fn an_approval_row_answers_with_what_its_label_says() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::gate_approval(
+                "gate-1",
+                "web_fetch",
+                serde_json::json!({}),
+                "main",
+            ),
+        );
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.handle_key(key(KeyCode::Char('2')));
+        dash.submit_input();
+        assert_eq!(
+            cmd_rx.try_recv().expect("an Answer command was queued"),
+            DaemonCommand::Answer {
+                response: interaction::InteractionResponse::approval(
+                    "gate-1",
+                    true,
+                    interaction::ApprovalScope::Run
+                ),
+            }
+        );
     }
 
     #[test]

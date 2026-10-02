@@ -4515,12 +4515,24 @@ async fn the_open_interactions_are_the_approval_inbox() {
         });
         let answer = run_query_with_daemon(
             control,
-            "{ openInteractions(first: 10) { total results { id stageName toolName } } }",
+            "{ openInteractions(first: 10) { total results { id stageName toolName \
+             answerOptions { id label number answer } } } }",
         )
         .await;
         assert!(answer.errors.is_empty(), "{:?}", answer.errors);
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         assert_eq!(json["openInteractions"]["total"], 2);
+        // Each option under the word that answers with it and the number the
+        // listing shows it under.
+        assert_eq!(
+            json["openInteractions"]["results"][0]["answerOptions"][3],
+            serde_json::json!({
+                "id": "deny",
+                "label": "Deny",
+                "number": 4,
+                "answer": "lev respond ask-1 deny",
+            })
+        );
         assert_eq!(json["openInteractions"]["results"][0]["id"], "ask-1");
         assert_eq!(json["openInteractions"]["results"][0]["toolName"], "shell");
 

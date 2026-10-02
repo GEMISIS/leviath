@@ -891,6 +891,11 @@ pub(super) struct TreeStatusNode {
 #[derive(Deserialize)]
 pub(super) struct SubmitInteractionReq {
     pub(super) request_id: String,
+    /// The word of one of the request's `answer_options`: `allow`, `deny`,
+    /// `yes`, a choice's own word. Stands alone, or beside `feedback` on a
+    /// deny.
+    #[serde(default)]
+    pub(super) option: Option<String>,
     pub(super) value: Option<String>,
     pub(super) choice_index: Option<usize>,
     pub(super) approved: Option<bool>,

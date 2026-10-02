@@ -8,6 +8,12 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "interaction_answer.rs"]
+pub mod answer;
+pub use answer::{
+    AnswerOption, answer_at, answer_options, answer_with_option, how_to_answer, parse_answer,
+};
+
 // ─── Request ────────────────────────────────────────────────────────────────
 
 /// The kind of interaction being requested.
@@ -274,9 +280,8 @@ impl InteractionRequest {
     /// "Allow for this session" on a call it degrades to once - has the user
     /// choose a grant they do not get.
     ///
-    /// The options are fixed-position - every client maps an index to a scope
-    /// through [`approval_choice`] - so the wording varies and the length does
-    /// not.
+    /// Every client reads an option's meaning off its label through
+    /// [`answer_options`], so the wording here is the one place it lives.
     pub fn tool_approval(
         id: impl Into<String>,
         tool_name: impl Into<String>,
@@ -341,21 +346,6 @@ impl InteractionRequest {
 /// client renders it from the request's `options`, so this is where the words
 /// live.
 pub const DENY_WITH_FEEDBACK: &str = "Deny with feedback";
-
-/// The scope a tool-approval option index means, or `None` for deny.
-///
-/// One definition, so the dashboard, `lev respond`, the REST endpoint and the
-/// ACP bridge cannot drift from the labels [`InteractionRequest::tool_approval`]
-/// builds. An index past the end denies: an answer this does not recognise must
-/// never approve.
-pub fn approval_choice(index: usize) -> Option<ApprovalScope> {
-    match index {
-        0 => Some(ApprovalScope::Once),
-        1 => Some(ApprovalScope::Stage),
-        2 => Some(ApprovalScope::Run),
-        _ => None,
-    }
-}
 
 /// Whether `resp` is an answer `req` can take, or why not.
 ///
@@ -922,27 +912,6 @@ mod tests {
             InteractionResponse::approval("a", false, ApprovalScope::Once).with_parts(vec![part]);
         let err = check_answer(&tool, &denied).unwrap_err();
         assert!(err.contains("files go with a text answer"), "{err}");
-    }
-
-    /// The index-to-scope mapping is what every client uses, so it has to match
-    /// the option order exactly, and an index it does not recognise must deny.
-    #[test]
-    fn approval_choice_matches_the_option_order() {
-        let req = InteractionRequest::tool_approval("id", "shell", serde_json::json!({}), "s", &[]);
-        assert_eq!(approval_choice(0), Some(ApprovalScope::Once));
-        assert!(req.options[1].contains("stage"));
-        assert_eq!(approval_choice(1), Some(ApprovalScope::Stage));
-        assert!(req.options[2].contains("run"));
-        assert_eq!(approval_choice(2), Some(ApprovalScope::Run));
-        assert_eq!(req.options[3], "Deny");
-        assert_eq!(approval_choice(3), None);
-        assert_eq!(req.options[4], DENY_WITH_FEEDBACK);
-        assert_eq!(approval_choice(4), None, "feedback is still a deny");
-        assert_eq!(
-            approval_choice(99),
-            None,
-            "an unknown answer must not approve"
-        );
     }
 
     /// A gate approval is a different decision, so it keeps its own wording and

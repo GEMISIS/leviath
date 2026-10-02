@@ -287,7 +287,9 @@ the box, where `Enter` or `Space` sends, as does a click on it. `PgUp` / `PgDn` 
 document edit takes the same keys, with a Save button in place of Send. Single-line boxes (a
 rename, a filter, a server URL) still submit on `Enter`.
 
-A tool approval is a list of choices: `↑` / `↓` pick one and `Enter` answers. Its last row, "Deny
+A tool approval, a confirm and a multiple choice are lists numbered from 1, the same numbers
+`lev interactions` shows and `lev respond` takes. `↑` / `↓` or the option's number pick one, and
+`Enter` answers. A tool approval's last row, "Deny
 with feedback", opens the same response box instead of answering, for the line or two that tells
 the run what to do instead of the call. `Ctrl+S` or the Send button sends it with the deny, and
 `Esc` goes back to the choices with nothing sent. The text reaches the model inside the refused
