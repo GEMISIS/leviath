@@ -81,6 +81,7 @@
 
 // Public because [`tool_bridge::ToolJob`] carries a `CancelToken`, so anything
 // handing work to the tool lane needs to name the type.
+pub(crate) mod approval_prompt;
 pub mod bind;
 pub mod blob_store;
 pub mod cancel;

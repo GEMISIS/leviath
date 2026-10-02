@@ -152,6 +152,7 @@ pub(crate) type Unreachable = (
     (
         Without<InFlightWork>,
         Without<crate::tick_scope::PanickedInParallel>,
+        Without<super::lane_batch::PendingBatch>,
     ),
 );
 

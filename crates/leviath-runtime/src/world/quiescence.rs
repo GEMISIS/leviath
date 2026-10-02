@@ -1,7 +1,5 @@
 //! How the driver decides a tick changed nothing: per-phase marker counts,
 //! the per-agent progress digest, and whether anything is still in flight.
-//! Moved out of `world.rs` whole; nothing here changed but the file it lives
-//! in.
 
 use super::*;
 
@@ -69,6 +67,7 @@ impl PipelineWorld {
             self.count::<With<AwaitingCompaction>>(),
             self.count::<With<crate::title::PendingTitle>>(),
             self.count::<With<crate::title::AwaitingTitle>>(),
+            self.count::<With<crate::pipeline::lane_batch::PendingBatch>>(),
         ];
         Fingerprint {
             markers,

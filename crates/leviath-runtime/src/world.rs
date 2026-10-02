@@ -70,7 +70,7 @@ use crate::tool_bridge::ToolLane;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fingerprint {
     /// How many agents hold each phase marker.
-    markers: [usize; 12],
+    markers: [usize; 13],
     /// Per-agent run progress that no marker reflects (see
     /// [`PipelineWorld::agent_digest`]).
     agents: u64,
@@ -415,9 +415,10 @@ impl PipelineWorld {
         world.insert_resource(crate::gate_prompt::GatePromptStage {
             outcomes: gp_tx,
             wake: wake.clone(),
-            runtime: gp_runtime,
+            runtime: gp_runtime.clone(),
         });
         world.insert_resource(crate::gate_prompt::GatePromptResults(gp_rx));
+        crate::approval_prompt::install(&mut world, gp_runtime, wake.clone());
         world.insert_resource(InferenceResults(inf_rx));
         world.insert_resource(TransitionResults(trans_rx));
         world.insert_resource(CompactionResults(compact_rx));
@@ -512,8 +513,16 @@ impl PipelineWorld {
                 // again before each batch has to be looked at here, or a tool
                 // that arrived since its turn was built is refused for another
                 // one.
-                (rescan_before_dispatch, run_tool_call_hooks, dispatch_tools).chain(),
-                collect_tools,
+                // Then a batch with lane work is decided call by call and sent.
+                (
+                    rescan_before_dispatch,
+                    run_tool_call_hooks,
+                    dispatch_tools,
+                    crate::approval_prompt::collect_approvals,
+                    crate::pipeline::dispatch_lane_batches,
+                )
+                    .chain(),
+                (collect_tools, crate::pipeline::settle_write_ledgers).chain(),
                 // Apply any resolved stage-boundary interaction-point answers
                 // before the stage decides its transition.
                 crate::interaction_points::collect_interaction_point,

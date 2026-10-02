@@ -193,7 +193,10 @@ fn phase_of(world: &World, entity: Entity, agent: &AgentState) -> PipelinePhase 
     if world.get::<p::AwaitingCompaction>(entity).is_some() {
         return PipelinePhase::AwaitingCompaction;
     }
-    if world.get::<p::AwaitingTools>(entity).is_some() {
+    // A batch being decided, or held on an approval, is a batch in hand.
+    if world.get::<p::AwaitingTools>(entity).is_some()
+        || world.get::<p::lane_batch::PendingBatch>(entity).is_some()
+    {
         return PipelinePhase::AwaitingTools;
     }
     if world.get::<p::AwaitingInference>(entity).is_some() {

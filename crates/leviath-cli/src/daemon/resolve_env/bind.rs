@@ -85,7 +85,14 @@ impl BindEnv for DaemonEnv {
         self.log_lint(spec);
         let service = self.tool_service.clone();
         let tools = state.tools;
-        Ok(bindings.after_insert(move |entity| service.register(entity, tools)))
+        // What the run has been granted and has written are the world's to
+        // keep: none yet, and whatever its seeds wrote before it was placed.
+        let ledger = leviath_runtime::pipeline::WriteLedger {
+            written: tools.writes.written(),
+        };
+        Ok(bindings
+            .with((leviath_runtime::pipeline::ToolGrants::default(), ledger))
+            .after_insert(move |entity| service.register(entity, tools)))
     }
 }
 

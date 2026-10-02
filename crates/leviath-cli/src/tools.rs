@@ -680,7 +680,8 @@ pub(crate) fn declared_write_bytes(tool_name: &str, arguments: &serde_json::Valu
         .map(|s| s.len() as u64)
 }
 
-/// Refuse a call that would take the run past a write ceiling, or fill the disk.
+/// Refuse a call that would take the run past a write ceiling, or fill the disk,
+/// for a run that has written `written` so far.
 ///
 /// Returns the refusal, or `None` to proceed.
 ///
@@ -699,6 +700,7 @@ pub(crate) fn write_budget_refusal(
     arguments: &serde_json::Value,
     workdir: &std::path::Path,
     budget: &crate::daemon::tool_service::WriteBudget,
+    written: u64,
 ) -> Option<String> {
     let declared = declared_write_bytes(tool_name, arguments);
     let writes_something = declared.is_some()
@@ -710,7 +712,9 @@ pub(crate) fn write_budget_refusal(
     if !writes_something {
         return None;
     }
-    budget.check(workdir, declared.unwrap_or(0)).refusal()
+    budget
+        .check_at(workdir, written, declared.unwrap_or(0))
+        .refusal()
 }
 
 /// How many bytes a *finished* shell call put on disk, for charging the run's

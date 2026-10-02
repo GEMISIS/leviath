@@ -4171,7 +4171,7 @@ fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
     // Run the tool dispatch so the gate blocks the outbound call and records
     // an audit event, then persist.
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
 
@@ -4204,7 +4204,7 @@ fn dispatch_persistence_taint_audit_is_not_rewritten_when_unchanged() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
     let first = next_snapshot(&mut prx);
@@ -4255,7 +4255,7 @@ fn dispatch_persistence_resends_the_taint_audit_on_the_terminal_snapshot() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     run_dispatch_persistence(&mut world);
     // This is the snapshot the lane would coalesce away: it carried the audit,
@@ -5954,7 +5954,7 @@ async fn dispatch_tools_enqueues_runnable_job_and_advances() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -6038,7 +6038,7 @@ async fn dispatch_journals_the_batch_then_each_completion() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<AwaitingTools>(e).is_some());
 
@@ -6183,7 +6183,7 @@ async fn a_dispatched_batch_records_what_it_belongs_to() {
         ReadyForTools,
     ));
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let mut batch = None;
@@ -6254,7 +6254,7 @@ async fn dispatch_journals_a_batch_it_resolved_itself() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
     assert!(jrx.try_recv().is_err(), "nothing went to the lane");
@@ -6303,7 +6303,7 @@ async fn dispatch_logs_an_all_inline_batch_it_would_otherwise_swallow() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<ReadyToInfer>(e).is_some(), "nothing to await");
@@ -6346,7 +6346,7 @@ async fn dispatch_all_inline_without_a_buffer_still_advances() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<ReadyToInfer>(e).is_some());
 }
@@ -6368,7 +6368,7 @@ async fn dispatch_without_run_metadata_is_unjournaled() {
         ReadyForTools,
     ));
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let job = jrx.try_recv().expect("job still enqueued");
@@ -6407,7 +6407,7 @@ async fn gate_held_batch_is_not_journaled_until_it_dispatches() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -6507,7 +6507,7 @@ async fn dispatch_tools_skips_non_active_agent() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<ReadyForTools>(e).is_some()); // cancelled ⇒ not enqueued
@@ -6595,7 +6595,7 @@ fn a_fan_out_call_is_read_inline_and_never_reaches_the_lane() {
     let e = ready_for_tools(&mut world, vec![call]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
@@ -6634,7 +6634,7 @@ fn parking_on_a_fan_out_writes_no_result_for_it_yet() {
     let e = ready_for_tools(&mut world, vec![fan, note]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let w = world.get::<ContextWindow>(e).unwrap();
@@ -6674,7 +6674,7 @@ fn a_malformed_fan_out_call_is_refused_and_the_agent_carries_on() {
     let e = ready_for_tools(&mut world, vec![call]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<crate::fanout::PendingFanOut>(e).is_none());
@@ -6701,7 +6701,7 @@ fn a_second_fan_out_call_in_one_turn_is_refused() {
     let e = ready_for_tools(&mut world, vec![first, second]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert_eq!(
@@ -6725,7 +6725,7 @@ fn a_fan_out_call_sharing_a_turn_with_lane_work_is_refused() {
     let e = ready_for_tools(&mut world, vec![call, tc("c2", "read_file")]);
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -6783,7 +6783,7 @@ fn runtime_info_is_answered_from_the_world_and_never_reaches_the_lane() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing was queued: the whole point is that it is answered inline.
@@ -6905,7 +6905,7 @@ fn a_refreshing_region_holds_the_stage_until_its_seed_lands() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(start_stage_seeds);
+    s.add_systems((start_stage_seeds, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The stage is held, and the calls went out.
@@ -7095,7 +7095,7 @@ async fn dispatch_tools_applies_all_context_inline() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // All-context batch: nothing enqueued, applied inline, ready to infer.
@@ -7152,7 +7152,7 @@ async fn dispatch_records_a_submitted_output_inline() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing reached the lane, and the agent goes back to work rather than
@@ -7211,7 +7211,7 @@ async fn a_submitted_artifact_is_stored_when_the_world_has_a_store() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     let recorded = world
         .get::<crate::persistence::FinalOutput>(e)
@@ -7295,7 +7295,7 @@ async fn the_blueprint_overwrite_policy_wins_over_the_operators() {
             ))
             .id();
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
         let recorded = world
             .get::<crate::persistence::FinalOutput>(e)
@@ -7351,7 +7351,7 @@ async fn artifacts_are_checked_against_the_run_workdir() {
             .id();
 
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
 
         assert_eq!(
@@ -7401,7 +7401,7 @@ async fn a_refused_submission_leaves_an_earlier_answer_alone() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert_eq!(
@@ -7460,7 +7460,7 @@ async fn dispatch_tools_refuses_a_tool_the_stage_never_offered() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7503,7 +7503,7 @@ async fn dispatch_tools_tells_a_toolless_stage_to_answer_directly() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7540,7 +7540,7 @@ async fn dispatch_tools_matches_an_offered_tool_through_its_alias() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7567,7 +7567,7 @@ async fn dispatch_tools_honours_the_stage_tool_filter() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7590,7 +7590,7 @@ async fn dispatch_tools_treats_an_empty_tool_filter_as_no_narrowing() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7621,7 +7621,7 @@ async fn dispatch_tools_refuses_an_unoffered_context_tool() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7647,7 +7647,7 @@ async fn dispatch_tools_partitions_context_and_lane() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Context result stashed; the non-context call went to the lane.
@@ -7722,7 +7722,7 @@ async fn dispatch_tools_refuses_arguments_that_fail_the_advertised_schema() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7769,7 +7769,7 @@ async fn dispatch_tools_skips_validation_when_the_schema_does_not_compile() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -7817,7 +7817,7 @@ async fn dispatch_tools_validates_through_a_tool_alias() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -7872,7 +7872,7 @@ async fn dispatch_tools_validates_an_mcp_style_schema() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let stashed = &world.get::<ContextToolResults>(e).unwrap().0;
@@ -7955,7 +7955,7 @@ async fn dispatch_tools_gate_blocks_outbound_leak_but_allows_inbound() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -7993,7 +7993,7 @@ async fn dispatch_tools_holds_batch_for_an_interactive_gate_prompt() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // Blocked + interactive ⇒ held for a prompt, not dispatched or [blocked].
     assert_eq!(
@@ -8040,7 +8040,7 @@ async fn dispatch_tools_gates_a_submission_over_tainted_context() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "nothing reaches the lane");
@@ -8083,7 +8083,7 @@ async fn dispatch_tools_prompts_for_a_tainted_submission_and_applies_it_once_app
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert_eq!(
         world
@@ -8141,7 +8141,7 @@ async fn dispatch_tools_auto_approves_a_gate_block_under_yolo() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // No gate prompt was raised; the call went to the lane.
     assert!(
@@ -8203,7 +8203,7 @@ async fn dispatch_tools_under_yolo_submits_over_tainted_context_and_records_it()
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(
@@ -8260,7 +8260,7 @@ async fn dispatch_tools_executes_a_gate_approved_call_and_blocks_a_denied_one() 
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The approved call was enqueued to the lane; the denied one was not.
@@ -8300,7 +8300,7 @@ async fn dispatch_tools_falls_through_for_a_resolved_agents_unprompted_call() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     // Inbound read_file is gate-allowed ⇒ reaches the lane.
     let job = jrx.try_recv().expect("allowed call enqueued");
@@ -8335,7 +8335,7 @@ async fn dispatch_tools_gate_allows_outbound_via_allowlist() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Allowlisted ⇒ the outbound call reaches the lane instead of `[blocked]`.
@@ -8366,7 +8366,7 @@ async fn dispatch_tools_gate_allows_outbound_via_scripted_rule() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // The scripted rule allows it ⇒ reaches the lane, not `[blocked]`.
@@ -16022,7 +16022,7 @@ async fn dispatch_tools_announces_lane_calls() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(world.get::<AwaitingTools>(e).is_some());
@@ -19667,7 +19667,7 @@ async fn dispatch_tools_refuses_a_submission_that_is_only_a_stage_name() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     // Nothing went to the async lane, so the window is the only record.
@@ -19701,7 +19701,7 @@ async fn dispatch_tools_records_a_real_submission_with_the_blueprint_present() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let recorded = world
@@ -20064,7 +20064,7 @@ async fn dispatch_tools_refuses_a_call_whose_arguments_were_cut_off() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let text = conversation_text(&world, e);
@@ -20103,7 +20103,7 @@ async fn dispatch_tools_escalates_the_refusal_with_the_cut_offs_in_a_row() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     let text = conversation_text(&world, e);
     assert!(text.contains("That is 2 replies in a row"), "{text}");
@@ -20210,7 +20210,7 @@ async fn a_refused_cut_off_call_assembles_as_an_object_the_provider_accepts() {
         .id();
 
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     let assembled = world.get::<ContextWindow>(e).unwrap().assemble();
@@ -20892,7 +20892,7 @@ mod typed_tool_results {
         call.arguments = serde_json::json!({});
         let e = ready_for_tools(&mut world, vec![call]);
         let mut s = Schedule::default();
-        s.add_systems(dispatch_tools);
+        s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
         s.run(&mut world);
         assert!(jrx.try_recv().is_err(), "must not reach the tool lane");
         let conv = world
@@ -21281,7 +21281,7 @@ async fn a_recovered_batch_runs_only_what_had_not_finished() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
     assert!(world.get::<AwaitingTools>(e).is_some());
     assert!(
@@ -21358,7 +21358,7 @@ fn a_recovered_batch_resolved_inline_applies_its_recovered_results() {
         ))
         .id();
     let mut s = Schedule::default();
-    s.add_systems(dispatch_tools);
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
     s.run(&mut world);
 
     assert!(jrx.try_recv().is_err(), "nothing went to the lane");

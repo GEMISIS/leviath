@@ -115,6 +115,11 @@ pub(crate) use tool_results::{
 mod gate;
 pub(crate) use gate::taint_block_message;
 pub use gate::{GateScriptRules, PolicyGate, ToolSensitivities};
+pub(crate) mod lane_batch;
+pub(crate) use lane_batch::{dispatch_lane_batches, settle_write_ledgers};
+pub(crate) mod tool_verdicts;
+pub use crate::approval_prompt::{declined_result, unanswered_approval_result};
+pub use tool_verdicts::{DecideCtx, DecidedCall, Decision, ToolGrants, ToolVerdict, WriteLedger};
 mod tools;
 pub(crate) use tools::{
     AwaitingTools, ContextToolResults, LandedResults, RecoveredResults, ToolServiceRes, ToolStage,

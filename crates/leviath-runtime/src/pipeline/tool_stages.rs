@@ -10,13 +10,21 @@ use spec_view::StageToolOverrides;
 /// transition systems each tick.
 pub(crate) fn sync_tool_stages(
     service: Res<ToolServiceRes>,
-    entered: Query<(Entity, &StageJustEntered)>,
+    mut entered: Query<(
+        Entity,
+        &StageJustEntered,
+        Option<&mut super::tool_verdicts::ToolGrants>,
+    )>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
-    for (entity, stage) in entered.iter() {
+    for (entity, stage, grants) in entered.iter_mut() {
         crate::tick_scope::enter(entity);
         service.0.sync_stage(entity, stage.index, &stage.name);
+        // A stage-scoped grant ends when the run moves to different work.
+        if let Some(mut grants) = grants {
+            grants.enter_stage(stage.index);
+        }
         commands.entity(entity).remove::<StageJustEntered>();
     }
 }
