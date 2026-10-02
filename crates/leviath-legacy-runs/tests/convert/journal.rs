@@ -243,3 +243,50 @@ fn every_step_is_stamped_no_earlier_than_the_one_before() {
     assert!(stamps.len() > 1);
     assert!(stamps.windows(2).all(|w| w[0] <= w[1]), "{stamps:?}");
 }
+
+/// Every record that held the window is a point in the converted run's
+/// history, as it was in the release that wrote it, even one that left the
+/// window as it was: the first is the state the run started in, and each
+/// later one is a delta that carries the window.
+#[test]
+fn every_record_that_held_the_window_is_a_point_in_the_history() {
+    for name in ["real-finished", "finished"] {
+        let run = Run::fixture(name);
+        // A step that moved nothing but the totals, as most of an old run's
+        // steps are.
+        let progress = run
+            .records()
+            .into_iter()
+            .rfind(|r| matches!(r, JournalRecord::Progress { .. }))
+            .expect("a progress step");
+        run.journal(|records| {
+            let at = records.len() - 1;
+            records.insert(at, progress);
+        });
+        let held = run
+            .records()
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    JournalRecord::ContextCheckpoint { .. }
+                        | JournalRecord::ContextDiff { .. }
+                        | JournalRecord::Progress { .. }
+                        | JournalRecord::Checkpoint { .. }
+                )
+            })
+            .count();
+        let (_, file) = run.converted();
+        assert_eq!(file.fold(), file.last, "{name}");
+        let points = 1 + file
+            .deltas
+            .iter()
+            .filter(|d| {
+                d.changes
+                    .iter()
+                    .any(|c| matches!(c, leviath_runtime::state::Change::Context(_)))
+            })
+            .count();
+        assert_eq!(points, held, "{name}");
+    }
+}

@@ -14,7 +14,7 @@ use leviath_runtime::spec::names::ModelRef;
 use leviath_runtime::spec::run_spec::RunSpec;
 use leviath_runtime::state::context::ToolCallState;
 use leviath_runtime::state::{
-    MessageState, RunEvent, RunState, Spend, StateDelta, ToolResultState,
+    Change, ContextDiff, MessageState, RunEvent, RunState, Spend, StateDelta, ToolResultState,
 };
 
 use crate::context::Losses;
@@ -38,6 +38,8 @@ struct Replay<'a> {
     /// The latest provider attempt not yet matched to its usage.
     attempt: Option<AttemptRecord>,
     at: i64,
+    /// Whether the checkpoint the start state was seeded from has been read.
+    seeded: bool,
 }
 
 impl Replay<'_> {
@@ -47,7 +49,10 @@ impl Replay<'_> {
         self.deltas.last().map_or(at, |d| d.at.max(at))
     }
 
-    /// Apply one journal step's changes and events as a delta.
+    /// Apply one journal step's changes and events as a delta. A step that
+    /// held the window is a point in the run's history, as every release
+    /// that wrote the journal showed it, so its delta always carries the
+    /// window, even when the window is as it was.
     fn step(&mut self, context_moved: bool, events: Vec<RunEvent>) {
         let mut next = self.state.clone();
         next.pending = None;
@@ -61,7 +66,21 @@ impl Replay<'_> {
                 &mut Losses::default(),
             );
         }
-        let delta = StateDelta::between(&self.state, &next, self.stamp(self.at), events);
+        let mut delta = StateDelta::between(&self.state, &next, self.stamp(self.at), events);
+        if context_moved
+            && !delta
+                .changes
+                .iter()
+                .any(|c| matches!(c, Change::Context(_)))
+        {
+            delta.changes.push(Change::Context(ContextDiff {
+                regions: Vec::new(),
+                removed: Vec::new(),
+                order: None,
+                hidden: None,
+                max_tokens: Some(next.context.max_tokens),
+            }));
+        }
         if !delta.is_empty() {
             delta.apply(&mut self.state);
             self.deltas.push(delta);
@@ -81,7 +100,7 @@ impl Replay<'_> {
             JournalRecord::ContextCheckpoint { snapshot, at } => {
                 self.at = *at;
                 self.context = snapshot.clone();
-                true
+                self.held_after_seed()
             }
             JournalRecord::ContextDiff { delta, at } => {
                 self.at = *at;
@@ -98,7 +117,7 @@ impl Replay<'_> {
                 self.at = *at;
                 self.meta = (**meta).clone();
                 self.context = context.clone();
-                true
+                self.held_after_seed()
             }
             JournalRecord::StatusChanged { status, at } => {
                 self.at = *at;
@@ -108,6 +127,12 @@ impl Replay<'_> {
             _ => false,
         };
         self.step(moved, events);
+    }
+
+    /// Whether a checkpoint is a point of its own: every one but the first,
+    /// which is the state the run started in.
+    fn held_after_seed(&mut self) -> bool {
+        std::mem::replace(&mut self.seeded, true)
     }
 
     /// The events a record that is not a state change carries.
@@ -348,6 +373,7 @@ pub(crate) fn build(
         deltas: Vec::new(),
         attempt: None,
         at: old.header.started_at,
+        seeded: false,
     };
     for r in old.records.iter().skip(1) {
         replay.record(r);
