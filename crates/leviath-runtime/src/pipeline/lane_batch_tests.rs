@@ -448,6 +448,41 @@ fn entering_a_stage_moves_the_grants_with_it() {
     assert!(world.get::<StageJustEntered>(bare).is_none());
 }
 
+/// A service whose executor blows up.
+struct Explodes;
+
+impl ToolService for Explodes {
+    fn exec_for(
+        &self,
+        _entity: Entity,
+        _calls: Vec<leviath_providers::ToolCall>,
+        _progress: ToolProgress,
+    ) -> BoxedToolExec {
+        Box::new(|| Box::pin(async { panic!("the executor blew up") }))
+    }
+}
+
+/// A batch whose executor panics still reports, each of its calls failed,
+/// so its run is not left waiting on the lane for good.
+#[tokio::test]
+async fn a_batch_whose_executor_panics_reports_each_call_failed() {
+    let mut world = World::new();
+    let (jobs, mut rx) = unbounded_channel();
+    world.insert_resource(ToolServiceRes(Arc::new(Explodes)));
+    world.insert_resource(ToolStage::detached(jobs));
+    agent(&mut world, &["ok", "ok"]);
+    run(&mut world);
+    let job = rx.try_recv().expect("the batch went to the lane");
+    let silent = crate::test_support::SilentPanics::install();
+    let results = tokio::spawn((job.exec)()).await;
+    drop(silent);
+    let results = results.expect("the batch reported instead of panicking");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[1].0, "c1");
+    assert!(results[0].1.as_str().starts_with("[error]"));
+    assert!(results[0].1.as_str().contains("the executor blew up"));
+}
+
 /// The judge's exec_for is only there because the trait asks for it.
 #[tokio::test]
 async fn the_judges_plain_exec_runs_nothing() {

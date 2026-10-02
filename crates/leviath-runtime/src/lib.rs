@@ -132,6 +132,7 @@ pub(crate) mod tick_scope;
 pub mod title;
 pub(crate) mod title_bridge;
 pub mod tool_bridge;
+mod tool_guard;
 pub mod world;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no
 // `#[cfg(test)]` is needed here (adding one would trigger clippy's

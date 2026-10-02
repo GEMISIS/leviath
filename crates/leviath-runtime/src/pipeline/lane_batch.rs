@@ -391,6 +391,7 @@ fn send(
         .collect();
     lane.service.0.offer_parts(entity, offered);
     let landed = LandedResults::default();
+    let call_ids: Vec<String> = calls.iter().map(|c| c.call.id.clone()).collect();
     let exec = lane
         .service
         .0
@@ -401,6 +402,9 @@ fn send(
         }
         None => exec,
     };
+    // A batch that panics still reports, each of its calls failed, so the
+    // run does not wait on it for good.
+    let exec = crate::tool_guard::guarded(exec, call_ids);
     let cancel = crate::cancel::CancelToken::new();
     // The lane is alive for the world's lifetime; a failed send would only
     // happen during shutdown, where dropping the job is fine.
