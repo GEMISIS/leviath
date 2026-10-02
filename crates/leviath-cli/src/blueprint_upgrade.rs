@@ -82,7 +82,7 @@ pub(crate) fn upgrade_all(agents_dir: Option<&Path>, others: &[PathBuf]) -> Vec<
 
 /// The bundled blueprint an installed directory is named after.
 fn bundled_named(dir: &Path) -> Option<&'static crate::bundled::BundledAgent> {
-    let name = dir.file_name()?.to_str()?;
+    let name = dir.file_name().unwrap_or_default().to_string_lossy();
     crate::bundled::BUNDLED_AGENTS
         .iter()
         .find(|a| a.name == name)
