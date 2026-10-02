@@ -57,7 +57,7 @@ fn mime_block(mime: &str, data: &str, remote: Option<RemoteFile>) -> ContentBloc
 }
 
 #[test]
-fn a_tool_loop_becomes_steps_with_the_signature_before_its_call() {
+fn a_tool_loop_becomes_steps_with_the_signature_opening_the_model_turn() {
     let body = build(
         &request(vec![
             message("user", MessageContent::Text("start".into())),
@@ -102,15 +102,15 @@ fn a_tool_loop_becomes_steps_with_the_signature_before_its_call() {
         kinds,
         [
             "user_input",
-            "model_output",
             "thought",
+            "model_output",
             "function_call",
             "function_result"
         ]
     );
     assert_eq!(steps[0]["content"][0]["text"], "start");
-    assert_eq!(steps[1]["content"][0]["text"], "reading");
-    assert_eq!(steps[2]["signature"], "sig-1");
+    assert_eq!(steps[1]["signature"], "sig-1");
+    assert_eq!(steps[2]["content"][0]["text"], "reading");
     assert_eq!(steps[3]["arguments"], json!({ "path": "a.txt" }));
     assert_eq!(steps[4]["name"], "read_file");
     assert_eq!(steps[4]["call_id"], "call-1");
@@ -274,4 +274,53 @@ fn a_call_with_no_words_and_no_signature_is_just_the_call_on_a_model_that_needs_
         .map(|s| s["type"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["user_input", "function_call", "function_result"]);
+}
+
+/// Calls made in one turn share its thought: the signature is handed back
+/// once, ahead of them, and a second signature gets its own thought.
+#[test]
+fn calls_that_share_a_signature_are_behind_one_thought() {
+    let call = |id: &str, signature: &str| ContentBlock::ToolUse {
+        id: id.into(),
+        name: "read_file".into(),
+        input: json!({}),
+        thought_signature: Some(signature.into()),
+    };
+    let result = |id: &str| ContentBlock::ToolResult {
+        tool_use_id: id.into(),
+        content: "ok".into(),
+        is_error: false,
+    };
+    let body = build(
+        &request(vec![
+            message("user", MessageContent::Text("go".into())),
+            message(
+                "assistant",
+                MessageContent::Blocks(vec![call("a", "s1"), call("b", "s1"), call("c", "s2")]),
+            ),
+            message(
+                "user",
+                MessageContent::Blocks(vec![result("a"), result("b"), result("c")]),
+            ),
+        ]),
+        true,
+    );
+    let steps = body["input"].as_array().unwrap();
+    let kinds: Vec<&str> = steps.iter().map(|s| s["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "user_input",
+            "thought",
+            "thought",
+            "function_call",
+            "function_call",
+            "function_call",
+            "function_result",
+            "function_result",
+            "function_result"
+        ]
+    );
+    assert_eq!(steps[1]["signature"], "s1");
+    assert_eq!(steps[2]["signature"], "s2");
 }
