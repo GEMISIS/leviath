@@ -10,23 +10,24 @@
 use anyhow::bail;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
 use leviath_runtime::spec::inputs::InputValue;
+use leviath_runtime::spec::issues::SpawnIssues;
 use leviath_runtime::spec::launch::Unattended;
 use leviath_runtime::spec::run_spec::SpecOrigin;
 use leviath_runtime::spec::summary::SpawnSummary;
 
-use super::request::issues_report;
+use super::request::{issues_report, merged_issues};
 use crate::daemon::client::LocalRun;
 
 /// Ask the daemon to validate `run`, and print what it would be: the
 /// summary, or (as JSON with `json`) the summary or the issues. A refusal is
-/// an error naming every problem, one per line.
+/// an error naming every problem, one per line, the command line's own first.
 pub async fn send_check(client: &ControlClient, run: &LocalRun, json: bool) -> anyhow::Result<()> {
-    match client.validate_spawn(run.request.clone()).await {
-        Ok(ControlResponse::Valid { summary }) => {
+    match validate(client, run).await? {
+        Ok(summary) => {
             println!("{}", check_report(&summary, json));
             Ok(())
         }
-        Ok(ControlResponse::Rejected { issues }) => {
+        Err(issues) => {
             if json {
                 println!(
                     "{}",
@@ -35,10 +36,26 @@ pub async fn send_check(client: &ControlClient, run: &LocalRun, json: bool) -> a
             }
             bail!(issues_report(&issues))
         }
+    }
+}
+
+/// What the daemon makes of `run`, with the command line's own problems put
+/// in front of its answer: the summary only when nobody found anything wrong.
+pub(crate) async fn validate(
+    client: &ControlClient,
+    run: &LocalRun,
+) -> anyhow::Result<Result<SpawnSummary, SpawnIssues>> {
+    let daemon = match client.validate_spawn(run.request.clone()).await {
+        Ok(ControlResponse::Valid { summary }) => Ok(summary),
+        Ok(ControlResponse::Rejected { issues }) => Err(issues),
         Ok(ControlResponse::Error { message }) => bail!("the check failed: {message}"),
         Ok(other) => bail!("unexpected daemon response: {other:?}"),
         Err(e) => bail!("the leviath daemon is not reachable ({e}); start it with `lev daemon`"),
-    }
+    };
+    Ok(match daemon {
+        Ok(summary) if run.issues.is_empty() => Ok(*summary),
+        other => Err(merged_issues(run, other.err().unwrap_or_default())),
+    })
 }
 
 /// The summary as printed: JSON, or a short block a person reads.

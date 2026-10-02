@@ -69,6 +69,22 @@ pub struct RunState {
     pub wait_reason: Option<WaitState>,
     /// The last edge it took.
     pub last_transition: Option<TransitionRecord>,
+    /// Why it has no title, once titling gave up: the provider it could not
+    /// reach, or what came back instead of a title.
+    pub title_error: Option<String>,
+    /// How many of its blueprint's `read_paths` this machine grants, as
+    /// fixed when it was placed. `None` for a blueprint that declares none.
+    pub read_paths: Option<ReadPathCounts>,
+}
+
+/// How many `read_paths` a run's blueprint declares, and how many of them
+/// this machine's config grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReadPathCounts {
+    /// Entries the blueprint declares.
+    pub declared: u32,
+    /// Entries the config grants.
+    pub granted: u32,
 }
 
 impl RunState {
@@ -100,6 +116,8 @@ impl RunState {
             final_output: None,
             wait_reason: None,
             last_transition: None,
+            title_error: None,
+            read_paths: None,
         }
     }
 }

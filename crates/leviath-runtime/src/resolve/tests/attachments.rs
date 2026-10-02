@@ -156,6 +156,24 @@ async fn a_file_of_the_wrong_type_is_refused_by_its_input_and_its_region() {
     );
 }
 
+/// Another input's problem does not hide a file of the wrong type: each
+/// input that reads is still checked against its file.
+#[tokio::test]
+async fn a_file_of_the_wrong_type_is_refused_beside_other_input_problems() {
+    let mut g = graph();
+    g.inputs
+        .push(file_input("diagram", &["image/svg+xml"], "system"));
+    let mut request = raw(g)
+        .input("diagram", RawInput::Text("d.png".into()))
+        .input("colour", RawInput::Text("blue".into()));
+    request.attachments = vec![attach("d.png", None)];
+    let issues = spawn(&request, &Fake::default()).await.unwrap_err();
+    assert_eq!(
+        found(&issues),
+        ["inputs.colour Unknown", "inputs.diagram WrongType"]
+    );
+}
+
 #[tokio::test]
 async fn a_file_input_naming_a_refused_attachment_adds_no_second_issue() {
     let mut g = graph();

@@ -122,18 +122,50 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Short<T> {
     }
 }
 
-impl<T: schemars::JsonSchema> schemars::JsonSchema for Short<T> {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        format!("Short_{}", T::schema_name()).into()
-    }
-    fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let table = g.subschema_for::<T>();
-        schemars::json_schema!({ "anyOf": [{ "type": "integer" }, { "type": "string" }, table] })
-    }
+/// Give a short form its schema: exactly the shapes its reader takes, so a
+/// request checked against the published schema is not refused for a shape
+/// the schema allowed. `$branches` builds every branch but the table's.
+macro_rules! short_schema {
+    ($table:ty, $name:literal, $branches:expr) => {
+        impl schemars::JsonSchema for Short<$table> {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                concat!("Short_", $name).into()
+            }
+            fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                let branches: fn(&mut schemars::SchemaGenerator) -> Vec<serde_json::Value> =
+                    $branches;
+                schemars::json_schema!({ "anyOf": branches(g) })
+            }
+        }
+    };
+}
+
+/// A token count: a whole number a `u32` holds.
+fn tokens_schema() -> serde_json::Value {
+    serde_json::json!({ "type": "integer", "minimum": 0, "maximum": u32::MAX })
+}
+
+/// A number as `"35%"` reads it, before the `%`.
+const PERCENT: &str = r"\s*[-+]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]+)?\s*%\s*";
+
+/// Text that is one of `names`.
+fn names_schema(names: &str) -> serde_json::Value {
+    let names: Vec<&str> = names.split(", ").collect();
+    serde_json::json!({ "type": "string", "enum": names })
+}
+
+/// The `kind` of a type table: one of the input types.
+fn type_kinds(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::Schema::try_from(names_schema(TYPE_NAMES)).expect("an object is a schema")
+}
+
+/// The `kind` of a region table: one of the region kinds.
+fn region_kinds(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::Schema::try_from(names_schema(KIND_NAMES)).expect("an object is a schema")
 }
 
 /// The table half of a [`Short`] for a type that has no table form.
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Serialize)]
 pub(crate) enum NoTable {}
 
 impl<'de> Deserialize<'de> for NoTable {
@@ -301,6 +333,12 @@ impl TryFrom<BudgetText> for Budget {
     }
 }
 
+short_schema!(ClampedPercent, "ClampedPercent", |g| vec![
+    tokens_schema(),
+    serde_json::json!({ "type": "string", "pattern": format!("^{PERCENT}$") }),
+    g.subschema_for::<ClampedPercent>().into(),
+]);
+
 readable!(Budget, BudgetText);
 
 // ── OutputCap ───────────────────────────────────────────────────────────────
@@ -336,6 +374,11 @@ impl TryFrom<OutputCapText> for OutputCap {
         }
     }
 }
+
+short_schema!(NoTable, "NoTable", |_| vec![
+    tokens_schema(),
+    serde_json::json!({ "type": "string", "pattern": format!("^{PERCENT}( of .+)?$") }),
+]);
 
 readable!(OutputCap, OutputCapText);
 
@@ -422,6 +465,11 @@ impl TryFrom<SlotText> for InputSlot {
     }
 }
 
+short_schema!(SlotTable, "SlotTable", |g| vec![
+    names_schema("output_format, output_instructions"),
+    g.subschema_for::<SlotTable>().into(),
+]);
+
 readable!(InputSlot, SlotText);
 
 // ── InputType ───────────────────────────────────────────────────────────────
@@ -441,6 +489,7 @@ pub(crate) enum Bound {
 #[derive(Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TypeTable {
+    #[schemars(schema_with = "type_kinds")]
     kind: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     multiline: bool,
@@ -533,6 +582,10 @@ impl From<&InputType> for TypeText {
 
 const TYPE_NAMES: &str =
     "text, bool, int, float, choice, list, record, file, path, model, blueprint, duration, url";
+
+/// The input types whose name alone is a type: the rest need settings.
+const TYPE_NAMES_ALONE: &str =
+    "text, bool, int, float, file, path, model, blueprint, duration, url";
 
 fn whole(b: Option<Bound>, what: &str) -> Result<Option<i64>, String> {
     match b {
@@ -645,6 +698,11 @@ impl TryFrom<TypeText> for InputType {
     }
 }
 
+short_schema!(Box<TypeTable>, "TypeTable", |g| vec![
+    names_schema(TYPE_NAMES_ALONE),
+    g.subschema_for::<TypeTable>().into(),
+]);
+
 readable!(InputType, TypeText);
 
 // ── RegionKind ──────────────────────────────────────────────────────────────
@@ -656,6 +714,7 @@ pub(crate) type KindText = Short<KindTable>;
 #[derive(Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KindTable {
+    #[schemars(schema_with = "region_kinds")]
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_items: Option<u32>,
@@ -716,6 +775,10 @@ impl From<&RegionKind> for KindText {
 }
 
 const KIND_NAMES: &str = "pinned, sliding_window, temporary, compacting, clearable, compact_history, keyed, checklist, custom";
+
+/// The region kinds whose name alone is a kind: the rest need settings.
+const KIND_NAMES_ALONE: &str =
+    "pinned, temporary, compacting, clearable, compact_history, keyed, checklist";
 
 impl TryFrom<KindText> for RegionKind {
     type Error = String;
@@ -781,6 +844,11 @@ impl TryFrom<KindText> for RegionKind {
         })
     }
 }
+
+short_schema!(KindTable, "KindTable", |g| vec![
+    names_schema(KIND_NAMES_ALONE),
+    g.subschema_for::<KindTable>().into(),
+]);
 
 readable!(RegionKind, KindText);
 

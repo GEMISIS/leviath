@@ -232,7 +232,7 @@ curl -fsSL https://leviath.dev/install.sh | sh
 After it, `lev setup` asks for one model provider, and you are ready.
 
 - [Getting Started](/docs/getting-started): from install to your first run in four steps.
-- [Agent catalog](/docs/agent-catalog): seven ready-made blueprints.
+- [Agent catalog](/docs/agent-catalog): eleven ready-made blueprints.
 - [Build your first agent](/docs/first-agent): write a blueprint from an empty directory.
 
 Then read [Overview](/docs/overview) for the whole system in one pass.

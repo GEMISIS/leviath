@@ -65,6 +65,58 @@ fn installed(graph: RunGraph) -> LoadedBlueprint {
     }
 }
 
+/// A fan-out's installed worker blueprint is pinned to the revision installed
+/// when the run is resolved; one not installed, or already pinned, is left as
+/// written, and so is any other stage.
+#[tokio::test]
+async fn a_fan_out_worker_blueprint_is_pinned_to_the_installed_revision() {
+    use crate::spec::graph::{FanOutDef, StageMode, WorkerFailure, WorkerSource};
+    let fan = |worker: &str| {
+        StageMode::FanOut(FanOutDef {
+            worker: WorkerSource::Blueprint(BlueprintRef::parse(worker).unwrap()),
+            merge_stage: None,
+            max_workers: 2,
+            on_worker_failure: WorkerFailure::Continue,
+            split_prompt: String::new(),
+            results_region: None,
+            max_items: None,
+            max_attempts: None,
+        })
+    };
+    let pinned = format!("coder@{}", Digest::of(b"v0"));
+    let mut g = graph();
+    g.stages[0].mode = fan("coder");
+    let mut ghost = g.clone();
+    ghost.stages[0].mode = fan("ghost");
+    let mut kept = g.clone();
+    kept.stages[0].mode = fan(&pinned);
+    let env = Fake {
+        blueprints: [("coder".to_string(), installed(graph()))].into(),
+        ..Fake::default()
+    };
+    let worker = |g: RunGraph| async {
+        let spec = spawn(&raw(g), &env).await.unwrap().spec;
+        match &spec.graph.stages[0].mode {
+            StageMode::FanOut(fan) => fan.worker.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(
+        worker(g).await,
+        WorkerSource::Blueprint(
+            BlueprintRef::parse(&format!("coder@{}", Digest::of(b"v1"))).unwrap()
+        )
+    );
+    assert_eq!(
+        worker(ghost).await,
+        WorkerSource::Blueprint(BlueprintRef::parse("ghost").unwrap())
+    );
+    assert_eq!(
+        worker(kept).await,
+        WorkerSource::Blueprint(BlueprintRef::parse(&pinned).unwrap())
+    );
+}
+
 #[tokio::test]
 async fn a_blueprint_request_loads_the_installed_graph() {
     let mut g = graph();
@@ -191,19 +243,36 @@ async fn many_independent_problems_come_back_together() {
 }
 
 #[tokio::test]
-async fn an_invalid_graph_stops_before_the_machine_is_asked_about_it() {
+async fn an_invalid_graph_has_only_its_stages_models_checked() {
     let mut g = graph();
     g.entry = Some(n("nowhere"));
+    let stages = g.stages.len();
     let request = raw(g).input("colour", RawInput::Bool(true));
-    let env = Fake::default();
+    let env = Fake {
+        models: [(
+            "build".to_string(),
+            Err(SpawnIssue::new(
+                SpecPath::root(),
+                IssueCode::Unresolvable,
+                "no provider",
+            )),
+        )]
+        .into(),
+        ..Fake::default()
+    };
     let issues = spawn(&request, &env).await.unwrap_err();
     assert_eq!(
         found(&issues),
-        ["source.raw.entry Dangling", "inputs.colour Unknown"]
+        [
+            "source.raw.entry Dangling",
+            "inputs.colour Unknown",
+            "source.raw.stages.build.model Unresolvable",
+        ]
     );
+    assert_eq!(env.asked().len(), stages, "each stage's model is checked");
     assert!(
-        env.asked().is_empty(),
-        "no model was chosen for a broken graph"
+        env.tool_bases.lock().unwrap().is_empty(),
+        "no tools are chosen for a broken graph"
     );
 }
 

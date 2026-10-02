@@ -36,7 +36,7 @@ gets, what each stage takes in and hands back, and the shape of a run's memory. 
 the run's typed **inputs**, such as its task, which each run is given when it starts. There is no
 agent code to write, and nothing is compiled.
 
-Seven [pre-built agents](/docs/agent-catalog) ship with Leviath, and `lev create` scaffolds your own.
+Eleven [pre-built agents](/docs/agent-catalog) ship with Leviath, and `lev create` scaffolds your own.
 See [Agent blueprints](/docs/agents).
 
 ## Work happens in stages

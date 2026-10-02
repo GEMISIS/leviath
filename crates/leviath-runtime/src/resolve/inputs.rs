@@ -61,9 +61,15 @@ pub(super) fn check(
             Checked::default()
         }
     };
+    // Another input's problem must not hide this one's, so each input that
+    // reads on its own is held to its file and its path either way.
+    let passed = match checked.ok {
+        true => checked.values.clone(),
+        false => each_passing(&decls, request, &cx),
+    };
     for decl in &graph.inputs {
         let at = SpecPath::root().field("inputs").key(decl.name.as_str());
-        match (&decl.ty, checked.values.get(decl.name.as_str())) {
+        match (&decl.ty, passed.get(decl.name.as_str())) {
             (InputType::File { accepts }, Some(InputValue::File(name))) => {
                 if let Some(file) = files.get(name)
                     && !attach::accepts(&file.mime, accepts)
@@ -108,6 +114,20 @@ pub(super) fn check(
         }
     }
     checked
+}
+
+/// Every input that reads when checked on its own, with its value.
+fn each_passing(decls: &[InputDecl], request: &SpawnRequest, cx: &CheckCtx<'_>) -> InputValues {
+    let values = decls.iter().filter_map(|decl| {
+        let given = request
+            .inputs
+            .get(decl.name.as_str())
+            .map(|raw| [(decl.name.to_string(), raw.clone())].into())
+            .unwrap_or_default();
+        let value = check_inputs(std::slice::from_ref(decl), &given, cx).ok()?;
+        value.0.into_iter().next()
+    });
+    InputValues(values.collect())
 }
 
 /// Apply every input's graph slots: a stage's model, its iteration cap, a

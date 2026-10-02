@@ -2,9 +2,9 @@
 //!
 //! The binary frames are for the machine; these views are what `lev run show`
 //! prints. TOML has no null and no integer past `i64::MAX`, so the values go
-//! through JSON first: an absent optional field is left out (unless nothing
-//! else is there, as in a change that clears a field), a `null` inside a list
-//! or a cleared field reads as the string `"none"`, and an integer too large for TOML is
+//! through JSON first: an absent optional field is left out (unless it is the
+//! one field of a change that clears it), a `null` inside a list or a cleared
+//! field reads as the string `"none"`, and an integer too large for TOML is
 //! written as a string of its digits.
 
 use serde::Serialize;
@@ -37,13 +37,15 @@ fn render<T: Serialize + ?Sized>(key: &str, value: &T) -> String {
 
 /// `value` with every shape TOML cannot hold replaced by one it can.
 ///
-/// An object whose every field is `null` keeps them, each read as `"none"`:
-/// that is a change clearing a field (`{ "Pending": null }`), and leaving the
-/// field out would leave an empty table that says nothing.
+/// An object of one field, and that `null`, keeps it, read as `"none"`: that
+/// is a change clearing a field (`{ "Pending": null }`), and leaving the field
+/// out would leave an empty table that says nothing. A table of several
+/// settings all unset is an empty table, the way an unset setting is absent
+/// anywhere else.
 fn tomlable(value: Value) -> Value {
     match value {
         Value::Object(map) => {
-            let cleared = map.values().all(Value::is_null);
+            let cleared = map.len() == 1 && map.values().all(Value::is_null);
             Value::Object(
                 map.into_iter()
                     .filter(|(_, v)| cleared || !v.is_null())

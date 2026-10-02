@@ -58,10 +58,40 @@ impl BindEnv for DaemonEnv {
         bindings.extend(self.taint(spec, state.reads_granted));
         bindings.extend(self.title(spec));
         bindings.extend(self.record(spec));
+        self.log_lint(spec);
         let service = self.tool_service.clone();
         let tools = state.tools;
         Ok(bindings.after_insert(move |entity| service.register(entity, tools)))
     }
+}
+
+/// Each warning and error `lev validate` reports for the blueprint in `dir`,
+/// as one line naming the blueprint and the finding's code. Nothing for no
+/// directory, or for one whose `agent.toml` will not read (resolving the run
+/// already said why).
+fn lint_lines(dir: Option<&Path>) -> Vec<String> {
+    let Some(dir) = dir else {
+        return Vec::new();
+    };
+    let file = std::fs::read_to_string(dir.join(leviath_blueprint::FILE_NAME))
+        .ok()
+        .and_then(|text| leviath_blueprint::BlueprintFile::parse(&text).ok());
+    let Some(file) = file else {
+        return Vec::new();
+    };
+    let env = crate::lint::LintEnv::offline(dir);
+    crate::lint::lint_blueprint(&file, &env)
+        .into_iter()
+        .filter(|f| f.severity != crate::lint::LintSeverity::Note)
+        .map(|f| {
+            format!(
+                "blueprint '{}': {} [{}]",
+                file.blueprint.name,
+                f.one_line(),
+                f.code
+            )
+        })
+        .collect()
 }
 
 /// The name a run's permissions and grants are looked up under: its
@@ -425,6 +455,22 @@ impl DaemonEnv {
         match settings.enabled && !chain.is_empty() {
             true => Bindings::new().with(leviath_runtime::title::TitleCandidates(chain)),
             false => Bindings::new(),
+        }
+    }
+
+    /// Log, against the run, whatever `lev validate` would say about its
+    /// blueprint. Nothing here refuses a run: these are authoring mistakes
+    /// whose cost is a run that behaves oddly hours later, so the answer is
+    /// put where someone looking for why a run stalled will find it. Notes
+    /// describe what the blueprint means to do and are left out. A graph its
+    /// caller wrote has no blueprint to lint.
+    ///
+    /// The lint is built from the blueprint's own directory so its
+    /// `tools/*.rhai` resolve, and without the provider check: resolving the
+    /// run already refused a stage no registered provider serves.
+    fn log_lint(&self, spec: &RunSpec) {
+        for line in lint_lines(self.blueprint_dir(spec).as_deref()) {
+            tracing::warn!(run_id = %spec.run_id, "{line}");
         }
     }
 

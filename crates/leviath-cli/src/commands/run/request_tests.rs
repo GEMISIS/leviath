@@ -19,6 +19,16 @@ fn task_of(run: &LocalRun) -> String {
     input_of(run, TASK_INPUT).unwrap_or_default()
 }
 
+/// What the command line itself found wrong with `run`, as reported.
+fn refused(run: anyhow::Result<LocalRun>) -> String {
+    let run = run.unwrap();
+    assert!(
+        !run.issues.is_empty(),
+        "the command line found nothing wrong"
+    );
+    issues_report(&run.issues)
+}
+
 /// The directory of the blueprint `run` asked for.
 fn source_name(run: &LocalRun) -> String {
     serde_json::to_value(&run.request.source).unwrap()["blueprint_file"]
@@ -275,12 +285,10 @@ fn a_task_is_asked_for_only_when_the_run_needs_one() {
         ..line(&taskless, dir.path())
     })
     .unwrap();
-    let err = run_request(RunLine {
+    let err = refused(run_request(RunLine {
         task: Some("review my code"),
         ..line(&taskless, dir.path())
-    })
-    .unwrap_err()
-    .to_string();
+    }));
     assert!(
         err.contains("inputs.task: unknown: diffonly takes no task"),
         "{err}"
@@ -306,7 +314,9 @@ fn inputs_are_read_by_their_declared_types() {
     .unwrap();
     assert_eq!(input_of(&run, "art").as_deref(), Some("focus on safety"));
 
-    let err = run_request(RunLine {
+    // No task was given, and nobody is asked for one: the run is refused
+    // anyway, and the daemon's word on the missing task is not news.
+    let run = run_request(RunLine {
         inputs: vec!["bogus=1".to_string(), "no-equals".to_string()],
         named: HashMap::from([
             ("art".to_string(), "@/no/such/file.md".to_string()),
@@ -314,8 +324,10 @@ fn inputs_are_read_by_their_declared_types() {
         ]),
         ..line(&manifest, dir.path())
     })
-    .unwrap_err()
-    .to_string();
+    .unwrap();
+    assert!(run.task_unasked);
+    assert!(!run.request.inputs.contains_key(TASK_INPUT));
+    let err = issues_report(&run.issues);
     assert!(err.starts_with("4 problems with this run:"), "{err}");
     assert!(
         err.contains("inputs.bogus: unknown: --input names no input"),
@@ -327,6 +339,28 @@ fn inputs_are_read_by_their_declared_types() {
     );
     assert!(err.contains("not name=value"), "{err}");
     assert!(err.contains("Failed to read region file"), "{err}");
+
+    // The daemon's answer joins them: what it says at a path the command
+    // line already refused is left out, and so is the unasked task.
+    let task = SpecPath::root().field("inputs").key(TASK_INPUT);
+    let daemon = SpawnIssues(vec![
+        SpawnIssue::new(
+            SpecPath::root().field("inputs").key("art"),
+            IssueCode::Missing,
+            "required",
+        ),
+        SpawnIssue::new(task.clone(), IssueCode::Missing, "no task"),
+        SpawnIssue::new(SpecPath::root().field("workdir"), IssueCode::Missing, "w"),
+    ]);
+    let all = merged_issues(&run, daemon.clone());
+    let paths: Vec<String> = all.iter().map(|i| i.path.to_string()).collect();
+    assert_eq!(paths.len(), 5, "{paths:?}");
+    assert_eq!(paths[4], "workdir");
+    let asked = LocalRun {
+        task_unasked: false,
+        ..run
+    };
+    assert!(merged_issues(&asked, daemon).iter().any(|i| i.path == task));
 
     // Values typed by the dashboard go straight on the request.
     let run = run_request(RunLine {
@@ -344,7 +378,7 @@ fn inputs_are_read_by_their_declared_types() {
 fn launch_flags_that_do_not_read_are_refused_together() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = write_manifest(&dir.path().join("a"));
-    let err = run_request(RunLine {
+    let err = refused(run_request(RunLine {
         task: Some("t"),
         model: Some("not a model".to_string()),
         yolo: true,
@@ -366,9 +400,7 @@ fn launch_flags_that_do_not_read_are_refused_together() {
             }],
         }),
         ..line(&manifest, dir.path())
-    })
-    .unwrap_err()
-    .to_string();
+    }));
     assert!(err.contains("model: invalid"), "{err}");
     assert!(err.contains("launch.unattended: invalid"), "{err}");
     assert!(err.contains("launch.allow[1]: invalid"), "{err}");
@@ -534,13 +566,12 @@ fn a_request_file_is_sent_with_the_flags_over_it() {
         graph.inputs.clear();
     }
     std::fs::write(&json_file, serde_json::to_string(&untitled).unwrap()).unwrap();
-    let err = run_request(RunLine {
+    let err = refused(run_request(RunLine {
         request_file: Some(&json_file),
         task: Some("t"),
         ..RunLine::new(None, "/mine", dir.path())
-    })
-    .unwrap_err();
-    assert!(err.to_string().contains("this run takes no task"), "{err}");
+    }));
+    assert!(err.contains("this run takes no task"), "{err}");
 }
 
 /// A request file names what it runs, so naming a blueprint as well is

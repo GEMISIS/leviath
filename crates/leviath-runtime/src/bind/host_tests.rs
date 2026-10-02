@@ -155,7 +155,7 @@ fn a_requested_model_wins_and_an_unservable_stage_is_an_issue() {
     let mut nowhere = stage(&["gone/x"]);
     nowhere.model.allow_user_default = false;
     let issue = choose_model(&nowhere, None, &ModelDefaults::default(), &r).unwrap_err();
-    assert_eq!(issue.path.to_string(), "stages.plan.model");
+    assert_eq!(issue.path.to_string(), "(request)");
     assert_eq!(issue.code, IssueCode::Unresolvable);
     assert!(issue.message.contains("no usable provider"), "{issue}");
     assert_eq!(issue.known, ["mock"]);
@@ -285,8 +285,23 @@ fn a_required_tool_the_stage_cannot_have_is_an_issue() {
     let issues = select_tools(&catalog(), &s).unwrap_err();
     assert_eq!(issues.len(), 1);
     let issue = issues.iter().next().unwrap();
-    assert_eq!(issue.path.to_string(), "stages.plan.required_tools[1]");
+    assert_eq!(issue.path.to_string(), "required_tools[1]");
     assert!(issue.known.contains(&"mine".to_string()));
+}
+
+#[test]
+fn a_named_tool_nothing_offers_is_an_issue_unless_it_is_an_mcp_tool() {
+    let mut s = stage(&[]);
+    s.tools = ["read_file", "mine", "search", "raed_file", "gone__tool"]
+        .into_iter()
+        .map(|n| ToolSelector::Tool(ToolName::new(n).unwrap()))
+        .collect();
+    let issues = select_tools(&catalog(), &s).unwrap_err();
+    let paths: Vec<String> = issues.iter().map(|i| i.path.to_string()).collect();
+    assert_eq!(paths, ["tools[3]"], "{issues}");
+    let issue = issues.iter().next().unwrap();
+    assert_eq!(issue.code, IssueCode::Unknown);
+    assert!(issue.known.contains(&"read_file".to_string()));
 }
 
 #[test]
@@ -312,6 +327,16 @@ fn bytes_are_typed_by_the_registry_and_the_declaration() {
     assert!(
         contradicted.contains("its bytes are image/png"),
         "{contradicted}"
+    );
+    // A type whose opening bytes are known must open with them.
+    let mislabelled = sniff(&r, "a", b"hello", Some(&pattern("image/png"))).unwrap_err();
+    assert!(
+        mislabelled.contains("do not begin the way image/png files do"),
+        "{mislabelled}"
+    );
+    assert_eq!(
+        sniff(&r, "a", png, Some(&pattern("image/png"))).unwrap(),
+        "image/png"
     );
 
     let mut checked = leviath_core::mime::MimeRegistry::builtin();

@@ -146,7 +146,7 @@ async fn models_tools_and_code_answer_through_the_shared_host() {
     let mut nowhere = stage(&["gone/x"]);
     nowhere.model.allow_user_default = false;
     let issue = e.model(&nowhere, None).await.unwrap_err();
-    assert_eq!(issue.path.to_string(), "stages.plan.model");
+    assert_eq!(issue.path.to_string(), "(request)");
 
     let mut s = stage(&[]);
     s.tools = vec![ToolSelector::Tool(ToolName::new("read_file").unwrap())];

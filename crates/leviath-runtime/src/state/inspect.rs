@@ -21,8 +21,9 @@ use super::context::{
 };
 use super::{
     Clock, Cursor, FanOutState, FinalOutputState, Flags, MessageState, OpenInteraction,
-    PendingBatch, PipelinePhase, RunState, RunStatus, Spend, StageProgress, StageRecord,
-    StageStatus, ToolResultState, Totals, TransitionRecord, VisitRecord, WaitState, WorkItemState,
+    PendingBatch, PipelinePhase, ReadPathCounts, RunState, RunStatus, Spend, StageProgress,
+    StageRecord, StageStatus, ToolResultState, Totals, TransitionRecord, VisitRecord, WaitState,
+    WorkItemState,
 };
 use crate::components::{AgentState, AgentStatus, ContextWindow};
 use crate::spec::inputs::{InputValue, InputValues, RawInput};
@@ -39,6 +40,7 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
     let agent = world.get::<AgentState>(entity)?;
     let stage = StageName::new(agent.current_stage.as_str()).ok()?;
     let window = world.get::<ContextWindow>(entity);
+    let metadata = world.get::<crate::persistence::RunMetadata>(entity);
     Some(RunState {
         seq: 0,
         status: status_of(&agent.status),
@@ -82,14 +84,17 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
             .iter()
             .filter_map(|c| RunId::new(c.as_str()).ok())
             .collect(),
-        title: world
-            .get::<crate::persistence::RunMetadata>(entity)
-            .and_then(|m| m.title.clone()),
+        title: metadata.and_then(|m| m.title.clone()),
         final_output: world
             .get::<crate::persistence::FinalOutput>(entity)
             .and_then(|o| final_output_of(&o.0)),
         wait_reason: wait_reason_of(world, entity, agent),
         last_transition: last_transition_of(world, entity),
+        title_error: metadata.and_then(|m| m.title_error.clone()),
+        read_paths: metadata.and_then(|m| m.read_paths).map(|r| ReadPathCounts {
+            declared: u32::try_from(r.declared).unwrap_or(u32::MAX),
+            granted: u32::try_from(r.granted).unwrap_or(u32::MAX),
+        }),
     })
 }
 

@@ -233,7 +233,8 @@ pub trait ResolveEnv: Send + Sync {
     /// Whether `path` names something of `kind` inside `workdir`.
     fn path_exists(&self, workdir: &Path, path: &WorkdirPath, kind: PathKind) -> bool;
     /// Choose a stage's provider and model. `requested` is the caller's
-    /// model, for a stage that allows one.
+    /// model, for a stage that allows one. An issue's path is relative to the
+    /// stage's `model`, usually the root.
     async fn model(
         &self,
         stage: &StageDef,
@@ -263,7 +264,8 @@ pub trait ResolveEnv: Send + Sync {
     /// code already read, for script tools, `base` is the blueprint's
     /// directory, whose own script tools the stage may use, and `workdir` is
     /// the run's, whose `tools/` a graph that looks at its tools again during
-    /// the run is given from the start.
+    /// the run is given from the start. An issue's path is relative to the
+    /// stage: `tools[1]`, `required_tools[0]`.
     async fn tools(
         &self,
         graph: &RunGraph,

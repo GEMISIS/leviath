@@ -46,6 +46,7 @@ use std::sync::Arc;
 use crate::insert::RunSpecC;
 use crate::spec::env::Caller;
 use crate::spec::graph::{FanOutDef, StageMode, WorkerFailure, WorkerSource};
+use crate::spec::inputs::InputDecl;
 use crate::spec::names::BlueprintRef;
 use crate::spec::request::{SpawnRequest, SpawnSource};
 use bevy_ecs::prelude::*;
@@ -82,6 +83,13 @@ pub trait FanOutSpawner: Send + Sync {
     /// The installed blueprint a fan-out's worker query picks, or `Err` with
     /// why none does.
     fn find_worker(&self, query: &str) -> Result<BlueprintRef, String>;
+
+    /// The inputs the blueprint `source` names declares, so a fan-out's items
+    /// are checked against them before any worker starts. `None` when this
+    /// spawner cannot read it; each worker's own spawn checks them then.
+    fn worker_inputs(&self, _source: &SpawnSource) -> Option<Vec<InputDecl>> {
+        None
+    }
 }
 
 /// The installed [`FanOutSpawner`], as a world resource. Absent in a pure-runtime
@@ -482,12 +490,12 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
                 continue;
             }
         };
-        // A worker entering this run's own graph takes that graph's inputs, so
-        // its items are checked here, before any worker starts. A worker
-        // running an installed blueprint has its inputs checked when that
-        // blueprint is resolved.
-        if let (WorkerSource::Stage(_), Some(spec)) = (&config.worker, &spec)
-            && let Err(issues) = items::check_items(&spec.graph.inputs, &request.items)
+        // A worker takes the inputs of the graph it runs, so its items are
+        // checked here against them, before any worker starts, each at its
+        // item's path: this run's own graph for a worker stage, the named
+        // blueprint's when the spawner can read it.
+        if let Some(decls) = worker_decls(world, &config.worker, spec.as_deref())
+            && let Err(issues) = items::check_items(&decls, &request.items)
         {
             answer_call(
                 world,
@@ -513,6 +521,28 @@ pub(crate) fn start_pending_fan_outs(world: &mut World) {
         }
         begin_fan_out(world, entity, config, request.items, origin);
     }
+}
+
+/// The inputs a fan-out's worker takes, when they can be read before it
+/// starts: this run's own graph's for a worker stage, and otherwise those of
+/// the blueprint the installed spawner reads for it.
+fn worker_decls(
+    world: &World,
+    worker: &WorkerSource,
+    spec: Option<&crate::spec::run_spec::RunSpec>,
+) -> Option<Vec<InputDecl>> {
+    let spawner = world
+        .get_resource::<FanOutSpawnerRes>()
+        .map(|r| r.0.clone());
+    let source = match worker {
+        WorkerSource::Stage(_) => return spec.map(|s| s.graph.inputs.clone()),
+        WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
+        WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),
+        WorkerSource::Query(query) => {
+            SpawnSource::Blueprint(spawner.as_ref()?.find_worker(query).ok()?)
+        }
+    };
+    spawner?.worker_inputs(&source)
 }
 
 /// Start a fan-out: park `parent` on its workers.
@@ -3654,6 +3684,87 @@ mod tests {
             world.get::<FanOutWaiting>(e).expect("parked").pending.len(),
             1
         );
+    }
+
+    /// A spawner that reads every worker blueprint as taking only `topic`
+    /// text, and starts workers as [`TestSpawner`] does.
+    struct Typed(Arc<dyn FanOutSpawner>);
+
+    impl FanOutSpawner for Typed {
+        fn spawn_worker(
+            &self,
+            world: &mut World,
+            parent: Entity,
+            request: SpawnRequest,
+            caller: Caller,
+        ) -> Result<Entity, String> {
+            self.0.spawn_worker(world, parent, request, caller)
+        }
+
+        fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
+            self.0.find_worker(query)
+        }
+
+        fn worker_inputs(&self, _source: &SpawnSource) -> Option<Vec<InputDecl>> {
+            Some(topic_blueprint(cfg(None, 1, WorkerFailure::Continue)).inputs)
+        }
+    }
+
+    /// A worker blueprint's items are checked against the inputs it
+    /// declares, before any worker starts, each at its item's path.
+    #[test]
+    fn a_blueprint_workers_items_are_checked_against_its_inputs() {
+        let mut world = World::new();
+        install(&mut world, Arc::new(Typed(TestSpawner::ok())));
+        let mut bp = fanout_blueprint(cfg(None, 2, WorkerFailure::Continue));
+        bp.stages[0].mode = Mode::Autonomous;
+        let e = spawn_parent(&mut world, bp, "");
+        let call = |topic: serde_json::Value| serde_json::json!({"agent": "probe", "items": [{"id": "a", "inputs": {"topic": topic}}]});
+        pending(&mut world, e, call(serde_json::json!(4)));
+        start_pending_fan_outs(&mut world);
+        assert!(world.get::<FanOutWaiting>(e).is_none(), "nothing started");
+        let convo = conversation_text(&world, e);
+        assert!(convo.contains("items[0].inputs.topic"), "{convo}");
+
+        pending(&mut world, e, call(serde_json::json!("rust")));
+        start_pending_fan_outs(&mut world);
+        assert!(
+            world.get::<FanOutWaiting>(e).is_some(),
+            "a typed item starts"
+        );
+    }
+
+    /// Which inputs a worker is held to before it starts: its own graph's for
+    /// a worker stage, the spawner's reading of a named, pathed or queried
+    /// blueprint, and none when nothing can say.
+    #[test]
+    fn a_workers_inputs_come_from_its_graph_or_the_spawner() {
+        let blueprint = WorkerSource::Blueprint(BlueprintRef::parse("probe").unwrap());
+        let file = WorkerSource::BlueprintFile(
+            crate::spec::names::BlueprintPath::new("/abs/probe").unwrap(),
+        );
+        let query = WorkerSource::Query("tests".into());
+        let nobody = WorkerSource::Query("nobody".into());
+        let stage = WorkerSource::Stage(StageName::new("w").unwrap());
+        let spec = spec_c("t", topic_blueprint(cfg(None, 1, WorkerFailure::Continue))).0;
+
+        let mut world = World::new();
+        assert!(
+            worker_decls(&world, &blueprint, None).is_none(),
+            "no spawner"
+        );
+        assert!(worker_decls(&world, &query, None).is_none());
+        assert!(worker_decls(&world, &stage, None).is_none(), "no graph");
+        let topic = worker_decls(&world, &stage, Some(&*spec)).unwrap();
+        assert!(topic.iter().any(|d| d.name.as_str() == "topic"));
+
+        install(&mut world, Arc::new(Typed(TestSpawner::ok())));
+        for worker in [&blueprint, &file, &query] {
+            assert!(worker_decls(&world, worker, None).is_some());
+        }
+        assert!(worker_decls(&world, &nobody, None).is_none());
+        install(&mut world, TestSpawner::ok());
+        assert!(worker_decls(&world, &blueprint, None).is_none(), "unread");
     }
 
     /// An ordinary stage has no worker to fall back on, so a call that names

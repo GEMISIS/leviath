@@ -644,6 +644,37 @@ async fn a_dry_run_that_would_be_refused_says_why() {
     assert_eq!(issues.as_array().map(Vec::len), Some(1));
 }
 
+/// An issue's path reads in this schema's field names: a raw graph is
+/// `source.graph`, an attachment's bytes its `content`; anything else is
+/// left alone.
+#[test]
+fn issue_paths_name_this_schemas_fields() {
+    let shown = |path: SpecPath| {
+        let issue = super::SpawnIssue::from(&SpawnIssue::new(path, IssueCode::Invalid, "x"));
+        let names: Vec<Option<String>> = issue.segments.iter().map(|s| s.name.clone()).collect();
+        (issue.path, names)
+    };
+    let raw = SpecPath::root()
+        .field("source")
+        .field("raw")
+        .field("edges")
+        .index(0)
+        .field("to");
+    let (path, names) = shown(raw);
+    assert_eq!(path, "source.graph.edges[0].to");
+    assert_eq!(names[1].as_deref(), Some("graph"));
+    let data = SpecPath::root().field("attachments").index(1).field("data");
+    assert_eq!(shown(data).0, "attachments[1].content");
+    for kept in [
+        SpecPath::root().field("source").field("blueprint"),
+        SpecPath::root().field("attachments").index(1).field("name"),
+        SpecPath::root().field("inputs").key("raw"),
+        SpecPath::root(),
+    ] {
+        assert_eq!(shown(kept.clone()).0, kept.to_string());
+    }
+}
+
 /// Every issue code the runtime has is one this schema can say.
 #[test]
 fn every_issue_code_crosses_over() {

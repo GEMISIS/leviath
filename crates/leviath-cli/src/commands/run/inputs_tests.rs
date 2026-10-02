@@ -193,7 +193,7 @@ fn inputs_read_against_their_declarations() {
         input("depth=3"),
         input("tags=a,b"),
     ];
-    let read = read_inputs(&decls, &typed, dir.path()).unwrap();
+    let read = read_inputs(&decls, &typed, dir.path());
     assert_eq!(read.values.get("notes"), Some(&text("be quick")));
     assert!(!read.values.contains_key("pics"), "a picture is a part");
     assert_eq!(read.values.get("cover"), Some(&text("hero.png")));
@@ -209,14 +209,14 @@ fn inputs_read_against_their_declarations() {
     let regions: Vec<Option<&str>> = read.parts.iter().map(|p| p.region.as_deref()).collect();
     assert_eq!(regions, [Some("pics"), None, None, None]);
     // The notes went to the region they fill, not the first slot they name.
-    let read = read_inputs(&decls, &[input("notes=see @hero.png")], dir.path()).unwrap();
+    let read = read_inputs(&decls, &[input("notes=see @hero.png")], dir.path());
     assert_eq!(read.parts[0].region.as_deref(), Some("pad"));
 
     // Text naming no file stays text, and says so.
-    let read = read_inputs(&decls, &[input("notes=see @ghost.png")], dir.path()).unwrap();
+    let read = read_inputs(&decls, &[input("notes=see @ghost.png")], dir.path());
     assert_eq!(read.unresolved, ["ghost.png"]);
 
-    let issues = read_inputs(
+    let read = read_inputs(
         &decls,
         &[
             input("bogus=1"),
@@ -225,10 +225,15 @@ fn inputs_read_against_their_declarations() {
             input("depth=4"),
             input("cover=@missing.png"),
             input("notes=@missing.md"),
+            input("tags=a,b"),
         ],
         dir.path(),
-    )
-    .unwrap_err();
+    );
+    // What did read is kept, so the daemon checks it with everything else.
+    assert_eq!(read.values.get("depth"), Some(&RawInput::Int(2)));
+    assert!(read.values.contains_key("tags"));
+    assert!(!read.values.contains_key("bogus"));
+    let issues = read.issues;
     let lines: Vec<String> = issues.iter().map(ToString::to_string).collect();
     assert_eq!(issues.len(), 5, "{lines:#?}");
     assert_eq!(issues.0[0].path.to_string(), "inputs.bogus");
@@ -240,4 +245,7 @@ fn inputs_read_against_their_declarations() {
     assert!(issues.0[2].message.contains("more than once"), "{lines:#?}");
     assert_eq!(issues.0[3].path.to_string(), "inputs.cover");
     assert_eq!(issues.0[4].path.to_string(), "inputs.notes");
+    // A file that is not there is not a value of the wrong type.
+    assert_eq!(issues.0[3].code, IssueCode::Unresolvable, "{lines:#?}");
+    assert_eq!(issues.0[4].code, IssueCode::Unresolvable, "{lines:#?}");
 }

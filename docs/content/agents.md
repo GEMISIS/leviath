@@ -11,7 +11,7 @@ order: 5
 A **blueprint** is a multi-stage [workflow graph](/docs/stages) you write once and run many times.
 It is a directory holding an `agent.toml` file and the blueprint's own tools and scripts. Each
 `lev run` of it is a **run**: one execution, with its own id and its own memory. The
-[agent catalog](/docs/agent-catalog) has seven complete blueprints worth stealing from.
+[agent catalog](/docs/agent-catalog) has eleven complete blueprints worth stealing from.
 
 New to this? [Build your first agent](/docs/first-agent) walks through writing one stage by
 stage. This page explains what each part of a blueprint is for. The

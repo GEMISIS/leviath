@@ -56,7 +56,8 @@ Installing under a name that already exists replaces the previous install.
 When a blueprint asks for anything unusual, `lev add` prints an inventory of exactly what it wants
 so you can look before running it. Unusual means pre-approved tools, script host access, shipped
 executable script tools, `read_paths` declarations with their grant status, a disabled sandbox,
-or a command that runs at startup.
+or a command that runs at startup. A tool the blueprint pre-approves that a blueprint may not
+grant itself, such as `shell`, is listed as asked for, because it still asks at run time.
 
 > [!WARNING]
 > A blueprint can carry executable `.rhai` tool scripts, grant its own tool permissions, and

@@ -249,6 +249,21 @@ async fn a_graph_counts_the_edges_a_run_took() {
             s.last_transition = Some(taken.clone());
             s.visits.insert(edge.to.clone(), 2);
         });
+        // A move no edge joins (a fan-out stage sent to its merge stage) is
+        // an edge of its own, named by nothing and counted. Twice is one
+        // edge taken twice.
+        for at in [40, 50] {
+            let unjoined = TransitionRecord {
+                from: edge.to.clone(),
+                to: edge.to.clone(),
+                edge: None,
+                reason: TransitionReason::Forced,
+                visit: format!("v{at}"),
+            };
+            step(&run_id, at, Vec::new(), |s| {
+                s.last_transition = Some(unjoined);
+            });
+        }
 
         let view = graph(&run_id).unwrap();
         assert_eq!(view.nodes.len(), spec.graph.stages.len());
@@ -261,10 +276,18 @@ async fn a_graph_counts_the_edges_a_run_took() {
         assert!(entered.current);
         assert_eq!(view.nodes.iter().filter(|n| n.current).count(), 1);
         assert_eq!(view.edges[0].taken, 3);
-        assert_eq!(view.edges[0].name, edge.name.as_str());
-        assert!(view.edges[1..].iter().all(|e| e.taken == 0));
+        assert_eq!(view.edges[0].name.as_deref(), Some(edge.name.as_str()));
+        let declared = spec.graph.edges.len();
+        assert!(view.edges[1..declared].iter().all(|e| e.taken == 0));
+        assert_eq!(view.edges.len(), declared + 1);
+        let extra = &view.edges[declared];
+        assert_eq!((extra.name.as_ref(), extra.condition), (None, None));
+        assert_eq!(extra.reason, Some(TransitionReason::Forced));
+        assert_eq!(extra.taken, 2);
         let json = serde_json::to_value(&view).unwrap();
         assert!(json["edges"][0]["condition"].is_string(), "{json}");
+        assert!(json["edges"][0]["reason"].is_null(), "{json}");
+        assert_eq!(json["edges"][declared]["reason"], "Forced", "{json}");
 
         assert_eq!(graph("ghost").unwrap_err().code(), "NOT_FOUND");
     })

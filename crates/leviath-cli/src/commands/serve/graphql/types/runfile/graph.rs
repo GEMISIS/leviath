@@ -12,6 +12,7 @@ use leviath_runtime::spec::graph::EdgeCondition as CoreCondition;
 
 use super::super::super::super::core::inspect::RunGraphView;
 use super::saturating;
+use super::state::TransitionReason;
 
 /// When an edge is followed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
@@ -55,7 +56,9 @@ pub(crate) struct RunGraphNode {
     pub(crate) current: bool,
 }
 
-/// One edge of a run's graph, and how often the run took it.
+/// One edge of a run's graph, and how often the run took it: a declared
+/// edge, or a move the run made that no declared edge joins (a fan-out stage
+/// sent to its merge stage, a person moving the run).
 #[mirror(no_filter)]
 #[derive(Debug, SimpleObject)]
 pub(crate) struct RunGraphEdge {
@@ -63,10 +66,13 @@ pub(crate) struct RunGraphEdge {
     pub(crate) from: String,
     /// The stage it enters.
     pub(crate) to: String,
-    /// Its name, unique among the edges leaving `from`.
-    pub(crate) name: String,
-    /// When it is followed.
-    pub(crate) condition: EdgeCondition,
+    /// Its name, unique among the edges leaving `from`. Null for a move no
+    /// edge joins.
+    pub(crate) name: Option<String>,
+    /// When it is followed. Null for a move no edge joins.
+    pub(crate) condition: Option<EdgeCondition>,
+    /// Why the run made a move no edge joins. Null for a declared edge.
+    pub(crate) reason: Option<TransitionReason>,
     /// How many times the run took it, counted from the moves its run file
     /// records.
     pub(crate) taken: i32,
@@ -78,7 +84,8 @@ pub(crate) struct RunGraphEdge {
 pub(crate) struct RunGraph {
     /// The stages, in the graph's order.
     pub(crate) nodes: Vec<RunGraphNode>,
-    /// The edges, in the graph's order.
+    /// The edges, in the graph's order, then each move the run made that no
+    /// edge joins, in the order it first made it.
     pub(crate) edges: Vec<RunGraphEdge>,
 }
 
@@ -101,7 +108,8 @@ impl From<&RunGraphView> for RunGraph {
                     from: edge.from.clone(),
                     to: edge.to.clone(),
                     name: edge.name.clone(),
-                    condition: EdgeCondition::from(edge.condition),
+                    condition: edge.condition.map(EdgeCondition::from),
+                    reason: edge.reason.map(TransitionReason::from),
                     taken: saturating(edge.taken),
                 })
                 .collect(),

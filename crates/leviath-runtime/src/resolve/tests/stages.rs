@@ -181,7 +181,7 @@ async fn a_required_tool_the_machine_lacks_is_refused_with_what_it_has() {
             (
                 "plan".to_string(),
                 Err(SpawnIssue::new(
-                    SpecPath::root().key("gh"),
+                    SpecPath::root().field("tools").key("gh"),
                     IssueCode::Unavailable,
                     "server gh is not connected",
                 )

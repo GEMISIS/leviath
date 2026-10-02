@@ -128,11 +128,58 @@ fn daemon(dir: &std::path::Path, reply: String) -> (ControlId, tokio::task::Join
 
 /// Ask a daemon answering `reply` to check a run.
 async fn check(reply: String, json: bool) -> anyhow::Result<()> {
+    check_run(&LocalRun::default(), reply, json).await
+}
+
+/// Ask a daemon answering `reply` to check `run`.
+async fn check_run(run: &LocalRun, reply: String, json: bool) -> anyhow::Result<()> {
     let dir = tempfile::tempdir().unwrap();
     let (id, server) = daemon(dir.path(), reply);
-    let result = send_check(&ControlClient::new(id), &LocalRun::default(), json).await;
+    let result = send_check(&ControlClient::new(id), run, json).await;
     server.await.unwrap();
     result
+}
+
+/// What the command line found wrong is reported with the daemon's answer,
+/// first, and a run with any is refused even when the daemon finds nothing.
+#[tokio::test]
+async fn the_command_lines_own_problems_join_the_daemons() {
+    use leviath_runtime::spec::issues::{IssueCode, SpawnIssue, SpawnIssues, SpecPath};
+    let run = LocalRun {
+        issues: SpawnIssues(vec![SpawnIssue::new(
+            SpecPath::root().field("inputs").key("depth"),
+            IssueCode::WrongType,
+            "this is not a whole number",
+        )]),
+        ..LocalRun::default()
+    };
+    let valid = serde_json::to_string(&ControlResponse::Valid {
+        summary: Box::new(summary()),
+    })
+    .unwrap();
+    let err = check_run(&run, valid, false).await.unwrap_err().to_string();
+    assert!(err.starts_with("1 problem with this run:"), "{err}");
+    assert!(err.contains("inputs.depth: wrong type"), "{err}");
+
+    let rejected = crate::test_support::rejected_reply("no such stage").to_string();
+    let err = check_run(&run, rejected, true)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("2 problems with this run:"), "{err}");
+    let (cli, theirs) = (err.find("inputs.depth").unwrap(), err.find("no such stage"));
+    assert!(theirs.is_some_and(|d| d > cli), "{err}");
+
+    // A spawn with such problems is only checked, never started.
+    let dir = tempfile::tempdir().unwrap();
+    let rejected = crate::test_support::rejected_reply("no such stage").to_string();
+    let (id, server) = daemon(dir.path(), rejected);
+    let err = crate::daemon::client::send_spawn_batch(&ControlClient::new(id), run, 1, false)
+        .await
+        .unwrap_err()
+        .to_string();
+    server.await.unwrap();
+    assert!(err.starts_with("2 problems with this run:"), "{err}");
 }
 
 #[tokio::test]

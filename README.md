@@ -129,8 +129,8 @@ This writes an `agent.toml` blueprint you can customize: the inputs it takes, mo
 
 ## Agents
 
-Seven agents ship out of the box, covering coding, review, research, data gathering, and log
-analysis. Each is a multi-stage directed graph with structured context regions, per-stage model
+Eleven agents ship out of the box, covering coding, review, research, data gathering, log
+analysis, and building 3D models. Each is a multi-stage directed graph with structured context regions, per-stage model
 fallback, and error recovery, and five of them fan out to cover several things at once instead of
 one after another. `coder` is the largest:
 

@@ -38,36 +38,25 @@ pub(super) async fn plan_all(
     let mut found = Vec::new();
     for stage in &graph.stages {
         let sat = at.field("stages").key(stage.name.as_str());
-        let requested = request
-            .model
-            .as_ref()
-            .filter(|_| stage.model.allow_user_default);
-        let model = match env.model(stage, requested).await {
-            Ok(plan) => Some(plan),
-            Err(issue) => {
-                issues.push(rebase(&sat.field("model"), issue));
-                None
-            }
-        };
+        let model = model_of(stage, request, at, env, issues).await;
         let tools = match env
             .tools(graph, stage, code, src.base.as_deref(), workdir)
             .await
         {
             Ok(got) => {
                 found.extend(got.code);
-                got.tools
+                Some(got.tools)
             }
             Err(refused) => {
-                let base = sat.field("tools");
                 issues.absorb(SpawnIssues(
-                    refused.0.into_iter().map(|i| rebase(&base, i)).collect(),
+                    refused.0.into_iter().map(|i| rebase(&sat, i)).collect(),
                 ));
-                Vec::new()
+                None
             }
         };
         chosen.push((model, tools));
     }
-    let chosen: Vec<(ModelPlan, Vec<ToolDef>)> = chosen
+    let chosen: Vec<(ModelPlan, Option<Vec<ToolDef>>)> = chosen
         .into_iter()
         .map(|(model, tools)| model.map(|m| (m, tools)))
         .collect::<Option<_>>()?;
@@ -81,6 +70,45 @@ pub(super) async fn plan_all(
         plans.push(plan(graph, stage, request, model, tools, budgets));
     }
     Some((plans, found))
+}
+
+/// Only each stage's model, for a graph that does not hold together. A
+/// stage's model depends on nothing but the stage, so its issues come back
+/// beside the graph's own rather than after they are fixed. A name two stages
+/// share is asked about once.
+pub(super) async fn check_models(
+    graph: &RunGraph,
+    request: &SpawnRequest,
+    at: &SpecPath,
+    env: &dyn ResolveEnv,
+    issues: &mut SpawnIssues,
+) {
+    let mut asked = BTreeSet::new();
+    for stage in graph.stages.iter().filter(|s| asked.insert(&s.name)) {
+        model_of(stage, request, at, env, issues).await;
+    }
+}
+
+/// A stage's model, or its issue under the stage's path.
+async fn model_of(
+    stage: &StageDef,
+    request: &SpawnRequest,
+    at: &SpecPath,
+    env: &dyn ResolveEnv,
+    issues: &mut SpawnIssues,
+) -> Option<ModelPlan> {
+    let requested = request
+        .model
+        .as_ref()
+        .filter(|_| stage.model.allow_user_default);
+    match env.model(stage, requested).await {
+        Ok(plan) => Some(plan),
+        Err(issue) => {
+            let base = at.field("stages").key(stage.name.as_str()).field("model");
+            issues.push(rebase(&base, issue));
+            None
+        }
+    }
 }
 
 fn plan(
@@ -123,14 +151,19 @@ fn plan(
 /// prompt for a person, unless the stage names it in `required_tools`: the
 /// model never sees it, so it decides for itself instead of spending a turn to
 /// be told nobody is there. This is the one place that cut is made. Then every
-/// tool the stage requires must be there.
+/// tool the stage requires must be there. `None` is a stage whose tools the
+/// host refused, with its own issues already said: it gets none, and nothing
+/// more is said about them.
 fn stage_tools(
     stage: &StageDef,
-    mut tools: Vec<ToolDef>,
+    tools: Option<Vec<ToolDef>>,
     auto: &AutoAnswers,
     sat: &SpecPath,
     issues: &mut SpawnIssues,
 ) -> Vec<ToolDef> {
+    let Some(mut tools) = tools else {
+        return Vec::new();
+    };
     if auto.questions {
         tools.retain(|t| {
             !BLOCKING_INTERACTION_TOOLS.contains(&t.name.as_str())

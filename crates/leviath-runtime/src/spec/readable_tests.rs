@@ -408,6 +408,74 @@ fn a_short_form_of_the_wrong_shape_is_named() {
     );
 }
 
+/// Each short form's published schema says what its reader takes: a whole
+/// number only where one is read, the names that stand alone as an enum, the
+/// table's `kind` as an enum, and a percentage as a pattern.
+#[test]
+fn each_short_form_schema_is_as_precise_as_its_reader() {
+    use serde_json::{Value, json};
+    let schema =
+        serde_json::to_value(schemars::schema_for!(crate::spec::request::SpawnRequest)).unwrap();
+    let defs = &schema["$defs"];
+    let branches = |name: &str| -> Vec<Value> {
+        defs[name]["anyOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: {}", defs[name]))
+            .clone()
+    };
+    let typed = |name: &str, ty: &str| -> Vec<Value> {
+        branches(name)
+            .into_iter()
+            .filter(|b| b["type"] == ty)
+            .collect()
+    };
+    let names = |name: &str| -> Vec<String> {
+        let found: Vec<Value> = branches(name)
+            .into_iter()
+            .filter(|b| b.get("enum").is_some())
+            .collect();
+        assert_eq!(found.len(), 1, "{name}: {found:?}");
+        serde_json::from_value(found[0]["enum"].clone()).unwrap()
+    };
+    for name in ["InputType", "RegionKind", "InputSlot"] {
+        assert!(typed(name, "integer").is_empty(), "{name} reads no number");
+        assert!(
+            typed(name, "string")
+                .iter()
+                .all(|b| b.get("enum").is_some()),
+            "{name}: names, not any text"
+        );
+    }
+    for ty in names("InputType") {
+        serde_json::from_value::<InputType>(json!(ty)).unwrap();
+    }
+    assert!(names("InputType").contains(&"text".to_string()));
+    assert!(!names("InputType").contains(&"choice".to_string()));
+    for kind in names("RegionKind") {
+        serde_json::from_value::<RegionKind>(json!(kind)).unwrap();
+    }
+    assert!(!names("RegionKind").contains(&"custom".to_string()));
+    assert_eq!(names("InputSlot"), ["output_format", "output_instructions"]);
+    let kinds = |table: &str| -> Vec<String> {
+        serde_json::from_value(defs[table]["properties"]["kind"]["enum"].clone())
+            .unwrap_or_else(|e| panic!("{table}: {e}"))
+    };
+    assert_eq!(kinds("TypeTable").join(", "), TYPE_NAMES);
+    assert_eq!(kinds("KindTable").join(", "), KIND_NAMES);
+    for name in ["Budget", "OutputCap"] {
+        let whole = typed(name, "integer");
+        assert_eq!(whole.len(), 1, "{name}");
+        assert_eq!(whole[0]["minimum"], 0);
+        assert_eq!(whole[0]["maximum"], u32::MAX);
+        let text = typed(name, "string");
+        assert!(text[0]["pattern"].is_string(), "{name}: {text:?}");
+    }
+    assert!(
+        !serde_json::to_string(defs).unwrap().contains("NoTable"),
+        "a reply cap has no table form"
+    );
+}
+
 #[test]
 fn the_short_forms_publish_their_own_schema() {
     let schema =

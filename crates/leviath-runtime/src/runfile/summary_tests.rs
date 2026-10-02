@@ -59,6 +59,29 @@ fn a_run_is_listed_as_of_its_last_step() {
     assert_eq!(meta.final_output.unwrap().submitted_at, 7);
 }
 
+/// Why a run has no title, and how many of its read paths were granted, are
+/// listed from the run file as they were from the live run.
+#[test]
+fn a_run_lists_its_title_error_and_read_path_grants() {
+    let (_dir, path, mut writer) = written();
+    let mut next = writer.state().clone();
+    next.title_error = Some("mock/m failed: HTTP 403".to_string());
+    next.read_paths = Some(crate::state::ReadPathCounts {
+        declared: 3,
+        granted: 2,
+    });
+    writer.record(next, 99, Vec::new()).unwrap();
+    let meta = summary(&RunFileReader::open(&path).unwrap()).unwrap();
+    assert_eq!(meta.title_error.as_deref(), Some("mock/m failed: HTTP 403"));
+    assert_eq!(
+        meta.read_paths,
+        Some(leviath_core::run_meta::ReadPathGrantCounts {
+            declared: 3,
+            granted: 2
+        })
+    );
+}
+
 /// A run of a blueprint read from its directory names the file it ran, and
 /// a parked run says why it is parked.
 #[test]

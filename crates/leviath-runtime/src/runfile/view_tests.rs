@@ -60,3 +60,19 @@ fn a_cleared_field_is_named_as_none() {
     let change = &table["delta"][0]["changes"][0];
     assert_eq!(change["Pending"].as_str(), Some("none"), "{table}");
 }
+
+/// A table of settings that are all unset is an empty table: its fields are
+/// absent, not each the word "none".
+#[test]
+fn settings_left_unset_are_absent_not_none() {
+    let value = serde_json::json!({
+        "nudge": { "enabled": null, "max": null, "text": null },
+        "hooks": { "after_inference": null, "on_error": null },
+        "kept": { "max": null, "text": "go" },
+    });
+    let text = render("spec", &value);
+    assert!(!text.contains("none"), "{text}");
+    let table = parse(&text);
+    assert!(table["spec"]["nudge"].as_table().unwrap().is_empty());
+    assert_eq!(table["spec"]["kept"]["text"].as_str(), Some("go"));
+}

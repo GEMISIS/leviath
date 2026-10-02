@@ -216,12 +216,22 @@ impl fmt::Display for SpawnIssue {
             (None, None) => {}
         }
         if let Some(hint) = &self.hint {
-            out.push_str(&format!(". {hint}"));
+            end_sentence(&mut out);
+            out.push_str(hint);
         }
         if !self.known.is_empty() {
-            out.push_str(&format!(". Known: {}", self.known.join(", ")));
+            end_sentence(&mut out);
+            out.push_str(&format!("Known: {}", self.known.join(", ")));
         }
         f.write_str(&out)
+    }
+}
+
+/// Close the sentence `out` ends with, unless it already closes itself.
+fn end_sentence(out: &mut String) {
+    match out.ends_with(['.', '!', '?']) {
+        true => out.push(' '),
+        false => out.push_str(". "),
     }
 }
 
@@ -346,6 +356,15 @@ mod tests {
         assert_eq!(only_e.to_string(), "(request): invalid: x (expected y)");
         let only_g = SpawnIssue::new(SpecPath::root(), IssueCode::Invalid, "x").got("z");
         assert_eq!(only_g.to_string(), "(request): invalid: x (got z)");
+        // A message or hint that ends its own sentence is not given a second
+        // full stop.
+        let closed = SpawnIssue::new(SpecPath::root(), IssueCode::Invalid, "no restart.")
+            .hint("really?")
+            .known(["a"]);
+        assert_eq!(
+            closed.to_string(),
+            "(request): invalid: no restart. really? Known: a"
+        );
     }
 
     #[test]
