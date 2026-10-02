@@ -120,8 +120,11 @@ pub(crate) fn route_for(
 }
 
 /// A file name every vendor takes: the part's own name without the
-/// characters some refuse, else one made from its hash.
-fn file_name(name: Option<&str>, sha256: &str) -> String {
+/// characters some refuse, else one made from its hash, ending in an
+/// extension its type claims. OpenAI reads an image's format from the name
+/// alone, so a name with no such extension gains the type's first one
+/// (`extensions`, from the mime registry).
+fn file_name(name: Option<&str>, sha256: &str, extensions: &[String]) -> String {
     let cleaned: String = name
         .unwrap_or_default()
         .chars()
@@ -132,9 +135,17 @@ fn file_name(name: Option<&str>, sha256: &str) -> String {
         })
         .take(200)
         .collect();
-    match cleaned.trim() {
+    let name = match cleaned.trim() {
         "" => format!("part-{}", sha256.get(..12).unwrap_or(sha256)),
         name => name.to_string(),
+    };
+    let claimed = Path::new(&name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
+    match (claimed, extensions.first()) {
+        (false, Some(extension)) => format!("{name}.{extension}"),
+        _ => name,
     }
 }
 
@@ -142,11 +153,13 @@ fn file_name(name: Option<&str>, sha256: &str) -> String {
 /// take by file: a copy the ledger holds, or a fresh upload. `again` uploads
 /// every part already named, for a request the vendor answered with a file it
 /// no longer has. A part whose bytes cannot be read, or whose upload fails,
-/// stays as it was and goes inline. Returns how many parts were uploaded.
+/// stays as it was and goes inline. `registry` names each upload's
+/// extension. Returns how many parts were uploaded.
 pub(crate) async fn attach(
     request: &mut InferenceRequest,
     route: &FileRoute,
     mime: &ModelMime,
+    registry: &leviath_core::mime::MimeRegistry,
     store: &dyn leviath_core::mime::BlobStore,
     run_id: &str,
     again: bool,
@@ -198,7 +211,11 @@ pub(crate) async fn attach(
             let upload = FileUpload {
                 bytes,
                 mime_type: part.mime_type.to_string(),
-                name: file_name(name.as_deref(), &part.sha256),
+                name: file_name(
+                    name.as_deref(),
+                    &part.sha256,
+                    &registry.info(&part.mime_type).extensions,
+                ),
                 ttl_secs: route.ttl_secs,
             };
             match route.provider.upload_file(&upload).await {

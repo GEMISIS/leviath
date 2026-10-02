@@ -7,10 +7,11 @@
 //! status. An `error` event is a failure delivered inside a 200.
 //!
 //! Text is passed on as it arrives. A function call's arguments may arrive in
-//! pieces, as objects to merge rather than text to append, so a call is
-//! assembled here and handed on whole when its step stops. A thought's
-//! signature rides on the calls that follow it, which is where the request
-//! builder hands it back.
+//! pieces, either as objects to merge or as `arguments_delta` text to join and
+//! read once the step stops, so a call is assembled here and handed on whole.
+//! A thought's signature rides on the calls that follow it, which is where the
+//! request builder hands it back; a call signed on its own step with no
+//! thought ahead of it keeps its own.
 
 use base64::Engine as _;
 use serde_json::{Map, Value};
@@ -24,6 +25,10 @@ struct Call {
     id: String,
     name: String,
     arguments: Map<String, Value>,
+    /// `arguments_delta` text so far, read as one document when the step stops.
+    arguments_text: String,
+    /// The signature on the call's own step.
+    signature: Option<String>,
 }
 
 /// State carried across the events of one interaction.
@@ -94,6 +99,10 @@ pub(crate) fn parse_event(
                     let call = turn.calls.entry(index).or_default();
                     call.id = str_of(step, "id");
                     call.name = str_of(step, "name");
+                    call.signature = step
+                        .get("signature")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     merge_arguments(call, step.get("arguments"));
                     None
                 }
@@ -124,12 +133,24 @@ pub(crate) fn parse_event(
                     merge_arguments(call, delta.get("arguments"));
                     None
                 }
+                "arguments_delta" => {
+                    let call = turn.calls.entry(index).or_default();
+                    call.arguments_text.push_str(
+                        delta
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    None
+                }
                 _ => content_chunk(Some(&Value::Array(vec![delta.clone()])), turn),
             }
         }
         "step.stop" => {
             record_usage(turn, json.get("usage"));
-            let call = turn.calls.remove(&index)?;
+            let mut call = turn.calls.remove(&index)?;
+            let text = std::mem::take(&mut call.arguments_text);
+            merge_arguments(&mut call, Some(&Value::String(text)));
             // The API names its calls; a reply that arrives without one still
             // has to be answerable, and an empty id is the one value that
             // cannot be.
@@ -142,7 +163,7 @@ pub(crate) fn parse_event(
                 id: Some(id),
                 name: Some(call.name),
                 arguments_delta: Value::Object(call.arguments).to_string(),
-                thought_signature: turn.signature.clone(),
+                thought_signature: turn.signature.clone().or(call.signature),
             };
             turn.finished_calls += 1;
             Some(Some(Ok(StreamChunk {

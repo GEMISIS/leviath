@@ -8,9 +8,9 @@
 //!
 //! - `system` text becomes `system_instruction`;
 //! - a `user` message becomes a `user_input` step;
-//! - an assistant's text becomes a `model_output` step, and each call it made a
-//!   `function_call` step, preceded by a `thought` step carrying the signature
-//!   Gemini issued for it;
+//! - an assistant message opens with a `thought` step for each signature
+//!   Gemini issued its calls, then its text as a `model_output` step, then
+//!   each call as a `function_call` step;
 //! - a tool result becomes a `function_result` step naming its call.
 
 use serde_json::{Map, Value, json};
@@ -139,13 +139,28 @@ fn merge_extra(body: &mut Map<String, Value>, generation: &mut Map<String, Value
     }
 }
 
-/// An assistant message's steps: its text, then each call behind its
-/// signature.
+/// An assistant message's steps: the signed thoughts its calls came from, then
+/// its text, then each call. A model turn that holds a thought must open with
+/// it, so the thoughts lead even when the model spoke before calling; calls
+/// that share a signature share one thought.
 fn push_assistant(
     steps: &mut Vec<Value>,
     names: &mut std::collections::HashMap<String, String>,
     message: &Value,
 ) {
+    let calls = message["tool_calls"].as_array().map(Vec::as_slice);
+    let mut signatures: Vec<&str> = calls
+        .into_iter()
+        .flatten()
+        .filter_map(|call| {
+            call.pointer("/extra_content/google/thought_signature")
+                .and_then(Value::as_str)
+        })
+        .collect();
+    signatures.dedup();
+    for signature in signatures {
+        steps.push(json!({ "type": "thought", "signature": signature }));
+    }
     let text = text_of(&message["content"]);
     if !text.is_empty() {
         steps.push(json!({
@@ -153,19 +168,13 @@ fn push_assistant(
             "content": [{ "type": "text", "text": text }],
         }));
     }
-    for call in message["tool_calls"].as_array().into_iter().flatten() {
+    for call in calls.into_iter().flatten() {
         let id = call["id"].as_str().unwrap_or_default();
         let name = call
             .pointer("/function/name")
             .and_then(Value::as_str)
             .unwrap_or_default();
         names.insert(id.to_string(), name.to_string());
-        if let Some(signature) = call
-            .pointer("/extra_content/google/thought_signature")
-            .and_then(Value::as_str)
-        {
-            steps.push(json!({ "type": "thought", "signature": signature }));
-        }
         steps.push(json!({
             "type": "function_call",
             "id": id,

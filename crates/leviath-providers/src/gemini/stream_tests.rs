@@ -284,3 +284,63 @@ fn a_call_that_arrives_with_no_id_is_given_one() {
     assert!(id.starts_with("gemini_call_"), "{id}");
     assert_eq!(call.name.as_deref(), Some("set"));
 }
+
+/// The events gemini-3.5-flash-lite sent for one call, as recorded: the
+/// arguments come as an `arguments_delta` holding JSON text, and the call step
+/// carries a signature of its own beside the thought's.
+#[test]
+fn arguments_sent_as_text_deltas_reach_the_call() {
+    let chunks = run(&[
+        json!({ "event_type": "step.start", "index": 0, "step": { "type": "thought" } }),
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "signature": "EmAKXgFp", "type": "thought_signature" } }),
+        json!({ "event_type": "step.stop", "index": 0 }),
+        json!({ "event_type": "step.start", "index": 1, "step": { "id": "call_74410", "signature": "AWkUfROB", "type": "function_call", "name": "read_file", "arguments": {} } }),
+        json!({ "event_type": "step.delta", "index": 1, "delta": { "arguments": "{\"path\":\"input.txt\"}", "type": "arguments_delta" } }),
+        json!({ "event_type": "step.stop", "index": 1 }),
+        json!({ "event_type": "interaction.completed", "interaction": { "status": "requires_action" } }),
+    ]);
+    let chunks: Vec<StreamChunk> = chunks.into_iter().map(Result::unwrap).collect();
+    let calls: Vec<&ToolCallDelta> = chunks.iter().flat_map(|c| c.tool_calls.iter()).collect();
+    assert_eq!(calls.len(), 1);
+    let args: Value = serde_json::from_str(&calls[0].arguments_delta).unwrap();
+    assert_eq!(args, json!({ "path": "input.txt" }));
+    assert_eq!(calls[0].thought_signature.as_deref(), Some("EmAKXgFp"));
+}
+
+/// Text deltas are pieces of one JSON document, joined before they are read.
+#[test]
+fn arguments_split_across_text_deltas_are_joined() {
+    let chunks = run(&[
+        json!({ "event_type": "step.start", "index": 0, "step": { "id": "c", "type": "function_call", "name": "w", "arguments": { "a": 1 } } }),
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "arguments": "{\"pa", "type": "arguments_delta" } }),
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "arguments": "th\":\"x\"}", "type": "arguments_delta" } }),
+        json!({ "event_type": "step.delta", "index": 0, "delta": { "type": "arguments_delta" } }),
+        json!({ "event_type": "step.stop", "index": 0 }),
+        json!({ "event_type": "step.start", "index": 1, "step": { "id": "d", "type": "function_call", "name": "w" } }),
+        json!({ "event_type": "step.delta", "index": 1, "delta": { "arguments": "{\"cut", "type": "arguments_delta" } }),
+        json!({ "event_type": "step.stop", "index": 1 }),
+    ]);
+    let chunks: Vec<StreamChunk> = chunks.into_iter().map(Result::unwrap).collect();
+    let calls: Vec<&ToolCallDelta> = chunks.iter().flat_map(|c| c.tool_calls.iter()).collect();
+    let args: Value = serde_json::from_str(&calls[0].arguments_delta).unwrap();
+    assert_eq!(args, json!({ "a": 1, "path": "x" }));
+    assert_eq!(
+        calls[1].arguments_delta, "{}",
+        "text that never closes adds nothing"
+    );
+}
+
+/// A call signed on its own step, with no thought ahead of it, keeps that
+/// signature.
+#[test]
+fn a_call_signed_on_its_own_step_keeps_its_signature() {
+    let chunks = run(&[
+        json!({ "event_type": "step.start", "index": 0, "step": { "id": "c", "signature": "own", "type": "function_call", "name": "w" } }),
+        json!({ "event_type": "step.stop", "index": 0 }),
+    ]);
+    let chunks: Vec<StreamChunk> = chunks.into_iter().map(Result::unwrap).collect();
+    assert_eq!(
+        chunks[0].tool_calls[0].thought_signature.as_deref(),
+        Some("own")
+    );
+}

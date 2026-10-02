@@ -162,7 +162,16 @@ async fn a_part_uploads_once_and_every_later_request_names_it() {
         pdf.clone(),
         obj,
     ]);
-    let uploaded = attach(&mut first, &route, &vision(), &run.store, "run-1", false).await;
+    let uploaded = attach(
+        &mut first,
+        &route,
+        &vision(),
+        &run.registry,
+        &run.store,
+        "run-1",
+        false,
+    )
+    .await;
     assert_eq!(uploaded, 1, "the same part twice is one upload");
     assert_eq!(
         remote_ids(&first),
@@ -173,7 +182,16 @@ async fn a_part_uploads_once_and_every_later_request_names_it() {
 
     let mut second = request(vec![pdf.clone()]);
     assert_eq!(
-        attach(&mut second, &route, &vision(), &run.store, "run-1", false).await,
+        attach(
+            &mut second,
+            &route,
+            &vision(),
+            &run.registry,
+            &run.store,
+            "run-1",
+            false
+        )
+        .await,
         0
     );
     assert_eq!(remote_ids(&second), [Some("file-0".into())]);
@@ -197,7 +215,16 @@ async fn a_part_uploads_once_and_every_later_request_names_it() {
         reasoning: None,
     };
     assert_eq!(
-        attach(&mut refused, &route, &vision(), &run.store, "run-1", true).await,
+        attach(
+            &mut refused,
+            &route,
+            &vision(),
+            &run.registry,
+            &run.store,
+            "run-1",
+            true
+        )
+        .await,
         1
     );
     assert_eq!(
@@ -228,6 +255,7 @@ async fn a_failed_upload_goes_inline_and_a_provider_without_files_is_skipped() {
             &mut req,
             &route(&run, refusing),
             &vision(),
+            &run.registry,
             &run.store,
             "run-1",
             false
@@ -248,6 +276,7 @@ async fn a_failed_upload_goes_inline_and_a_provider_without_files_is_skipped() {
             &mut req,
             &route(&run, without),
             &vision(),
+            &run.registry,
             &run.store,
             "run-1",
             false
@@ -265,6 +294,7 @@ async fn a_failed_upload_goes_inline_and_a_provider_without_files_is_skipped() {
             &mut missing,
             &route(&run, Arc::new(gone)),
             &vision(),
+            &run.registry,
             &run.store,
             "run-1",
             false
@@ -297,6 +327,7 @@ async fn an_expiring_entry_is_uploaded_again_and_a_bad_ledger_starts_afresh() {
         &mut req,
         &route(&run, storage.clone()),
         &vision(),
+        &run.registry,
         &run.store,
         "run-1",
         false,
@@ -315,6 +346,7 @@ async fn an_expiring_entry_is_uploaded_again_and_a_bad_ledger_starts_afresh() {
         &mut again,
         &route(&run, storage),
         &vision(),
+        &run.registry,
         &run.store,
         "run-1",
         false,
@@ -349,13 +381,18 @@ async fn forgetting_a_run_leaves_what_it_cannot_delete_to_expire() {
 
 #[test]
 fn a_file_name_keeps_a_readable_name_and_falls_back_to_the_hash() {
-    assert_eq!(file_name(Some("a<b>.png"), "abc"), "a_b_.png");
+    let png = ["png".to_string()];
+    assert_eq!(file_name(Some("a<b>.png"), "abc", &png), "a_b_.png");
     assert_eq!(
-        file_name(Some("  "), "0123456789abcdef"),
-        "part-0123456789ab"
+        file_name(Some("  "), "0123456789abcdef", &png),
+        "part-0123456789ab.png"
     );
-    assert_eq!(file_name(None, "short"), "part-short");
-    assert_eq!(file_name(Some("x\ny"), "s"), "x_y");
+    assert_eq!(file_name(None, "short", &[]), "part-short");
+    assert_eq!(
+        file_name(Some("x\ny"), "s", &[]),
+        "x_y",
+        "a type that claims no extension adds none"
+    );
 }
 
 #[tokio::test]
@@ -522,8 +559,57 @@ async fn a_ledger_that_cannot_be_written_leaves_the_upload_in_place() {
     };
     let mut req = request(vec![pdf]);
     assert_eq!(
-        attach(&mut req, &route, &vision(), &run.store, "run-1", false).await,
+        attach(
+            &mut req,
+            &route,
+            &vision(),
+            &run.registry,
+            &run.store,
+            "run-1",
+            false
+        )
+        .await,
         1
     );
     assert_eq!(remote_ids(&req), [Some("file-0".into())]);
+}
+
+/// OpenAI reads an uploaded image's format from its file name, and refuses
+/// one with no extension ("Expected image type ... but got none"). A part
+/// named after an artifact (`image`), or not named at all, is uploaded under
+/// a name that ends in its type's extension.
+#[tokio::test]
+async fn an_upload_is_named_with_its_types_extension() {
+    let run = run();
+    std::fs::create_dir_all(&run.run_dir).unwrap();
+    let storage = Arc::new(Storage::default());
+    let route = route(&run, storage.clone());
+    let mut req = request(vec![
+        stored(&run, "image/png", b"\x89PNG\r\n\x1a\n1", Some("image")),
+        stored(&run, "image/png", b"\x89PNG\r\n\x1a\n2", None),
+        stored(&run, "image/jpeg", b"\xff\xd8\xff3", Some("photo.JPEG")),
+        stored(&run, "image/png", b"\x89PNG\r\n\x1a\n4", Some("shot.jpg")),
+    ]);
+    assert_eq!(
+        attach(
+            &mut req,
+            &route,
+            &vision(),
+            &run.registry,
+            &run.store,
+            "run-1",
+            false
+        )
+        .await,
+        4
+    );
+    let names = storage.names.lock().unwrap().clone();
+    assert_eq!(names[0], "image.png");
+    assert!(names[1].starts_with("part-"));
+    assert!(names[1].ends_with(".png"));
+    assert_eq!(names[2], "photo.JPEG", "an extension the type claims stays");
+    assert_eq!(
+        names[3], "shot.jpg.png",
+        "one the type does not claim gains its own"
+    );
 }
