@@ -1,7 +1,6 @@
 //! Recording what changed a context window, as it changes.
 //!
-//! The persistence lane already carries the window itself, in each step's
-//! state. That is what a region held; it is not what moved it, and the two are
+//! A run's file already carries the window itself, in each step's state. That is what a region held; it is not what moved it, and the two are
 //! not recoverable from one another: a plan region that emptied looks the same
 //! whether a compaction took it, a stage-edge transform cleared it, or the model
 //! called `context_delete`.
@@ -15,12 +14,11 @@
 //! [`crate::runfile::record::RunRecord::ContextTransaction`] for what that
 //! buys a reader.
 //!
-//! Each commit appends its own small record, the same fire-and-forget shape
-//! [`crate::inference_usage`] uses for what a provider call cost:
-//! [`PersistMsg::Append`](crate::persistence_bridge::PersistMsg::Append) with no ack, because nothing downstream waits on it.
-//! Deliberately not a buffer on the window drained by the snapshot lane - that
-//! lane takes the window immutably and coalesces superseded snapshots, so a
-//! buffer would lose writes on exactly the busiest ticks.
+//! Each commit sends its own small record to the world's journal, the same
+//! fire-and-forget shape [`crate::inference_usage`] uses for what a provider
+//! call cost: no ack, because nothing downstream waits on it. Deliberately not
+//! a buffer on the window drained by the snapshot system - that system takes
+//! the window immutably, so a buffer would need a second pass to empty it.
 //!
 //! The handle lives on the window because the writers do not have one. A write
 //! happens wherever a `&mut ContextWindow` does: inside a tool handler, a
@@ -33,7 +31,7 @@ use crate::runfile::record::{RegionCommit, RunRecord};
 use leviath_core::ContextCause;
 use leviath_core::run_meta::revision::{EntryFacts, RegionFacts, region_digest, window_revision};
 
-use crate::persistence_bridge::PersistMsg;
+use crate::pipeline::journal::Journaled;
 
 use super::ContextWindow;
 
@@ -50,16 +48,13 @@ pub(crate) struct ContextJournal {
     /// compaction, a nudge - commits with this empty, and the record then says
     /// that no execution was known rather than borrowing the last one.
     executing: String,
-    /// The persistence lane, downgraded from the world's `PersistenceStage`.
+    /// The world's journal, downgraded from its `JournalSender`.
     ///
-    /// Weak, and that is the whole point. A clean shutdown closes the lane by
-    /// dropping the world's own sender and then waiting for the worker's `recv`
-    /// to end, so anything else holding a live sender holds the shutdown open
-    /// instead: one window per agent, each keeping the channel alive, and
-    /// `lev daemon stop` never returns. A weak handle cannot do that. It also
-    /// says the right thing about who the lane belongs to - the world owns it,
-    /// and a window only writes down it while it is open.
-    sender: tokio::sync::mpsc::WeakUnboundedSender<PersistMsg>,
+    /// Weak, because the journal belongs to the world: a window only writes
+    /// to it while the world keeps it open, and one window per agent holding
+    /// it open would keep records arriving at a world that has stopped
+    /// reading them.
+    sender: tokio::sync::mpsc::WeakUnboundedSender<Journaled>,
 }
 
 /// What one region held when a transaction opened.
@@ -129,23 +124,22 @@ impl ContextWindow {
     /// Point this window's change records at the run's journal.
     ///
     /// Called once, at spawn, which is the one place both halves are in hand:
-    /// the run id the archive is named after, and the lane the rest of the
-    /// runtime appends through. A window with no journal - every test window,
+    /// the run id the archive is named after, and the journal the rest of the
+    /// runtime records through. A window with no journal - every test window,
     /// `lev test`, an agent in a world that persists nothing - records nothing
     /// and is otherwise unaffected.
     ///
-    /// A record can only land once the run's archive exists, and it is the first
-    /// snapshot that creates it. The seeds written during spawn itself are
-    /// therefore dropped by the lane, exactly as an early usage record is.
+    /// The seeds are written before this is called, so they are in the run's
+    /// first state and never a change of their own.
     pub(crate) fn attach_journal(
         &mut self,
         run_id: &str,
-        persist: Option<&crate::pipeline::PersistenceStage>,
+        persist: Option<&crate::pipeline::JournalSender>,
     ) {
         self.journal = persist.map(|stage| ContextJournal {
             run_id: run_id.to_string(),
             executing: String::new(),
-            sender: stage.0.downgrade(),
+            sender: stage.downgrade(),
         });
     }
 
@@ -274,15 +268,15 @@ impl ContextWindow {
             execution_id: journal.executing.clone(),
             at: chrono::Utc::now().timestamp(),
         };
-        // A lane that has closed takes nothing: the world drops its sender to
-        // shut the lane down, and a write racing that is a write nobody is
-        // waiting on. No ack either - a change record is history, and the run
-        // does not wait on its own history the way the tool lane waits on a
-        // batch record.
+        // A journal that has closed takes nothing: the world drops its sender
+        // as it stops, and a write racing that is a write nobody is waiting
+        // on. No ack either - a change record is history, and the run does not
+        // wait on its own history the way the tool lane waits on a batch
+        // record.
         let Some(sender) = journal.sender.upgrade() else {
             return;
         };
-        let _ = sender.send(PersistMsg::Append {
+        let _ = sender.send(Journaled {
             run_id: journal.run_id.clone(),
             record: Box::new(record),
             ack: None,

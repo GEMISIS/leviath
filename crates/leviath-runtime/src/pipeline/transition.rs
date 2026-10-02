@@ -354,7 +354,7 @@ fn escape(
 pub(crate) fn resolve_transition(
     mut agents: Query<ResolveTransitionQuery, With<ResolveTransition>>,
     sink: Option<Res<crate::host::WorldEventSink>>,
-    persist: Option<Res<crate::pipeline::PersistenceStage>>,
+    persist: Option<Res<crate::pipeline::JournalSender>>,
     mut commands: Commands,
 ) {
     crate::tick_scope::clear();
@@ -589,24 +589,19 @@ pub(crate) fn transition_record(
     }))
 }
 
-/// Send a move the run just made to the persistence lane, so the step that
+/// Send a move the run just made to the world's journal, so the step that
 /// records it keeps every edge the run took, however many it took in one
-/// tick. A run with no lane, or no record of its own, keeps no journal.
+/// tick. A run with no journal, or no record of its own, keeps none.
 pub(crate) fn journal_transition(
-    persist: Option<&crate::pipeline::PersistenceStage>,
+    persist: Option<&crate::pipeline::JournalSender>,
     metadata: Option<&crate::persistence::RunMetadata>,
     taken: Option<&LastTransition>,
 ) {
     if let (Some(persist), Some(md), Some(taken)) = (persist, metadata, taken) {
-        let _ = persist
-            .0
-            .send(crate::persistence_bridge::PersistMsg::Append {
-                run_id: md.run_id.clone(),
-                record: Box::new(crate::runfile::record::RunRecord::Transition(
-                    taken.0.clone(),
-                )),
-                ack: None,
-            });
+        persist.record(
+            &md.run_id,
+            crate::runfile::record::RunRecord::Transition(taken.0.clone()),
+        );
     }
 }
 
@@ -976,7 +971,7 @@ pub fn force_transition(world: &mut World, agent: crate::world::AgentId, target_
         return;
     };
     journal_transition(
-        world.get_resource::<crate::pipeline::PersistenceStage>(),
+        world.get_resource::<crate::pipeline::JournalSender>(),
         world.get::<crate::persistence::RunMetadata>(entity),
         taken.as_ref(),
     );

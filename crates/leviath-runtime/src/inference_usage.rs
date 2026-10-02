@@ -14,8 +14,7 @@
 use crate::runfile::record::{InferenceKind, RunRecord};
 
 use crate::persistence::{RunMetadata, TokenTotals};
-use crate::persistence_bridge::PersistMsg;
-use crate::pipeline::PersistenceStage;
+use crate::pipeline::JournalSender;
 
 /// Everything one call needs to report itself.
 ///
@@ -49,7 +48,7 @@ pub(crate) struct CallUsage<'a> {
 ///
 /// All three halves are optional and independent: a world with no `TokenTotals`
 /// (a bare test agent) still journals, one with no ledger still counts, and one
-/// with no persistence lane or run metadata - tests, unpersisted agents - still
+/// with no journal or run metadata - tests, unpersisted agents - still
 /// does both. None of those absences is an error, which is why this takes
 /// options rather than making callers branch.
 ///
@@ -61,7 +60,7 @@ pub(crate) struct CallUsage<'a> {
 pub(crate) fn record_call(
     totals: Option<&mut TokenTotals>,
     ledger: Option<&mut crate::pipeline::StageLedger>,
-    persist: Option<&PersistenceStage>,
+    persist: Option<&JournalSender>,
     metadata: Option<&RunMetadata>,
     call: &CallUsage<'_>,
 ) {
@@ -116,11 +115,7 @@ pub(crate) fn record_call(
     // No ack: a usage record is telemetry, and nothing downstream waits on it
     // the way the tool lane waits on its batch record being durable before
     // anything can run.
-    let _ = persist.0.send(PersistMsg::Append {
-        run_id: md.run_id.clone(),
-        record: Box::new(record),
-        ack: None,
-    });
+    persist.record(&md.run_id, record);
 }
 
 #[cfg(test)]
@@ -175,19 +170,13 @@ mod tests {
         }
     }
 
-    /// Every `Append` the lane received, in order.
-    ///
-    /// Drained with an `if let` rather than destructured with a `let ... else
-    /// { panic!() }`: the panicking arm is a branch no test can take, and the
-    /// 100% gate counts it.
+    /// Every record the journal received, in order.
     fn appended(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::pipeline::journal::Journaled>,
     ) -> Vec<RunRecord> {
         let mut out = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg {
-                out.push(*record);
-            }
+        while let Ok(sent) = rx.try_recv() {
+            out.push(*sent.record);
         }
         out
     }
@@ -199,12 +188,11 @@ mod tests {
     fn a_reported_cost_is_journaled_as_reported() {
         let u = leviath_providers::TokenUsage::new(100, 0, 0, 20).with_reported_cost(Some(0.0042));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let noise = tx.clone();
         let mut totals = TokenTotals::default();
         record_call(
             Some(&mut totals),
             None,
-            Some(&PersistenceStage(tx)),
+            Some(&JournalSender::new(tx, None)),
             Some(&metadata()),
             &CallUsage {
                 kind: InferenceKind::Stage,
@@ -220,14 +208,6 @@ mod tests {
         assert_eq!(totals.cost.total_usd(), Some(0.0042));
         assert!(totals.cost.is_exact());
 
-        // The lane carries snapshots and buffered log lines on the same wire,
-        // so the drain has to skip what is not an append rather than assume
-        // every message is one.
-        let _ = noise.send(crate::persistence_bridge::PersistMsg::StageLines {
-            run_id: "run-u".to_string(),
-            output_appends: vec![],
-            log_appends: vec![],
-        });
         let records = appended(&mut rx);
         assert_eq!(records.len(), 1, "one call, one record");
         let shown = format!("{:?}", records[0]);
@@ -244,7 +224,7 @@ mod tests {
         record_call(
             Some(&mut totals),
             None,
-            Some(&PersistenceStage(tx)),
+            Some(&JournalSender::new(tx, None)),
             Some(&metadata()),
             &CallUsage {
                 kind: InferenceKind::Stage,
@@ -275,7 +255,7 @@ mod tests {
         record_call(
             Some(&mut totals),
             None,
-            Some(&PersistenceStage(tx)),
+            Some(&JournalSender::new(tx, None)),
             Some(&metadata()),
             &call(InferenceKind::Stage, &u),
         );
@@ -301,29 +281,18 @@ mod tests {
 
         // Both present: counted and written.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let tx_for_noise = tx.clone();
         let mut totals = TokenTotals::default();
         record_call(
             Some(&mut totals),
             None,
-            Some(&PersistenceStage(tx)),
+            Some(&JournalSender::new(tx, None)),
             Some(&metadata()),
             &call(InferenceKind::Compaction, &u),
         );
         assert_eq!(totals.prompt_tokens, 100);
-        // The persistence channel carries snapshots and buffered log lines on
-        // the same wire, so the drain has to pick ours out of mixed traffic
-        // rather than assume the next message is it.
-        let _ = tx_for_noise.send(crate::persistence_bridge::PersistMsg::StageLines {
-            run_id: "run-u".to_string(),
-            output_appends: vec![],
-            log_appends: vec![],
-        });
         let mut appended: Vec<(String, RunRecord)> = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            if let crate::persistence_bridge::PersistMsg::Append { run_id, record, .. } = msg {
-                appended.push((run_id, *record));
-            }
+        while let Ok(sent) = rx.try_recv() {
+            appended.push((sent.run_id, *sent.record));
         }
         assert_eq!(appended.len(), 1, "one call, one record");
         let (run_id, record) = appended.remove(0);
@@ -356,7 +325,7 @@ mod tests {
         record_call(
             Some(&mut totals),
             None,
-            Some(&PersistenceStage(tx)),
+            Some(&JournalSender::new(tx, None)),
             None,
             &call(InferenceKind::Title, &u),
         );

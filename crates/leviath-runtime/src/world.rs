@@ -346,6 +346,7 @@ impl PipelineWorld {
         let (tool_job_tx, tool_job_rx) = unbounded_channel();
         let (tool_res_tx, tool_res_rx) = unbounded_channel();
         let (persist_tx, persist_rx) = unbounded_channel();
+        let (journal_tx, journal_rx) = unbounded_channel();
         let (msg_tx, msg_rx) = unbounded_channel();
         let (ip_tx, ip_rx) = unbounded_channel();
         let (gp_tx, gp_rx) = unbounded_channel();
@@ -421,6 +422,12 @@ impl PipelineWorld {
         world.insert_resource(ToolStage::new(tool_job_tx, tool_stats));
         world.insert_resource(ToolResults(tool_res_rx));
         world.insert_resource(PersistenceStage(persist_tx));
+        world.insert_resource(crate::pipeline::JournalSender::new(
+            journal_tx,
+            Some(wake.clone()),
+        ));
+        world.insert_resource(crate::pipeline::JournalInbox(journal_rx));
+        world.insert_resource(crate::pipeline::RunJournals::default());
         world.insert_resource(crate::pipeline::PersistLaneHealth(persist_stats));
         world.insert_resource(MessageIntake(msg_rx));
         // Telemetry defaults to the no-op sink; a host that wants export
@@ -824,8 +831,11 @@ impl PipelineWorld {
         // Dispatch anything that settled between the last park and now (e.g. an
         // inference result that woke the loop the same instant shutdown fired).
         self.run_to_fixed_point();
-        // Drop every in-flight job, which is what makes the line below finish.
+        // Stop every in-flight job, so nothing is left waiting on a person.
         self.abort_in_flight_work();
+        // What happened since the last tick (a call that finished as its batch
+        // was stopped, say) goes to the lane as a step of its own.
+        crate::pipeline::journal::flush(&mut self.world);
         // Drop the *only* `PersistJob` sender so the worker's `recv()` loop drains
         // its queue and then ends.
         self.world.remove_resource::<PersistenceStage>();
@@ -849,18 +859,11 @@ impl PipelineWorld {
 
     /// Cancel every job still in flight, so shutdown does not wait on one.
     ///
-    /// `remove_resource::<PersistenceStage>` drops the world's sender, but a
-    /// dispatched tool batch carries its own clone (the progress callback that
-    /// journals each call as it finishes). While that batch is alive the channel
-    /// stays open, so awaiting the persistence worker waits on the batch - and a
-    /// batch parked on an approval prompt is waiting on a person. `lev daemon
-    /// stop` then hung until somebody answered, which with no interaction
-    /// timeout is for ever.
-    ///
-    /// Cancelling drops the batch instead. Its calls are not marked done and its
-    /// assistant turn is already journalled with the batch pending, so the run
-    /// reloads on the next daemon start exactly where it was: parked, and asking
-    /// again.
+    /// A batch parked on an approval prompt is waiting on a person, and with no
+    /// interaction timeout that is for ever. Cancelling drops the batch
+    /// instead. Its calls are not marked done and its assistant turn is
+    /// already journalled with the batch pending, so the run reloads on the
+    /// next daemon start exactly where it was: parked, and asking again.
     fn abort_in_flight_work(&mut self) {
         let mut agents = self.world.query::<&crate::pipeline::InFlightWork>();
         for in_flight in agents.iter(&self.world) {

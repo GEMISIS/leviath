@@ -338,10 +338,10 @@ pub(crate) struct AttemptJournal {
     pub provider: String,
     /// The model, likewise as configured.
     pub model: String,
-    /// The persistence lane. Every attempt is a fire-and-forget append: nothing
-    /// waits on one, and a world with no journal answers
-    /// [`Appended::NoJournal`](crate::persistence_bridge::Appended::NoJournal).
-    pub lane: UnboundedSender<crate::persistence_bridge::PersistMsg>,
+    /// The world's journal. Every attempt is a fire-and-forget record that
+    /// wakes the world, so a failed attempt reaches the run's file while the
+    /// call is still being retried.
+    pub lane: crate::pipeline::JournalSender,
     /// What went out, computed once because every attempt sends the same
     /// request. Even a file renewal leaves it untouched: it replaces the ids
     /// stored parts are named by, and the digest counts messages and tools
@@ -429,29 +429,26 @@ impl AttemptJournal {
             ),
             Ending::Failed(outcome) => (outcome, None),
         };
-        let _ = self
-            .lane
-            .send(crate::persistence_bridge::PersistMsg::Append {
-                run_id: self.run_id.clone(),
-                record: Box::new(crate::runfile::record::RunRecord::InferenceAttempt(
-                    Box::new(crate::runfile::record::AttemptRecord {
-                        id: id.to_string(),
-                        stage: self.stage.clone(),
-                        attempt,
-                        provider: self.provider.clone(),
-                        model: self.model.clone(),
-                        outcome,
-                        finish_reason: finish.map_or_else(String::new, |f| f.label().to_string()),
-                        stopped_for: finish.and_then(|f| f.unrecognised()).map(str::to_string),
-                        duration_ms: millis(took),
-                        backoff_ms: millis(waited),
-                        digest: self.digest.clone(),
-                        model_input: Some(self.model_input.record(request)),
-                        at: chrono::Utc::now().timestamp(),
-                    }),
-                )),
-                ack: None,
-            });
+        self.lane.record(
+            &self.run_id,
+            crate::runfile::record::RunRecord::InferenceAttempt(Box::new(
+                crate::runfile::record::AttemptRecord {
+                    id: id.to_string(),
+                    stage: self.stage.clone(),
+                    attempt,
+                    provider: self.provider.clone(),
+                    model: self.model.clone(),
+                    outcome,
+                    finish_reason: finish.map_or_else(String::new, |f| f.label().to_string()),
+                    stopped_for: finish.and_then(|f| f.unrecognised()).map(str::to_string),
+                    duration_ms: millis(took),
+                    backoff_ms: millis(waited),
+                    digest: self.digest.clone(),
+                    model_input: Some(self.model_input.record(request)),
+                    at: chrono::Utc::now().timestamp(),
+                },
+            )),
+        );
     }
 }
 
@@ -1763,7 +1760,7 @@ mod tests {
         provider: Arc<dyn Provider>,
     ) -> (
         InferenceJob,
-        mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+        mpsc::UnboundedReceiver<crate::pipeline::journal::Journaled>,
     ) {
         let (lane, records) = mpsc::unbounded_channel();
         let mut job = job(provider);
@@ -1772,7 +1769,7 @@ mod tests {
             stage: "draft".to_string(),
             provider: "openai".to_string(),
             model: "gpt".to_string(),
-            lane,
+            lane: crate::pipeline::JournalSender::new(lane, None),
             digest: crate::runfile::record::RequestDigest {
                 system_hash: 11,
                 messages: 0,
@@ -2313,13 +2310,11 @@ mod tests {
 /// and the file-renewal tests beside them read the same lane for the same thing.
 #[cfg(test)]
 pub(crate) fn journaled_attempts(
-    lane: &mut tokio::sync::mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+    lane: &mut tokio::sync::mpsc::UnboundedReceiver<crate::pipeline::journal::Journaled>,
 ) -> Vec<crate::runfile::record::AttemptRecord> {
     let mut records = Vec::new();
-    while let Ok(msg) = lane.try_recv() {
-        if let crate::persistence_bridge::PersistMsg::Append { record, .. } = msg
-            && let crate::runfile::record::RunRecord::InferenceAttempt(attempt) = *record
-        {
+    while let Ok(sent) = lane.try_recv() {
+        if let crate::runfile::record::RunRecord::InferenceAttempt(attempt) = *sent.record {
             records.push(*attempt);
         }
     }
