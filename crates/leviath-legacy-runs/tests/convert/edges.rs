@@ -343,16 +343,21 @@ fn a_run_that_named_no_stage_is_listed_in_none() {
 }
 
 /// When the run last made progress is kept where its record says it was
-/// earlier than the record's last write, as a reaped worker's is.
+/// earlier than the record's last write, as a reaped worker's is: its
+/// parent touches `meta.json` and nothing else.
 #[test]
 fn a_record_touched_after_its_last_progress_keeps_when_that_was() {
     let run = Run::fixture("finished");
-    run.meta(|m| m.last_progress_at = Some(m.updated_at - 130));
+    let mut at = 0;
+    run.json("meta.json", |m| {
+        at = m["updated_at"].as_i64().unwrap() - 130;
+        m["last_progress_at"] = at.into();
+    });
     let (_, file) = run.converted();
+    assert_eq!(file.last.last_progress_at, Some(at));
     let updated = file.deltas.last().unwrap().at;
-    assert_eq!(file.last.last_progress_at, Some(updated - 130));
     let listed = leviath_runtime::runfile::summary_of(&file.spec, &file.last, updated);
-    assert_eq!(listed.last_progress_at, Some(updated - 130));
+    assert_eq!(listed.last_progress_at, Some(at));
     assert_eq!(listed.updated_at, updated);
 
     let moved = Run::fixture("finished");

@@ -171,9 +171,6 @@ pub(crate) fn from_meta(state: &mut RunState, meta: &RunMeta, graph: &RunGraph) 
         tool_calls: meta.tool_calls as u64,
     };
     state.clock = clock(meta.active, Some(meta.started_at), meta.updated_at);
-    // Kept only when it says something the step's own time does not: a
-    // worker's record is touched again when its parent reaps it.
-    state.last_progress_at = meta.last_progress_at.filter(|at| *at < meta.updated_at);
     state.flags = flags(&meta.flags);
     state.children = meta
         .children
@@ -274,6 +271,12 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
             "the run's record says it was not empty, though it changed no file and handed back no answer, and every earlier release showed what the record said",
         );
     }
+    // Kept only when it says something the last step's time does not: a
+    // worker's record is touched again when its parent reaps it.
+    state.last_progress_at = old
+        .listed
+        .last_progress_at
+        .filter(|at| *at < old.listed.updated_at);
     if old.listed.active.is_none() {
         // What every earlier release showed as its working time.
         state.clock = clock(None, Some(old.listed.started_at), old.listed.updated_at);
