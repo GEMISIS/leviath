@@ -87,7 +87,8 @@ impl Server {
         };
         match self.control.validate_spawn(request).await {
             Ok(ControlResponse::Valid { summary }) => {
-                self.write(&JsonRpcMessage::response(id, &summary)).await;
+                let result = camel_case(&summary);
+                self.write(&JsonRpcMessage::response(id, &result)).await;
             }
             Ok(ControlResponse::Rejected { issues }) => self.reject(id, &issues).await,
             other => self.daemon_failed(id, other).await,
@@ -210,6 +211,41 @@ fn operator_issues(args: &AgentClientArgs, request: &mut SpawnRequest) -> SpawnI
         launch.seed_commands = false;
     }
     issues
+}
+
+/// A dry run's summary as this protocol spells a result: every key in
+/// camelCase, as `_leviath/spawn`'s `{sessionId, runId}` is. The inputs are
+/// keyed by the names the blueprint gave them, which keep their spelling.
+fn camel_case(summary: &leviath_runtime::spec::summary::SpawnSummary) -> serde_json::Value {
+    let mut value = serde_json::to_value(summary).expect("a summary is plain data");
+    let inputs = value["inputs"].take();
+    let mut value = camel_keys(value);
+    value["inputs"] = inputs;
+    value
+}
+
+/// `value` with every object key in camelCase, all the way down.
+fn camel_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => map
+            .into_iter()
+            .map(|(key, inner)| (camel(&key), camel_keys(inner)))
+            .collect(),
+        serde_json::Value::Array(items) => items.into_iter().map(camel_keys).collect(),
+        other => other,
+    }
+}
+
+/// `snake_case` as `camelCase`.
+fn camel(key: &str) -> String {
+    let mut words = key.split('_');
+    let first = words.next().unwrap_or_default().to_string();
+    words.fold(first, |mut out, word| {
+        let mut chars = word.chars();
+        out.extend(chars.next().map(|c| c.to_ascii_uppercase()));
+        out.push_str(chars.as_str());
+        out
+    })
 }
 
 /// What a session spawned from `request` is called: its blueprint's name, or

@@ -17,7 +17,8 @@ use crate::runstate;
 /// Arguments for `lev run show`.
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShowArgs {
-    /// The run's id, as `lev ps` lists it.
+    /// The run's id, as `lev ps` lists it, or the start of it when only one
+    /// run's id starts that way.
     #[arg(value_name = "RUN")]
     pub run_id: String,
 
@@ -49,7 +50,7 @@ pub async fn execute(args: ShowArgs) -> anyhow::Result<()> {
 
 /// What `args` asks for, as it is printed.
 pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
-    let id = &args.run_id;
+    let id = &resolve(&args.run_id)?;
     let reader = runstate::run_file::open_in(&runstate::run_dir(id)).with_context(|| {
         format!(
             "run '{id}' has no run file to read; `lev ps --all` lists the runs there are, and \
@@ -78,10 +79,37 @@ pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
             false => view::state_toml(&state),
         });
     }
+    let spec = runstate::run_file::redacted_spec(reader.spec().clone());
     Ok(match args.json {
-        true => to_json(reader.spec()),
-        false => view::spec_toml(reader.spec()),
+        true => to_json(&spec),
+        false => view::spec_toml(&spec),
     })
+}
+
+/// The run `given` names: an exact id, or a prefix only one run's id starts
+/// with. A prefix no run has is left as it is, so the read that follows says
+/// there is no such run; one several share is refused with their ids.
+fn resolve(given: &str) -> anyhow::Result<String> {
+    if runstate::run_dir(given).is_dir() {
+        return Ok(given.to_string());
+    }
+    let mut matches: Vec<String> = std::fs::read_dir(runstate::runs_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(given))
+        .collect();
+    matches.sort();
+    match matches.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Ok(given.to_string()),
+        many => bail!(
+            "'{given}' is the start of {} runs' ids: {}; give more of the one you mean",
+            many.len(),
+            many.join(", ")
+        ),
+    }
 }
 
 /// What to say about a run file that ends in a step a crash left half

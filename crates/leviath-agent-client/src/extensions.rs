@@ -11,7 +11,8 @@
 //!   an empty prompt only follows it, and one with content is delivered to
 //!   it as a message first.
 //! - [`VALIDATE_SPAWN`] checks the request the whole way without starting
-//!   anything. The result is a summary of the run it would be.
+//!   anything. The result is a summary of the run it would be, its keys in
+//!   camelCase like every result here.
 //!
 //! A request either method refuses is answered with the JSON-RPC error
 //! `invalid params` (`-32602`), whose `data` lists every problem at once:

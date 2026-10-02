@@ -302,12 +302,16 @@ fn to_server_event(event: WorldEvent) -> ServerEvent {
             from,
             to,
             iteration,
+            edge,
+            reason,
         } => ServerEvent::StageTransition {
             agent_id,
             run_id,
             from,
             to,
             iteration,
+            edge,
+            reason,
         },
         WorldEvent::ToolCallStarted {
             run_id,
@@ -688,7 +692,9 @@ mod tests {
                 agent_id: "a".into(),
                 from: "plan".into(),
                 to: "implement".into(),
-                iteration: 1
+                iteration: 1,
+                edge: None,
+                reason: None,
             }),
             "stage_transition"
         );
@@ -830,9 +836,13 @@ mod tests {
             from: "plan".into(),
             to: "implement".into(),
             iteration: 2,
+            edge: Some("build_it".into()),
+            reason: Some(leviath_runtime::state::TransitionReason::ModelChoice),
         }))
         .unwrap();
         assert_eq!(json["type"], "stage_transition");
+        assert_eq!(json["edge"], "build_it");
+        assert_eq!(json["reason"], "ModelChoice");
         assert_eq!(json["run_id"], "run-9");
         assert_eq!(json["agent_id"], "a");
         assert_eq!(json["from"], "plan");

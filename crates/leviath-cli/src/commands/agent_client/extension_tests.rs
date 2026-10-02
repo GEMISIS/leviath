@@ -321,7 +321,13 @@ async fn a_dry_run_answers_with_the_summary_or_the_daemons_issues() {
         origin: leviath_runtime::spec::run_spec::SpecOrigin::Raw,
         entry_stage: graph.stages[0].name.clone(),
         stages: Vec::new(),
-        inputs: Default::default(),
+        inputs: leviath_runtime::spec::inputs::InputValues(
+            [(
+                leviath_runtime::spec::names::InputName::new("max_items").unwrap(),
+                leviath_runtime::spec::inputs::InputValue::Int(15),
+            )]
+            .into(),
+        ),
         launch: LaunchPolicy::top_level(&LaunchRequest::default(), 3, true),
         workdir: "/w".into(),
     };
@@ -344,7 +350,16 @@ async fn a_dry_run_answers_with_the_summary_or_the_daemons_issues() {
     ))
     .await;
     let result = h.recv().await.result.expect("valid");
-    assert_eq!(result, serde_json::to_value(&valid).unwrap());
+    // camelCase, like `_leviath/spawn`'s `{sessionId, runId}` and the rest of
+    // the protocol; an input keeps the name the blueprint gave it.
+    assert_eq!(result["entryStage"], valid.entry_stage.as_str());
+    assert_eq!(result["launch"]["maxDepth"], 3);
+    assert_eq!(result["launch"]["seedCommands"], true);
+    assert_eq!(
+        result["inputs"]["max_items"],
+        serde_json::json!({"int": 15})
+    );
+    assert!(result.get("entry_stage").is_none(), "{result}");
     h.send(&call(
         2,
         extensions::VALIDATE_SPAWN,

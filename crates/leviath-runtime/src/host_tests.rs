@@ -4770,6 +4770,8 @@ fn every_world_event_variant_carries_its_run_id() {
             from: "a".to_string(),
             to: "b".to_string(),
             iteration: 1,
+            edge: Some("next".to_string()),
+            reason: Some(crate::state::TransitionReason::Gate),
         },
         WorldEvent::ToolCallStarted {
             execution_id: "x1".to_string(),

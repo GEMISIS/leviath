@@ -28,7 +28,6 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures_core::Stream;
 
-use crate::failure::FailureKind;
 use crate::learned::LearnedModels;
 use crate::provider::{
     InferenceRequest, InferenceResponse, ModelCapabilities, ModelCapabilityOverride, ModelInfo,
@@ -702,24 +701,13 @@ pub(crate) async fn classify_response(
         Some(kind) => format!("{kind}: {message}"),
         None => message,
     };
-    let kind = FailureKind::from_status(status.as_u16());
-    let detail = format!(
-        "[{}] HTTP {}: {} - {}",
-        kind.label(),
-        status,
-        named,
-        kind.remedy()
-    );
     let reason = match status.as_u16() {
         401 => Some(UnavailableReason::AuthFailed),
         403 if is_bad_key(error_type.as_deref(), &body) => Some(UnavailableReason::AuthFailed),
         403 => Some(UnavailableReason::Forbidden),
         code => UnavailableReason::classify(code, &body),
     };
-    Err(match reason {
-        Some(reason) => ProviderError::Unavailable { reason, detail },
-        None => ProviderError::ApiError(detail),
-    })
+    Err(ProviderError::from_http(status, &named, reason))
 }
 
 #[async_trait]
