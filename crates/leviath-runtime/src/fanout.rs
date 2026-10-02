@@ -3769,7 +3769,10 @@ mod tests {
     fn a_workers_inputs_come_from_its_graph_or_the_spawner() {
         let blueprint = WorkerSource::Blueprint(BlueprintRef::parse("probe").unwrap());
         let file = WorkerSource::BlueprintFile(
-            crate::spec::names::BlueprintPath::new("/abs/probe").unwrap(),
+            crate::spec::names::BlueprintPath::new(
+                std::env::temp_dir().join("probe").to_string_lossy(),
+            )
+            .unwrap(),
         );
         let query = WorkerSource::Query("tests".into());
         let nobody = WorkerSource::Query("nobody".into());
