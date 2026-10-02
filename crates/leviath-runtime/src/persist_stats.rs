@@ -100,6 +100,9 @@ pub struct PersistLaneStats {
     /// be failed. Keyed by run rather than appended to, so a run failing every
     /// append costs one entry however long the world takes to notice.
     unwritable: Mutex<HashMap<String, JournalError>>,
+    /// The last step each run's file holds, by run id, so a run read live
+    /// says which step it is at as its file numbers them.
+    steps: Mutex<HashMap<String, u64>>,
 }
 
 impl PersistLaneStats {
@@ -177,6 +180,25 @@ impl PersistLaneStats {
         )
         .into_values()
         .collect()
+    }
+
+    /// Note that `run_id`'s file now ends at step `seq`.
+    pub(crate) fn stepped(&self, run_id: &str, seq: u64) {
+        self.steps
+            .lock()
+            .expect("the step table is never held across a panic")
+            .insert(run_id.to_string(), seq);
+    }
+
+    /// The last step `run_id`'s file holds, as far as this lane knows: 0 for
+    /// a run it has written nothing for.
+    pub(crate) fn step_of(&self, run_id: &str) -> u64 {
+        self.steps
+            .lock()
+            .expect("the step table is never held across a panic")
+            .get(run_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// A point-in-time read of the counters.

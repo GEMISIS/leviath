@@ -69,6 +69,8 @@ pub struct RunState {
     pub wait_reason: Option<WaitState>,
     /// The last edge it took.
     pub last_transition: Option<TransitionRecord>,
+    /// Where it is among its current stage's checkpoints.
+    pub point: PointProgress,
 }
 
 impl RunState {
@@ -100,6 +102,7 @@ impl RunState {
             final_output: None,
             wait_reason: None,
             last_transition: None,
+            point: PointProgress::default(),
         }
     }
 }
@@ -331,6 +334,19 @@ pub struct Flags {
     pub broken_scripts: Vec<String>,
 }
 
+/// Where a run is among the checkpoints of the stage it is in: the stage
+/// boundary questions a graph declares (`interactive_points`), which a person
+/// answers before the stage may move on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PointProgress {
+    /// The checkpoint it is on, by its position in the stage's list.
+    pub cursor: u32,
+    /// The rounds of revision taken at that checkpoint.
+    pub round: u32,
+    /// While the checkpoint is put to a person: the document it shows them.
+    pub asking: Option<String>,
+}
+
 /// Tool calls in flight.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PendingBatch {
@@ -369,6 +385,11 @@ pub struct FanOutState {
     pub failed: Vec<(String, String)>,
     /// Whether starting new workers is paused.
     pub paused: bool,
+    /// How its report comes back: into the stage's results, or as the result
+    /// of the `fan_out` call that started it.
+    pub origin: crate::fanout::FanOutOrigin,
+    /// The files finished workers handed back, already in this run's store.
+    pub parts: Vec<context::PartState>,
 }
 
 /// One fan-out work item.

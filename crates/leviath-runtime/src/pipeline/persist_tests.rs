@@ -247,10 +247,9 @@ async fn the_run_file_ends_where_the_run_does() {
         .join("run-42")
         .join(leviath_core::files::RUN_FILE);
     let file = RunFileReader::open(&path).unwrap();
-    let mut recorded = file.latest_state().unwrap();
+    let recorded = file.latest_state().unwrap();
     assert!(recorded.seq > 1);
-    // The file numbers the steps; a live read does not.
-    recorded.seq = 0;
+    // The file numbers the steps, and a live read says which one it is at.
     assert_eq!(recorded, live);
     // Every step on the way reads back, and the tool calls are in the deltas.
     let events: Vec<_> = file
@@ -321,4 +320,255 @@ fn a_world_with_no_persistence_lane_persists_nothing() {
     spawn_run(&mut world, "s", true);
     super::dispatch_persistence(&mut world);
     assert!(world.get_resource::<super::PersistenceStage>().is_none());
+}
+
+/// The step the next snapshot on the lane carries, if the next message is
+/// one and carries one.
+fn next_step(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::persistence_bridge::PersistMsg>,
+) -> Option<crate::state::RunState> {
+    match rx.try_recv().ok()? {
+        crate::persistence_bridge::PersistMsg::Snapshot(job) => job.run_file.map(|s| s.state),
+        _ => None,
+    }
+}
+
+/// A fan-out's parent records a step when one of its workers finishes and
+/// is reaped, though nothing else about the parent moved: its file has to say
+/// which workers are done, or a restart counts them as never having run.
+#[test]
+fn a_worker_finishing_is_a_step_of_its_parents() {
+    let (mut world, mut rx) = persist_world();
+    let parent = spawn_run(&mut world, "s", true);
+    world.get_mut::<AgentState>(parent).unwrap().status = AgentStatus::Waiting;
+    let worker = |world: &mut World, id: &str| {
+        world
+            .spawn(AgentState {
+                agent_id: id.to_string(),
+                ..agent("s")
+            })
+            .id()
+    };
+    let first = worker(&mut world, "w-1");
+    let second = worker(&mut world, "w-2");
+    crate::fanout::restore_fan_out_waiting(
+        &mut world,
+        parent,
+        crate::fanout::FanOutState {
+            config: crate::spec::graph::FanOutDef::same_graph(
+                crate::spec::names::StageName::new("s").unwrap(),
+            ),
+            max_workers: 2,
+            pending: Vec::new(),
+            active: vec![
+                ("i1".to_string(), "w-1".to_string()),
+                ("i2".to_string(), "w-2".to_string()),
+            ],
+            summaries: Vec::new(),
+            failures: Vec::new(),
+            parts: Vec::new(),
+            paused: false,
+            origin: Default::default(),
+        },
+        &|run| match run {
+            "w-1" => Some(first),
+            _ => Some(second),
+        },
+    );
+    super::dispatch_persistence(&mut world);
+    assert!(next_step(&mut rx).is_some());
+    super::dispatch_persistence(&mut world);
+    assert!(next_step(&mut rx).is_none(), "nothing moved, nothing sent");
+
+    world.get_mut::<AgentState>(first).unwrap().status = AgentStatus::Complete;
+    crate::fanout::fan_out_collect(&mut world);
+    super::dispatch_persistence(&mut world);
+    let step = next_step(&mut rx).expect("the reaped worker is a step");
+    let fan_out = step.fan_out.expect("still fanning out");
+    assert_eq!(fan_out.done.len(), 1);
+    assert_eq!(fan_out.done[0].0, "i1");
+    assert_eq!(fan_out.active.len(), 1);
+}
+
+/// A reply that calls `do` once per id, in order.
+fn with_tools(ids: &[&str]) -> InferenceResponse {
+    let mut r = text("calling");
+    r.tool_calls = ids
+        .iter()
+        .map(|id| ToolCall {
+            id: id.to_string(),
+            name: "do".to_string(),
+            arguments: serde_json::json!({"n": id}),
+            thought_signature: None,
+        })
+        .collect();
+    r
+}
+
+/// A tool service that notes every call it is asked to run and answers each
+/// as it goes, reporting it the moment it lands. With `hold`, every call after
+/// a batch's first waits forever, as a slow command would.
+struct FirstThenHold {
+    asked: Arc<Mutex<Vec<String>>>,
+    hold: bool,
+}
+
+impl ToolService for FirstThenHold {
+    fn exec_for(&self, _e: Entity, calls: Vec<ToolCall>, progress: ToolProgress) -> BoxedToolExec {
+        let asked = self.asked.clone();
+        let hold = self.hold;
+        Box::new(move || {
+            Box::pin(async move {
+                asked
+                    .lock()
+                    .unwrap()
+                    .extend(calls.iter().map(|c| c.id.clone()));
+                let mut out = Vec::new();
+                for (i, call) in calls.into_iter().enumerate() {
+                    if hold && i > 0 {
+                        std::future::pending::<()>().await;
+                    }
+                    let result: leviath_core::region::EntryContent =
+                        format!("ran {}", call.id).into();
+                    progress(&call.id, &result);
+                    out.push((call.id, result));
+                }
+                out
+            })
+        })
+    }
+}
+
+/// A world over `dir` whose model answers `replies` in order and whose tools
+/// are `tools`.
+fn tool_world(
+    dir: &std::path::Path,
+    replies: Vec<InferenceResponse>,
+    tools: FirstThenHold,
+) -> PipelineWorld {
+    let mut providers = crate::ProviderRegistry::new();
+    providers.register(
+        "script".to_string(),
+        Arc::new(Script {
+            responses: Mutex::new(replies.into_iter().collect()),
+        }),
+    );
+    PipelineWorld::new(
+        providers,
+        Arc::new(tools),
+        crate::InferencePoolConfig::new(),
+        1,
+        Some(dir.to_path_buf()),
+        Handle::current(),
+    )
+}
+
+/// Whether `run_id`'s file under `dir` records call `call` finishing.
+fn file_has_finished(dir: &std::path::Path, run_id: &str, call: &str) -> bool {
+    let path = dir.join(run_id).join(leviath_core::files::RUN_FILE);
+    let Ok(file) = RunFileReader::open(&path) else {
+        return false;
+    };
+    file.deltas(1, file.last_seq())
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|d| &d.events)
+        .any(|e| matches!(e, crate::state::RunEvent::ToolFinished { call_id, .. } if call_id == call))
+}
+
+/// A call that finished inside a batch still running is in the run's file as
+/// done, read live and read back, whether the daemon stops cleanly or dies;
+/// the run resumed from that file runs only the call that had not finished.
+#[tokio::test]
+async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
+    for clean_stop in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Arc::new(Mutex::new(Vec::new()));
+        let mut world = tool_world(
+            dir.path(),
+            vec![with_tools(&["c1", "c2"])],
+            FirstThenHold {
+                asked: first.clone(),
+                hold: true,
+            },
+        );
+        let id = world.spawn_agent((
+            (
+                StageCursor { index: 0 },
+                agent("s"),
+                MessageInbox::default(),
+                StageProgress::default(),
+                VisitCounts::default(),
+                window(),
+                stage(),
+                setup().inference_config,
+            ),
+            (
+                metadata("run-r1"),
+                crate::persistence::TokenTotals::default(),
+                crate::pipeline::PersistWatermark::default(),
+                crate::persistence::RunClock::default(),
+                ReadyToInfer,
+                crate::insert::RunSpecC(spec()),
+            ),
+        ));
+        for _ in 0..500 {
+            world.run_to_fixed_point();
+            if file_has_finished(dir.path(), "run-r1", "c1") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(file_has_finished(dir.path(), "run-r1", "c1"));
+        let live = crate::state::inspect::inspect(world.world(), id.entity()).unwrap();
+        let live_done: Vec<&String> = live.pending.as_ref().unwrap().done.keys().collect();
+        assert_eq!(live_done, ["c1"], "a live read shows the call that landed");
+        if clean_stop {
+            world.flush_and_stop().await;
+        }
+
+        let run = crate::restore::read_for_resume(&dir.path().join("run-r1"))
+            .unwrap()
+            .unwrap();
+        let pending = run.state.pending.clone().expect("the batch is in flight");
+        assert_eq!(
+            pending.done.keys().collect::<Vec<_>>(),
+            ["c1"],
+            "the file holds the finished call as done"
+        );
+        assert_eq!(pending.done["c1"].text, "ran c1");
+        if !clean_stop {
+            world.flush_and_stop().await;
+        }
+
+        let second = Arc::new(Mutex::new(Vec::new()));
+        let mut again = tool_world(
+            dir.path(),
+            vec![text("all done")],
+            FirstThenHold {
+                asked: second.clone(),
+                hold: false,
+            },
+        );
+        let at = run.state.seq;
+        let e = crate::restore::resume(
+            again.world_mut(),
+            run,
+            crate::spec::env::Bindings::new().with(stage()),
+        );
+        let placed = crate::state::inspect::inspect(again.world(), e).unwrap();
+        assert_eq!(
+            placed.seq, at,
+            "a resumed run is at the step its file ended on"
+        );
+        again.run_until_idle(40).await;
+        again.flush_and_stop().await;
+        assert_eq!(
+            *second.lock().unwrap(),
+            ["c2"],
+            "only the unfinished call runs"
+        );
+        let after = crate::state::inspect::inspect(again.world(), e).unwrap();
+        assert_eq!(after.status, crate::state::RunStatus::Complete);
+    }
 }

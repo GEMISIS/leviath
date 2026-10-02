@@ -5,8 +5,9 @@
 //! inspection shows what it returns, and insertion places the same fields
 //! back, so each field here has its mirror in `insert`.
 //!
-//! `seq` is left at 0: a live state has no step number until the persist
-//! system records it, and the run file is what numbers steps.
+//! `seq` is the last step the run's file holds, as the persistence lane
+//! reports it: the file is what numbers steps, and a live read says which of
+//! them the run is at. A world that keeps no files reads 0.
 
 use std::collections::BTreeMap;
 
@@ -21,8 +22,9 @@ use super::context::{
 };
 use super::{
     Clock, Cursor, FanOutState, FinalOutputState, Flags, MessageState, OpenInteraction,
-    PendingBatch, PipelinePhase, RunState, RunStatus, Spend, StageProgress, StageRecord,
-    StageStatus, ToolResultState, Totals, TransitionRecord, VisitRecord, WaitState, WorkItemState,
+    PendingBatch, PipelinePhase, PointProgress, RunState, RunStatus, Spend, StageProgress,
+    StageRecord, StageStatus, ToolResultState, Totals, TransitionRecord, VisitRecord, WaitState,
+    WorkItemState,
 };
 use crate::components::{AgentState, AgentStatus, ContextWindow};
 use crate::spec::inputs::{InputValue, InputValues, RawInput};
@@ -31,16 +33,21 @@ use crate::spec::names::{
 };
 
 /// The live state of the run on `entity`, or `None` when the entity is not a
-/// run (it has no [`AgentState`]) or its current stage has no valid name.
+/// run (it has no [`AgentState`]), its current stage has no valid name, or it
+/// is a finished fan-out worker whose state was dropped from memory (its run
+/// file holds it).
 ///
 /// A value the state has no room for (a region or child whose name is not a
 /// valid name) is left out rather than failing the whole read.
 pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
+    if world.get::<crate::fanout::Slimmed>(entity).is_some() {
+        return None;
+    }
     let agent = world.get::<AgentState>(entity)?;
     let stage = StageName::new(agent.current_stage.as_str()).ok()?;
     let window = world.get::<ContextWindow>(entity);
     Some(RunState {
-        seq: 0,
+        seq: step_of(world, entity),
         status: status_of(&agent.status),
         cursor: Cursor {
             stage: stage.clone(),
@@ -90,7 +97,36 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
             .and_then(|o| final_output_of(&o.0)),
         wait_reason: wait_reason_of(world, entity, agent),
         last_transition: last_transition_of(world, entity),
+        point: point_of(world, entity),
     })
+}
+
+/// The last step the run's file holds, under the run id its steps are
+/// recorded by. 0 for a run that keeps no file.
+fn step_of(world: &World, entity: Entity) -> u64 {
+    let lane = world.get_resource::<crate::pipeline::PersistLaneHealth>();
+    let run = world.get::<crate::persistence::RunMetadata>(entity);
+    lane.zip(run)
+        .map_or(0, |(lane, run)| lane.0.step_of(&run.run_id))
+}
+
+/// Where the run is among its stage's checkpoints, and the document an open
+/// one shows.
+fn point_of(world: &World, entity: Entity) -> PointProgress {
+    use crate::interaction_points as ip;
+    let asking = world
+        .get::<ip::AwaitingInteractionPoint>(entity)
+        .and(world.get::<ip::PointBody>(entity))
+        .map(|b| b.0.clone());
+    PointProgress {
+        cursor: world
+            .get::<ip::InteractionPointCursor>(entity)
+            .map_or(0, |c| c.0 as u32),
+        round: world
+            .get::<ip::InteractionPointRounds>(entity)
+            .map_or(0, |r| r.0 as u32),
+        asking,
+    }
 }
 
 /// The edge the run last took, as every system that moves a run between
@@ -431,7 +467,9 @@ fn part_of(part: &Part) -> Option<PartState> {
     })
 }
 
-fn part_from(part: &PartState) -> Option<Part> {
+/// One part, from the form the run file stores it in. `None` for a part whose
+/// type does not parse. The inverse of `part_of`.
+pub(crate) fn part_from(part: &PartState) -> Option<Part> {
     let mime_type = leviath_core::mime::MimeType::parse(part.mime_type.as_str()).ok()?;
     let body = match &part.body {
         PartBody::Inline(s) => leviath_core::mime::PartBody::Inline(s.clone()),
@@ -455,12 +493,23 @@ fn part_from(part: &PartState) -> Option<Part> {
 }
 
 /// The tool batch in flight: the calls of the reply being run, and the
-/// results already in for them.
+/// results already in for them: the ones settled inline, the ones carried
+/// over from before a restart, and the ones the tool lane has handed back
+/// while the rest of the batch still runs.
 ///
 /// The calls come from the reply itself, not the context window: the turn
-/// that made them is written to the window only once every result is in.
+/// that made them is written to the window only once every result is in. A
+/// batch waiting to be dispatched (a paused run's, say) is in flight too.
 fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> {
-    world.get::<crate::pipeline::AwaitingTools>(entity)?;
+    let dispatched = world
+        .get::<crate::pipeline::AwaitingTools>(entity)
+        .is_some();
+    let to_dispatch = world
+        .get::<crate::pipeline::ReadyForTools>(entity)
+        .is_some();
+    if !dispatched && !to_dispatch {
+        return None;
+    }
     let calls: Vec<ToolCallState> = world
         .get::<crate::components::InferenceResult>(entity)?
         .tool_calls
@@ -480,11 +529,15 @@ fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> {
     {
         done.insert(id, result_of(text));
     }
-    for (id, content) in world
+    let recovered = world
         .get::<crate::pipeline::RecoveredResults>(entity)
         .map(|r| r.0.clone())
-        .unwrap_or_default()
-    {
+        .unwrap_or_default();
+    let landed = world
+        .get::<crate::pipeline::LandedResults>(entity)
+        .map(crate::pipeline::LandedResults::snapshot)
+        .unwrap_or_default();
+    for (id, content) in recovered.into_iter().chain(landed) {
         done.insert(id, result_of(content.into_string()));
     }
     Some(PendingBatch { calls, done })
@@ -519,6 +572,8 @@ fn fan_out_of(waiting: &crate::fanout::FanOutWaiting, stage: &StageName) -> FanO
         done: s.summaries,
         failed: s.failures,
         paused: s.paused,
+        origin: s.origin,
+        parts: s.parts.iter().filter_map(part_of).collect(),
     }
 }
 

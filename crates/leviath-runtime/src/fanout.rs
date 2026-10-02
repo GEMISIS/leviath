@@ -103,7 +103,9 @@ struct ActiveWorker {
 /// One engine, two entry points. The workers, the concurrency cap, the failure
 /// policy and the merged report are identical either way; only the last step
 /// differs, and this is the whole of that difference.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub enum FanOutOrigin {
     /// A fan-out stage. The report goes to the stage's `results_region` and
     /// the stage transitions to its `merge_stage`.
@@ -182,6 +184,17 @@ impl FanOutWaiting {
     /// against a known denominator rather than an unexplained stall.
     pub(crate) fn outstanding(&self) -> usize {
         self.active.len() + self.pending.len()
+    }
+
+    /// How far the fan-out has got: its queued, running, done and failed
+    /// workers, counted. Any worker starting or finishing changes it.
+    pub(crate) fn progress(&self) -> [usize; 4] {
+        [
+            self.pending.len(),
+            self.active.len(),
+            self.summaries.len(),
+            self.failures.len(),
+        ]
     }
 
     /// Whether this parent's fan-out is paused (see the field).
@@ -684,6 +697,12 @@ pub(crate) fn fan_out_collect(world: &mut World) {
 #[derive(Component)]
 pub(crate) struct MergedWorker;
 
+/// A finished worker whose context and spec were dropped from memory by
+/// [`slim_merged_workers`]. What is left of it in the world is not its state,
+/// so a read of its state goes to its run file instead.
+#[derive(Component)]
+pub(crate) struct Slimmed;
+
 /// Drop a merged worker's heavy components once its terminal snapshot has
 /// reached the persistence lane.
 ///
@@ -713,7 +732,8 @@ pub(crate) fn slim_merged_workers(
         }
         commands
             .entity(entity)
-            .remove::<(ContextWindow, InferenceResult, RunSpecC, MergedWorker)>();
+            .remove::<(ContextWindow, InferenceResult, RunSpecC, MergedWorker)>()
+            .insert(Slimmed);
     }
 }
 
@@ -2361,8 +2381,10 @@ mod tests {
         run_slim(&mut world);
         assert!(world.get::<ContextWindow>(worker).is_none());
         assert!(world.get::<MergedWorker>(worker).is_none());
-        // The entity itself survives for the host's bookkeeping.
+        // The entity itself survives for the host's bookkeeping, but what is
+        // left of it is not its state: that is read from its file.
         assert!(world.get::<AgentState>(worker).is_some());
+        assert!(crate::state::inspect::inspect(&world, worker).is_none());
     }
 
     #[test]

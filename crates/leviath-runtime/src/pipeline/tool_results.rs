@@ -1012,6 +1012,7 @@ pub(crate) fn collect_tools(
             .remove::<AwaitingTools>()
             .remove::<ContextToolResults>()
             .remove::<super::tools::RecoveredResults>()
+            .remove::<super::tools::LandedResults>()
             .remove::<InFlightWork>()
             .insert(ReadyToInfer);
     }

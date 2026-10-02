@@ -169,3 +169,131 @@ fn a_run_comes_back_with_its_files_and_the_questions_it_asked() {
     assert_eq!(run.blobs[&digest], b"bytes");
     assert_eq!(run.asked, 3);
 }
+
+/// A run file for `run` under `runs`, in `state`, whose stage requires an
+/// output when `require_output` says so.
+fn on_disk(
+    runs: &std::path::Path,
+    run: &str,
+    state: &crate::state::RunState,
+    require_output: bool,
+) {
+    let dir = runs.join(run);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut spec = spec();
+    spec.graph.stages[0].require_output = require_output;
+    crate::runfile::RunFileWriter::create(
+        &dir.join(leviath_core::files::RUN_FILE),
+        &spec,
+        &crate::runfile::reader_tests::code(),
+        state,
+        Default::default(),
+    )
+    .unwrap();
+}
+
+/// A fan-out read back for resuming takes the workers that finished out of
+/// the running ones, each with what it ended with as its own file says: its
+/// output, else its last reply, unless its stage needed an output it did not
+/// give; a failure or a cancel as a failure. A worker still going, or one
+/// whose file does not read, stays running.
+#[test]
+fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
+    use crate::spec::names::RunId;
+    use crate::state::context::EntryKind;
+    use crate::state::{FanOutState, FinalOutputState};
+    let runs = tempfile::tempdir().unwrap();
+    let ended = |status: RunStatus| {
+        let mut s = crate::runfile::reader_tests::initial();
+        s.status = status;
+        s.phase = PipelinePhase::Done;
+        s
+    };
+    let mut answered = ended(RunStatus::Complete);
+    answered.final_output = Some(FinalOutputState {
+        content: "the answer".into(),
+        format: None,
+        stage: answered.cursor.stage.clone(),
+        submitted_at: 1,
+        truncated: false,
+        artifacts: Vec::new(),
+    });
+    on_disk(runs.path(), "w-answer", &answered, false);
+    let mut replied = ended(RunStatus::Complete);
+    let mut early = crate::runfile::reader_tests::entry("first", EntryKind::AssistantTurn(vec![]));
+    early.timestamp = 1;
+    let mut late = crate::runfile::reader_tests::entry("last", EntryKind::AssistantTurn(vec![]));
+    late.timestamp = 2;
+    replied.context.regions[1].entries = vec![late, early];
+    on_disk(runs.path(), "w-reply", &replied, false);
+    on_disk(runs.path(), "w-silent", &ended(RunStatus::Complete), false);
+    on_disk(runs.path(), "w-required", &ended(RunStatus::Complete), true);
+    on_disk(
+        runs.path(),
+        "w-broke",
+        &ended(RunStatus::Error("boom".into())),
+        false,
+    );
+    on_disk(
+        runs.path(),
+        "w-stopped",
+        &ended(RunStatus::Cancelled),
+        false,
+    );
+    on_disk(runs.path(), "w-going", &ended(RunStatus::Active), false);
+
+    let ids = [
+        "w-answer",
+        "w-reply",
+        "w-silent",
+        "w-required",
+        "w-broke",
+        "w-stopped",
+        "w-going",
+        "w-gone",
+    ];
+    let mut parent = crate::runfile::reader_tests::initial();
+    parent.fan_out = Some(FanOutState {
+        stage: parent.cursor.stage.clone(),
+        config: crate::spec::graph::FanOutDef::same_graph(parent.cursor.stage.clone()),
+        max_workers: 8,
+        queued: Vec::new(),
+        active: ids
+            .iter()
+            .map(|id| (format!("i-{id}"), RunId::new(*id).unwrap()))
+            .collect(),
+        done: Vec::new(),
+        failed: Vec::new(),
+        paused: false,
+        origin: Default::default(),
+        parts: Vec::new(),
+    });
+    on_disk(runs.path(), "parent", &parent, false);
+
+    let run = read_for_resume(&runs.path().join("parent"))
+        .unwrap()
+        .unwrap();
+    let fan_out = run.state.fan_out.unwrap();
+    let pairs = |v: &[(String, String)]| -> Vec<(String, String)> { v.to_vec() };
+    assert_eq!(
+        pairs(&fan_out.done),
+        [
+            ("i-w-answer".to_string(), "the answer".to_string()),
+            ("i-w-reply".to_string(), "last".to_string()),
+            ("i-w-silent".to_string(), String::new()),
+        ]
+    );
+    assert_eq!(
+        pairs(&fan_out.failed),
+        [
+            (
+                "i-w-required".to_string(),
+                "worker finished without the final output its stage requires".to_string()
+            ),
+            ("i-w-broke".to_string(), "boom".to_string()),
+            ("i-w-stopped".to_string(), "worker cancelled".to_string()),
+        ]
+    );
+    let still: Vec<&str> = fan_out.active.iter().map(|(_, r)| r.as_str()).collect();
+    assert_eq!(still, ["w-going", "w-gone"]);
+}

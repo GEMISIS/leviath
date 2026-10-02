@@ -742,6 +742,15 @@ fn a_fan_out_in_progress_is_placed_with_its_workers() {
         done: vec![("d1".into(), "summary".into())],
         failed: vec![("f1".into(), "broke".into())],
         paused: true,
+        origin: crate::fanout::FanOutOrigin::Tool {
+            call_id: "call-9".into(),
+        },
+        parts: vec![crate::state::context::PartState {
+            mime_type: "text/plain".into(),
+            body: crate::state::context::PartBody::Inline("handed up".into()),
+            name: Some("notes.txt".into()),
+            deliver: None,
+        }],
     });
     let mut world = World::new();
     world.spawn(AgentState {
@@ -806,6 +815,8 @@ fn a_tool_started_fan_out_keeps_the_calls_worker() {
             done: vec![],
             failed: vec![],
             paused: false,
+            origin: Default::default(),
+            parts: vec![],
         });
         let mut world = World::new();
         let e = insert(
@@ -867,6 +878,107 @@ fn each_phase_places_the_marker_that_drives_it() {
     let choice = &world.get::<AwaitingTransitionChoice>(e).unwrap().0;
     assert_eq!(choice.len(), 1);
     assert_eq!(choice[0].name.as_str(), "back");
+}
+
+/// A run that was waiting on a person is placed working, so it asks again;
+/// one waiting on anything else is placed as it was, and either way what its
+/// file says it was doing is what a summary of it reads.
+#[test]
+fn a_run_waiting_on_a_person_is_placed_to_ask_again() {
+    use crate::state::WaitState;
+    let spec = Arc::new(two_stage_spec());
+    for (reason, placed) in [
+        (WaitState::UserPrompt, AgentStatus::Active),
+        (WaitState::ToolApproval, AgentStatus::Active),
+        (WaitState::InteractionPoint, AgentStatus::Active),
+        (WaitState::TaintGate, AgentStatus::Active),
+        (WaitState::FanOutWorkers(2), AgentStatus::Waiting),
+        (WaitState::Children(1), AgentStatus::Waiting),
+    ] {
+        let mut state = mid_run();
+        state.wait_reason = Some(reason.clone());
+        let mut world = World::new();
+        let e = insert(&mut world, spec.clone(), Bindings::new(), &state);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            placed,
+            "{reason:?}"
+        );
+        assert_eq!(
+            place::agent_state(&spec, &state).status,
+            AgentStatus::Waiting
+        );
+    }
+}
+
+/// A paused run whose tool batch was in flight keeps it: the batch is placed
+/// to be dispatched once the run is resumed, and reading the run back shows
+/// it, so the step its placing records does not drop it.
+#[test]
+fn a_paused_run_keeps_its_batch_in_flight() {
+    let spec = Arc::new(two_stage_spec());
+    let mut state = mid_run();
+    state.status = RunStatus::Paused;
+    state.phase = PipelinePhase::Paused;
+    let batch = state
+        .pending
+        .clone()
+        .expect("the mid-run state has a batch");
+    let mut world = World::new();
+    let e = insert(&mut world, spec, Bindings::new(), &state);
+    let read = crate::state::inspect::inspect(&world, e).unwrap();
+    let pending = read.pending.expect("the batch is still in flight");
+    assert_eq!(pending.calls, batch.calls);
+    assert_eq!(
+        pending.done.keys().collect::<Vec<_>>(),
+        batch.done.keys().collect::<Vec<_>>()
+    );
+    // A failed call reads back marked as one, once.
+    assert_eq!(pending.done["c"].text, "[error] denied");
+    assert!(pending.done["c"].is_error);
+    assert_eq!(read.phase, PipelinePhase::Paused);
+}
+
+/// A run stopped at a checkpoint is placed to ask it again over the document
+/// it showed, at the checkpoint and round it had reached.
+#[test]
+fn a_checkpoint_put_to_a_person_is_placed_to_be_asked_again() {
+    use crate::interaction_points::{
+        InteractionPointCursor, InteractionPointRounds, ReadyForInteractionPoint,
+    };
+    let spec = Arc::new(two_stage_spec());
+    let mut state = mid_run();
+    state.pending = None;
+    state.phase = PipelinePhase::AwaitingPerson;
+    state.point = crate::state::PointProgress {
+        cursor: 1,
+        round: 2,
+        asking: Some("## Plan".into()),
+    };
+    let mut world = World::new();
+    let e = insert(&mut world, spec.clone(), Bindings::new(), &state);
+    assert!(world.get::<ReadyForInteractionPoint>(e).is_some());
+    assert!(world.get::<ReadyToInfer>(e).is_none());
+    assert_eq!(
+        world
+            .get::<crate::components::InferenceResult>(e)
+            .unwrap()
+            .response,
+        "## Plan"
+    );
+    assert_eq!(world.get::<InteractionPointCursor>(e).unwrap().0, 1);
+    assert_eq!(world.get::<InteractionPointRounds>(e).unwrap().0, 2);
+    let read = crate::state::inspect::inspect(&world, e).unwrap().point;
+    assert_eq!((read.cursor, read.round), (1, 2));
+
+    // At the first checkpoint with no revisions, and asking nothing, nothing
+    // about checkpoints is placed.
+    state.point = Default::default();
+    let mut world = World::new();
+    let e = insert(&mut world, spec, Bindings::new(), &state);
+    assert!(world.get::<InteractionPointCursor>(e).is_none());
+    assert!(world.get::<InteractionPointRounds>(e).is_none());
+    assert!(world.get::<ReadyToInfer>(e).is_some());
 }
 
 #[test]

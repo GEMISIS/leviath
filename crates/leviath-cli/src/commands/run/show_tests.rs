@@ -139,3 +139,34 @@ async fn a_step_or_a_range_that_is_not_there_is_refused() {
     })
     .await;
 }
+
+/// A run file that ends in a step a crash left half written still shows the
+/// steps before it, and says the last one is missing rather than keeping
+/// quiet about it. The file itself is left as it is.
+#[tokio::test]
+async fn a_torn_last_step_is_left_out_and_said_so() {
+    runstate::with_isolated_runs_dir_async("run-show-torn", |_d| async move {
+        let id = three_steps();
+        let file = runstate::run_dir(&id).join(leviath_core::files::RUN_FILE);
+        let mut bytes = std::fs::read(&file).unwrap();
+        let whole = bytes.len();
+        bytes.extend_from_slice(&[7, 0, 0]);
+        std::fs::write(&file, &bytes).unwrap();
+        let shown = render(&ShowArgs {
+            deltas: Some("..".to_string()),
+            json: true,
+            ..args(&id)
+        })
+        .unwrap();
+        let steps: Vec<serde_json::Value> = serde_json::from_str(&shown).unwrap();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(std::fs::metadata(&file).unwrap().len() as usize, whole + 3);
+    })
+    .await;
+    let note = torn_note("r-1", 3).expect("a torn tail is said");
+    assert!(
+        note.contains("run 'r-1'") && note.contains("3 bytes"),
+        "{note}"
+    );
+    assert!(torn_note("r-1", 0).is_none());
+}

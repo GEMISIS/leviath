@@ -24,6 +24,12 @@ impl BindEnv for Plain {
     fn mcp_fingerprint(&self, server: &McpServerName) -> Option<Digest> {
         self.mcp.get(server.as_str()).cloned()
     }
+    fn providers_now(&self) -> Vec<String> {
+        self.providers.keys().cloned().collect()
+    }
+    fn mcp_servers_now(&self) -> Vec<String> {
+        self.mcp.keys().cloned().collect()
+    }
     async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues> {
         assert!(code.contains_key(&Digest::of(b"code")));
         Ok(Bindings::new().with(Bound(spec.run_id.to_string())))
@@ -110,8 +116,9 @@ async fn an_unchanged_machine_binds_through_the_host() {
 
 #[tokio::test]
 async fn a_removed_provider_is_unavailable_where_the_stage_uses_it() {
+    // Renamed: the provider the run used is gone, and another is configured.
     let env = Plain {
-        providers: BTreeMap::new(),
+        providers: [("renamed".to_string(), d())].into(),
         ..same()
     };
     let issues = refused(&spec(), &code(), &env).await;
@@ -119,7 +126,7 @@ async fn a_removed_provider_is_unavailable_where_the_stage_uses_it() {
     let issue = issues.iter().next().unwrap();
     assert_eq!(issue.code, IssueCode::Unavailable);
     assert!(issue.message.contains("'mock'"), "{issue}");
-    assert_eq!(issue.known, ["mock"]);
+    assert_eq!(issue.known, ["renamed"], "what is configured now");
 }
 
 #[tokio::test]
@@ -155,7 +162,7 @@ async fn a_fallback_provider_and_an_unused_one_are_reported_where_they_are_recor
         paths(&issues),
         ["env.providers.compactor", "stages.plan.fallbacks"]
     );
-    assert_eq!(issues.iter().next().unwrap().known.len(), 3);
+    assert_eq!(issues.iter().next().unwrap().known, ["mock"]);
     // A fallback without a provider names none.
     s.stages[0].fallbacks = vec![ModelRef::parse("bare").unwrap()];
     let issues = refused(&s, &code(), &same()).await;
@@ -176,7 +183,13 @@ async fn a_removed_mcp_server_is_unavailable_at_the_stages_that_use_its_tools() 
     let issue = issues.iter().next().unwrap();
     assert_eq!(issue.code, IssueCode::Unavailable);
     assert!(issue.message.contains("MCP server 'gh'"), "{issue}");
-    assert_eq!(issue.known, ["search"]);
+    assert!(issue.known.is_empty(), "no server is configured now");
+    let renamed = Plain {
+        mcp: [("github".to_string(), d())].into(),
+        ..same()
+    };
+    let issues = refused(&spec(), &code(), &renamed).await;
+    assert_eq!(issues.iter().next().unwrap().known, ["github"]);
 }
 
 #[tokio::test]
@@ -268,7 +281,7 @@ async fn an_mcp_server_no_stage_uses_is_reported_against_its_fingerprint() {
         .insert(McpServerName::new("idle").unwrap(), d());
     let issues = refused(&s, &code(), &same()).await;
     assert_eq!(paths(&issues), ["env.mcp_servers.idle"]);
-    assert!(issues.iter().next().unwrap().known.is_empty());
+    assert_eq!(issues.iter().next().unwrap().known, ["gh"]);
 }
 
 #[tokio::test]

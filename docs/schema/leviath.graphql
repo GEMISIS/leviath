@@ -1639,6 +1639,25 @@ type ChecklistItemOutput {
 	note: String
 }
 
+"The run moved among its stage's checkpoints, or put one to a person."
+type CheckpointChangeOutput {
+	"Where it is among them now."
+	checkpoint: CheckpointProgressOutput!
+}
+
+"""
+Where a run is among the checkpoints of the stage it is in: the questions
+a stage puts to a person before it may move on.
+"""
+type CheckpointProgressOutput {
+	"The checkpoint it is on, by its position in the stage's list."
+	index: Int!
+	"The rounds of revision taken at that checkpoint."
+	round: Int!
+	"While the checkpoint is put to a person: the document it shows them."
+	document: String
+}
+
 "The run started a child run."
 type ChildrenChangeOutput {
 	"Its children now."
@@ -12309,6 +12328,8 @@ type RunStateOutput {
 	waitReason: String
 	"The last move it made between stages."
 	lastTransition: StageTransitionOutput
+	"Where it is among its stage's checkpoints."
+	checkpoint: CheckpointProgressOutput!
 }
 
 "Where a run is in its life."
@@ -15473,7 +15494,7 @@ type StateAnswerOutput {
 }
 
 "One part of a run's state that a step changed, with its new value."
-union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput
+union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | CheckpointChangeOutput
 
 "Working time: seconds banked, and when the running clock started."
 type StateClockOutput {

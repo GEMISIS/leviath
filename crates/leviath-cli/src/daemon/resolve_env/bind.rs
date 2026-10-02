@@ -44,6 +44,30 @@ impl BindEnv for DaemonEnv {
         self.server_tools(server)
     }
 
+    fn providers_now(&self) -> Vec<String> {
+        let creds = crate::commands::run::session::provider_creds_from_config(&self.config);
+        let mut names: std::collections::BTreeSet<String> =
+            creds.into_iter().map(|c| c.name).collect();
+        names.extend(
+            self.registry
+                .provider_names()
+                .into_iter()
+                .map(str::to_string),
+        );
+        names.into_iter().collect()
+    }
+
+    fn mcp_servers_now(&self) -> Vec<String> {
+        let mut names: std::collections::BTreeSet<String> = self
+            .config
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        names.extend(self.mcp_by_server().into_keys().map(|s| s.to_string()));
+        names.into_iter().collect()
+    }
+
     async fn bind(&self, spec: &RunSpec, code: &CodeFiles) -> Result<Bindings, SpawnIssues> {
         let mut issues = SpawnIssues::new();
         let compiled = issues.take(leviath_runtime::bind::scripts::compile(spec, code));

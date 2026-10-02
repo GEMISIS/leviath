@@ -8,8 +8,8 @@ use async_graphql::{Enum, ID, SimpleObject};
 use leviath_graphql_derive::mirror;
 use leviath_runtime::state::{
     Clock, Cursor, FanOutState, FinalOutputState, Flags, MessageState, OpenInteraction,
-    PendingBatch, PipelinePhase, RunState as CoreState, RunStatus as CoreStatus, Spend,
-    StageProgress as CoreProgress, StageRecord as CoreRecord, StageStatus, Totals,
+    PendingBatch, PipelinePhase, PointProgress, RunState as CoreState, RunStatus as CoreStatus,
+    Spend, StageProgress as CoreProgress, StageRecord as CoreRecord, StageStatus, Totals,
     TransitionReason as CoreReason, TransitionRecord, VisitRecord,
 };
 
@@ -276,6 +276,29 @@ impl From<&Clock> for StateClock {
         Self {
             banked_secs: big(clock.banked_secs),
             since: clock.since.map(Timestamp),
+        }
+    }
+}
+
+/// Where a run is among the checkpoints of the stage it is in: the questions
+/// a stage puts to a person before it may move on.
+#[mirror(no_filter)]
+#[derive(Debug, SimpleObject)]
+pub(crate) struct CheckpointProgress {
+    /// The checkpoint it is on, by its position in the stage's list.
+    pub(crate) index: i32,
+    /// The rounds of revision taken at that checkpoint.
+    pub(crate) round: i32,
+    /// While the checkpoint is put to a person: the document it shows them.
+    pub(crate) document: Option<String>,
+}
+
+impl From<&PointProgress> for CheckpointProgress {
+    fn from(point: &PointProgress) -> Self {
+        Self {
+            index: saturating(point.cursor),
+            round: saturating(point.round),
+            document: point.asking.clone(),
         }
     }
 }
@@ -828,6 +851,8 @@ pub(crate) struct RunState {
     pub(crate) wait_reason: Option<String>,
     /// The last move it made between stages.
     pub(crate) last_transition: Option<StageTransition>,
+    /// Where it is among its stage's checkpoints.
+    pub(crate) checkpoint: CheckpointProgress,
 }
 
 impl From<&CoreState> for RunState {
@@ -859,6 +884,7 @@ impl From<&CoreState> for RunState {
                 .as_ref()
                 .map(|w| leviath_core::run_meta::WaitReason::from(w).to_string()),
             last_transition: s.last_transition.as_ref().map(StageTransition::from),
+            checkpoint: CheckpointProgress::from(&s.point),
         }
     }
 }

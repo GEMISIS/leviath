@@ -15,9 +15,10 @@
 //! What the run was doing comes back with its state: a model call that was
 //! out is made again, a tool batch in flight is dispatched again with the
 //! results that came back carried over (a call that finished never runs
-//! twice), a choice of edge is asked again, and a fan-out picks its workers
-//! back up. A run directory in the older many-file layout is converted to a
-//! run file first, when this build carries the converter.
+//! twice), a question put to a person or a stage checkpoint is asked again, a
+//! choice of edge is asked again, and a fan-out picks its workers back up. A
+//! run directory in the older many-file layout is converted to a run file
+//! first, when this build carries the converter.
 
 use std::path::Path;
 
@@ -254,3 +255,7 @@ fn relink_tree(world: &mut PipelineWorld, placed: &[Placed]) {
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "recovery_resume_tests.rs"]
+mod resume_tests;

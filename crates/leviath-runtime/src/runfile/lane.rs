@@ -126,7 +126,8 @@ impl RunFileLane {
                 None => RunFileWriter::open(&path, policy),
             };
             opened.and_then(|mut writer| {
-                let state = writer.state().clone();
+                let mut state = writer.state().clone();
+                fold_finished(&mut state, &events, Started::Elsewhere);
                 let finished = matches!(
                     state.status,
                     RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
@@ -190,7 +191,7 @@ impl RunFileLane {
 fn write_step(
     slot: Option<RunFileWriter>,
     run_dir: &Path,
-    step: RunFileStep,
+    mut step: RunFileStep,
     events: Vec<RunEvent>,
     owner: OwnerFrame,
     policy: CheckpointPolicy,
@@ -200,6 +201,7 @@ fn write_step(
         step.state.status,
         RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
     );
+    fold_finished(&mut step.state, &events, Started::InThisState);
     let result = writer_for(slot, &path, &step, owner, policy).and_then(|mut writer| {
         store_new_blobs(&mut writer, run_dir, &step.state)?;
         let seq = writer.record(step.state, step.at, events)?;
@@ -271,6 +273,48 @@ fn store_new_blobs(
 
 fn blob_dir(run_dir: &Path) -> PathBuf {
     run_dir.join(leviath_core::files::BLOBS_DIR)
+}
+
+/// Where the state a step records stands against a batch the step's events
+/// start.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Started {
+    /// The state is the run's state now, so a batch the events start is the
+    /// one it holds.
+    InThisState,
+    /// The state is the one last written, from before the events: a batch
+    /// they start is not the one it holds.
+    Elsewhere,
+}
+
+/// Put each call the step's events say finished into the batch `state` holds
+/// as done, so the file holds a finished call as done the moment it lands
+/// rather than when the whole batch ends. Only results that came back after
+/// the last batch the events start count, and only for a call of the batch
+/// in `state`. A result already there is kept.
+fn fold_finished(state: &mut RunState, events: &[RunEvent], started: Started) {
+    let Some(batch) = state.pending.as_mut() else {
+        return;
+    };
+    let last_start = events
+        .iter()
+        .rposition(|e| matches!(e, RunEvent::ToolStarted(_)));
+    if last_start.is_some() && started == Started::Elsewhere {
+        return;
+    }
+    let after = last_start.map_or(0, |i| i + 1);
+    for event in events.iter().skip(after) {
+        if let RunEvent::ToolFinished {
+            call_id, result, ..
+        } = event
+            && batch.calls.iter().any(|c| c.id == *call_id)
+        {
+            batch
+                .done
+                .entry(call_id.clone())
+                .or_insert_with(|| result.clone());
+        }
+    }
 }
 
 /// A model reference from a journal's provider and model strings, when the

@@ -1839,6 +1839,22 @@ async fn inspect_reads_an_unloaded_run_from_its_run_file() {
     .await;
     assert!(none.is_none());
 
+    // A finished worker still in the world, with its state dropped from
+    // memory, is read from its file too: what is left in the world is not
+    // its state.
+    let worker = spawn(&mut host, "t-1", "t-1");
+    host.world_mut()
+        .world_mut()
+        .entity_mut(worker.entity())
+        .insert(crate::fanout::Slimmed);
+    let state = ask(&mut host, |reply| ControlOp::Inspect {
+        run_id: "t-1".to_string(),
+        reply,
+    })
+    .await
+    .expect("read from the run file");
+    assert_eq!(*state, *written.state());
+
     // A world kept in memory has no run files to read.
     let mut bare = host_with(vec![]);
     let none = ask(&mut bare, |reply| ControlOp::Inspect {
@@ -2804,6 +2820,48 @@ async fn an_empty_message_is_refused() {
     .await;
     let why = refused.expect_err("an empty message says nothing");
     assert!(why.contains("empty message"), "{why}");
+}
+
+/// A message to a run that will never read it is refused with why, rather
+/// than reported as delivered: no such run, one that finished or failed, and
+/// one that was cancelled (which says how to carry it on).
+#[tokio::test]
+async fn a_message_no_run_will_read_is_refused() {
+    let mut host = host_with(vec![]);
+    for (agent, status) in [
+        ("done", AgentStatus::Complete),
+        (
+            "broke",
+            AgentStatus::Error {
+                message: "x".to_string(),
+            },
+        ),
+        ("stopped", AgentStatus::Cancelled),
+    ] {
+        let e = spawn(&mut host, agent, agent);
+        host.world_mut()
+            .world_mut()
+            .get_mut::<AgentState>(e.entity())
+            .unwrap()
+            .status = status;
+    }
+    for (agent, says) in [
+        ("ghost", "no run 'ghost'"),
+        ("done", "has finished"),
+        ("broke", "has failed"),
+        ("stopped", "lev resume stopped"),
+    ] {
+        let refused = ask(&mut host, |reply| ControlOp::Message {
+            agent_id: agent.to_string(),
+            content: "hi".to_string(),
+            target_region: None,
+            parts: Vec::new(),
+            reply,
+        })
+        .await;
+        let why = refused.expect_err("nobody will read it");
+        assert!(why.contains(says), "{agent}: {why}");
+    }
 }
 
 #[tokio::test]

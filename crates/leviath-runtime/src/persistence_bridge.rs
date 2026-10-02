@@ -282,10 +282,14 @@ async fn record_run_file(
 ) {
     let run_id = step.run_id.clone();
     stats.append_attempted();
-    if let Err(e) = run_files.record(runs_dir, step).await {
-        let message = e.kind.to_string();
-        tracing::warn!(run_id = %run_id, error = %e, "persistence: run file step not written");
-        stats.journal_append_failed(&run_id, &e.path, &message);
+    match run_files.record(runs_dir, step).await {
+        Ok(Some(seq)) => stats.stepped(&run_id, seq),
+        Ok(None) => {}
+        Err(e) => {
+            let message = e.kind.to_string();
+            tracing::warn!(run_id = %run_id, error = %e, "persistence: run file step not written");
+            stats.journal_append_failed(&run_id, &e.path, &message);
+        }
     }
 }
 
@@ -299,7 +303,10 @@ async fn flush_run_file(
 ) -> Appended {
     stats.append_attempted();
     match run_files.flush(runs_dir, run_id).await {
-        Ok(Some(seq)) => Appended::Landed { position: seq },
+        Ok(Some(seq)) => {
+            stats.stepped(run_id, seq);
+            Appended::Landed { position: seq }
+        }
         Ok(None) => Appended::NoJournal,
         Err(e) => {
             let message = e.kind.to_string();

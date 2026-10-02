@@ -76,6 +76,8 @@ pub enum Change {
     WaitReason(Option<WaitState>),
     /// `last_transition`.
     LastTransition(Option<TransitionRecord>),
+    /// `point`.
+    Point(PointProgress),
 }
 
 /// An edge a run took, and why.
@@ -243,6 +245,7 @@ impl StateDelta {
             final_output => FinalOutput,
             wait_reason => WaitReason,
             last_transition => LastTransition,
+            point => Point,
         );
         Self {
             seq: prev.seq + 1,
@@ -285,6 +288,7 @@ impl StateDelta {
                 Change::FinalOutput(v) => state.final_output = v,
                 Change::WaitReason(v) => state.wait_reason = v,
                 Change::LastTransition(v) => state.last_transition = v,
+                Change::Point(v) => state.point = v,
             }
         }
         state.seq = self.seq;

@@ -10,8 +10,11 @@
 //! What the run was doing comes back with its state. A run that was waiting on
 //! a model reply asks again; a tool batch in flight is dispatched again with
 //! the results that had come back carried over, so a call that finished is
-//! never run twice; a run choosing its next stage is asked again among the
-//! same edges; a fan-out picks its workers back up by run id. See
+//! never run twice, and a question one of its calls put to a person is asked
+//! again; a run stopped at a checkpoint has it asked again over the same
+//! document; a run choosing its next stage is asked again among the same
+//! edges; a fan-out picks its workers back up by run id, and a worker that
+//! finished while the daemon was down is read from its own file. See
 //! [`insert::place`](crate::insert::place) for each.
 //!
 //! When the daemon restarts, [`triage`] puts the runs it finds in the order
@@ -52,7 +55,10 @@ pub fn read_for_resume(
         return Ok(None);
     }
     let reader = crate::runfile::RunFileReader::open(&path)?;
-    let state = reader.latest_state()?;
+    let mut state = reader.latest_state()?;
+    if let (Some(fan_out), Some(runs_dir)) = (state.fan_out.as_mut(), run_dir.parent()) {
+        settle_finished_workers(fan_out, runs_dir);
+    }
     let blobs = reader
         .blob_digests()
         .map(|d| (d.clone(), reader.blob(d).ok().flatten().unwrap_or_default()))
@@ -73,6 +79,71 @@ pub fn read_for_resume(
         state,
         spec: std::sync::Arc::new(reader.spec().clone()),
     }))
+}
+
+/// Take each fan-out worker that finished out of the running ones, with what
+/// it finished with, read from its own run file under `runs_dir`. A worker's
+/// end is recorded on its own file before its parent records reaping it, so a
+/// parent that stopped in between still lists it as running; a finished run
+/// is not brought back, so this is where its result is found. A worker whose
+/// file does not read stays running, and placing the parent counts it failed
+/// when it is not in the world either.
+fn settle_finished_workers(fan_out: &mut crate::state::FanOutState, runs_dir: &std::path::Path) {
+    let active = std::mem::take(&mut fan_out.active);
+    for (item, run) in active {
+        let reader = crate::runfile::RunFileReader::open(
+            &runs_dir
+                .join(run.as_str())
+                .join(leviath_core::files::RUN_FILE),
+        )
+        .ok();
+        let finished = reader
+            .and_then(|reader| reader.latest_state().ok().map(|state| (state, reader)))
+            .and_then(|(state, reader)| worker_result(reader.spec(), &state));
+        match finished {
+            Some(Ok(summary)) => fan_out.done.push((item, summary)),
+            Some(Err(why)) => fan_out.failed.push((item, why)),
+            None => fan_out.active.push((item, run)),
+        }
+    }
+}
+
+/// What a worker finished with, or `None` while it is still going: as the
+/// parent reads a worker it reaps live (its final output, else its last
+/// reply, unless its stage requires an output it did not give).
+fn worker_result(
+    spec: &crate::spec::run_spec::RunSpec,
+    state: &crate::state::RunState,
+) -> Option<Result<String, String>> {
+    match &state.status {
+        RunStatus::Complete => Some(match &state.final_output {
+            Some(out) => Ok(out.content.clone()),
+            None if spec
+                .graph
+                .stage(state.cursor.stage.as_str())
+                .is_some_and(|s| s.require_output) =>
+            {
+                Err("worker finished without the final output its stage requires".to_string())
+            }
+            None => Ok(last_reply(state)),
+        }),
+        RunStatus::Error(message) => Some(Err(message.clone())),
+        RunStatus::Cancelled => Some(Err("worker cancelled".to_string())),
+        _ => None,
+    }
+}
+
+/// The text of the last model turn in a run's context.
+fn last_reply(state: &crate::state::RunState) -> String {
+    state
+        .context
+        .regions
+        .iter()
+        .flat_map(|r| &r.entries)
+        .filter(|e| matches!(e.kind, crate::state::EntryKind::AssistantTurn(_)))
+        .max_by_key(|e| e.timestamp)
+        .map(|e| e.text.clone())
+        .unwrap_or_default()
 }
 
 /// Place a run read back by [`read_for_resume`] into the world, with the live

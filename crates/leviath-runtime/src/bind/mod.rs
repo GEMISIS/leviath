@@ -79,6 +79,7 @@ fn provider_paths(spec: &RunSpec, provider: &ProviderName) -> Vec<SpecPath> {
 }
 
 fn check_providers(spec: &RunSpec, env: &dyn BindEnv, issues: &mut SpawnIssues) {
+    let configured = env.providers_now();
     for (provider, recorded) in &spec.env.providers {
         let issue = match env.provider_fingerprint(provider) {
             None => (
@@ -104,15 +105,10 @@ fn check_providers(spec: &RunSpec, env: &dyn BindEnv, issues: &mut SpawnIssues) 
             issues.push(
                 SpawnIssue::new(path, code, message.clone())
                     .hint(hint.clone())
-                    .known(env_known_providers(spec)),
+                    .known(configured.iter()),
             );
         }
     }
-}
-
-/// The providers the run recorded, for an issue's `known` list.
-fn env_known_providers(spec: &RunSpec) -> Vec<String> {
-    spec.env.providers.keys().map(|p| p.to_string()).collect()
 }
 
 /// The MCP tools the run's stages were given from `server`, by the tool's
@@ -176,6 +172,7 @@ fn mcp_differences(
 }
 
 fn check_mcp_servers(spec: &RunSpec, env: &dyn BindEnv, issues: &mut SpawnIssues) {
+    let configured = env.mcp_servers_now();
     for (server, recorded) in &spec.env.mcp_servers {
         let tools = recorded_mcp_tools(spec, server);
         let (code, message) = match env.mcp_fingerprint(server) {
@@ -222,7 +219,7 @@ fn check_mcp_servers(spec: &RunSpec, env: &dyn BindEnv, issues: &mut SpawnIssues
                     .hint(format!(
                         "restore '{server}' as it was when the run started, or start a new run"
                     ))
-                    .known(tools.keys()),
+                    .known(configured.iter()),
             );
         }
     }

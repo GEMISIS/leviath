@@ -353,3 +353,19 @@ fn the_daemon_lists_an_mcp_servers_tools_for_a_changed_fingerprint() {
         Some(host::registered_fingerprint("mock"))
     );
 }
+
+/// What a refusal to resume lists as known is what this machine has now:
+/// the providers in its config and registry, and the MCP servers it has
+/// configured or connected.
+#[test]
+fn the_daemon_names_the_providers_and_servers_it_has_now() {
+    let mut config = crate::config::Config::default();
+    config.providers.openai_api_key = Some("sk-test".into());
+    config.mcp_servers = vec![leviath_mcp::MCPServerConfig {
+        name: "quiet".into(),
+        ..Default::default()
+    }];
+    let (env, _agents) = crate::daemon::resolve_env::tests::env_with(config);
+    assert_eq!(BindEnv::providers_now(&env), ["mock", "openai"]);
+    assert_eq!(BindEnv::mcp_servers_now(&env), ["gh", "quiet"]);
+}

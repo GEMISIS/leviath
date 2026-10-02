@@ -73,6 +73,13 @@ pub struct PersistWatermark {
     /// the same calls again, with the results that came back carried over,
     /// rather than asking the model a second time.
     last_awaiting_tools: Option<bool>,
+    /// The fan-out's progress as of the last snapshot: its queued, running,
+    /// done and failed workers, counted.
+    ///
+    /// A worker finishing moves nothing else about its parent, and the
+    /// parent's file has to say which workers are done: a restart reads the
+    /// workers it lists as running and counts any it cannot find as failed.
+    last_fan_out: Option<[usize; 4]>,
 }
 
 impl PersistWatermark {
@@ -224,7 +231,9 @@ pub(crate) fn reflect_interaction_status(
                     state.status = AgentStatus::Waiting;
                     commands.entity(entity).insert(AwaitingInteraction);
                     if let Some(mut progress) = progress {
-                        progress.waiting_since = Some(now);
+                        // A run that resumed asking again has been waiting
+                        // since it first asked, so that start is kept.
+                        progress.waiting_since.get_or_insert(now);
                     }
                 }
             }
@@ -542,12 +551,18 @@ fn build_snapshots(
         // run's file has to hold it; see `last_awaiting_tools`.
         let awaiting_tools = awaiting_tools.is_some();
         let tools_changed = watermark.last_awaiting_tools != Some(awaiting_tools);
+        let fan_out_now = fan_out_waiting.map(crate::fanout::FanOutWaiting::progress);
+        let fan_out_changed = watermark.last_fan_out != fan_out_now;
         // Beat even when nothing changed, so `updated_at` distinguishes a run
         // that is slow from one that nothing is driving.
         let due_for_heartbeat = watermark
             .last_written_at
             .is_none_or(|at| now.saturating_sub(at) >= PERSIST_HEARTBEAT_SECS);
-        let due = watermark_changed || title_changed || tools_changed || due_for_heartbeat;
+        let due = watermark_changed
+            || title_changed
+            || tools_changed
+            || fan_out_changed
+            || due_for_heartbeat;
         if !due && !has_appends {
             continue; // nothing meaningful changed, nothing buffered, beat not due
         }
@@ -593,6 +608,7 @@ fn build_snapshots(
             watermark.last_title = Some((md.title.clone(), md.title_error.clone()));
         }
         watermark.last_awaiting_tools = Some(awaiting_tools);
+        watermark.last_fan_out = fan_out_now;
         watermark.last_written_at = Some(now);
 
         // Tree links, for a deterministic restart-time rebuild of the graph.

@@ -732,6 +732,19 @@
               "LastTransition"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`point`.",
+            "properties": {
+              "Point": {
+                "$ref": "#/$defs/PointProgress"
+              }
+            },
+            "required": [
+              "Point"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1190,6 +1203,38 @@
         ],
         "type": "object"
       },
+      "FanOutOrigin": {
+        "description": "How a fan-out was started, and so how its results come back.\n\nOne engine, two entry points. The workers, the concurrency cap, the failure\npolicy and the merged report are identical either way; only the last step\ndiffers, and this is the whole of that difference.",
+        "oneOf": [
+          {
+            "const": "Stage",
+            "description": "A fan-out stage. The report goes to the stage's `results_region` and\nthe stage transitions to its `merge_stage`.\n\nThe default, so a state that does not say reads as a stage.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A `fan_out` tool call from an ordinary stage. The report comes back as\nthat call's result - routed by the stage's `tool_routing` like any other,\nso the graph decides where it lands or whether it lands at all - and\nthe agent carries on where it left off.",
+            "properties": {
+              "Tool": {
+                "properties": {
+                  "call_id": {
+                    "description": "The tool call this fan-out is the result of.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "call_id"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Tool"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "FanOutState": {
         "description": "A fan-out in progress.",
         "properties": {
@@ -1255,6 +1300,17 @@
             "minimum": 0,
             "type": "integer"
           },
+          "origin": {
+            "$ref": "#/$defs/FanOutOrigin",
+            "description": "How its report comes back: into the stage's results, or as the result\nof the `fan_out` call that started it."
+          },
+          "parts": {
+            "description": "The files finished workers handed back, already in this run's store.",
+            "items": {
+              "$ref": "#/$defs/PartState"
+            },
+            "type": "array"
+          },
           "paused": {
             "description": "Whether starting new workers is paused.",
             "type": "boolean"
@@ -1279,7 +1335,9 @@
           "active",
           "done",
           "failed",
-          "paused"
+          "paused",
+          "origin",
+          "parts"
         ],
         "type": "object"
       },
@@ -1911,6 +1969,35 @@
             "type": "string"
           }
         ]
+      },
+      "PointProgress": {
+        "description": "Where a run is among the checkpoints of the stage it is in: the stage\nboundary questions a graph declares (`interactive_points`), which a person\nanswers before the stage may move on.",
+        "properties": {
+          "asking": {
+            "description": "While the checkpoint is put to a person: the document it shows them.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "description": "The checkpoint it is on, by its position in the stage's list.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "round": {
+            "description": "The rounds of revision taken at that checkpoint.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cursor",
+          "round"
+        ],
+        "type": "object"
       },
       "QuestionKind": {
         "description": "What a question asked a person for.",
@@ -8121,6 +8208,38 @@
         ],
         "type": "object"
       },
+      "FanOutOrigin": {
+        "description": "How a fan-out was started, and so how its results come back.\n\nOne engine, two entry points. The workers, the concurrency cap, the failure\npolicy and the merged report are identical either way; only the last step\ndiffers, and this is the whole of that difference.",
+        "oneOf": [
+          {
+            "const": "Stage",
+            "description": "A fan-out stage. The report goes to the stage's `results_region` and\nthe stage transitions to its `merge_stage`.\n\nThe default, so a state that does not say reads as a stage.",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A `fan_out` tool call from an ordinary stage. The report comes back as\nthat call's result - routed by the stage's `tool_routing` like any other,\nso the graph decides where it lands or whether it lands at all - and\nthe agent carries on where it left off.",
+            "properties": {
+              "Tool": {
+                "properties": {
+                  "call_id": {
+                    "description": "The tool call this fan-out is the result of.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "call_id"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Tool"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "FanOutState": {
         "description": "A fan-out in progress.",
         "properties": {
@@ -8186,6 +8305,17 @@
             "minimum": 0,
             "type": "integer"
           },
+          "origin": {
+            "$ref": "#/$defs/FanOutOrigin",
+            "description": "How its report comes back: into the stage's results, or as the result\nof the `fan_out` call that started it."
+          },
+          "parts": {
+            "description": "The files finished workers handed back, already in this run's store.",
+            "items": {
+              "$ref": "#/$defs/PartState"
+            },
+            "type": "array"
+          },
           "paused": {
             "description": "Whether starting new workers is paused.",
             "type": "boolean"
@@ -8210,7 +8340,9 @@
           "active",
           "done",
           "failed",
-          "paused"
+          "paused",
+          "origin",
+          "parts"
         ],
         "type": "object"
       },
@@ -8796,6 +8928,35 @@
             "type": "string"
           }
         ]
+      },
+      "PointProgress": {
+        "description": "Where a run is among the checkpoints of the stage it is in: the stage\nboundary questions a graph declares (`interactive_points`), which a person\nanswers before the stage may move on.",
+        "properties": {
+          "asking": {
+            "description": "While the checkpoint is put to a person: the document it shows them.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "description": "The checkpoint it is on, by its position in the stage's list.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "round": {
+            "description": "The rounds of revision taken at that checkpoint.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cursor",
+          "round"
+        ],
+        "type": "object"
       },
       "RegionState": {
         "description": "One region's live state.",
@@ -9740,6 +9901,10 @@
         "$ref": "#/$defs/PipelinePhase",
         "description": "What its pipeline is doing."
       },
+      "point": {
+        "$ref": "#/$defs/PointProgress",
+        "description": "Where it is among its current stage's checkpoints."
+      },
       "progress": {
         "$ref": "#/$defs/StageProgress",
         "description": "The current stage's counters."
@@ -9801,7 +9966,8 @@
       "totals",
       "clock",
       "flags",
-      "children"
+      "children",
+      "point"
     ],
     "title": "RunState",
     "type": "object"

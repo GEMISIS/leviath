@@ -413,12 +413,9 @@ fn fan_out(f: &FanOutFile, stage: &StageDef, report: &mut Report) -> FanOutState
             }
         })
         .collect();
-    if !f.origin.is_null() {
-        report.note(format!(
-            "the fan-out's origin {} is not kept: the run file does not record how a fan-out's report is delivered",
-            f.origin
-        ));
-    }
+    // An old fan-out with no origin was a stage's, which is the default; an
+    // origin is otherwise the same shape the run file keeps.
+    let origin = serde_json::from_value(f.origin.clone()).unwrap_or_default();
     if !f.parts.is_empty() {
         report.note(format!(
             "{} files the fan-out's workers handed back are not kept",
@@ -444,6 +441,8 @@ fn fan_out(f: &FanOutFile, stage: &StageDef, report: &mut Report) -> FanOutState
         done: f.summaries.clone(),
         failed: f.failures.clone(),
         paused: f.paused,
+        origin,
+        parts: Vec::new(),
     }
 }
 

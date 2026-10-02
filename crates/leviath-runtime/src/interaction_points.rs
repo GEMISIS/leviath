@@ -57,6 +57,12 @@ pub(crate) struct ReadyForInteractionPoint;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct AwaitingInteractionPoint;
 
+/// The document an open interaction point shows the person, as it was put to
+/// them. Read with [`AwaitingInteractionPoint`], so a run's state holds what
+/// the point asks over and a restart can ask it again over the same text.
+#[derive(Component, Debug, Clone)]
+pub(crate) struct PointBody(pub String);
+
 /// Which interaction point (index into the stage's `points`) the agent is on.
 /// Absent ⇒ 0. Advanced on approve; reset when a new stage is entered.
 #[derive(Component, Debug, Clone, Copy)]
@@ -619,7 +625,7 @@ pub(crate) fn dispatch_interaction_point(
                 .entity(entity)
                 .remove::<ReadyForInteractionPoint>()
                 .remove::<PlanBodyOverride>()
-                .insert(AwaitingInteractionPoint);
+                .insert((AwaitingInteractionPoint, PointBody(body)));
             continue;
         }
         stage.runtime.spawn(run_interaction_point(
@@ -627,7 +633,7 @@ pub(crate) fn dispatch_interaction_point(
                 entity,
                 agent_id: state.agent_id.clone(),
                 point,
-                body,
+                body: body.clone(),
                 round: rounds.map_or(0, |r| r.0),
             },
             PromptLane {
@@ -640,7 +646,7 @@ pub(crate) fn dispatch_interaction_point(
             .entity(entity)
             .remove::<ReadyForInteractionPoint>()
             .remove::<PlanBodyOverride>()
-            .insert(AwaitingInteractionPoint);
+            .insert((AwaitingInteractionPoint, PointBody(body)));
     }
 }
 
