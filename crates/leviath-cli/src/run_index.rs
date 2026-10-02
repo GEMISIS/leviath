@@ -118,21 +118,22 @@ impl RunIndex {
         if let Some(entry) = self.runs.get(&name).filter(|e| e.stamp == stamp) {
             return Some(entry.run.clone());
         }
-        match runstate::read_meta_from(dir) {
-            Ok(run) => {
-                let entry = Entry {
-                    stamp,
-                    run: run.clone(),
-                };
-                self.runs.insert(name, entry);
-                self.changed = true;
-                Some(run)
-            }
-            Err(_) => {
-                self.forget(&name);
-                None
-            }
-        }
+        // A file an earlier release wrote under the same name is told apart
+        // by its first bytes, not read whole.
+        let read = runstate::run_file::is_run_file(dir)
+            .then(|| runstate::read_meta_from(dir).ok())
+            .flatten();
+        let Some(run) = read else {
+            self.forget(&name);
+            return None;
+        };
+        let entry = Entry {
+            stamp,
+            run: run.clone(),
+        };
+        self.runs.insert(name, entry);
+        self.changed = true;
+        Some(run)
     }
 
     fn forget(&mut self, name: &str) {
@@ -171,20 +172,41 @@ impl RunIndex {
     }
 }
 
-/// Every run under `runs_dir`, newest first, through its index, which is
-/// brought up to date and saved.
-pub(crate) fn list(runs_dir: &Path) -> Vec<RunMeta> {
+/// Every run under `runs_dir` and its directory, through its index, which
+/// is brought up to date and saved.
+fn indexed(runs_dir: &Path) -> Vec<(PathBuf, RunMeta)> {
     let Ok(entries) = std::fs::read_dir(runs_dir) else {
         return Vec::new();
     };
     let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
     dirs.sort();
     let mut index = RunIndex::load(runs_dir);
-    let mut runs: Vec<RunMeta> = dirs.iter().filter_map(|d| index.run(d)).collect();
+    let runs = dirs
+        .iter()
+        .filter_map(|d| index.run(d).map(|run| (d.clone(), run)))
+        .collect();
     index.keep_only(&dirs.into_iter().collect());
     index.save();
+    runs
+}
+
+/// Every run under `runs_dir`, newest first, through its index, which is
+/// brought up to date and saved.
+pub(crate) fn list(runs_dir: &Path) -> Vec<RunMeta> {
+    let mut runs: Vec<RunMeta> = indexed(runs_dir).into_iter().map(|(_, run)| run).collect();
     runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     runs
+}
+
+/// Every run directory under `runs_dir` whose run has not finished, through
+/// its index: what a daemon brings back when it starts, found without
+/// reading the file of every run that finished.
+pub(crate) fn unfinished(runs_dir: &Path) -> Vec<PathBuf> {
+    indexed(runs_dir)
+        .into_iter()
+        .filter(|(_, run)| !runstate::is_terminal_status(&run.status))
+        .map(|(dir, _)| dir)
+        .collect()
 }
 
 /// Bring the index of `runs_dir` up to date every [`REFRESH_EVERY`] for as

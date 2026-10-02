@@ -11616,7 +11616,7 @@ enum RunOrderField {
 
 "Where a run's graph came from, and which revision of it ran."
 type RunOriginOutput {
-	"Which of the three it was."
+	"Which of the four it was."
 	kind: SpecOriginKind!
 	"The blueprint's name. Null for a graph the caller wrote."
 	blueprintName: String
@@ -14115,6 +14115,11 @@ enum SpecOriginKind {
 	BLUEPRINT_FILE
 	"A graph the caller wrote."
 	RAW
+	"""
+	The graph a run from an earlier release recorded, its blueprint gone
+	when it was converted. Such a run never resumes.
+	"""
+	RECORDED
 }
 
 "A run's spend passed a figure the operator asked to be told about."

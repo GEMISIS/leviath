@@ -350,31 +350,37 @@ async fn an_old_run_directory_is_converted_on_first_load() {
         .join("leviath-legacy-runs")
         .join("tests")
         .join("fixtures");
-    let runs = tempfile::tempdir().unwrap();
-    copy_dir(&fixtures.join("mid-tool-batch"), &runs.path().join("old"));
-    std::fs::create_dir_all(runs.path().join("empty")).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    copy_dir(&fixtures.join("mid-tool-batch"), &runs.join("old"));
+    std::fs::create_dir_all(runs.join("empty")).unwrap();
     // A directory that claims the older layout and cannot be read as it.
-    std::fs::create_dir_all(runs.path().join("broken")).unwrap();
-    std::fs::write(runs.path().join("broken").join("meta.json"), "not json").unwrap();
+    std::fs::create_dir_all(runs.join("broken")).unwrap();
+    std::fs::write(runs.join("broken").join("meta.json"), "not json").unwrap();
 
     crate::test_support::with_tracing(|| {
-        crate::daemon::convert_old::convert_all(runs.path(), Some(&fixtures.join("agents")), None);
+        crate::daemon::convert_old::convert_all(&runs, Some(&fixtures.join("agents")), None);
     });
 
-    let old = runs.path().join("old");
+    let old = runs.join("old");
     assert!(
         old.join("legacy").join("meta.json").is_file(),
         "the old files are kept aside"
     );
     let found = read_run(&old).expect("the converted run reads as a run file");
     assert!(!found.spec.run_id.as_str().is_empty());
-    assert!(runs.path().join("broken").join("meta.json").is_file());
+    assert!(runs.join("broken").join("meta.json").is_file());
+    // Both were saved in the home's backup before anything changed.
+    let backup = crate::home_backup::Backup::of_home(home.path());
+    assert!(backup.dir().join("runs/old/meta.json").is_file());
+    assert!(backup.dir().join("runs/old/run.lvr").is_file());
+    assert!(backup.dir().join("runs/broken/meta.json").is_file());
 
     // Converting again finds nothing to do.
     crate::daemon::convert_old::convert_one(&old, None, None);
     assert!(read_run(&old).is_some());
     // A runs directory that is not there converts nothing.
-    crate::daemon::convert_old::convert_all(&runs.path().join("gone"), None, None);
+    crate::daemon::convert_old::convert_all(&runs.join("gone"), None, None);
 }
 
 /// A finished run converted from the older layout still hands back its
@@ -389,8 +395,8 @@ fn a_converted_run_answers_from_its_run_file() {
         .join("tests")
         .join("fixtures")
         .join("real-finished");
-    let runs = tempfile::tempdir().unwrap();
-    let dir = runs.path().join("done");
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("runs").join("done");
     copy_dir(&fixture, &dir);
     crate::daemon::convert_old::convert_one(&dir, None, None);
 
@@ -399,4 +405,27 @@ fn a_converted_run_answers_from_its_run_file() {
     let meta = crate::runstate::read_meta_from(&dir).expect("the run file reads");
     let answer = crate::runstate::read_final_output_in(&dir, &meta).expect("the answer");
     assert_eq!(answer.content, kept);
+}
+
+/// An old run whose blueprint is gone converts from what it recorded, lists
+/// and reads like any other, and is never brought back to run.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_run_converted_without_its_blueprint_never_resumes() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("leviath-legacy-runs")
+        .join("tests")
+        .join("fixtures")
+        .join("finished");
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join("runs").join("orphan");
+    copy_dir(&fixture, &dir);
+    std::fs::remove_file(dir.join("blueprint.leviath")).unwrap();
+    crate::test_support::with_tracing(|| {
+        crate::daemon::convert_old::convert_one(&dir, None, None);
+        let meta = crate::runstate::read_meta_from(&dir).expect("the run file reads");
+        assert_eq!(meta.agent_name, "probe");
+        assert!(read_run(&dir).is_none());
+    });
 }

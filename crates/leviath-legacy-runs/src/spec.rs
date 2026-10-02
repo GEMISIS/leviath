@@ -2,13 +2,13 @@
 //! context snapshot.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::old::blueprint::Blueprint;
 use crate::old::layout::RegionSeed;
 use leviath_core::JsonDoc;
 use leviath_core::output::OutputSpec;
-use leviath_core::run_meta::{ContextSnapshot, RunMeta};
+use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus as OldStatus};
 use leviath_runtime::spec::env::CodeFiles;
 use leviath_runtime::spec::graph::{ArtifactDef, CodeRef, OutputDef, RunGraph};
 use leviath_runtime::spec::inputs::{InputValue, InputValues};
@@ -33,11 +33,18 @@ pub(crate) struct Built {
     pub(crate) code: Vec<(Digest, Vec<u8>)>,
 }
 
-/// The run's blueprint, and the run graph read from it.
-pub(crate) fn graph(
-    old: &LegacyRun,
-    report: &mut Report,
-) -> Result<(Blueprint, RunGraph), ConvertError> {
+/// Where the run's graph was read from.
+pub(crate) enum Source {
+    /// Its blueprint.
+    Blueprint(Box<Blueprint>),
+    /// What the run recorded, because its blueprint could not be read, and
+    /// why it could not.
+    Recorded(String),
+}
+
+/// The run's blueprint, and the run graph read from it; or, when there is no
+/// blueprint that reads as a run graph, the graph the run recorded.
+pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> (Source, RunGraph) {
     let blueprint_path = match &old.blueprint.source {
         BlueprintSource::Snapshot => old.dir.join(crate::legacy::BLUEPRINT_SNAPSHOT_FILE),
         BlueprintSource::Installed(path) => {
@@ -47,14 +54,42 @@ pub(crate) fn graph(
             ));
             path.clone()
         }
+        BlueprintSource::Recorded { why, .. } => return recorded(old, why.clone(), report),
     };
-    let blueprint = parse_manifest(&old.blueprint.text).map_err(|e| ConvertError::Unreadable {
-        path: blueprint_path,
+    let shown = blueprint_path.display().to_string();
+    match read_blueprint(&old.blueprint.text, blueprint_path) {
+        Ok((blueprint, graph)) => match crate::recorded::missing_stage(old, &graph) {
+            None => (Source::Blueprint(Box::new(blueprint)), graph),
+            Some(stage) => recorded(
+                old,
+                format!(
+                    "the blueprint at {shown} has no stage {stage:?}, which the run ran, so it is not the blueprint the run ran"
+                ),
+                report,
+            ),
+        },
+        Err(e) => recorded(old, e.to_string(), report),
+    }
+}
+
+/// The blueprint in `text`, read from `path`, and its run graph.
+fn read_blueprint(text: &str, path: PathBuf) -> Result<(Blueprint, RunGraph), ConvertError> {
+    let blueprint = parse_manifest(text).map_err(|e| ConvertError::Unreadable {
+        path,
         why: e.to_string(),
     })?;
     let mut graph = crate::old::graph::from_blueprint(&blueprint).map_err(ConvertError::Graph)?;
-    read_manifest_tables(&mut graph, &old.blueprint.text).map_err(ConvertError::Graph)?;
+    read_manifest_tables(&mut graph, text).map_err(ConvertError::Graph)?;
     Ok((blueprint, graph))
+}
+
+/// The graph the run recorded, its blueprint unread for `why`.
+fn recorded(old: &LegacyRun, why: String, report: &mut Report) -> (Source, RunGraph) {
+    report.note(format!(
+        "the run's blueprint could not be read, so its graph is what the run recorded and it never resumes: {why}"
+    ));
+    let graph = crate::recorded::graph(old, report);
+    (Source::Recorded(why), graph)
 }
 
 pub(crate) fn build(
@@ -68,39 +103,49 @@ pub(crate) fn build(
             "blobs/{name} was left out: a stored part is named by its digest"
         ));
     }
-    let (blueprint, graph) = graph(old, report)?;
-    // The pin names the installed blueprint a fan-out worker of this run is
-    // started from. The old manifest's digest can never match a file this
-    // build reads, so the pin is the `agent.toml` it was migrated to.
-    let digest = match &old.blueprint.migrated {
-        Some(bytes) => {
-            let d = Digest::of(bytes);
-            report.note(format!(
-                "origin.blueprint.digest is the installed agent.toml's ({d}), which the run's workers are started from"
-            ));
-            Some(d)
-        }
-        None => {
-            report.fill(
-                "origin.blueprint.digest",
-                "None",
-                "no agent.toml is installed for the run's blueprint, so a worker it starts takes whichever one is installed then",
-            );
-            None
-        }
+    let (source, graph) = graph(old, report);
+    let name =
+        BlueprintName::new(meta.agent_name.as_str()).map_err(ConvertError::name("agent_name"))?;
+    let manifest = meta.agent_path.clone();
+    let (origin, binds) = match &source {
+        Source::Blueprint(blueprint) => (
+            SpecOrigin::Blueprint {
+                blueprint: BlueprintRef {
+                    name,
+                    digest: pin(old, report),
+                },
+                version: blueprint.version.clone(),
+                manifest,
+            },
+            caller_inputs(blueprint),
+        ),
+        Source::Recorded(why) => (
+            SpecOrigin::Recorded {
+                name,
+                manifest,
+                why: why.clone(),
+            },
+            vec![("task".to_string(), "task".to_string())],
+        ),
     };
-    let origin = SpecOrigin::Blueprint {
-        blueprint: BlueprintRef {
-            name: BlueprintName::new(meta.agent_name.as_str())
-                .map_err(ConvertError::name("agent_name"))?,
-            digest,
-        },
-        version: blueprint.version.clone(),
-    };
+    // A run that finished, or whose graph is only what it recorded, never
+    // runs again, so nothing about this machine is looked up for it: it keeps
+    // the models it ran on.
+    let resumable = matches!(source, Source::Blueprint(_)) && !finished(meta);
+    if lookup.is_some() && !resumable {
+        report.note("the run never runs again, so its stages keep the models it recorded and nothing was looked up on this machine");
+    }
+    let lookup = lookup.filter(|_| resumable);
     let first = old.first_context();
-    let binds = caller_inputs(&blueprint);
     let inputs = inputs(&graph, &binds, meta, first, report);
-    let seeded = seeded(&graph, &binds, &inputs, first);
+    let mut seeded = seeded(&graph, &binds, &inputs, first);
+    // The task is what every earlier release listed the run under, whatever
+    // the graph seeded with it (an old run's task region could carry its
+    // stage's instructions too).
+    if !meta.task.is_empty() {
+        let task = RegionName::new("task").expect("`task` is a region name");
+        seeded.entry(task).or_default().text = meta.task.clone();
+    }
     let (mut code, mut code_frames) = code(&graph, old, report);
     let requested_model = requested_model(meta, report);
     // Bare `--yolo` answered everything; what a named profile answered was
@@ -117,6 +162,7 @@ pub(crate) fn build(
             ledger: &old.stages,
             context: &old.folded.context,
             requested: requested_model.as_ref(),
+            launched: meta.model.as_deref().and_then(|m| ModelRef::parse(m).ok()),
             auto: auto_answers,
             lookup,
             code: &held,
@@ -160,6 +206,38 @@ pub(crate) fn build(
         spec,
         code: code_frames,
     })
+}
+
+/// Whether the run finished for good: complete, or failed. A cancelled run
+/// can be resumed.
+fn finished(meta: &RunMeta) -> bool {
+    matches!(
+        meta.status,
+        OldStatus::Complete | OldStatus::CompleteInteractive | OldStatus::Error
+    )
+}
+
+/// The installed blueprint a fan-out worker of this run is started from.
+/// The old manifest's digest can never match a file this build reads, so
+/// the pin is the `agent.toml` it was migrated to.
+fn pin(old: &LegacyRun, report: &mut Report) -> Option<Digest> {
+    match &old.blueprint.migrated {
+        Some(bytes) => {
+            let d = Digest::of(bytes);
+            report.note(format!(
+                "origin.blueprint.digest is the installed agent.toml's ({d}), which the run's workers are started from"
+            ));
+            Some(d)
+        }
+        None => {
+            report.fill(
+                "origin.blueprint.digest",
+                "None",
+                "no agent.toml is installed for the run's blueprint, so a worker it starts takes whichever one is installed then",
+            );
+            None
+        }
+    }
 }
 
 /// Each caller input of the blueprint and a region it seeds, as

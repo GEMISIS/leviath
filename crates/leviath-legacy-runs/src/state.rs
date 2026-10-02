@@ -83,15 +83,22 @@ fn phase(meta: &RunMeta, tools_in_flight: bool) -> PipelinePhase {
     }
 }
 
+/// What a record spent. One that names no cost at all (a record from before
+/// runs priced their calls) counts as unpriced, so it shows no cost rather
+/// than a cost of nothing, as every earlier release showed it.
 fn spend(
     prompt: usize,
     completion: usize,
     cached: usize,
     cache_write: usize,
-    priced_usd: f64,
+    (priced_usd, cost): (f64, Option<f64>),
     exact: bool,
     unpriced: usize,
 ) -> Spend {
+    let unpriced = match cost {
+        Some(_) => unpriced,
+        None => unpriced.max(1),
+    };
     Spend {
         prompt_tokens: prompt as u64,
         completion_tokens: completion as u64,
@@ -104,8 +111,14 @@ fn spend(
     }
 }
 
-fn clock(active: Option<leviath_core::run_meta::ActiveClock>, at: i64) -> Clock {
-    let mut c = active.unwrap_or_default();
+/// A record's working clock, settled at `at`. A record from before the clock
+/// existed has none, and worked for its wall-clock span, from `from` to
+/// `at`, as every earlier release showed it.
+fn clock(active: Option<leviath_core::run_meta::ActiveClock>, from: Option<i64>, at: i64) -> Clock {
+    let mut c = active.unwrap_or_else(|| leviath_core::run_meta::ActiveClock {
+        banked_secs: from.map_or(0, |from| leviath_core::duration::between(from, at)),
+        since: None,
+    });
     c.settle(at);
     Clock {
         banked_secs: c.banked_secs,
@@ -151,13 +164,13 @@ pub(crate) fn from_meta(state: &mut RunState, meta: &RunMeta, graph: &RunGraph) 
             meta.completion_tokens,
             meta.cached_tokens,
             meta.cache_write_tokens,
-            meta.cost_priced_usd,
+            (meta.cost_priced_usd, meta.cost_usd),
             meta.cost_is_exact,
             meta.unpriced_calls,
         ),
         tool_calls: meta.tool_calls as u64,
     };
-    state.clock = clock(meta.active, meta.updated_at);
+    state.clock = clock(meta.active, Some(meta.started_at), meta.updated_at);
     state.flags = flags(&meta.flags);
     state.children = meta
         .children
@@ -230,6 +243,30 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
         .into_iter()
         .collect();
     state.final_output = final_output(old, stage, report);
+    if let Some(why) = spec.origin.never_resumes()
+        && !matches!(
+            state.status,
+            RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+        )
+    {
+        report.note(crate::recorded::stopped(meta, why));
+        state.status = RunStatus::Error(format!(
+            "this run's blueprint could not be read when it was converted from an earlier release, so it cannot resume: {why}"
+        ));
+        state.phase = PipelinePhase::Done;
+        state.pending = None;
+    }
+    if old.not_empty {
+        report.fill(
+            "flags.no_output_tools",
+            "true",
+            "the run's record says it was not empty, though it changed no file and handed back no answer, and every earlier release showed what the record said",
+        );
+    }
+    if old.listed.active.is_none() {
+        // What every earlier release showed as its working time.
+        state.clock = clock(None, Some(old.listed.started_at), old.listed.updated_at);
+    }
     report_unrecorded(&state, report);
     state
 }
@@ -289,11 +326,11 @@ fn visit(v: &StageVisitRecord, at: i64) -> VisitRecord {
             v.completion_tokens,
             v.cached_tokens,
             v.cache_write_tokens,
-            v.cost_priced_usd,
+            (v.cost_priced_usd, v.cost_usd),
             v.cost_is_exact,
             v.unpriced_calls,
         ),
-        clock: clock(v.active, at),
+        clock: clock(v.active, Some(v.entered_at), v.left_at.unwrap_or(at)),
     }
 }
 
@@ -308,7 +345,7 @@ fn ledger(r: &OldStage, meta: &RunMeta) -> Option<StageRecord> {
             r.completion_tokens,
             r.cached_tokens,
             r.cache_write_tokens,
-            r.cost_priced_usd,
+            (r.cost_priced_usd, r.cost_usd),
             r.cost_is_exact,
             r.unpriced_calls,
         ),
@@ -328,7 +365,7 @@ fn ledger(r: &OldStage, meta: &RunMeta) -> Option<StageRecord> {
         output_cap_raised: r.output_cap_raised,
         started_at: r.started_at,
         ended_at: r.ended_at,
-        clock: clock(r.active, at),
+        clock: clock(r.active, r.started_at, r.ended_at.unwrap_or(at)),
     })
 }
 

@@ -21,6 +21,7 @@ fn summary() -> SpawnSummary {
         origin: SpecOrigin::Blueprint {
             blueprint: BlueprintRef::parse("coder").unwrap(),
             version: "1.2.0".to_string(),
+            manifest: String::new(),
         },
         entry_stage: StageName::new("plan").unwrap(),
         stages: vec![
@@ -222,4 +223,15 @@ async fn every_answer_to_a_check_is_reported() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("not reachable"), "{err}");
+}
+
+/// A run converted from what an old run recorded says so.
+#[test]
+fn a_recorded_graph_says_where_it_came_from() {
+    let recorded = SpecOrigin::Recorded {
+        name: leviath_runtime::spec::names::BlueprintName::new("coder").unwrap(),
+        manifest: String::new(),
+        why: "gone".into(),
+    };
+    assert_eq!(origin(&recorded), "the graph an old run of coder recorded");
 }

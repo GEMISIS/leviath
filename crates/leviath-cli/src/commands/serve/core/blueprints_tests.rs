@@ -121,6 +121,7 @@ async fn a_raw_graph_is_named_by_its_title() {
         spec.origin = SpecOrigin::Blueprint {
             blueprint: leviath_runtime::spec::names::BlueprintRef::parse("coder").unwrap(),
             version: "2.1.0".to_string(),
+            manifest: String::new(),
         };
         spec.graph.title = Some("a quick look".to_string());
         let installed = ParsedBlueprint::of_run(&spec);

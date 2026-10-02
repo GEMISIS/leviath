@@ -9,19 +9,40 @@
 //! any run is brought back, and again whenever an unloaded run is paged in.
 //! At start the MCP servers an unfinished old run's stages connect to are
 //! connected first, so their tools are there to look up.
+//!
+//! Each old run directory is saved in the home's backup (see
+//! [`crate::home_backup`]) before it is converted, and one that cannot be
+//! saved is left as it is. A run that does not convert is left as it is too,
+//! and listed beside the runs directory, so the daemon tries it once per
+//! release rather than at every start. A pass logs one line saying what it
+//! did; what each conversion filled in is in the run's own log.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use leviath_runtime::spec::graph::RunGraph;
+use serde::{Deserialize, Serialize};
 
 use crate::daemon::resolve_env::DaemonEnv;
+use crate::home_backup::Backup;
 
 /// What the daemon resolves a run of a graph against.
 pub(crate) type Envs<'a> = dyn Fn(&RunGraph) -> DaemonEnv + Sync + 'a;
 
 /// The daemon's answers about a stage, for the converter.
+///
+/// What a lookup would log (a model no provider here serves, a script
+/// provider that does not load) is left out of the daemon's log: a lookup
+/// that fails is in the converted run's own log, with what it fell back to,
+/// and a thousand old runs would otherwise log it a thousand times.
 #[cfg(feature = "legacy-runs")]
 struct Lookup<'a>(&'a Envs<'a>);
+
+/// Run `f` with nothing it logs reaching the daemon's log.
+#[cfg(feature = "legacy-runs")]
+fn quietly<T>(f: impl FnOnce() -> T) -> T {
+    tracing::dispatcher::with_default(&tracing::Dispatch::none(), f)
+}
 
 #[cfg(feature = "legacy-runs")]
 impl leviath_legacy_runs::StageLookup for Lookup<'_> {
@@ -32,8 +53,11 @@ impl leviath_legacy_runs::StageLookup for Lookup<'_> {
         requested: Option<&leviath_runtime::spec::names::ModelRef>,
     ) -> Result<leviath_runtime::spec::env::ModelPlan, String> {
         use leviath_runtime::spec::env::ResolveEnv;
-        let env = (self.0)(graph);
-        crate::daemon::block_on::block_on(env.model(stage, requested)).map_err(|i| i.to_string())
+        quietly(|| {
+            let env = (self.0)(graph);
+            crate::daemon::block_on::block_on(env.model(stage, requested))
+                .map_err(|i| i.to_string())
+        })
     }
 
     fn tools(
@@ -45,35 +69,217 @@ impl leviath_legacy_runs::StageLookup for Lookup<'_> {
         workdir: Option<&Path>,
     ) -> Result<leviath_runtime::spec::env::StageTools, String> {
         use leviath_runtime::spec::env::ResolveEnv;
-        let env = (self.0)(graph);
-        crate::daemon::block_on::block_on(env.tools(graph, stage, code, base, workdir))
-            .map_err(|i| i.to_string())
+        quietly(|| {
+            let env = (self.0)(graph);
+            crate::daemon::block_on::block_on(env.tools(graph, stage, code, base, workdir))
+                .map_err(|i| i.to_string())
+        })
     }
 
     fn default_max_depth(&self, graph: &RunGraph) -> u8 {
         use leviath_runtime::spec::env::ResolveEnv;
-        (self.0)(graph).limits().default_max_depth
+        quietly(|| (self.0)(graph).limits().default_max_depth)
+    }
+}
+
+/// The old runs that did not convert, kept beside the runs directory so that
+/// a later start leaves them as they are rather than trying each again. The
+/// list is kept per release: a new release tries every one again, and so
+/// does a start after the file is deleted.
+#[derive(Debug)]
+pub(crate) struct Unconverted {
+    path: PathBuf,
+    runs: BTreeMap<String, String>,
+    changed: bool,
+}
+
+/// What the list of runs that did not convert holds.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct UnconvertedFile {
+    /// The release that tried them.
+    version: String,
+    /// Why each did not convert, by run directory name.
+    runs: BTreeMap<String, String>,
+}
+
+impl Unconverted {
+    /// Where the list for `runs_dir` is kept: beside it, named after it.
+    pub(crate) fn path_for(runs_dir: &Path) -> PathBuf {
+        let name = runs_dir
+            .file_name()
+            .map_or_else(|| "runs".into(), |n| n.to_string_lossy().into_owned());
+        runs_dir.with_file_name(format!("{name}.unconverted"))
+    }
+
+    /// The list for `runs_dir`. One another release wrote is read as empty,
+    /// so every run in it is tried again.
+    fn load(runs_dir: &Path) -> Self {
+        let path = Self::path_for(runs_dir);
+        let file = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<UnconvertedFile>(&bytes).ok());
+        let changed = file.is_some();
+        let runs = file
+            .filter(|f| f.version == env!("CARGO_PKG_VERSION"))
+            .map(|f| f.runs)
+            .unwrap_or_default();
+        Self {
+            path,
+            changed: changed && runs.is_empty(),
+            runs,
+        }
+    }
+
+    /// Why the run in the directory `name` did not convert, when it did not.
+    fn why(&self, name: &str) -> Option<&str> {
+        self.runs.get(name).map(String::as_str)
+    }
+
+    fn add(&mut self, name: String, why: String) {
+        self.runs.insert(name, why);
+        self.changed = true;
+    }
+
+    /// Write the list back when it changed, or remove it when it is empty.
+    fn save(self) {
+        if !self.changed {
+            return;
+        }
+        let written = match self.runs.is_empty() {
+            true => std::fs::remove_file(&self.path),
+            false => {
+                let file = UnconvertedFile {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    runs: self.runs,
+                };
+                let bytes =
+                    serde_json::to_vec_pretty(&file).expect("a list of names is plain data");
+                leviath_sys::perms::write_private(&self.path, &bytes)
+            }
+        };
+        if let Err(e) = written {
+            let (shown, why) = (self.path.display().to_string(), e.to_string());
+            tracing::warn!(path = %shown, error = %why, "the list of old runs that did not convert could not be written");
+        }
+    }
+}
+
+/// What converting one directory came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Done {
+    /// Not an old run directory.
+    Nothing,
+    /// Converted into a run file.
+    Converted,
+    /// Tried, and not converted.
+    Failed,
+    /// Left as it was: it did not convert before.
+    Held,
+}
+
+/// What one pass over the old runs did, for its one line in the log.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Pass {
+    converted: usize,
+    failed: usize,
+    held: usize,
+}
+
+impl Pass {
+    fn add(&mut self, done: Done) {
+        match done {
+            Done::Nothing => {}
+            Done::Converted => self.converted += 1,
+            Done::Failed => self.failed += 1,
+            Done::Held => self.held += 1,
+        }
+    }
+
+    /// Say in one line what the pass did, when it did anything.
+    fn log(&self, runs_dir: &Path, backup: &Backup) {
+        if *self == Self::default() {
+            return;
+        }
+        let list = Unconverted::path_for(runs_dir).display().to_string();
+        let saved = backup.dir().display().to_string();
+        tracing::info!(
+            converted = self.converted,
+            failed = self.failed,
+            left_as_they_were = self.held,
+            backup = %saved,
+            unconverted = %list,
+            "old run directories: each converted one was saved in the backup first; one that does \
+             not convert is left as it was and listed, and is tried again by the next release (or \
+             after the list is deleted)"
+        );
     }
 }
 
 /// Convert every run directory under `runs_dir` that is still in the older
-/// layout, looking each stage up through `envs` when given.
+/// layout, looking each stage up through `envs` when given. Each is saved in
+/// the home's backup first, and one that did not convert before is left as
+/// it is.
 pub(crate) fn convert_all(runs_dir: &Path, agents_dir: Option<&Path>, envs: Option<&Envs<'_>>) {
     let Ok(entries) = std::fs::read_dir(runs_dir) else {
         return;
     };
+    let mut unconverted = Unconverted::load(runs_dir);
+    let backup = Backup::of_runs(runs_dir);
+    let mut pass = Pass::default();
     for dir in entries.flatten().map(|e| e.path()) {
-        convert_one(&dir, agents_dir, envs);
+        pass.add(convert_in(
+            &dir,
+            agents_dir,
+            envs,
+            &backup,
+            &mut unconverted,
+        ));
     }
+    unconverted.save();
+    pass.log(runs_dir, &backup);
 }
 
 /// Convert the run in `dir` into a run file when it is in the older layout,
-/// logging what the conversion had to fill in. A directory that cannot be
-/// converted is left as it is and said so.
-#[cfg(feature = "legacy-runs")]
+/// the way [`convert_all`] does for each run.
 pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&Envs<'_>>) {
+    let runs_dir = dir.parent().unwrap_or(dir);
+    let mut unconverted = Unconverted::load(runs_dir);
+    let backup = Backup::of_runs(runs_dir);
+    let mut pass = Pass::default();
+    pass.add(convert_in(dir, agents_dir, envs, &backup, &mut unconverted));
+    unconverted.save();
+    pass.log(runs_dir, &backup);
+}
+
+/// Convert the run in `dir` when it is an old run that has not failed to
+/// convert before: saved in `backup` first (one that cannot be saved is not
+/// converted, and is tried again at the next start), and listed in
+/// `unconverted` when it does not convert. What each conversion filled in is
+/// in the run's own log, and at debug level in the daemon's.
+#[cfg(feature = "legacy-runs")]
+fn convert_in(
+    dir: &Path,
+    agents_dir: Option<&Path>,
+    envs: Option<&Envs<'_>>,
+    backup: &Backup,
+    unconverted: &mut Unconverted,
+) -> Done {
     if !leviath_legacy_runs::is_legacy(dir) {
-        return;
+        return Done::Nothing;
+    }
+    let name = dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    if unconverted.why(&name).is_some() {
+        return Done::Held;
+    }
+    let shown = dir.display().to_string();
+    if let Err(e) = backup.save_run(dir) {
+        let why = e.to_string();
+        tracing::warn!(dir = %shown, error = %why, "an old run directory could not be backed up, so it was not converted");
+        return Done::Failed;
     }
     let lookup = envs.map(Lookup);
     let env = leviath_legacy_runs::ConvertEnv {
@@ -84,21 +290,22 @@ pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&E
     };
     match leviath_legacy_runs::convert(dir, &env) {
         Ok(report) => {
-            tracing::info!(
-                run_id = %report.run_id,
-                deltas = report.deltas,
-                "converted an old run directory into a run file"
-            );
-            for filled in &report.defaulted {
-                tracing::info!(run_id = %report.run_id, "converted from the old layout: {filled}");
+            let id = report.run_id.to_string();
+            for line in report
+                .defaulted
+                .iter()
+                .map(ToString::to_string)
+                .chain(report.notes)
+            {
+                tracing::debug!(run_id = %id, "converted from the old layout: {line}");
             }
-            for note in &report.notes {
-                tracing::info!(run_id = %report.run_id, "converted from the old layout: {note}");
-            }
+            Done::Converted
         }
         Err(e) => {
-            let shown = dir.display();
-            tracing::warn!(dir = %shown, error = %e, "an old run directory could not be converted");
+            let why = e.to_string();
+            tracing::warn!(dir = %shown, error = %why, "an old run directory could not be converted; it is left as it was");
+            unconverted.add(name, why);
+            Done::Failed
         }
     }
 }
@@ -106,12 +313,18 @@ pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&E
 /// Without the converter, a run directory with no run file this build reads
 /// is only reported.
 #[cfg(not(feature = "legacy-runs"))]
-pub(crate) fn convert_one(dir: &Path, _agents_dir: Option<&Path>, _envs: Option<&Envs<'_>>) {
-    let file = std::fs::read(dir.join(leviath_core::files::RUN_FILE)).unwrap_or_default();
-    if dir.is_dir() && !file.starts_with(leviath_runtime::runfile::codec::MAGIC) {
+fn convert_in(
+    dir: &Path,
+    _agents_dir: Option<&Path>,
+    _envs: Option<&Envs<'_>>,
+    _backup: &Backup,
+    _unconverted: &mut Unconverted,
+) -> Done {
+    if dir.is_dir() && !crate::runstate::run_file::is_run_file(dir) {
         let shown = dir.display();
         tracing::warn!(dir = %shown, "a run directory with no run file this build can read");
     }
+    Done::Nothing
 }
 
 /// What the daemon has at start for converting old runs, before its host

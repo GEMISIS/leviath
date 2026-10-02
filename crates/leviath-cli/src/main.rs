@@ -154,6 +154,9 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn ps(&self, args: commands::ps::PsArgs) -> anyhow::Result<()> {
+        // Here and not in the command's core, so no test ever takes the
+        // notice off a real home.
+        leviath_cli::home_backup::tell_once();
         commands::ps::send_list(&control_client()?, &args).await
     }
 

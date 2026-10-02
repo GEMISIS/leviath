@@ -19,6 +19,10 @@
 //! choice of edge is asked again, and a fan-out picks its workers back up. A
 //! run directory in the older many-file layout is converted to a run file
 //! first, when this build carries the converter.
+//!
+//! A start reads only the runs that have not finished, found through the run
+//! index, so a home with a thousand finished runs starts as fast as an empty
+//! one.
 
 use std::path::Path;
 
@@ -51,14 +55,21 @@ fn convert_old(starter: &DaemonStarter, dir: &Path, all: bool) {
 }
 
 /// Read the run in `dir` from its run file. `None` when the directory holds
-/// none, or one that cannot be read (said in the log).
+/// none, or one that cannot be read (said in the log), or a run that never
+/// resumes: one converted from an earlier release without its blueprint.
 fn read_run(dir: &Path) -> Option<Resumable> {
-    leviath_runtime::restore::read_for_resume(dir)
+    let run = leviath_runtime::restore::read_for_resume(dir)
         .inspect_err(|e| {
             tracing::warn!(error = %e, "a run file could not be read; the run is not resumed");
         })
         .ok()
-        .flatten()
+        .flatten()?;
+    if let Some(why) = run.spec.origin.never_resumes() {
+        let id = run.spec.run_id.to_string();
+        tracing::info!(run_id = %id, why = %why, "the run cannot resume: its graph is only what an old run recorded");
+        return None;
+    }
+    Some(run)
 }
 
 /// Bind a run read back from its file and place it in the world. A binding
@@ -113,12 +124,11 @@ pub(crate) fn resume_all(
     // A daemon that died may have left a command it ran still running, so a
     // call that was in flight is not run again: it comes back interrupted.
     let crashed = leviath_runtime::restore::begin_session(runs_dir);
-    // A directory that does not read holds nothing to bring back.
-    let found: Vec<Resumable> = std::fs::read_dir(runs_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| read_run(&e.path()))
+    // Only a run that has not finished is read: the run index says which
+    // those are without reading the file of every run that has.
+    let found: Vec<Resumable> = crate::run_index::unfinished(runs_dir)
+        .iter()
+        .filter_map(|dir| read_run(dir))
         .map(|mut run| {
             if crashed {
                 leviath_runtime::restore::interrupt_in_flight(&mut run.state);

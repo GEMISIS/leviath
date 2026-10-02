@@ -381,6 +381,7 @@ fn spec() -> CoreSpec {
                 digest: Some(digest.clone()),
             },
             version: "1.0.0".into(),
+            manifest: String::new(),
         },
         graph: graph(),
         inputs: input_values(),
@@ -1163,6 +1164,14 @@ fn every_origin_says_where_the_graph_came_from() {
     assert!(file.path.is_some() && file.digest.is_some());
     let raw = RunOrigin::from(&SpecOrigin::Raw);
     assert!(raw.blueprint_name.is_none() && raw.version.is_none());
+    let recorded = RunOrigin::from(&SpecOrigin::Recorded {
+        name: named!(BlueprintName, "coder"),
+        manifest: "/agents/coder/agent.leviath".into(),
+        why: "gone".into(),
+    });
+    assert_eq!(recorded.kind, super::spec::SpecOriginKind::Recorded);
+    assert_eq!(recorded.blueprint_name.as_deref(), Some("coder"));
+    assert!(recorded.version.is_none() && recorded.path.is_none());
 }
 
 /// Every launch setting reads as the mode it is.

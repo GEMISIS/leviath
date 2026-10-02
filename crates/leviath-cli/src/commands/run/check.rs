@@ -108,13 +108,16 @@ pub(crate) fn check_report(summary: &SpawnSummary, json: bool) -> String {
 /// Where a run's graph comes from, in a few words.
 fn origin(origin: &SpecOrigin) -> String {
     match origin {
-        SpecOrigin::Blueprint { blueprint, version } => {
+        SpecOrigin::Blueprint {
+            blueprint, version, ..
+        } => {
             format!("blueprint {blueprint}, version {version}")
         }
         SpecOrigin::BlueprintFile { path, version, .. } => {
             format!("blueprint in {path}, version {version}")
         }
         SpecOrigin::Raw => "a graph from the request".to_string(),
+        SpecOrigin::Recorded { name, .. } => format!("the graph an old run of {name} recorded"),
     }
 }
 

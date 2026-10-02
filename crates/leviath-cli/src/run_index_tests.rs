@@ -108,6 +108,36 @@ fn no_runs_and_an_unwritable_index_are_harmless() {
     assert!(index.run(Path::new("/")).is_none());
 }
 
+/// What a daemon brings back when it starts is found through the index: a
+/// run that finished is not among them, and a directory still holding the
+/// file an earlier release wrote is passed over from its first bytes.
+#[test]
+fn a_start_reads_only_the_runs_that_have_not_finished() {
+    let home = runs();
+    let dir = home.path().join("runs");
+    let mut done = meta("done-run", "done", 300);
+    done.status = leviath_core::run_meta::RunStatus::Complete;
+    create_run_in(&dir.join("done-run"), &done).unwrap();
+    std::fs::create_dir_all(dir.join("old-layout")).unwrap();
+    std::fs::write(
+        dir.join("old-layout").join(leviath_core::files::RUN_FILE),
+        b"LVR1 a journal from an earlier release",
+    )
+    .unwrap();
+
+    let open = unfinished(&dir);
+    let names: Vec<String> = open
+        .iter()
+        .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["new-run", "old-run"]);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path_for(&dir)).unwrap()).unwrap();
+    assert!(saved["runs"]["done-run"].is_object(), "{saved}");
+    assert!(saved["runs"]["old-layout"].is_null(), "{saved}");
+    assert!(unfinished(&home.path().join("gone")).is_empty());
+}
+
 /// The daemon keeps the index up to date on its own.
 #[tokio::test]
 async fn the_daemon_keeps_the_index_fresh() {

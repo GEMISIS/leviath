@@ -141,6 +141,9 @@ async fn a_blueprint_request_loads_the_installed_graph() {
         &spec.origin,
         SpecOrigin::Blueprint { version, .. } if version == "1.2.0"
     ));
+    // The run lists the file its blueprint was read from.
+    let manifest = std::path::Path::new("/agents/coder").join("agent.toml");
+    assert_eq!(spec.origin.manifest(), manifest.to_string_lossy());
     let digest = Digest::of(b"fn on_stage_enter() {}");
     assert_eq!(
         spec.code_digest(&CodeRef::File("hooks/enter.rhai".into())),
@@ -355,6 +358,10 @@ async fn a_blueprint_file_request_loads_the_graph_in_that_directory() {
         &resolved.spec.origin,
         SpecOrigin::BlueprintFile { path: p, version, .. } if *p == path && version == "1.2.0"
     ));
+    assert_eq!(
+        resolved.spec.origin.manifest(),
+        path.path().join("agent.toml").to_string_lossy()
+    );
 
     let gone = crate::spec::names::BlueprintPath::new(
         std::env::temp_dir().join("nothing-here").to_string_lossy(),

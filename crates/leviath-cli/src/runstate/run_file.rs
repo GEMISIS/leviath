@@ -23,6 +23,19 @@ pub(crate) fn path_in(dir: &Path) -> PathBuf {
     dir.join(leviath_core::files::RUN_FILE)
 }
 
+/// Whether `dir` holds a run file this build reads, told from its first few
+/// bytes alone: a directory from an earlier release holds an older file
+/// under the same name, and reading the whole of it to find that out is what
+/// a listing of a thousand such runs cannot afford.
+pub(crate) fn is_run_file(dir: &Path) -> bool {
+    use std::io::Read;
+    let magic = leviath_runtime::runfile::codec::MAGIC;
+    let mut head = vec![0u8; magic.len()];
+    std::fs::File::open(path_in(dir))
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| head == magic)
+}
+
 /// The run file in `dir`, read from its bytes.
 pub(crate) fn open_in(dir: &Path) -> anyhow::Result<RunFileReader> {
     let path = path_in(dir);

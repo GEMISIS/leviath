@@ -96,7 +96,7 @@ ERROR leviath_cli::daemon::recovery: a run could not be resumed on this machine 
 That run stays ended, so start a new one. See
 [when the machine changed](/docs/run-file#when-the-machine-changed). A run directory from an older
 Leviath is converted to a run file the first time the daemon loads it. Its old files move to a
-`legacy/` directory inside it.
+`legacy/` directory inside it. See [upgrading from an earlier release](#upgrading-from-an-earlier-release).
 
 The tricky part is tool calls that were mid-batch when it went down. Some of those already had real
 effects: a file written, a shell command run. Re-running them would do the damage twice. So the
@@ -136,6 +136,36 @@ stateDiagram-v2
   Draining --> Stopped: finish in-flight work
   Stopped --> [*]
 ```
+
+## Upgrading from an earlier release
+
+The first time a new release's daemon starts on your home, it brings what the earlier release wrote
+up to date:
+
+- each installed blueprint still written as an `agent.leviath` becomes an `agent.toml`, or is
+  replaced by this release's copy when Leviath ships it;
+- each run directory in the old many-file layout becomes a run file.
+
+Before it changes any of them, the daemon saves it under `~/.leviath/backups/<version>-<time>/`:
+
+| Folder | Holds |
+|---|---|
+| `agents/` | Each installed blueprint directory, as it was |
+| `agent_paths/` | Each blueprint from one of your `agent_paths`, as it was |
+| `runs/` | Each old run directory, as it was |
+
+A run's files are hard links rather than copies, so the backup costs no extra disk space while the
+run's own `legacy/` folder holds the same files. One backup is kept per release, and Leviath never
+deletes anything in it. An item that cannot be saved is left exactly as it was. The daemon log names
+the backup, and the next `lev ps` prints where it is, once.
+
+A run converts once. One that cannot be converted is left as it was and listed, with the reason, in
+`~/.leviath/runs.unconverted`. Later starts of the same release leave it alone, and the next release
+tries it again. To try again now, delete that file and run `lev daemon restart`.
+
+A run whose blueprint is gone, or no longer reads, still converts: its graph is what the run
+recorded, so it lists and reads back like any other run. It never resumes. One that had not
+finished ends in `error`, saying why.
 
 ## What the front-ends do while it restarts
 

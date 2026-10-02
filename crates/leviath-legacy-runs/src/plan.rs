@@ -36,6 +36,8 @@ pub(crate) struct Stages<'a> {
     pub(crate) context: &'a ContextSnapshot,
     /// The model the run was launched with.
     pub(crate) requested: Option<&'a ModelRef>,
+    /// The model the run recorded its first stage starting on.
+    pub(crate) launched: Option<ModelRef>,
     pub(crate) auto: AutoAnswers,
     pub(crate) lookup: Option<&'a dyn StageLookup>,
     /// The code the run holds, by digest.
@@ -76,9 +78,10 @@ pub(crate) fn plan_all(
 
 /// The model the old run would have run `stage` on: the model it was
 /// launched with when the stage takes the caller's, else the one its ledger
-/// recorded the stage running on, else the stage's own first model. `true`
-/// with a model the lookup is asked for by name; among the stage's own
-/// models the lookup chooses itself, as it does for a new run.
+/// recorded the stage running on, else for its first stage the one the run
+/// recorded starting on, else the stage's own first model. `true` with a
+/// model the lookup is asked for by name; among the stage's own models the
+/// lookup chooses itself, as it does for a new run.
 fn wanted(cx: &Stages<'_>, stage: &StageDef) -> Option<(ModelRef, bool)> {
     if let Some(r) = cx.requested.filter(|_| stage.model.allow_user_default) {
         return Some((r.clone(), true));
@@ -89,7 +92,8 @@ fn wanted(cx: &Stages<'_>, stage: &StageDef) -> Option<(ModelRef, bool)> {
         .find(|r| r.name == stage.name.as_str())
         .and_then(|r| r.models.last())
         .and_then(ledger_model);
-    match ran {
+    let first = cx.graph.entry_stage().is_some_and(|e| e.name == stage.name);
+    match ran.or_else(|| cx.launched.clone().filter(|_| first)) {
         Some(m) => Some((m, true)),
         None => stage.model.models.first().map(|m| (m.clone(), false)),
     }

@@ -11,6 +11,10 @@
 //! the new format has no place for, is left exactly as it was and every
 //! problem is named.
 //!
+//! Before a blueprint directory is changed, the whole of it is saved in the
+//! home's backup (see [`crate::home_backup`]); one that cannot be saved is
+//! left as it was.
+//!
 //! Only the daemon does this, at start, for the agents directory of the home
 //! it serves and the operator's `agent_paths`, before it converts old runs (so
 //! their workers can be pinned to the new files). One daemon runs per home, so
@@ -86,11 +90,24 @@ fn old_blueprints(agents_dir: Option<&Path>, others: &[PathBuf]) -> Vec<(PathBuf
 }
 
 /// Upgrade every old blueprint in `agents_dir` (where a blueprint this build
-/// ships is replaced by the bundled one) and in each of `others`.
-pub(crate) fn upgrade_all(agents_dir: Option<&Path>, others: &[PathBuf]) -> Vec<Upgraded> {
+/// ships is replaced by the bundled one) and in each of `others`, each saved
+/// in `backup` first.
+pub(crate) fn upgrade_all(
+    agents_dir: Option<&Path>,
+    others: &[PathBuf],
+    backup: &crate::home_backup::Backup,
+) -> Vec<Upgraded> {
     old_blueprints(agents_dir, others)
         .into_iter()
         .map(|(dir, blueprint, installed)| {
+            if let Err(e) = backup.save_blueprint(&blueprint, agents_dir) {
+                return Upgraded {
+                    dir: blueprint,
+                    outcome: Outcome::Failed(vec![format!(
+                        "it could not be backed up first, so it was not changed: {e}"
+                    )]),
+                };
+            }
             let bundled = installed.then(|| bundled_named(&blueprint)).flatten();
             upgrade_one(&dir, &blueprint, bundled)
         })
@@ -194,7 +211,11 @@ pub(crate) fn upgrade_at_start(
     others: &[PathBuf],
 ) {
     if runs_dir == home_runs {
-        upgrade_logged(agents_dir, others);
+        upgrade_logged(
+            agents_dir,
+            others,
+            &crate::home_backup::Backup::of_runs(home_runs),
+        );
     }
 }
 
@@ -231,15 +252,22 @@ fn migrate(_dir: &Path) -> Result<Outcome, Vec<String>> {
 }
 
 /// Upgrade at daemon start, each outcome in the daemon's log.
-pub(crate) fn upgrade_logged(agents_dir: Option<&Path>, others: &[PathBuf]) {
-    for done in upgrade_all(agents_dir, others) {
+pub(crate) fn upgrade_logged(
+    agents_dir: Option<&Path>,
+    others: &[PathBuf],
+    backup: &crate::home_backup::Backup,
+) {
+    // Formatted outside the macros, so the text is made whether or not a
+    // subscriber reads the fields.
+    let saved = backup.dir().display().to_string();
+    for done in upgrade_all(agents_dir, others, backup) {
         let (name, dir) = (done.name(), done.dir.display().to_string());
         match &done.outcome {
             Outcome::Migrated => {
-                tracing::info!(blueprint = %name, dir = %dir, "migrated an agent.leviath blueprint to agent.toml; the old file is under legacy/")
+                tracing::info!(blueprint = %name, dir = %dir, backup = %saved, "migrated an agent.leviath blueprint to agent.toml; the old file is under legacy/, and the whole directory as it was is in the backup")
             }
             Outcome::Reinstalled => {
-                tracing::info!(blueprint = %name, dir = %dir, "replaced an old install of a bundled blueprint with this build's; the old files are under legacy/")
+                tracing::info!(blueprint = %name, dir = %dir, backup = %saved, "replaced an old install of a bundled blueprint with this build's; the old files are under legacy/, and the whole directory as it was is in the backup")
             }
             Outcome::Failed(problems) => {
                 for problem in problems {

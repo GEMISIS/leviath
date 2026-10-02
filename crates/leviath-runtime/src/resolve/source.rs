@@ -26,6 +26,11 @@ pub(super) async fn load(
                     origin: SpecOrigin::Blueprint {
                         blueprint: loaded.reference,
                         version: loaded.version,
+                        manifest: loaded
+                            .base_dir
+                            .join(leviath_core::files::BLUEPRINT_MANIFEST)
+                            .to_string_lossy()
+                            .into_owned(),
                     },
                     base: Some(loaded.base_dir),
                     at,

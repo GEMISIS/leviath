@@ -749,14 +749,15 @@ async fn an_unreadable_run_file_is_left_out_and_says_why() {
     .await
 }
 
-/// A run of an installed blueprint looks for it among the installed ones; a
-/// run whose blueprint directory is gone says so; a run directory with no
-/// run file says that; and a run's webhook secret never reaches the bundle.
+/// A run of an installed blueprint that names no blueprint file looks for
+/// it among the installed ones; a run whose blueprint directory is gone says
+/// so; a run directory with no run file says that; and a run's webhook
+/// secret never reaches the bundle.
 #[tokio::test]
 async fn each_run_says_what_of_it_could_not_be_copied() {
     with_env(|root| async move {
         let runs = root.join("runs");
-        let mut installed = meta("r-installed", &root.join("not-installed"));
+        let mut installed = meta("r-installed", Path::new(""));
         installed.agent_name = "not-installed".to_string();
         installed.callback_url = Some("https://example.com/hook".to_string());
         write_meta(&runs, &installed);

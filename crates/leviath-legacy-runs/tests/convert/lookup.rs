@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use leviath_core::JsonDoc;
+use leviath_legacy_runs::journal::JournalRecord;
 use leviath_legacy_runs::{ConvertEnv, StageLookup, convert, graph};
 use leviath_runtime::spec::env::{CodeFiles, ModelPlan, StageTools};
 use leviath_runtime::spec::graph::{CodeRef, RunGraph, StageDef};
@@ -59,9 +60,13 @@ name = "chart"
 type = "image/png"
 "#;
 
+/// A run of the two-stage blueprint that was cancelled, so it can be resumed
+/// and its stages are looked up on this machine.
 fn two_stage_run() -> Run {
     let run = Run::fixture("finished");
     run.write("blueprint.leviath", TWO);
+    run.journal(|r| r.retain(|r| !matches!(r, JournalRecord::StatusChanged { .. })));
+    run.meta(|m| m.status = leviath_core::run_meta::RunStatus::Cancelled);
     run
 }
 

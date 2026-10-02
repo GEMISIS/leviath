@@ -23,6 +23,7 @@ pub mod daemon;
 pub mod dependencies;
 pub mod dispatch;
 pub(crate) mod held_checkpoints;
+pub mod home_backup;
 pub(crate) mod lint;
 pub mod logging;
 pub(crate) mod provider_checks;
