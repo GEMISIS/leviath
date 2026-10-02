@@ -8,6 +8,7 @@ pub(crate) mod block_on;
 pub(crate) mod catalog_refresh;
 pub mod client;
 pub(crate) mod config_reload;
+pub(crate) mod convert_old;
 pub(crate) mod fanout_spawner;
 pub(crate) mod gate_rules;
 pub mod lifecycle;

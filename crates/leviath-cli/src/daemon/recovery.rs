@@ -37,56 +37,16 @@ pub(crate) struct Recovered {
     pub reloaded: Vec<(String, AgentId)>,
 }
 
-/// Convert every run directory under `runs_dir` that is still in the older
-/// many-file layout into a run file, logging what each conversion had to fill
-/// in. A directory that cannot be converted is left as it is and said so.
-pub(crate) fn convert_old_runs(runs_dir: &Path, agents_dir: Option<&Path>) {
-    let Ok(entries) = std::fs::read_dir(runs_dir) else {
-        return;
+/// Convert the old run in `dir` (every one under it, with `all`), looking its
+/// stages up the way a new run of its graph would be resolved here.
+fn convert_old(starter: &DaemonStarter, dir: &Path, all: bool) {
+    let envs = |graph: &leviath_runtime::spec::graph::RunGraph| {
+        starter.env_for_graph(graph, starter.config.current())
     };
-    for dir in entries.flatten().map(|e| e.path()) {
-        convert_old_run(&dir, agents_dir);
-    }
-}
-
-/// Convert the run in `dir` into a run file when it is in the older layout.
-#[cfg(feature = "legacy-runs")]
-fn convert_old_run(dir: &Path, agents_dir: Option<&Path>) {
-    if !leviath_legacy_runs::is_legacy(dir) {
-        return;
-    }
-    let env = leviath_legacy_runs::ConvertEnv {
-        agents_dir: agents_dir.map(Path::to_path_buf),
-    };
-    match leviath_legacy_runs::convert(dir, &env) {
-        Ok(report) => {
-            tracing::info!(
-                run_id = %report.run_id,
-                deltas = report.deltas,
-                "converted an old run directory into a run file"
-            );
-            for filled in &report.defaulted {
-                tracing::info!(run_id = %report.run_id, "converted from the old layout: {filled}");
-            }
-            for note in &report.notes {
-                tracing::info!(run_id = %report.run_id, "converted from the old layout: {note}");
-            }
-        }
-        Err(e) => {
-            let shown = dir.display();
-            tracing::warn!(dir = %shown, error = %e, "an old run directory could not be converted");
-        }
-    }
-}
-
-/// Without the converter, a run in the older layout is only reported.
-#[cfg(not(feature = "legacy-runs"))]
-fn convert_old_run(dir: &Path, _agents_dir: Option<&Path>) {
-    let old = dir.join(leviath_core::files::META_FILE).is_file()
-        && !dir.join(leviath_core::files::RUN_FILE).is_file();
-    if old {
-        let shown = dir.display();
-        tracing::warn!(dir = %shown, "an old run directory, and this build cannot convert it");
+    let agents = starter.agents_dir.as_deref();
+    match all {
+        true => crate::daemon::convert_old::convert_all(dir, agents, Some(&envs)),
+        false => crate::daemon::convert_old::convert_one(dir, agents, Some(&envs)),
     }
 }
 
@@ -149,7 +109,7 @@ pub(crate) fn resume_all(
     starter: &DaemonStarter,
     runs_dir: &Path,
 ) -> Recovered {
-    convert_old_runs(runs_dir, starter.agents_dir.as_deref());
+    convert_old(starter, runs_dir, true);
     // A daemon that died may have left a command it ran still running, so a
     // call that was in flight is not run again: it comes back interrupted.
     let crashed = leviath_runtime::restore::begin_session(runs_dir);
@@ -192,7 +152,7 @@ pub(crate) fn reload_run(
     run_id: &str,
 ) -> Option<AgentId> {
     let dir = starter.runs_dir.join(run_id);
-    convert_old_run(&dir, starter.agents_dir.as_deref());
+    convert_old(starter, &dir, false);
     let mut run = read_run(&dir)?;
     match &run.state.status {
         RunStatus::Complete | RunStatus::Error(_) => return None,

@@ -25,11 +25,11 @@ pub(crate) fn loaded_at(path: &Path) -> Option<LoadedBlueprint> {
 /// The installed tree is the shared `LEVIATH_HOME`-aware one, so `lev run
 /// <name>` finds what `lev add` wrote when the override is set.
 pub(crate) fn find_blueprint(path: &str) -> anyhow::Result<PathBuf> {
-    find_blueprint_in(
-        path,
-        leviath_core::paths::agents_dir().as_deref(),
-        Path::new(""),
-    )
+    let agents_dir = leviath_core::paths::agents_dir();
+    // Blueprints a previous release installed are upgraded first, so a
+    // machine with no daemon running finds them under their names.
+    crate::blueprint_upgrade::upgrade_reported(agents_dir.as_deref(), &[]);
+    find_blueprint_in(path, agents_dir.as_deref(), Path::new(""))
 }
 
 /// [`find_blueprint`] against a given installed-agents directory and a given

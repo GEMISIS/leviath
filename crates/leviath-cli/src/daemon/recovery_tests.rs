@@ -358,7 +358,7 @@ async fn an_old_run_directory_is_converted_on_first_load() {
     std::fs::write(runs.path().join("broken").join("meta.json"), "not json").unwrap();
 
     crate::test_support::with_tracing(|| {
-        convert_old_runs(runs.path(), Some(&fixtures.join("agents")));
+        crate::daemon::convert_old::convert_all(runs.path(), Some(&fixtures.join("agents")), None);
     });
 
     let old = runs.path().join("old");
@@ -371,10 +371,10 @@ async fn an_old_run_directory_is_converted_on_first_load() {
     assert!(runs.path().join("broken").join("meta.json").is_file());
 
     // Converting again finds nothing to do.
-    convert_old_run(&old, None);
+    crate::daemon::convert_old::convert_one(&old, None, None);
     assert!(read_run(&old).is_some());
     // A runs directory that is not there converts nothing.
-    convert_old_runs(&runs.path().join("gone"), None);
+    crate::daemon::convert_old::convert_all(&runs.path().join("gone"), None, None);
 }
 
 /// A finished run converted from the older layout still hands back its
@@ -392,7 +392,7 @@ fn a_converted_run_answers_from_its_run_file() {
     let runs = tempfile::tempdir().unwrap();
     let dir = runs.path().join("done");
     copy_dir(&fixture, &dir);
-    convert_old_run(&dir, None);
+    crate::daemon::convert_old::convert_one(&dir, None, None);
 
     let kept = std::fs::read_to_string(dir.join("legacy").join(leviath_core::FINAL_OUTPUT_FILE))
         .expect("the sidecar is kept aside");

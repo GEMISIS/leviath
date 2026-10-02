@@ -170,3 +170,21 @@ fn a_batch_with_some_results_back_keeps_them() {
     assert!(report.defaulted("pending.done.*.is_error").is_some());
     assert_eq!(file.last.status, RunStatus::Active);
 }
+
+/// Every step is stamped no earlier than the one before it, the last one
+/// too, even when the run's metadata says it last moved before its journal
+/// did.
+#[test]
+fn every_step_is_stamped_no_earlier_than_the_one_before() {
+    let run = Run::fixture("finished");
+    let first = run.records()[0].clone();
+    let RunRecord::Header { meta, .. } = &first else {
+        panic!("the journal starts with its header");
+    };
+    let early = meta.started_at - 100;
+    run.meta(|m| m.updated_at = early);
+    let (_, file) = run.converted();
+    let stamps: Vec<i64> = file.deltas.iter().map(|d| d.at).collect();
+    assert!(stamps.len() > 1);
+    assert!(stamps.windows(2).all(|w| w[0] <= w[1]), "{stamps:?}");
+}

@@ -34,6 +34,8 @@ the typed file either way.
 
 Bytes are only touched at the edges. When a part arrives it is written once under
 `<run>/blobs/<sha256>`, and when a request is built the bytes are read back for the model.
+The run's file takes a copy at the run's next step and keeps it for good, so `lev blobs` and
+anything else that reads a part finds it there when the blob directory lacks it.
 Everything between, the journal, the snapshots, the events, carries a reference: hash, type,
 size, dimensions, a token estimate. Deleting a run deletes its blobs.
 
