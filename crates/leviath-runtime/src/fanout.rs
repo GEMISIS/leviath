@@ -34,10 +34,13 @@
 //! [`FAN_OUT_TOOL`]: leviath_core::stage_tools::FAN_OUT_TOOL
 mod items;
 mod report;
+mod starts;
 mod worker_sources;
 pub(crate) use items::{FanOutRequest, config_for, is_fan_out_tool, parse_fan_out_call};
 pub use items::{WORK_ITEM_LABEL, WorkItem};
 use report::*;
+pub(crate) use starts::WorkerStarts;
+pub use starts::{PlaceWorker, WorkerPrep};
 use worker_sources::merge_worker_sources;
 
 use std::collections::VecDeque;
@@ -66,19 +69,15 @@ const DEFAULT_FANOUT_DEPTH: usize = 3;
 
 /// Starts one worker for a fan-out work item. The implementor resolves and
 /// binds `request` for `caller` (a [`Caller::Worker`] naming the parent, its
-/// policy and depth, and the stage a same-graph worker enters), spawns it into
-/// `world`, and returns the child entity. Parent/child linking is done by
+/// policy and depth, and the stage a same-graph worker enters) off the world's
+/// tick, and says how to place what it made. Parent/child linking is done by
 /// `fan_out_collect`, not the spawner.
 pub trait FanOutSpawner: Send + Sync {
-    /// Spawn one worker under `parent`, or `Err` with a human-readable reason
-    /// (recorded as that item's failure).
-    fn spawn_worker(
-        &self,
-        world: &mut World,
-        parent: Entity,
-        request: SpawnRequest,
-        caller: Caller,
-    ) -> Result<Entity, String>;
+    /// Prepare one worker: everything that reads or writes outside the world
+    /// (resolving, recording, binding) happens in the returned future, which
+    /// the world runs off its tick. It resolves to how to place the worker, or
+    /// `Err` with a human-readable reason (recorded as that item's failure).
+    fn prepare_worker(&self, request: SpawnRequest, caller: Caller) -> WorkerPrep;
 
     /// The installed blueprint a fan-out's worker query picks, or `Err` with
     /// why none does.
@@ -138,6 +137,9 @@ pub struct FanOutWaiting {
     config: FanOutDef,
     max_workers: Option<usize>,
     pending: VecDeque<WorkItem>,
+    /// Items whose workers are being prepared off the tick (see
+    /// [`starts`]). They count as running against the concurrency cap.
+    starting: Vec<WorkItem>,
     active: Vec<ActiveWorker>,
     summaries: Vec<(String, String)>,
     failures: Vec<(String, String)>,
@@ -191,7 +193,12 @@ impl FanOutWaiting {
     /// Surfaced by `lev ps` so "waiting" on a fan-out parent reads as progress
     /// against a known denominator rather than an unexplained stall.
     pub(crate) fn outstanding(&self) -> usize {
-        self.active.len() + self.pending.len()
+        self.running() + self.pending.len()
+    }
+
+    /// Workers running or being started.
+    fn running(&self) -> usize {
+        self.active.len() + self.starting.len()
     }
 
     /// How far the fan-out has got: its queued, running, done and failed
@@ -199,7 +206,7 @@ impl FanOutWaiting {
     pub(crate) fn progress(&self) -> [usize; 4] {
         [
             self.pending.len(),
-            self.active.len(),
+            self.running(),
             self.summaries.len(),
             self.failures.len(),
         ]
@@ -225,7 +232,14 @@ impl FanOutWaiting {
             config: self.config.clone(),
             origin: self.origin.clone(),
             max_workers: self.max_workers,
-            pending: self.pending.iter().cloned().collect(),
+            // A worker still being prepared has no run of its own to come
+            // back to yet, so it is saved as still to start.
+            pending: self
+                .starting
+                .iter()
+                .chain(self.pending.iter())
+                .cloned()
+                .collect(),
             active: self
                 .active
                 .iter()
@@ -267,6 +281,7 @@ pub fn restore_fan_out_waiting(
         config: state.config,
         max_workers: state.max_workers,
         pending: state.pending.into_iter().collect(),
+        starting: Vec::new(),
         active,
         summaries: state.summaries,
         failures,
@@ -604,6 +619,7 @@ pub(crate) fn begin_fan_out(
             config,
             max_workers,
             pending: items.into_iter().collect(),
+            starting: Vec::new(),
             active: Vec::new(),
             summaries: Vec::new(),
             failures: Vec::new(),
@@ -624,13 +640,28 @@ pub(crate) fn fan_out_collect(world: &mut World) {
         let mut q = world.query_filtered::<Entity, With<FanOutWaiting>>();
         q.iter(world).collect()
     };
+    // The worker starts that finished off the tick since the last pass. One
+    // whose parent is not waiting on it any more is placed and cancelled.
+    let mut landed = starts::drain(world);
+    let (mine, orphans): (Vec<_>, Vec<_>) = landed
+        .drain(..)
+        .partition(|l| parents.contains(&l.parent()));
+    for orphan in orphans {
+        starts::abandon(world, orphan);
+    }
+    let mut landed = mine;
 
     for parent in parents {
         crate::tick_scope::enter(parent);
+        let (here, rest): (Vec<_>, Vec<_>) = landed.drain(..).partition(|l| l.parent() == parent);
+        landed = rest;
         // A cancelled/errored parent abandons the fan-out; its workers are reaped
         // by the host's cascade cancel (which walks SubAgentChildren).
         if !matches!(agent_status(world, parent), Some(AgentStatus::Waiting)) {
             world.entity_mut(parent).remove::<FanOutWaiting>();
+            for late in here {
+                starts::abandon(world, late);
+            }
             continue;
         }
         // A `Waiting` parent from the query above still holds its `FanOutWaiting`
@@ -639,6 +670,9 @@ pub(crate) fn fan_out_collect(world: &mut World) {
             .entity_mut(parent)
             .take::<FanOutWaiting>()
             .expect("a Waiting fan-out parent still holds FanOutWaiting");
+        for start in here {
+            starts::land(world, parent, &mut w, start);
+        }
 
         // 1. Reap workers that have reached a terminal state. A consumed
         // worker's result now lives in `w.summaries`/`w.failures`, so its heavy
@@ -674,45 +708,34 @@ pub(crate) fn fan_out_collect(world: &mut World) {
         // above still runs: a worker that finished before the pause landed has a
         // result worth keeping.
         //
-        // At most `MAX_WORKER_STARTS_PER_PASS` per pass. Starting a worker
-        // means reading and checking its blueprint, compiling its script
-        // tools and building its sandbox, on the driver thread, with every
-        // other run frozen; the rest of the queue starts on the next pass of
-        // the same wake, after the other systems have had their turn.
+        // At most `MAX_WORKER_STARTS_PER_PASS` begun per pass. Each start is
+        // prepared off the tick (see `starts`) and placed by a later pass
+        // when it lands; the rest of the queue begins on the next pass.
         let mut started_this_pass = 0usize;
-        while !w.paused && w.max_workers.is_none_or(|cap| w.active.len() < cap) {
+        let mut in_place = Vec::new();
+        while !w.paused && w.max_workers.is_none_or(|cap| w.running() < cap) {
             if started_this_pass >= MAX_WORKER_STARTS_PER_PASS {
                 break;
             }
             let Some(item) = w.pending.pop_front() else {
                 break;
             };
-            let started_at = std::time::Instant::now();
-            match start_worker(world, parent, &w.config, &item) {
-                Ok(child) => {
+            match starts::begin(world, parent, &w.config, &item, w.starting.len()) {
+                Ok(start) => {
                     started_this_pass += 1;
-                    tracing::info!(
-                        item = %item.id,
-                        spawn_ms = started_at.elapsed().as_millis() as u64,
-                        "fan-out worker started"
-                    );
-                    // Capture the worker's run-id so the waiting state persists.
-                    let run_id = world
-                        .get::<crate::persistence::RunMetadata>(child)
-                        .map(|m| m.run_id.clone())
-                        .unwrap_or_default();
-                    w.active.push(ActiveWorker {
-                        item_id: item.id,
-                        entity: child,
-                        run_id,
-                    });
+                    w.starting.push(item.clone());
+                    in_place.extend(starts::launch(world, parent, item.id, start));
                 }
                 Err(message) => w.failures.push((item.id, message)),
             }
         }
+        // A world with no runtime ran its starts in place: they land now.
+        for start in in_place {
+            starts::land(world, parent, &mut w, start);
+        }
 
-        // 3. Finished when nothing is running or queued.
-        if w.active.is_empty() && w.pending.is_empty() {
+        // 3. Finished when nothing is running, starting or queued.
+        if w.running() == 0 && w.pending.is_empty() {
             finish_fan_out(world, parent, w);
         } else {
             world.entity_mut(parent).insert(w);
@@ -986,97 +1009,6 @@ fn leave_fan_out(world: &mut World, parent: Entity, config: &FanOutDef) {
     }
 }
 
-/// Start one worker and link it to `parent` (`ParentRef` + `SubAgentChildren`),
-/// enforcing the parent graph's child-depth cap. Returns the child entity.
-fn start_worker(
-    world: &mut World,
-    parent: Entity,
-    config: &FanOutDef,
-    item: &WorkItem,
-) -> Result<Entity, String> {
-    let spec = world
-        .get::<RunSpecC>(parent)
-        .map(|s| s.0.clone())
-        .ok_or_else(|| "fan-out parent has no run spec".to_string())?;
-    let max_depth = world
-        .get::<SubAgentChildren>(parent)
-        .map(|k| k.max_child_depth)
-        .or_else(|| spec.graph.max_child_depth.map(usize::from))
-        .unwrap_or(DEFAULT_FANOUT_DEPTH);
-    let parent_depth = world.get::<ParentRef>(parent).map_or(0, |p| p.depth);
-    let child_depth = parent_depth + 1;
-    if child_depth > max_depth {
-        return Err(format!(
-            "fan-out worker depth limit ({max_depth}) reached; not spawning"
-        ));
-    }
-    // The run's own ceiling, beside the depth one. Refusing here rather than at
-    // the split means the items already started keep running and the merge still
-    // happens on what came back: a run that stopped widening is a cheaper answer,
-    // not a failure.
-    let budget = world.get_resource::<FanOutBudget>().map_or(0, |b| b.0);
-    let live = run_tree_size(world, parent);
-    if budget > 0 && live >= budget {
-        return Err(format!(
-            "this run already has {live} agents and its ceiling is {budget} \
-             ([limits] max_agents_per_run); not spawning another"
-        ));
-    }
-
-    let spawner = world
-        .get_resource::<FanOutSpawnerRes>()
-        .map(|r| r.0.clone())
-        .ok_or_else(|| "no fan-out spawner installed".to_string())?;
-    let source = match &config.worker {
-        WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
-        WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),
-        WorkerSource::Stage(_) => spec.same_graph_source(),
-        WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
-    };
-    let (request, caller) = items::worker_request(&spec, config, item, source, parent_depth);
-    let child = spawner.spawn_worker(world, parent, request, caller)?;
-
-    let parent_agent_id = world
-        .get::<AgentState>(parent)
-        .map(|s| s.agent_id.clone())
-        .unwrap_or_default();
-    world.entity_mut(child).insert(ParentRef {
-        parent_entity: parent,
-        parent_agent_id,
-        depth: child_depth,
-    });
-    match world.get_mut::<SubAgentChildren>(parent) {
-        Some(mut kids) => kids.children.push(child),
-        None => {
-            world.entity_mut(parent).insert(SubAgentChildren {
-                children: vec![child],
-                max_child_depth: max_depth,
-            });
-        }
-    }
-    // Record the worker's run-id on the parent's serializable state so the tree
-    // (fan-out workers included) is persisted for a deterministic restart rebuild.
-    // A freshly spawned worker always has run metadata; its parent always has state.
-    let worker_id = world
-        .get::<crate::persistence::RunMetadata>(child)
-        .expect("a fan-out worker always has run metadata")
-        .run_id
-        .clone();
-    world
-        .get_mut::<AgentState>(parent)
-        .expect("a fan-out parent always has AgentState")
-        .spawned_children_ids
-        .push(worker_id);
-    // Seed the worker's context from the parent per any declared context
-    // transform (when a fan-out worker runs a different blueprint).
-    crate::context_transform::apply_context_transforms(
-        world,
-        crate::world::AgentId::in_world(world, parent),
-        crate::world::AgentId::in_world(world, child),
-    );
-    Ok(child)
-}
-
 /// A worker's terminal result: `Some(Ok(deliverable))` if complete,
 /// `Some(Err(reason))` if it errored/was cancelled/vanished, `None` if still
 /// running.
@@ -1151,17 +1083,17 @@ mod tests {
 
     /// A spawner that spawns a trivial `Active` worker per item, refusing the ids
     /// in `fail`.
-    struct TestSpawner {
+    pub(super) struct TestSpawner {
         fail: HashSet<String>,
     }
 
     impl TestSpawner {
-        fn ok() -> Arc<dyn FanOutSpawner> {
+        pub(super) fn ok() -> Arc<dyn FanOutSpawner> {
             Arc::new(TestSpawner {
                 fail: HashSet::new(),
             })
         }
-        fn refusing(ids: &[&str]) -> Arc<dyn FanOutSpawner> {
+        pub(super) fn refusing(ids: &[&str]) -> Arc<dyn FanOutSpawner> {
             Arc::new(TestSpawner {
                 fail: ids.iter().map(|s| s.to_string()).collect(),
             })
@@ -1169,55 +1101,15 @@ mod tests {
     }
 
     impl FanOutSpawner for TestSpawner {
-        fn spawn_worker(
-            &self,
-            world: &mut World,
-            _parent: Entity,
-            request: SpawnRequest,
-            _caller: Caller,
-        ) -> Result<Entity, String> {
-            let item_id = request.delivery.metadata[WORK_ITEM_LABEL].as_str();
-            if self.fail.contains(item_id) {
-                return Err(format!("spawn refused for '{item_id}'"));
-            }
-            Ok(world
-                .spawn((
-                    AgentState {
-                        agent_id: format!("worker-{item_id}"),
-                        current_visit: String::new(),
-                        current_stage: "w".to_string(),
-                        iteration: 0,
-                        status: AgentStatus::Active,
-                        spawned_children_ids: vec![],
-                        pending_wait: None,
-                        accepts_messages: true,
-                    },
-                    // A real worker carries run metadata (attached by build_agent);
-                    // mirror that so the parent can record the worker's run-id.
-                    crate::persistence::RunMetadata {
-                        run_id: format!("run-{item_id}"),
-                        agent_name: "worker".to_string(),
-                        agent_path: String::new(),
-                        task: String::new(),
-                        model: None,
-                        workdir: String::new(),
-                        num_stages: 1,
-                        started_at: 0,
-                        parent_run_id: None,
-                        metadata: std::collections::HashMap::new(),
-                        callback_url: None,
-                        callback_secret: None,
-                        title: None,
-                        title_error: None,
-                        blueprint_digest: None,
-                        unattended: false,
-                        yolo_profile: None,
-                        read_paths: None,
-                        output_request: None,
-                        model_override: None,
-                    },
-                ))
-                .id())
+        fn prepare_worker(&self, request: SpawnRequest, _caller: Caller) -> WorkerPrep {
+            let item_id = request.delivery.metadata[WORK_ITEM_LABEL].clone();
+            let refused = self.fail.contains(&item_id);
+            Box::pin(async move {
+                if refused {
+                    return Err(format!("spawn refused for '{item_id}'"));
+                }
+                Ok(Box::new(move |world: &mut World| test_worker(world, &item_id)) as PlaceWorker)
+            })
         }
 
         fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
@@ -1228,7 +1120,50 @@ mod tests {
         }
     }
 
-    fn cfg(merge: Option<&str>, max_workers: u32, policy: WorkerFailure) -> FanOutDef {
+    /// A trivial `Active` worker for `item_id`, carrying the run metadata a
+    /// real worker has.
+    fn test_worker(world: &mut World, item_id: &str) -> Entity {
+        world
+            .spawn((
+                AgentState {
+                    agent_id: format!("worker-{item_id}"),
+                    current_visit: String::new(),
+                    current_stage: "w".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: vec![],
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                // A real worker carries run metadata (attached by build_agent);
+                // mirror that so the parent can record the worker's run-id.
+                crate::persistence::RunMetadata {
+                    run_id: format!("run-{item_id}"),
+                    agent_name: "worker".to_string(),
+                    agent_path: String::new(),
+                    task: String::new(),
+                    model: None,
+                    workdir: String::new(),
+                    num_stages: 1,
+                    started_at: 0,
+                    parent_run_id: None,
+                    metadata: std::collections::HashMap::new(),
+                    callback_url: None,
+                    callback_secret: None,
+                    title: None,
+                    title_error: None,
+                    blueprint_digest: None,
+                    unattended: false,
+                    yolo_profile: None,
+                    read_paths: None,
+                    output_request: None,
+                    model_override: None,
+                },
+            ))
+            .id()
+    }
+
+    pub(super) fn cfg(merge: Option<&str>, max_workers: u32, policy: WorkerFailure) -> FanOutDef {
         FanOutDef {
             worker: WorkerSource::Stage(StageName::new("w").unwrap()),
             merge_stage: merge.map(|m| StageName::new(m).unwrap()),
@@ -1258,7 +1193,7 @@ mod tests {
     }
 
     /// A graph whose stage 0 is a fan-out stage and stage 1 is `merge`.
-    fn fanout_blueprint(config: FanOutDef) -> RunGraph {
+    pub(super) fn fanout_blueprint(config: FanOutDef) -> RunGraph {
         let layout = layout(
             vec![region("conversation", RegionKind::Clearable, 10_000)],
             12_000,
@@ -1290,7 +1225,7 @@ mod tests {
 
     /// Spawn a parent sitting on `ProcessResponse` with `response` as its
     /// (split) inference output.
-    fn spawn_parent(world: &mut World, bp: RunGraph, response: &str) -> Entity {
+    pub(super) fn spawn_parent(world: &mut World, bp: RunGraph, response: &str) -> Entity {
         world
             .spawn((
                 both(bp),
@@ -1313,7 +1248,21 @@ mod tests {
             .id()
     }
 
-    fn install(world: &mut World, spawner: Arc<dyn FanOutSpawner>) {
+    /// Start one worker for `item` under `parent` and place it, as a pass of
+    /// `fan_out_collect` does in a world with no runtime: in place.
+    fn start_worker(
+        world: &mut World,
+        parent: Entity,
+        config: &FanOutDef,
+        item: &WorkItem,
+    ) -> Result<Entity, String> {
+        let start = starts::begin(world, parent, config, item, 0)?;
+        let landed = starts::launch(world, parent, item.id.clone(), start)
+            .expect("a world with no runtime runs a start in place");
+        starts::place(world, parent, landed).1
+    }
+
+    pub(super) fn install(world: &mut World, spawner: Arc<dyn FanOutSpawner>) {
         world.insert_resource(FanOutSpawnerRes(spawner));
     }
 
@@ -1324,18 +1273,12 @@ mod tests {
     }
 
     impl FanOutSpawner for Recording {
-        fn spawn_worker(
-            &self,
-            world: &mut World,
-            parent: Entity,
-            request: SpawnRequest,
-            caller: Caller,
-        ) -> Result<Entity, String> {
+        fn prepare_worker(&self, request: SpawnRequest, caller: Caller) -> WorkerPrep {
             self.sources.lock().unwrap().push(request.source.clone());
             TestSpawner {
                 fail: HashSet::new(),
             }
-            .spawn_worker(world, parent, request, caller)
+            .prepare_worker(request, caller)
         }
 
         fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
@@ -1388,7 +1331,7 @@ mod tests {
         assert!(recording.find_worker("helper@not-a-digest").is_err());
     }
 
-    fn status_of(world: &World, e: Entity) -> AgentStatus {
+    pub(super) fn status_of(world: &World, e: Entity) -> AgentStatus {
         world.get::<AgentState>(e).unwrap().status.clone()
     }
 
@@ -1403,7 +1346,7 @@ mod tests {
         );
     }
 
-    fn conversation_text(world: &World, e: Entity) -> String {
+    pub(super) fn conversation_text(world: &World, e: Entity) -> String {
         world
             .get::<ContextWindow>(e)
             .unwrap()
@@ -1454,7 +1397,7 @@ mod tests {
     }
 
     /// A work item with the given id and no inputs.
-    fn item(id: &str) -> WorkItem {
+    pub(super) fn item(id: &str) -> WorkItem {
         WorkItem {
             id: id.to_string(),
             inputs: Default::default(),
@@ -3722,14 +3665,8 @@ mod tests {
     struct Typed(Arc<dyn FanOutSpawner>);
 
     impl FanOutSpawner for Typed {
-        fn spawn_worker(
-            &self,
-            world: &mut World,
-            parent: Entity,
-            request: SpawnRequest,
-            caller: Caller,
-        ) -> Result<Entity, String> {
-            self.0.spawn_worker(world, parent, request, caller)
+        fn prepare_worker(&self, request: SpawnRequest, caller: Caller) -> WorkerPrep {
+            self.0.prepare_worker(request, caller)
         }
 
         fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
@@ -3855,3 +3792,7 @@ mod tests {
         assert!(err.contains("no run spec"), "{err}");
     }
 }
+
+#[cfg(test)]
+#[path = "fanout/starts_tests.rs"]
+mod starts_tests;

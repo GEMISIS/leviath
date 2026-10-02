@@ -383,6 +383,10 @@ impl PipelineWorld {
         world.insert_resource(crate::blob_store::MimeRegistryHandle::default());
         world.insert_resource(crate::blob_store::MimeLimits::default());
         world.insert_resource(Providers(providers));
+        world.insert_resource(crate::fanout::WorkerStarts::new(
+            runtime.clone(),
+            wake.clone(),
+        ));
         world.insert_resource(InferenceStage {
             // The wake goes into the pools, not just the bridges: freeing a slot
             // has to re-drive dispatch, or the agents parked on a full pool never

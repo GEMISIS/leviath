@@ -1,20 +1,21 @@
-//! The daemon-side [`FanOutSpawner`]: starts a fan-out worker from the
-//! request the runtime hands it, in the shared world.
+//! The daemon-side [`FanOutSpawner`]: prepares a fan-out worker from the
+//! request the runtime hands it, for the shared world to place.
 //!
 //! The runtime's fan-out systems only *start and track* workers. A worker is
 //! started the way every run is, through the [`DaemonStarter`]: resolved,
-//! recorded and bound as a [`Caller::Worker`] of its parent, then placed. It
-//! is started from inside the world's tick, so the machine is not warmed for
-//! it first: the parent's start already warmed what its fan-outs use, and any
-//! MCP server a worker declares that is not connected yet is connected in the
-//! background for the workers after it.
+//! recorded and bound as a [`Caller::Worker`] of its parent, then placed. The
+//! resolving, recording and binding happen in the future
+//! [`FanOutSpawner::prepare_worker`] returns, which the world runs off its
+//! tick; placing is an insert the world does when it lands. The machine is
+//! not warmed for a worker first: the parent's start already warmed what its
+//! fan-outs use, and any MCP server a worker declares that is not connected
+//! yet is connected in the background for the workers after it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use leviath_runtime::fanout::FanOutSpawner;
+use leviath_runtime::fanout::{FanOutSpawner, PlaceWorker, WorkerPrep};
 use leviath_runtime::spec::env::Caller;
 use leviath_runtime::spec::inputs::InputDecl;
 use leviath_runtime::spec::names::BlueprintRef;
@@ -33,42 +34,42 @@ pub(crate) struct DaemonFanOutSpawner {
 }
 
 impl FanOutSpawner for DaemonFanOutSpawner {
-    fn spawn_worker(
-        &self,
-        world: &mut World,
-        _parent: Entity,
-        request: SpawnRequest,
-        caller: Caller,
-    ) -> Result<Entity, String> {
-        let config = self.starter.config.current();
-        let env = self.starter.env_for(&request, config);
-        // A server the worker's graph declares that is not connected yet is
-        // connected for the next worker of the same kind.
-        if let Some(graph) = self.starter.graph_of(&request) {
-            let servers = crate::daemon::starter::mcp_configs(&graph);
-            let uncached: Vec<_> = servers
-                .into_iter()
-                .filter(|s| {
-                    self.starter
-                        .mcp_pool
-                        .cached_defs_for(std::slice::from_ref(s))
-                        .is_empty()
-                })
-                .collect();
-            if !uncached.is_empty() {
-                tokio::runtime::Handle::current()
-                    .spawn(self.starter.mcp_pool.clone().ensure_all(uncached));
+    fn prepare_worker(&self, request: SpawnRequest, caller: Caller) -> WorkerPrep {
+        let starter = self.starter.clone();
+        Box::pin(async move {
+            let config = starter.config.current();
+            let env = starter.env_for(&request, config);
+            // A server the worker's graph declares that is not connected yet is
+            // connected for the next worker of the same kind.
+            if let Some(graph) = starter.graph_of(&request) {
+                let servers = crate::daemon::starter::mcp_configs(&graph);
+                let uncached: Vec<_> = servers
+                    .into_iter()
+                    .filter(|s| {
+                        starter
+                            .mcp_pool
+                            .cached_defs_for(std::slice::from_ref(s))
+                            .is_empty()
+                    })
+                    .collect();
+                if !uncached.is_empty() {
+                    tokio::spawn(starter.mcp_pool.clone().ensure_all(uncached));
+                }
             }
-        }
-        let prepared =
-            crate::daemon::block_on::block_on(self.starter.start_with(env, request, caller))
+            let prepared = starter
+                .start_with(env, request, caller)
+                .await
                 .map_err(|issues| issues.to_string())?;
-        Ok(leviath_runtime::insert::insert(
-            world,
-            prepared.spec,
-            prepared.bindings,
-            &prepared.state,
-        ))
+            let place: PlaceWorker = Box::new(move |world: &mut World| {
+                leviath_runtime::insert::insert(
+                    world,
+                    prepared.spec,
+                    prepared.bindings,
+                    &prepared.state,
+                )
+            });
+            Ok(place)
+        })
     }
 
     fn find_worker(&self, query: &str) -> Result<BlueprintRef, String> {
@@ -128,6 +129,7 @@ mod tests {
     use crate::daemon::starter::testing::{TestLaunch, request_for, starter};
     use crate::daemon::tool_service::CliToolService;
     use crate::test_support::{FakeProvider, fixtures};
+    use bevy_ecs::entity::Entity;
     use leviath_runtime::components::AgentStatus;
     use leviath_runtime::inference_pool::InferencePoolConfig;
     use leviath_runtime::insert::RunSpecC;
@@ -309,7 +311,8 @@ binds = [{ region = "task" }]
         agent: Option<&str>,
     ) -> Result<Entity, String> {
         let (request, caller) = worker_of(world, parent, stage, agent);
-        spawner.spawn_worker(world.world_mut(), parent, request, caller)
+        let place = crate::daemon::block_on::block_on(spawner.prepare_worker(request, caller))?;
+        Ok(place(world.world_mut()))
     }
 
     /// A worker blueprint's inputs are read so a fan-out's items are checked
