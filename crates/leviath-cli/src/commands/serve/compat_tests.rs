@@ -15,7 +15,7 @@ use super::super::types::{AppState, ServeLimits};
 use crate::commands::serve::testutil::{fake_daemon, no_daemon_client, state_with_agent_paths};
 
 /// A blueprint with three inputs: `task`, `subject` (which fills the `query`
-/// region) and `count` (which fills `notes` through a template).
+/// and `aside` regions) and `count` (which fills `notes` through a template).
 const PROBE: &str = r#"[blueprint]
 name = "compat-probe"
 version = "1.0.0"
@@ -26,10 +26,11 @@ layout = { total_budget_tokens = 4000, regions = [
   { name = "task", kind = "pinned", budget = 1000 },
   { name = "query", kind = "pinned", budget = 1000 },
   { name = "notes", kind = "pinned", budget = 1000 },
+  { name = "aside", kind = "pinned", budget = 1000 },
 ] }
 inputs = [
   { name = "task", type = "text", required = true, binds = [{ region = "task" }] },
-  { name = "subject", type = "text", binds = [{ region = "query" }] },
+  { name = "subject", type = "text", binds = [{ region = "query" }, { region = "aside" }] },
   { name = "count", type = "int", binds = [{ region = "notes", template = "count={count}" }] },
 ]
 "#;
@@ -275,6 +276,59 @@ async fn a_region_no_input_fills_is_left_out_with_a_warning() {
     let names: Vec<&str> = request.inputs.keys().map(String::as_str).collect();
     assert_eq!(names, ["subject", "task"]);
     assert!(request.attachments.is_empty());
+}
+
+/// Two texts for one input: the one under the input's own name wins, then
+/// the first region by name, every time, and the answer names each text left
+/// out.
+#[tokio::test]
+async fn two_texts_for_one_input_keep_the_same_one_every_time() {
+    for (regions, kept, dropped) in [
+        (
+            serde_json::json!({"subject": "S", "query": "Q", "aside": "A"}),
+            "S",
+            ["regions.aside:", "regions.query:"],
+        ),
+        (
+            serde_json::json!({"query": "Q", "aside": "A"}),
+            "A",
+            ["regions.query:", "regions.query:"],
+        ),
+    ] {
+        for _ in 0..8 {
+            let (state, seen, _bp, _sock) = served(Some(ControlResponse::Spawned {
+                run_id: "compat-probe-3".into(),
+                warnings: Default::default(),
+            }));
+            let body = serde_json::json!({
+                "blueprint": "compat-probe",
+                "task": "go",
+                "regions": regions,
+            });
+            let (status, answer) = send(state, spawn(body)).await;
+            assert_eq!(status, StatusCode::OK, "{answer}");
+            assert_eq!(
+                spawned(&seen).inputs["subject"],
+                RawInput::Text(kept.into()),
+                "{regions}"
+            );
+            let warnings: Vec<&str> = answer["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            assert!(
+                warnings.first().is_some_and(|w| w.starts_with(dropped[0])),
+                "{answer}"
+            );
+            assert!(
+                warnings.last().is_some_and(|w| w.starts_with(dropped[1])),
+                "{answer}"
+            );
+            assert!(warnings.iter().all(|w| w.contains("'subject'")), "{answer}");
+        }
+    }
 }
 
 #[tokio::test]

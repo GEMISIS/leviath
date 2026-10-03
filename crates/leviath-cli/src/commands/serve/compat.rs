@@ -132,23 +132,34 @@ pub(super) async fn spawn_agent(
     let (task, named) = super::upload::inline_parts(&body.task, None, &workdir, max_upload)?;
     body.task = task;
     parts.extend(named);
-    let mut regions = HashMap::new();
+    let mut filling = Vec::new();
     let mut left_out = Vec::new();
     for (region, text) in std::mem::take(&mut body.regions) {
-        let input = match input_for_region(&declared, &region) {
-            Ok(input) => input,
-            Err(why) => {
-                left_out.push(format!(
-                    "regions.{region}: {why} in blueprint '{}', so its text was left out",
-                    body.blueprint
-                ));
-                continue;
-            }
-        };
+        match input_for_region(&declared, &region) {
+            Ok(input) => filling.push((input, region, text)),
+            Err(why) => left_out.push(format!(
+                "regions.{region}: {why} in blueprint '{}', so its text was left out",
+                body.blueprint
+            )),
+        }
+    }
+    // Two texts for one input: the one under the input's own name wins, then
+    // the first region by name.
+    filling.sort_by(|(a_in, a, _), (b_in, b, _)| (a != a_in, a).cmp(&(b != b_in, b)));
+    let mut regions = HashMap::new();
+    let mut from: HashMap<String, String> = HashMap::new();
+    for (input, region, text) in filling {
+        if let Some(winner) = from.get(&input) {
+            left_out.push(format!(
+                "regions.{region}: fills input '{input}', which regions.{winner} fills too, so its text was left out"
+            ));
+            continue;
+        }
         let (kept, named) =
             super::upload::inline_parts(&text, Some(&region), &workdir, max_upload)?;
         parts.extend(named);
-        regions.insert(input, kept);
+        regions.insert(input.clone(), kept);
+        from.insert(input, region);
     }
     left_out.sort();
     let request = launch_of(body, regions, parts)
