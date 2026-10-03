@@ -56,6 +56,13 @@ impl Replay<'_> {
     fn step(&mut self, context_moved: bool, events: Vec<RunEvent>) {
         let mut next = self.state.clone();
         next.pending = None;
+        // Each move into a stage is a visit to it, as the world counts one, so
+        // every point of the history names the stage it was in.
+        if let Some(stage) = stage_of(&self.spec.graph, &self.meta)
+            && (stage.name != next.cursor.stage || !next.visits.contains_key(&stage.name))
+        {
+            *next.visits.entry(stage.name.clone()).or_default() += 1;
+        }
         from_meta(&mut next, &self.meta, &self.spec.graph);
         if context_moved {
             let stage = stage_of(&self.spec.graph, &self.meta).unwrap_or(entry(&self.spec.graph));
@@ -355,7 +362,10 @@ pub(crate) fn build(
     report: &mut Report,
 ) -> (RunState, Vec<StateDelta>, RunState) {
     let graph = &spec.graph;
-    let first = entry(graph);
+    // The run starts in the stage its first record names, visited once, as a
+    // run the world spawns does; one whose record names none entered none.
+    let named = stage_of(graph, &old.header);
+    let first = named.unwrap_or_else(|| entry(graph));
     let empty = ContextSnapshot {
         stage_name: String::new(),
         total_tokens: 0,
@@ -364,7 +374,8 @@ pub(crate) fn build(
     };
     let context = old.first_context().cloned().unwrap_or(empty);
     let start_ctx = context_in(graph, first, &context, &mut Losses::default());
-    let start = RunState::initial(first.name.clone(), start_ctx, first.accepts_messages);
+    let mut start = RunState::initial(first.name.clone(), start_ctx, first.accepts_messages);
+    start.visits.extend(named.map(|s| (s.name.clone(), 1)));
     let mut replay = Replay {
         spec,
         meta: old.header.clone(),

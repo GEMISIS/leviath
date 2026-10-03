@@ -266,7 +266,9 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
     }
     // An old record files the stage a run was cancelled in as failed, and a
     // paused run's stage as running; converted, it reads as its run does.
-    state.settle_ledger();
+    // Every other stage reads as its record says: a stage an old record
+    // never reached is pending there, and every earlier release showed it so.
+    state.settle_stage_here();
     if old.not_empty {
         report.fill(
             "flags.no_output_tools",
@@ -353,12 +355,23 @@ fn visit(v: &StageVisitRecord, at: i64) -> VisitRecord {
     }
 }
 
+/// Whether the run was ever in the stage. A record from before stages kept
+/// the answer names none, so it is read off what the record says the stage
+/// did: it spent, was visited, started, or got past pending.
+fn entered(r: &OldStage) -> bool {
+    r.entered
+        || r.prompt_tokens + r.completion_tokens > 0
+        || r.visit_count.max(r.visits.len()) > 0
+        || r.started_at.is_some()
+        || !matches!(r.status, StageRunStatus::Pending | StageRunStatus::Skipped)
+}
+
 fn ledger(r: &OldStage, meta: &RunMeta) -> Option<StageRecord> {
     let at = meta.updated_at;
     Some(StageRecord {
         stage: StageName::new(r.name.as_str()).ok()?,
         status: stage_status(&r.status),
-        entered: r.entered,
+        entered: entered(r),
         spend: spend(
             r.prompt_tokens,
             r.completion_tokens,

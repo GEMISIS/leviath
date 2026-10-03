@@ -131,6 +131,13 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
             .unwrap(),
         );
     });
+    // It started in the entry stage, as every run does, and moved on.
+    run.journal(|records| {
+        let JournalRecord::Header { meta, .. } = &mut records[0] else {
+            panic!("the journal starts with its header");
+        };
+        meta.current_stage = "main".into();
+    });
     let (report, file) = run.converted();
     assert!(matches!(report.blueprint, BlueprintSource::Installed(_)));
     let spec = &file.spec;
@@ -348,6 +355,70 @@ fn the_stage_a_run_stopped_in_converts_as_its_run_stands() {
     }
 }
 
+/// A record from before stages said whether they were entered names none,
+/// so whether a stage was reached is read off what the record says it did:
+/// its spend, its visits, when it started, or a status past pending. Such
+/// a stage keeps the status its record gives it, a stage it never reached
+/// keeps reading pending, as every earlier release showed both, and the
+/// stage a cancelled run stopped in reads cancelled.
+#[test]
+fn a_stage_from_before_entered_was_recorded_keeps_its_status() {
+    for (run_status, here) in [
+        (OldStatus::Complete, StageStatus::Complete),
+        (OldStatus::Error, StageStatus::Error),
+        (OldStatus::Cancelled, StageStatus::Cancelled),
+    ] {
+        let run = Run::fixture("finished");
+        rich(&run);
+        status(&run, run_status.clone(), None, None);
+        run.json("stages.json", |v| {
+            let first = v[0].clone();
+            let bare = |name: &str, status: &str| {
+                let mut s = first.clone();
+                s["name"] = json!(name);
+                s["status"] = json!(status);
+                s["prompt_tokens"] = json!(0);
+                s["completion_tokens"] = json!(0);
+                s["visits"] = json!([]);
+                s["visit_count"] = json!(0);
+                s["started_at"] = json!(null);
+                s
+            };
+            let mut main = first.clone();
+            main["status"] = json!("error");
+            let second = bare("second", "complete");
+            let mut third = bare("third", "pending");
+            third["started_at"] = first["started_at"].clone();
+            let mut visited = bare("visited", "pending");
+            visited["visit_count"] = json!(1);
+            let never = bare("never", "pending");
+            *v = json!([main, second, third, visited, never]);
+            for s in v.as_array_mut().unwrap() {
+                s.as_object_mut().unwrap().remove("entered");
+            }
+        });
+        let (_, file) = run.converted();
+        let read: Vec<(String, StageStatus, bool)> = file
+            .last
+            .ledger
+            .iter()
+            .map(|r| (r.stage.to_string(), r.status, r.entered))
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                ("main".into(), here, true),
+                ("second".into(), StageStatus::Complete, true),
+                ("third".into(), StageStatus::Pending, true),
+                ("visited".into(), StageStatus::Pending, true),
+                ("never".into(), StageStatus::Pending, false),
+            ],
+            "{run_status:?}"
+        );
+        assert_eq!(file.fold(), file.last);
+    }
+}
+
 #[test]
 fn a_run_in_no_stage_it_names_resumes_at_the_entry() {
     let run = Run::fixture("finished");
@@ -375,6 +446,57 @@ fn a_run_that_named_no_stage_is_listed_in_none() {
     assert_eq!(file.last.visits.get("main"), Some(&1));
     let listed = leviath_runtime::runfile::summary_of(&file.spec, &file.last, 0);
     assert_eq!(listed.current_stage, "main");
+}
+
+/// Every point of a converted run's history names the stage the run was in
+/// there, as the release that wrote it showed it: the stage it started in is
+/// visited from the start, and each move to another stage is a visit.
+#[test]
+fn every_point_of_a_converted_history_names_its_stage() {
+    let run = Run::fixture("finished");
+    rich(&run);
+    run.journal(|records| {
+        let first = records
+            .iter_mut()
+            .find(|r| matches!(r, JournalRecord::Progress { .. }))
+            .unwrap();
+        let JournalRecord::Progress { meta, .. } = first else {
+            unreachable!()
+        };
+        meta.current_stage = "second".into();
+    });
+    let (_, file) = run.converted();
+    assert_eq!(file.fold(), file.last);
+    let mut state = file.states[0].clone();
+    let name = |s: &leviath_runtime::state::RunState| {
+        leviath_runtime::runfile::summary_of(&file.spec, s, 0).current_stage
+    };
+    let mut named = vec![(name(&state), state.visits.clone())];
+    for d in &file.deltas {
+        d.apply(&mut state);
+        named.push((name(&state), state.visits.clone()));
+    }
+    let visits = |pairs: &[(&str, u32)]| -> std::collections::BTreeMap<_, _> {
+        pairs
+            .iter()
+            .map(|(s, n)| {
+                (
+                    leviath_runtime::spec::names::StageName::new(*s).unwrap(),
+                    *n,
+                )
+            })
+            .collect()
+    };
+    assert_eq!(named[0], ("main".into(), visits(&[("main", 1)])));
+    assert!(named.iter().all(|(n, _)| !n.is_empty()), "{named:?}");
+    assert!(
+        named.contains(&("second".into(), visits(&[("main", 1), ("second", 1)]))),
+        "{named:?}"
+    );
+    assert!(
+        named.contains(&("main".into(), visits(&[("main", 2), ("second", 1)]))),
+        "{named:?}"
+    );
 }
 
 /// When the run last made progress is kept where its record says it was

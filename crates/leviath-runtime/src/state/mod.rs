@@ -171,17 +171,28 @@ impl RunState {
     /// stage the run is in, once entered, reads as the run does, and once the
     /// run is over a stage it never entered reads as skipped.
     pub fn settle_ledger(&mut self) {
+        self.settle_stage_here();
         let over = matches!(
             self.status,
             RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
         );
+        for rec in self.ledger.iter_mut().filter(|r| over && !r.entered) {
+            rec.status = StageStatus::Skipped;
+        }
+    }
+
+    /// The first half of [`settle_ledger`](Self::settle_ledger) alone: the
+    /// stage the run is in, once entered, reads as the run does, and every
+    /// other stage keeps the status it has.
+    pub fn settle_stage_here(&mut self) {
         let here = StageStatus::from(&self.status);
-        for rec in &mut self.ledger {
-            match (rec.stage == self.cursor.stage && rec.entered, rec.entered) {
-                (true, _) => rec.status = here,
-                (false, false) if over => rec.status = StageStatus::Skipped,
-                _ => {}
-            }
+        let stage = &self.cursor.stage;
+        for rec in self
+            .ledger
+            .iter_mut()
+            .filter(|r| r.entered && r.stage == *stage)
+        {
+            rec.status = here;
         }
     }
 }
