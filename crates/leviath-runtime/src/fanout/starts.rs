@@ -46,7 +46,7 @@ pub(crate) struct WorkerLanded {
 /// The depth a worker starts at, and the deepest a child of its tree may be.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Depths {
-    child: usize,
+    pub(super) child: usize,
     max: usize,
 }
 
@@ -100,6 +100,38 @@ pub(super) fn begin(
         .get::<RunSpecC>(parent)
         .map(|s| s.0.clone())
         .ok_or_else(|| "fan-out parent has no run spec".to_string())?;
+    let depths = depths(world, parent, &spec, starting)?;
+    let parent_depth = depths.child - 1;
+    let spawner = world
+        .get_resource::<FanOutSpawnerRes>()
+        .map(|r| r.0.clone())
+        .ok_or_else(|| "no fan-out spawner installed".to_string())?;
+    let (config, item) = (config.clone(), item.clone());
+    let prep: WorkerPrep = Box::pin(async move {
+        // Off the tick from here: a query is a walk of the agents directory.
+        let source = match &config.worker {
+            WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
+            WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),
+            WorkerSource::Stage(_) => spec.same_graph_source(),
+            WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
+        };
+        let (request, caller) = items::worker_request(&spec, &config, &item, source, parent_depth);
+        spawner.prepare_worker(request, caller).await
+    });
+    Ok(Start { prep, depths })
+}
+
+/// Where a worker of `parent` (whose spec is `spec`) sits in the tree, or
+/// why no worker of it may start now: the tree is as deep as it may go, or
+/// the run has as many agents as its ceiling allows. `starting` is how many
+/// of the parent's workers are still being prepared, which count against
+/// the run's agent budget as if they were already running.
+pub(super) fn depths(
+    world: &World,
+    parent: Entity,
+    spec: &crate::spec::run_spec::RunSpec,
+    starting: usize,
+) -> Result<Depths, String> {
     let max_depth = world
         .get::<SubAgentChildren>(parent)
         .map(|k| k.max_child_depth)
@@ -124,28 +156,9 @@ pub(super) fn begin(
              ([limits] max_agents_per_run); not spawning another"
         ));
     }
-    let spawner = world
-        .get_resource::<FanOutSpawnerRes>()
-        .map(|r| r.0.clone())
-        .ok_or_else(|| "no fan-out spawner installed".to_string())?;
-    let (config, item) = (config.clone(), item.clone());
-    let prep: WorkerPrep = Box::pin(async move {
-        // Off the tick from here: a query is a walk of the agents directory.
-        let source = match &config.worker {
-            WorkerSource::Blueprint(blueprint) => SpawnSource::Blueprint(blueprint.clone()),
-            WorkerSource::BlueprintFile(path) => SpawnSource::BlueprintFile(path.clone()),
-            WorkerSource::Stage(_) => spec.same_graph_source(),
-            WorkerSource::Query(query) => SpawnSource::Blueprint(spawner.find_worker(query)?),
-        };
-        let (request, caller) = items::worker_request(&spec, &config, &item, source, parent_depth);
-        spawner.prepare_worker(request, caller).await
-    });
-    Ok(Start {
-        prep,
-        depths: Depths {
-            child: child_depth,
-            max: max_depth,
-        },
+    Ok(Depths {
+        child: child_depth,
+        max: max_depth,
     })
 }
 
@@ -259,7 +272,7 @@ pub(super) fn place(
     } = landed;
     let placed = result.map(|place| {
         let child = place(world);
-        link(world, parent, child, depths);
+        link(world, parent, child, depths, true);
         tracing::info!(item = %item_id, "fan-out worker started");
         child
     });
@@ -276,9 +289,9 @@ pub(super) fn abandon(world: &mut World, landed: WorkerLanded) {
 }
 
 /// Link a placed worker to `parent` (`ParentRef` + `SubAgentChildren`), record
-/// it on the parent's state so the tree survives a restart, and seed its
-/// context from the parent per any declared transform.
-fn link(world: &mut World, parent: Entity, child: Entity, depths: Depths) {
+/// it on the parent's state so the tree survives a restart, and, with
+/// `seed`, seed its context from the parent per any declared transform.
+pub(super) fn link(world: &mut World, parent: Entity, child: Entity, depths: Depths, seed: bool) {
     let parent_agent_id = world
         .get::<AgentState>(parent)
         .map(|s| s.agent_id.clone())
@@ -309,9 +322,11 @@ fn link(world: &mut World, parent: Entity, child: Entity, depths: Depths) {
         .expect("a fan-out parent always has AgentState")
         .spawned_children_ids
         .push(worker_id);
-    crate::context_transform::apply_context_transforms(
-        world,
-        crate::world::AgentId::in_world(world, parent),
-        crate::world::AgentId::in_world(world, child),
-    );
+    if seed {
+        crate::context_transform::apply_context_transforms(
+            world,
+            crate::world::AgentId::in_world(world, parent),
+            crate::world::AgentId::in_world(world, child),
+        );
+    }
 }

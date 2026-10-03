@@ -540,8 +540,10 @@ async fn worker_on_disk(starter: &DaemonStarter, parent: &str, item: &str) -> St
 
 /// A worker whose run file was written before the daemon stopped, and which
 /// its parent never recorded, is adopted as its item's worker when the
-/// parent still has the item queued, so the item is not started a second
-/// time. One for an item the parent is not waiting on is cancelled.
+/// parent still has the item queued and it was started with what the item
+/// asks for, so the item is not started a second time. One for an item the
+/// parent is not waiting on is cancelled, and so is one started with other
+/// inputs than its item's: that item stays queued and starts fresh.
 #[tokio::test]
 async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
     use leviath_runtime::spec::graph::StageMode;
@@ -553,6 +555,7 @@ async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
     let starter = starter(Config::default(), registry(), runs.path());
     let started = worker_on_disk(&starter, &parent, "w1").await;
     let stray = worker_on_disk(&starter, &parent, "gone").await;
+    let mismatched = worker_on_disk(&starter, &parent, "w2").await;
     let config = {
         let reader =
             leviath_runtime::runfile::RunFileReader::open(&run_file(runs.path(), &parent)).unwrap();
@@ -561,9 +564,15 @@ async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
             other => panic!("the split stage fans out: {other:?}"),
         }
     };
-    let queued = |id: &str| WorkItemState {
+    let queued = |id: &str, task: &str| WorkItemState {
         id: id.to_string(),
-        inputs: Default::default(),
+        inputs: leviath_runtime::spec::inputs::InputValues(
+            [(
+                leviath_runtime::spec::names::InputName::new("task").unwrap(),
+                leviath_runtime::spec::inputs::InputValue::Text(task.to_string()),
+            )]
+            .into(),
+        ),
     };
     change(runs.path(), &parent, |s| {
         s.status = RunStatus::Waiting;
@@ -573,7 +582,7 @@ async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
             stage: s.cursor.stage.clone(),
             config,
             max_workers: Some(4),
-            queued: vec![queued("w1"), queued("w2")],
+            queued: vec![queued("w1", "do w1"), queued("w2", "do something else")],
             active: Vec::new(),
             done: Vec::new(),
             failed: Vec::new(),
@@ -601,6 +610,7 @@ async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
     );
     assert_eq!(now.children, [id(&started)]);
     assert_eq!(live(&mut world, &stray).status, RunStatus::Cancelled);
+    assert_eq!(live(&mut world, &mismatched).status, RunStatus::Cancelled);
     assert_ne!(live(&mut world, &started).status, RunStatus::Cancelled);
 }
 

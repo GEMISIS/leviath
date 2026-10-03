@@ -3269,7 +3269,7 @@ mod tests {
 
     /// The run metadata a worker or parent carries, enough for the store to
     /// key its files by.
-    fn run_meta(run_id: &str) -> crate::persistence::RunMetadata {
+    pub(super) fn run_meta(run_id: &str) -> crate::persistence::RunMetadata {
         crate::persistence::RunMetadata {
             run_id: run_id.to_string(),
             agent_name: "a".to_string(),
