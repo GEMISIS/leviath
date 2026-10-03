@@ -163,6 +163,10 @@ async fn a_start_that_lands_after_its_parent_left_is_cancelled() {
     let (mut world, e) = runtime_world(spawner, 2, &["a", "b"]);
     fan_out_collect(&mut world);
     set_status(&mut world, e, AgentStatus::Cancelled);
+    // The parent is seen cancelled and stops waiting before either start can
+    // land, so both land with no parent waiting on them, every time.
+    fan_out_collect(&mut world);
+    assert!(world.get::<FanOutWaiting>(e).is_none());
     gate.add_permits(2);
     collect_until(&mut world, |world| {
         world.iter_entities().any(|w| {
