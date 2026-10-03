@@ -320,9 +320,12 @@ fn a_worker_at_an_interaction_point_keeps_the_question() {
     assert_eq!(file.spec.placement.depth, 1);
 }
 
+/// A call the old daemon was running when it stopped is never started again:
+/// it comes back interrupted, for the model to check, as the release that
+/// wrote the run gave it back when it resumed.
 #[test]
 fn a_run_stopped_mid_tool_batch_keeps_the_batch_in_flight() {
-    let (_, file) = Run::fixture("mid-tool-batch").converted();
+    let (report, file) = Run::fixture("mid-tool-batch").converted();
     assert_eq!(file.last.status, RunStatus::Active);
     assert_eq!(file.last.phase, PipelinePhase::AwaitingTools);
     let batch = file.last.pending.as_ref().unwrap();
@@ -331,7 +334,13 @@ fn a_run_stopped_mid_tool_batch_keeps_the_batch_in_flight() {
         batch.calls[0].args.value(),
         &serde_json::json!({"command": "sleep 120"})
     );
-    assert!(batch.done.is_empty());
+    let stood_in = &batch.done[&batch.calls[0].id];
+    assert_eq!(
+        stood_in.text,
+        leviath_runtime::restore::INTERRUPTED_TOOL_RESULT
+    );
+    assert!(stood_in.is_error);
+    assert!(report.notes.iter().any(|n| n.contains(&batch.calls[0].id)));
     assert_eq!(file.last.clock.since, None);
 }
 

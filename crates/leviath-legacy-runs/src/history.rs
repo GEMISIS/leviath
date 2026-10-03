@@ -96,6 +96,7 @@ impl Replay<'_> {
     /// A record is one or the other, so each half passes over the kinds that
     /// belong to the other.
     fn record(&mut self, r: &JournalRecord) {
+        self.enter_named_stage(r);
         let events = self.events(r);
         let moved = match r {
             JournalRecord::Header { meta, .. } => {
@@ -154,6 +155,28 @@ impl Replay<'_> {
             _ => false,
         };
         self.step(moved, events);
+    }
+
+    /// Move into the stage a model call's record names, in a step of its
+    /// own, when the run is not in it yet. A journal wrote a call's records
+    /// as the call was made, and the step that moved the run into the stage
+    /// only at its next save, after them; read against the cursor before it,
+    /// as a step is, the call then reads as made in the stage it was made
+    /// in. A record that names no stage of the graph (the title call names
+    /// none) moves nothing.
+    fn enter_named_stage(&mut self, r: &JournalRecord) {
+        let named = match r {
+            JournalRecord::InferenceAttempt(a) => &a.stage,
+            JournalRecord::InferenceFailover(f) => &f.stage,
+            JournalRecord::InferenceUsage { stage, .. } => stage,
+            _ => return,
+        };
+        if let Some(stage) = self.spec.graph.stage(named)
+            && stage.name.as_str() != self.meta.current_stage
+        {
+            self.meta.current_stage = stage.name.to_string();
+            self.step(false, Vec::new());
+        }
     }
 
     /// Whether a checkpoint is a point of its own: every one but the first,

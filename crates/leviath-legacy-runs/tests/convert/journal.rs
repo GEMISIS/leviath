@@ -407,3 +407,57 @@ fn model_calls_and_executions_read_back_as_recorded() {
     assert_eq!(started, vec![("call_1".to_string(), 1)]);
     assert_eq!(file.fold(), file.last);
 }
+
+/// A model call is read in the stage its records name. An old journal wrote
+/// a call's attempt and its bill as the call was made, and the step that
+/// moved the run into the stage only at its next save, after them; the call
+/// still reads as made in the stage it was made in, as the release that
+/// wrote it served it, and the stage is visited once.
+#[test]
+fn a_model_call_reads_in_the_stage_its_records_name() {
+    let run = Run::fixture("finished");
+    let text = std::fs::read_to_string(run.path("blueprint.leviath")).unwrap();
+    run.write(
+        "blueprint.leviath",
+        &format!(
+            "{text}\n[stages.merge]\nmode = \"autonomous\"\nmodel = {{ models = [{{ provider = \"openai\", model = \"gpt-mock\" }}] }}\n"
+        ),
+    );
+    let second = "a18da3de090c500c0-00000003";
+    run.journal(|records| {
+        let at = records
+            .iter()
+            .position(|r| matches!(r, JournalRecord::InferenceAttempt(a) if a.id == second))
+            .expect("the second call's attempt");
+        for r in records[at..].iter_mut() {
+            match r {
+                JournalRecord::InferenceAttempt(a) => a.stage = "merge".into(),
+                JournalRecord::InferenceUsage { stage, .. } => *stage = "merge".into(),
+                JournalRecord::Progress { meta, .. } => meta.current_stage = "merge".into(),
+                _ => {}
+            }
+        }
+    });
+    run.json("meta.json", |v| v["current_stage"] = json!("merge"));
+    let (_, file) = run.converted();
+    let mut state = file.states[0].clone();
+    let mut read = Vec::new();
+    for d in &file.deltas {
+        for e in &d.events {
+            if let RunEvent::Attempt(a) = e {
+                read.push((a.id.clone(), state.cursor.stage.to_string()));
+            }
+        }
+        d.apply(&mut state);
+    }
+    assert_eq!(
+        read,
+        vec![
+            ("a18da3de08fb580d8-00000001".to_string(), "main".to_string()),
+            (second.to_string(), "merge".to_string()),
+        ]
+    );
+    assert_eq!(file.last.cursor.stage.as_str(), "merge");
+    assert_eq!(file.last.visits.get("merge"), Some(&1));
+    assert_eq!(file.fold(), file.last);
+}

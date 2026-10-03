@@ -305,6 +305,7 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
     // Every other stage reads as its record says: a stage an old record
     // never reached is pending there, and every earlier release showed it so.
     state.settle_stage_here();
+    interrupt_running_calls(&mut state, report);
     // Kept only when it says something the last step's time does not: a
     // worker's record is touched again when its parent reaps it.
     state.last_progress_at = old
@@ -317,6 +318,29 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
     }
     report_unrecorded(&state, report);
     state
+}
+
+/// Settle the calls the old daemon was running when it stopped. Stopping
+/// killed each one part way, or it is still running on its own, so it is
+/// never started again: it comes back interrupted, for the model to check,
+/// as the release that wrote the run gave it back when it resumed.
+fn interrupt_running_calls(state: &mut RunState, report: &mut Report) {
+    let before: Vec<String> = state
+        .pending
+        .iter()
+        .flat_map(|b| b.done.keys().cloned())
+        .collect();
+    leviath_runtime::restore::interrupt_in_flight(state);
+    for id in state
+        .pending
+        .iter()
+        .flat_map(|b| b.done.keys())
+        .filter(|id| !before.contains(id))
+    {
+        report.note(format!(
+            "tool call {id} was running when the old daemon stopped: it comes back interrupted and is not run again"
+        ));
+    }
 }
 
 /// End a run that cannot carry on, saying why.
