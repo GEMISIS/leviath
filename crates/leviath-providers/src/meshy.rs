@@ -32,12 +32,18 @@ use crate::provider::{
 use crate::rate_limit::RateLimiter;
 
 mod ops;
+#[cfg(test)]
+mod resume_tests;
 use ops::{MeshyOp, TaskState, animate_action, created_task_id, library_action_id, task_state};
 
 /// The default Meshy API origin.
 const DEFAULT_BASE_URL: &str = "https://api.meshy.ai";
 /// The mime type every Meshy operation produces.
 const GLTF_BINARY: &str = "model/gltf-binary";
+/// What an operation made: its parts, and a note for each of its tasks that
+/// had to be submitted again (see [`crate::jobs::Ran::note`]).
+type Made = (Vec<Blob>, Vec<Option<String>>);
+
 /// How long to wait between status polls.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// The whole-operation deadline when a stage sets no `request_timeout_secs`.
@@ -281,6 +287,29 @@ impl MeshyProvider {
         created_task_id(&create)
     }
 
+    /// Run one task of `request`'s operation to its end: the task this call
+    /// already submitted for `phase`, or a new one created at `path` with
+    /// `body`, recorded the moment it is created (see [`crate::jobs`]).
+    async fn run_task(
+        &self,
+        request: &InferenceRequest,
+        phase: &str,
+        path: &str,
+        body: &Value,
+        deadline: Instant,
+    ) -> Result<crate::jobs::Ran<Value>> {
+        let step = format!("meshy/{}/{phase}", request.model);
+        crate::jobs::submit_or_resume(
+            &step,
+            || self.create_task(path, body),
+            |id| {
+                let status_url = format!("{}/{id}", self.url(path));
+                async move { self.poll_to_completion(&status_url, deadline).await }
+            },
+        )
+        .await
+    }
+
     /// Download a finished task's mesh, and its preview render when it has one,
     /// as parts. The preview is best-effort: a mesh that came back is a success
     /// even if its thumbnail cannot be fetched.
@@ -309,47 +338,61 @@ impl MeshyProvider {
     }
 
     /// Run a single-phase operation end to end: submit, poll, download.
-    async fn run_operation(&self, op: MeshyOp, request: &InferenceRequest) -> Result<Vec<Blob>> {
+    async fn run_operation(&self, op: MeshyOp, request: &InferenceRequest) -> Result<Made> {
         let deadline = Self::deadline_for(request);
-        let task_id = self
-            .create_task(op.path(), &op.build_body(request)?)
+        let task = self
+            .run_task(
+                request,
+                "task",
+                op.path(),
+                &op.build_body(request)?,
+                deadline,
+            )
             .await?;
-        let status_url = format!("{}/{task_id}", self.url(op.path()));
-        let task = self.poll_to_completion(&status_url, deadline).await?;
-        self.download_parts(op, &task).await
+        let parts = self.download_parts(op, &task.value).await?;
+        Ok((parts, vec![task.note]))
     }
 
     /// Text to a textured mesh: a preview task builds the geometry, then a
     /// refine task textures it. Both share one endpoint and one deadline.
-    async fn run_text_to_3d(&self, request: &InferenceRequest) -> Result<Vec<Blob>> {
+    async fn run_text_to_3d(&self, request: &InferenceRequest) -> Result<Made> {
         let op = MeshyOp::TextTo3d;
         let deadline = Self::deadline_for(request);
-        let preview_id = self
-            .create_task(op.path(), &op.build_body(request)?)
+        let preview = self
+            .run_task(
+                request,
+                "preview",
+                op.path(),
+                &op.build_body(request)?,
+                deadline,
+            )
             .await?;
-        let preview_url = format!("{}/{preview_id}", self.url(op.path()));
-        self.poll_to_completion(&preview_url, deadline).await?;
 
-        let refine_body = MeshyOp::text_refine_body(&preview_id, request);
-        let refine_id = self.create_task(op.path(), &refine_body).await?;
-        let refine_url = format!("{}/{refine_id}", self.url(op.path()));
-        let task = self.poll_to_completion(&refine_url, deadline).await?;
-        self.download_parts(op, &task).await
+        let refine_body = MeshyOp::text_refine_body(&preview.id, request);
+        let refine = self
+            .run_task(request, "refine", op.path(), &refine_body, deadline)
+            .await?;
+        let parts = self.download_parts(op, &refine.value).await?;
+        Ok((parts, vec![preview.note, refine.note]))
     }
 
     /// A mesh to an animated mesh: rig it, look the requested action up in the
     /// animation library, then apply that action to the rigged model.
-    async fn run_animate(&self, request: &InferenceRequest) -> Result<Vec<Blob>> {
+    async fn run_animate(&self, request: &InferenceRequest) -> Result<Made> {
         let op = MeshyOp::Animate;
         let deadline = Self::deadline_for(request);
 
         // Phase 1: rig. Animate's build_body is a rig body and its path a rig
         // path, so the first phase reuses them.
-        let rig_id = self
-            .create_task(op.path(), &op.build_body(request)?)
+        let rig = self
+            .run_task(
+                request,
+                "rig",
+                op.path(),
+                &op.build_body(request)?,
+                deadline,
+            )
             .await?;
-        let rig_url = format!("{}/{rig_id}", self.url(op.path()));
-        self.poll_to_completion(&rig_url, deadline).await?;
 
         // Phase 2: resolve the requested action to a library action id.
         let action = animate_action(request);
@@ -359,11 +402,12 @@ impl MeshyProvider {
         })?;
 
         // Phase 3: animate the rigged model with that action.
-        let anim_body = MeshyOp::animate_body(&rig_id, action_id);
-        let anim_id = self.create_task(ANIMATIONS_PATH, &anim_body).await?;
-        let anim_url = format!("{}/{anim_id}", self.url(ANIMATIONS_PATH));
-        let task = self.poll_to_completion(&anim_url, deadline).await?;
-        self.download_parts(op, &task).await
+        let anim_body = MeshyOp::animate_body(&rig.id, action_id);
+        let anim = self
+            .run_task(request, "animate", ANIMATIONS_PATH, &anim_body, deadline)
+            .await?;
+        let parts = self.download_parts(op, &anim.value).await?;
+        Ok((parts, vec![rig.note, anim.note]))
     }
 
     /// The animation library, filtered by a search term.
@@ -416,7 +460,7 @@ impl Provider for MeshyProvider {
         if let Some(limiter) = &self.rate_limiter {
             limiter.acquire().await?;
         }
-        let parts = match op {
+        let (parts, notes) = match op {
             MeshyOp::TextTo3d => self.run_text_to_3d(request).await?,
             MeshyOp::Animate => self.run_animate(request).await?,
             single => self.run_operation(single, request).await?,
@@ -432,7 +476,7 @@ impl Provider for MeshyProvider {
                 .join(", ")
         );
         Ok(InferenceResponse {
-            content: summary,
+            content: crate::jobs::noted(summary, notes),
             tool_calls: Vec::new(),
             tokens_used: TokenUsage::new(0, 0, 0, 0),
             finish_reason: FinishReason::Complete,

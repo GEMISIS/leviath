@@ -141,54 +141,64 @@ async fn video(
     let size = media::extra_str(request, "size");
     let reference = media::first_part(request, |m| m.starts_with("image/"));
     let url = endpoint.url("/videos");
-    let created = endpoint
-        .send(|client| {
-            let mut form = reqwest::multipart::Form::new()
-                .text("model", request.model.clone())
-                .text("prompt", prompt.clone());
-            if let Some(seconds) = &seconds {
-                form = form.text("seconds", seconds.clone());
-            }
-            if let Some(size) = &size {
-                form = form.text("size", size.clone());
-            }
-            if let Some(image) = &reference {
-                let part = reqwest::multipart::Part::bytes(image.bytes.clone())
-                    .file_name(image.name.clone().unwrap_or_else(|| "reference".into()))
-                    .mime_str(image.mime_type.as_str())
-                    .expect("a stored part's type is a valid mime type");
-                form = form.part("input_reference", part);
-            }
-            client.post(&url).multipart(form)
-        })
-        .await?;
-    let created =
-        crate::provider::check_http_response(created, endpoint.rate_limiter.as_ref()).await?;
-    let created: Value = crate::provider::decode_json(created).await?;
-    let id = created
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ProviderError::InvalidResponse("the video request answered no id".into()))?
-        .to_string();
-
-    let status_url = endpoint.url(&format!("/videos/{id}"));
-    let done = media::poll_until("the OpenAI video job", deadline, poll_interval, || {
-        let url = status_url.clone();
-        async move {
-            let job = endpoint.get_json(&url).await?;
-            Ok(match job.get("status").and_then(Value::as_str) {
-                Some("completed") => Poll::Done(job),
-                Some("failed") => Poll::Failed(
-                    job.pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("no reason given")
-                        .to_string(),
-                ),
-                _ => Poll::Running,
+    let submit = || async {
+        let created = endpoint
+            .send(|client| {
+                let mut form = reqwest::multipart::Form::new()
+                    .text("model", request.model.clone())
+                    .text("prompt", prompt.clone());
+                if let Some(seconds) = &seconds {
+                    form = form.text("seconds", seconds.clone());
+                }
+                if let Some(size) = &size {
+                    form = form.text("size", size.clone());
+                }
+                if let Some(image) = &reference {
+                    let part = reqwest::multipart::Part::bytes(image.bytes.clone())
+                        .file_name(image.name.clone().unwrap_or_else(|| "reference".into()))
+                        .mime_str(image.mime_type.as_str())
+                        .expect("a stored part's type is a valid mime type");
+                    form = form.part("input_reference", part);
+                }
+                client.post(&url).multipart(form)
             })
-        }
-    })
-    .await?;
+            .await?;
+        let created =
+            crate::provider::check_http_response(created, endpoint.rate_limiter.as_ref()).await?;
+        let created: Value = crate::provider::decode_json(created).await?;
+        created
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse("the video request answered no id".into())
+            })
+    };
+    let wait = |id: String| {
+        let status_url = endpoint.url(&format!("/videos/{id}"));
+        media::poll_until("the OpenAI video job", deadline, poll_interval, move || {
+            let url = status_url.clone();
+            async move {
+                let job = endpoint.get_json(&url).await?;
+                Ok(match job.get("status").and_then(Value::as_str) {
+                    Some("completed") => Poll::Done(job),
+                    Some("failed") => Poll::Failed(
+                        job.pointer("/error/message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("no reason given")
+                            .to_string(),
+                    ),
+                    _ => Poll::Running,
+                })
+            }
+        })
+    };
+    let step = format!("{}/{}/video", super::PROVIDER_NAME, request.model);
+    let crate::jobs::Ran {
+        id,
+        value: done,
+        note,
+    } = crate::jobs::submit_or_resume(&step, submit, wait).await?;
 
     let content_url = endpoint.url(&format!("/videos/{id}/content"));
     let response = endpoint.send(|client| client.get(&content_url)).await?;
@@ -213,7 +223,8 @@ async fn video(
             })
             .unwrap_or(0.0);
         let cost = billing.unit.map(|u| u.cost(length));
-        media::response(media::summary(&route(request), &parts), parts, cost)
+        let summary = crate::jobs::noted(media::summary(&route(request), &parts), [note]);
+        media::response(summary, parts, cost)
     })
 }
 
