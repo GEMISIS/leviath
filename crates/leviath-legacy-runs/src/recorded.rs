@@ -54,7 +54,7 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> RunGraph {
         })
         .collect();
     let mut graph: RunGraph = serde_json::from_value(json!({
-        "description": "the graph this run recorded: its blueprint could not be read when it was converted",
+        "description": "the graph this run recorded: the blueprint it ran could not be read when it was converted",
         "stages": [],
         "inputs": [{ "name": "task", "type": "text" }],
         "layout": { "total_budget_tokens": n32(old.folded.context.max_tokens), "regions": [] },
@@ -66,21 +66,56 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> RunGraph {
     report.fill(
         "graph",
         "what the run recorded",
-        "the run's blueprint could not be read; the graph has the stages it entered, the models they ran on, the edges it took and its regions, and the run never resumes",
+        "the blueprint the run ran could not be read; the graph has the stages it entered, the models they ran on, the edges it took and its regions, and the run never resumes",
     );
     graph
 }
 
-/// A stage the run recorded running that `graph` does not have, if any.
-pub(crate) fn missing_stage(old: &LegacyRun, graph: &RunGraph) -> Option<String> {
+/// Why `graph` is not the graph the run ran, when it is not: it lacks a
+/// stage the run ran, has another number of stages than the run recorded,
+/// has the run's stages in another order, or has the run's stage at another
+/// place. A run's stage files are kept by the stage's place in its graph, so
+/// a graph that moved a stage would show one stage's output as another's.
+pub(crate) fn not_what_it_ran(old: &LegacyRun, graph: &RunGraph) -> Option<String> {
     let ledger = old
         .stages
         .iter()
         .filter_map(|r| StageName::new(r.name.as_str()).ok());
-    ledger
+    if let Some(stage) = ledger
         .chain(stage_path(old))
-        .map(|s| s.to_string())
-        .find(|name| graph.stage(name).is_none())
+        .find(|name| graph.stage(name.as_str()).is_none())
+    {
+        return Some(format!(
+            "it has no stage {:?}, which the run ran",
+            stage.as_str()
+        ));
+    }
+    let names: Vec<&str> = graph.stages.iter().map(|s| s.name.as_str()).collect();
+    let meta = old.meta();
+    if meta.num_stages > 0 && meta.num_stages != names.len() {
+        return Some(format!(
+            "it has {} stages, and the run recorded {}",
+            names.len(),
+            meta.num_stages
+        ));
+    }
+    let recorded: Vec<&str> = old.stages.iter().map(|r| r.name.as_str()).collect();
+    if recorded.len() == names.len() && recorded != names {
+        return Some(format!(
+            "it has the run's stages in another order ({}), and the run recorded {}",
+            names.join(", "),
+            recorded.join(", ")
+        ));
+    }
+    let place = names.iter().position(|n| *n == meta.current_stage)?;
+    (place != meta.stage_index).then(|| {
+        format!(
+            "its stage {:?} is stage {}, and the run recorded it as stage {}",
+            meta.current_stage,
+            place + 1,
+            meta.stage_index + 1
+        )
+    })
 }
 
 /// Every stage the run was recorded in, in order, each change once.

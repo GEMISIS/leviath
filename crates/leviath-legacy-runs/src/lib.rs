@@ -2,16 +2,24 @@
 //!
 //! Before the run file, a run was spread over several files in its directory:
 //! an LVR1 journal (`run.lvr`), `meta.json`, `context.json`, `stages.json`,
-//! `fanout.json`, `interactions.json`, the blueprint it ran
+//! `fanout.json`, `interactions.json` (or, from Leviath 0.1.0, the question
+//! a worker asked in `pending.json`), the blueprint it ran
 //! (`blueprint.leviath`), and stored parts under `blobs/`. [`convert`] reads
 //! all of them and writes one LVR2 run file in their place: the run's
 //! [`RunSpec`](leviath_runtime::spec::run_spec::RunSpec), its code, a state
 //! at the start, one delta per journal step that maps onto one, and the
 //! state the run was last in. The old files move into `legacy/` beside it
 //! rather than being deleted, except the per-stage logs and audits
-//! (`stages/`), the answer (`final_output`) and the stored parts (`blobs/`),
-//! which a run in the new layout keeps in the same place and form: they stay
-//! where they are, and the run file names each of them.
+//! (`stages/`), the answer (`final_output`), the stored parts (`blobs/`) and
+//! the list of files uploaded to providers (`provider-files.json`), which a
+//! run in the new layout keeps in the same place and form: they stay where
+//! they are, and the run file names the ones it names for a new run.
+//!
+//! A converted run lists as the release that wrote it listed it: what its
+//! `meta.json` says, and the graph it ran. When the installed blueprint is
+//! no longer that graph (a stage gone, added or moved), the run's graph is
+//! the one it recorded, and a run that was not finished ends with the reason
+//! rather than carrying on against stages it never had.
 //!
 //! An old run did not record everything a run file holds. Whatever the
 //! conversion had to fill in is named in the [`ConvertReport`], with the value

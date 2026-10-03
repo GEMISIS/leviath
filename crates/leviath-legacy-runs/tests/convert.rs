@@ -7,6 +7,8 @@
 //! tool batch in flight). Personal paths in them were replaced with
 //! `/home/user`.
 
+#[path = "convert/as_listed.rs"]
+mod as_listed;
 mod common;
 #[path = "convert/edges.rs"]
 mod edges;

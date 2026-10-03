@@ -18,12 +18,14 @@ const PARTIAL: &str = "run.lvr.converting";
 
 /// The files of an old run that a run in the new layout keeps too, under
 /// the same names and in the same form: the per-stage logs and audits, the
-/// answer, and the stored parts. They stay where they are, and the run file
-/// names each of them, as it does for a new run.
+/// answer, the stored parts, and the list of files the run uploaded to its
+/// providers, which are deleted there when it ends. They stay where they
+/// are, and the run file names the ones a run file names for a new run.
 const KEPT: &[&str] = &[
     "stages",
     leviath_core::FINAL_OUTPUT_FILE,
     leviath_core::files::BLOBS_DIR,
+    leviath_runtime::provider_files::LEDGER_FILE,
     PARTIAL,
     LEGACY_DIR,
 ];

@@ -127,6 +127,7 @@ fn a_recorded_graph_has_every_stage_the_run_entered_and_the_edges_it_took() {
             at: 1_790_811_836,
         });
     });
+    run.json("meta.json", |v| v["current_stage"] = json!("review"));
     let (_, file) = run.converted();
     let stages: Vec<&str> = file
         .spec
