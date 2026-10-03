@@ -543,7 +543,7 @@ pub(crate) fn part_from(part: &PartState) -> Option<Part> {
 /// The calls come from the reply itself, not the context window: the turn
 /// that made them is written to the window only once every result is in. A
 /// batch waiting to be dispatched (a paused run's, say) is in flight too.
-fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> {
+pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> {
     let dispatched = world
         .get::<crate::pipeline::AwaitingTools>(entity)
         .is_some();

@@ -480,9 +480,10 @@ fn file_has_finished(dir: &std::path::Path, run_id: &str, call: &str) -> bool {
 
 /// A call that finished inside a batch still running is in the run's file as
 /// done, read live and read back, whether the daemon stops cleanly or dies,
-/// and is never run again. A call still running is run again after a clean
-/// stop, which killed it; after the daemon died it may still be running, so
-/// it comes back as interrupted, for the model to check, and is not run again.
+/// and is never run again. A call still running is never started again
+/// either: a clean stop killed it part way, and after the daemon died it may
+/// still be running, so either way it comes back as interrupted, for the
+/// model to check.
 #[tokio::test]
 async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
     for clean_stop in [true, false] {
@@ -536,12 +537,23 @@ async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
             .unwrap()
             .unwrap();
         let pending = run.state.pending.clone().expect("the batch is in flight");
+        let settled: Vec<&str> = match clean_stop {
+            true => vec!["c1", "c2"],
+            false => vec!["c1"],
+        };
         assert_eq!(
             pending.done.keys().collect::<Vec<_>>(),
-            ["c1"],
-            "the file holds the finished call as done"
+            settled,
+            "the file holds the finished call as done, and a clean stop the stopped one"
         );
         assert_eq!(pending.done["c1"].text, "ran c1");
+        if clean_stop {
+            assert_eq!(
+                pending.done["c2"].text,
+                crate::restore::INTERRUPTED_TOOL_RESULT
+            );
+            assert!(pending.done["c2"].is_error);
+        }
         let crashed = crate::restore::begin_session(dir.path());
         assert_eq!(
             crashed, !clean_stop,
@@ -580,11 +592,7 @@ async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
         );
         again.run_until_idle(40).await;
         again.flush_and_stop().await;
-        let rerun: Vec<String> = match clean_stop {
-            true => vec!["c2".to_string()],
-            false => Vec::new(),
-        };
-        assert_eq!(*second.lock().unwrap(), rerun, "what runs again");
+        assert!(second.lock().unwrap().is_empty(), "nothing runs again");
         let after = crate::state::inspect::inspect(again.world(), e).unwrap();
         assert_eq!(after.status, crate::state::RunStatus::Complete);
         let told = after
@@ -593,7 +601,7 @@ async fn a_call_that_finished_mid_batch_is_not_run_again_after_a_restart() {
             .iter()
             .flat_map(|r| &r.entries)
             .any(|e| e.text == crate::restore::INTERRUPTED_TOOL_RESULT);
-        assert_eq!(told, !clean_stop, "the model is told what it must check");
+        assert!(told, "the model is told what it must check");
     }
 }
 

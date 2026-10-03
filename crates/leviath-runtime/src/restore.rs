@@ -10,8 +10,9 @@
 //! What the run was doing comes back with its state. A run that was waiting on
 //! a model reply asks again; a tool batch in flight is dispatched again with
 //! the results that had come back carried over, so a call that finished is
-//! never run twice, and a question one of its calls put to a person is asked
-//! again; a run stopped at a checkpoint has it asked again over the same
+//! never run twice, a call that was still running is never started again (it
+//! comes back interrupted, for the model to check), and a question one of its
+//! calls put to a person is asked again; a run stopped at a checkpoint has it asked again over the same
 //! document; a run choosing its next stage is asked again among the same
 //! edges; a fan-out picks its workers back up by run id, and a worker that
 //! finished while the daemon was down is read from its own file. See
@@ -194,7 +195,7 @@ pub fn begin_session(runs_dir: &std::path::Path) -> bool {
 }
 
 /// End a daemon's session over `runs_dir` cleanly: every call it had running
-/// was stopped, so a restart may run them again.
+/// was stopped, and settled so that a restart does not start it again.
 pub fn end_session(runs_dir: &std::path::Path) {
     let _ = std::fs::remove_file(runs_dir.join(SESSION_MARK));
 }
@@ -210,22 +211,76 @@ pub fn interrupt_in_flight(state: &mut crate::state::RunState) {
     let Some(batch) = state.pending.as_mut() else {
         return;
     };
-    let asking = batch.calls.iter().any(|call| {
-        !batch.done.contains_key(&call.id)
-            && crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS
-                .contains(&leviath_tools::canonical_tool_name(&call.name))
-    });
-    if asking {
-        return;
+    let settled = stand_ins(batch, &children);
+    batch.done.extend(settled);
+}
+
+/// Settle the calls a world stopping cleanly had running on the tool lane.
+/// Stopping killed each one part way, so like a call the daemon died under
+/// it is not started again after a restart: it gets the same stand-in, which
+/// the run's last step records as its result. A batch still being decided or
+/// held on an approval never reached the lane, so it is left to run. Returns
+/// the runs with a batch on the lane, whose state the stop records.
+pub(crate) fn settle_running_calls(world: &mut World) -> Vec<String> {
+    let mut lane = world.query_filtered::<(
+        Entity,
+        &crate::components::AgentState,
+        &crate::persistence::RunMetadata,
+    ), With<crate::pipeline::AwaitingTools>>();
+    let running: Vec<(Entity, String, Vec<String>)> = lane
+        .iter(world)
+        .map(|(entity, agent, md)| {
+            let children = agent.spawned_children_ids.clone();
+            (entity, md.run_id.clone(), children)
+        })
+        .collect();
+    let mut on_the_lane = Vec::new();
+    for (entity, run_id, children) in running {
+        let settled: Vec<crate::tool_bridge::ToolResult> =
+            crate::state::inspect::pending_of(world, entity)
+                .iter()
+                .flat_map(|batch| stand_ins(batch, &children))
+                .map(|(id, result)| (id, result.text.into()))
+                .collect();
+        on_the_lane.push(run_id);
+        world
+            .entity_mut(entity)
+            .entry::<crate::pipeline::RecoveredResults>()
+            .or_default()
+            .into_mut()
+            .0
+            .extend(settled);
     }
-    for call in &batch.calls {
-        batch
-            .done
-            .entry(call.id.clone())
-            .or_insert_with(|| crate::state::ToolResultState {
-                text: interrupted_result(&call.name, &children),
-                is_error: true,
-            });
+    on_the_lane
+}
+
+/// The stand-in result for each call of `batch` that had not finished, by
+/// call id; none for a batch stopped on a question to a person.
+fn stand_ins(
+    batch: &crate::state::PendingBatch,
+    children: &[String],
+) -> Vec<(String, crate::state::ToolResultState)> {
+    let unfinished: Vec<&crate::state::context::ToolCallState> = batch
+        .calls
+        .iter()
+        .filter(|call| !batch.done.contains_key(&call.id))
+        .collect();
+    let asking = unfinished.iter().any(|call| {
+        crate::dynamic_interaction::BLOCKING_INTERACTION_TOOLS
+            .contains(&leviath_tools::canonical_tool_name(&call.name))
+    });
+    match asking {
+        true => Vec::new(),
+        false => unfinished
+            .into_iter()
+            .map(|call| {
+                let result = crate::state::ToolResultState {
+                    text: interrupted_result(&call.name, children),
+                    is_error: true,
+                };
+                (call.id.clone(), result)
+            })
+            .collect(),
     }
 }
 

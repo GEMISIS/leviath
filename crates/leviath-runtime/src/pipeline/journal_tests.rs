@@ -242,7 +242,7 @@ fn records_fold_into_each_runs_events_in_the_world() {
 fn a_world_with_no_journal_folds_nothing() {
     let mut world = World::new();
     assert!(drain(&mut world).is_empty());
-    flush(&mut world);
+    flush(&mut world, &[]);
 }
 
 /// A run's state, as its file records it, names every stored part its
@@ -278,7 +278,7 @@ fn what_happened_goes_to_the_lane_as_steps() {
     journal.record("live", done("c1"));
     journal.record("gone", done("c2"));
     journal.record("quiet", usage());
-    flush(&mut world);
+    flush(&mut world, &[]);
     let sent = steps(&mut lane);
     let shapes: Vec<(&str, bool, usize)> = sent
         .iter()
@@ -291,7 +291,7 @@ fn what_happened_goes_to_the_lane_as_steps() {
 
     world.remove_resource::<super::super::PersistenceStage>();
     let landed = journal.record_acked("live", usage());
-    flush(&mut world);
+    flush(&mut world, &[]);
     assert_eq!(
         landed.blocking_recv().unwrap(),
         crate::persistence_bridge::Appended::NoJournal
