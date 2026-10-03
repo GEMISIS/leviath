@@ -944,6 +944,11 @@ nothing to any region leaves no trace to find. `status: "skipped"` is the same f
 stated from the other side, and means the run finished without reaching this
 stage, as distinct from `"pending"` on a run that is still going.
 
+The stage a run stops or holds in reads as the run does. It is `"paused"` while
+the run is paused or held, `"cancelled"` once it is cancelled, and `"error"` only
+when it failed. `GET /api/agents/{id}/stages` sends `"paused"` as `"active"` and
+`"cancelled"` as `"error"`, for clients that know only those words.
+
 **The per-stage cost split.** The run-level totals are on the run record; which
 stage spent them, and the cache read/write split within a stage, are only here.
 A stage showing no cache reads cannot be told apart from one paying to write a

@@ -35,7 +35,7 @@ pub(crate) fn spec(run_id: &str) -> Result<RunSpec, ServeError> {
 ///
 /// Now is the daemon's answer for a run it holds, read from the run's live
 /// components; for one it does not hold, or when the daemon cannot be reached,
-/// it is the run file's last step.
+/// it is the run file's last step. A held run reads paused, as it is listed.
 pub(crate) async fn state(
     app: &AppState,
     run_id: &str,
@@ -45,7 +45,7 @@ pub(crate) async fn state(
         return state_at(&run_file::require(run_id)?, run_id, seq);
     }
     if let Ok(ControlResponse::State { state }) = app.control.inspect(run_id).await {
-        return Ok(*state);
+        return Ok(leviath_runtime::runfile::as_it_stands(*state));
     }
     let reader = run_file::require(run_id)?;
     state_at(&reader, run_id, reader.last_seq())
@@ -54,12 +54,15 @@ pub(crate) async fn state(
 /// The state at step `seq` of the run in `reader`. A step past the run's last
 /// is a window the file does not hold.
 fn state_at(reader: &RunFileReader, run_id: &str, seq: u64) -> Result<RunState, ServeError> {
-    reader.state_at(seq).map_err(|e| match e.kind {
-        RunFileErrorKind::NoSuchStep { seq, last } => ServeError::RangeNotSatisfiable(format!(
-            "Run '{run_id}' has no step {seq}; its last step is {last}"
-        )),
-        _ => run_file::unreadable(run_id, &e),
-    })
+    reader
+        .state_at(seq)
+        .map(leviath_runtime::runfile::as_it_stands)
+        .map_err(|e| match e.kind {
+            RunFileErrorKind::NoSuchStep { seq, last } => ServeError::RangeNotSatisfiable(format!(
+                "Run '{run_id}' has no step {seq}; its last step is {last}"
+            )),
+            _ => run_file::unreadable(run_id, &e),
+        })
 }
 
 /// The run's steps from `from` to `to`, both included. `from` defaults to the

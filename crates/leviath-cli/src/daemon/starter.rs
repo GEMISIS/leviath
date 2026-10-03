@@ -409,6 +409,7 @@ pub(crate) fn record_failed(
     let mut failed = state.clone();
     failed.status = leviath_runtime::state::RunStatus::Error(issues.to_string());
     failed.phase = leviath_runtime::state::PipelinePhase::Done;
+    failed.settle_ledger();
     let events = vec![leviath_runtime::state::RunEvent::Log(issues.to_string())];
     writer
         .record(failed, chrono::Utc::now().timestamp(), events)

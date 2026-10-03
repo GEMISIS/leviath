@@ -128,6 +128,47 @@ fn a_held_run_says_the_machine_changed() {
     assert_eq!(meta.waiting_on, Some(crate::restore::held_reason(&issues)));
 }
 
+/// A held run reads paused, as the daemon lists it, and so does the stage it
+/// is in; the same run brought back reads as its state recorded it.
+#[test]
+fn a_held_run_and_its_stage_read_paused() {
+    let mut state = initial();
+    state.status = RunStatus::Active;
+    let here = state.cursor.stage.clone();
+    let mut rec = crate::insert::place::pending_stage(here);
+    rec.entered = true;
+    rec.status = crate::state::StageStatus::Active;
+    state.ledger = vec![rec];
+    let stage_word = |state: &crate::state::RunState| {
+        serde_json::to_value(&stage_records(state)[0].status).unwrap()
+    };
+    let back = summary_of(&spec(), &state, 5);
+    assert_eq!(
+        (back.status, stage_word(&state)),
+        (
+            leviath_core::run_meta::RunStatus::Running,
+            serde_json::json!("active")
+        )
+    );
+
+    state.held = Some(
+        crate::spec::issues::SpawnIssue::new(
+            crate::spec::issues::SpecPath::root(),
+            crate::spec::issues::IssueCode::Changed,
+            "an MCP server's tools changed",
+        )
+        .into(),
+    );
+    let held = summary_of(&spec(), &state, 5);
+    assert_eq!(
+        (held.status, stage_word(&state)),
+        (
+            leviath_core::run_meta::RunStatus::Paused,
+            serde_json::json!("paused")
+        )
+    );
+}
+
 /// A run file whose state does not decode lists nothing, and says why.
 #[test]
 fn a_run_file_whose_state_does_not_decode_is_an_error() {
@@ -183,4 +224,21 @@ fn a_kept_progress_time_and_an_unentered_stage_are_listed_as_kept() {
     let meta = summary_of(&spec(), &state, 9);
     assert_eq!((meta.last_progress_at, meta.updated_at), (Some(4), 9));
     assert_eq!(meta.current_stage, state.cursor.stage.as_str());
+}
+
+/// A run that is not held stands as recorded, and a stage recorded cancelled
+/// reads cancelled.
+#[test]
+fn an_unheld_run_stands_as_recorded_and_a_cancelled_stage_reads_so() {
+    let mut state = initial();
+    state.status = RunStatus::Cancelled;
+    let mut rec = crate::insert::place::pending_stage(state.cursor.stage.clone());
+    rec.entered = true;
+    rec.status = crate::state::StageStatus::Cancelled;
+    state.ledger = vec![rec];
+    assert_eq!(as_it_stands(state.clone()), state);
+    assert_eq!(
+        serde_json::to_value(&stage_records(&state)[0].status).unwrap(),
+        serde_json::json!("cancelled")
+    );
 }

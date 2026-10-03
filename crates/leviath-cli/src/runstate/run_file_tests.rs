@@ -94,6 +94,44 @@ async fn a_forced_cancel_is_the_run_files_last_step() {
     });
 }
 
+/// A forced cancel of a held run, in a stage, ends the run and that stage
+/// cancelled, and the run no longer reads as held.
+#[tokio::test]
+async fn a_forced_cancel_ends_a_held_run_and_its_stage_cancelled() {
+    let runs = tempfile::tempdir().unwrap();
+    let run_id = recorded(runs.path());
+    let dir = runs.path().join(&run_id);
+    let path = run_file::path_in(&dir);
+    let mut writer =
+        leviath_runtime::runfile::RunFileWriter::open(&path, Default::default()).unwrap();
+    let mut held = writer.state().clone();
+    held.status = leviath_runtime::state::RunStatus::Waiting;
+    let here = held.cursor.stage.clone();
+    let rec = held.ledger.iter_mut().find(|r| r.stage == here).unwrap();
+    rec.entered = true;
+    rec.status = leviath_runtime::state::StageStatus::WaitingInput;
+    held.held = Some(
+        leviath_runtime::spec::issues::SpawnIssue::new(
+            leviath_runtime::spec::issues::SpecPath::root(),
+            leviath_runtime::spec::issues::IssueCode::Changed,
+            "an MCP server's tools changed",
+        )
+        .into(),
+    );
+    writer.record(held, 4, Vec::new()).unwrap();
+    drop(writer);
+
+    assert_eq!(force_cancel_in(&dir, 5), ForceCancelOutcome::Terminated);
+    let meta = read_meta_from(&dir).unwrap();
+    assert_eq!((meta.status, meta.waiting_on), (RunStatus::Cancelled, None));
+    let stages = run_file::stages_in(&dir).unwrap();
+    let stage = stages.iter().find(|s| s.name == here.as_str()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&stage.status).unwrap(),
+        serde_json::json!("cancelled")
+    );
+}
+
 /// A run file whose state does not decode lists nothing.
 #[tokio::test]
 async fn a_run_file_whose_state_does_not_decode_is_not_listed() {

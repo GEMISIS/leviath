@@ -264,6 +264,9 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
         state.phase = PipelinePhase::Done;
         state.pending = None;
     }
+    // An old record files the stage a run was cancelled in as failed, and a
+    // paused run's stage as running; converted, it reads as its run does.
+    state.settle_ledger();
     if old.not_empty {
         report.fill(
             "flags.no_output_tools",
@@ -324,8 +327,10 @@ fn stage_status(s: &StageRunStatus) -> StageStatus {
         StageRunStatus::Pending => StageStatus::Pending,
         StageRunStatus::Active => StageStatus::Active,
         StageRunStatus::WaitingInput => StageStatus::WaitingInput,
+        StageRunStatus::Paused => StageStatus::Paused,
         StageRunStatus::Complete => StageStatus::Complete,
         StageRunStatus::Error => StageStatus::Error,
+        StageRunStatus::Cancelled => StageStatus::Cancelled,
         StageRunStatus::Skipped => StageStatus::Skipped,
     }
 }

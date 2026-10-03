@@ -228,15 +228,17 @@ pub fn run_status_for_label(label: &str) -> Option<RunStatus> {
 }
 
 /// Map an agent's ECS status to the on-disk per-stage [`StageRunStatus`] for the
-/// stage it is currently in. `Cancelled` has no stage-level equivalent, so it
-/// surfaces as `Error` (the stage stopped without completing).
+/// stage it is currently in: the same state its run reads as by
+/// [`run_status_from`], so a stage never says a run failed that was
+/// cancelled, or is running that is paused.
 pub(crate) fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
     match status {
-        // A paused agent's current stage is still mid-flight, not a new stage state.
-        AgentStatus::Idle | AgentStatus::Active | AgentStatus::Paused => StageRunStatus::Active,
+        AgentStatus::Idle | AgentStatus::Active => StageRunStatus::Active,
+        AgentStatus::Paused => StageRunStatus::Paused,
         AgentStatus::Waiting => StageRunStatus::WaitingInput,
         AgentStatus::Complete => StageRunStatus::Complete,
-        AgentStatus::Error { .. } | AgentStatus::Cancelled => StageRunStatus::Error,
+        AgentStatus::Error { .. } => StageRunStatus::Error,
+        AgentStatus::Cancelled => StageRunStatus::Cancelled,
     }
 }
 
@@ -595,7 +597,7 @@ mod tests {
         );
         assert_eq!(
             stage_status_from(&AgentStatus::Paused),
-            StageRunStatus::Active
+            StageRunStatus::Paused
         );
         assert_eq!(
             stage_status_from(&AgentStatus::Waiting),
@@ -613,7 +615,7 @@ mod tests {
         );
         assert_eq!(
             stage_status_from(&AgentStatus::Cancelled),
-            StageRunStatus::Error
+            StageRunStatus::Cancelled
         );
     }
 

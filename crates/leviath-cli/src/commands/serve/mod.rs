@@ -234,7 +234,7 @@ fn api_router() -> Router<AppState> {
         .route("/api/agents/{id}/artifacts/{name}", get(blobs::artifact))
         .route("/api/agents/{id}/logs", get(run_reads::run_logs))
         .route("/api/agents/{id}/result", get(run_reads::run_result))
-        .route("/api/agents/{id}/stages", get(run_reads::run_stages))
+        .route("/api/agents/{id}/stages", get(compat::agent_stages))
         .route("/api/agents/{id}/tree-status", get(tree::run_tree_status))
         .route("/api/agents/{id}/pause", post(run_reads::pause_run))
         .route("/api/agents/{id}/resume", post(run_reads::resume_run))

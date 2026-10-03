@@ -6222,12 +6222,16 @@ enum LedgerStageStatus {
 	PENDING
 	"The run is in it."
 	ACTIVE
-	"Waiting for a person."
+	"Waiting for a person or for the runs it started."
 	WAITING_INPUT
+	"Paused, or held until the machine can take the run back."
+	PAUSED
 	"Done."
 	COMPLETE
 	"Failed."
 	ERROR
+	"Cancelled."
+	CANCELLED
 	"Passed over."
 	SKIPPED
 }
@@ -15425,17 +15429,27 @@ enum StageStatus {
 	PENDING
 	"The stage the run is in right now."
 	ACTIVE
-	"Entered, and blocked on a person answering."
+	"""
+	Entered, and parked: on a person answering, or on the runs it
+	started.
+	"""
 	WAITING_INPUT
+	"""
+	The stage a paused run is in, paused by a person or held until the
+	machine can take the run back.
+	"""
+	PAUSED
 	"Finished and left."
 	COMPLETE
 	"Ended in a failure. The run's own error carries the message."
 	ERROR
+	"The stage a run was in when it was cancelled."
+	CANCELLED
 	"The run finished without ever entering this stage."
 	SKIPPED
 }
 
-"Exact and set tests on `StageStatus` (PENDING, ACTIVE, WAITING_INPUT, COMPLETE, ERROR, SKIPPED)."
+"Exact and set tests on `StageStatus` (PENDING, ACTIVE, WAITING_INPUT, PAUSED, COMPLETE, ERROR, CANCELLED, SKIPPED)."
 input StageStatusFilter {
 	"Exactly this value."
 	eq: StageStatus

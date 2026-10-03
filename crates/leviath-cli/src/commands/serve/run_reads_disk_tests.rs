@@ -85,6 +85,75 @@ async fn logs_body(run_id: &str, query: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+// ─── run_stages ─────────────────────────────────────────────────────────
+
+/// The statuses `uri` answers for a run's stages.
+async fn stage_words(uri: &str) -> (StatusCode, Vec<serde_json::Value>) {
+    let app = Router::new()
+        .route("/api/runs/{id}/stages", get(run_stages))
+        .route(
+            "/api/agents/{id}/stages",
+            get(crate::commands::serve::compat::agent_stages),
+        )
+        .with_state(test_state());
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let words = body["stages"]
+        .as_array()
+        .map(|stages| stages.iter().map(|s| s["status"].clone()).collect())
+        .unwrap_or_default();
+    (status, words)
+}
+
+/// A paused or cancelled stage says so on `/api/runs`, and in the words an
+/// older client knows on `/api/agents`: active and error.
+#[tokio::test]
+async fn a_paused_or_cancelled_stage_reads_as_older_clients_know_on_the_old_route() {
+    use leviath_core::run_meta::StageRunStatus;
+    crate::runstate::with_isolated_runs_dir_async("stages_old_words", |_d| async move {
+        let run_id = unique_run_id("stages-words");
+        create_run(&make_run(&run_id)).unwrap();
+        let with = |index, name: &str, status| leviath_core::run_meta::StageRecord {
+            status,
+            ..stage_rec(index, name)
+        };
+        runstate::write_stages_index(
+            &run_id,
+            &[
+                stage_rec(0, "plan"),
+                with(1, "code", StageRunStatus::Cancelled),
+                with(2, "review", StageRunStatus::Paused),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            stage_words(&format!("/api/runs/{run_id}/stages")).await,
+            (
+                StatusCode::OK,
+                vec!["complete".into(), "cancelled".into(), "paused".into()]
+            )
+        );
+        assert_eq!(
+            stage_words(&format!("/api/agents/{run_id}/stages")).await,
+            (
+                StatusCode::OK,
+                vec!["complete".into(), "error".into(), "active".into()]
+            )
+        );
+        assert_eq!(
+            stage_words("/api/agents/ghost/stages").await,
+            (StatusCode::NOT_FOUND, Vec::new())
+        );
+    })
+    .await;
+}
+
 // ─── run_logs ───────────────────────────────────────────────────────────
 
 #[tokio::test]

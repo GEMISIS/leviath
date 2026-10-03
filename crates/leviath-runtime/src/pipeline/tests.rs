@@ -2800,6 +2800,49 @@ fn reconcile_stage_ledger_completes_current_stage_on_run_complete() {
     assert_eq!(led.0[0].ended_at, Some(50));
 }
 
+/// The stage a run stops or holds in reads as the run does: a cancelled run's
+/// stage is cancelled rather than failed, a paused run's is paused rather
+/// than running, and so on for every status a run can stand in.
+#[test]
+fn the_stage_a_run_stops_or_holds_in_reads_as_the_run_does() {
+    for (status, word) in [
+        (AgentStatus::Idle, "active"),
+        (AgentStatus::Active, "active"),
+        (AgentStatus::Waiting, "waiting_input"),
+        (AgentStatus::Paused, "paused"),
+        (AgentStatus::Complete, "complete"),
+        (
+            AgentStatus::Error {
+                message: "boom".to_string(),
+            },
+            "error",
+        ),
+        (AgentStatus::Cancelled, "cancelled"),
+    ] {
+        let mut led = three_stage_ledger();
+        reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 10, true);
+        reconcile_stage_ledger(&mut led, 1, &status, 20, false);
+        let said = serde_json::to_value(&led.0[1].status).expect("a status serializes");
+        assert_eq!(said, serde_json::json!(word), "{status:?}");
+        let before = serde_json::to_value(&led.0[0].status).expect("a status serializes");
+        assert_eq!(before, serde_json::json!("complete"), "{status:?}");
+    }
+}
+
+/// A paused stage goes back to running when its run is resumed.
+#[test]
+fn a_paused_stage_runs_again_on_resume() {
+    let mut led = three_stage_ledger();
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Paused, 10, false);
+    let paused = serde_json::to_value(&led.0[0].status).expect("a status serializes");
+    reconcile_stage_ledger(&mut led, 0, &AgentStatus::Active, 20, true);
+    let resumed = serde_json::to_value(&led.0[0].status).expect("a status serializes");
+    assert_eq!(
+        (paused, resumed),
+        (serde_json::json!("paused"), serde_json::json!("active"))
+    );
+}
+
 /// A produced part the run cannot keep leaves its note in the stage log, after
 /// the token line, so the log says why a stage has nothing to hand back.
 #[test]

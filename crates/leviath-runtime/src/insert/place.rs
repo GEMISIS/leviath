@@ -171,8 +171,10 @@ fn stage_run_status(status: StageStatus) -> leviath_core::run_meta::StageRunStat
         StageStatus::Pending => S::Pending,
         StageStatus::Active => S::Active,
         StageStatus::WaitingInput => S::WaitingInput,
+        StageStatus::Paused => S::Paused,
         StageStatus::Complete => S::Complete,
         StageStatus::Error => S::Error,
+        StageStatus::Cancelled => S::Cancelled,
         StageStatus::Skipped => S::Skipped,
     }
 }

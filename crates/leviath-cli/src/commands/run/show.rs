@@ -77,7 +77,7 @@ pub(crate) fn render(args: &ShowArgs) -> anyhow::Result<String> {
         if seq > last {
             bail!("run '{id}' has no step {seq}: its last step is {last}");
         }
-        let state = reader.state_at(seq)?;
+        let state = leviath_runtime::runfile::as_it_stands(reader.state_at(seq)?);
         return Ok(match args.json {
             true => to_json(&state),
             false => view::state_toml(&state),

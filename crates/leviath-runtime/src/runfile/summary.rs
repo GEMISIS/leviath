@@ -6,6 +6,8 @@
 //! run in the world list the same. The context window and the stage ledger are
 //! read the same way, for the readers that show those.
 
+use std::borrow::Cow;
+
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
 
 use super::error::RunFileError;
@@ -26,6 +28,7 @@ pub fn summary(reader: &RunFileReader) -> Result<RunMeta, RunFileError> {
 /// `updated_at` (unix seconds). What [`summary`] reads for the last step, for
 /// a reader that walks a run's history and wants the record at each step.
 pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta {
+    let state = &*standing(state);
     let ledger = place::stage_ledger(state);
     let final_output = place::final_output(state);
     let mut meta = build_run_meta(
@@ -81,7 +84,28 @@ pub fn context_snapshot(spec: &RunSpec, state: &RunState) -> ContextSnapshot {
 /// The run's per-stage ledger in `state`: one record per stage it entered,
 /// with its spend and visits.
 pub fn stage_records(state: &RunState) -> Vec<StageRecord> {
-    place::stage_ledger(state).0
+    place::stage_ledger(&standing(state)).0
+}
+
+/// The run in `state` as its readers show it: as recorded, unless the machine
+/// it was last brought back on could not take it. A held run stands paused,
+/// and the stage it is in with it, as the daemon lists it. The record itself
+/// keeps what the run was doing, so it comes back there once the machine is
+/// put back.
+pub fn as_it_stands(mut state: RunState) -> RunState {
+    if state.held.is_some() {
+        state.status = crate::state::RunStatus::Paused;
+        state.settle_ledger();
+    }
+    state
+}
+
+/// [`as_it_stands`], copying `state` only when it is held.
+fn standing(state: &RunState) -> Cow<'_, RunState> {
+    match state.held {
+        Some(_) => Cow::Owned(as_it_stands(state.clone())),
+        None => Cow::Borrowed(state),
+    }
 }
 
 #[cfg(test)]

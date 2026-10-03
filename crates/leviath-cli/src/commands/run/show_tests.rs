@@ -302,3 +302,55 @@ async fn a_run_that_may_never_finish_still_shows() {
     })
     .await;
 }
+
+/// A held run's state reads paused, and the stage it is in with it, as the
+/// run is listed; why it is held still shows.
+#[tokio::test]
+async fn a_held_runs_state_reads_paused() {
+    runstate::with_isolated_runs_dir_async("run-show-held", |_d| async move {
+        let dir = recorded(&runstate::runs_dir());
+        step(&dir, 10, |s| {
+            s.status = leviath_runtime::state::RunStatus::Waiting;
+            let here = s.cursor.stage.clone();
+            for rec in s.ledger.iter_mut().filter(|r| r.stage == here) {
+                rec.entered = true;
+                rec.status = leviath_runtime::state::StageStatus::WaitingInput;
+            }
+            s.held = Some(
+                leviath_runtime::spec::issues::SpawnIssue::new(
+                    leviath_runtime::spec::issues::SpecPath::root(),
+                    leviath_runtime::spec::issues::IssueCode::Changed,
+                    "an MCP server's tools changed",
+                )
+                .into(),
+            );
+        });
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let json: serde_json::Value = serde_json::from_str(
+            &render(&ShowArgs {
+                at: Some(1),
+                json: true,
+                ..args(&id)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let cursor = json["cursor"]["stage"].clone();
+        let here: Vec<&serde_json::Value> = json["ledger"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["stage"] == cursor)
+            .map(|r| &r["status"])
+            .collect();
+        assert_eq!(
+            (&json["status"], here, json["held"].is_null()),
+            (
+                &serde_json::json!("Paused"),
+                vec![&serde_json::json!("Paused")],
+                false
+            )
+        );
+    })
+    .await;
+}

@@ -3,7 +3,9 @@
 use clap::Args;
 
 use super::theme::{C_ACTIVE, C_DIM, C_ERROR, C_SUCCESS, C_WARN};
-use super::theme::{GLYPH_ACTIVE, GLYPH_COMPLETE, GLYPH_ERROR, GLYPH_PENDING, GLYPH_WAITING};
+use super::theme::{
+    GLYPH_ACTIVE, GLYPH_CANCELLED, GLYPH_COMPLETE, GLYPH_ERROR, GLYPH_PENDING, GLYPH_WAITING,
+};
 use crate::tui::flowgraph::FlowView;
 
 use crate::runstate::{self, StageRecord};
@@ -281,7 +283,7 @@ impl std::fmt::Display for AgentDisplayStatus {
             Self::CompleteInteractive => write!(f, "{}COMPLETE", GLYPH_COMPLETE),
             Self::Error(msg) => write!(f, "{}ERROR: {}", GLYPH_ERROR, msg),
             Self::Paused => write!(f, "{}PAUSED", GLYPH_PENDING),
-            Self::Cancelled => write!(f, "⊘CANCEL"),
+            Self::Cancelled => write!(f, "{}CANCEL", GLYPH_CANCELLED),
             Self::Stale => write!(f, "{}STALE", GLYPH_ERROR),
         }
     }

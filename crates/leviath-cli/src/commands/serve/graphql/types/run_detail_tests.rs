@@ -247,6 +247,8 @@ fn every_stage_status_maps_to_one_value() {
         (Core::Complete, StageStatus::Complete),
         (Core::Error, StageStatus::Error),
         (Core::Skipped, StageStatus::Skipped),
+        (Core::Paused, StageStatus::Paused),
+        (Core::Cancelled, StageStatus::Cancelled),
     ];
     for (core, expected) in cases {
         assert_eq!(StageStatus::from(&core), expected, "{core:?}");

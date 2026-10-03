@@ -19,7 +19,7 @@
 //!
 //! These routes are kept for older clients and will be removed.
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use leviath_runtime::spec::inputs::{InputDecl, InputSlot, InputType};
@@ -30,9 +30,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::core::error::as_api_error;
+use super::core::inspect;
 use super::core::spawn::{self as spawn_core, Verdict};
 use super::runs::run_json;
 use super::types::*;
+use leviath_core::run_meta::StageRunStatus;
 
 /// The body `POST /api/agents` takes.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -270,6 +272,33 @@ pub(super) async fn list_agents(
     }
     let now = leviath_core::duration::now_secs();
     Json(runs.iter().map(|m| run_json(m, now)).collect())
+}
+
+/// `GET /api/agents/{id}/stages`: the ledger `GET /api/runs/{id}/stages`
+/// serves, in the words older clients know. Those know a stage only as
+/// pending, active, waiting_input, complete, error or skipped, and fail on
+/// any other word, so a paused stage is sent as active and a cancelled one as
+/// error.
+pub(super) async fn agent_stages(
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<RunStagesResp>, ApiError> {
+    let read = id.clone();
+    let mut stages = super::blocking::blocking(move || inspect::stages(&read))
+        .await
+        .map_err(|e| as_api_error(&e))?;
+    for stage in &mut stages {
+        stage.status = as_older_clients_know(&stage.status);
+    }
+    Ok(Json(RunStagesResp { run_id: id, stages }))
+}
+
+/// A stage's status in the words older clients know.
+fn as_older_clients_know(status: &StageRunStatus) -> StageRunStatus {
+    match status {
+        StageRunStatus::Paused => StageRunStatus::Active,
+        StageRunStatus::Cancelled => StageRunStatus::Error,
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]

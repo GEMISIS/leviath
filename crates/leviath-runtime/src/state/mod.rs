@@ -165,6 +165,25 @@ impl RunState {
             last_progress_at: None,
         }
     }
+
+    /// Bring the ledger into line with how the run stands, for a state
+    /// written outside the world, which reconciles its ledger on its own: the
+    /// stage the run is in, once entered, reads as the run does, and once the
+    /// run is over a stage it never entered reads as skipped.
+    pub fn settle_ledger(&mut self) {
+        let over = matches!(
+            self.status,
+            RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+        );
+        let here = StageStatus::from(&self.status);
+        for rec in &mut self.ledger {
+            match (rec.stage == self.cursor.stage && rec.entered, rec.entered) {
+                (true, _) => rec.status = here,
+                (false, false) if over => rec.status = StageStatus::Skipped,
+                _ => {}
+            }
+        }
+    }
 }
 
 /// How a run is doing.
@@ -297,14 +316,32 @@ pub enum StageStatus {
     Pending,
     /// Running.
     Active,
-    /// Waiting on a person.
+    /// Waiting on a person or on the runs it started.
     WaitingInput,
+    /// Paused, or held until the machine can take the run back.
+    Paused,
     /// Done.
     Complete,
     /// Failed.
     Error,
+    /// Stopped by a person.
+    Cancelled,
     /// Passed over.
     Skipped,
+}
+
+impl From<&RunStatus> for StageStatus {
+    /// The status of the stage a run is in, as the run's own status says it.
+    fn from(status: &RunStatus) -> Self {
+        match status {
+            RunStatus::Idle | RunStatus::Active => Self::Active,
+            RunStatus::Waiting => Self::WaitingInput,
+            RunStatus::Paused => Self::Paused,
+            RunStatus::Complete => Self::Complete,
+            RunStatus::Error(_) => Self::Error,
+            RunStatus::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 /// One visit to a stage.
