@@ -200,6 +200,7 @@ fn spec_of(meta: &RunMeta, regions: Vec<RegionDef>) -> RunSpec {
         },
         env: EnvFingerprint::default(),
         created_at: meta.started_at,
+        listed: None,
     }
 }
 
@@ -245,6 +246,7 @@ fn state_of(meta: &RunMeta, spec: &RunSpec, base: Option<RunState>) -> RunState 
             reported_calls: 0,
             computed_calls: u32::from(!meta.cost_is_exact),
             unpriced_calls: unpriced_calls as u32,
+            cost_unknown: false,
         },
         tool_calls: n(meta.tool_calls),
     };
@@ -519,6 +521,7 @@ pub(crate) fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow
         reported_calls: calls[0] as u32,
         computed_calls: calls[1] as u32,
         unpriced_calls: calls[2] as u32,
+        cost_unknown: false,
     };
     state.ledger = stages
         .iter()

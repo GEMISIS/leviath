@@ -88,6 +88,40 @@ fn a_finished_run_whose_blueprint_gained_a_stage_keeps_the_graph_it_ran() {
     assert_eq!(file.fold(), file.last);
 }
 
+/// A graph the run recorded says why it was used rather than the blueprint:
+/// here the blueprint read, and was not the graph the run ran.
+#[test]
+fn a_recorded_graph_says_why_it_was_used() {
+    let agents = changed_agents();
+    let run = Run::fixture("finished");
+    let (report, file) = {
+        run.remove("blueprint.leviath");
+        let env = ConvertEnv {
+            agents_dir: Some(agents.path().to_path_buf()),
+            stages: None,
+        };
+        let report = convert(&run.dir, &env).unwrap();
+        (report, RunFile::read(&run.path("run.lvr")))
+    };
+    let SpecOrigin::Recorded { why, .. } = &file.spec.origin else {
+        panic!("{:?}", file.spec.origin);
+    };
+    let description = file.spec.graph.description.clone().unwrap_or_default();
+    assert!(description.contains(why.as_str()), "{description}");
+    assert!(!description.contains("could not be read"), "{description}");
+    let said: Vec<&String> = report
+        .notes
+        .iter()
+        .chain(report.defaulted.iter().map(|d| &d.why))
+        .collect();
+    assert!(
+        !said
+            .iter()
+            .any(|n| n.contains("blueprint the run ran could not be read")),
+        "{said:?}"
+    );
+}
+
 #[test]
 fn a_finished_run_whose_stages_were_reordered_keeps_the_order_it_ran() {
     let run = Run::fixture("finished");
@@ -260,6 +294,11 @@ fn a_run_waiting_on_a_0_1_0_question_ends_and_says_why() {
     assert_eq!(file.last.phase, PipelinePhase::Done);
     assert!(file.last.interactions.is_empty());
     assert_eq!(listed(&run).status, OldStatus::Error);
+    // It is never brought back, so it lists the manifest its record names.
+    assert_eq!(
+        listed(&run).agent_path,
+        "/home/user/lve/.leviath/agents/probe/agent.leviath"
+    );
     assert!(report.legacy_dir.join("pending.json").is_file());
     assert_eq!(file.fold(), file.last);
 }
@@ -294,4 +333,150 @@ fn the_provider_upload_list_stays_where_it_is() {
     let (report, _) = run.converted();
     assert!(run.path("provider-files.json").is_file());
     assert!(!report.legacy_dir.join("provider-files.json").exists());
+}
+
+/// What a run recorded about itself lists as its record said, wherever this
+/// build would list the same run otherwise: the model it named (or none),
+/// its stages (none for a run refused before it started), its blueprint's
+/// revision (or none) and the depth cap of its tree of child runs (none
+/// until it started one). How it was doing lists as its record said while
+/// it stands where it was converted: no progress stamp and no working clock
+/// where it kept none, and not empty where it said so.
+#[test]
+fn a_run_lists_what_it_recorded_about_itself() {
+    let run = Run::fixture("finished");
+    run.json("meta.json", |v| {
+        v["model"] = json!(null);
+        v["num_stages"] = json!(0);
+        v["max_child_depth"] = json!(0);
+        let m = v.as_object_mut().unwrap();
+        m.remove("blueprint_digest");
+        m.remove("last_progress_at");
+        m.remove("active");
+    });
+    let (_, file) = run.converted();
+    assert_eq!(file.spec.graph.stages.len(), 1);
+    let meta = listed(&run);
+    assert_eq!(meta.model, None);
+    assert_eq!(meta.num_stages, 0);
+    assert_eq!(meta.max_child_depth, 0);
+    assert_eq!(meta.blueprint_digest, None);
+    assert_eq!(meta.last_progress_at, None);
+    assert_eq!(meta.active, None);
+    assert!(meta.flags.empty_output);
+
+    // Once the run moves on, how it is doing lists as this build lists any
+    // run; what it recorded about itself does not change.
+    let tail = leviath_runtime::runfile::RunFileTail::read(&run.path("run.lvr")).unwrap();
+    let mut moved = tail.state.clone();
+    moved.seq += 1;
+    moved.flags.modified_file_count = 1;
+    let later = leviath_runtime::runfile::summary_of(&tail.spec, &moved, tail.updated_at + 5);
+    assert_eq!(later.last_progress_at, Some(tail.updated_at + 5));
+    assert!(later.active.is_some());
+    assert!(!later.flags.empty_output);
+    assert_eq!((later.model, later.num_stages), (None, 0));
+
+    // A child run lists the depth cap it recorded, not what is left of it.
+    let child = Run::fixture("finished");
+    child.meta(|m| {
+        m.depth = 1;
+        m.max_child_depth = 2;
+        m.parent_run_id = Some("probe-1790811800-aaaaaaaaaaaa".into());
+    });
+    let (_, file) = child.converted();
+    assert_eq!(file.spec.launch.max_depth, 1);
+    let meta = listed(&child);
+    assert_eq!(meta.max_child_depth, 2);
+    assert_eq!(
+        meta.blueprint_digest.as_deref(),
+        Some("fec796f35c707cada2ccaddd6150af491f892a1c28966004c8344d632a3316a5")
+    );
+    assert_eq!(meta.model.as_deref(), Some("openai/gpt-mock"));
+    assert_eq!(meta.last_progress_at, Some(1_790_811_836));
+    assert_eq!(meta.active.map(|a| a.banked_secs), Some(0));
+}
+
+/// A ledger from a release that did not count visits lists none, and the
+/// run still names the stage it is in.
+#[test]
+fn a_ledger_that_did_not_count_visits_lists_none() {
+    let run = Run::fixture("finished");
+    run.json("stages.json", |v| {
+        for stage in v.as_array_mut().unwrap() {
+            stage["visit_count"] = json!(0);
+            stage["visits"] = json!([]);
+        }
+    });
+    let (_, file) = run.converted();
+    assert!(file.last.visits.is_empty(), "{:?}", file.last.visits);
+    let stages = leviath_runtime::runfile::stage_records(&file.last);
+    assert_eq!((stages[0].visit_count, stages[0].entered), (0, true));
+    assert_eq!(listed(&run).current_stage, "main");
+    assert_eq!(file.fold(), file.last);
+}
+
+/// A run that was not finished lists the copy of its blueprint it was
+/// brought back from, as the release that wrote it listed it while it was:
+/// converted, that copy is under `legacy/`. One that kept no copy, whose
+/// record names a manifest that is gone, lists the `agent.toml` its agent
+/// was upgraded to. A finished run lists the manifest its record names.
+#[test]
+fn an_unfinished_run_lists_a_blueprint_that_is_there() {
+    let paused = |run: &Run| {
+        run.journal(|r| {
+            r.retain(|r| {
+                !matches!(
+                    r,
+                    leviath_legacy_runs::journal::JournalRecord::StatusChanged { .. }
+                )
+            })
+        });
+        run.meta(|m| m.status = OldStatus::Paused);
+    };
+    let run = Run::fixture("finished");
+    paused(&run);
+    run.converted();
+    let kept = run.path("legacy/blueprint.leviath");
+    assert!(kept.is_file());
+    assert_eq!(listed(&run).agent_path, kept.to_string_lossy());
+
+    let done = Run::fixture("finished");
+    done.converted();
+    assert_eq!(
+        listed(&done).agent_path,
+        "/home/user/lve/.leviath/agents/probe/agent.leviath"
+    );
+
+    // No copy: the installed agent was upgraded to an `agent.toml`.
+    let agents = tempfile::tempdir().unwrap();
+    let dir = agents.path().join("probe");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(
+        fixtures_dir().join("agents/probe/agent.leviath"),
+        dir.join("agent.leviath"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("agent.toml"), "# upgraded\n").unwrap();
+    let env = ConvertEnv {
+        agents_dir: Some(agents.path().to_path_buf()),
+        stages: None,
+    };
+    let upgraded = Run::fixture("finished");
+    paused(&upgraded);
+    upgraded.remove("blueprint.leviath");
+    convert(&upgraded.dir, &env).unwrap();
+    assert_eq!(
+        listed(&upgraded).agent_path,
+        dir.join("agent.toml").to_string_lossy()
+    );
+
+    // No copy, and the manifest the record names is still there.
+    let named = Run::fixture("finished");
+    paused(&named);
+    named.remove("blueprint.leviath");
+    let manifest = dir.join("agent.leviath").to_string_lossy().into_owned();
+    named.meta(|m| m.agent_path = manifest.clone());
+    convert(&named.dir, &env).unwrap();
+    assert_eq!(listed(&named).agent_path, manifest);
 }

@@ -242,3 +242,78 @@ fn an_unheld_run_stands_as_recorded_and_a_cancelled_stage_reads_so() {
         serde_json::json!("cancelled")
     );
 }
+
+/// A run converted from an earlier release lists what it recorded about
+/// itself for good, and how it was doing as that release listed it while it
+/// stands where it was converted. Once it moves on, how it is doing lists as
+/// any run's does.
+#[test]
+fn a_converted_run_lists_as_its_release_did_until_it_moves() {
+    let mut spec = spec();
+    let mut listed = crate::spec::run_spec::tests::listed();
+    listed.empty_output = false;
+    spec.listed = Some(listed);
+    let mut state = initial();
+    state.seq = 4;
+    state.status = RunStatus::Complete;
+    let meta = summary_of(&spec, &state, 9);
+    assert_eq!(meta.model.as_deref(), Some("mock/gpt-mock"));
+    assert_eq!(meta.num_stages, 2);
+    assert_eq!(meta.max_child_depth, 3);
+    assert_eq!(meta.blueprint_digest, Some("ab".repeat(32)));
+    assert_eq!(meta.last_progress_at, Some(5));
+    assert_eq!(
+        meta.active.map(|a| (a.banked_secs, a.since)),
+        Some((6, Some(7)))
+    );
+    assert!(!meta.flags.empty_output);
+
+    state.seq = 5;
+    let moved = summary_of(&spec, &state, 9);
+    assert_eq!(moved.last_progress_at, Some(9));
+    assert!(
+        moved.flags.empty_output,
+        "it changed nothing and answered nothing"
+    );
+    assert_eq!(moved.active.map(|a| a.banked_secs), Some(0));
+    assert_eq!(moved.model.as_deref(), Some("mock/gpt-mock"));
+
+    // A record that kept no working clock lists none.
+    state.seq = 4;
+    spec.listed.as_mut().unwrap().clock = None;
+    assert_eq!(summary_of(&spec, &state, 9).active, None);
+}
+
+/// A cost an earlier release's record never named lists as unknown, with no
+/// call counted unpriced, for the run and for each stage.
+#[test]
+fn a_cost_never_named_lists_as_unknown() {
+    let mut state = initial();
+    state.totals.spend.priced_usd = 0.0;
+    state.totals.spend.cost_unknown = true;
+    let mut rec = crate::insert::place::pending_stage(state.cursor.stage.clone());
+    rec.entered = true;
+    rec.spend.cost_unknown = true;
+    state.ledger = vec![rec];
+    let meta = summary_of(&spec(), &state, 9);
+    assert_eq!((meta.cost_usd, meta.unpriced_calls), (None, 0));
+    assert!(!meta.cost_is_exact);
+    let stages = stage_records(&state);
+    assert_eq!((stages[0].cost_usd, stages[0].unpriced_calls), (None, 0));
+    state.totals.spend.cost_unknown = false;
+    assert_eq!(summary_of(&spec(), &state, 9).cost_usd, Some(0.0));
+}
+
+/// A run whose ledger says it entered its stage names that stage, though it
+/// counted no visit to it: an earlier release did not count them.
+#[test]
+fn a_stage_entered_without_a_counted_visit_is_named() {
+    let mut state = initial();
+    state.visits.clear();
+    let mut rec = crate::insert::place::pending_stage(state.cursor.stage.clone());
+    rec.entered = true;
+    state.ledger = vec![rec];
+    let meta = summary_of(&spec(), &state, 9);
+    assert_eq!(meta.current_stage, state.cursor.stage.as_str());
+    assert_eq!(stage_records(&state)[0].visit_count, 0);
+}

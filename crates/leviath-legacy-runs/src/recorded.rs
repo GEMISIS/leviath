@@ -24,8 +24,8 @@ use crate::report::Report;
 /// What a stage is called when the run recorded none.
 const UNNAMED_STAGE: &str = "stage";
 
-/// The graph the run recorded.
-pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> RunGraph {
+/// The graph the run recorded, used in place of its blueprint for `why`.
+pub(crate) fn graph(old: &LegacyRun, why: &str, report: &mut Report) -> RunGraph {
     let path = stage_path(old);
     let mut names: Vec<StageName> = Vec::new();
     let ledger = old.stages.iter().map(|r| r.name.as_str());
@@ -54,7 +54,7 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> RunGraph {
         })
         .collect();
     let mut graph: RunGraph = serde_json::from_value(json!({
-        "description": "the graph this run recorded: the blueprint it ran could not be read when it was converted",
+        "description": format!("the graph this run recorded, used in place of its blueprint because {why}"),
         "stages": [],
         "inputs": [{ "name": "task", "type": "text" }],
         "layout": { "total_budget_tokens": n32(old.folded.context.max_tokens), "regions": [] },
@@ -66,7 +66,7 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> RunGraph {
     report.fill(
         "graph",
         "what the run recorded",
-        "the blueprint the run ran could not be read; the graph has the stages it entered, the models they ran on, the edges it took and its regions, and the run never resumes",
+        "the run's blueprint could not be read as the graph it ran; the graph has the stages it entered, the models they ran on, the edges it took and its regions, and the run never resumes",
     );
     graph
 }
@@ -200,7 +200,7 @@ fn region(name: RegionName, r: &RegionSnapshot) -> RegionDef {
             max_items: n32(r.entries.len()).max(1),
             eviction: Default::default(),
         },
-        "keyed" => RegionKind::Keyed { max_entries: None },
+        "keyed" | "hashmap" | "hash_map" => RegionKind::Keyed { max_entries: None },
         "checklist" => RegionKind::Checklist,
         _ => RegionKind::Pinned,
     };
@@ -209,7 +209,7 @@ fn region(name: RegionName, r: &RegionSnapshot) -> RegionDef {
         kind,
         budget: Budget::Tokens(n32(r.max_tokens)),
         compact_at: None,
-        description: None,
+        description: r.description.clone(),
         describe_in_prompt: false,
         required: false,
         required_message: None,

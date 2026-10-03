@@ -177,6 +177,7 @@ pub(crate) fn push_events(events: &mut Vec<RunEvent>, answered: &mut Answered, r
                 reported_calls: u32::from(cost_usd.is_some() && reported),
                 computed_calls: u32::from(cost_usd.is_some() && !reported),
                 unpriced_calls: u32::from(cost_usd.is_none()),
+                cost_unknown: false,
             };
             events.push(RunEvent::Inference {
                 attempt: attempt.as_ref().map(|a| a.id.clone()).unwrap_or_default(),

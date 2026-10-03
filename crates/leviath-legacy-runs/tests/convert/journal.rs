@@ -49,10 +49,10 @@ fn every_kind_of_record_reads_as_an_event_or_a_change() {
             "cost_usd": cost, "cost_reported_by_provider": true, "at": 6
         }})
     };
-    let failover = |to: &str| {
+    let failover = |to: &str, model: &str| {
         json!({"InferenceFailover": {
             "stage": "main", "iteration": 3, "from_provider": "openai", "from_model": "gpt-mock",
-            "to_provider": to, "to_model": "m2", "reason": "down", "kind": "unavailable", "at": 7
+            "to_provider": to, "to_model": model, "reason": "down", "kind": "unavailable", "at": 7
         }})
     };
     run.journal(|r| r.push(header.clone()));
@@ -64,8 +64,9 @@ fn every_kind_of_record_reads_as_an_event_or_a_change() {
         attempt(failed),
         usage("openai", "gpt-mock", json!(0.5)),
         usage("openai", "has space", json!(null)),
-        failover("other"),
-        failover(""),
+        failover("other", "m2"),
+        failover("", "m2"),
+        failover("other", "has space"),
         {"ToolBatch": {"calls": [
             {"id": "c2", "execution_id": "x2", "name": "shell", "arguments": "not json", "result": "inline"}
         ], "at": 9, "stage_index": 0, "iteration": 3, "response": ""}},
@@ -86,19 +87,32 @@ fn every_kind_of_record_reads_as_an_event_or_a_change() {
     let events = events(&run);
     assert!(logged(
         &events,
-        "attempt a1 on openai/gpt-mock did not answer"
+        "model call a1 on openai/gpt-mock failed: auth"
     ));
-    assert!(events.iter().any(|e| matches!(
-        e,
-        RunEvent::Inference { attempt, spend, .. } if attempt == "a1" && spend.reported_calls == 1
-    )));
-    assert!(logged(&events, "which are not valid names"));
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, RunEvent::Failover { reason, .. } if reason == "down"))
+            .any(|e| matches!(e, RunEvent::Attempt(a) if a.id == "a1"))
     );
-    assert!(logged(&events, "failed over from openai/gpt-mock to /m2"));
+    // A call that failed answered nothing, so the bill after it is for no
+    // attempt of its.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RunEvent::Inference { attempt, spend, .. } if attempt.is_empty() && spend.reported_calls == 1
+    )));
+    assert!(logged(&events, "which are not valid names"));
+    let moves: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Failover { to, reason, .. } if reason == "down" => Some(to.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moves, ["other/m2", "m2"]);
+    assert!(logged(
+        &events,
+        "failed over from openai/gpt-mock to other/has space"
+    ));
     assert!(events.iter().any(|e| matches!(
         e,
         RunEvent::ToolStarted(c) if c.args.value() == &json!("not json")
@@ -122,7 +136,10 @@ fn every_kind_of_record_reads_as_an_event_or_a_change() {
             .any(|e| matches!(e, RunEvent::Message(m) if m.text == "hello"))
     );
     assert!(logged(&events, "machine m2"));
-    assert!(logged(&events, "produced 0 files"));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RunEvent::Artifacts { execution_id, .. } if execution_id == "x2"
+    )));
     assert!(logged(&events, "a model call in stage main"));
 }
 
@@ -289,4 +306,104 @@ fn every_record_that_held_the_window_is_a_point_in_the_history() {
             .count();
         assert_eq!(points, held, "{name}");
     }
+}
+
+/// A converted run's model calls and tool executions read back as the
+/// release that wrote it served them: each attempt whole (how it ended, how
+/// long it took, the digest of what it sent), the title call billed apart
+/// from the stage's calls, and each execution under the id it was dispatched
+/// with, in the iteration whose answer asked for it, ended as its record
+/// says. A step is read against the cursor before it, as every reader of a
+/// run file reads one.
+#[test]
+fn model_calls_and_executions_read_back_as_recorded() {
+    use leviath_runtime::state::journal::CallKind;
+    let run = Run::fixture("finished");
+    let recorded: Vec<_> = run
+        .records()
+        .into_iter()
+        .filter_map(|r| match r {
+            JournalRecord::InferenceAttempt(a) => Some(a),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded.len(), 2);
+    let (_, file) = run.converted();
+    let mut state = file.states[0].clone();
+    let mut attempts = Vec::new();
+    let mut titles = Vec::new();
+    let mut started = Vec::new();
+    let mut dispatched = Vec::new();
+    let mut completed = Vec::new();
+    for d in &file.deltas {
+        for e in &d.events {
+            match e {
+                RunEvent::Attempt(a) => attempts.push((**a).clone()),
+                RunEvent::Inference {
+                    kind: CallKind::Title,
+                    stage,
+                    ..
+                } => titles.push(stage.clone()),
+                RunEvent::ToolStarted(c) => started.push((c.id.clone(), state.cursor.iteration)),
+                RunEvent::Dispatched {
+                    call_id,
+                    execution_id,
+                    requested_by,
+                } => dispatched.push((call_id.clone(), execution_id.clone(), requested_by.clone())),
+                RunEvent::Completed {
+                    call_id, outcome, ..
+                } => completed.push((call_id.clone(), *outcome)),
+                _ => {}
+            }
+        }
+        d.apply(&mut state);
+    }
+    assert_eq!(attempts.len(), recorded.len(), "{attempts:?}");
+    for (kept, a) in attempts.iter().zip(&recorded) {
+        assert_eq!(kept.id, a.id);
+        assert_eq!(kept.duration_ms, a.duration_ms);
+        assert_eq!(
+            kept.finish_reason.as_deref(),
+            Some(a.finish_reason.as_str())
+        );
+        assert_eq!(kept.digest.system_hash, a.digest.system_hash);
+        assert_eq!(kept.digest.messages as usize, a.digest.messages);
+        assert_eq!(kept.digest.tools as usize, a.digest.tools);
+        assert_eq!(kept.digest.max_tokens as usize, a.digest.max_tokens);
+        assert_eq!(kept.digest.temperature, a.digest.temperature);
+    }
+    assert_eq!(titles, vec![None], "the title call belongs to no stage");
+    assert_eq!(started, vec![("call_1".to_string(), 1)]);
+    assert_eq!(
+        dispatched,
+        vec![(
+            "call_1".to_string(),
+            "x18da3de08fc75b28-00000002".to_string(),
+            recorded[0].id.clone()
+        )]
+    );
+    assert_eq!(
+        completed,
+        vec![("call_1".to_string(), None)],
+        "the record did not say how the call ended"
+    );
+    assert_eq!(file.fold(), file.last);
+
+    // A journal that billed no call before its batch still reads the batch
+    // in the iteration it was dispatched in.
+    let run = Run::fixture("finished");
+    run.journal(|records| records.retain(|r| !matches!(r, JournalRecord::InferenceUsage { .. })));
+    let (_, file) = run.converted();
+    let mut state = file.states[0].clone();
+    let mut started = Vec::new();
+    for d in &file.deltas {
+        for e in &d.events {
+            if let RunEvent::ToolStarted(c) = e {
+                started.push((c.id.clone(), state.cursor.iteration));
+            }
+        }
+        d.apply(&mut state);
+    }
+    assert_eq!(started, vec![("call_1".to_string(), 1)]);
+    assert_eq!(file.fold(), file.last);
 }

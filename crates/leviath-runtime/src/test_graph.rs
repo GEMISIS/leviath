@@ -348,6 +348,7 @@ fn spec_from(
         delivery: Delivery::default(),
         env: EnvFingerprint::default(),
         created_at: chrono::Utc::now().timestamp(),
+        listed: None,
     }
 }
 

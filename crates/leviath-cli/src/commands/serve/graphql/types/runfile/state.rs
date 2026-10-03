@@ -244,6 +244,9 @@ pub(crate) struct StateSpend {
     pub(crate) computed_calls: i32,
     /// Calls nothing could price.
     pub(crate) unpriced_calls: i32,
+    /// Whether what it cost is not known though no call was counted as
+    /// unpriced: a record from an earlier release that named no cost.
+    pub(crate) cost_unknown: bool,
 }
 
 impl From<&Spend> for StateSpend {
@@ -257,6 +260,7 @@ impl From<&Spend> for StateSpend {
             reported_calls: saturating(s.reported_calls),
             computed_calls: saturating(s.computed_calls),
             unpriced_calls: saturating(s.unpriced_calls),
+            cost_unknown: s.cost_unknown,
         }
     }
 }

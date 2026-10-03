@@ -15,7 +15,7 @@ use super::reader::RunFileReader;
 use super::tail::RunFileTail;
 use crate::insert::place;
 use crate::persistence::{RunMetaSources, RunPosition, build_context_snapshot, build_run_meta};
-use crate::spec::run_spec::RunSpec;
+use crate::spec::run_spec::{ListedAs, RunSpec};
 use crate::state::RunState;
 
 /// The run in `reader`, as of its last step.
@@ -31,6 +31,23 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
     let state = &*standing(state);
     let ledger = place::stage_ledger(state);
     let final_output = place::final_output(state);
+    // A run converted from an earlier release, standing where it was
+    // converted, is listed as that release listed it.
+    let converted = ListedAs::standing(spec.listed.as_ref(), state.seq);
+    let last_progress_at = match converted {
+        Some(listed) => listed.last_progress_at,
+        None => Some(state.last_progress_at.unwrap_or(updated_at)),
+    };
+    let active = match converted {
+        Some(listed) => listed.clock.as_ref().map(active_clock),
+        None => Some(place::run_clock(state).0),
+    };
+    let max_child_depth = spec
+        .listed
+        .as_ref()
+        .map_or(usize::from(spec.launch.max_depth), |l| {
+            l.max_child_depth as usize
+        });
     let mut meta = build_run_meta(
         RunMetaSources {
             md: &place::run_metadata(spec, state),
@@ -44,15 +61,25 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
         RunPosition {
             stage_index: place::stage_index(spec, state),
             now_secs: updated_at,
-            last_progress_at: Some(state.last_progress_at.unwrap_or(updated_at)),
+            last_progress_at,
             depth: usize::from(spec.placement.depth),
-            max_child_depth: usize::from(spec.launch.max_depth),
-            active: Some(place::run_clock(state).0),
+            max_child_depth,
+            active,
         },
     );
+    if let Some(listed) = converted {
+        meta.flags.empty_output = listed.empty_output;
+    }
+    // A cost an earlier release's record never named is not known, though
+    // no call was counted as unpriced.
+    if state.totals.spend.cost_unknown {
+        meta.cost_usd = None;
+        meta.cost_is_exact = false;
+    }
     // A run that never entered a stage has no stage to name, though its
-    // cursor has to point at one.
-    if state.visits.is_empty() {
+    // cursor has to point at one. A run from an earlier release that did not
+    // count visits says it entered one in its ledger alone.
+    if state.visits.is_empty() && !state.ledger.iter().any(|r| r.entered) {
         meta.current_stage.clear();
     }
     // The answer's content is in a file beside the run file; its size is in
@@ -70,6 +97,14 @@ pub fn summary_of(spec: &RunSpec, state: &RunState, updated_at: i64) -> RunMeta 
             .map(leviath_core::run_meta::WaitReason::from),
     };
     meta
+}
+
+/// A working clock as a record lists it.
+fn active_clock(clock: &crate::state::Clock) -> leviath_core::run_meta::ActiveClock {
+    leviath_core::run_meta::ActiveClock {
+        banked_secs: clock.banked_secs,
+        since: clock.since,
+    }
 }
 
 /// The run's context window in `state`, as a snapshot: each region shaped as

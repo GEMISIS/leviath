@@ -24,8 +24,12 @@ fn called(id: &str, on: &str, finish: Option<&str>) -> RunEvent {
     }
 }
 
+/// A call a run file kept only as its bill is not listed: a run converted
+/// from a journal that recorded no attempts lists none, as the release that
+/// wrote it did. A move to another model with no call kept whole to follow
+/// stands on its own, for the call it gave up on.
 #[tokio::test]
-async fn calls_read_back_in_order_with_the_moves_between_them() {
+async fn only_calls_kept_whole_are_listed_and_a_lone_move_stands_alone() {
     crate::runstate::with_isolated_runs_dir_async("inferences-read", |_d| async move {
         let run_id = recorded();
         step(
@@ -48,28 +52,24 @@ async fn calls_read_back_in_order_with_the_moves_between_them() {
             ],
             |s| s.cursor.iteration += 1,
         );
-        // A call with no provider named.
-        step(&run_id, 30, vec![called("a3", "bare", None)], |s| {
-            s.cursor.iteration += 1;
-        });
+        // A move whose models name no provider.
+        step(
+            &run_id,
+            30,
+            vec![RunEvent::Failover {
+                from: model("bare"),
+                to: model("other"),
+                reason: "down".into(),
+            }],
+            |s| s.cursor.iteration += 1,
+        );
 
         let calls = read(&run_id).unwrap();
-        assert_eq!(calls.len(), 4);
-        let first = &calls[0].record;
-        assert_eq!(first.id, "a1");
-        assert_eq!(
-            (first.provider.as_str(), first.model.as_str()),
-            ("anthropic", "m")
-        );
-        assert_eq!(first.finish_reason, "tool_call");
-        assert_eq!(first.outcome, AttemptOutcome::Succeeded);
-        assert_eq!(first.at, 10);
-        assert!(!first.stage.is_empty());
-        assert!(calls[0].failover.is_none());
-
-        let failed = &calls[1];
+        assert_eq!(calls.len(), 2, "only the moves are listed");
+        let failed = &calls[0];
         assert_eq!(failed.record.id, "");
         assert_eq!(failed.record.model, "m");
+        assert!(!failed.record.stage.is_empty());
         assert!(matches!(
             failed.record.outcome,
             AttemptOutcome::Failed {
@@ -84,13 +84,10 @@ async fn calls_read_back_in_order_with_the_moves_between_them() {
         );
         assert_eq!(moved.reason, "rate_limited");
         assert_eq!(moved.iteration, 1);
+        assert_eq!(failed.record.at, 20);
+        assert_eq!(calls[1].record.provider, "");
 
-        assert_eq!(calls[2].record.id, "a2");
-        assert_eq!(calls[2].record.finish_reason, "");
-        assert_eq!(calls[3].record.provider, "");
-
-        assert_eq!(attempt(&run_id, "a2").unwrap().unwrap().record.at, 20);
-        assert!(attempt(&run_id, "nope").unwrap().is_none());
+        assert!(attempt(&run_id, "a1").unwrap().is_none());
         assert!(
             attempt(&run_id, "").unwrap().is_none(),
             "an empty id names nothing"

@@ -15888,6 +15888,11 @@ type StateSpendOutput {
 	computedCalls: Int!
 	"Calls nothing could price."
 	unpricedCalls: Int!
+	"""
+	Whether what it cost is not known though no call was counted as
+	unpriced: a record from an earlier release that named no cost.
+	"""
+	costUnknown: Boolean!
 }
 
 "One tool call a model made."

@@ -75,6 +75,7 @@ fn spend() -> Spend {
         reported_calls: 1,
         computed_calls: 2,
         unpriced_calls: 3,
+        cost_unknown: false,
     }
 }
 
@@ -450,6 +451,7 @@ fn spec() -> CoreSpec {
             leviath_version: "0.6.4".into(),
         },
         created_at: 1_000,
+        listed: None,
     }
 }
 

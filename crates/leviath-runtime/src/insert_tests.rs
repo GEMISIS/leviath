@@ -416,6 +416,7 @@ fn spend(tokens: u64) -> Spend {
         reported_calls: 1,
         computed_calls: 1,
         unpriced_calls: 0,
+        cost_unknown: false,
     }
 }
 

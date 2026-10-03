@@ -83,9 +83,10 @@ fn phase(meta: &RunMeta, tools_in_flight: bool) -> PipelinePhase {
     }
 }
 
-/// What a record spent. One that names no cost at all (a record from before
-/// runs priced their calls) counts as unpriced, so it shows no cost rather
-/// than a cost of nothing, as every earlier release showed it.
+/// What a record spent. One that names no cost at all and counts no call as
+/// unpriced (a record from before runs priced their calls) has a cost that
+/// is not known, so it shows no cost rather than a cost of nothing, and no
+/// unpriced call, as every earlier release showed it.
 fn spend(
     prompt: usize,
     completion: usize,
@@ -95,10 +96,6 @@ fn spend(
     exact: bool,
     unpriced: usize,
 ) -> Spend {
-    let unpriced = match cost {
-        Some(_) => unpriced,
-        None => unpriced.max(1),
-    };
     Spend {
         prompt_tokens: prompt as u64,
         completion_tokens: completion as u64,
@@ -108,6 +105,7 @@ fn spend(
         reported_calls: 0,
         computed_calls: u32::from(!exact),
         unpriced_calls: n32(unpriced),
+        cost_unknown: cost.is_none() && unpriced == 0,
     }
 }
 
@@ -219,10 +217,13 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
     }
     state.ledger = old.stages.iter().filter_map(|r| ledger(r, meta)).collect();
     state.visits = visits(&old.stages);
-    // A run whose record names its stage was in it, whether or not it kept a
-    // ledger to count the visits by. One whose record names none entered no
-    // stage, and is listed with none.
-    if stage_of(graph, meta).is_some() {
+    // A run whose record names its stage was in it. With no ledger record of
+    // the stage to count its visits by, that is one visit; a ledger record
+    // counts them as the release that wrote it did, which for a release
+    // that did not count them is none. One whose record names no stage
+    // entered none, and is listed with none.
+    if stage_of(graph, meta).is_some() && !old.stages.iter().any(|r| r.name == stage.name.as_str())
+    {
         state.visits.entry(stage.name.clone()).or_insert(1);
     }
     state.cursor.visit = old
@@ -242,7 +243,26 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
             .map(|v| v.entered_at),
         ..StageProgress::default()
     };
-    state.fan_out = old.fanout.as_ref().map(|f| fan_out(f, stage, report));
+    let fan = old
+        .fanout
+        .as_ref()
+        .map(|f| fan_out(f, stage, &old.dir, report));
+    // A fan-out whose every worker never left a run behind merges nothing
+    // when it resumes, and lists as one that came back empty, as the
+    // release that wrote it listed it.
+    if let Some((f, gone)) = &fan
+        && *gone > 0
+        && !matches!(
+            state.status,
+            RunStatus::Complete | RunStatus::Error(_) | RunStatus::Cancelled
+        )
+        && f.active.is_empty()
+        && f.queued.is_empty()
+        && f.done.is_empty()
+    {
+        state.flags.splits_degraded += 1;
+    }
+    state.fan_out = fan.map(|(f, _)| f);
     state.interactions = old
         .point
         .as_ref()
@@ -262,7 +282,7 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
         end(
             &mut state,
             format!(
-                "the blueprint this run ran could not be read when it was converted from an earlier release, so it cannot resume: {why}"
+                "this run was converted from an earlier release with the graph it recorded rather than its blueprint, so it cannot resume: {why}"
             ),
         );
     }
@@ -285,13 +305,6 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
     // Every other stage reads as its record says: a stage an old record
     // never reached is pending there, and every earlier release showed it so.
     state.settle_stage_here();
-    if old.not_empty {
-        report.fill(
-            "flags.no_output_tools",
-            "true",
-            "the run's record says it was not empty, though it changed no file and handed back no answer, and every earlier release showed what the record said",
-        );
-    }
     // Kept only when it says something the last step's time does not: a
     // worker's record is touched again when its parent reaps it.
     state.last_progress_at = old
@@ -380,11 +393,13 @@ fn visit(v: &StageVisitRecord, at: i64) -> VisitRecord {
 
 /// Whether the run was ever in the stage. A record from before stages kept
 /// the answer names none, so it is read off what the record says the stage
-/// did: it spent, was visited, started, or got past pending.
+/// did: it spent, started, or got past pending. A visit alone does not say
+/// so: a fan-out worker is placed in its graph's entry stage before it is
+/// moved to the stage it works in, and every release recorded that as a
+/// visit to a stage the worker never entered.
 fn entered(r: &OldStage) -> bool {
     r.entered
         || r.prompt_tokens + r.completion_tokens > 0
-        || r.visit_count.max(r.visits.len()) > 0
         || r.started_at.is_some()
         || !matches!(r.status, StageRunStatus::Pending | StageRunStatus::Skipped)
 }
@@ -471,7 +486,14 @@ fn pending(b: &PendingToolBatch, report: &mut Report) -> PendingBatch {
     PendingBatch { calls, done }
 }
 
-fn fan_out(f: &FanOutFile, stage: &StageDef, report: &mut Report) -> FanOutState {
+/// The fan-out the run was waiting on, and how many of its workers left no
+/// run behind in the runs directory `dir` is in.
+fn fan_out(
+    f: &FanOutFile,
+    stage: &StageDef,
+    dir: &std::path::Path,
+    report: &mut Report,
+) -> (FanOutState, usize) {
     let task = InputName::new("task").expect("`task` is an input name");
     let queued = f
         .pending
@@ -494,17 +516,28 @@ fn fan_out(f: &FanOutFile, stage: &StageDef, report: &mut Report) -> FanOutState
             "an old work item was a JSON context, and a worker received it as this task text",
         );
     }
-    let active = f
-        .active
-        .iter()
-        .filter_map(|(item, run)| match RunId::new(run.as_str()) {
-            Ok(id) => Some((item.clone(), id)),
-            Err(e) => {
-                report.note(format!("fan-out worker {run:?} was left out: {e}"));
-                None
+    let mut failed = f.failures.clone();
+    let mut active = Vec::new();
+    // A worker the old run still waited on but that left no run directory
+    // beside it never started, or its files are gone: nothing will ever
+    // report for it, so it is a failure, named as one.
+    let runs = dir.parent();
+    for (item, run) in &f.active {
+        match RunId::new(run.as_str()) {
+            Ok(id) if runs.is_some_and(|r| r.join(run).is_dir()) => {
+                active.push((item.clone(), id));
             }
-        })
-        .collect();
+            Ok(_) => {
+                let why = format!(
+                    "worker run {run} has no run directory: it never started, or its files are gone"
+                );
+                report.note(format!("fan-out work item {item:?} failed: {why}"));
+                failed.push((item.clone(), why));
+            }
+            Err(e) => report.note(format!("fan-out worker {run:?} was left out: {e}")),
+        }
+    }
+    let gone = failed.len() - f.failures.len();
     // An old fan-out with no origin was a stage's, which is the default; an
     // origin is otherwise the same shape the run file keeps.
     let origin = serde_json::from_value(f.origin.clone()).unwrap_or_default();
@@ -524,18 +557,19 @@ fn fan_out(f: &FanOutFile, stage: &StageDef, report: &mut Report) -> FanOutState
             FanOutDef::same_graph(stage.name.clone())
         }
     };
-    FanOutState {
+    let state = FanOutState {
         stage: stage.name.clone(),
         config,
         max_workers: (f.max_workers < usize::MAX).then_some(n32(f.max_workers)),
         queued,
         active,
         done: f.summaries.clone(),
-        failed: f.failures.clone(),
+        failed,
         paused: f.paused,
         origin,
         parts: Vec::new(),
-    }
+    };
+    (state, gone)
 }
 
 fn interaction(

@@ -58,6 +58,53 @@ pub struct RunSpec {
     pub env: EnvFingerprint,
     /// When it was resolved, in unix seconds.
     pub created_at: i64,
+    /// For a run converted from an earlier release, what that release listed
+    /// it with where this build would list the same run otherwise. `None`
+    /// for every run this build resolved.
+    pub listed: Option<ListedAs>,
+}
+
+/// What an earlier release listed a run converted from it with, where this
+/// build would list the same run otherwise: each as the run's own record
+/// said it.
+///
+/// What the run recorded about itself (its model, its stages, its blueprint,
+/// its tree's depth cap) is listed so for good. How it was doing (when it
+/// last made progress, its working clock, whether it came to nothing) is
+/// listed so while the run stands where it was converted, at step `seq`,
+/// and as this build lists any run once it moves on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ListedAs {
+    /// The model it was listed under. `None` where its record named none: a
+    /// run refused before it started, or one from a release that did not
+    /// record it.
+    pub model: Option<String>,
+    /// How many stages it was listed with: none for a run refused before it
+    /// started.
+    pub num_stages: u32,
+    /// The depth its tree of child runs was listed as capped at: the cap it
+    /// recorded once it started a child run, and none before that.
+    pub max_child_depth: u32,
+    /// The revision of its blueprint it was listed under, where it named one.
+    pub blueprint_digest: Option<String>,
+    /// The step of its run file the run was converted at.
+    pub seq: u64,
+    /// When it was listed as last making progress, where its record said.
+    pub last_progress_at: Option<i64>,
+    /// The working clock it was listed with, where its record kept one.
+    pub clock: Option<crate::state::Clock>,
+    /// Whether it was listed as having stopped with nothing to show for
+    /// itself.
+    pub empty_output: bool,
+}
+
+impl ListedAs {
+    /// What the run is listed with while it stands at step `seq`: all of
+    /// this while it stands where it was converted, and nothing once it
+    /// moves on.
+    pub fn standing(listed: Option<&Self>, seq: u64) -> Option<&Self> {
+        listed.filter(|l| l.seq == seq)
+    }
 }
 
 impl RunSpec {
@@ -378,6 +425,24 @@ pub(crate) mod tests {
                 leviath_version: "0.6.4".into(),
             },
             created_at: 1,
+            listed: None,
+        }
+    }
+
+    /// What an earlier release listed a run with, every field set.
+    pub(crate) fn listed() -> ListedAs {
+        ListedAs {
+            model: Some("mock/gpt-mock".into()),
+            num_stages: 2,
+            max_child_depth: 3,
+            blueprint_digest: Some("ab".repeat(32)),
+            seq: 4,
+            last_progress_at: Some(5),
+            clock: Some(crate::state::Clock {
+                banked_secs: 6,
+                since: Some(7),
+            }),
+            empty_output: true,
         }
     }
 

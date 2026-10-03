@@ -389,6 +389,9 @@ pub struct Spend {
     pub computed_calls: u32,
     /// Calls that could not be priced.
     pub unpriced_calls: u32,
+    /// Whether its cost is not known though no call was counted as
+    /// unpriced: a record from an earlier release that named no cost.
+    pub cost_unknown: bool,
 }
 
 /// A run's totals.

@@ -414,7 +414,9 @@ fn a_stage_from_before_entered_was_recorded_keeps_its_status() {
                 ("main".into(), here, true),
                 ("second".into(), StageStatus::Complete, true),
                 ("third".into(), StageStatus::Pending, true),
-                ("visited".into(), StageStatus::Pending, true),
+                // A visit alone is not entering: a fan-out worker was
+                // placed in its entry stage before it moved to its own.
+                ("visited".into(), StageStatus::Pending, false),
                 ("never".into(), StageStatus::Pending, false),
             ],
             "{run_status:?}"
@@ -901,7 +903,9 @@ fn a_key_the_old_parser_ignored_is_left_out_and_reported() {
         "{dropped:?}"
     );
     assert!(
-        !notes.iter().any(|n| n.contains("could not be read")),
+        !notes
+            .iter()
+            .any(|n| n.contains("graph is what it recorded")),
         "{notes:?}"
     );
 }

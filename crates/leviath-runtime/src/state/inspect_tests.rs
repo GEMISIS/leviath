@@ -499,11 +499,15 @@ fn ledger() -> p::StageLedger {
         r.status = status;
         records.push(r);
     }
+    // A stage whose record names no cost and counts no call unpriced: one
+    // from an earlier release that never priced its calls.
+    records[3].cost_usd = None;
     let r = &mut records[1];
     r.entered = true;
     r.prompt_tokens = 10;
     r.cost_priced_usd = 0.5;
     r.cost_is_exact = false;
+    r.cost_usd = None;
     r.unpriced_calls = 1;
     r.computed_calls = 1;
     r.reported_calls = 2;
@@ -667,6 +671,9 @@ async fn a_busy_run_reads_every_field_from_its_components() {
     assert_eq!(active.spend.computed_calls, 1);
     assert_eq!(active.spend.reported_calls, 2);
     assert_eq!(active.spend.unpriced_calls, 1);
+    assert!(!active.spend.cost_unknown, "a call went unpriced");
+    assert!(s.ledger[3].spend.cost_unknown);
+    assert!(!s.ledger[0].spend.cost_unknown);
     assert_eq!(active.models.len(), 2);
     assert_eq!(active.models[1].provider, None);
     assert_eq!(active.visits[0].clock.banked_secs, 4);

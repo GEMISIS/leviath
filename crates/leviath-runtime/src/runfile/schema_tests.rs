@@ -30,7 +30,7 @@ fn the_published_schemas_match_this_build() {
 /// The hash of the binary samples below as this build encodes them. When it
 /// changes, the binary layout changed: bump `LAYOUT_VERSION`, then record
 /// the new hash here.
-const LAYOUT_HASH: &str = "3a2916f50a598ee76bef40735e154844fb386ac9e71d8dbff254a94366737e95";
+const LAYOUT_HASH: &str = "d773ab825ea7f522da4de92be460e5a915ed41bb0a6c974a5bc670b77a58e99e";
 
 /// A fully populated sample of every frame type, so a change to any type's
 /// binary encoding changes the bytes.
@@ -41,6 +41,7 @@ fn layout_samples() -> Vec<u8> {
     // A large real graph (the coder blueprint's, frozen here so later edits
     // to the bundled blueprint do not move the hash).
     let mut spec = crate::spec::run_spec::tests::spec();
+    spec.listed = Some(crate::spec::run_spec::tests::listed());
     // Read with LF newlines whatever the checkout gave the file: its
     // multi-line strings keep a CRLF, and the bytes would move.
     let sample = include_str!("layout_sample.toml").replace("\r\n", "\n");

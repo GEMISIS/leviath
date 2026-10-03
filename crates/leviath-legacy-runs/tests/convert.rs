@@ -224,7 +224,9 @@ fn an_errored_run_keeps_why() {
 
 #[test]
 fn a_fan_out_parent_keeps_its_queue_and_its_workers() {
-    let (report, file) = Run::fixture("fanout-parent").converted();
+    let run = Run::fixture("fanout-parent");
+    std::fs::create_dir(run.dir.with_file_name(WORKER)).unwrap();
+    let (report, file) = run.converted();
     assert_eq!(file.last.phase, PipelinePhase::FanOut);
     assert_eq!(file.last.status, RunStatus::Waiting);
     let fan = file.last.fan_out.as_ref().unwrap();
@@ -249,6 +251,54 @@ fn a_fan_out_parent_keeps_its_queue_and_its_workers() {
     );
     assert_eq!(file.spec.launch.max_depth, 2);
     assert!(file.spec.seeded.contains_key("notes"));
+    assert!(fan.failed.is_empty());
+    assert_eq!(file.last.flags.splits_degraded, 0);
+}
+
+/// The worker the `fanout-parent` fixture waits on.
+const WORKER: &str = "waiter-1790811839-36428b065732";
+
+/// A worker the old run still waited on but that left no run directory
+/// never reports. It is a failure the fan-out names, and a fan-out with
+/// nothing else left to report merges nothing, so the run lists as one whose
+/// fan-out came back empty, as the release that wrote it listed it once it
+/// carried on.
+#[test]
+fn a_fan_out_worker_that_left_no_run_is_a_named_failure() {
+    let run = Run::fixture("fanout-parent");
+    run.json("fanout.json", |v| v["pending"] = serde_json::json!([]));
+    let (report, file) = run.converted();
+    let fan = file.last.fan_out.as_ref().unwrap();
+    assert!(fan.active.is_empty());
+    assert_eq!(fan.failed.len(), 1);
+    assert_eq!(fan.failed[0].0, "alpha");
+    assert!(fan.failed[0].1.contains(WORKER), "{:?}", fan.failed);
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("\"alpha\" failed") && n.contains(WORKER)),
+        "{:?}",
+        report.notes
+    );
+    assert_eq!(file.last.status, RunStatus::Waiting);
+    assert_eq!(file.last.flags.splits_degraded, 1);
+    assert_eq!(file.fold(), file.last);
+
+    // With work still queued, the fan-out is not empty yet.
+    let run = Run::fixture("fanout-parent");
+    let (_, file) = run.converted();
+    let fan = file.last.fan_out.as_ref().unwrap();
+    assert_eq!((fan.queued.len(), fan.failed.len()), (1, 1));
+    assert_eq!(file.last.flags.splits_degraded, 0);
+
+    // A run that finished lists as it did, whatever its fan-out file says.
+    let run = Run::fixture("fanout-parent");
+    run.json("fanout.json", |v| v["pending"] = serde_json::json!([]));
+    run.meta(|m| m.status = leviath_core::run_meta::RunStatus::Complete);
+    let (_, file) = run.converted();
+    assert_eq!(file.last.status, RunStatus::Complete);
+    assert_eq!(file.last.flags.splits_degraded, 0);
 }
 
 #[test]

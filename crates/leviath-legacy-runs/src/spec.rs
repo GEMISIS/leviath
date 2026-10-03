@@ -19,7 +19,9 @@ use leviath_runtime::spec::names::{
     BlueprintName, BlueprintRef, Digest, HttpUrl, MimePattern, ModelRef, ProfileName, RegionName,
     RunId,
 };
-use leviath_runtime::spec::run_spec::{EnvFingerprint, RunSpec, SeededContent, SpecOrigin};
+use leviath_runtime::spec::run_spec::{
+    EnvFingerprint, ListedAs, RunSpec, SeededContent, SpecOrigin,
+};
 
 use crate::context::{Losses, parts};
 use crate::legacy::LegacyRun;
@@ -37,8 +39,8 @@ pub(crate) struct Built {
 pub(crate) enum Source {
     /// Its blueprint.
     Blueprint(Box<Blueprint>),
-    /// What the run recorded, because its blueprint could not be read, and
-    /// why it could not.
+    /// What the run recorded, because its blueprint could not be read as
+    /// the graph it ran, and why.
     Recorded(String),
 }
 
@@ -95,12 +97,12 @@ fn read_blueprint(
     Ok((blueprint, graph, notes, dropped))
 }
 
-/// The graph the run recorded, the blueprint it ran unread for `why`.
+/// The graph the run recorded, used in place of its blueprint for `why`.
 fn recorded(old: &LegacyRun, why: String, report: &mut Report) -> (Source, RunGraph) {
     report.note(format!(
-        "the blueprint the run ran could not be read, so its graph is what the run recorded and it never resumes: {why}"
+        "the run's graph is what it recorded, and it never resumes, because {why}"
     ));
-    let graph = crate::recorded::graph(old, report);
+    let graph = crate::recorded::graph(old, &why, report);
     (Source::Recorded(why), graph)
 }
 
@@ -118,7 +120,7 @@ pub(crate) fn build(
     let (source, graph) = graph(old, report);
     let name =
         BlueprintName::new(meta.agent_name.as_str()).map_err(ConvertError::name("agent_name"))?;
-    let manifest = meta.agent_path.clone();
+    let manifest = manifest(old);
     let (origin, binds) = match &source {
         Source::Blueprint(blueprint) => (
             SpecOrigin::Blueprint {
@@ -208,6 +210,7 @@ pub(crate) fn build(
         env: EnvFingerprint::default(),
         created_at: meta.started_at,
         graph,
+        listed: None,
     };
     report.fill(
         "env",
@@ -220,6 +223,24 @@ pub(crate) fn build(
     })
 }
 
+/// What the release a run came from listed it with, as its `meta.json`
+/// says, for the run as it stands at step `seq` of its run file.
+pub(crate) fn listed(meta: &RunMeta, seq: u64) -> ListedAs {
+    ListedAs {
+        model: meta.model.clone(),
+        num_stages: crate::context::n32(meta.num_stages),
+        max_child_depth: crate::context::n32(meta.max_child_depth),
+        blueprint_digest: meta.blueprint_digest.clone(),
+        seq,
+        last_progress_at: meta.last_progress_at,
+        clock: meta.active.map(|a| leviath_runtime::state::Clock {
+            banked_secs: a.banked_secs,
+            since: a.since,
+        }),
+        empty_output: meta.flags.empty_output,
+    }
+}
+
 /// Whether the run finished for good: complete, or failed. A cancelled run
 /// can be resumed.
 fn finished(meta: &RunMeta) -> bool {
@@ -229,12 +250,46 @@ fn finished(meta: &RunMeta) -> bool {
     )
 }
 
+/// The blueprint file a run is listed with: the one its record names. A run
+/// that was not finished was brought back from the copy of its blueprint it
+/// kept, and every earlier release listed it with that copy while it was;
+/// converted, the copy is under `legacy/`. One that kept none, whose record
+/// names a manifest that is no longer there, is listed with the `agent.toml`
+/// its agent was upgraded to.
+fn manifest(old: &LegacyRun) -> String {
+    let meta = old.meta();
+    // A 0.1.0 worker's question is never reopened, so its run is not
+    // brought back.
+    let brought_back = old.question.is_none()
+        && matches!(
+            meta.status,
+            OldStatus::Starting | OldStatus::Running | OldStatus::WaitingInput | OldStatus::Paused
+        );
+    let kept = match &old.blueprint.source {
+        BlueprintSource::Snapshot => Some(
+            old.dir
+                .join(crate::write::LEGACY_DIR)
+                .join(crate::legacy::BLUEPRINT_SNAPSHOT_FILE),
+        ),
+        _ => old
+            .blueprint
+            .migrated
+            .as_ref()
+            .map(|(path, _)| path.clone())
+            .filter(|_| !Path::new(&meta.agent_path).is_file()),
+    };
+    match (brought_back, kept) {
+        (true, Some(path)) => path.to_string_lossy().into_owned(),
+        _ => meta.agent_path.clone(),
+    }
+}
+
 /// The installed blueprint a fan-out worker of this run is started from.
 /// The old manifest's digest can never match a file this build reads, so
 /// the pin is the `agent.toml` it was migrated to.
 fn pin(old: &LegacyRun, report: &mut Report) -> Option<Digest> {
     match &old.blueprint.migrated {
-        Some(bytes) => {
+        Some((_, bytes)) => {
             let d = Digest::of(bytes);
             report.note(format!(
                 "origin.blueprint.digest is the installed agent.toml's ({d}), which the run's workers are started from"

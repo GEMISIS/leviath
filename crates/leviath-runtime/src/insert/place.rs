@@ -180,9 +180,10 @@ fn stage_run_status(status: StageStatus) -> leviath_core::run_meta::StageRunStat
 }
 
 /// A cost is known exactly when no call was priced from published rates and
-/// none went unpriced; it is known at all when none went unpriced.
+/// none went unpriced; it is known at all when none went unpriced and its
+/// record named one.
 fn cost(spend: &Spend) -> (Option<f64>, bool) {
-    let known = spend.unpriced_calls == 0;
+    let known = spend.unpriced_calls == 0 && !spend.cost_unknown;
     (
         known.then_some(spend.priced_usd),
         known && spend.computed_calls == 0,
@@ -345,8 +346,23 @@ pub(crate) fn io_buffer(spec: &RunSpec, state: &RunState) -> crate::pipeline::St
 /// (from `title`) what it is called.
 pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
     let blueprint = spec.origin.blueprint_name().map(str::to_string);
-    let digest = spec.origin.digest().map(ToString::to_string);
     let task = task_text(spec);
+    // A run converted from an earlier release is listed with the model,
+    // stages and blueprint revision that release listed it with.
+    let (model, num_stages, digest) = match &spec.listed {
+        Some(listed) => (
+            listed.model.clone(),
+            listed.num_stages as usize,
+            listed.blueprint_digest.clone(),
+        ),
+        None => (
+            spec.stages
+                .first()
+                .map(|p| format!("{}/{}", p.provider, p.model)),
+            spec.graph.stages.len(),
+            spec.origin.digest().map(ToString::to_string),
+        ),
+    };
     RunMetadata {
         run_id: spec.run_id.to_string(),
         agent_name: blueprint
@@ -357,12 +373,9 @@ pub(crate) fn run_metadata(spec: &RunSpec, state: &RunState) -> RunMetadata {
         // from, or the one an old run recorded.
         agent_path: spec.origin.manifest(),
         task,
-        model: spec
-            .stages
-            .first()
-            .map(|p| format!("{}/{}", p.provider, p.model)),
+        model,
         workdir: spec.placement.workdir.to_string_lossy().into_owned(),
-        num_stages: spec.graph.stages.len(),
+        num_stages,
         started_at: spec.created_at,
         parent_run_id: spec.placement.parent.as_ref().map(ToString::to_string),
         metadata: spec

@@ -243,6 +243,7 @@ pub async fn resolve(
         delivery: request.delivery.clone(),
         env: env_fingerprint,
         created_at: now_secs(),
+        listed: None,
     };
     issues.into_result(Resolved {
         spec,

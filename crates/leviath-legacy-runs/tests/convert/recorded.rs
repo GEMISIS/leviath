@@ -210,33 +210,42 @@ fn an_answer_whose_artifacts_name_a_media_type_converts() {
     assert_eq!(answer.artifacts[0].mime_type, "image/png");
 }
 
+/// A record from before the working clock worked for its wall-clock span.
+/// It lists with no clock, as every earlier release listed it, and so with
+/// that span as its working time.
 #[test]
 fn a_record_from_before_the_run_clock_works_for_its_wall_clock_span() {
     let run = Run::fixture("real-finished");
+    let start = 1_790_516_000;
     run.meta(|m| {
         m.active = None;
-        m.started_at = 1_000;
-        m.updated_at = 1_600;
+        m.started_at = start;
+        m.updated_at = start + 600;
     });
     run.json("stages.json", |v| {
         for stage in v.as_array_mut().unwrap() {
             stage.as_object_mut().unwrap().remove("active");
-            stage["started_at"] = json!(1_000);
-            stage["ended_at"] = json!(1_450);
+            stage["started_at"] = json!(start);
+            stage["ended_at"] = json!(start + 450);
         }
     });
     // `meta.json` was written after the journal's last record, and is what
     // every earlier release listed.
-    run.json("meta.json", |v| v["updated_at"] = json!(1_700));
+    run.json("meta.json", |v| v["updated_at"] = json!(start + 900));
     let (_, file) = run.converted();
-    assert_eq!(file.last.clock.banked_secs, 700);
-    assert_eq!(listed(&run).active_runtime_secs(9_000), 700);
+    assert_eq!(file.last.clock.banked_secs, 900);
+    let meta = listed(&run);
+    assert_eq!(meta.active, None);
+    assert_eq!(meta.active_runtime_secs(start + 9_000), 900);
     assert_eq!(file.last.ledger[0].clock.banked_secs, 450);
     assert_eq!(file.fold(), file.last);
 }
 
+/// A run lists whether it came to nothing as its record said, and whether
+/// its blueprint could change a file as its record said, whatever this build
+/// would make of what it changed.
 #[test]
-fn a_record_from_before_the_run_flags_is_not_called_empty() {
+fn a_run_lists_whether_it_came_to_nothing_as_its_record_said() {
     let run = Run::fixture("finished");
     let strip = |v: &mut serde_json::Value| {
         v.as_object_mut().unwrap().remove("flags");
@@ -269,16 +278,16 @@ fn a_record_from_before_the_run_flags_is_not_called_empty() {
         });
     });
     let (report, _) = run.converted();
-    assert!(!listed(&run).flags.empty_output);
-    assert!(report.defaulted("flags.no_output_tools").is_some());
-    // A record that kept its flags is judged by them.
+    let meta = listed(&run);
+    assert!(!meta.flags.empty_output);
+    assert!(!meta.flags.no_output_tools);
+    assert!(report.defaulted("flags.no_output_tools").is_none());
+    // A record that kept its flags lists them.
     let kept = Run::fixture("finished");
     kept.converted();
     assert!(listed(&kept).flags.empty_output);
-    // One from before runs recorded whether they could change a file is
-    // empty only when it said so itself.
-    // A record that kept the flag but stopped before its verdict was written
-    // says not empty as well.
+    // One from before runs recorded whether they could change a file, and
+    // one that kept the flag, are each empty only when they said so.
     for (said, shown, keep) in [
         (false, false, false),
         (true, true, false),
@@ -293,8 +302,10 @@ fn a_record_from_before_the_run_flags_is_not_called_empty() {
             flags.insert("empty_output".into(), json!(said));
         });
         let (report, _) = older.converted();
-        assert_eq!(listed(&older).flags.empty_output, shown, "said {said}");
-        assert_eq!(report.defaulted("flags.no_output_tools").is_some(), !said);
+        let meta = listed(&older);
+        assert_eq!(meta.flags.empty_output, shown, "said {said}");
+        assert!(!meta.flags.no_output_tools, "said {said}");
+        assert!(report.defaulted("flags.no_output_tools").is_none());
     }
 }
 
@@ -385,13 +396,16 @@ fn a_recorded_graph_keeps_each_region_as_its_snapshot_shows_it() {
         ("sliding_window", "SlidingWindow"),
         ("sliding", "SlidingWindow"),
         ("keyed", "Keyed"),
+        ("hashmap", "Keyed"),
+        ("hash_map", "Keyed"),
         ("checklist", "Checklist"),
         ("custom", "Pinned"),
     ];
     run.journal(|records| {
         for r in records.iter_mut() {
             if let JournalRecord::ContextCheckpoint { snapshot, .. } = r {
-                let template = snapshot.regions[0].clone();
+                let mut template = snapshot.regions[0].clone();
+                template.description = Some("what it holds".into());
                 snapshot.regions = kinds
                     .iter()
                     .map(|(k, _)| {
@@ -437,6 +451,16 @@ fn a_recorded_graph_keeps_each_region_as_its_snapshot_shows_it() {
             "{k}: {shown:?}"
         );
     }
+    // Each keeps the description its snapshot gave it.
+    let described = file
+        .spec
+        .graph
+        .layout
+        .regions
+        .iter()
+        .filter(|r| r.description.as_deref() == Some("what it holds"))
+        .count();
+    assert_eq!(described, kinds.len());
 }
 
 /// The installed blueprint of a run that kept no copy can have changed since
@@ -497,7 +521,8 @@ fn a_finished_run_is_not_looked_up_on_this_machine() {
     );
 }
 
-/// A record that names no cost shows none, rather than a cost of nothing.
+/// A record that names no cost shows none, rather than a cost of nothing,
+/// and counts no call as unpriced, as every earlier release listed it.
 #[test]
 fn a_record_without_a_cost_shows_none() {
     let run = Run::fixture("real-finished");
@@ -508,8 +533,14 @@ fn a_record_without_a_cost_shows_none() {
         }
     });
     let (_, file) = run.converted();
-    assert_eq!(listed(&run).cost_usd, None);
-    assert!(file.last.ledger[0].spend.unpriced_calls >= 1);
+    let meta = listed(&run);
+    assert_eq!((meta.cost_usd, meta.unpriced_calls), (None, 0));
+    let stage = &file.last.ledger[0].spend;
+    assert_eq!((stage.unpriced_calls, stage.cost_unknown), (0, true));
+    let reader = RunFileReader::open(&run.path("run.lvr")).unwrap();
+    let tail = leviath_runtime::runfile::RunFileTail::of(&reader).unwrap();
+    let stages = leviath_runtime::runfile::stage_records(&tail.state);
+    assert_eq!((stages[0].cost_usd, stages[0].unpriced_calls), (None, 0));
     let kept = Run::fixture("real-finished");
     kept.converted();
     assert_eq!(listed(&kept).cost_usd, Some(0.0));

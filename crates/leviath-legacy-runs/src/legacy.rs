@@ -103,9 +103,9 @@ pub(crate) struct BlueprintFile {
     pub(crate) source: BlueprintSource,
     /// The directory its scripts are read from, when one exists.
     pub(crate) script_dir: Option<PathBuf>,
-    /// The bytes of the `agent.toml` the installed agent was migrated to,
+    /// The `agent.toml` the installed agent was migrated to, and its bytes,
     /// when there is one: what a fan-out worker of the run is resolved from.
-    pub(crate) migrated: Option<Vec<u8>>,
+    pub(crate) migrated: Option<(PathBuf, Vec<u8>)>,
 }
 
 /// Everything an old run directory holds.
@@ -124,9 +124,6 @@ pub(crate) struct LegacyRun {
     pub(crate) question: Option<String>,
     pub(crate) final_output: Option<String>,
     pub(crate) blueprint: BlueprintFile,
-    /// Whether the run's record says it was not empty where a listing now
-    /// would call it so: every earlier release showed what the record said.
-    pub(crate) not_empty: bool,
     /// The run as every earlier release listed it: its `meta.json` (see
     /// [`listed`]).
     pub(crate) listed: RunMeta,
@@ -165,14 +162,10 @@ impl LegacyRun {
             path: dir.to_path_buf(),
             why: format!("it has no {META_FILE}"),
         })?;
-        let not_empty = said_not_empty(&meta);
-        let mut records = match journal {
+        let records = match journal {
             Some(bytes) => journal_records(&journal_path, &bytes)?,
             None => records_without_journal(dir, meta.clone())?,
         };
-        if not_empty {
-            kept_not_empty(&mut records);
-        }
         let Some(JournalRecord::Header { meta: header, .. }) = records.first() else {
             return Err(ConvertError::Unreadable {
                 path: journal_path,
@@ -189,8 +182,7 @@ impl LegacyRun {
             question: question(&dir.join(QUESTION_FILE)),
             final_output: std::fs::read_to_string(dir.join(leviath_core::FINAL_OUTPUT_FILE)).ok(),
             blueprint: blueprint(dir, &meta, env),
-            not_empty,
-            listed: listed(meta, &folded.meta, not_empty),
+            listed: listed(meta, &folded.meta),
             dir: dir.to_path_buf(),
             header,
             records,
@@ -205,9 +197,8 @@ impl LegacyRun {
 /// was written after the journal's last record. A run that was not finished
 /// was brought back at start from its journal, which a crash can leave a
 /// step ahead of `meta.json`, so its stage, iteration and totals are the
-/// journal's. A run whose record says it was not empty keeps saying so.
-fn listed(mut meta: RunMeta, journal: &RunMeta, not_empty: bool) -> RunMeta {
-    meta.flags.no_output_tools |= not_empty;
+/// journal's.
+fn listed(mut meta: RunMeta, journal: &RunMeta) -> RunMeta {
     if matches!(
         meta.status,
         RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
@@ -241,41 +232,6 @@ fn question(path: &Path) -> Option<String> {
         Ok(q) => format!("the question {:?}", q.prompt),
         Err(_) => format!("a question in {QUESTION_FILE} that does not read"),
     })
-}
-
-/// Whether `meta` says its run was not empty where a listing now would call
-/// it so: it stopped having changed no file and handed back no answer, and
-/// still says otherwise. A record from before runs kept their flags says so
-/// too, having none.
-fn said_not_empty(meta: &RunMeta) -> bool {
-    let f = &meta.flags;
-    let stopped = matches!(
-        meta.status,
-        RunStatus::Complete
-            | RunStatus::CompleteInteractive
-            | RunStatus::Error
-            | RunStatus::Cancelled
-    );
-    stopped
-        && !f.empty_output
-        && f.modified_file_count == 0
-        && !f.no_output_tools
-        && meta.final_output.is_none()
-}
-
-/// Mark every record of a run whose record says it was not empty as one
-/// that could not have changed a file, so it is not called empty for
-/// changing none: what it can change was not always recorded, and every
-/// earlier release went by what the record said.
-fn kept_not_empty(records: &mut [JournalRecord]) {
-    for r in records {
-        if let JournalRecord::Header { meta, .. }
-        | JournalRecord::Progress { meta, .. }
-        | JournalRecord::Checkpoint { meta, .. } = r
-        {
-            meta.flags.no_output_tools = true;
-        }
-    }
 }
 
 /// Parse a JSON file, or `None` when there is no such file.
@@ -382,9 +338,10 @@ fn blueprint(dir: &Path, meta: &RunMeta, env: &ConvertEnv<'_>) -> BlueprintFile 
             .map(|p| (d.clone(), p))
     });
     let script_dir = found.as_ref().map(|(d, _)| d.clone());
-    let migrated = dirs
-        .iter()
-        .find_map(|d| std::fs::read(d.join(leviath_blueprint::FILE_NAME)).ok());
+    let migrated = dirs.iter().find_map(|d| {
+        let path = d.join(leviath_blueprint::FILE_NAME);
+        std::fs::read(&path).ok().map(|bytes| (path, bytes))
+    });
     let snapshot = dir.join(BLUEPRINT_SNAPSHOT_FILE);
     if let Ok(text) = std::fs::read_to_string(&snapshot) {
         return BlueprintFile {

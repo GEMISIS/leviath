@@ -4,29 +4,26 @@
 //! delta per journal step that changed something the run file keeps. The
 //! context, status, stage and totals come from the journal's snapshots and
 //! metadata; model calls, tool calls, answers and messages become events.
-//! A last delta then carries the run to the state rebuilt from every file,
-//! with the conversion's report in its log, so folding the deltas always ends
-//! exactly at the last state.
+//! A record of a kind the running world still sends (a model call's attempt
+//! and its bill, a move to another model, a tool batch and each call's end,
+//! a settled question, files an execution produced, a committed change to the
+//! window) becomes the events the world makes of it in a new run's file, so
+//! a converted run's calls and executions read as the release that wrote
+//! them showed them. A last delta then carries the run to the state rebuilt
+//! from every file, with the conversion's report in its log, so folding the
+//! deltas always ends exactly at the last state.
 
 use leviath_core::run_meta::{ContextSnapshot, RunMeta};
-use leviath_runtime::runfile::record::{AttemptOutcome, AttemptRecord};
-use leviath_runtime::spec::names::ModelRef;
+use leviath_runtime::runfile::record::{InferenceKind, RunRecord};
+use leviath_runtime::runfile::{Answered, journal_events_with};
 use leviath_runtime::spec::run_spec::RunSpec;
-use leviath_runtime::state::context::ToolCallState;
-use leviath_runtime::state::{
-    Change, ContextDiff, MessageState, RunEvent, RunState, Spend, StateDelta, ToolResultState,
-};
+use leviath_runtime::state::{Change, ContextDiff, MessageState, RunEvent, RunState, StateDelta};
 
 use crate::context::Losses;
 use crate::journal::{self, JournalRecord};
 use crate::legacy::LegacyRun;
 use crate::report::Report;
 use crate::state::{context_in, entry, from_meta, last, stage_of};
-
-/// A model as the journal names one.
-fn model(provider: &str, model: &str) -> Option<ModelRef> {
-    ModelRef::parse(&format!("{provider}/{model}")).ok()
-}
 
 /// The walk through the journal.
 struct Replay<'a> {
@@ -35,8 +32,9 @@ struct Replay<'a> {
     context: ContextSnapshot,
     state: RunState,
     deltas: Vec<StateDelta>,
-    /// The latest provider attempt not yet matched to its usage.
-    attempt: Option<AttemptRecord>,
+    /// The attempts that answered, waiting for the usage record that bills
+    /// them.
+    answered: Answered,
     at: i64,
     /// Whether the checkpoint the start state was seeded from has been read.
     seeded: bool,
@@ -131,6 +129,28 @@ impl Replay<'_> {
                 self.meta.status = status.clone();
                 false
             }
+            // A stage's model call is made in the iteration the record
+            // names, which the metadata written after it only catches up
+            // with by a later step.
+            JournalRecord::InferenceUsage {
+                kind: InferenceKind::Stage,
+                iteration,
+                ..
+            } if *iteration > 0 => {
+                self.meta.iteration = *iteration;
+                false
+            }
+            // So is the batch its answer asked for. A journal that billed no
+            // call first moves to that iteration in a step of its own, so
+            // the batch is read in the iteration it was dispatched in, as a
+            // step is read against the cursor before it.
+            JournalRecord::ToolBatch { iteration, .. }
+                if *iteration > 0 && self.meta.iteration != *iteration =>
+            {
+                self.meta.iteration = *iteration;
+                self.step(false, Vec::new());
+                false
+            }
             _ => false,
         };
         self.step(moved, events);
@@ -144,137 +164,15 @@ impl Replay<'_> {
 
     /// The events a record that is not a state change carries.
     fn events(&mut self, r: &JournalRecord) -> Vec<RunEvent> {
+        if let Some((record, at)) = shared(r) {
+            self.at = at;
+            let events = journal_events_with(&record, &mut self.answered);
+            return match (events.is_empty(), dropped(r)) {
+                (true, Some(line)) => vec![RunEvent::Log(line)],
+                _ => events,
+            };
+        }
         match r {
-            JournalRecord::InferenceAttempt(a) => {
-                self.attempt = Some(a.clone());
-                match &a.outcome {
-                    AttemptOutcome::Succeeded => Vec::new(),
-                    other => vec![RunEvent::Log(format!(
-                        "attempt {} on {}/{} did not answer: {}",
-                        a.id,
-                        a.provider,
-                        a.model,
-                        serde_json::to_string(other).unwrap_or_default()
-                    ))],
-                }
-            }
-            JournalRecord::InferenceUsage {
-                kind,
-                stage,
-                iteration,
-                provider,
-                model: name,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                cache_write_tokens,
-                cost_usd,
-                cost_reported_by_provider,
-                at,
-                ..
-            } => {
-                self.at = *at;
-                let attempt = self
-                    .attempt
-                    .take_if(|a| a.provider == *provider && a.model == *name);
-                let Some(model) = model(provider, name) else {
-                    return vec![RunEvent::Log(format!(
-                        "a {} call to {provider:?}/{name:?}, which are not valid names",
-                        kind.label()
-                    ))];
-                };
-                let spend = Spend {
-                    prompt_tokens: *prompt_tokens as u64,
-                    completion_tokens: *completion_tokens as u64,
-                    cached_tokens: *cached_tokens as u64,
-                    cache_write_tokens: *cache_write_tokens as u64,
-                    priced_usd: cost_usd.unwrap_or_default(),
-                    reported_calls: u32::from(*cost_reported_by_provider == Some(true)),
-                    computed_calls: u32::from(*cost_reported_by_provider == Some(false)),
-                    unpriced_calls: u32::from(cost_usd.is_none()),
-                };
-                vec![RunEvent::Inference {
-                    attempt: attempt.as_ref().map(|a| a.id.clone()).unwrap_or_default(),
-                    model,
-                    spend,
-                    finish_reason: attempt.map(|a| a.finish_reason),
-                    kind: (*kind).into(),
-                    stage: leviath_runtime::spec::names::StageName::new(stage).ok(),
-                    iteration: u32::try_from(*iteration).unwrap_or(u32::MAX),
-                }]
-            }
-            JournalRecord::InferenceFailover(f) => {
-                self.at = f.at;
-                match (
-                    model(&f.from_provider, &f.from_model),
-                    model(&f.to_provider, &f.to_model),
-                ) {
-                    (Some(from), Some(to)) => vec![RunEvent::Failover {
-                        from,
-                        to,
-                        reason: f.reason.clone(),
-                    }],
-                    _ => vec![RunEvent::Log(format!(
-                        "failed over from {}/{} to {}/{}: {}",
-                        f.from_provider, f.from_model, f.to_provider, f.to_model, f.reason
-                    ))],
-                }
-            }
-            JournalRecord::ToolBatch { calls, at, .. } => {
-                self.at = *at;
-                let mut events = Vec::new();
-                for c in calls {
-                    events.push(RunEvent::ToolStarted(ToolCallState {
-                        id: c.id.clone(),
-                        name: c.name.clone(),
-                        args: leviath_core::JsonDoc::parse(&c.arguments).unwrap_or_else(|_| {
-                            leviath_core::JsonDoc::new(serde_json::Value::String(
-                                c.arguments.clone(),
-                            ))
-                        }),
-                        thought_signature: c.thought_signature.clone(),
-                    }));
-                    events.extend(c.result.as_ref().map(|r| RunEvent::ToolFinished {
-                        call_id: c.id.clone(),
-                        result: ToolResultState {
-                            text: r.as_str().to_string(),
-                            is_error: false,
-                        },
-                        millis: 0,
-                    }));
-                }
-                events
-            }
-            JournalRecord::ToolCallDone {
-                call_id,
-                result,
-                outcome,
-                at,
-                ..
-            } => {
-                self.at = *at;
-                vec![RunEvent::ToolFinished {
-                    call_id: call_id.clone(),
-                    result: ToolResultState {
-                        text: result.as_str().to_string(),
-                        is_error: outcome
-                            .is_some_and(|o| o != leviath_core::execution::ToolOutcome::Succeeded),
-                    },
-                    millis: 0,
-                }]
-            }
-            JournalRecord::Interaction {
-                request_id,
-                settlement,
-                at,
-                ..
-            } => {
-                self.at = *at;
-                vec![RunEvent::Answered {
-                    id: request_id.clone(),
-                    answer: serde_json::to_string(settlement).unwrap_or_default(),
-                }]
-            }
             JournalRecord::Message { message, at } => {
                 self.at = *at;
                 vec![RunEvent::Message(MessageState {
@@ -293,42 +191,9 @@ impl Replay<'_> {
                     "the run moved to machine {machine_id}, world {world_id}"
                 ))]
             }
-            JournalRecord::ArtifactsProduced {
-                execution_id,
-                artifacts,
-                at,
-            } => {
-                self.at = *at;
-                vec![RunEvent::Log(format!(
-                    "execution {execution_id} produced {} files",
-                    artifacts.len()
-                ))]
-            }
             JournalRecord::Inference { stage, at, .. } => {
                 self.at = *at;
                 vec![RunEvent::Log(format!("a model call in stage {stage}"))]
-            }
-            // What changed the window, kept as the live lane keeps it, so a
-            // converted run reads its context changes the way it always did.
-            JournalRecord::ContextTransaction {
-                revision_before,
-                revision_after,
-                cause,
-                regions,
-                execution_id,
-                at,
-            } => {
-                self.at = *at;
-                leviath_runtime::runfile::journal_events(
-                    &leviath_runtime::runfile::record::RunRecord::ContextTransaction {
-                        revision_before: revision_before.clone(),
-                        revision_after: revision_after.clone(),
-                        cause: *cause,
-                        regions: regions.clone(),
-                        execution_id: execution_id.clone(),
-                        at: *at,
-                    },
-                )
             }
             JournalRecord::ContextChange {
                 region,
@@ -352,6 +217,163 @@ impl Replay<'_> {
             // A change of state carries no event; `record` reads it.
             _ => Vec::new(),
         }
+    }
+}
+
+/// A record of a kind the running world still sends, as the world's own
+/// record of it, and when it was written.
+fn shared(r: &JournalRecord) -> Option<(RunRecord, i64)> {
+    Some(match r.clone() {
+        JournalRecord::InferenceAttempt(a) => {
+            let at = a.at;
+            (RunRecord::InferenceAttempt(Box::new(a)), at)
+        }
+        JournalRecord::InferenceFailover(f) => {
+            let at = f.at;
+            (RunRecord::InferenceFailover(f), at)
+        }
+        JournalRecord::InferenceUsage {
+            kind,
+            stage,
+            iteration,
+            provider,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            cache_write_tokens,
+            cost_usd,
+            cost_reported_by_provider,
+            at,
+        } => (
+            RunRecord::InferenceUsage {
+                kind,
+                stage,
+                iteration,
+                provider,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                cache_write_tokens,
+                cost_usd,
+                cost_reported_by_provider,
+                at,
+            },
+            at,
+        ),
+        JournalRecord::ToolBatch {
+            calls,
+            at,
+            stage_index,
+            iteration,
+            visit_id,
+            requested_by,
+            response,
+        } => (
+            RunRecord::ToolBatch {
+                calls,
+                at,
+                stage_index,
+                iteration,
+                visit_id,
+                requested_by,
+                response,
+            },
+            at,
+        ),
+        JournalRecord::ToolCallDone {
+            iteration,
+            call_id,
+            execution_id,
+            result,
+            outcome,
+            at,
+        } => (
+            RunRecord::ToolCallDone {
+                iteration,
+                call_id,
+                execution_id,
+                result,
+                outcome,
+                at,
+            },
+            at,
+        ),
+        JournalRecord::ArtifactsProduced {
+            execution_id,
+            artifacts,
+            at,
+        } => (
+            RunRecord::ArtifactsProduced {
+                execution_id,
+                artifacts,
+                at,
+            },
+            at,
+        ),
+        JournalRecord::Interaction {
+            request_id,
+            kind,
+            tool,
+            prompt,
+            stage,
+            settlement,
+            asked_at,
+            at,
+        } => (
+            RunRecord::Interaction {
+                request_id,
+                kind,
+                tool,
+                prompt,
+                stage,
+                settlement,
+                asked_at,
+                at,
+            },
+            at,
+        ),
+        JournalRecord::ContextTransaction {
+            revision_before,
+            revision_after,
+            cause,
+            regions,
+            execution_id,
+            at,
+        } => (
+            RunRecord::ContextTransaction {
+                revision_before,
+                revision_after,
+                cause,
+                regions,
+                execution_id,
+                at,
+            },
+            at,
+        ),
+        _ => return None,
+    })
+}
+
+/// What the log says of a model call's bill, or a move between models, that
+/// names a model no run file can: the world keeps no event for either.
+fn dropped(r: &JournalRecord) -> Option<String> {
+    match r {
+        JournalRecord::InferenceUsage {
+            kind,
+            provider,
+            model,
+            ..
+        } => Some(format!(
+            "a {} call to {provider:?}/{model:?}, which are not valid names",
+            kind.label()
+        )),
+        JournalRecord::InferenceFailover(f) => Some(format!(
+            "failed over from {}/{} to {}/{}: {}",
+            f.from_provider, f.from_model, f.to_provider, f.to_model, f.reason
+        )),
+        _ => None,
     }
 }
 
@@ -382,7 +404,7 @@ pub(crate) fn build(
         context,
         state: start.clone(),
         deltas: Vec::new(),
-        attempt: None,
+        answered: Answered::default(),
         at: old.header.started_at,
         seeded: false,
     };

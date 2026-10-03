@@ -9,9 +9,9 @@
 //! A run file keeps every model call whole, as an attempt event: how it
 //! ended, how long it took and waited, the digest of what was sent, and the
 //! request itself when it was captured. A move to another model follows the
-//! failed call it gave up on. A file written without attempt events (one
-//! converted from an older layout) is read from its answered calls and its
-//! moves alone, and the digest and timings it never kept read as zero.
+//! failed call it gave up on. A call a run file kept only as its bill (a run
+//! converted from a journal that recorded no attempts) is not listed, as the
+//! release that wrote that journal listed none.
 
 use std::ops::ControlFlow;
 
@@ -144,32 +144,6 @@ fn input(m: &ModelInputState) -> ModelInput {
     }
 }
 
-/// A call the file kept as its answer alone, as the journal's record of it.
-fn answered(
-    attempt: &str,
-    model: &ModelRef,
-    finish: &Option<String>,
-    stage: &str,
-    at: i64,
-) -> AttemptRecord {
-    let (provider, model) = names(model);
-    AttemptRecord {
-        id: attempt.to_string(),
-        stage: stage.to_string(),
-        attempt: 1,
-        provider,
-        model,
-        outcome: AttemptOutcome::Succeeded,
-        finish_reason: finish.clone().unwrap_or_default(),
-        stopped_for: None,
-        duration_ms: 0,
-        backoff_ms: 0,
-        digest: no_digest(),
-        model_input: None,
-        at,
-    }
-}
-
 /// Put a move to another model on the failed call it gave up on, the last one
 /// listed. A list holding no such call gets the move alone, standing for the
 /// call it gave up on.
@@ -219,30 +193,14 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<Attempt>, ServeError> {
     let Some(reader) = run_file::open(run_id)? else {
         return Ok(Vec::new());
     };
-    // Both readings are taken in one pass: the calls kept whole, and the calls
-    // read from their answers alone, for a file that kept none whole.
     let mut whole: Vec<Attempt> = Vec::new();
-    let mut answers: Vec<Attempt> = Vec::new();
-    let mut kept_whole = false;
     run_file::walk(run_id, &reader, &mut |step| {
         let stage = step.cursor.stage.to_string();
         let at = step.delta.at;
         for event in &step.delta.events {
             match event {
-                RunEvent::Attempt(a) => {
-                    kept_whole = true;
-                    whole.push(Attempt {
-                        record: kept(a, &stage, at),
-                        failover: None,
-                    });
-                }
-                RunEvent::Inference {
-                    attempt,
-                    model,
-                    finish_reason,
-                    ..
-                } => answers.push(Attempt {
-                    record: answered(attempt, model, finish_reason, &stage, at),
+                RunEvent::Attempt(a) => whole.push(Attempt {
+                    record: kept(a, &stage, at),
                     failover: None,
                 }),
                 RunEvent::Failover { from, to, reason } => {
@@ -259,18 +217,14 @@ pub(crate) fn read(run_id: &str) -> Result<Vec<Attempt>, ServeError> {
                         kind: String::new(),
                         at,
                     };
-                    follow(&mut whole, failover.clone());
-                    follow(&mut answers, failover);
+                    follow(&mut whole, failover);
                 }
                 _ => {}
             }
         }
         ControlFlow::Continue(())
     })?;
-    Ok(match kept_whole {
-        true => whole,
-        false => answers,
-    })
+    Ok(whole)
 }
 
 #[cfg(test)]

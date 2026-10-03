@@ -3244,6 +3244,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "cost_unknown": {
+            "description": "Whether its cost is not known though no call was counted as\nunpriced: a record from an earlier release that named no cost.",
+            "type": "boolean"
+          },
           "priced_usd": {
             "description": "Cost of the calls that could be priced, in US dollars.",
             "format": "double",
@@ -3276,7 +3280,8 @@
           "priced_usd",
           "reported_calls",
           "computed_calls",
-          "unpriced_calls"
+          "unpriced_calls",
+          "cost_unknown"
         ],
         "type": "object"
       },
@@ -4330,6 +4335,29 @@
         },
         "required": [
           "percent"
+        ],
+        "type": "object"
+      },
+      "Clock": {
+        "description": "Time spent working, not counting time spent waiting.",
+        "properties": {
+          "banked_secs": {
+            "description": "Seconds banked from earlier stretches of work.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "since": {
+            "description": "When the current stretch began, in unix seconds, while working.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "banked_secs"
         ],
         "type": "object"
       },
@@ -5529,6 +5557,73 @@
           "max_depth",
           "seed_commands",
           "capture_model_input"
+        ],
+        "type": "object"
+      },
+      "ListedAs": {
+        "description": "What an earlier release listed a run converted from it with, where this\nbuild would list the same run otherwise: each as the run's own record\nsaid it.\n\nWhat the run recorded about itself (its model, its stages, its blueprint,\nits tree's depth cap) is listed so for good. How it was doing (when it\nlast made progress, its working clock, whether it came to nothing) is\nlisted so while the run stands where it was converted, at step `seq`,\nand as this build lists any run once it moves on.",
+        "properties": {
+          "blueprint_digest": {
+            "description": "The revision of its blueprint it was listed under, where it named one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clock": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Clock"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The working clock it was listed with, where its record kept one."
+          },
+          "empty_output": {
+            "description": "Whether it was listed as having stopped with nothing to show for\nitself.",
+            "type": "boolean"
+          },
+          "last_progress_at": {
+            "description": "When it was listed as last making progress, where its record said.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_child_depth": {
+            "description": "The depth its tree of child runs was listed as capped at: the cap it\nrecorded once it started a child run, and none before that.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "model": {
+            "description": "The model it was listed under. `None` where its record named none: a\nrun refused before it started, or one from a release that did not\nrecord it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "num_stages": {
+            "description": "How many stages it was listed with: none for a run refused before it\nstarted.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seq": {
+            "description": "The step of its run file the run was converted at.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "num_stages",
+          "max_child_depth",
+          "seq",
+          "empty_output"
         ],
         "type": "object"
       },
@@ -8351,6 +8446,17 @@
         "$ref": "#/$defs/LaunchPolicy",
         "description": "What the run is trusted with."
       },
+      "listed": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ListedAs"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For a run converted from an earlier release, what that release listed\nit with where this build would list the same run otherwise. `None`\nfor every run this build resolved."
+      },
       "origin": {
         "$ref": "#/$defs/SpecOrigin",
         "description": "Where the graph came from."
@@ -10148,6 +10254,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "cost_unknown": {
+            "description": "Whether its cost is not known though no call was counted as\nunpriced: a record from an earlier release that named no cost.",
+            "type": "boolean"
+          },
           "priced_usd": {
             "description": "Cost of the calls that could be priced, in US dollars.",
             "format": "double",
@@ -10180,7 +10290,8 @@
           "priced_usd",
           "reported_calls",
           "computed_calls",
-          "unpriced_calls"
+          "unpriced_calls",
+          "cost_unknown"
         ],
         "type": "object"
       },

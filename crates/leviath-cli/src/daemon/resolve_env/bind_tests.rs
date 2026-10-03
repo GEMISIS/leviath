@@ -67,6 +67,7 @@ fn spec(workdir: &Path) -> RunSpec {
         delivery: Delivery::default(),
         env: Default::default(),
         created_at: 0,
+        listed: None,
     }
 }
 

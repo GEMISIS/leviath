@@ -303,9 +303,10 @@ fn clock_of(active: Option<leviath_core::run_meta::ActiveClock>) -> Clock {
     })
 }
 
-/// A spend from the ledger's figures: its tokens, its priced subtotal, and
-/// its calls as `[reported, computed, unpriced]`.
-fn spend_of(tokens: [usize; 4], priced_usd: f64, calls: [usize; 3]) -> Spend {
+/// A spend from the ledger's figures: its tokens, its priced subtotal, its
+/// calls as `[reported, computed, unpriced]`, and the cost it lists. A cost
+/// listed as unknown with no call unpriced is one its record never named.
+fn spend_of(tokens: [usize; 4], priced_usd: f64, calls: [usize; 3], cost: Option<f64>) -> Spend {
     Spend {
         prompt_tokens: tokens[0] as u64,
         completion_tokens: tokens[1] as u64,
@@ -315,6 +316,7 @@ fn spend_of(tokens: [usize; 4], priced_usd: f64, calls: [usize; 3]) -> Spend {
         reported_calls: calls[0] as u32,
         computed_calls: calls[1] as u32,
         unpriced_calls: calls[2] as u32,
+        cost_unknown: cost.is_none() && calls[2] == 0,
     }
 }
 
@@ -342,6 +344,7 @@ fn stage_record_of(r: &leviath_core::run_meta::StageRecord) -> Option<StageRecor
             ],
             r.cost_priced_usd,
             [r.reported_calls, r.computed_calls, r.unpriced_calls],
+            r.cost_usd,
         ),
         models: r
             .models
@@ -369,6 +372,7 @@ fn stage_record_of(r: &leviath_core::run_meta::StageRecord) -> Option<StageRecor
                     ],
                     v.cost_priced_usd,
                     [v.reported_calls, v.computed_calls, v.unpriced_calls],
+                    v.cost_usd,
                 ),
                 clock: clock_of(v.active),
             })
@@ -682,6 +686,7 @@ fn totals_of(t: &crate::persistence::TokenTotals) -> Totals {
             reported_calls: t.cost.reported_calls as u32,
             computed_calls: t.cost.computed_calls as u32,
             unpriced_calls: t.cost.unpriced_calls as u32,
+            cost_unknown: false,
         },
         tool_calls: t.tool_calls as u64,
     }

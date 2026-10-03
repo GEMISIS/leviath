@@ -144,8 +144,9 @@ pub fn graph(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<RunGraph, ConvertEr
 pub fn convert(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<ConvertReport, ConvertError> {
     let old = legacy::LegacyRun::read(run_dir, env)?;
     let mut report = report::Report::default();
-    let built = spec::build(&old, env.stages, &mut report)?;
+    let mut built = spec::build(&old, env.stages, &mut report)?;
     let (start, deltas, last) = history::build(&old, &built.spec, &mut report);
+    built.spec.listed = Some(spec::listed(old.meta(), last.seq));
     let bytes = write::encode(&built, &start, &deltas, &last);
     let written = write::install(run_dir, &bytes)?;
     let blueprint_name = old.meta().agent_name.clone();
