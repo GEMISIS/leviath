@@ -83,7 +83,10 @@ fn rich(run: &Run) {
     std::fs::write(agent.join("hooks/b.rhai"), "fn on_stage_enter(ctx) { ctx }").unwrap();
     run.remove("blueprint.leviath");
     let path = agent.join("agent.leviath").display().to_string();
-    run.meta(|m| m.agent_path.clone_from(&path));
+    run.meta(|m| {
+        m.agent_path.clone_from(&path);
+        m.num_stages = 3;
+    });
 }
 
 /// Set the run's status everywhere, dropping the journal's own status records.
@@ -111,6 +114,7 @@ fn a_rich_run_carries_its_scripts_inputs_and_stages() {
     });
     run.meta(|m| {
         m.current_stage = "second".into();
+        m.stage_index = 1;
         m.model = None;
         m.blueprint_digest = Some("not a digest".into());
         m.yolo_profile = Some("careful".into());

@@ -58,23 +58,22 @@ pub(crate) fn graph(old: &LegacyRun, report: &mut Report) -> (Source, RunGraph) 
     };
     let shown = blueprint_path.display().to_string();
     match read_blueprint(&old.blueprint.text, blueprint_path) {
-        Ok((blueprint, graph, notes, dropped)) => match crate::recorded::missing_stage(old, &graph)
-        {
-            None => {
-                for note in notes {
-                    report.note(note);
+        Ok((blueprint, graph, notes, dropped)) => {
+            match crate::recorded::not_what_it_ran(old, &graph) {
+                None => {
+                    for note in notes {
+                        report.note(note);
+                    }
+                    report.dropped.extend(dropped);
+                    (Source::Blueprint(Box::new(blueprint)), graph)
                 }
-                report.dropped.extend(dropped);
-                (Source::Blueprint(Box::new(blueprint)), graph)
-            }
-            Some(stage) => recorded(
-                old,
-                format!(
-                    "the blueprint at {shown} has no stage {stage:?}, which the run ran, so it is not the blueprint the run ran"
+                Some(why) => recorded(
+                    old,
+                    format!("the blueprint at {shown} is not the one the run ran: {why}"),
+                    report,
                 ),
-                report,
-            ),
-        },
+            }
+        }
         Err(e) => recorded(old, e.to_string(), report),
     }
 }
@@ -96,10 +95,10 @@ fn read_blueprint(
     Ok((blueprint, graph, notes, dropped))
 }
 
-/// The graph the run recorded, its blueprint unread for `why`.
+/// The graph the run recorded, the blueprint it ran unread for `why`.
 fn recorded(old: &LegacyRun, why: String, report: &mut Report) -> (Source, RunGraph) {
     report.note(format!(
-        "the run's blueprint could not be read, so its graph is what the run recorded and it never resumes: {why}"
+        "the blueprint the run ran could not be read, so its graph is what the run recorded and it never resumes: {why}"
     ));
     let graph = crate::recorded::graph(old, report);
     (Source::Recorded(why), graph)

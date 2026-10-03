@@ -178,6 +178,7 @@ pub(crate) fn from_meta(state: &mut RunState, meta: &RunMeta, graph: &RunGraph) 
         .filter_map(|c| RunId::new(c.as_str()).ok())
         .collect();
     state.title = meta.title.clone();
+    state.title_error = meta.title_error.clone();
     state.wait_reason = meta
         .waiting_on
         .as_ref()
@@ -258,11 +259,26 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
         )
     {
         report.note(crate::recorded::stopped(meta, why));
-        state.status = RunStatus::Error(format!(
-            "this run's blueprint could not be read when it was converted from an earlier release, so it cannot resume: {why}"
-        ));
-        state.phase = PipelinePhase::Done;
-        state.pending = None;
+        end(
+            &mut state,
+            format!(
+                "the blueprint this run ran could not be read when it was converted from an earlier release, so it cannot resume: {why}"
+            ),
+        );
+    }
+    // Nothing answers a question a 0.1.0 worker asked: the worker is gone,
+    // and 0.1.0 kept no record of the call that asked it to reopen it from.
+    if let Some(question) = &old.question
+        && state.status == RunStatus::Waiting
+    {
+        let why = format!(
+            "it was waiting on {question}, which a Leviath 0.1.0 worker asked; that worker is gone and 0.1.0 kept no record of the call that asked it, so the question cannot be reopened"
+        );
+        report.note(crate::recorded::stopped(meta, &why));
+        end(
+            &mut state,
+            format!("this run was converted from an earlier release and cannot resume: {why}"),
+        );
     }
     // An old record files the stage a run was cancelled in as failed, and a
     // paused run's stage as running; converted, it reads as its run does.
@@ -288,6 +304,13 @@ pub(crate) fn last(old: &LegacyRun, spec: &RunSpec, report: &mut Report) -> RunS
     }
     report_unrecorded(&state, report);
     state
+}
+
+/// End a run that cannot carry on, saying why.
+fn end(state: &mut RunState, why: String) {
+    state.status = RunStatus::Error(why);
+    state.phase = PipelinePhase::Done;
+    state.pending = None;
 }
 
 /// Name the fields no old run records at all.

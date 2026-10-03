@@ -66,7 +66,10 @@ fn two_stage_run() -> Run {
     let run = Run::fixture("finished");
     run.write("blueprint.leviath", TWO);
     run.journal(|r| r.retain(|r| !matches!(r, JournalRecord::StatusChanged { .. })));
-    run.meta(|m| m.status = leviath_core::run_meta::RunStatus::Cancelled);
+    run.meta(|m| {
+        m.status = leviath_core::run_meta::RunStatus::Cancelled;
+        m.num_stages = 2;
+    });
     run
 }
 

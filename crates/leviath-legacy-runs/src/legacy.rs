@@ -30,6 +30,9 @@ const FANOUT_FILE: &str = "fanout.json";
 /// The interaction point a paused run waited on.
 const INTERACTIONS_FILE: &str = "interactions.json";
 
+/// The question a Leviath 0.1.0 worker was waiting on a person to answer.
+const QUESTION_FILE: &str = "pending.json";
+
 /// The copy of the blueprint the run executed.
 pub(crate) const BLUEPRINT_SNAPSHOT_FILE: &str = "blueprint.leviath";
 
@@ -116,13 +119,16 @@ pub(crate) struct LegacyRun {
     pub(crate) stages: Vec<StageRecord>,
     pub(crate) fanout: Option<FanOutFile>,
     pub(crate) point: Option<PointFile>,
+    /// The question a Leviath 0.1.0 worker left in `pending.json`, as the
+    /// run's log names it, when there is one.
+    pub(crate) question: Option<String>,
     pub(crate) final_output: Option<String>,
     pub(crate) blueprint: BlueprintFile,
     /// Whether the run's record says it was not empty where a listing now
     /// would call it so: every earlier release showed what the record said.
     pub(crate) not_empty: bool,
-    /// The run's metadata as `meta.json` holds it: what every earlier
-    /// release listed it as.
+    /// The run as every earlier release listed it: its `meta.json` (see
+    /// [`listed`]).
     pub(crate) listed: RunMeta,
     /// The stored parts under `blobs/`, by digest, with their sizes. They
     /// stay where they are, and the run file names them.
@@ -133,9 +139,9 @@ pub(crate) struct LegacyRun {
 }
 
 impl LegacyRun {
-    /// The run's latest metadata.
+    /// The run's metadata, as every earlier release listed it.
     pub(crate) fn meta(&self) -> &RunMeta {
-        &self.folded.meta
+        &self.listed
     }
 
     /// The context as the journal first recorded it, which is what the run
@@ -180,10 +186,11 @@ impl LegacyRun {
             stages: json_file(&dir.join(STAGES_FILE))?.unwrap_or_default(),
             fanout: json_file(&dir.join(FANOUT_FILE))?,
             point: json_file(&dir.join(INTERACTIONS_FILE))?,
+            question: question(&dir.join(QUESTION_FILE)),
             final_output: std::fs::read_to_string(dir.join(leviath_core::FINAL_OUTPUT_FILE)).ok(),
             blueprint: blueprint(dir, &meta, env),
             not_empty,
-            listed: meta,
+            listed: listed(meta, &folded.meta, not_empty),
             dir: dir.to_path_buf(),
             header,
             records,
@@ -192,6 +199,48 @@ impl LegacyRun {
             stray_blobs,
         })
     }
+}
+
+/// The run as every earlier release listed it: what `meta.json` says, which
+/// was written after the journal's last record. A run that was not finished
+/// was brought back at start from its journal, which a crash can leave a
+/// step ahead of `meta.json`, so its stage, iteration and totals are the
+/// journal's. A run whose record says it was not empty keeps saying so.
+fn listed(mut meta: RunMeta, journal: &RunMeta, not_empty: bool) -> RunMeta {
+    meta.flags.no_output_tools |= not_empty;
+    if matches!(
+        meta.status,
+        RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
+    ) {
+        return meta;
+    }
+    meta.current_stage.clone_from(&journal.current_stage);
+    meta.stage_index = journal.stage_index;
+    meta.iteration = journal.iteration;
+    meta.prompt_tokens = journal.prompt_tokens;
+    meta.completion_tokens = journal.completion_tokens;
+    meta.cached_tokens = journal.cached_tokens;
+    meta.cache_write_tokens = journal.cache_write_tokens;
+    meta.tool_calls = journal.tool_calls;
+    meta.cost_usd = journal.cost_usd;
+    meta.cost_priced_usd = journal.cost_priced_usd;
+    meta.cost_is_exact = journal.cost_is_exact;
+    meta.unpriced_calls = journal.unpriced_calls;
+    meta
+}
+
+/// The question in a Leviath 0.1.0 `pending.json` at `path`, as a log names
+/// it: its prompt, or the file itself when it does not read.
+fn question(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Question {
+        prompt: String,
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(match serde_json::from_str::<Question>(&text) {
+        Ok(q) => format!("the question {:?}", q.prompt),
+        Err(_) => format!("a question in {QUESTION_FILE} that does not read"),
+    })
 }
 
 /// Whether `meta` says its run was not empty where a listing now would call
