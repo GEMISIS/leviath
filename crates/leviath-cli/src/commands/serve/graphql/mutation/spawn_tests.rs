@@ -151,7 +151,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
             assert!(!request.launch.seed_commands);
             assert!(request.launch.capture_model_input);
             let callback = request.delivery.callback.as_ref().expect("a callback");
-            assert_eq!(callback.url.as_str(), "https://example.com/hook");
+            assert_eq!(callback.url.as_str(), "https://1.1.1.1/hook");
             assert_eq!(callback.secret.as_ref().map(|s| s.expose()), Some("shh"));
             assert_eq!(request.delivery.metadata["ticket"], "42");
             record("coder-1");
@@ -206,7 +206,7 @@ async fn a_spawn_carries_every_field_it_was_given() {
                     "captureModelInput": true,
                 },
                 "delivery": {
-                    "callback": { "url": "https://example.com/hook", "secret": "shh" },
+                    "callback": { "url": "https://1.1.1.1/hook", "secret": "shh" },
                     "metadata": [{ "key": "ticket", "value": "42" }],
                 },
             } }),

@@ -437,7 +437,7 @@ fn an_unfinished_run_lists_a_blueprint_that_is_there() {
     let run = Run::fixture("finished");
     paused(&run);
     run.converted();
-    let kept = run.path("legacy/blueprint.leviath");
+    let kept = run.path("legacy").join("blueprint.leviath");
     assert!(kept.is_file());
     assert_eq!(listed(&run).agent_path, kept.to_string_lossy());
 

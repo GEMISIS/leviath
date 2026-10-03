@@ -131,7 +131,7 @@ async fn the_old_body_starts_a_run_and_answers_in_the_old_shape() {
         "no_seed_commands": true,
         "capture_model_input": true,
         "metadata": {"k": "v"},
-        "callback_url": "https://example.com/hook",
+        "callback_url": "https://1.1.1.1/hook",
         "callback_secret": "s3cret",
         "output_format": "markdown",
         "parts": [{"path": "brief.txt", "region": "query"}],
