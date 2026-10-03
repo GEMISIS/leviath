@@ -126,6 +126,9 @@ pub enum TransitionReason {
     Worker,
     /// Code picked it.
     Router,
+    /// The model was asked to pick and named no edge it could take, so the
+    /// run took the stage's first edge.
+    Fallback,
 }
 
 /// Something that happened during a step that the state does not keep.

@@ -732,6 +732,9 @@ pub(crate) enum TransitionReason {
     Gate,
     /// The model chose the edge.
     ModelChoice,
+    /// The model named no edge it could take, so the run took the stage's
+    /// first edge.
+    Fallback,
     /// Something outside the run forced it.
     Forced,
     /// A fan-out worker finished.
@@ -746,6 +749,7 @@ impl From<CoreReason> for TransitionReason {
             CoreReason::Condition => Self::Condition,
             CoreReason::Gate => Self::Gate,
             CoreReason::ModelChoice => Self::ModelChoice,
+            CoreReason::Fallback => Self::Fallback,
             CoreReason::Forced => Self::Forced,
             CoreReason::Worker => Self::Worker,
             CoreReason::Router => Self::Router,

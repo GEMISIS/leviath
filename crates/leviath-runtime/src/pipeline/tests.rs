@@ -16031,6 +16031,50 @@ fn collect_choice_emits_a_stage_transition_event() {
     );
 }
 
+/// A reply that names no edge, in a stage that may not end the run, moves the
+/// run along its first edge: the model chose nothing, and the reason says so.
+#[test]
+fn a_choice_that_names_no_edge_is_recorded_as_a_fallback() {
+    use crate::host::{WorldEvent, WorldEventSink};
+    for (reply, reason) in [
+        ("DONE", crate::state::TransitionReason::Fallback),
+        ("c", crate::state::TransitionReason::ModelChoice),
+    ] {
+        let (mut world, tx) = world_with_transition_results();
+        let (sink_tx, mut sink_rx) = tokio::sync::broadcast::channel(16);
+        world.insert_resource(WorldEventSink(sink_tx));
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+            stage_named("c", None, false, None),
+        ]);
+        let e = spawn_responding_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1"), si("m2")],
+            vec![plain_edge("b"), plain_edge("c")],
+        );
+        world.entity_mut(e).insert(run_metadata());
+        tx.send(InferenceOutcome {
+            latency: std::time::Duration::ZERO,
+            entity: e,
+            attempt_id: String::new(),
+            result: Ok(resp(reply)),
+            pricing: None,
+            attempt: None,
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        let ev = sink_rx.try_recv().expect("stage transition event");
+        let WorldEvent::StageTransition { reason: got, .. } = ev else {
+            panic!("a stage transition");
+        };
+        assert_eq!(got, Some(reason), "{reply}");
+    }
+}
+
 #[tokio::test]
 async fn dispatch_tools_announces_lane_calls() {
     use crate::host::{WorldEvent, WorldEventSink};

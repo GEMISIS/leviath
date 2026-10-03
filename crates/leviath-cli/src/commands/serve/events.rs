@@ -200,7 +200,8 @@ pub(crate) enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edge: Option<String>,
         /// Why that edge, as `GET /api/runs/{id}/graph` spells it:
-        /// `Condition`, `Gate`, `ModelChoice`, `Forced`, `Worker` or `Router`.
+        /// `Condition`, `Gate`, `ModelChoice`, `Fallback`, `Forced`, `Worker`
+        /// or `Router`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<leviath_runtime::state::TransitionReason>,
     },

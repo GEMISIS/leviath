@@ -18139,6 +18139,11 @@ enum TransitionReason {
 	GATE
 	"The model chose the edge."
 	MODEL_CHOICE
+	"""
+	The model named no edge it could take, so the run took the stage's
+	first edge.
+	"""
+	FALLBACK
 	"Something outside the run forced it."
 	FORCED
 	"A fan-out worker finished."

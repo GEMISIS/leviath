@@ -1027,6 +1027,7 @@ impl Probe {
             TransitionReason::Condition,
             TransitionReason::Gate,
             TransitionReason::ModelChoice,
+            TransitionReason::Fallback,
             TransitionReason::Forced,
             TransitionReason::Worker,
             TransitionReason::Router,

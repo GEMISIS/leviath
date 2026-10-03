@@ -3754,6 +3754,11 @@
             "const": "Router",
             "description": "Code picked it.",
             "type": "string"
+          },
+          {
+            "const": "Fallback",
+            "description": "The model was asked to pick and named no edge it could take, so the\nrun took the stage's first edge.",
+            "type": "string"
           }
         ]
       },
@@ -10622,6 +10627,11 @@
           {
             "const": "Router",
             "description": "Code picked it.",
+            "type": "string"
+          },
+          {
+            "const": "Fallback",
+            "description": "The model was asked to pick and named no edge it could take, so the\nrun took the stage's first edge.",
             "type": "string"
           }
         ]

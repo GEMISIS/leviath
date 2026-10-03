@@ -75,12 +75,14 @@ pub(crate) use crate::test_graph::{TestRun, place_test_run, place_test_task};
 pub(crate) use spawn::DEFAULT_CONTEXT_WINDOW_TOKENS;
 pub use spawn::ResolvedStage;
 mod transition_choice;
+#[cfg(test)]
+pub(crate) use transition_choice::build_transition_prompt;
+#[cfg(test)]
+pub(crate) use transition_choice::match_transition_choice;
 pub(crate) use transition_choice::{
     AwaitingTransitionResponse, TransitionResults, collect_transition_choice,
     dispatch_transition_choice,
 };
-#[cfg(test)]
-pub(crate) use transition_choice::{build_transition_prompt, match_transition_choice};
 mod tool_stages;
 pub(crate) use tool_stages::{
     poll_dynamic_tool_refresh, refresh_advertised_tools, rescan_before_dispatch, sync_tool_stages,

@@ -62,7 +62,18 @@ pub(crate) fn build_transition_prompt(stage: &StageDef, edges: &[EdgeDef]) -> St
     p
 }
 
+/// [`route_choice`] without the reason.
+#[cfg(test)]
+pub(crate) fn match_transition_choice(
+    choice: &str,
+    edges: &[EdgeDef],
+    allow_complete: bool,
+) -> Option<String> {
+    route_choice(choice, edges, allow_complete).map(|(to, _)| to)
+}
+
 /// Match an LLM transition response to one of the choosable edges' target stages,
+/// with why the run goes there,
 /// or `None` if the stage may complete and the LLM chose to end here.
 ///
 /// Models are asked to answer with only the target stage name (or `DONE`), but
@@ -72,12 +83,13 @@ pub(crate) fn build_transition_prompt(stage: &StageDef, edges: &[EdgeDef]) -> St
 /// substring-scanning the whole response, where a stage name mentioned in
 /// passing ("the implementation", "the approved plan") would hijack the routing.
 /// When nothing matches, a stage that may complete ends the run; otherwise the
-/// run advances along the first declared edge.
-pub(crate) fn match_transition_choice(
+/// run advances along the first declared edge, as a fallback: the model chose
+/// nothing it could take.
+pub(crate) fn route_choice(
     choice: &str,
     edges: &[EdgeDef],
     allow_complete: bool,
-) -> Option<String> {
+) -> Option<(String, crate::state::TransitionReason)> {
     let lines: Vec<&str> = choice
         .lines()
         .map(str::trim)
@@ -110,7 +122,10 @@ pub(crate) fn match_transition_choice(
                 .iter()
                 .find(|e| word.eq_ignore_ascii_case(e.to.as_str()))
             {
-                return Some(edge.to.to_string());
+                return Some((
+                    edge.to.to_string(),
+                    crate::state::TransitionReason::ModelChoice,
+                ));
             }
         }
     }
@@ -119,7 +134,12 @@ pub(crate) fn match_transition_choice(
     if allow_complete {
         None
     } else {
-        edges.first().map(|edge| edge.to.to_string())
+        edges.first().map(|edge| {
+            (
+                edge.to.to_string(),
+                crate::state::TransitionReason::Fallback,
+            )
+        })
     }
 }
 
@@ -510,8 +530,8 @@ pub(crate) fn collect_transition_choice(
         );
 
         let allow_complete = graph.stages[cursor.index].allow_complete;
-        match match_transition_choice(&choice, &resp.0, allow_complete) {
-            Some(target) => {
+        match route_choice(&choice, &resp.0, allow_complete) {
+            Some((target, picked)) => {
                 let idx = spec_view::stage_index(graph, &target).unwrap_or(0);
                 // The chosen edge (absent when the matched target has no explicit
                 // edge, e.g. a fallback - then Direct, ungated).
@@ -520,7 +540,7 @@ pub(crate) fn collect_transition_choice(
                 // The edge's gate is checked BEFORE its transform runs, so a
                 // held stage keeps the context it still needs.
                 let stage = &graph.stages[cursor.index];
-                let mut reason = crate::state::TransitionReason::ModelChoice;
+                let mut reason = picked;
                 match gate_blocks(
                     edge.and_then(|e| e.gate.as_ref()),
                     stage,
