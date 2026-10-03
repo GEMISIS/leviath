@@ -219,6 +219,15 @@ pub(crate) fn context_history(run_id: &str) -> Vec<leviath_runtime::runfile::his
     run_history(run_id).points
 }
 
+/// [`context_history`] a point at a time, each handed to `each` as it is
+/// reached rather than all held at once. False when the run has no history.
+pub(crate) fn each_context_point(
+    run_id: &str,
+    each: impl FnMut(leviath_runtime::runfile::history::RunPoint),
+) -> bool {
+    run_file::walk_history_in(&run_dir(run_id), each).is_some()
+}
+
 /// A run's history: its window over time (see [`context_history`]) and the
 /// edges it took, read off its run file. Empty when there is none.
 pub(crate) fn run_history(run_id: &str) -> RunHistory {

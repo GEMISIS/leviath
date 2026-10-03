@@ -127,12 +127,31 @@ fn point(spec: &RunSpec, state: &RunState, at: i64) -> RunPoint {
 /// directory has no run file this build reads, or one of its steps does not
 /// decode.
 pub(crate) fn history_in(dir: &Path) -> Option<RunHistory> {
+    let mut points = Vec::new();
+    let transitions = walk_history_in(dir, |point| points.push(point))?;
+    Some(RunHistory {
+        points,
+        transitions: Some(transitions),
+    })
+}
+
+/// [`history_in`] a point at a time: each is handed to `each` as the walk
+/// reaches it, and is the caller's to keep or drop. A reader that shows the
+/// points one by one then never holds them all, and every point holds the
+/// whole window, which on a long run is hundreds of copies of the largest
+/// thing it records. Returns the edges the run took; `None`, with nothing
+/// handed over, where [`history_in`] answers `None`.
+pub(crate) fn walk_history_in(
+    dir: &Path,
+    mut each: impl FnMut(RunPoint),
+) -> Option<Vec<(String, String)>> {
     let reader = open_in(dir).ok()?;
     let spec = reader.spec();
     let mut state = reader.state_at(0).ok()?;
-    let mut points = vec![point(spec, &state, spec.created_at)];
+    let deltas = reader.deltas(state.seq + 1, reader.last_seq()).ok()?;
+    each(point(spec, &state, spec.created_at));
     let mut transitions = Vec::new();
-    for delta in reader.deltas(state.seq + 1, reader.last_seq()).ok()? {
+    for delta in deltas {
         delta.apply(&mut state);
         for taken in delta.transitions() {
             transitions.push((taken.from.to_string(), taken.to.to_string()));
@@ -142,13 +161,10 @@ pub(crate) fn history_in(dir: &Path) -> Option<RunHistory> {
             .iter()
             .any(|c| matches!(c, Change::Context(_)))
         {
-            points.push(point(spec, &state, delta.at));
+            each(point(spec, &state, delta.at));
         }
     }
-    Some(RunHistory {
-        points,
-        transitions: Some(transitions),
-    })
+    Some(transitions)
 }
 
 #[cfg(test)]

@@ -266,42 +266,63 @@ pub fn region_kind_str(kind: &RegionKind) -> &'static str {
 /// Build the full context snapshot from a window. Pure over the
 /// window - no engine/entity. (Ported from the CLI's `build_context_snapshot`.)
 pub(crate) fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> ContextSnapshot {
-    let regions = window
-        .regions
-        .iter()
-        .map(|r| RegionSnapshot {
-            name: r.name.clone(),
-            kind: region_kind_str(&r.kind).to_string(),
-            description: r.description.clone(),
-            current_tokens: r.current_tokens,
-            max_tokens: r.max_tokens,
-            entries: r
-                .content
-                .iter()
-                .enumerate()
-                .map(|(i, e)| RegionEntrySnapshot {
-                    content: e.content.clone(),
-                    tokens: e.tokens,
-                    kind: e.kind.clone(),
-                    metadata: e.metadata.clone(),
-                    key: e.key.clone(),
-                    // `None` when the region has no taint tracking (it is off,
-                    // or this is an older region): `Public`, which is what a
-                    // restore assumed anyway.
-                    taint: r
-                        .taint
-                        .as_ref()
-                        .and_then(|t| t.entry_taint(i))
-                        .unwrap_or_default(),
-                    reasoning: e.reasoning.clone(),
-                })
-                .collect(),
+    snapshot_of(
+        window.regions.iter().cloned(),
+        (window.current_tokens, window.max_tokens),
+        stage_name,
+    )
+}
+
+/// [`build_context_snapshot`] of a window nothing else will read, which hands
+/// each entry's text over rather than copying it. A run's history builds one
+/// for every step that changed its window, and each holds the whole window.
+pub(crate) fn context_snapshot_of(window: ContextWindow, stage_name: &str) -> ContextSnapshot {
+    let tokens = (window.current_tokens, window.max_tokens);
+    snapshot_of(window.regions.into_iter(), tokens, stage_name)
+}
+
+/// The snapshot of `regions`, a window holding `(total, max)` tokens.
+fn snapshot_of(
+    regions: impl Iterator<Item = leviath_core::Region>,
+    (total_tokens, max_tokens): (usize, usize),
+    stage_name: &str,
+) -> ContextSnapshot {
+    let regions = regions
+        .map(|r| {
+            // `None` when the region has no taint tracking (it is off, or this
+            // is an older region): `Public`, which is what a restore assumed
+            // anyway.
+            let taint = r.taint;
+            RegionSnapshot {
+                name: r.name,
+                kind: region_kind_str(&r.kind).to_string(),
+                description: r.description,
+                current_tokens: r.current_tokens,
+                max_tokens: r.max_tokens,
+                entries: r
+                    .content
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, e)| RegionEntrySnapshot {
+                        content: e.content,
+                        tokens: e.tokens,
+                        kind: e.kind,
+                        metadata: e.metadata,
+                        key: e.key,
+                        taint: taint
+                            .as_ref()
+                            .and_then(|t| t.entry_taint(i))
+                            .unwrap_or_default(),
+                        reasoning: e.reasoning,
+                    })
+                    .collect(),
+            }
         })
         .collect();
     ContextSnapshot {
         stage_name: stage_name.to_string(),
-        total_tokens: window.current_tokens,
-        max_tokens: window.max_tokens,
+        total_tokens,
+        max_tokens,
         regions,
     }
 }
