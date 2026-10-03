@@ -282,11 +282,11 @@ across stages, and per-stage models with different prices.
 | `--json` | Print the ledger as JSON |
 
 ```
-STAGE                STATUS         PROMPT     OUTPUT   CACHE RD   CACHE WR        COST
-ingest               complete        16832       2249          0          0    ~$0.0891
-report               complete        37644        493          0          0    ~$0.1932
-summary              complete       252848        648          0          0    ~$1.2812
-TOTAL                               307324       3390          0          0    ~$1.5635
+STAGE                STATUS            PROMPT     OUTPUT   CACHE RD   CACHE WR        COST
+ingest               complete           16832       2249          0          0    ~$0.0891
+report               complete           37644        493          0          0    ~$0.1932
+summary              complete          252848        648          0          0    ~$1.2812
+TOTAL                                  307324       3390          0          0    ~$1.5635
 ```
 
 `CACHE WR` is the write half of a cache decision. Without it a stage showing no reads might be

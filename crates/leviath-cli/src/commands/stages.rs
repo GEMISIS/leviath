@@ -62,18 +62,28 @@ fn cost_cell(cost_usd: Option<f64>, is_exact: bool) -> String {
     }
 }
 
+/// A stage's status spelled as `lev stages --json` and the API spell it
+/// (`waiting_input`), which also sets the width of the STATUS column: the
+/// longest of them, so every row lines up.
+fn status_label(status: &leviath_core::run_meta::StageRunStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 /// The table `lev stages` prints. Split out so its shape is assertable without
 /// capturing stdout.
 fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
     println!(
-        "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
+        "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11}",
         "STAGE", "STATUS", "PROMPT", "OUTPUT", "CACHE RD", "CACHE WR", "COST"
     );
     for stage in stages {
         println!(
-            "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
+            "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11}",
             leviath_core::truncate_chars(&stage.name, 20),
-            format!("{:?}", stage.status).to_lowercase(),
+            status_label(&stage.status),
             stage.prompt_tokens,
             stage.completion_tokens,
             stage.cached_tokens,
@@ -83,7 +93,7 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
         if with_visits {
             for (n, visit) in stage.visits.iter().enumerate() {
                 println!(
-                    "  {:<18} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
+                    "  {:<18} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11}",
                     format!("visit {}", n + 1),
                     match visit.left_at {
                         Some(_) => "left",
@@ -115,7 +125,7 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
             regions.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
             for (name, tokens) in regions {
                 println!(
-                    "  {:<18} {:>42}",
+                    "  {:<18} {:>45}",
                     leviath_core::truncate_chars(name, 18),
                     tokens
                 );
@@ -135,7 +145,7 @@ fn print_ledger(stages: &[StageRecord], with_regions: bool, with_visits: bool) {
         .try_fold(0.0, |acc, s| Some(acc + s.cost_usd?));
     let total_exact = stages.iter().all(|s| s.cost_is_exact);
     println!(
-        "{:<20} {:<10} {:>10} {:>10} {:>10} {:>10} {:>11}",
+        "{:<20} {:<13} {:>10} {:>10} {:>10} {:>10} {:>11}",
         "TOTAL",
         "",
         prompt,
@@ -164,6 +174,28 @@ mod tests {
         r.cache_write_tokens = 7;
         r.status = StageRunStatus::Complete;
         r
+    }
+
+    /// Every status fits the 13-character STATUS column, spelled as `--json`
+    /// spells it, so no row is pushed out of line (`waiting_input` was printed
+    /// as `waitinginput` in a 10-character column).
+    #[test]
+    fn every_status_fits_its_column() {
+        use StageRunStatus::*;
+        for status in [
+            Pending,
+            Active,
+            WaitingInput,
+            Paused,
+            Complete,
+            Error,
+            Cancelled,
+            Skipped,
+        ] {
+            let label = status_label(&status);
+            assert!(!label.is_empty() && label.len() <= 13, "{label}");
+        }
+        assert_eq!(status_label(&WaitingInput), "waiting_input");
     }
 
     #[test]
