@@ -30,6 +30,7 @@ use leviath_runtime::spec::summary::SpawnSummary;
 
 use super::super::types::AppState;
 use super::error::ServeError;
+use super::held;
 
 /// What the daemon, or this server, made of a request.
 #[derive(Debug)]
@@ -268,25 +269,34 @@ pub(crate) async fn send_message(
     }
 }
 
+/// What an answer to a question nothing has open is told: it was answered
+/// already, or it expired.
+const NOT_OPEN: &str = "No such open interaction: it was answered already, or it expired";
+
 /// Answer a pending ask.
 ///
 /// The first answer wins: the daemon takes the request out of its pending map
 /// under a lock, so a second answer to the same request finds nothing and is
 /// told so. Two people clicking the same prompt is the ordinary case, not an
-/// error worth hiding.
+/// error worth hiding. A question a held run asked is refused as held, with
+/// what to put back, rather than told it is not there.
 pub(crate) async fn answer_interaction(
     state: &AppState,
     response: leviath_core::interaction::InteractionResponse,
 ) -> Result<(), ServeError> {
+    let request_id = response.request_id.clone();
     let reply = state
         .control
         .request(&ControlRequest::AnswerInteraction { response })
         .await;
     match reply {
         Ok(ControlResponse::Ok { ok: true }) => Ok(()),
-        Ok(ControlResponse::Ok { ok: false }) => Err(ServeError::NotFound(
-            "No such open interaction: it was answered already, or it expired".to_string(),
-        )),
+        Ok(ControlResponse::Ok { ok: false }) => Err(held::or_held(
+            &state.control,
+            |h| h.question.id == request_id,
+            ServeError::NotFound(NOT_OPEN.to_string()),
+        )
+        .await),
         // An answer the question cannot take, such as text for a choice or
         // nothing at all. The question stays open.
         Ok(ControlResponse::Error { message }) => Err(ServeError::BadRequest(message)),
@@ -310,6 +320,46 @@ pub(crate) async fn open_interactions(
         Ok(ControlResponse::Interactions { interactions }) => Ok(interactions),
         Ok(other) => Err(ServeError::unexpected_reply(&other)),
         Err(e) => Err(ServeError::from_daemon_io(&e)),
+    }
+}
+
+/// The ask open under `request_id`, read from the daemon.
+///
+/// Nothing open under it is `NotFound`: answered already, or expired. A
+/// question a held run asked is `Held` instead, saying what to put back.
+pub(crate) async fn open_request(
+    state: &AppState,
+    request_id: &str,
+) -> Result<leviath_core::interaction::InteractionRequest, ServeError> {
+    let open = open_interactions(state).await?;
+    match open.into_iter().find(|(_, ask)| ask.id == request_id) {
+        Some((_, ask)) => Ok(ask),
+        None => Err(held::or_held(
+            &state.control,
+            |h| h.question.id == request_id,
+            ServeError::NotFound(NOT_OPEN.to_string()),
+        )
+        .await),
+    }
+}
+
+/// The ask run `run_id` is parked on, read from the daemon.
+///
+/// None is `NotFound`. A run the daemon holds off this machine with a question
+/// open is `Held`: nothing can answer that question until the run is back.
+pub(crate) async fn run_interaction(
+    state: &AppState,
+    run_id: &str,
+) -> Result<leviath_core::interaction::InteractionRequest, ServeError> {
+    let open = open_interactions(state).await?;
+    match open.into_iter().find(|(id, _)| id == run_id) {
+        Some((_, ask)) => Ok(ask),
+        None => Err(held::or_held(
+            &state.control,
+            |h| h.run_id == run_id,
+            ServeError::NotFound("No pending interaction".to_string()),
+        )
+        .await),
     }
 }
 

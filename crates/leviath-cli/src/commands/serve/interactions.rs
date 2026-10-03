@@ -20,27 +20,23 @@ struct ShownRequest<'a> {
 }
 
 /// `GET /api/runs/{id}/interaction`: the open interaction the daemon has for
-/// this agent, if any (from the in-memory interaction hub).
+/// this agent, if any (from the in-memory interaction hub). A run the daemon
+/// holds off this machine is a 409 saying so: its question cannot be
+/// answered until the run is back.
 pub(super) async fn get_interaction(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let open = super::core::spawn::open_interactions(&state)
+    let request = super::core::spawn::run_interaction(&state, &id)
         .await
         .map_err(|e| super::core::error::as_api_error(&e))?;
-    match open.into_iter().find(|(agent_id, _)| agent_id == &id) {
-        Some((_, request)) => Ok(Json(
-            serde_json::to_value(ShownRequest {
-                request: &request,
-                answer_options: leviath_core::interaction::answer_options(&request),
-            })
-            .unwrap_or(serde_json::Value::Null),
-        )),
-        None => Err(err(
-            StatusCode::NOT_FOUND,
-            "No pending interaction".to_string(),
-        )),
-    }
+    Ok(Json(
+        serde_json::to_value(ShownRequest {
+            request: &request,
+            answer_options: leviath_core::interaction::answer_options(&request),
+        })
+        .unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 /// Read an approval scope off the wire.
@@ -131,16 +127,10 @@ async fn option_response(
                 .to_string(),
         ));
     }
-    let open = super::core::spawn::open_interactions(state)
+    let request = super::core::spawn::open_request(state, &body.request_id)
         .await
         .map_err(|e| super::core::error::as_api_error(&e))?;
-    let Some((_, request)) = open.iter().find(|(_, r)| r.id == body.request_id) else {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "No such open interaction: it was answered already, or it expired".to_string(),
-        ));
-    };
-    leviath_core::interaction::answer_with_option(request, word, body.feedback.as_deref())
+    leviath_core::interaction::answer_with_option(&request, word, body.feedback.as_deref())
         .map_err(|why| err(StatusCode::BAD_REQUEST, why))
 }
 
@@ -226,6 +216,10 @@ mod tests {
         Router::new()
             .route(
                 "/api/runs/{id}/interaction",
+                get(get_interaction).post(submit_interaction),
+            )
+            .route(
+                "/api/agents/{id}/interaction",
                 get(get_interaction).post(submit_interaction),
             )
             .route("/api/runs/{id}/message", post(send_message))
@@ -524,6 +518,8 @@ mod tests {
                 ControlRequest::ListInteractions => ControlResponse::Interactions {
                     interactions: vec![("a".to_string(), open.clone())],
                 },
+                // Asked on a miss, for whether a held run asked it: none did.
+                ControlRequest::List => crate::commands::serve::core::held::listing(Vec::new()),
                 other => {
                     let seen = serde_json::to_value(&other).unwrap()["response"].clone();
                     *sink.lock().unwrap() = Some(seen);
@@ -948,5 +944,96 @@ mod tests {
             .await,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    // ─── a held run's question ───────────────────────────────────────────────
+
+    /// A daemon holding run `held-1` off this machine, with its question
+    /// `held-1-ask-1` on its file: nothing is open, and an answer finds
+    /// nothing.
+    fn holding_daemon() -> (
+        ControlClient,
+        tempfile::TempDir,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use crate::commands::serve::core::held::{listing, seed_held};
+        let reply = listing(vec![seed_held("held-1", "held-1-ask-1")]);
+        crate::commands::serve::testutil::busy_daemon(move |req| match req {
+            leviath_runtime::control_socket::ControlRequest::List => reply.clone(),
+            leviath_runtime::control_socket::ControlRequest::ListInteractions => {
+                ControlResponse::Interactions {
+                    interactions: Vec::new(),
+                }
+            }
+            _ => ControlResponse::Ok { ok: false },
+        })
+    }
+
+    /// The status and body text `method uri` answers with.
+    async fn answered(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: &'static str,
+    ) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// Reading or answering a held run's question, on the routes and on their
+    /// `/api/agents` twins, is a 409 saying the run is held and what to put
+    /// back, not a 404 saying there is no such question.
+    #[tokio::test]
+    async fn a_held_runs_question_is_a_409_saying_why() {
+        crate::runstate::with_isolated_runs_dir_async("rest-held", |_d| async {
+            for base in ["/api/runs", "/api/agents"] {
+                for (method, body) in [
+                    ("GET", ""),
+                    ("POST", r#"{"request_id":"held-1-ask-1","value":"blue"}"#),
+                    ("POST", r#"{"request_id":"held-1-ask-1","option":"red"}"#),
+                ] {
+                    let (control, _dir, _srv) = holding_daemon();
+                    let uri = format!("{base}/held-1/interaction");
+                    let (status, text) = answered(app_with(control), method, &uri, body).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::CONFLICT,
+                        "{method} {uri} {body}: {text}"
+                    );
+                    let error = serde_json::from_str::<serde_json::Value>(&text).unwrap()["error"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                    assert!(error.contains("run 'held-1'"), "{error}");
+                    assert!(error.contains("configure 'openai' again"), "{error}");
+                    assert!(error.contains("new id"), "{error}");
+                }
+            }
+            // Any other run, and any other question, is still not found.
+            let (control, _dir, _srv) = holding_daemon();
+            let (status, _) =
+                answered(app_with(control), "GET", "/api/runs/other/interaction", "").await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            let (control, _dir, _srv) = holding_daemon();
+            let (status, _) = answered(
+                app_with(control),
+                "POST",
+                "/api/runs/held-1/interaction",
+                r#"{"request_id":"other","value":"blue"}"#,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        })
+        .await;
     }
 }

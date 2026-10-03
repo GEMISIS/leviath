@@ -1669,11 +1669,14 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command."
+        "description": "The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command. A run the daemon holds off this machine (its provider was taken away, say) is a 409 whose `error` says what to put back: its question cannot be answered until the run is back, and then reopens under a new id."
       },
       "post": {
         "tags": [
@@ -1699,6 +1702,9 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
           "413": {
             "$ref": "#/components/responses/Error"
           },
@@ -1706,7 +1712,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Body: `request_id` (the open request's id) plus one of `option`, `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). `option` is the `id` of one of the request's `answer_options` (`allow`, `allow-stage`, `allow-run`, `deny`, `yes`, `no`, or a choice's own word); a word the request does not offer is a 400 listing the ones it does. A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`.",
+        "description": "Body: `request_id` (the open request's id) plus one of `option`, `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). `option` is the `id` of one of the request's `answer_options` (`allow`, `allow-stage`, `allow-run`, `deny`, `yes`, `no`, or a choice's own word); a word the request does not offer is a 400 listing the ones it does. A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. A question asked by a run the daemon holds off this machine is a 409 whose `error` says what to put back: nothing can answer it until the run is back, and then it reopens under a new id. Announced as `interaction.feedback`.",
         "requestBody": {
           "required": true,
           "content": {
@@ -5241,12 +5247,15 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
           "503": {
             "$ref": "#/components/responses/Overloaded"
           }
         },
         "deprecated": true,
-        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/interaction`. The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command."
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/interaction`. The request carries `answer_options`: each option's `id` (the word that answers with it), `label`, `number` as `lev interactions` lists it, and `answer`, the `lev respond` command. A run the daemon holds off this machine (its provider was taken away, say) is a 409 whose `error` says what to put back: its question cannot be answered until the run is back, and then reopens under a new id."
       },
       "post": {
         "tags": [
@@ -5272,6 +5281,9 @@
           "408": {
             "$ref": "#/components/responses/Timeout"
           },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
           "413": {
             "$ref": "#/components/responses/Error"
           },
@@ -5279,7 +5291,7 @@
             "$ref": "#/components/responses/Overloaded"
           }
         },
-        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/interaction`. Body: `request_id` (the open request's id) plus one of `option`, `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). `option` is the `id` of one of the request's `answer_options` (`allow`, `allow-stage`, `allow-run`, `deny`, `yes`, `no`, or a choice's own word); a word the request does not offer is a 400 listing the ones it does. A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. Announced as `interaction.feedback`.",
+        "description": "Kept for older clients and will be removed; use `POST /api/runs/{id}/interaction`. Body: `request_id` (the open request's id) plus one of `option`, `value`, `choice_index`, or `approved` with an optional `scope` (`once`, `stage`, `session`). `option` is the `id` of one of the request's `answer_options` (`allow`, `allow-stage`, `allow-run`, `deny`, `yes`, `no`, or a choice's own word); a word the request does not offer is a 400 listing the ones it does. A deny (`approved: false`) may carry `feedback`, a string the model reads inside the tool result for the refused call: `[denied] User declined tool call '<tool>'. Feedback: <text>`. `feedback` beside `approved: true` is a 400. 202 once the daemon holds the answer, 404 when nothing with that id is open. A question asked by a run the daemon holds off this machine is a 409 whose `error` says what to put back: nothing can answer it until the run is back, and then it reopens under a new id. Announced as `interaction.feedback`.",
         "requestBody": {
           "required": true,
           "content": {

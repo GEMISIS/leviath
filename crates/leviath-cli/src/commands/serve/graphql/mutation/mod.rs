@@ -235,7 +235,9 @@ impl RunMutation {
     ///
     /// The first answer wins. A second answer to the same request is not an
     /// error on the client's part: two people clicking one prompt is ordinary,
-    /// and it reads as `ALREADY_SETTLED` rather than as a failure.
+    /// and it reads as `ALREADY_SETTLED` rather than as a failure. A question
+    /// a held run asked (see `heldInteractions`) is an error coded `RUN_HELD`,
+    /// saying what to put back: it reopens under a new id once the run is back.
     async fn answer_interaction(
         &self,
         ctx: &Context<'_>,

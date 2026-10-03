@@ -12,6 +12,8 @@ use leviath_core::interaction::{
 };
 use leviath_runtime::control_socket::{ControlClient, ControlRequest, ControlResponse};
 
+use crate::commands::serve::core::held::{HeldQuestion, held_questions};
+
 /// Arguments for `lev msg`.
 #[derive(clap::Args, Debug, Clone)]
 pub struct MsgArgs {
@@ -539,42 +541,6 @@ async fn open_interactions(
     }
 }
 
-/// A question a run asked that the daemon holds off this machine. Nothing
-/// answers it while the run is held: once the machine can take the run back,
-/// the question reopens under a new id.
-pub(super) struct HeldQuestion {
-    run_id: String,
-    question: leviath_runtime::state::OpenInteraction,
-    remedy: String,
-}
-
-/// The questions open on the runs the daemon holds off this machine, read off
-/// each one's file. None when the daemon does not list its runs.
-async fn held_questions(client: &ControlClient) -> Vec<HeldQuestion> {
-    let runs = match client.request(&ControlRequest::List).await {
-        Ok(ControlResponse::List { runs, .. }) => runs,
-        _ => Vec::new(),
-    };
-    runs.into_iter()
-        .filter_map(|row| match row.wait_reason {
-            Some(leviath_core::run_meta::WaitReason::NeedsSetup { remedy, .. }) => {
-                Some((row.run_id, remedy))
-            }
-            _ => None,
-        })
-        .flat_map(|(run_id, remedy)| {
-            let open = crate::runstate::run_file::tail_in(&crate::runstate::run_dir(&run_id))
-                .map(|tail| tail.state.interactions)
-                .unwrap_or_default();
-            open.into_iter().map(move |question| HeldQuestion {
-                run_id: run_id.clone(),
-                question,
-                remedy: remedy.clone(),
-            })
-        })
-        .collect()
-}
-
 /// One held question as the listing shows it: what was asked, and why
 /// nothing can answer it yet.
 fn format_held(held: &HeldQuestion) -> String {
@@ -583,11 +549,7 @@ fn format_held(held: &HeldQuestion) -> String {
     for (i, option) in q.options.iter().enumerate() {
         s.push_str(&format!("\n    {}. {option}", i + 1));
     }
-    s.push_str(&format!(
-        "\n  held: this machine cannot take the run back as it stands, so nothing can answer \
-         this yet: {}\n  once the run is back, the question reopens under a new id",
-        held.remedy
-    ));
+    s.push_str(&format!("\n  held: {}", held.refusal()));
     s
 }
 
@@ -597,12 +559,7 @@ fn held_refusal(typed: &str, held: &[HeldQuestion]) -> Option<String> {
     let h = held
         .iter()
         .find(|h| !typed.is_empty() && h.question.id.starts_with(typed))?;
-    Some(format!(
-        "'{}' was asked by run '{}', which this machine cannot take back as it stands, so \
-         nothing can answer it yet: {}. Once the run is back, the question reopens under a new \
-         id: lev interactions",
-        h.question.id, h.run_id, h.remedy
-    ))
+    Some(format!("{}: lev interactions", h.refusal()))
 }
 
 /// `err`, or why `typed` cannot be answered when a held run asked it.

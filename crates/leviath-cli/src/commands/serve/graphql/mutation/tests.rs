@@ -956,6 +956,8 @@ async fn an_option_word_answers_with_that_option() {
             sink.lock().unwrap().push(response);
             ControlResponse::Ok { ok: true }
         }
+        // Asked on a miss, for whether a held run asked it: none did.
+        ControlRequest::List => crate::commands::serve::core::held::listing(Vec::new()),
         other => panic!("a listing or an answer, not {other:?}"),
     });
     let ask = |id: &str, answer: &str| {
@@ -1041,6 +1043,43 @@ async fn a_second_answer_reads_as_already_settled() {
     )
     .await;
     assert_eq!(code_of(&unreachable), "\"DAEMON_UNAVAILABLE\"");
+}
+
+/// Answering a question a held run asked is an error coded `RUN_HELD` saying
+/// what to put back, not `ALREADY_SETTLED`: nothing settled it, and it
+/// reopens under a new id once the run is back. Named by its option's word
+/// too.
+#[tokio::test]
+async fn answering_a_held_runs_question_is_run_held() {
+    use crate::commands::serve::core::held::{listing, seed_held};
+    use leviath_runtime::control_socket::ControlRequest;
+    crate::runstate::with_isolated_runs_dir_async("graphql-held-answer", |_d| async {
+        let reply = listing(vec![seed_held("held-1", "held-1-ask-1")]);
+        for answer in ["{ text: \"blue\" }", "{ option: { id: \"red\" } }"] {
+            let reply = reply.clone();
+            let (control, _socket, _srv) = busy_daemon(move |req| match req {
+                ControlRequest::List => reply.clone(),
+                ControlRequest::ListInteractions => ControlResponse::Interactions {
+                    interactions: Vec::new(),
+                },
+                _ => ControlResponse::Ok { ok: false },
+            });
+            let refused = mutate(
+                control,
+                &format!(
+                    "mutation {{ answerInteraction(request: {{ interactionId: \"held-1-ask-1\", \
+                     answer: {answer} }}) {{ outcome }} }}"
+                ),
+            )
+            .await;
+            assert_eq!(code_of(&refused), "\"RUN_HELD\"", "{answer}");
+            let message = &refused.errors[0].message;
+            assert!(message.contains("run 'held-1'"), "{message}");
+            assert!(message.contains("configure 'openai' again"), "{message}");
+            assert!(message.contains("new id"), "{message}");
+        }
+    })
+    .await;
 }
 
 /// A negative choice index is refused: the options are a zero-based list.

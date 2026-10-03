@@ -363,6 +363,12 @@ text or an edited document. `choice_index` is a multiple choice, zero-based. `ap
 optional `scope` (`once`, `stage` or `session`) for a tool approval or a confirm. It answers `202`
 once the daemon has it and `404` when nothing with that id is open.
 
+A run the daemon holds off the machine, because its provider was taken out of the config say, keeps
+the question it was waiting on and nothing can answer it. Both the `GET` and the `POST` on that
+question answer `409`, on these routes and on their `/api/agents` twins. The `error` names the run
+and what to put back. Once the run is back it asks again under a new id, and that one is answered
+as usual. See [a question on a held run](/docs/interaction#a-question-on-a-held-run).
+
 ```json
 {"request_id": "coder-1788924523-abc123-approve-1", "option": "allow-run"}
 ```

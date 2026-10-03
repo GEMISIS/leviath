@@ -5812,6 +5812,13 @@ type InteractionOutput {
 	open.
 	"""
 	settledAt: Timestamp
+	"""
+	Why nothing can answer this yet, and what to put back, for a question
+	asked by a run the daemon holds off this machine (`heldInteractions`
+	lists them). Answering one is refused with `RUN_HELD`; once the run is
+	back, the question reopens under a new id. Null for every other.
+	"""
+	held: String
 }
 
 """
@@ -8003,7 +8010,9 @@ type Mutation {
 	
 	The first answer wins. A second answer to the same request is not an
 	error on the client's part: two people clicking one prompt is ordinary,
-	and it reads as `ALREADY_SETTLED` rather than as a failure.
+	and it reads as `ALREADY_SETTLED` rather than as a failure. A question
+	a held run asked (see `heldInteractions`) is an error coded `RUN_HELD`,
+	saying what to put back: it reopens under a new id once the run is back.
 	"""
 	answerInteraction(
 		"The ask, and exactly one answer of the kind it takes."
@@ -9648,6 +9657,25 @@ type Query {
 	"""
 	openInteractions(
 		"Which open asks to include. Omitted means all of them."
+		filter: InteractionInput,
+		"Sort key and direction. Omitted means the order they were read."
+		orderBy: [InteractionOrder!],
+		"Page size; capped by the server's page-size cap."
+		first: Int! = 50,
+		"Cursor from the previous page."
+		after: Cursor
+	): InteractionConnection!
+	"""
+	Every question asked by a run the daemon holds off this machine: its
+	provider was taken away, say.
+	
+	None of these can be answered yet, which is why they are not in
+	`openInteractions`. Each says what to put back in `held`; answering
+	one is refused with `RUN_HELD`, and once its run is back the question
+	reopens under a new id and is listed in `openInteractions`.
+	"""
+	heldInteractions(
+		"Which held questions to include. Omitted means all of them."
 		filter: InteractionInput,
 		"Sort key and direction. Omitted means the order they were read."
 		orderBy: [InteractionOrder!],

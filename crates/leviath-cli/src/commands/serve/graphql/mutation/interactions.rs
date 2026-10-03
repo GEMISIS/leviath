@@ -101,19 +101,14 @@ pub(crate) struct AnswerInteractionResult {
 
 /// The response an option's word names, read against the ask open under
 /// `request_id`. Nothing open under it is `NotFound`, which the caller reads
-/// as already settled.
+/// as already settled; a question a held run asked is `Held`.
 async fn option_response(
     state: &AppState,
     request_id: &str,
     named: AnswerOptionWrite,
 ) -> Result<leviath_core::interaction::InteractionResponse, ServeError> {
-    let open = spawn_core::open_interactions(state).await?;
-    let Some((_, ask)) = open.iter().find(|(_, ask)| ask.id == request_id) else {
-        return Err(ServeError::NotFound(format!(
-            "No open interaction '{request_id}'"
-        )));
-    };
-    leviath_core::interaction::answer_with_option(ask, &named.id, named.feedback.as_deref())
+    let ask = spawn_core::open_request(state, request_id).await?;
+    leviath_core::interaction::answer_with_option(&ask, &named.id, named.feedback.as_deref())
         .map_err(ServeError::BadRequest)
 }
 
@@ -158,7 +153,9 @@ impl AnswerInteractionRequest {
 ///
 /// The first answer wins. A second answer to the same request is not an error
 /// on the client's part: two people clicking one prompt is ordinary, and it
-/// reads as `ALREADY_SETTLED` rather than as a failure.
+/// reads as `ALREADY_SETTLED` rather than as a failure. A question a held run
+/// asked is an error coded `RUN_HELD`, saying what to put back: nothing can
+/// answer it until the run is back, and then it reopens under a new id.
 pub(crate) async fn answer_interaction(
     ctx: &Context<'_>,
     request: AnswerInteractionRequest,
@@ -175,7 +172,7 @@ pub(crate) async fn answer_interaction(
             outcome: AnswerOutcome::Accepted,
         }),
         // Nothing open under that id: answered already, or expired. The other
-        // failures are the daemon's and stay failures.
+        // failures, a held run's question among them, stay failures.
         Err(ServeError::NotFound(_)) => Ok(AnswerInteractionResult {
             interaction_id,
             outcome: AnswerOutcome::AlreadySettled,

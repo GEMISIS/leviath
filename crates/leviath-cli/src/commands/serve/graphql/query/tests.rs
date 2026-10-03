@@ -4571,6 +4571,91 @@ async fn the_open_interactions_are_the_approval_inbox() {
     .await;
 }
 
+/// A question a held run asked is not in the approval inbox, whose every
+/// entry a client reads as one it can answer: it is in `heldInteractions`,
+/// saying what to put back, and nothing else is.
+#[tokio::test]
+async fn a_held_runs_question_is_listed_as_held_and_not_as_open() {
+    use crate::commands::serve::core::held::{listing, seed_held};
+    use crate::commands::serve::testutil::busy_daemon;
+    use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
+
+    crate::runstate::with_isolated_runs_dir_async("graphql-held-list", |_d| async move {
+        let mut live = seed_held("live-1", "live-1-ask-1");
+        live.wait_reason = Some(leviath_core::run_meta::WaitReason::UserPrompt);
+        let mut plain = seed_held("plain-1", "plain-1-ask-1");
+        plain.wait_reason = Some(leviath_core::run_meta::WaitReason::NeedsSetup {
+            blocker: leviath_core::run_meta::SetupBlocker::ProviderMissing,
+            remedy: "configure 'openai' again".to_string(),
+        });
+        let path = crate::runstate::run_file::path_in(&crate::runstate::run_dir("plain-1"));
+        let mut writer = leviath_runtime::runfile::RunFileWriter::open(
+            &path,
+            leviath_runtime::runfile::CheckpointPolicy::default(),
+        )
+        .expect("the run file opens");
+        let mut next = writer.state().clone();
+        next.interactions[0].options.clear();
+        let at = writer.state().seq as i64 + 1;
+        writer.record(next, at, Vec::new()).expect("the step lands");
+        let reply = listing(vec![seed_held("held-1", "held-1-ask-1"), live, plain]);
+        let daemon = move || {
+            let reply = reply.clone();
+            busy_daemon(move |req| match req {
+                ControlRequest::List => reply.clone(),
+                _ => ControlResponse::Interactions {
+                    interactions: Vec::new(),
+                },
+            })
+        };
+
+        let (control, _socket, _srv) = daemon();
+        let open = run_query_with_daemon(control, "{ openInteractions { total } }").await;
+        assert!(open.errors.is_empty(), "{:?}", open.errors);
+        let json = serde_json::to_value(&open.data).expect("data serializes");
+        assert_eq!(json["openInteractions"]["total"], 0);
+
+        let (control, _socket, _srv) = daemon();
+        let held = run_query_with_daemon(
+            control,
+            "{ heldInteractions(first: 10) { total results { id kind prompt options \
+             stageName isRequired held answerOptions { id } run { id } } } }",
+        )
+        .await;
+        assert!(held.errors.is_empty(), "{:?}", held.errors);
+        let json = serde_json::to_value(&held.data).expect("data serializes");
+        let listed = &json["heldInteractions"];
+        assert_eq!(listed["total"], 2);
+        let first = &listed["results"][0];
+        assert_eq!(first["id"], "held-1-ask-1");
+        assert_eq!(first["kind"], "MULTIPLE_CHOICE");
+        assert_eq!(first["options"], serde_json::json!(["red"]));
+        assert_eq!(first["stageName"], "ask");
+        assert_eq!(first["isRequired"], true);
+        assert_eq!(first["run"]["id"], "held-1");
+        assert_eq!(first["answerOptions"], serde_json::json!([]));
+        let why = first["held"].as_str().expect("held says why");
+        assert!(why.contains("run 'held-1'"), "{why}");
+        assert!(why.contains("configure 'openai' again"), "{why}");
+        assert!(why.contains("new id"), "{why}");
+        assert_eq!(listed["results"][1]["kind"], "FREE_TEXT");
+
+        // A page over the cap is refused like every listing's.
+        let (control, _socket, _srv) = daemon();
+        let oversized =
+            run_query_with_daemon(control, "{ heldInteractions(first: 100000) { total } }").await;
+        assert!(
+            oversized
+                .errors
+                .first()
+                .is_some_and(|error| error.message.contains("page cap")),
+            "{:?}",
+            oversized.errors
+        );
+    })
+    .await;
+}
+
 /// The approval inbox refuses a page bigger than its cap and a filter too deep
 /// to walk, before it asks the daemon anything.
 #[tokio::test]

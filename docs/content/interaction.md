@@ -362,6 +362,30 @@ tail is the part two runs are most likely to share. An id given in full answers 
 whatever longer ids begin with it, and a start that fits nothing is `no such open interaction`, the
 same as an id that was never open.
 
+### A question on a held run
+
+The daemon holds a run off the machine when it cannot place it as things stand, such as when the
+provider the run uses was taken out of the config. A question that run was waiting on can't be
+answered while it is held. `lev interactions` lists it under the open ones, marked `[held]`, with
+what to put back:
+
+```
+coder-1788924523-abc123-ask-1  [held]  agent=coder-1788924523-abc123
+  What colour?
+  held: 'coder-1788924523-abc123-ask-1' was asked by run 'coder-1788924523-abc123', which this
+  machine cannot take back as it stands, so nothing can answer it yet: configure 'openai' again,
+  then `lev resume` this run. Once the run is back, the question reopens under a new id
+```
+
+`lev respond` and `lev interactions <id>` on it give that same reason instead of `no such open
+interaction`. Put back what it names and resume the run, or restart the daemon. The run asks the
+question again under a new id, and that one is answered as usual. `lev interactions --json` lists
+only questions that can be answered, so a held one is not in it.
+
+The API and GraphQL say the same. Reading or answering it over REST is a `409` whose `error` is
+the reason above. GraphQL lists it in `heldInteractions` rather than `openInteractions`, and
+`answerInteraction` on it fails with the code `RUN_HELD`.
+
 A text answer carries files the way a message does. Every `--attach` and every `@path` in the
 words become typed [parts](/docs/mime) stored by the run, and written beside the answer in the
 tool result. The model reads the file where the words mention it. A choice or an approval has

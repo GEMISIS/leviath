@@ -255,6 +255,10 @@ pub(crate) struct Interaction {
     pub(crate) settlement: Option<Settlement>,
     /// When it settled. Null while it is open.
     pub(crate) settled_at: Option<Timestamp>,
+    /// The question as a held run asked it, for one that did. Null for every
+    /// other. Boxed: every open ask an event carries has this field, and none
+    /// of those is held.
+    pub(crate) held: Option<Box<crate::commands::serve::core::held::HeldQuestion>>,
 }
 
 /// The GraphQL name every listing and relation names this type by. The Rust
@@ -301,6 +305,36 @@ impl Interaction {
             asked_at: None,
             settlement: None,
             settled_at: None,
+            held: None,
+        }
+    }
+
+    /// A question a run the daemon holds off this machine asked, read off the
+    /// run's file. The file keeps what was asked and the options offered, so
+    /// the kind is read off those: a question with options is a choice, and
+    /// anything else took text.
+    fn held_question(held: crate::commands::serve::core::held::HeldQuestion) -> Self {
+        let question = &held.question;
+        let kind = match question.options.is_empty() {
+            true => InteractionKind::FreeText,
+            false => InteractionKind::MultipleChoice,
+        };
+        Self {
+            run_id: held.run_id.clone(),
+            id: question.id.clone(),
+            kind,
+            prompt: question.prompt.clone(),
+            body: None,
+            options: question.options.clone(),
+            answer_options: Vec::new(),
+            tool_call: None,
+            tool_name: None,
+            stage_name: held.stage.clone(),
+            is_required: true,
+            asked_at: None,
+            settlement: None,
+            settled_at: None,
+            held: Some(Box::new(held)),
         }
     }
 
@@ -321,6 +355,7 @@ impl Interaction {
             asked_at: Some(Timestamp(record.asked_at)),
             settlement: Some(Settlement::from(&record.settlement)),
             settled_at: Some(Timestamp(record.at)),
+            held: None,
         }
     }
 }
@@ -430,6 +465,15 @@ impl Interaction {
     async fn settled_at(&self) -> Option<Timestamp> {
         self.settled_at
     }
+
+    /// Why nothing can answer this yet, and what to put back, for a question
+    /// asked by a run the daemon holds off this machine (`heldInteractions`
+    /// lists them). Answering one is refused with `RUN_HELD`; once the run is
+    /// back, the question reopens under a new id. Null for every other.
+    #[filter(skip)]
+    async fn held(&self) -> Option<String> {
+        self.held.as_ref().map(|held| held.refusal())
+    }
 }
 
 impl Paged for Interaction {
@@ -498,24 +542,51 @@ pub(crate) async fn open(
     first: i32,
     after: Option<Cursor>,
 ) -> async_graphql::Result<Connection<Interaction>> {
+    let items = open
+        .into_iter()
+        .map(|(run_id, request)| Interaction::open(run_id, request))
+        .collect();
+    across_runs("open", items, filter, order_by, first, after).await
+}
+
+/// Read one page of the questions asked by runs the daemon holds off this
+/// machine. None of them can be answered until its run is back, which is why
+/// they are not in `openInteractions`: a client reads every entry there as
+/// one it can answer.
+pub(crate) async fn held(
+    held: Vec<crate::commands::serve::core::held::HeldQuestion>,
+    filter: Option<InteractionFilter>,
+    order_by: Option<Vec<InteractionOrder>>,
+    first: i32,
+    after: Option<Cursor>,
+) -> async_graphql::Result<Connection<Interaction>> {
+    let items = held.into_iter().map(Interaction::held_question).collect();
+    across_runs("held", items, filter, order_by, first, after).await
+}
+
+/// One page of a listing across every run, `open` or `held`, which names it
+/// in its cursors and its page-cap refusal.
+async fn across_runs(
+    listing: &str,
+    items: Vec<Interaction>,
+    filter: Option<InteractionFilter>,
+    order_by: Option<Vec<InteractionOrder>>,
+    first: i32,
+    after: Option<Cursor>,
+) -> async_graphql::Result<Connection<Interaction>> {
     let limit = page(
         first,
         interactions::INTERACTIONS_MAX_LIMIT,
-        "the open interactions page cap",
+        &format!("the {listing} interactions page cap"),
     )
     .gql()?;
     let filter = filter.unwrap_or_default();
     let rendered = super::super::paging::digest::canonical(&filter).gql()?;
-    let digest = cursor::filter_digest(&["interactions", "open", rendered.as_str()]);
+    let digest = cursor::filter_digest(&["interactions", listing, rendered.as_str()]);
     let descending = order_by
         .unwrap_or_default()
         .first()
         .is_some_and(|term| term.direction.descending());
-
-    let items: Vec<Interaction> = open
-        .into_iter()
-        .map(|(run_id, request)| Interaction::open(run_id, request))
-        .collect();
     walk(items, &filter, &digest, after, descending, limit).await
 }
 

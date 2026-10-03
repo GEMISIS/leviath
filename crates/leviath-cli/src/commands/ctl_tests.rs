@@ -1333,65 +1333,15 @@ fn the_full_view_shows_arguments_body_and_the_answer_line() {
 
 // ─── a held run's question ────────────────────────────────────────────────
 
-/// The row a daemon lists a run with that it holds off this machine.
-fn held_row(run_id: &str) -> leviath_runtime::host::RunListEntry {
-    leviath_runtime::host::RunListEntry {
-        run_id: run_id.to_string(),
-        title: None,
-        status: leviath_runtime::components::AgentStatus::Paused,
-        wait_reason: Some(leviath_core::run_meta::WaitReason::NeedsSetup {
-            blocker: leviath_core::run_meta::SetupBlocker::ProviderMissing,
-            remedy: "configure 'openai' again, then `lev resume` this run".to_string(),
-        }),
-        stage: "ask".to_string(),
-        stage_index: None,
-        num_stages: None,
-        iteration: 0,
-        tool_calls: 0,
-        last_progress_at: None,
-        started_at: None,
-        active: None,
-        unattended: false,
-        yolo_profile: None,
-        empty_output: false,
-        splits_degraded: 0,
-        broken_scripts: Vec::new(),
-        read_paths: None,
-        has_final_output: false,
-        may_never_finish: Vec::new(),
-    }
-}
-
 /// A run held off this machine with `question` open on its file, and a live
 /// run beside it with one open too, as a `List` reply.
 fn held_listing(run_id: &str, question: &str) -> String {
-    for (id, asked) in [(run_id, question), ("live-1", "live-1-ask-1")] {
-        seed_live_run(id);
-        let path = crate::runstate::run_file::path_in(&crate::runstate::run_dir(id));
-        let mut writer = leviath_runtime::runfile::RunFileWriter::open(
-            &path,
-            leviath_runtime::runfile::CheckpointPolicy::default(),
-        )
-        .unwrap();
-        let mut next = writer.state().clone();
-        next.interactions
-            .push(leviath_runtime::state::OpenInteraction {
-                id: asked.to_string(),
-                prompt: "What colour?".to_string(),
-                options: vec!["red".to_string()],
-            });
-        let at = writer.state().seq as i64 + 1;
-        writer.record(next, at, Vec::new()).unwrap();
-    }
-    let mut live = held_row("live-1");
+    use crate::commands::serve::core::held::{listing, seed_held};
+    let held = seed_held(run_id, question);
+    let mut live = seed_held("live-1", "live-1-ask-1");
     live.status = leviath_runtime::components::AgentStatus::Waiting;
     live.wait_reason = Some(leviath_core::run_meta::WaitReason::UserPrompt);
-    serde_json::to_string(&ControlResponse::List {
-        runs: vec![held_row(run_id), live],
-        finished: Vec::new(),
-        health: Default::default(),
-    })
-    .unwrap()
+    serde_json::to_string(&listing(vec![held, live])).unwrap()
 }
 
 /// A question a held run asked cannot be answered until the run is back, and

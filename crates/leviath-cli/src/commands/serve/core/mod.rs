@@ -20,6 +20,7 @@ pub(super) mod error;
 pub(super) mod executions;
 pub(super) mod export;
 pub(super) mod files;
+pub(crate) mod held;
 pub(super) mod history;
 pub(super) mod inferences;
 pub(super) mod inspect;

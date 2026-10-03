@@ -15,7 +15,7 @@ mod compat;
 mod config;
 mod config_health;
 mod config_types;
-mod core;
+pub(crate) mod core;
 mod cursor;
 mod doctor;
 mod events;
@@ -1114,6 +1114,7 @@ mod tests {
         ("BadRequest", 400),
         ("NotFound", 404),
         ("Conflict", 409),
+        ("Held", 409),
         ("Forbidden", 403),
         ("DaemonUnavailable", 503),
         ("DaemonIncompatible", 502),
@@ -1305,6 +1306,7 @@ mod tests {
             ("BadRequest", ServeError::BadRequest(String::new())),
             ("NotFound", ServeError::NotFound(String::new())),
             ("Conflict", ServeError::Conflict(String::new())),
+            ("Held", ServeError::Held(String::new())),
             ("Forbidden", ServeError::Forbidden(String::new())),
             (
                 "DaemonUnavailable",

@@ -142,7 +142,7 @@ shows up much later as missing data.
 | `first` cap | Listings |
 |---|---|
 | `500` | `models`, `providers`, `tools` |
-| `200` | `runs`, `blueprints`, `scripts`, `mcpServers`, `mimeRows`, `yoloProfiles`, `updateJobs`, `openInteractions`, and every listing on a run except the two below |
+| `200` | `runs`, `blueprints`, `scripts`, `mcpServers`, `mimeRows`, `yoloProfiles`, `updateJobs`, `openInteractions`, `heldInteractions`, and every listing on a run except the two below |
 | `1000` | `files` on a run, where a row is a name and a size |
 | `100` | `contextHistory` on a run, where a point carries a whole context window |
 
@@ -1207,6 +1207,24 @@ mutation {
 than beside an approval. The first answer wins, and a second one comes back `ALREADY_SETTLED`
 rather than as an error, because two people clicking one prompt is ordinary.
 
+A run the daemon holds off the machine, because its provider was taken out of the config say, keeps
+the question it was waiting on, and nothing can answer it until the run is back. It is not in
+`openInteractions`, whose every entry a client can answer. `heldInteractions` lists it instead,
+with the same fields, and `held` says what to put back:
+
+```graphql
+{
+  heldInteractions {
+    results { id prompt options held run { id } }
+    total
+  }
+}
+```
+
+`answerInteraction` on a held question fails with the code `RUN_HELD`, and the message is the same
+reason. Once the run is back it asks again under a new id, which `openInteractions` lists as usual.
+`held` is null on every question that is not held.
+
 ### Blueprint writes
 
 ```graphql
@@ -1608,6 +1626,7 @@ before any resolver ran included: those are `BAD_USER_INPUT`.
 | `FORBIDDEN` | This server is configured to refuse it, such as a workdir outside `--workdir-root` | `403` |
 | `NOT_FOUND` | Nothing by that name, or nothing in the state the act needs | `404` |
 | `CONFLICT` | It exists and its state refuses the change | `409` |
+| `RUN_HELD` | The question was asked by a run the daemon holds off the machine. Put back what the message names | `409` |
 | `PAYLOAD_TOO_LARGE` | An attachment is over this server's `max_upload_bytes` | `413` |
 | `UNPROCESSABLE` | Well formed, and something on disk will not answer, such as a `yolo.toml` a profile you never touched has broken | `422` |
 | `UPSTREAM` | Something this server depends on answered badly. Retrying may well work | `502` |
