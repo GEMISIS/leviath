@@ -287,8 +287,10 @@ pub(crate) fn analyze(meta: &RunMeta, moments: &[Moment]) -> RunTimeline {
     for moment in moments {
         match moment {
             Moment::Status { status, at } => {
+                // Said again while already waiting, the wait still began the
+                // first time.
                 if matches!(status, RunStatus::WaitingInput) {
-                    waiting_since = Some(*at);
+                    waiting_since.get_or_insert(*at);
                 } else if let Some(since) = waiting_since.take() {
                     totals.waiting += (*at - since).max(0);
                     prev = *at;
@@ -324,8 +326,12 @@ pub(crate) fn analyze(meta: &RunMeta, moments: &[Moment]) -> RunTimeline {
                 }
                 prev = *at;
             }
+            // A tool that ends while the run is parked was in flight when the
+            // wait began (the approval it asked for, the children it
+            // started): its time runs up to the wait, which is waiting.
             Moment::ToolDone { at } => {
-                totals.tools += (*at - prev).max(0);
+                let until = waiting_since.map_or(*at, |since| since.min(*at));
+                totals.tools += (until - prev).max(0);
                 prev = *at;
             }
         }

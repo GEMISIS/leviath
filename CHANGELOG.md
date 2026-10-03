@@ -139,6 +139,14 @@ same list.
 
 ### Fixed
 
+- `lev timeline` counted a tool that finished while its run was parked (an
+  approval prompt, children it started) as tool time for the whole wait, and
+  the wait as waiting too, so the parts added up to more than the wall clock:
+  one real run showed an hour of tools and an hour of waiting in an hour.
+  The tool's time now ends where the wait began. A run said to be waiting
+  twice over is waiting from the first time. A converted run whose old
+  journal kept no status history shows its waits too, read off the status
+  each of its steps recorded; 0.6.4 counted that time as "other".
 - A task handed to a blueprint that takes no input at all was refused with
   "give it its inputs with --input", which it has none of. It now says how to
   declare a task input, as 0.6.4 said how to add a task region.
