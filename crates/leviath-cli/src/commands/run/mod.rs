@@ -12,6 +12,7 @@ pub mod attach;
 pub mod check;
 pub(crate) mod inputs;
 pub(crate) mod locate;
+pub use locate::installed_old_format;
 pub mod request;
 pub(crate) mod session;
 pub mod show;

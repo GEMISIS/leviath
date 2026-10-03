@@ -87,8 +87,10 @@ same list.
   way, and a `lev` of 0.6.4 or earlier talking to this daemon shows an empty
   `lev ps`, no open questions and runs it cannot read; it also replaces any
   daemon of another build when it starts a run. A `lev` of this release says
-  on every command when the daemon is another build, which one is newer, and
-  what to do, and replaces only an older daemon.
+  on every command that talks to the daemon, and in `lev daemon status`,
+  when the daemon is another build, which one is newer, and what to do, and
+  replaces only an older daemon. With no daemon running, `lev run` of an
+  installed `agent.leviath` starts the daemon, which upgrades it, and runs it.
 - `lev validate --json` gives each input a `type` and the `regions` it
   fills, beside 0.6.4's `key`, `region` (the first of them) and `required`,
   and gains `may_never_finish`. `lev stages --json` gains `computed_calls`
@@ -101,6 +103,13 @@ same list.
   otherwise. It used to answer with an empty string when no value was given,
   which a run reads as nobody answering: a checkpoint approved, a review was
   "acknowledged". Bare `lev respond` no longer lists; `lev interactions` does.
+- **Breaking.** A message to a run that has finished is refused: `lev msg`
+  exits 1 and says the run reads no more messages, so start a new run.
+  0.6.4 printed "message delivered" and exited 0, though nothing would ever
+  read the message.
+- `GET /api/update` (and `lev update --check --json`) keeps `renamed_keys`,
+  now always empty: an `agent.toml` refuses a key it does not know, so a
+  blueprint has no old spellings to rewrite.
 - New `lev interactions [REQUEST_ID] [--json]` lists the questions runs are
   waiting on, or shows one in full with the line that answers it, and never
   answers anything. `lev ps` points at it.

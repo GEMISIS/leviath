@@ -205,10 +205,15 @@ pub(crate) fn send(world: &mut World, happened: BTreeMap<String, Happened>) {
     }
 }
 
-/// Fold what the inbox holds and hand it to the lane, with no snapshot: how
-/// what happened after a world's last tick reaches the files as it stops.
-pub(crate) fn flush(world: &mut World) {
-    let happened = drain(world);
+/// Fold what the inbox holds and hand it to the lane: how what happened
+/// after a world's last tick reaches the files as it stops. The runs in
+/// `settled` had a batch's calls settled as it stopped, so their state goes
+/// too.
+pub(crate) fn flush(world: &mut World, settled: &[String]) {
+    let mut happened = drain(world);
+    for run_id in settled {
+        happened.entry(run_id.clone()).or_default().landed = true;
+    }
     send(world, happened);
 }
 

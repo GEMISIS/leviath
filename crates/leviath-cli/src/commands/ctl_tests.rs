@@ -1261,6 +1261,7 @@ async fn interactions_lists_and_shows_without_answering() {
 
 #[tokio::test]
 async fn interactions_lists_nothing_open() {
+    assert_eq!(listing_text(&[], &[]), "no open interactions");
     for json in [false, true] {
         let (r, _) = read_with(interactions_line(&[]), interactions_args(None, json)).await;
         assert!(r.is_ok());
@@ -1375,7 +1376,10 @@ async fn answering_a_held_runs_question_says_the_run_is_held() {
             let err = r.unwrap_err().to_string();
             assert!(err.contains("run 'held-1'"), "{err}");
             assert!(err.contains("configure 'openai' again"), "{err}");
-            assert!(err.contains("new id"), "{err}");
+            assert!(
+                err.ends_with("reopens under a new id, which `lev interactions` lists"),
+                "{err}"
+            );
             assert!(answered_ids(&requests).is_empty());
         }
         // Not one a held run asked: the plain answer.
@@ -1408,6 +1412,10 @@ async fn a_held_runs_question_is_listed_as_held() {
             assert!(text.starts_with("held-1-ask-1  [held]"), "{text}");
             assert!(text.contains("What colour?"), "{text}");
             assert!(text.contains("configure 'openai' again"), "{text}");
+            // Listed once, as held, not after a line saying nothing is open.
+            let listed = listing_text(&[], &held);
+            assert!(listed.starts_with("held-1-ask-1  [held]"), "{listed}");
+            assert!(!listed.contains("no open interactions"), "{listed}");
             Ok(())
         })
         .await;

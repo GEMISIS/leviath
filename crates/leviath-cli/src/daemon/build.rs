@@ -176,6 +176,34 @@ pub fn mixed_notice_here() -> Option<String> {
     mixed_notice(running, marker.as_deref(), &Build::current())
 }
 
+/// What `lev daemon status` says about the running daemon's build, whose
+/// marker reads `marker`, when it is not this `lev`'s: which is newer, and
+/// what to do. `None` while they match or no daemon runs.
+pub fn status_line(running: bool, marker: Option<&str>, cli: &Build) -> Option<String> {
+    let daemon = Build::parse(marker.unwrap_or_default());
+    let (newer, what_to_do) = match daemon.standing(cli) {
+        Standing::Same => return None,
+        Standing::Newer => (
+            "newer",
+            "use the newer lev, or `lev daemon restart` to run this one's build",
+        ),
+        Standing::Older => ("older", "`lev daemon restart` replaces it with this lev's"),
+    };
+    running.then(|| {
+        format!(
+            "build: {}, {newer} than this lev ({}); {what_to_do}",
+            daemon.describe(),
+            cli.describe()
+        )
+    })
+}
+
+/// [`status_line`] for the daemon of this home and this binary.
+pub fn status_line_here(running: bool) -> Option<String> {
+    let marker = super::setup::read_build_marker();
+    status_line(running, marker.as_deref(), &Build::current())
+}
+
 /// The warning for a daemon and a `lev` of different builds: which is which,
 /// what it means for what this command shows, and what to do.
 fn mixed_line(daemon: &Build, cli: &Build, standing: Standing) -> String {

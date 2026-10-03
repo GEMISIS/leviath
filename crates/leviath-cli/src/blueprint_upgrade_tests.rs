@@ -324,6 +324,9 @@ fn the_daemon_upgrades_and_a_command_only_says_so() {
     let line = named("fine");
     assert!(line.contains("lev daemon restart"), "{line}");
     assert!(line.contains("lev blueprint migrate"), "{line}");
+    // The directory is named in the command that converts it, not before.
+    let at = fine.display().to_string();
+    assert_eq!(line.matches(&at).count(), 2, "{line}");
     let line = named("waiting");
     assert!(line.contains("could not be upgraded"), "{line}");
     assert!(!line.contains("lev daemon restart"), "{line}");

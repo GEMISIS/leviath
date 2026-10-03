@@ -207,8 +207,9 @@ reason, until you fix it and convert it with `lev blueprint migrate`.
 Run one version of `lev` and its daemon at a time, and run `lev daemon restart` after upgrading.
 Each release reads the home its own way, so a `lev` talking to a daemon of another build shows
 that build's view of it: an empty `lev ps`, no open questions while one is pending, or a run file
-it cannot read. When the two differ, every command except `lev daemon` starts with a line saying
-which is which:
+it cannot read. When the two differ, every command that talks to the daemon starts with a line
+saying which is which, and `lev daemon status` says it too. A command that only reads files, such
+as `lev list` or `lev validate`, has no daemon to differ from and says nothing:
 
 ```text
 warning: this daemon is an earlier release (build 839f0344), older than this lev (<version> (build 1a2b3c4d)). Each build reads the home its own way, ...

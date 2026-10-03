@@ -97,13 +97,23 @@ pub(crate) fn old_format(path: &Path, shown: &str, agents_dir: Option<&Path>) ->
             false => "",
         };
         format!(
-            "'{shown}' is an {OLD_FILE_NAME} from an earlier release, at {}, and this release \
-             reads {FILE_NAME}: convert it with `lev blueprint migrate {} -o {}`.{installed}",
-            dir.display(),
+            "'{shown}' is an {OLD_FILE_NAME} from an earlier release, and this release reads \
+             {FILE_NAME}: convert it with `lev blueprint migrate {} -o {}`.{installed}",
             dir.display(),
             dir.join(FILE_NAME).display()
         )
     })
+}
+
+/// Whether the agent argument `path` names an installed blueprint still in
+/// the format an earlier release wrote: one the daemon upgrades as it starts.
+pub fn installed_old_format(path: &str) -> bool {
+    installed_old_format_in(path, leviath_core::paths::agents_dir().as_deref())
+}
+
+/// [`installed_old_format`] against a given installed-agents directory.
+pub(crate) fn installed_old_format_in(path: &str, agents_dir: Option<&Path>) -> bool {
+    agents_dir.is_some_and(|dir| old_format(&dir.join(path), path, Some(dir)).is_some())
 }
 
 #[cfg(test)]

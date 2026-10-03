@@ -146,6 +146,18 @@ pub(crate) fn torn_note(id: &str, cut: usize) -> Option<String> {
     })
 }
 
+/// What to add when `lev` could not parse `argv` (`refused`, as opposed to
+/// printing help) and it began `lev run show`: that reads a run's file, so a
+/// blueprint named `show` is run with the task first.
+pub fn parse_hint(argv: &[String], refused: bool) -> Option<String> {
+    let words: Vec<&str> = argv.iter().skip(1).take(2).map(String::as_str).collect();
+    (refused && words == ["run", "show"]).then(|| {
+        "note: `lev run show RUN` reads a run's file. To run a blueprint named show, give the \
+         task first: lev run --task <TASK> show"
+            .to_string()
+    })
+}
+
 /// `value` as pretty JSON.
 fn to_json<T: serde::Serialize + ?Sized>(value: &T) -> String {
     serde_json::to_string_pretty(value).expect("run file types are plain data")

@@ -1344,6 +1344,7 @@ The body is exactly what `lev update --check --json` prints, from the same plann
     "command": ["scoop", "update", "leviath"]
   },
   "agents": [],
+  "renamed_keys": [],
   "migrations": [],
   "config_error": null,
 
@@ -1358,6 +1359,9 @@ is either `run`, carrying a `commands` list of argv lists to run in order, or `a
 a `message` to show instead. A `cargo install` copy is always `advise`: rebuilding it is a full
 compile, which is not something to start on someone's behalf. So is a binary sitting somewhere
 no installer puts one, where the honest answer is to point at the install docs.
+
+`renamed_keys` is always empty. An `agent.toml` refuses a key it does not know, so a blueprint
+has no old spellings to rewrite; the key stays so a client that reads it still finds it.
 
 Render `binary.commands` rather than composing your own. That is the whole point of the route:
 a client that hard-codes one package manager's command is right for the users who happen to

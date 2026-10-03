@@ -854,9 +854,11 @@ impl PipelineWorld {
         self.run_to_fixed_point();
         // Stop every in-flight job, so nothing is left waiting on a person.
         self.abort_in_flight_work();
+        // A call stopped part way is not started again after a restart.
+        let settled = crate::restore::settle_running_calls(&mut self.world);
         // What happened since the last tick (a call that finished as its batch
         // was stopped, say) goes to the lane as a step of its own.
-        crate::pipeline::journal::flush(&mut self.world);
+        crate::pipeline::journal::flush(&mut self.world, &settled);
         // Drop the *only* `PersistJob` sender so the worker's `recv()` loop drains
         // its queue and then ends.
         self.world.remove_resource::<PersistenceStage>();
@@ -864,8 +866,8 @@ impl PipelineWorld {
         if let Some(task) = self.persist_task.take() {
             let _ = task.await;
         }
-        // Everything this world had running was stopped above, so a restart
-        // may run it again: the session ended cleanly.
+        // Everything this world had running was stopped and settled above:
+        // the session ended cleanly.
         if let Some(runs_dir) = &self.runs_dir {
             crate::restore::end_session(runs_dir);
         }

@@ -573,7 +573,7 @@ fn held_refusal(typed: &str, held: &[HeldQuestion]) -> Option<String> {
     let h = held
         .iter()
         .find(|h| !typed.is_empty() && h.question.id.starts_with(typed))?;
-    Some(format!("{}: lev interactions", h.refusal()))
+    Some(format!("{}, which `lev interactions` lists", h.refusal()))
 }
 
 /// `err`, or why `typed` cannot be answered when a held run asked it.
@@ -584,27 +584,29 @@ async fn or_held(client: &ControlClient, typed: &str, err: anyhow::Error) -> any
     }
 }
 
-/// List the interactions the daemon is currently holding.
-fn list_interactions(interactions: &[(String, InteractionRequest)], json: bool) {
-    if json {
-        let open: Vec<OpenInteraction<'_>> = interactions
-            .iter()
-            .map(|(agent_id, request)| OpenInteraction::new(agent_id, request))
-            .collect();
-        // Nothing open is an empty array, not a sentence: a caller
-        // polling this branches on length, not on prose.
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&open).expect("an interaction listing serializes")
-        );
-        return;
-    }
-    if interactions.is_empty() {
-        println!("no open interactions");
-    } else {
-        for (agent_id, req) in interactions {
-            println!("{}", format_interaction(agent_id, req));
-        }
+/// The interactions the daemon is currently holding, as JSON. Nothing open is
+/// an empty array, not a sentence: a caller polling this branches on length,
+/// not on prose.
+fn interactions_json(interactions: &[(String, InteractionRequest)]) -> String {
+    let open: Vec<OpenInteraction<'_>> = interactions
+        .iter()
+        .map(|(agent_id, request)| OpenInteraction::new(agent_id, request))
+        .collect();
+    serde_json::to_string_pretty(&open).expect("an interaction listing serializes")
+}
+
+/// The listing `lev interactions` prints: each open question, then each
+/// question a held run asked, saying why it cannot be answered yet. Only
+/// when there are neither does it say nothing is open.
+fn listing_text(open: &[(String, InteractionRequest)], held: &[HeldQuestion]) -> String {
+    let lines: Vec<String> = open
+        .iter()
+        .map(|(agent_id, req)| format_interaction(agent_id, req))
+        .chain(held.iter().map(format_held))
+        .collect();
+    match lines.is_empty() {
+        true => "no open interactions".to_string(),
+        false => lines.join("\n"),
     }
 }
 
@@ -630,16 +632,14 @@ fn show_interaction(
 pub async fn interactions(client: &ControlClient, args: &InteractionsArgs) -> anyhow::Result<()> {
     let open = open_interactions(client).await?;
     match &args.request_id {
+        // A question a held run asked is left out of `--json`, whose caller
+        // reads every entry as one it can answer.
+        None if args.json => {
+            println!("{}", interactions_json(&open));
+            Ok(())
+        }
         None => {
-            list_interactions(&open, args.json);
-            // A question a held run asked is listed under the ones that can
-            // be answered, saying why it cannot be yet. Left out of `--json`,
-            // whose caller reads every entry as one it can answer.
-            if !args.json {
-                for held in held_questions(client).await {
-                    println!("{}", format_held(&held));
-                }
-            }
+            println!("{}", listing_text(&open, &held_questions(client).await));
             Ok(())
         }
         Some(typed) => match show_interaction(&open, typed, args.json) {

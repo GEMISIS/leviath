@@ -401,8 +401,9 @@ async fn finished_fan_out_workers_come_back_as_done_after_a_restart() {
 
 /// After a daemon died, a call it had running comes back interrupted rather
 /// than run again (the command may still be running), and a call that
-/// finished keeps its result. After a clean stop the same call is run again.
-/// A batch stopped on a question is asked again either way.
+/// finished keeps its result. A clean stop settles every call it had running
+/// before it ends, so a call it left unsettled never reached the tool lane,
+/// and runs. A batch stopped on a question is asked again either way.
 #[tokio::test]
 async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
     use leviath_runtime::state::ToolResultState;
@@ -458,7 +459,10 @@ async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
                 );
                 assert!(done["c2"].is_error);
             }
-            false => assert!(!done.contains_key("c2"), "a clean stop runs it again"),
+            false => assert!(
+                !done.contains_key("c2"),
+                "an unsettled call never ran, so it runs"
+            ),
         }
         let asked = live(&mut world, &asking).pending.expect("in flight").done;
         assert!(asked.is_empty(), "the question is asked again");
@@ -598,4 +602,100 @@ async fn a_worker_its_parent_never_recorded_runs_its_item_once() {
     assert_eq!(now.children, [id(&started)]);
     assert_eq!(live(&mut world, &stray).status, RunStatus::Cancelled);
     assert_ne!(live(&mut world, &started).status, RunStatus::Cancelled);
+}
+
+/// A blueprint whose one stage runs shell commands.
+#[cfg(unix)]
+const SHELLER: &str = r#"[blueprint]
+name = "sheller"
+version = "0.0.0"
+description = "Runs a command."
+
+[graph]
+entry = "work"
+inputs = [{ name = "task", type = { kind = "text", multiline = true }, binds = [{ region = "task" }] }]
+
+[graph.layout]
+total_budget_tokens = 50000
+regions = [
+    { name = "task", kind = "pinned", budget = 2000 },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 40 }, budget = 20000 },
+]
+
+[[graph.stages]]
+name = "work"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["shell"]
+system_prompt = "Work."
+"#;
+
+/// A daemon that stops cleanly while a command runs stops the command and
+/// settles its call: the next daemon gives the model the interrupted result,
+/// as for a call the daemon died under, and never starts the command again.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_call_running_at_a_clean_stop_is_not_started_again() {
+    use leviath_runtime::spec::env::Caller;
+    let agent = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let marker = work.path().join("marker.txt");
+    let manifest = manifest_in(agent.path(), SHELLER);
+    let starter = starter(Config::default(), registry(), runs.path());
+    let request = crate::daemon::requests::TaskLaunch {
+        blueprint: manifest.to_string_lossy().into_owned(),
+        task: "carry on".to_string(),
+        workdir: Some(work.path().to_string_lossy().into_owned()),
+        unattended: true,
+        ..Default::default()
+    }
+    .into_request()
+    .expect("the request reads");
+    let env = starter.env_for(&request, starter.config.current());
+    let run = starter
+        .start_with(env, request, Caller::TopLevel)
+        .await
+        .expect("the run starts")
+        .spec
+        .run_id
+        .to_string();
+    let command = format!(
+        "echo start >> '{m}'; sleep 30; echo end >> '{m}'",
+        m = marker.display()
+    );
+    change(runs.path(), &run, |s| {
+        s.phase = PipelinePhase::AwaitingTools;
+        s.pending = Some(PendingBatch {
+            calls: vec![ToolCallState {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+                args: leviath_core::JsonDoc::new(serde_json::json!({ "command": command })),
+                thought_signature: None,
+            }],
+            done: Default::default(),
+        });
+    });
+    let mut world = world_for(&starter);
+    resume_all(&mut world, &starter, runs.path());
+    let started = drive_until(&mut world, |_| marker.exists()).await;
+    assert!(started, "the command starts");
+
+    // The daemon's clean stop: its control channel closes and the host
+    // stops its world.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(tx);
+    leviath_runtime::host::WorldHost::with_interactions(world, starter.hub.clone())
+        .serve(rx)
+        .await;
+
+    let mut again = world_for(&starter);
+    resume_all(&mut again, &starter, runs.path());
+    let done = live(&mut again, &run).pending.expect("in flight").done;
+    assert_eq!(
+        done["c1"].text,
+        leviath_runtime::restore::INTERRUPTED_TOOL_RESULT
+    );
+    let applied = drive_until(&mut again, |w| live(w, &run).pending.is_none()).await;
+    assert!(applied, "the batch lands without running again");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "start\n");
 }

@@ -90,18 +90,20 @@ async fn async_main() -> anyhow::Result<()> {
     // and fold the extracted flags back in (both steps are tested lib seams).
     let (argv, region_flags) =
         commands::run::extract_region_flags(std::env::args().collect::<Vec<_>>());
-    let mut cli = Cli::parse_from(argv);
+    let mut cli = Cli::try_parse_from(&argv).unwrap_or_else(|e| {
+        let _ = e.print();
+        let hint = commands::run::show::parse_hint(&argv, e.use_stderr());
+        hint.into_iter().for_each(|line| eprintln!("{line}"));
+        std::process::exit(e.exit_code())
+    });
     apply_region_flags(&mut cli.command, region_flags);
 
-    // Initialize tracing (fmt → stderr, plus the reloadable OTLP log-export
-    // slot the daemon fills when `[observability]` asks for it). Logs go to
-    // stderr, never stdout: `lev agent-client` uses stdout as its JSON-RPC
-    // protocol channel, and a stray log line there would corrupt the stream a
-    // host is parsing.
+    // Logs go to stderr, never stdout: `lev agent-client` speaks JSON-RPC on
+    // stdout, and a stray log line there would corrupt the host's stream.
     leviath_cli::logging::init(cli.verbose);
 
     info!("Leviath CLI v{}", env!("CARGO_PKG_VERSION"));
-    if !matches!(cli.command, Commands::Daemon(_)) {
+    if leviath_cli::dispatch::reaches_daemon(&cli.command) {
         let notice = leviath_cli::daemon::build::mixed_notice_here();
         notice.into_iter().for_each(|line| eprintln!("{line}"));
     }
@@ -452,6 +454,11 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
             return Ok(());
         }
     }
+    // The daemon upgrades an installed blueprint of an earlier release as it
+    // starts, so that one starts it, and waits, before it is read.
+    if commands::run::installed_old_format(path) {
+        ensure_daemon_running().await?;
+    }
     // Read here, where the paths the user typed still mean what they meant.
     let parts = commands::run::attach::attach_all(&args.attach, &std::env::current_dir()?)?;
     let spawn_args = commands::run::request::read_run_flags(commands::run::request::RunFlags {
@@ -473,11 +480,9 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
         )?,
         parts,
     })?;
-    // Deliberately after the resolve, not before. No `--task` opens an editor,
-    // and a user can sit in vim for twenty minutes: checking daemon liveness
-    // and build staleness first would mean spawning against a socket last
-    // verified a third of an hour ago. It also stops a run that was never going
-    // to happen (a bad path, a typo'd region) from auto-starting a daemon.
+    // After the resolve: no `--task` opens an editor a person can sit in for
+    // twenty minutes, and a run that was never going to happen (a bad path,
+    // a typo'd region) should not start a daemon.
     ensure_daemon_running().await?;
     leviath_cli::daemon::client::send_spawn_batch(
         &control_client()?,
@@ -625,9 +630,11 @@ async fn real_daemon_status() -> anyhow::Result<()> {
     let supervision = resolve_service_unit()
         .ok()
         .map(|unit| commands::daemon_service::format_supervision(unit.path.exists(), &unit.path));
+    let build = leviath_cli::daemon::build::status_line_here(running);
     for line in leviath_cli::daemon::lifecycle::status_lines(running, count, supervision) {
         println!("{line}");
     }
+    build.into_iter().for_each(|line| println!("{line}"));
     Ok(())
 }
 
@@ -739,17 +746,10 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
         DaemonIdentity, bind_control_listener, control_id_from_str,
     };
 
-    // Refuse to start on a config that exists but doesn't parse. The old
-    // `unwrap_or_default()` silently ran the daemon on defaults - every
-    // configured section (permissions, limits, observability, providers)
-    // ignored with nothing in the log. A missing file still loads as
-    // defaults; only a broken one is fatal, and the parse error lands in
-    // `daemon.log` for whoever finds the daemon not running.
-    //
-    // The file is attached before the config is read for exactly that reason:
-    // a refusal to start has to be the first line in it, whichever way the
-    // daemon was started. The cap follows `[observability]` once the host is
-    // up (`telemetry_reload`).
+    // A config that exists but does not parse is refused rather than run on
+    // defaults (a missing one loads as defaults). The log is attached first, so
+    // the refusal is the first line in `daemon.log` however the daemon started;
+    // its cap follows `[observability]` once the host is up.
     if let Some(path) = leviath_cli::logging::daemon_log_path()
         && leviath_cli::logging::attach_log_file(
             path.clone(),
@@ -768,8 +768,9 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
         })?,
     };
 
-    // `bind_control_listener` enforces the single-instance guarantee and is fully
-    // unit-tested; only driving its `accept` in a loop is the untestable sliver.
+    // Our build is recorded before a client can reach us, and again once the
+    // single-instance bind is won, over any loser's.
+    leviath_cli::daemon::setup::write_build_marker_unless_running(&id);
     let listener = bind_control_listener(&id)?;
     // A fresh token per daemon: whoever cannot read our own directory cannot
     // drive the control channel. This is what authenticates callers on Windows,
@@ -780,8 +781,6 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // Recorded so `lev daemon stop` can fall back to signalling us if the
     // control channel ever stops answering.
     let _ = leviath_runtime::control_socket::ControlToken::write_pid(&control_dir);
-    // Record the build we started from so a later CLI can detect stale code and
-    // restart us (must happen right after we win the single-instance bind).
     leviath_cli::daemon::setup::write_build_marker();
     // Who this daemon is, told to every client that asks in its handshake. A
     // long-lived client (`lev serve`, `lev dash`, the ACP bridge) compares it

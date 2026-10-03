@@ -387,13 +387,13 @@ pub(crate) fn pending_lines(agents_dir: Option<&Path>, others: &[PathBuf]) -> Ve
             let (name, to) = (name_of(&dir), dir.join(leviath_blueprint::FILE_NAME));
             match problems(&dir) {
                 Some(problems) => format!(
-                    "blueprint '{name}' at {shown} is an agent.leviath from an earlier release \
+                    "blueprint '{name}' is an agent.leviath from an earlier release \
                      that could not be upgraded, so it is not listed: {problems}. Fix it, then \
                      convert it with `lev blueprint migrate {shown} -o {}`",
                     to.display()
                 ),
                 None => format!(
-                    "blueprint '{name}' at {shown} is an agent.leviath from an earlier release, so \
+                    "blueprint '{name}' is an agent.leviath from an earlier release, so \
                      it is not listed: the daemon upgrades it when it starts (`lev daemon \
                      restart`), or convert it with `lev blueprint migrate {shown} -o {}`",
                     to.display()

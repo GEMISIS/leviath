@@ -398,6 +398,33 @@ pub fn apply_region_flags(
     }
 }
 
+/// Whether `command` talks to the daemon, so that a daemon of another build
+/// than this `lev` changes what it does or shows. Only these say so before
+/// they run; a command that reads files or config alone has no daemon to
+/// differ from, and `lev daemon status` says how the builds stand itself.
+pub fn reaches_daemon(command: &Commands) -> bool {
+    match command {
+        Commands::Run(commands::run::RunArgs {
+            command: Some(commands::run::RunCommand::Show(_)),
+            ..
+        }) => false,
+        Commands::Serve(args) => !args.print_graphql_schema,
+        Commands::Doctor(args) => !args.no_daemon && !args.offline,
+        Commands::Run(_)
+        | Commands::Ps(_)
+        | Commands::Msg(_)
+        | Commands::Cancel(_)
+        | Commands::Pause(_)
+        | Commands::Resume(_)
+        | Commands::Interactions(_)
+        | Commands::Respond(_)
+        | Commands::Dashboard(_)
+        | Commands::AgentClient(_)
+        | Commands::Rage(_) => true,
+        _ => false,
+    }
+}
+
 /// Route a parsed subcommand to its executor. Safe commands are called
 /// directly (and are exercised through `dispatch()` by the tests below); the
 /// I/O-risky ones go through `ex` (see [`RiskyExecutors`]).
@@ -479,6 +506,49 @@ mod tests {
                 COMMANDS_HELP.contains(&format!("  {name} ")),
                 "`{name}` is not listed in COMMANDS_HELP - add it to a section"
             );
+        }
+    }
+
+    /// The commands parsed from `argv`.
+    fn parsed(argv: &[&str]) -> Commands {
+        use clap::{Command, FromArgMatches, Subcommand};
+        let lev = Commands::augment_subcommands(Command::new("lev"));
+        Commands::from_arg_matches(&lev.get_matches_from(argv)).expect("the command parses")
+    }
+
+    /// The mixed-build warning is for commands that talk to the daemon, and
+    /// only those.
+    #[test]
+    fn only_a_command_that_talks_to_the_daemon_warns_of_its_build() {
+        let reaching: [&[&str]; 13] = [
+            &["lev", "ps"],
+            &["lev", "run", "bp", "--task", "t"],
+            &["lev", "msg", "r", "hi"],
+            &["lev", "kill", "r"],
+            &["lev", "pause", "r"],
+            &["lev", "resume", "r"],
+            &["lev", "interactions"],
+            &["lev", "respond", "q", "yes"],
+            &["lev", "dash"],
+            &["lev", "serve"],
+            &["lev", "agent-client"],
+            &["lev", "rage"],
+            &["lev", "doctor"],
+        ];
+        for argv in reaching {
+            assert!(reaches_daemon(&parsed(argv)), "{argv:?}");
+        }
+        let local: [&[&str]; 7] = [
+            &["lev", "list"],
+            &["lev", "validate", "bp"],
+            &["lev", "run", "show", "r"],
+            &["lev", "serve", "--print-graphql-schema"],
+            &["lev", "doctor", "--no-daemon"],
+            &["lev", "doctor", "--offline"],
+            &["lev", "daemon", "status"],
+        ];
+        for argv in local {
+            assert!(!reaches_daemon(&parsed(argv)), "{argv:?}");
         }
     }
 
