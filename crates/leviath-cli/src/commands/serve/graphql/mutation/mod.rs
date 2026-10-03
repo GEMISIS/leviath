@@ -238,6 +238,7 @@ impl RunMutation {
     /// and it reads as `ALREADY_SETTLED` rather than as a failure. A question
     /// a held run asked (see `heldInteractions`) is an error coded `RUN_HELD`,
     /// saying what to put back: it reopens under a new id once the run is back.
+    /// An id no run on this machine asked is an error coded `NOT_FOUND`.
     async fn answer_interaction(
         &self,
         ctx: &Context<'_>,

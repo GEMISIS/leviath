@@ -2,10 +2,11 @@
 //! `Run.graph`.
 //!
 //! These are the REST routes' own reads (`core::inspect`), so a run answers
-//! the same on both surfaces. What this adds is GraphQL's shape: a run with
-//! no run file reads as null rather than as a miss, a step a client names is
-//! a GraphQL `Int` checked here, and one `deltas` call answers at most
-//! [`MAX_STEPS`] steps.
+//! the same on both surfaces, a step past the run's last coded
+//! `RANGE_NOT_SATISFIABLE` as REST answers it 416. What this adds is GraphQL's
+//! shape: a run with no run file reads as null rather than as a miss, a step a
+//! client names is a GraphQL `Int` checked here, and one `deltas` call answers
+//! at most [`MAX_STEPS`] steps.
 
 use super::super::super::super::blocking::blocking;
 use super::super::super::super::core::error::ServeError;
@@ -20,13 +21,11 @@ use super::state::RunState;
 /// The most steps one `deltas` call answers with.
 pub(crate) const MAX_STEPS: u64 = 200;
 
-/// `read`'s answer, with a run that has no run file read as `None`, and a
-/// step the run does not have as the caller's mistake.
+/// `read`'s answer, with a run that has no run file read as `None`.
 fn present<T>(read: Result<T, ServeError>) -> Result<Option<T>, ServeError> {
     match read {
         Ok(value) => Ok(Some(value)),
         Err(ServeError::NotFound(_)) => Ok(None),
-        Err(ServeError::RangeNotSatisfiable(message)) => Err(ServeError::BadRequest(message)),
         Err(e) => Err(e),
     }
 }

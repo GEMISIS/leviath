@@ -521,6 +521,54 @@ async fn a_refusal_from_the_daemon_is_a_bad_request_with_its_reason() {
     assert!(failure.to_string().contains("empty message"), "{failure}");
 }
 
+/// A message the daemon will not deliver because of the run it names is not
+/// the caller's mistake: no run by that name is a miss, a run that finished or
+/// was cancelled is there and refuses it, and a run held off this machine says
+/// what to put back. The daemon's own words are kept for each.
+#[tokio::test]
+async fn a_message_no_run_will_read_says_which_run_and_why() {
+    use crate::commands::serve::core::held::{listing, seed_held};
+    crate::runstate::with_isolated_runs_dir_async("core-message-refused", |_d| async move {
+        let held_row = seed_held("held-1", "held-1-ask-1");
+        crate::runstate::create_run(&crate::runstate::RunMeta {
+            status: crate::runstate::RunStatus::Complete,
+            ..crate::test_support::fixtures::run_meta("done-1")
+        })
+        .unwrap();
+        // The daemon lists the finished run too, and not as held.
+        let mut listed = held_row.clone();
+        listed.run_id = "done-1".to_string();
+        listed.wait_reason = None;
+        let (control, _socket, _srv) =
+            crate::commands::serve::testutil::busy_daemon(move |req| match req {
+                ControlRequest::List => listing(vec![held_row.clone(), listed.clone()]),
+                ControlRequest::Message { agent_id, .. } => ControlResponse::Error {
+                    message: format!("run '{agent_id}' reads no more messages"),
+                },
+                other => panic!("a listing or a message, not {other:?}"),
+            });
+        let mut state = state_with_agent_paths(Vec::new());
+        state.control = control;
+        for (run, code) in [
+            ("ghost", "NOT_FOUND"),
+            ("done-1", "CONFLICT"),
+            ("held-1", "RUN_HELD"),
+        ] {
+            let failure = send_message(&state, run, "hi".to_string(), None, Vec::new())
+                .await
+                .expect_err("the run reads no more messages");
+            assert_eq!(failure.code(), code, "{run}");
+            assert!(
+                failure
+                    .to_string()
+                    .contains(&format!("run '{run}' reads no more")),
+                "{run}"
+            );
+        }
+    })
+    .await;
+}
+
 /// The inbox is whatever the daemon is holding, each entry naming its run.
 #[tokio::test]
 async fn the_open_asks_come_back_with_their_runs() {

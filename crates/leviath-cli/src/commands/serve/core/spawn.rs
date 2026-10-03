@@ -248,6 +248,7 @@ pub(crate) async fn send_message(
     target_region: Option<String>,
     parts: Vec<InboundPart>,
 ) -> Result<(), ServeError> {
+    let says_nothing = message.trim().is_empty() && parts.is_empty();
     let reply = state
         .control
         .request(&ControlRequest::Message {
@@ -263,7 +264,22 @@ pub(crate) async fn send_message(
             "Agent run '{run_id}' is not accepting messages"
         ))),
         // A message that says nothing.
-        Ok(ControlResponse::Error { message }) => Err(ServeError::BadRequest(message)),
+        Ok(ControlResponse::Error { message }) if says_nothing => {
+            Err(ServeError::BadRequest(message))
+        }
+        // Refused because of the run it names: a run held off this machine
+        // says what to put back, one with a record here (finished, failed or
+        // cancelled) is there and refuses it, and no record is a miss. The
+        // daemon's words, which say what to do, are kept as they are.
+        Ok(ControlResponse::Error { message }) => {
+            Err(match held::is_held(&state.control, run_id).await {
+                true => ServeError::Held(message),
+                false if crate::runstate::read_meta(run_id).is_ok() => {
+                    ServeError::Conflict(message)
+                }
+                false => ServeError::NotFound(message),
+            })
+        }
         Ok(other) => Err(ServeError::unexpected_reply(&other)),
         Err(e) => Err(ServeError::from_daemon_io(&e)),
     }

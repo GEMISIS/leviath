@@ -808,8 +808,8 @@ async fn a_run_that_takes_no_messages_says_so() {
 }
 
 /// Attachments are named inside the run's own working directory, so a message
-/// carrying some to a run this server cannot read is refused before the daemon
-/// is asked.
+/// carrying some to a run this server has no record of is refused before the
+/// daemon is asked, as the miss REST answers 404 to.
 #[tokio::test]
 async fn a_message_with_files_needs_a_run_it_can_read() {
     crate::runstate::with_isolated_runs_dir_async("graphql-message-unread", |_d| async move {
@@ -819,7 +819,8 @@ async fn a_message_with_files_needs_a_run_it_can_read() {
                  attachments: [{ path: "notes.txt" }] }) { run { id } } }"#,
         )
         .await;
-        assert_eq!(code_of(&answer), "\"INTERNAL\"");
+        assert_eq!(code_of(&answer), "\"NOT_FOUND\"");
+        assert!(answer.errors[0].message.contains("ghost"));
     })
     .await;
 }
@@ -994,7 +995,14 @@ async fn an_option_word_answers_with_that_option() {
         "{:?}",
         refused.errors
     );
-    let gone = mutate(control, &ask("ask-9", "{ id: \"allow\" }")).await;
+    let gone = crate::runstate::with_isolated_runs_dir_async("graphql-option-gone", |_runs| {
+        let control = control.clone();
+        async move {
+            std::fs::create_dir_all(crate::runstate::run_dir("run-1")).unwrap();
+            mutate(control, &ask("run-1-ask-9", "{ id: \"allow\" }")).await
+        }
+    })
+    .await;
     assert!(gone.errors.is_empty(), "{:?}", gone.errors);
     assert_eq!(
         data_of(&gone)["answerInteraction"]["outcome"],
@@ -1023,13 +1031,18 @@ fn the_option_write_round_trips() {
 /// won.
 #[tokio::test]
 async fn a_second_answer_reads_as_already_settled() {
-    let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: false });
-    let answer = mutate(
-        control,
-        r#"mutation { answerInteraction(request: { interactionId: "ask-1",
-             answer: { text: "yes" } }) { interactionId outcome } }"#,
-    )
-    .await;
+    let answer =
+        crate::runstate::with_isolated_runs_dir_async("graphql-settled", |_runs| async move {
+            std::fs::create_dir_all(crate::runstate::run_dir("run-1")).unwrap();
+            let (control, _socket, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: false });
+            mutate(
+                control,
+                r#"mutation { answerInteraction(request: { interactionId: "run-1-ask-1",
+                 answer: { text: "yes" } }) { interactionId outcome } }"#,
+            )
+            .await
+        })
+        .await;
     assert!(answer.errors.is_empty(), "{:?}", answer.errors);
     let json = data_of(&answer);
     assert_eq!(json["answerInteraction"]["outcome"], "ALREADY_SETTLED");
@@ -1043,6 +1056,47 @@ async fn a_second_answer_reads_as_already_settled() {
     )
     .await;
     assert_eq!(code_of(&unreachable), "\"DAEMON_UNAVAILABLE\"");
+}
+
+/// An id no run on this machine could have asked is not settled, it is
+/// unknown: a typo, or an id from another machine. That is the miss REST
+/// answers 404 to, and an outcome of `ALREADY_SETTLED` would tell the client
+/// somebody else answered it.
+#[tokio::test]
+async fn an_id_no_run_asked_is_not_found() {
+    use leviath_runtime::control_socket::ControlRequest;
+    crate::runstate::with_isolated_runs_dir_async("graphql-unknown-answer", |_runs| async move {
+        std::fs::create_dir_all(crate::runstate::run_dir("run-1")).unwrap();
+        let (control, _socket, _srv) = busy_daemon(|req| match req {
+            ControlRequest::List => crate::commands::serve::core::held::listing(Vec::new()),
+            ControlRequest::ListInteractions => ControlResponse::Interactions {
+                interactions: Vec::new(),
+            },
+            _ => ControlResponse::Ok { ok: false },
+        });
+        for (id, answer) in [
+            ("ghost-ask-1", "{ text: \"yes\" }"),
+            ("nope", "{ text: \"yes\" }"),
+            ("ghost-approve-2", "{ option: { id: \"allow\" } }"),
+        ] {
+            let refused = mutate(
+                control.clone(),
+                &format!(
+                    "mutation {{ answerInteraction(request: {{ interactionId: \"{id}\", \
+                     answer: {answer} }}) {{ outcome }} }}"
+                ),
+            )
+            .await;
+            assert_eq!(code_of(&refused), "\"NOT_FOUND\"", "{id}");
+            let ext = refused.errors[0].extensions.as_ref().expect("extensions");
+            assert_eq!(
+                ext.get("httpStatus").map(ToString::to_string).as_deref(),
+                Some("404")
+            );
+            assert!(refused.errors[0].message.contains(id), "{id}");
+        }
+    })
+    .await;
 }
 
 /// Answering a question a held run asked is an error coded `RUN_HELD` saying

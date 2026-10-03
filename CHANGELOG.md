@@ -106,7 +106,15 @@ same list.
 - **Breaking.** A message to a run that has finished is refused: `lev msg`
   exits 1 and says the run reads no more messages, so start a new run.
   0.6.4 printed "message delivered" and exited 0, though nothing would ever
-  read the message.
+  read the message. `POST /api/runs/{id}/message` answers that refusal 409,
+  one to a run held off the machine 409, and one to no run at all 404 as
+  0.6.4 did; GraphQL's `sendMessage` answers `CONFLICT`, `RUN_HELD` and
+  `NOT_FOUND`.
+- GraphQL's `answerInteraction` on an id no run on this machine asked is an
+  error coded `NOT_FOUND`, the miss REST answers 404 to. 0.6.4 answered it
+  `ALREADY_SETTLED`, which said somebody had answered it. A question that was
+  answered or expired is still `ALREADY_SETTLED`. `sendMessage` with
+  attachments to a run with no record is `NOT_FOUND` rather than `INTERNAL`.
 - `GET /api/update` (and `lev update --check --json`) keeps `renamed_keys`,
   now always empty: an `agent.toml` refuses a key it does not know, so a
   blueprint has no old spellings to rewrite.

@@ -470,12 +470,20 @@ pub(crate) async fn send_message(
     let state = ctx.data_unchecked::<AppState>();
     let run_id = request.run_id.to_string();
     // Attachments are named inside the run's own working directory, so the
-    // record is read first for a request that sends any.
+    // record is read first for a request that sends any. Nothing has been
+    // asked of the daemon yet, so a record that is not there is a miss.
     let listed = request.attachments.unwrap_or_default();
     let parts = match listed.is_empty() {
         true => Vec::new(),
         false => {
-            let meta = read_meta(&run_id).gql()?;
+            let meta = runstate::read_meta(&run_id)
+                .map_err(|_| {
+                    ServeError::NotFound(format!(
+                        "Run '{run_id}' has no working directory this server can read \
+                         attachments from"
+                    ))
+                })
+                .gql()?;
             parts_of(
                 listed,
                 std::path::Path::new(&meta.workdir),

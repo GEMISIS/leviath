@@ -75,6 +75,17 @@ pub(crate) async fn held_questions(control: &ControlClient) -> Vec<HeldQuestion>
     .await
 }
 
+/// Whether the daemon holds the run `run_id` off this machine. False when the
+/// daemon does not list its runs.
+pub(crate) async fn is_held(control: &ControlClient, run_id: &str) -> bool {
+    match control.request(&ControlRequest::List).await {
+        Ok(ControlResponse::List { runs, .. }) => runs.iter().any(|row| {
+            row.run_id == run_id && matches!(row.wait_reason, Some(WaitReason::NeedsSetup { .. }))
+        }),
+        _ => false,
+    }
+}
+
 /// `otherwise`, or the refusal for the held question `named` picks.
 ///
 /// Asked only once nothing open answered to the name, so the daemon is listed
