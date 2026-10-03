@@ -404,7 +404,10 @@ async fn the_greeting_is_numbered_below_every_frame_the_stream_can_carry() {
 /// A run that starts matching joins the scope on its next status change.
 ///
 /// The one thing a subscribe-time set cannot do on its own: a run that was not
-/// interesting when the client subscribed, and became interesting since.
+/// interesting when the client subscribed, and became interesting since. The
+/// run fails only once the opening frame is in, which is when the set the
+/// subscription started with has been worked out: a run that has already
+/// failed by then is in that set, and its earlier frames with it.
 #[tokio::test]
 async fn a_run_that_starts_matching_joins_on_a_status_change() {
     with_isolated_runs_dir_async("sub-filter-joins", |_runs| async move {
@@ -417,25 +420,19 @@ async fn a_run_that_starts_matching_joins_on_a_status_change() {
             r#"subscription { runEvents(filter: { status: { eq: ERROR } }) {
                  __typename ... on RunEvent { runId } } }"#,
         ));
-        let collector = tokio::spawn(async move {
-            let mut out = Vec::new();
-            while out.len() < 2 {
-                match stream.next().await {
-                    Some(response) => {
-                        assert!(response.errors.is_empty(), "{:?}", response.errors);
-                        out.push(serde_json::to_value(&response.data).expect("serializes"));
-                    }
-                    None => break,
-                }
-            }
-            out
-        });
-        for _ in 0..500 {
-            if tx.receiver_count() > 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        let mut next = async || {
+            let response = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
+                .await
+                .expect("the frame arrives")
+                .expect("the stream is open");
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            serde_json::to_value(&response.data).expect("serializes")
+        };
+        let opened = next().await;
+        assert_eq!(
+            field(&opened, "runEvents", "__typename"),
+            "SubscriptionOpenedEvent"
+        );
         // Nothing matched at subscribe time, so this is dropped.
         crate::commands::serve::events::send(&tx, log("run-a", "still running"));
         // The run fails; the status frame is what makes the filter look again.
@@ -443,16 +440,17 @@ async fn a_run_that_starts_matching_joins_on_a_status_change() {
         crate::commands::serve::events::send(&tx, status("run-a"));
         crate::commands::serve::events::send(&tx, log("run-a", "after the failure"));
 
-        let out = tokio::time::timeout(std::time::Duration::from_secs(10), collector)
-            .await
-            .expect("the frames arrive")
-            .expect("the collector finishes");
-        assert_eq!(out.len(), 2);
+        let joined = next().await;
         assert_eq!(
-            field(&out[1], "runEvents", "__typename"),
+            field(&joined, "runEvents", "__typename"),
             "RunStatusChangedEvent"
         );
-        assert_eq!(field(&out[1], "runEvents", "runId"), "run-a");
+        assert_eq!(field(&joined, "runEvents", "runId"), "run-a");
+        let after = next().await;
+        assert_eq!(
+            field(&after, "runEvents", "__typename"),
+            "LogLineWrittenEvent"
+        );
     })
     .await;
 }
