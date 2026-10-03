@@ -1239,7 +1239,12 @@ async fn interactions_lists_and_shows_without_answering() {
     ] {
         let (r, requests) = read_with(interactions_line(&[FIRST, SECOND]), args).await;
         r.expect("a read of what is open succeeds");
-        assert_eq!(requests.len(), 1, "one listing, nothing else: {requests:?}");
+        let ops: Vec<&str> = requests.iter().filter_map(|r| r["op"].as_str()).collect();
+        assert!(
+            ops.iter()
+                .all(|op| ["list_interactions", "list"].contains(op)),
+            "listings, nothing else: {requests:?}"
+        );
         assert!(answered_ids(&requests).is_empty());
     }
 }
@@ -1324,4 +1329,151 @@ fn the_full_view_shows_arguments_body_and_the_answer_line() {
     assert!(out.contains("  required: no"), "{out}");
     assert!(!out.contains("arguments:"), "{out}");
     assert!(!out.contains("body:"), "{out}");
+}
+
+// ─── a held run's question ────────────────────────────────────────────────
+
+/// The row a daemon lists a run with that it holds off this machine.
+fn held_row(run_id: &str) -> leviath_runtime::host::RunListEntry {
+    leviath_runtime::host::RunListEntry {
+        run_id: run_id.to_string(),
+        title: None,
+        status: leviath_runtime::components::AgentStatus::Paused,
+        wait_reason: Some(leviath_core::run_meta::WaitReason::NeedsSetup {
+            blocker: leviath_core::run_meta::SetupBlocker::ProviderMissing,
+            remedy: "configure 'openai' again, then `lev resume` this run".to_string(),
+        }),
+        stage: "ask".to_string(),
+        stage_index: None,
+        num_stages: None,
+        iteration: 0,
+        tool_calls: 0,
+        last_progress_at: None,
+        started_at: None,
+        active: None,
+        unattended: false,
+        yolo_profile: None,
+        empty_output: false,
+        splits_degraded: 0,
+        broken_scripts: Vec::new(),
+        read_paths: None,
+        has_final_output: false,
+        may_never_finish: Vec::new(),
+    }
+}
+
+/// A run held off this machine with `question` open on its file, and a live
+/// run beside it with one open too, as a `List` reply.
+fn held_listing(run_id: &str, question: &str) -> String {
+    for (id, asked) in [(run_id, question), ("live-1", "live-1-ask-1")] {
+        seed_live_run(id);
+        let path = crate::runstate::run_file::path_in(&crate::runstate::run_dir(id));
+        let mut writer = leviath_runtime::runfile::RunFileWriter::open(
+            &path,
+            leviath_runtime::runfile::CheckpointPolicy::default(),
+        )
+        .unwrap();
+        let mut next = writer.state().clone();
+        next.interactions
+            .push(leviath_runtime::state::OpenInteraction {
+                id: asked.to_string(),
+                prompt: "What colour?".to_string(),
+                options: vec!["red".to_string()],
+            });
+        let at = writer.state().seq as i64 + 1;
+        writer.record(next, at, Vec::new()).unwrap();
+    }
+    let mut live = held_row("live-1");
+    live.status = leviath_runtime::components::AgentStatus::Waiting;
+    live.wait_reason = Some(leviath_core::run_meta::WaitReason::UserPrompt);
+    serde_json::to_string(&ControlResponse::List {
+        runs: vec![held_row(run_id), live],
+        finished: Vec::new(),
+        health: Default::default(),
+    })
+    .unwrap()
+}
+
+/// A question a held run asked cannot be answered until the run is back, and
+/// answering it says so, with what to put back, rather than that there is no
+/// such question.
+#[tokio::test]
+async fn answering_a_held_runs_question_says_the_run_is_held() {
+    crate::runstate::with_isolated_runs_dir_async("ctl-held-answer", |_base| async {
+        for typed in ["held-1-ask-1", "held-1-ask"] {
+            let args = RespondArgs {
+                request_id: typed.to_string(),
+                value: Some("blue".to_string()),
+                ..respond_args()
+            };
+            let listing = held_listing("held-1", "held-1-ask-1");
+            let (r, requests) = served(
+                vec![interactions_line(&[]), listing, APPLIED.to_string()],
+                |c| async move { respond(&c, &args).await },
+            )
+            .await;
+            let err = r.unwrap_err().to_string();
+            assert!(err.contains("run 'held-1'"), "{err}");
+            assert!(err.contains("configure 'openai' again"), "{err}");
+            assert!(err.contains("new id"), "{err}");
+            assert!(answered_ids(&requests).is_empty());
+        }
+        // Not one a held run asked: the plain answer.
+        let args = RespondArgs {
+            request_id: "live-1-ask-1".to_string(),
+            value: Some("blue".to_string()),
+            ..respond_args()
+        };
+        let listing = held_listing("held-1", "held-1-ask-1");
+        let (r, _) = served(vec![interactions_line(&[]), listing], |c| async move {
+            respond(&c, &args).await
+        })
+        .await;
+        assert_eq!(r.unwrap_err().to_string(), "no such open interaction");
+    })
+    .await;
+}
+
+/// The listing names a held run's question as held, with why and what to
+/// do, and only a held run's: a live run's questions are the daemon's to
+/// list.
+#[tokio::test]
+async fn a_held_runs_question_is_listed_as_held() {
+    crate::runstate::with_isolated_runs_dir_async("ctl-held-list", |_base| async {
+        let listing = held_listing("held-1", "held-1-ask-1");
+        let held = served(vec![listing], |c| async move {
+            let held = held_questions(&c).await;
+            assert_eq!(held.len(), 1);
+            let text = format_held(&held[0]);
+            assert!(text.starts_with("held-1-ask-1  [held]"), "{text}");
+            assert!(text.contains("What colour?"), "{text}");
+            assert!(text.contains("configure 'openai' again"), "{text}");
+            Ok(())
+        })
+        .await;
+        held.0.unwrap();
+        // The listing prints it, and showing it by its id says why it waits.
+        let listing = held_listing("held-1", "held-1-ask-1");
+        let (r, _) = read_with(interactions_line(&[]), interactions_args(None, false)).await;
+        r.unwrap();
+        let (r, _) = served(
+            vec![interactions_line(&[]), listing.clone()],
+            |c| async move { interactions(&c, &interactions_args(None, false)).await },
+        )
+        .await;
+        r.unwrap();
+        let (r, _) = served(vec![interactions_line(&[]), listing], |c| async move {
+            interactions(&c, &interactions_args(Some("held-1-ask-1"), false)).await
+        })
+        .await;
+        assert!(r.unwrap_err().to_string().contains("run 'held-1'"));
+        // A daemon that does not list its runs holds none.
+        let (r, _) = served(vec![APPLIED.to_string()], |c| async move {
+            assert!(held_questions(&c).await.is_empty());
+            Ok(())
+        })
+        .await;
+        r.unwrap();
+    })
+    .await;
 }

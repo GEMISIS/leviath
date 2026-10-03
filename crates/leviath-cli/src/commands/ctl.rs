@@ -539,6 +539,80 @@ async fn open_interactions(
     }
 }
 
+/// A question a run asked that the daemon holds off this machine. Nothing
+/// answers it while the run is held: once the machine can take the run back,
+/// the question reopens under a new id.
+pub(super) struct HeldQuestion {
+    run_id: String,
+    question: leviath_runtime::state::OpenInteraction,
+    remedy: String,
+}
+
+/// The questions open on the runs the daemon holds off this machine, read off
+/// each one's file. None when the daemon does not list its runs.
+async fn held_questions(client: &ControlClient) -> Vec<HeldQuestion> {
+    let runs = match client.request(&ControlRequest::List).await {
+        Ok(ControlResponse::List { runs, .. }) => runs,
+        _ => Vec::new(),
+    };
+    runs.into_iter()
+        .filter_map(|row| match row.wait_reason {
+            Some(leviath_core::run_meta::WaitReason::NeedsSetup { remedy, .. }) => {
+                Some((row.run_id, remedy))
+            }
+            _ => None,
+        })
+        .flat_map(|(run_id, remedy)| {
+            let open = crate::runstate::run_file::tail_in(&crate::runstate::run_dir(&run_id))
+                .map(|tail| tail.state.interactions)
+                .unwrap_or_default();
+            open.into_iter().map(move |question| HeldQuestion {
+                run_id: run_id.clone(),
+                question,
+                remedy: remedy.clone(),
+            })
+        })
+        .collect()
+}
+
+/// One held question as the listing shows it: what was asked, and why
+/// nothing can answer it yet.
+fn format_held(held: &HeldQuestion) -> String {
+    let q = &held.question;
+    let mut s = format!("{}  [held]  agent={}\n  {}", q.id, held.run_id, q.prompt);
+    for (i, option) in q.options.iter().enumerate() {
+        s.push_str(&format!("\n    {}. {option}", i + 1));
+    }
+    s.push_str(&format!(
+        "\n  held: this machine cannot take the run back as it stands, so nothing can answer \
+         this yet: {}\n  once the run is back, the question reopens under a new id",
+        held.remedy
+    ));
+    s
+}
+
+/// Why `typed` names no open interaction, when it names a question a held run
+/// asked: whole, or the start of its id.
+fn held_refusal(typed: &str, held: &[HeldQuestion]) -> Option<String> {
+    let h = held
+        .iter()
+        .find(|h| !typed.is_empty() && h.question.id.starts_with(typed))?;
+    Some(format!(
+        "'{}' was asked by run '{}', which this machine cannot take back as it stands, so \
+         nothing can answer it yet: {}. Once the run is back, the question reopens under a new \
+         id: lev interactions",
+        h.question.id, h.run_id, h.remedy
+    ))
+}
+
+/// `err`, or why `typed` cannot be answered when a held run asked it.
+async fn or_held(client: &ControlClient, typed: &str, err: anyhow::Error) -> anyhow::Error {
+    match held_refusal(typed, &held_questions(client).await) {
+        Some(why) => anyhow::anyhow!(why),
+        None => err,
+    }
+}
+
 /// List the interactions the daemon is currently holding.
 fn list_interactions(interactions: &[(String, InteractionRequest)], json: bool) {
     if json {
@@ -587,9 +661,20 @@ pub async fn interactions(client: &ControlClient, args: &InteractionsArgs) -> an
     match &args.request_id {
         None => {
             list_interactions(&open, args.json);
+            // A question a held run asked is listed under the ones that can
+            // be answered, saying why it cannot be yet. Left out of `--json`,
+            // whose caller reads every entry as one it can answer.
+            if !args.json {
+                for held in held_questions(client).await {
+                    println!("{}", format_held(&held));
+                }
+            }
             Ok(())
         }
-        Some(typed) => show_interaction(&open, typed, args.json),
+        Some(typed) => match show_interaction(&open, typed, args.json) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(or_held(client, typed, e).await),
+        },
     }
 }
 
@@ -654,7 +739,10 @@ async fn answer_interaction(
     let cwd = std::env::current_dir().unwrap_or_default();
     let attached = crate::commands::run::attach::attach_all(&args.attach, &cwd)?;
     let open = open_interactions(client).await?;
-    let (_, request) = resolve_request_id(typed, &open)?;
+    let (_, request) = match resolve_request_id(typed, &open) {
+        Ok(found) => found,
+        Err(e) => return Err(or_held(client, typed, e).await),
+    };
     let request_id = request.id.clone();
     // The daemon checks the answer too; checked here as well so the refusal
     // can say what answers the question.
