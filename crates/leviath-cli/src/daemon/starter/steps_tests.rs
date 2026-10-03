@@ -335,6 +335,18 @@ async fn a_refusal_after_the_file_is_written_is_recorded_on_it() {
         RunStatus::Error(why) => assert!(why.contains("the provider went away")),
         other => panic!("not recorded: {other:?}"),
     }
+    // It ended before it entered a stage, so every stage reads never reached
+    // rather than still to come.
+    let ledger = RunFileReader::open(&path)
+        .unwrap()
+        .latest_state()
+        .unwrap()
+        .ledger;
+    let unreached = ledger
+        .iter()
+        .filter(|r| r.status == leviath_runtime::state::StageStatus::Skipped)
+        .count();
+    assert_eq!((unreached, ledger.is_empty()), (ledger.len(), false));
     assert!(record_failed(&dir.path().join("gone.lvr"), &state, &issues).is_err());
 
     crate::test_support::with_tracing(|| {

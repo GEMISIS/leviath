@@ -5368,7 +5368,7 @@
           "agents"
         ],
         "summary": "The run's per-stage ledger",
-        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/stages`. What each stage spent, in tokens and in dollars, per visit as well as in total, and which regions it carried. Not derivable from the other routes: a stage that ran and wrote nothing to any region leaves no trace in context/history, so `entered` is the only way to tell it from a stage that was never reached, and pricing is the daemon's job - a console multiplying tokens by a rate card of its own produces a fourth answer that disagrees with the run's, the stage's and the provider's.",
+        "description": "Kept for older clients and will be removed; use `GET /api/runs/{id}/stages`. A paused stage reads `active` here and a cancelled one `error`, the words those clients know. What each stage spent, in tokens and in dollars, per visit as well as in total, and which regions it carried. Not derivable from the other routes: a stage that ran and wrote nothing to any region leaves no trace in context/history, so `entered` is the only way to tell it from a stage that was never reached, and pricing is the daemon's job - a console multiplying tokens by a rate card of its own produces a fourth answer that disagrees with the run's, the stage's and the provider's.",
         "responses": {
           "200": {
             "description": "Stage records in blueprint order. Empty for a run that has not reached its first stage boundary.",
@@ -5667,11 +5667,13 @@
               "pending",
               "active",
               "waiting_input",
+              "paused",
               "complete",
               "error",
+              "cancelled",
               "skipped"
             ],
-            "description": "`skipped` means the run finished without ever entering this stage, which is distinct from `pending` (not yet, on a live run)."
+            "description": "`skipped` means the run finished without ever entering this stage, which is distinct from `pending` (not yet, on a live run). The stage a run stops or holds in reads as the run does: `paused` while it is paused or held, `cancelled` once it is cancelled. `GET /api/agents/{id}/stages` sends those two as `active` and `error`, the words older clients know."
           },
           "entered": {
             "type": "boolean",

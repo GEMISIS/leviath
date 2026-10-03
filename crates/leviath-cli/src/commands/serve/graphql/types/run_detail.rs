@@ -248,12 +248,18 @@ pub(crate) enum StageStatus {
     Pending,
     /// The stage the run is in right now.
     Active,
-    /// Entered, and blocked on a person answering.
+    /// Entered, and parked: on a person answering, or on the runs it
+    /// started.
     WaitingInput,
+    /// The stage a paused run is in, paused by a person or held until the
+    /// machine can take the run back.
+    Paused,
     /// Finished and left.
     Complete,
     /// Ended in a failure. The run's own error carries the message.
     Error,
+    /// The stage a run was in when it was cancelled.
+    Cancelled,
     /// The run finished without ever entering this stage.
     Skipped,
 }
@@ -265,8 +271,10 @@ impl From<&leviath_core::run_meta::StageRunStatus> for StageStatus {
             Core::Pending => Self::Pending,
             Core::Active => Self::Active,
             Core::WaitingInput => Self::WaitingInput,
+            Core::Paused => Self::Paused,
             Core::Complete => Self::Complete,
             Core::Error => Self::Error,
+            Core::Cancelled => Self::Cancelled,
             Core::Skipped => Self::Skipped,
         }
     }

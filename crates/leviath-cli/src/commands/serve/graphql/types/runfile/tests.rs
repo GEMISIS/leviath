@@ -1010,6 +1010,8 @@ impl Probe {
             StageStatus::WaitingInput,
             StageStatus::Error,
             StageStatus::Skipped,
+            StageStatus::Paused,
+            StageStatus::Cancelled,
         ]
         .into_iter()
         .map(|status| StageRecord { status, ..record() })

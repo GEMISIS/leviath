@@ -58,6 +58,10 @@ pub(crate) fn force_cancel_in(run_dir: &Path, now: i64) -> ForceCancelOutcome {
             }
             next.status = State::Cancelled;
             next.phase = PipelinePhase::Done;
+            // Cancelled where it stood, held or not: a held run is no longer
+            // waiting on the machine, and the stage it was in ends with it.
+            next.held = None;
+            next.settle_ledger();
             writer
                 .record(next, now, Vec::new())
                 .map(|_| ForceCancelOutcome::Terminated)

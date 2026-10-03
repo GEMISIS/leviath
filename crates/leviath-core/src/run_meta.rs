@@ -1701,6 +1701,23 @@ mod tests {
         assert_eq!(StageRunStatus::WaitingInput.to_string(), "WaitingInput");
         assert_eq!(StageRunStatus::Complete.to_string(), "Complete");
         assert_eq!(StageRunStatus::Error.to_string(), "Error");
+        assert_eq!(StageRunStatus::Paused.to_string(), "Paused");
+        assert_eq!(StageRunStatus::Cancelled.to_string(), "Cancelled");
+    }
+
+    /// The two statuses a stage shares with its run go on the wire in the
+    /// run's own words.
+    #[test]
+    fn a_paused_or_cancelled_stage_says_so_as_its_run_does() {
+        for (stage, run) in [
+            (StageRunStatus::Paused, RunStatus::Paused),
+            (StageRunStatus::Cancelled, RunStatus::Cancelled),
+        ] {
+            let word = serde_json::to_value(&stage).unwrap();
+            assert_eq!(word, serde_json::json!(run.wire()));
+            let back: StageRunStatus = serde_json::from_value(word).unwrap();
+            assert_eq!(back, stage);
+        }
     }
 
     #[test]

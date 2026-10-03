@@ -25,12 +25,19 @@ pub enum StageRunStatus {
     Pending,
     /// The stage the run is in right now. At most one stage is `Active`.
     Active,
-    /// Entered, and blocked on a person answering.
+    /// Entered, and parked: on a person answering, or on the runs it
+    /// started, as its run's `waiting_input` is.
     WaitingInput,
+    /// The stage a paused run is in: paused by a person, or held until the
+    /// machine can take the run back. Running again once the run resumes.
+    Paused,
     /// Finished and left. A stage that loops back becomes `Active` again.
     Complete,
     /// Ended in a failure. The run's own `error` carries the message.
     Error,
+    /// The stage a run was in when it was stopped from outside. Nothing went
+    /// wrong in it, someone decided, as on its run.
+    Cancelled,
     /// The run finished without ever entering this stage.
     ///
     /// Distinct from [`Pending`](Self::Pending), which means "not yet" while a
@@ -50,8 +57,10 @@ impl std::fmt::Display for StageRunStatus {
             StageRunStatus::Skipped => write!(f, "Skipped"),
             StageRunStatus::Active => write!(f, "Active"),
             StageRunStatus::WaitingInput => write!(f, "WaitingInput"),
+            StageRunStatus::Paused => write!(f, "Paused"),
             StageRunStatus::Complete => write!(f, "Complete"),
             StageRunStatus::Error => write!(f, "Error"),
+            StageRunStatus::Cancelled => write!(f, "Cancelled"),
         }
     }
 }

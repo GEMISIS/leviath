@@ -485,3 +485,73 @@ fn a_step_lists_every_edge_it_took() {
             .is_empty()
     );
 }
+
+/// A state at `plan` (entered), having left `draft` and never reached
+/// `review`, standing as `status`.
+fn standing(status: RunStatus) -> RunState {
+    let mut s = base();
+    s.status = status;
+    for (name, entered) in [("draft", true), ("plan", true), ("review", false)] {
+        let mut rec = crate::insert::place::pending_stage(stage(name));
+        rec.entered = entered;
+        rec.status = match entered {
+            true => StageStatus::Complete,
+            false => StageStatus::Pending,
+        };
+        s.ledger.push(rec);
+    }
+    s.ledger[1].status = StageStatus::Active;
+    s
+}
+
+/// A state written outside the world reads, stage by stage, as its run does:
+/// the stage it stands in takes the run's status, a stage it left stays
+/// complete, and one it never reached is skipped once the run is over and
+/// pending until then.
+#[test]
+fn a_settled_ledger_reads_as_the_run_stands() {
+    for (status, here, unreached) in [
+        (RunStatus::Idle, StageStatus::Active, StageStatus::Pending),
+        (RunStatus::Active, StageStatus::Active, StageStatus::Pending),
+        (
+            RunStatus::Waiting,
+            StageStatus::WaitingInput,
+            StageStatus::Pending,
+        ),
+        (RunStatus::Paused, StageStatus::Paused, StageStatus::Pending),
+        (
+            RunStatus::Complete,
+            StageStatus::Complete,
+            StageStatus::Skipped,
+        ),
+        (
+            RunStatus::Error("boom".into()),
+            StageStatus::Error,
+            StageStatus::Skipped,
+        ),
+        (
+            RunStatus::Cancelled,
+            StageStatus::Cancelled,
+            StageStatus::Skipped,
+        ),
+    ] {
+        let mut s = standing(status.clone());
+        s.settle_ledger();
+        let got: Vec<StageStatus> = s.ledger.iter().map(|r| r.status).collect();
+        assert_eq!(
+            got,
+            vec![StageStatus::Complete, here, unreached],
+            "{status:?}"
+        );
+    }
+}
+
+/// A run stopped before it entered the stage its cursor names leaves that
+/// stage as never reached, not as stopped in.
+#[test]
+fn a_settled_ledger_leaves_an_unentered_cursor_stage_unreached() {
+    let mut s = standing(RunStatus::Cancelled);
+    s.ledger[1].entered = false;
+    s.settle_ledger();
+    assert_eq!(s.ledger[1].status, StageStatus::Skipped);
+}

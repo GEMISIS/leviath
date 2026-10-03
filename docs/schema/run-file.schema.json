@@ -3554,7 +3554,12 @@
           },
           {
             "const": "WaitingInput",
-            "description": "Waiting on a person.",
+            "description": "Waiting on a person or on the runs it started.",
+            "type": "string"
+          },
+          {
+            "const": "Paused",
+            "description": "Paused, or held until the machine can take the run back.",
             "type": "string"
           },
           {
@@ -3565,6 +3570,11 @@
           {
             "const": "Error",
             "description": "Failed.",
+            "type": "string"
+          },
+          {
+            "const": "Cancelled",
+            "description": "Stopped by a person.",
             "type": "string"
           },
           {
@@ -10443,7 +10453,12 @@
           },
           {
             "const": "WaitingInput",
-            "description": "Waiting on a person.",
+            "description": "Waiting on a person or on the runs it started.",
+            "type": "string"
+          },
+          {
+            "const": "Paused",
+            "description": "Paused, or held until the machine can take the run back.",
             "type": "string"
           },
           {
@@ -10454,6 +10469,11 @@
           {
             "const": "Error",
             "description": "Failed.",
+            "type": "string"
+          },
+          {
+            "const": "Cancelled",
+            "description": "Stopped by a person.",
             "type": "string"
           },
           {

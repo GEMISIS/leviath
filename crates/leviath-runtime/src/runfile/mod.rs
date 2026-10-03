@@ -35,7 +35,7 @@ pub mod writer;
 pub use error::{RunFileError, RunFileErrorKind};
 pub use events::{Answered, journal_events, journal_events_with};
 pub use reader::{RunFileReader, blob_path, read_blob};
-pub use summary::{context_snapshot, stage_records, summary, summary_of};
+pub use summary::{as_it_stands, context_snapshot, stage_records, summary, summary_of};
 pub use tail::{RunFileTail, read_spec};
 pub use writer::{CheckpointPolicy, RunFileWriter};
 

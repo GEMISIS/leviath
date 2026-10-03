@@ -295,9 +295,17 @@ fn the_stage_ledger_reads_every_status_and_skips_what_does_not_check() {
         skipped["status"] = json!("skipped");
         skipped["visits"] = json!([]);
         skipped["visit_count"] = json!(0);
+        let mut paused = first.clone();
+        paused["name"] = json!("paused");
+        paused["status"] = json!("paused");
+        let mut cancelled = first.clone();
+        cancelled["name"] = json!("cancelled");
+        cancelled["status"] = json!("cancelled");
         let mut bad = first;
         bad["name"] = json!(" bad");
-        v.as_array_mut().unwrap().extend([pending, skipped, bad]);
+        v.as_array_mut()
+            .unwrap()
+            .extend([pending, skipped, paused, cancelled, bad]);
     });
     let (_, file) = run.converted();
     let statuses: Vec<StageStatus> = file.last.ledger.iter().map(|r| r.status).collect();
@@ -306,11 +314,38 @@ fn the_stage_ledger_reads_every_status_and_skips_what_does_not_check() {
         vec![
             StageStatus::Complete,
             StageStatus::Pending,
-            StageStatus::Skipped
+            StageStatus::Skipped,
+            StageStatus::Paused,
+            StageStatus::Cancelled
         ]
     );
     assert!(file.last.ledger[1].models.is_empty());
     assert!(!file.last.visits.contains_key("skipped"));
+}
+
+/// An old record files the stage a run was cancelled in as failed, and the
+/// stage a paused run was in as running. Converted, that stage reads as its
+/// run does.
+#[test]
+fn the_stage_a_run_stopped_in_converts_as_its_run_stands() {
+    for (old, recorded, new) in [
+        (OldStatus::Cancelled, "error", StageStatus::Cancelled),
+        (OldStatus::Paused, "active", StageStatus::Paused),
+        (OldStatus::Error, "error", StageStatus::Error),
+    ] {
+        let run = Run::fixture("finished");
+        status(&run, old.clone(), None, None);
+        run.json("stages.json", |v| v[0]["status"] = json!(recorded));
+        let (_, file) = run.converted();
+        let here = file
+            .last
+            .ledger
+            .iter()
+            .find(|r| r.stage == file.last.cursor.stage)
+            .map(|r| r.status);
+        assert_eq!(here, Some(new), "{old:?}");
+        assert_eq!(file.fold(), file.last);
+    }
 }
 
 #[test]

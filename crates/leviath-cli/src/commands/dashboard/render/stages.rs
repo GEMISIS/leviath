@@ -206,7 +206,8 @@ impl Dashboard {
         // measuring it wall-clock counted the pause as time it spent.
         let dur_str = match s.started_at.is_some() {
             true if s.ended_at.is_some()
-                || (s.status == StageRunStatus::Active && is_current_tab) =>
+                || (matches!(s.status, StageRunStatus::Active | StageRunStatus::Paused)
+                    && is_current_tab) =>
             {
                 format!(" {}", precise(s.active_runtime_secs(agent.clock_now)))
             }
@@ -239,8 +240,11 @@ impl Dashboard {
                 }
             }
             StageRunStatus::WaitingInput => (GLYPH_WAITING, Style::default().fg(C_WARN)),
+            // Drawn as its run is in the run list: paused amber, cancelled dim.
+            StageRunStatus::Paused => (GLYPH_PENDING, Style::default().fg(C_WARN)),
             StageRunStatus::Complete => (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS)),
             StageRunStatus::Error => (GLYPH_ERROR, Style::default().fg(C_ERROR)),
+            StageRunStatus::Cancelled => (GLYPH_CANCELLED, Style::default().fg(C_DIM)),
             // A branch the run finished without taking. Drawn like a pending
             // stage rather than a completed one, because that is what it is:
             // the pending glyph on a finished run reads as "never reached",
@@ -380,9 +384,11 @@ mod tests {
             // A branch the run finished without taking. Drawn like a pending
             // stage, since that is what "never reached" looks like.
             make_stage_record("s6", StageRunStatus::Skipped),
+            make_stage_record("s7", StageRunStatus::Paused),
+            make_stage_record("s8", StageRunStatus::Cancelled),
         ]
         .into();
-        agent.num_stages = 6;
+        agent.num_stages = 8;
         agent.stage_index = 2;
         terminal
             .draw(|f| {
@@ -396,6 +402,7 @@ mod tests {
         assert!(buf.contains("s3"), "{buf}");
         assert!(buf.contains("s4"), "{buf}");
         assert!(buf.contains("s5"), "{buf}");
+        assert!(buf.contains(&format!("{GLYPH_CANCELLED} s8")), "{buf}");
     }
 
     /// Each tab is registered over the columns it was drawn on, and a strip
@@ -549,6 +556,26 @@ regions = []
         let line = dash.build_stage_tab_title(0, &record, &agent, 10);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("40s"), "{text}");
+    }
+
+    /// The stage a paused run is in reads paused and keeps showing the time
+    /// it worked, as the run does.
+    #[test]
+    fn build_stage_tab_title_paused_current_tab_reads_paused_with_its_clock() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-paused", AgentDisplayStatus::Paused);
+        agent.stage_index = 0;
+        agent.clock_now = 10_000;
+        let mut record = make_stage_record("plan", StageRunStatus::Paused);
+        record.started_at = Some(6_400);
+        record.ended_at = None;
+        record.active = Some(leviath_core::run_meta::ActiveClock {
+            banked_secs: 40,
+            since: None,
+        });
+        let line = dash.build_stage_tab_title(0, &record, &agent, 10);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, format!("{GLYPH_PENDING} plan 40s"));
     }
 
     #[test]

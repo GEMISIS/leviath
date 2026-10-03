@@ -310,12 +310,16 @@ pub(crate) enum LedgerStageStatus {
     Pending,
     /// The run is in it.
     Active,
-    /// Waiting for a person.
+    /// Waiting for a person or for the runs it started.
     WaitingInput,
+    /// Paused, or held until the machine can take the run back.
+    Paused,
     /// Done.
     Complete,
     /// Failed.
     Error,
+    /// Cancelled.
+    Cancelled,
     /// Passed over.
     Skipped,
 }
@@ -326,8 +330,10 @@ impl From<StageStatus> for LedgerStageStatus {
             StageStatus::Pending => Self::Pending,
             StageStatus::Active => Self::Active,
             StageStatus::WaitingInput => Self::WaitingInput,
+            StageStatus::Paused => Self::Paused,
             StageStatus::Complete => Self::Complete,
             StageStatus::Error => Self::Error,
+            StageStatus::Cancelled => Self::Cancelled,
             StageStatus::Skipped => Self::Skipped,
         }
     }
