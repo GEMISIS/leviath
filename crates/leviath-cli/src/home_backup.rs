@@ -158,13 +158,20 @@ impl Backup {
              it, then a digest of the path it was in)\n\
              runs/         each old run directory, as it was before it became a run file\n\n\
              To go back to the release you upgraded from:\n\
-             1. Stop the daemon: lev daemon stop\n\
+             1. Stop the daemon with this release's lev: lev daemon stop\n\
              2. For each name in agents/ here, replace <data root>/agents/<name> with the copy \
              here; for each name in runs/ here, replace <data root>/runs/<name> the same way. \
              The data root is the folder this backups/ folder is in. A blueprint in \
              agent_paths/ goes back to the agent path it came from.\n\
-             3. Delete <data root>/runs.unconverted and <data root>/runs.index.\n\
-             4. Start the earlier release's daemon: lev daemon start, with its lev.\n\n\
+             3. Delete <data root>/runs.index, and <data root>/runs.unconverted if there is \
+             one.\n\
+             4. Put the earlier release's lev back on your PATH and start its daemon: lev \
+             daemon start.\n\n\
+             Release 0.1.0 has no daemon: for it, steps 2 and 3 are all there is, and it runs \
+             each agent in the foreground with lev run, as it always did.\n\n\
+             Each run here is as it was when the upgrade converted it: a run the upgraded \
+             release carried on goes back to that point, and the earlier daemon picks it up \
+             from there.\n\n\
              Runs started after the upgrade are run files only, which the earlier release cannot \
              read, so it leaves them out of lev ps. An earlier release started without these \
              steps changes nothing, but lists no runs and no installed blueprints: every run is \

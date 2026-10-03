@@ -32,6 +32,8 @@ fn an_installed_blueprint_is_copied_once_and_the_backup_is_announced_once() {
         "{readme}"
     );
     assert!(readme.contains("runs.unconverted"), "{readme}");
+    // A release without a daemon cannot start one: the steps say so.
+    assert!(readme.contains("0.1.0 has no daemon"), "{readme}");
     // A second save of the same blueprint keeps the first copy.
     std::fs::write(coder.join("file"), "after").unwrap();
     let again = Backup::of_home(home.path());
