@@ -99,6 +99,8 @@ async fn a_call_made_again_polls_the_job_it_submitted() {
 /// A job the provider no longer has is submitted again, and the call says so.
 #[tokio::test]
 async fn a_job_that_is_gone_is_submitted_again_and_said() {
+    // With a subscriber listening, so the warning it logs is made.
+    let _guard = crate::test_support::always_on_tracing_guard();
     let remote = Remote::new();
     let log = JobLog::new([("step".to_string(), "job-old".to_string())].into());
     let ran = log

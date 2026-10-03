@@ -349,8 +349,8 @@ impl MeshyProvider {
                 deadline,
             )
             .await?;
-        let parts = self.download_parts(op, &task.value).await?;
-        Ok((parts, vec![task.note]))
+        let parts = self.download_parts(op, &task.value).await;
+        parts.map(|parts| (parts, vec![task.note]))
     }
 
     /// Text to a textured mesh: a preview task builds the geometry, then a
@@ -372,8 +372,8 @@ impl MeshyProvider {
         let refine = self
             .run_task(request, "refine", op.path(), &refine_body, deadline)
             .await?;
-        let parts = self.download_parts(op, &refine.value).await?;
-        Ok((parts, vec![preview.note, refine.note]))
+        let parts = self.download_parts(op, &refine.value).await;
+        parts.map(|parts| (parts, vec![preview.note, refine.note]))
     }
 
     /// A mesh to an animated mesh: rig it, look the requested action up in the
@@ -406,8 +406,8 @@ impl MeshyProvider {
         let anim = self
             .run_task(request, "animate", ANIMATIONS_PATH, &anim_body, deadline)
             .await?;
-        let parts = self.download_parts(op, &anim.value).await?;
-        Ok((parts, vec![rig.note, anim.note]))
+        let parts = self.download_parts(op, &anim.value).await;
+        parts.map(|parts| (parts, vec![rig.note, anim.note]))
     }
 
     /// The animation library, filtered by a search term.

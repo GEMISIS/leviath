@@ -761,6 +761,7 @@ fn delta() -> CoreDelta {
             }),
             Change::Written(600),
             Change::LastProgressAt(Some(1_700)),
+            Change::RemoteJobs(s.remote_jobs.clone()),
         ],
         events: vec![
             RunEvent::Inference {
@@ -1188,7 +1189,7 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(wedged["phase"]["reason"], "no way out", "{wedged}");
 
     let step = &json["deltas"][0];
-    assert_eq!(step["changes"].as_array().map(Vec::len), Some(32));
+    assert_eq!(step["changes"].as_array().map(Vec::len), Some(33));
     assert_eq!(step["changes"][27]["files"]["stages"][0]["index"], 0);
     assert_eq!(step["changes"][28]["blobs"][0]["mimeType"], "image/png");
     assert_eq!(step["changes"][29]["grants"]["stageIndex"], 1);
@@ -1198,6 +1199,8 @@ async fn every_field_of_every_converted_type_resolves() {
     assert_eq!(full["writtenBytes"], 600);
     assert_eq!(step["changes"][31]["lastProgressAt"], 1_700);
     assert_eq!(full["lastProgressAt"], 1_700);
+    assert_eq!(step["changes"][32]["remoteJobs"][0]["job"], "task-1");
+    assert_eq!(full["remoteJobs"][0]["step"], "meshy/rig/task");
     assert_eq!(step["changes"][24]["checkpoint"]["document"], "the plan");
     assert_eq!(full["checkpoint"]["round"], 2);
     assert_eq!(step["changes"][25]["held"][0]["code"], "UNAVAILABLE");

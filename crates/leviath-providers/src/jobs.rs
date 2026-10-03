@@ -63,11 +63,7 @@ impl JobLog {
 
     /// The jobs it holds, by step.
     pub fn jobs(&self) -> BTreeMap<String, String> {
-        self.0
-            .jobs
-            .lock()
-            .expect("the job log is never held across a panic")
-            .clone()
+        self.held().clone()
     }
 
     /// How many times it has changed.
@@ -86,54 +82,49 @@ impl JobLog {
 
     /// Forget every job: the call they belonged to is over.
     pub fn clear(&self) {
-        self.change(|jobs| !std::mem::take(jobs).is_empty());
+        let held = std::mem::take(&mut *self.held());
+        if !held.is_empty() {
+            self.changed();
+        }
     }
 
     /// Run `call` with this log as the one its provider submits through.
-    pub async fn scope<F: Future>(&self, call: F) -> F::Output {
-        JOBS.scope(self.clone(), call).await
+    pub fn scope<F: Future>(&self, call: F) -> impl Future<Output = F::Output> {
+        JOBS.scope(self.clone(), call)
     }
 
     fn get(&self, step: &str) -> Option<String> {
+        self.held().get(step).cloned()
+    }
+
+    fn put(&self, step: &str, id: &str) {
+        self.held().insert(step.to_string(), id.to_string());
+        self.changed();
+    }
+
+    fn forget(&self, step: &str) {
+        self.held().remove(step);
+        self.changed();
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, String>> {
         self.0
             .jobs
             .lock()
             .expect("the job log is never held across a panic")
-            .get(step)
-            .cloned()
     }
 
-    fn put(&self, step: &str, id: &str) {
-        self.change(|jobs| {
-            jobs.insert(step.to_string(), id.to_string());
-            true
-        });
-    }
-
-    fn forget(&self, step: &str) {
-        self.change(|jobs| jobs.remove(step).is_some());
-    }
-
-    /// Apply `edit`, and when it says it changed something, say so.
-    fn change(&self, edit: impl FnOnce(&mut BTreeMap<String, String>) -> bool) {
-        let changed = edit(
-            &mut self
-                .0
-                .jobs
-                .lock()
-                .expect("the job log is never held across a panic"),
-        );
-        if changed {
-            self.0.version.fetch_add(1, Ordering::AcqRel);
-            if let Some(wake) = self
-                .0
-                .wake
-                .lock()
-                .expect("the job log is never held across a panic")
-                .as_ref()
-            {
-                wake.notify_one();
-            }
+    /// Say it changed: count it, and wake whoever records it.
+    fn changed(&self) {
+        self.0.version.fetch_add(1, Ordering::AcqRel);
+        if let Some(wake) = self
+            .0
+            .wake
+            .lock()
+            .expect("the job log is never held across a panic")
+            .as_ref()
+        {
+            wake.notify_one();
         }
     }
 }

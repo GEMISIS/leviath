@@ -101,7 +101,7 @@ fn proven_worker(
         .ok_or("its parent is not waiting on its item")?;
     let parent_spec = &world
         .get::<RunSpecC>(parent)
-        .ok_or("its parent has no run spec")?
+        .expect("a run fanning out was placed from its spec")
         .0;
     let depths = starts::depths(world, parent, parent_spec, w.starting.len())?;
     if spec.placement.parent.as_ref() != Some(&parent_spec.run_id)

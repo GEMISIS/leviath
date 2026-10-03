@@ -26,6 +26,8 @@ struct Seen {
     finished: bool,
     /// Task ids it no longer has, answered 404.
     gone: HashSet<String>,
+    /// Task ids that failed.
+    failed: HashSet<String>,
 }
 
 /// A Meshy-style server: a POST creates `task-<n>`, a GET of a task reports
@@ -39,6 +41,10 @@ async fn mock_meshy() -> (String, Arc<Mutex<Seen>>) {
         while let Ok((mut socket, _)) = listener.accept().await {
             let mut buf = vec![0u8; 65536];
             let read = socket.read(&mut buf).await.unwrap_or(0);
+            if read == 0 {
+                // A call stopped before it sent anything.
+                continue;
+            }
             let request = String::from_utf8_lossy(&buf[..read]).to_string();
             let line = request.lines().next().unwrap_or_default().to_string();
             let mut words = line.split(' ');
@@ -56,6 +62,9 @@ async fn mock_meshy() -> (String, Arc<Mutex<Seen>>) {
                         let id = path.rsplit('/').next().unwrap_or_default().to_string();
                         seen.polls.push(id.clone());
                         let task = match seen.finished {
+                            _ if seen.failed.contains(&id) => {
+                                json!({ "status": "FAILED", "task_error": { "message": "bad mesh" } })
+                            }
                             true => {
                                 json!({ "status": "SUCCEEDED", "model_urls": { "glb": glb }, "result": { "rigged_character_glb_url": glb, "animation_glb_url": glb } })
                             }
@@ -143,12 +152,17 @@ async fn stop_mid_poll(
 ) -> std::collections::BTreeMap<String, String> {
     let log = JobLog::default();
     let req = request(model);
-    let stopped =
-        tokio::time::timeout(Duration::from_millis(300), log.scope(meshy.infer(&req))).await;
-    assert!(
-        stopped.is_err(),
-        "the call was still polling when it stopped"
-    );
+    // Stopped once it has recorded its task and polled it for a while.
+    let recorded = async {
+        while log.jobs().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    tokio::select! {
+        _ = log.scope(meshy.infer(&req)) => panic!("the call ended while its task still ran"),
+        _ = recorded => {}
+    }
     log.jobs()
 }
 
@@ -237,4 +251,22 @@ async fn a_failed_task_is_not_picked_back_up() {
     let err = log.scope(meshy.infer(&req)).await.unwrap_err();
     assert!(matches!(err, ProviderError::Other(_)), "{err}");
     assert!(log.jobs().is_empty(), "{:?}", log.jobs());
+}
+
+/// A task submitted before the restart that failed meanwhile ends the call
+/// made again with its failure, and is forgotten: the next call submits a
+/// new one rather than polling a task that will never finish.
+#[tokio::test]
+async fn a_task_that_failed_before_the_call_was_made_again_is_forgotten() {
+    let (base, seen) = mock_meshy().await;
+    let meshy = provider(&base);
+    seen.lock().unwrap().failed.insert("task-old".to_string());
+    let log = JobLog::new([("meshy/image-to-3d/task".to_string(), "task-old".to_string())].into());
+    let err = log
+        .scope(meshy.infer(&request("image-to-3d")))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("bad mesh"), "{err}");
+    assert!(log.jobs().is_empty(), "{:?}", log.jobs());
+    assert!(seen.lock().unwrap().creates.is_empty(), "nothing submitted");
 }
