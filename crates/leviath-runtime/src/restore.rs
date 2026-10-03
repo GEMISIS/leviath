@@ -313,7 +313,31 @@ pub fn resume(
     ) {
         out.0.content = content;
     }
+    let announced = Announced {
+        title: run.state.title.clone(),
+        priced_usd: run.state.totals.spend.priced_usd,
+        finished: crate::pipeline::is_terminal_status(&crate::insert::place::agent_status(
+            &run.state.status,
+        )),
+    };
+    world.entity_mut(entity).insert(announced);
     entity
+}
+
+/// What a run had already told subscribers when it stopped being in the
+/// world: placed on a run that comes back (paged in, or restored when the
+/// daemon starts), and read once by the host's first event pass over it, so
+/// that pass says only what is new. Without it, a run coming back would be
+/// announced as a run starting, renamed to the name it had, past every spend
+/// threshold it had passed, and, finished, finished again.
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct Announced {
+    /// The title it had.
+    pub title: Option<String>,
+    /// What it had spent on calls that could be priced, in US dollars.
+    pub priced_usd: f64,
+    /// Whether it had finished.
+    pub finished: bool,
 }
 
 /// Why a run is held, as the listings say it: the machine changed, and what
