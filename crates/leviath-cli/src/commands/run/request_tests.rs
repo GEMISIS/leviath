@@ -573,6 +573,11 @@ fn a_request_file_is_sent_with_the_flags_over_it() {
         ..RunLine::new(None, "/mine", dir.path())
     }));
     assert!(err.contains("this run takes no task"), "{err}");
+    // With no input at all there are no inputs to give it, so it says how
+    // to declare one instead.
+    assert!(!err.contains("--input"), "{err}");
+    assert!(err.contains("declares no input at all"), "{err}");
+    assert!(err.contains("[[graph.inputs]]"), "{err}");
 }
 
 /// A request file names what it runs, so naming a blueprint as well is

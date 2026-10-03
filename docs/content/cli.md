@@ -258,6 +258,10 @@ lev run show release-notes-1790848768-495da0e423db --deltas 3..7
 It reads the file on disk, so it needs no daemon. See [Inspecting a run](/docs/inspecting-a-run)
 for the other ways to read the same things.
 
+A blueprint named `show` or `help` is read as this subcommand when its name comes first, so give
+an option before the name to run it: `lev run --task "..." show`. `lev add` prints that form for
+such a name.
+
 ### `lev schema spawn-request`
 
 Print the JSON Schema of a spawn request: every field a `--request` file, a `POST /api/runs` body or
@@ -383,7 +387,10 @@ is written in `agent.toml`.
 
 Check a blueprint before running it. `PATH` is a blueprint directory or its `agent.toml`, and
 defaults to `.`. It reads the blueprint the way a spawn would, then prints what it is, the inputs
-it takes and the shape of its graph:
+it takes and the shape of its graph. An `agent.leviath` from an earlier release is not read; the
+command says how to convert it with `lev blueprint migrate`, as `lev add`, `lev pack` and `lev run`
+do. With `--json`, each input carries its `key`, its `type`, the `regions` it fills, `region` (the
+first of them) and whether it is `required`:
 
 ```
 $ lev validate ./release-notes
@@ -926,7 +933,8 @@ that answers with it), its `label`, the `number` the listing shows, and `answer`
 
 Answer an interaction the daemon is holding, with what the question shows. An answer can't be
 taken back, so the command needs exactly one of `ANSWER`, `--choice`, `--approve` or `--deny`.
-With none it refuses and points at `lev interactions`.
+With none it refuses and points at `lev interactions`, and so does `lev respond` with no
+`REQUEST_ID`: `lev interactions` lists the open questions with their ids.
 
 | Question | `ANSWER` |
 |---|---|

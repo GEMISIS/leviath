@@ -495,6 +495,27 @@ fn a_text_answer_carries_its_files_and_a_choice_refuses_them() {
     assert!(err.to_string().contains("empty.png"), "{err}");
 }
 
+/// Bare `lev respond` parses, and says where the question ids are instead
+/// of clap's bare "required argument".
+#[tokio::test]
+async fn respond_without_an_id_points_at_lev_interactions() {
+    use clap::{CommandFactory, FromArgMatches, Parser};
+    #[derive(Parser)]
+    struct Respond {
+        #[command(flatten)]
+        args: RespondArgs,
+    }
+    let matches = Respond::command()
+        .try_get_matches_from(["respond", "--json"])
+        .expect("bare respond parses");
+    let args = Respond::from_arg_matches(&matches).unwrap().args;
+    let dir = tempfile::tempdir().unwrap();
+    let client = ControlClient::new(control_id(dir.path()));
+    let err = respond(&client, &args).await.unwrap_err().to_string();
+    assert!(err.contains("needs the id of the question"), "{err}");
+    assert!(err.contains("`lev interactions` lists"), "{err}");
+}
+
 /// An attachment that cannot be read fails the answer before any daemon
 /// is dialled: there is none behind this id, and the error is the file's.
 #[tokio::test]
@@ -776,20 +797,6 @@ fn one_answer_and_only_one() {
     assert!(err.to_string().contains("give one answer"), "{err}");
 }
 
-/// The answer's clause is read by clap too: `REQUEST_ID` is required, so bare
-/// `lev respond` is a usage error rather than a listing.
-#[test]
-fn a_request_id_is_required() {
-    use clap::Parser;
-    #[derive(Parser, Debug)]
-    struct Cli {
-        #[command(flatten)]
-        respond: RespondArgs,
-    }
-    let err = Cli::try_parse_from(["lev"]).unwrap_err();
-    assert!(err.to_string().contains("REQUEST_ID"), "{err}");
-}
-
 #[test]
 fn kind_label_covers_every_kind() {
     for (kind, label) in [
@@ -1003,9 +1010,12 @@ async fn the_tail_of_an_id_names_nothing() {
 async fn an_empty_id_is_refused_rather_than_taking_the_only_open_one() {
     let (r, requests) = answer_with("", &[FIRST]).await;
     let err = r.unwrap_err().to_string();
+    assert!(err.contains("needs the id of the question"), "{err}");
+    assert!(answered_ids(&requests).is_empty());
+    // `lev interactions ""` refuses it the same way.
+    let err = show_interaction(&[], "", false).unwrap_err().to_string();
     assert!(err.contains("name an interaction"), "{err}");
     assert!(err.contains("lev interactions"), "{err}");
-    assert!(answered_ids(&requests).is_empty());
 }
 
 /// Answered by someone else between the listing and the answer: the id was

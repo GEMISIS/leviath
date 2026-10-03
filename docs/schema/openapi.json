@@ -768,7 +768,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -5009,7 +5009,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentResultResp"
+                  "$ref": "#/components/schemas/RunResultResp"
                 }
               }
             }
@@ -5469,6 +5469,26 @@
       },
       "Unauthorized": {
         "description": "The bearer token is missing or wrong. Every route, the websocket included.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "The request was malformed. The message says what to fix.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "BadGateway": {
+        "description": "The upstream server answered with an error, which the message carries.",
         "content": {
           "application/json": {
             "schema": {

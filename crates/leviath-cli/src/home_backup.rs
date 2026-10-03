@@ -32,6 +32,10 @@ const README: &str = "README.txt";
 /// told the user about yet.
 const UNANNOUNCED: &str = ".unannounced";
 
+/// The blueprints an upgrade left as they were that a summary has named, a
+/// directory a line.
+const NAMED_LEFT: &str = ".named-left";
+
 /// How one file of a run is saved: hard-linked, or a stand-in that fails
 /// where a test says.
 pub type Link<'a> = &'a dyn Fn(&Path, &Path) -> std::io::Result<()>;
@@ -150,8 +154,21 @@ impl Backup {
             "Leviath {} saved here what it changed when it upgraded this home from an earlier \
              release, before it changed it.\n\n\
              agents/       each installed blueprint directory, as it was\n\
-             agent_paths/  each blueprint from a configured agent path, as it was\n\
+             agent_paths/  each blueprint from a configured agent path, as it was (named after \
+             it, then a digest of the path it was in)\n\
              runs/         each old run directory, as it was before it became a run file\n\n\
+             To go back to the release you upgraded from:\n\
+             1. Stop the daemon: lev daemon stop\n\
+             2. For each name in agents/ here, replace <data root>/agents/<name> with the copy \
+             here; for each name in runs/ here, replace <data root>/runs/<name> the same way. \
+             The data root is the folder this backups/ folder is in. A blueprint in \
+             agent_paths/ goes back to the agent path it came from.\n\
+             3. Delete <data root>/runs.unconverted and <data root>/runs.index.\n\
+             4. Start the earlier release's daemon: lev daemon start, with its lev.\n\n\
+             Runs started after the upgrade are run files only, which the earlier release cannot \
+             read, so it leaves them out of lev ps. An earlier release started without these \
+             steps changes nothing, but lists no runs and no installed blueprints: every run is \
+             a run file and every blueprint an agent.toml, and it reads neither.\n\n\
              Leviath never deletes anything here. Delete it yourself once you no longer need it.\n",
             env!("CARGO_PKG_VERSION")
         );
@@ -161,6 +178,25 @@ impl Backup {
         let shown = self.dir.display().to_string();
         tracing::info!(backup = %shown, "backing up what an earlier release wrote before changing it");
         Ok(())
+    }
+
+    /// Note that a summary names the blueprints in `dirs`, each left as it
+    /// was, and say whether every one of them had been named before. Nothing
+    /// is noted where nothing was ever saved, since no summary is kept there
+    /// either.
+    pub fn name_left(&self, dirs: &[String]) -> bool {
+        let path = self.dir.join(NAMED_LEFT);
+        let before = std::fs::read_to_string(&path).unwrap_or_default();
+        let known: std::collections::BTreeSet<&str> = before.lines().collect();
+        let new: Vec<&String> = dirs
+            .iter()
+            .filter(|d| !known.contains(d.as_str()))
+            .collect();
+        if !new.is_empty() && self.dir.join(README).is_file() {
+            let text: String = new.iter().map(|d| format!("{d}\n")).collect();
+            let _ = leviath_sys::perms::write_private(&path, format!("{before}{text}").as_bytes());
+        }
+        new.is_empty()
     }
 
     /// Keep `lines`, what an upgrade that saved something here did, for the

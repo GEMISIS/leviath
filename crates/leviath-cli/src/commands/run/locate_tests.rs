@@ -92,6 +92,27 @@ fn nothing_found_says_what_to_pass() {
     assert!(!installed.join(FILE_NAME).exists());
 }
 
+/// The old manifest named as a file says how to convert it too, and only
+/// an installed one mentions the daemon's upgrade.
+#[test]
+fn the_old_manifest_itself_says_how_to_convert_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("helper");
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = dir.join(OLD_FILE_NAME);
+    std::fs::write(&old, "old").unwrap();
+    let err = find_blueprint_in(old.to_str().unwrap(), None, Path::new(""))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("lev blueprint migrate"), "{err}");
+    assert!(!err.contains("lev daemon restart"), "{err}");
+    // An `agent.toml` beside it is what every command reads, so the old file
+    // is nothing to report.
+    std::fs::write(dir.join(FILE_NAME), TINY).unwrap();
+    assert_eq!(old_format(&dir, "helper", None), None);
+    assert_eq!(old_format(&old, "helper", None), None);
+}
+
 #[test]
 fn a_file_with_another_name_is_not_a_blueprint() {
     let tmp = tempfile::tempdir().unwrap();

@@ -49,6 +49,13 @@ pub(super) struct Checked {
 /// holding one), and compile every custom region, output validator and stage
 /// hook it names, the same checks a spawn makes.
 pub(super) fn check(path: &Path) -> Result<Checked, CheckError> {
+    let shown = path.display().to_string();
+    let agents_dir = leviath_core::paths::agents_dir();
+    if let Some(message) =
+        crate::commands::run::locate::old_format(path, &shown, agents_dir.as_deref())
+    {
+        return Err(CheckError::Io(anyhow::anyhow!(message)));
+    }
     let file_path = blueprint_path(path);
     if !file_path.exists() {
         return Err(CheckError::Io(anyhow::anyhow!(
@@ -129,6 +136,10 @@ pub(crate) struct BlueprintSummary {
 pub(crate) struct InputSummary {
     /// The input's name.
     pub key: String,
+    /// The first region its value seeds: the key `lev validate --json` has
+    /// always written, kept so a script that reads it goes on working.
+    /// `regions` lists them all. Null for an input that seeds no region.
+    pub region: Option<String>,
     /// What it takes, as a person reads it.
     #[serde(rename = "type")]
     pub kind: String,
@@ -163,18 +174,22 @@ pub(super) fn input_summaries(graph: &RunGraph) -> Vec<InputSummary> {
     graph
         .inputs
         .iter()
-        .map(|decl| InputSummary {
-            key: decl.name.to_string(),
-            kind: decl.ty.describe(),
-            regions: decl
+        .map(|decl| {
+            let regions: Vec<String> = decl
                 .binds
                 .iter()
                 .filter_map(|slot| match slot {
                     InputSlot::Region(binding) => Some(binding.region.to_string()),
                     _ => None,
                 })
-                .collect(),
-            required: decl.required && decl.default.is_none(),
+                .collect();
+            InputSummary {
+                key: decl.name.to_string(),
+                region: regions.first().cloned(),
+                kind: decl.ty.describe(),
+                regions,
+                required: decl.required && decl.default.is_none(),
+            }
         })
         .collect()
 }

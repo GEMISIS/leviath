@@ -5,6 +5,7 @@
 //! to the built-in / MCP executors and the interaction hub.
 
 pub(crate) mod block_on;
+pub mod build;
 pub(crate) mod catalog_refresh;
 pub mod client;
 pub(crate) mod config_reload;

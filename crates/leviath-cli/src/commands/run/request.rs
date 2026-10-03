@@ -192,6 +192,20 @@ struct Source {
     manifest: PathBuf,
 }
 
+/// What to do about a task handed to a run that declares no `task` input:
+/// give it the inputs it does take, or, when it takes none at all, declare
+/// one, since nothing a caller hands it reaches the model.
+fn no_task_hint(decls: &[InputDecl]) -> String {
+    match decls.is_empty() {
+        true => "It declares no input at all, so whatever it is handed is ignored. To give it \
+                 a task, declare a task input in its agent.toml that fills one of its regions, \
+                 for example:\n    [[graph.inputs]]\n    name = \"task\"\n    type = \"text\"\n    \
+                 required = true\n    binds = [{ region = \"task\" }]"
+            .to_string(),
+        false => "give it its inputs with --input <name>=<value>".to_string(),
+    }
+}
+
 /// Every problem with `issues`, one per line, under a line saying how many.
 pub(crate) fn issues_report(issues: &SpawnIssues) -> String {
     let mut lines = vec![match issues.len() {
@@ -257,7 +271,7 @@ pub fn run_request(line: RunLine<'_>) -> anyhow::Result<LocalRun> {
                 IssueCode::Unknown,
                 format!("{} takes no task", source.name),
             )
-            .hint("give it its inputs with --input <name>=<value>")
+            .hint(no_task_hint(&source.decls))
             .known(source.decls.iter().map(|d| &d.name)),
         );
     }

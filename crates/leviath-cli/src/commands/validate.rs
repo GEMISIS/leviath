@@ -1574,10 +1574,17 @@ tools = ["submit_output"]
             value["blueprint"]["inputs"][0],
             serde_json::json!({
                 "key": "diff",
+                "region": "patch",
                 "type": "text",
                 "regions": ["patch"],
                 "required": true,
             })
+        );
+        // `region` is the key 0.6.4 wrote, the one region the input fills,
+        // kept for the scripts that read it.
+        assert_eq!(
+            value["blueprint"]["inputs"][1]["region"],
+            serde_json::json!("review_criteria")
         );
         assert_eq!(
             value["blueprint"]["inputs"][1]["key"],

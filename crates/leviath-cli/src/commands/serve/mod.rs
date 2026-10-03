@@ -952,6 +952,37 @@ mod tests {
         );
     }
 
+    /// Every `$ref` under `value`, as written.
+    fn refs_in(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.iter().for_each(|(key, value)| match key == "$ref" {
+                    true => out.extend(value.as_str().map(str::to_string)),
+                    false => refs_in(value, out),
+                })
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| refs_in(item, out)),
+            _ => {}
+        }
+    }
+
+    /// Every `$ref` in the spec names something the spec defines. A type
+    /// renamed in one place and not another leaves a route documented as
+    /// answering with a schema that does not exist, which a generated client
+    /// refuses outright.
+    #[test]
+    fn every_ref_in_the_openapi_spec_resolves() {
+        let spec: serde_json::Value = serde_json::from_str(OPENAPI).expect("the spec is JSON");
+        let mut refs = Vec::new();
+        refs_in(&spec, &mut refs);
+        let dangling: Vec<&String> = refs
+            .iter()
+            .filter(|r| spec.pointer(r.trim_start_matches('#')).is_none())
+            .collect();
+        assert_eq!(dangling, Vec::<&String>::new());
+        assert!(refs.len() > 100);
+    }
+
     /// Every `(path, METHOD)` the spec documents.
     fn documented_routes() -> Vec<(String, String)> {
         let spec: serde_json::Value = serde_json::from_str(OPENAPI).expect("the spec is JSON");

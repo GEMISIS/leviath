@@ -69,8 +69,8 @@ fn execute_with(
     println!("  cd {}", args.name);
     println!("  lev run . --task \"Your task here\"");
     println!(
-        "  lev add . && lev run {} --task \"Your task here\"",
-        args.name
+        "  lev add . && {}",
+        crate::commands::run::run_line(&args.name, "Your task here")
     );
 
     Ok(())

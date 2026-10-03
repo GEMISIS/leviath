@@ -25,7 +25,13 @@ fn an_installed_blueprint_is_copied_once_and_the_backup_is_announced_once() {
         std::fs::read_to_string(saved.join("sub/inner")).unwrap(),
         "inner"
     );
-    assert!(backup.dir().join(README).is_file());
+    // The backup says how to go back with it.
+    let readme = std::fs::read_to_string(backup.dir().join(README)).unwrap();
+    assert!(
+        readme.contains("To go back to the release you upgraded from"),
+        "{readme}"
+    );
+    assert!(readme.contains("runs.unconverted"), "{readme}");
     // A second save of the same blueprint keeps the first copy.
     std::fs::write(coder.join("file"), "after").unwrap();
     let again = Backup::of_home(home.path());
@@ -42,6 +48,27 @@ fn an_installed_blueprint_is_copied_once_and_the_backup_is_announced_once() {
     assert_eq!(announce(home.path()), ["first", "second"]);
     assert!(announce(home.path()).is_empty(), "told once");
     assert!(backup.dir().join("agents/coder").is_dir(), "never deleted");
+}
+
+/// A blueprint left as it was is noted as named only where a backup was
+/// begun; with none, nothing is written and nothing counts as named.
+#[test]
+fn blueprints_left_as_they_were_are_noted_in_a_begun_backup_only() {
+    let home = tempfile::tempdir().unwrap();
+    let backup = Backup::of_home(home.path());
+    let broken = ["/h/agents/broken".to_string()];
+    assert!(!backup.name_left(&broken));
+    assert!(!backup.name_left(&broken), "no backup, so nothing noted");
+    assert!(!backup.dir().exists());
+    let coder = home.path().join("coder");
+    tree(&coder, "x");
+    backup.save_blueprint(&coder, None).unwrap();
+    assert!(backup.name_left(&[]), "nothing to name");
+    assert!(!backup.name_left(&broken));
+    assert!(backup.name_left(&broken));
+    let both = [broken[0].clone(), "/h/agents/other".to_string()];
+    assert!(!backup.name_left(&both));
+    assert!(backup.name_left(&both));
 }
 
 #[test]

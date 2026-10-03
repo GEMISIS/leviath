@@ -102,6 +102,10 @@ fn find_manifest(project_path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn find_manifest_with_cwd(project_path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
+    let shown = project_path.display().to_string();
+    if let Some(message) = crate::commands::run::locate::old_format(project_path, &shown, None) {
+        anyhow::bail!(message);
+    }
     if project_path.is_file() && project_path.file_name() == Some(std::ffi::OsStr::new(FILE_NAME)) {
         return Ok(project_path.to_path_buf());
     }
@@ -472,6 +476,19 @@ mod tests {
         };
         let err = execute(args).await.unwrap_err();
         assert!(err.to_string().contains("Could not find agent.toml"));
+    }
+
+    /// An `agent.leviath` an earlier release wrote, by its directory or the
+    /// file, says how to convert it.
+    #[test]
+    fn an_old_manifest_says_how_to_convert_it() {
+        let project = tempfile::tempdir().unwrap();
+        let old = project.path().join("agent.leviath");
+        std::fs::write(&old, "[agent]\nname = \"old\"\n").unwrap();
+        for path in [project.path(), old.as_path()] {
+            let err = find_manifest_with_cwd(path, project.path()).unwrap_err();
+            assert!(err.to_string().contains("lev blueprint migrate"), "{err}");
+        }
     }
 
     #[tokio::test]

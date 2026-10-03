@@ -95,6 +95,24 @@ fn a_missing_blueprint_is_an_io_failure() {
     assert!(err.text().contains("No agent.toml found"), "{}", err.text());
 }
 
+/// A blueprint an earlier release wrote, named by its directory or its
+/// file, says how to convert it rather than "not found" or a parse error.
+#[test]
+fn an_old_manifest_says_how_to_convert_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("agent.leviath");
+    std::fs::write(&old, "[agent]\nname = \"old\"\n").unwrap();
+    for path in [dir.path(), old.as_path()] {
+        let err = check(path).unwrap_err();
+        assert_eq!(err.kind(), "io");
+        assert!(
+            err.text().contains("lev blueprint migrate"),
+            "{}",
+            err.text()
+        );
+    }
+}
+
 /// A blueprint that exists but cannot be read (here, a directory where the
 /// file should be) is an I/O failure too, not a parse error.
 #[test]
@@ -258,18 +276,21 @@ fn input_summaries_carry_key_type_regions_and_required() {
         vec![
             InputSummary {
                 key: "diff".to_string(),
+                region: Some("patch".to_string()),
                 kind: "text".to_string(),
                 regions: vec!["patch".to_string()],
                 required: true,
             },
             InputSummary {
                 key: "criteria".to_string(),
+                region: Some("review_criteria".to_string()),
                 kind: "text".to_string(),
                 regions: vec!["review_criteria".to_string()],
                 required: false,
             },
             InputSummary {
                 key: "focus".to_string(),
+                region: Some("focus".to_string()),
                 kind: "an integer at least 1".to_string(),
                 regions: vec!["focus".to_string()],
                 required: false,

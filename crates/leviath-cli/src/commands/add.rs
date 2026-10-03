@@ -70,6 +70,11 @@ async fn execute_with(
     tracing::info!("Installing agent package");
 
     let package_path = Path::new(&args.package);
+    if let Some(message) =
+        crate::commands::run::locate::old_format(package_path, &args.package, Some(agents_dir))
+    {
+        anyhow::bail!(message);
+    }
 
     if package_path.is_dir() {
         // Directory install: copy directory into <agents_dir>/<name>/
@@ -360,7 +365,10 @@ fn install_from_dir(
     copy_dir_recursive(src, &install_dir)?;
     println!("Installed agent '{}' to {}", name, install_dir.display());
     print_capabilities(&name, &install_dir, config);
-    println!("Run with:  lev run {} --task \"...\"", name);
+    println!(
+        "Run with:  {}",
+        crate::commands::run::run_line(&name, "...")
+    );
     Ok(())
 }
 
@@ -1364,6 +1372,31 @@ mod tests {
                     .unwrap_err();
                 assert!(err.to_string().contains("Failed to extract package"));
             })
+        });
+    }
+
+    /// An `agent.leviath` an earlier release wrote, by its directory or the
+    /// file, says how to convert it, and nothing is installed.
+    #[test]
+    fn execute_with_an_old_manifest_says_how_to_convert_it() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let agents_dir = tempfile::tempdir().unwrap();
+            let src = tempfile::tempdir().unwrap();
+            let old = src.path().join("agent.leviath");
+            std::fs::write(&old, "[agent]\nname = \"old\"\n").unwrap();
+            let installer =
+                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
+            for package in [src.path(), old.as_path()] {
+                let args = AddArgs {
+                    package: package.display().to_string(),
+                };
+                let err = execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap_err();
+                assert!(err.to_string().contains("lev blueprint migrate"), "{err}");
+            }
+            assert_eq!(std::fs::read_dir(agents_dir.path()).unwrap().count(), 0);
         });
     }
 

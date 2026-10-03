@@ -377,8 +377,74 @@ pub fn extract_named_inputs(
     (out, regions)
 }
 
+/// The command line that runs the installed blueprint `name` with `task`,
+/// as the hints after `lev add`, `lev create` and `lev setup` print it.
+///
+/// A blueprint named like one of `lev run`'s own subcommands (`show`,
+/// `help`) is read as that subcommand when its name comes first, so for one
+/// of those the task comes first: once an option has been given, the next
+/// word is the blueprint.
+pub fn run_line(name: &str, task: &str) -> String {
+    match takes_the_place_of_a_subcommand(name) {
+        true => format!("lev run --task \"{task}\" {name}"),
+        false => format!("lev run {name} --task \"{task}\""),
+    }
+}
+
+/// Whether `lev run <name>` would be read as one of `lev run`'s subcommands
+/// rather than as the blueprint `name`. Asked of clap, so a subcommand added
+/// later is covered without a list to keep in step.
+fn takes_the_place_of_a_subcommand(name: &str) -> bool {
+    use clap::Subcommand;
+    let run = RunCommand::augment_subcommands(clap::Command::new("run"));
+    name == "help" || run.find_subcommand(name).is_some()
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// `lev run` read as the binary reads it: the arguments and the
+    /// subcommands of [`RunArgs`].
+    fn parse_run(line: &str) -> Result<RunArgs, clap::Error> {
+        use clap::{CommandFactory, FromArgMatches, Parser};
+        #[derive(Parser)]
+        struct Lev {
+            #[command(subcommand)]
+            command: Top,
+        }
+        #[derive(clap::Subcommand)]
+        enum Top {
+            Run(RunArgs),
+        }
+        let words = line.split_whitespace().map(|w| w.trim_matches('"'));
+        let matches = Lev::command().try_get_matches_from(words)?;
+        let Top::Run(args) = Lev::from_arg_matches(&matches)
+            .expect("what clap matched reads back")
+            .command;
+        Ok(args)
+    }
+
+    /// The hint `lev add` prints for a blueprint runs that blueprint, even
+    /// one named like a `lev run` subcommand.
+    #[test]
+    fn the_run_line_runs_the_blueprint_it_names() {
+        for name in ["researcher", "show", "help"] {
+            let line = run_line(name, "x");
+            let args = parse_run(&line).expect(&line);
+            assert_eq!(
+                (args.command, args.path.as_deref(), args.task.as_deref()),
+                (None, Some(name), Some("x")),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            run_line("researcher", "..."),
+            "lev run researcher --task \"...\""
+        );
+        assert_eq!(run_line("show", "..."), "lev run --task \"...\" show");
+        // The name first is the subcommand, which is why the hint differs.
+        assert!(parse_run("lev run show --task x").is_err());
+    }
 
     /// The format label is passed through untouched and never matched against a
     /// known set, which is what lets `--output-format a2ui` work with no

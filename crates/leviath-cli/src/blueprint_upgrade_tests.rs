@@ -309,12 +309,24 @@ fn the_daemon_upgrades_and_a_command_only_says_so() {
 
     let waiting = agents.join("waiting");
     old_blueprint(&waiting, b"not toml [");
+    let fine = agents.join("fine");
+    old_blueprint(&fine, old_probe().as_bytes());
     let lines = pending_lines(Some(&agents), &[]);
-    let line = lines
-        .iter()
-        .find(|l| l.contains("'waiting'"))
-        .expect("the waiting blueprint is named");
+    let named = |name: &str| {
+        lines
+            .iter()
+            .find(|l| l.contains(&format!("'{name}'")))
+            .cloned()
+            .unwrap_or_default()
+    };
+    // One the daemon will upgrade says so; one it cannot says why, since a
+    // restart would leave it as it is.
+    let line = named("fine");
     assert!(line.contains("lev daemon restart"), "{line}");
+    assert!(line.contains("lev blueprint migrate"), "{line}");
+    let line = named("waiting");
+    assert!(line.contains("could not be upgraded"), "{line}");
+    assert!(!line.contains("lev daemon restart"), "{line}");
     assert!(line.contains("lev blueprint migrate"), "{line}");
     assert_eq!(
         std::fs::read(waiting.join(OLD_MANIFEST)).unwrap(),

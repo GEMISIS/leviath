@@ -231,6 +231,13 @@ fn main() {
     };
 
     println!("cargo:rustc-env=LEVIATH_BUILD={build}");
+    // When the commit was made, so a `lev` can tell whether a daemon of
+    // another build is older or newer than itself. Empty without git.
+    let committed_at = git(&["log", "-1", "--format=%ct"])
+        .and_then(|o| String::from_utf8(o).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    println!("cargo:rustc-env=LEVIATH_COMMITTED_AT={committed_at}");
 
     // `agents/` lives inside this crate so it ships in the published package
     // and a `cargo install leviath-cli` binary carries the same blueprints as

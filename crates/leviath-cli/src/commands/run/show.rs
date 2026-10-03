@@ -16,6 +16,10 @@ use crate::runstate;
 
 /// Arguments for `lev run show`.
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
+#[command(
+    after_help = "To run a blueprint named `show`, give an option before its name: \
+                  lev run --task \"...\" show"
+)]
 pub struct ShowArgs {
     /// The run's id, as `lev ps` lists it, or the start of it when only one
     /// run's id starts that way.

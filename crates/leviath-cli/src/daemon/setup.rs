@@ -77,15 +77,17 @@ pub(crate) fn build_marker_path() -> Option<std::path::PathBuf> {
     leviath_core::paths::data_dir().map(|d| d.join("daemon.build"))
 }
 
-/// Record [`CURRENT_BUILD`] so the CLI can detect a stale daemon later.
-/// Best-effort - a missing marker just triggers a restart on the next command.
+/// Record this build (its id, version and commit time; see
+/// [`super::build::Build::marker`]) so a `lev` of another build can tell how
+/// it stands to this daemon. Best-effort: a missing marker reads as an older
+/// daemon, which the next spawn command replaces.
 pub fn write_build_marker() {
     // Combinators (rather than `if let`) so the "no home dir" / "no parent"
     // fallbacks don't add branches that can't be exercised where a home always
     // resolves - mirroring `control_address`'s `.map` style.
     build_marker_path().into_iter().for_each(|path| {
         let _ = path.parent().map(std::fs::create_dir_all);
-        let _ = std::fs::write(&path, CURRENT_BUILD);
+        let _ = std::fs::write(&path, super::build::Build::current().marker());
     });
 }
 
@@ -94,13 +96,6 @@ pub fn read_build_marker() -> Option<String> {
     build_marker_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|s| s.trim().to_string())
-}
-
-/// Whether a running daemon should be restarted because it is on a different
-/// build than this CLI (or recorded no build at all - e.g. it predates this
-/// check).
-pub fn daemon_build_is_stale(recorded: Option<&str>) -> bool {
-    recorded != Some(CURRENT_BUILD)
 }
 
 /// Build the daemon's [`WorldHost`], doing the async startup work: build the
@@ -1847,32 +1842,23 @@ binds = [{{ region = "task" }}]
     }
 
     #[test]
-    fn daemon_build_is_stale_compares_against_current_build() {
-        assert!(daemon_build_is_stale(None), "missing marker is stale");
-        assert!(
-            daemon_build_is_stale(Some("some-other-build")),
-            "a different build is stale"
-        );
-        assert!(
-            !daemon_build_is_stale(Some(CURRENT_BUILD)),
-            "the current build is not stale"
-        );
-    }
-
-    #[test]
     fn build_marker_round_trips_and_is_current() {
         let dir = tempfile::tempdir().unwrap();
         temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
-            // No marker yet → read is None → treated as stale.
+            use super::super::build::{Build, Standing};
+            // No marker yet: an older daemon, which a spawn replaces.
             assert!(read_build_marker().is_none());
-            assert!(daemon_build_is_stale(read_build_marker().as_deref()));
+            let current = Build::current();
+            assert_eq!(Build::parse("").standing(&current), Standing::Older);
 
             write_build_marker();
             let path = build_marker_path().unwrap();
             assert!(path.exists());
-            assert_eq!(read_build_marker().as_deref(), Some(CURRENT_BUILD));
-            // A daemon that wrote the current build is not stale.
-            assert!(!daemon_build_is_stale(read_build_marker().as_deref()));
+            let marker = read_build_marker().unwrap();
+            assert!(marker.starts_with(CURRENT_BUILD), "{marker}");
+            // A daemon that wrote this build is this build.
+            assert_eq!(Build::parse(&marker), current);
+            assert_eq!(Build::parse(&marker).standing(&current), Standing::Same);
         });
     }
 

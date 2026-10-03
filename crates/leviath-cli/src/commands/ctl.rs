@@ -78,6 +78,7 @@ To see an interaction before answering it: lev interactions <REQUEST_ID>";
 pub struct RespondArgs {
     /// The interaction request id to answer, or enough of its start to name
     /// one open interaction. `lev interactions` lists them.
+    #[arg(default_value = "", hide_default_value = true)]
     pub request_id: String,
     /// The answer, read the way the question asks: an approval takes allow,
     /// allow-stage, allow-run or deny, a confirm yes or no, a multiple choice
@@ -425,6 +426,19 @@ fn format_interaction_detail(agent_id: &str, req: &InteractionRequest) -> String
     s
 }
 
+/// `lev respond` answers one question, named by its id. Without one it says
+/// where the ids are, rather than clap's bare "required argument": `lev
+/// interactions` lists the open questions.
+fn check_request_id(args: &RespondArgs) -> anyhow::Result<()> {
+    match args.request_id.trim().is_empty() {
+        true => bail!(
+            "lev respond needs the id of the question it answers: `lev interactions` lists \
+             the questions runs are waiting on, each with the line that answers it"
+        ),
+        false => Ok(()),
+    }
+}
+
 /// `lev respond` has to be told what the answer is: exactly one of an answer,
 /// `--choice`, `--approve` or `--deny`. An answer can't be taken back, and one
 /// with nothing in it reads to the run like nobody answered (a checkpoint
@@ -733,6 +747,7 @@ async fn answer_interaction(
 
 /// `lev respond`: answer a pending interaction.
 pub async fn respond(client: &ControlClient, args: &RespondArgs) -> anyhow::Result<()> {
+    check_request_id(args)?;
     check_one_answer(args)?;
     check_flags(args)?;
     answer_interaction(client, args, &args.request_id).await

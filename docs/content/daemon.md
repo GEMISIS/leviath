@@ -198,6 +198,51 @@ A run whose blueprint is gone, or no longer reads, still converts: its graph is 
 recorded, so it lists and reads back like any other run. It never resumes. One that had not
 finished ends in `error`, saying why.
 
+A blueprint that cannot be upgraded is left as it was, and the summary says why once. The daemon
+tries it again on every start without repeating the summary, and `lev list` names it, with the
+reason, until you fix it and convert it with `lev blueprint migrate`.
+
+### One version at a time
+
+Run one version of `lev` and its daemon at a time, and run `lev daemon restart` after upgrading.
+Each release reads the home its own way, so a `lev` talking to a daemon of another build shows
+that build's view of it: an empty `lev ps`, no open questions while one is pending, or a run file
+it cannot read. When the two differ, every command except `lev daemon` starts with a line saying
+which is which:
+
+```text
+warning: this daemon is an earlier release (build 839f0344), older than this lev (<version> (build 1a2b3c4d)). Each build reads the home its own way, ...
+```
+
+A command that starts runs replaces an older daemon with its own build, and says so. It leaves a
+newer one running: use the newer `lev`, or run `lev daemon restart` with the one you mean to keep.
+A `lev` from 0.6.4 or earlier cannot tell the two apart. It replaces any daemon that is not its own
+build, newer or not, and shows its own view of the home without a warning.
+
+### Going back
+
+To return to the release you upgraded from:
+
+1. Stop the daemon: `lev daemon stop`.
+2. For each name in `~/.leviath/backups/<version>-<time>/agents/`, replace
+   `~/.leviath/agents/<name>` with the backup's copy. Do the same for each name in the backup's
+   `runs/`, replacing `~/.leviath/runs/<name>`. A blueprint under the backup's `agent_paths/` goes
+   back to the agent path it came from; its folder is named after it, followed by a digest of
+   where it was.
+3. Delete `~/.leviath/runs.unconverted` and `~/.leviath/runs.index`.
+4. Start the old binary: `lev daemon start` with the earlier release's `lev`.
+
+Runs started after the upgrade stay unreadable by the earlier release: they exist only as run
+files, which it does not read, so it leaves their directories out of `lev ps`. Copy them aside
+before going back if you want them later; the new release reads them again when you upgrade once
+more.
+
+Started on an upgraded home without restoring, an earlier release changes nothing, but it sees
+little. `lev ps` and `lev list` come back empty, because every run is a run file and every
+blueprint an `agent.toml`, neither of which it reads. `lev result` and `lev stages` say the run is
+not there, and `lev run <name>` says there is no blueprint by that name. The backup folder holds a
+`README.txt` with these steps.
+
 ## What the front-ends do while it restarts
 
 The long-lived front-ends ride a daemon restart out: `lev serve`, `lev dash`, and

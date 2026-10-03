@@ -536,7 +536,7 @@ pub async fn execute_core<S: TerminalSetup, E: EventSource>(
 fn print_next_steps(applied: &plan::Applied) {
     println!();
     match applied.agents_installed.first() {
-        Some(agent) => println!("Try it:  lev run {agent} --task \"...\""),
+        Some(agent) => println!("Try it:  {}", crate::commands::run::run_line(agent, "...")),
         None => println!("Install an agent with `lev setup`, then `lev run <agent>`."),
     }
 }

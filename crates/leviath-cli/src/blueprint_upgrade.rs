@@ -308,6 +308,22 @@ fn keep_warnings(dir: &Path, dropped: &[String]) {
     }
 }
 
+/// Why the old blueprint in `dir` cannot be migrated, read without changing
+/// anything; `None` when it can be.
+#[cfg(feature = "legacy-runs")]
+fn problems(dir: &Path) -> Option<String> {
+    let manifest = std::fs::read_to_string(dir.join(OLD_MANIFEST)).unwrap_or_default();
+    leviath_legacy_runs::migrate_noted(&manifest)
+        .err()
+        .map(|problems| problems.join("; "))
+}
+
+/// Without the old-format reader no old blueprint can be migrated.
+#[cfg(not(feature = "legacy-runs"))]
+fn problems(_dir: &Path) -> Option<String> {
+    Some("this build of lev cannot read agent.leviath files".to_string())
+}
+
 /// Without the old-format reader an old blueprint cannot be migrated.
 #[cfg(not(feature = "legacy-runs"))]
 fn migrate(_dir: &Path) -> Result<Outcome, Vec<String>> {
@@ -348,6 +364,7 @@ pub(crate) fn upgrade_logged(
             }
             Outcome::Failed(problems) => {
                 upgrade.blueprints_failed += 1;
+                upgrade.left.push(dir.clone());
                 for problem in problems {
                     tracing::warn!(blueprint = %name, dir = %dir, problem = %problem, "an agent.leviath blueprint could not be migrated and was left as it was");
                     upgrade.warnings.push(format!(
@@ -367,13 +384,21 @@ pub(crate) fn pending_lines(agents_dir: Option<&Path>, others: &[PathBuf]) -> Ve
         .into_iter()
         .map(|(_, dir, _)| {
             let shown = dir.display();
-            format!(
-                "blueprint '{}' at {shown} is an agent.leviath from an earlier release, so it is \
-                 not listed: the daemon upgrades it when it starts (`lev daemon restart`), or \
-                 convert it with `lev blueprint migrate {shown} -o {}`",
-                name_of(&dir),
-                dir.join(leviath_blueprint::FILE_NAME).display()
-            )
+            let (name, to) = (name_of(&dir), dir.join(leviath_blueprint::FILE_NAME));
+            match problems(&dir) {
+                Some(problems) => format!(
+                    "blueprint '{name}' at {shown} is an agent.leviath from an earlier release \
+                     that could not be upgraded, so it is not listed: {problems}. Fix it, then \
+                     convert it with `lev blueprint migrate {shown} -o {}`",
+                    to.display()
+                ),
+                None => format!(
+                    "blueprint '{name}' at {shown} is an agent.leviath from an earlier release, so \
+                     it is not listed: the daemon upgrades it when it starts (`lev daemon \
+                     restart`), or convert it with `lev blueprint migrate {shown} -o {}`",
+                    to.display()
+                ),
+            }
         })
         .collect()
 }

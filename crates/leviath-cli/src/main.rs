@@ -101,6 +101,10 @@ async fn async_main() -> anyhow::Result<()> {
     leviath_cli::logging::init(cli.verbose);
 
     info!("Leviath CLI v{}", env!("CARGO_PKG_VERSION"));
+    if !matches!(cli.command, Commands::Daemon(_)) {
+        let notice = leviath_cli::daemon::build::mixed_notice_here();
+        notice.into_iter().for_each(|line| eprintln!("{line}"));
+    }
 
     dispatch(cli.command, &RealExecutors).await
 }
@@ -515,23 +519,23 @@ async fn real_doctor(args: commands::doctor::DoctorArgs) -> anyhow::Result<()> {
 /// [`leviath_runtime::control_socket::is_daemon_running`]; only the real
 /// subprocess spawn + poll live here.
 async fn ensure_daemon_running() -> anyhow::Result<()> {
-    use leviath_cli::daemon::setup::{
-        CURRENT_BUILD, control_address, daemon_build_is_stale, read_build_marker,
-    };
+    use leviath_cli::daemon::{build, setup::control_address, setup::read_build_marker};
     use leviath_runtime::control_socket::is_daemon_running;
     let id = control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
     let running = is_daemon_running(&id);
-    let steps = leviath_cli::daemon::lifecycle::start_steps(
-        running,
-        running && daemon_build_is_stale(read_build_marker().as_deref()),
-    );
+    // Only an older daemon is replaced; a newer one is left running.
+    let decision = build::replace(read_build_marker().as_deref(), &build::Build::current());
+    let steps = leviath_cli::daemon::lifecycle::start_steps(running, decision.replace);
     if !steps.spawn {
         control_client()?.wait_until_started().await?;
         return Ok(());
     }
     if steps.shutdown_first {
-        eprintln!("leviath daemon is on an older build; restarting to load {CURRENT_BUILD}…");
+        decision
+            .say
+            .into_iter()
+            .for_each(|line| eprintln!("{line}"));
         // Shut down quietly (straight over the control socket) rather than via
         // `daemon::send_shutdown`, whose stdout "daemon shutting down" line would
         // corrupt `lev agent-client`'s JSON-RPC protocol channel.

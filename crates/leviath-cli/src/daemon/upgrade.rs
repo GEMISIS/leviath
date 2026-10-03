@@ -24,6 +24,8 @@ pub(crate) struct Upgrade {
     pub(crate) blueprints: usize,
     /// Blueprints left as they were, because they could not be upgraded.
     pub(crate) blueprints_failed: usize,
+    /// The directory of each blueprint left as it was.
+    pub(crate) left: Vec<String>,
     /// Old runs converted into run files.
     pub(crate) converted: usize,
     /// Old runs tried this time that did not convert.
@@ -109,7 +111,18 @@ impl Upgrade {
 
     /// Log the summary, and keep it in `backup` for the next command to
     /// show once.
+    ///
+    /// A blueprint that cannot be upgraded is tried again on every start and
+    /// left as it was each time. A start that did nothing else, with every
+    /// blueprint it left already named by an earlier summary, says nothing:
+    /// `lev list` names what is still waiting.
     pub(crate) fn finish(&self, backup: &Backup) -> Vec<String> {
+        let named_before = backup.name_left(&self.left);
+        let only_left =
+            self.blueprints + self.converted + self.failed == 0 && self.dropped_in_runs.is_empty();
+        if only_left && named_before {
+            return Vec::new();
+        }
         let lines = self.lines(backup);
         for line in &lines {
             tracing::info!(upgrade = %line, "upgraded this home from an earlier release");
@@ -144,6 +157,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let backup = Backup::of_home(home.path());
         assert!(Upgrade::default().finish(&backup).is_empty());
+        assert!(Upgrade::default().lines(&backup).is_empty());
     }
 
     #[test]
@@ -174,6 +188,43 @@ mod tests {
             lines[2],
             "warning: blueprint 'r' of 2 converted runs: region 'log': `max_stored = 5` was dropped"
         );
+    }
+
+    /// A blueprint that cannot be upgraded is tried again on every start. The
+    /// summary names it once; later starts that change nothing else say
+    /// nothing, and `lev list` keeps naming it.
+    #[test]
+    fn a_blueprint_left_as_it_was_is_announced_once() {
+        let home = tempfile::tempdir().unwrap();
+        let backup = Backup::of_home(home.path());
+        // The first start saved something, so there is a backup to speak of.
+        let saved = home.path().join("saved");
+        std::fs::create_dir_all(&saved).unwrap();
+        backup.save_blueprint(&saved, None).unwrap();
+        let left = |extra: usize| Upgrade {
+            blueprints: extra,
+            blueprints_failed: 1,
+            left: vec!["/h/agents/broken".to_string()],
+            warnings: vec!["blueprint 'broken' at /h/agents/broken was left as it was".into()],
+            ..Upgrade::default()
+        };
+        assert_eq!(left(1).finish(&backup).len(), 2);
+        assert_eq!(crate::home_backup::announce(home.path()).len(), 2);
+        for _ in 0..3 {
+            assert!(left(0).finish(&backup).is_empty());
+            assert!(crate::home_backup::announce(home.path()).is_empty());
+        }
+        // Something new is said, with the blueprint still left beside it.
+        assert_eq!(left(2).finish(&backup).len(), 2);
+        // A second blueprint left as it was is news too.
+        let two = Upgrade {
+            left: vec![
+                "/h/agents/broken".to_string(),
+                "/h/agents/other".to_string(),
+            ],
+            ..left(0)
+        };
+        assert!(!two.finish(&backup).is_empty());
     }
 
     #[test]
