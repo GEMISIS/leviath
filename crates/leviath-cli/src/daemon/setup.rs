@@ -91,6 +91,16 @@ pub fn write_build_marker() {
     });
 }
 
+/// [`write_build_marker`] before the control channel at `id` is bound, so the
+/// first `lev` to reach this daemon reads its build, never the build of the
+/// daemon before it. A daemon already answering at `id` keeps its marker:
+/// this one is about to lose the single-instance bind to it.
+pub fn write_build_marker_unless_running(id: &leviath_runtime::control_socket::ControlId) {
+    if !leviath_runtime::control_socket::is_daemon_running(id) {
+        write_build_marker();
+    }
+}
+
 /// The build id a running daemon recorded, if the marker exists and is readable.
 pub fn read_build_marker() -> Option<String> {
     build_marker_path()
@@ -1859,6 +1869,23 @@ binds = [{{ region = "task" }}]
             // A daemon that wrote this build is this build.
             assert_eq!(Build::parse(&marker), current);
             assert_eq!(Build::parse(&marker).standing(&current), Standing::Same);
+        });
+    }
+
+    /// A starting daemon records its build before a client can reach it,
+    /// unless another daemon already answers, whose marker stays.
+    #[tokio::test]
+    async fn the_build_is_recorded_before_the_bind_unless_a_daemon_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            let id = control_address().unwrap();
+            write_build_marker_unless_running(&id);
+            let path = build_marker_path().unwrap();
+            assert!(path.exists(), "nothing answers, so this build is recorded");
+            std::fs::remove_file(&path).unwrap();
+            let _listener = leviath_runtime::control_socket::bind_control_listener(&id).unwrap();
+            write_build_marker_unless_running(&id);
+            assert!(!path.exists(), "the daemon answering keeps its own marker");
         });
     }
 

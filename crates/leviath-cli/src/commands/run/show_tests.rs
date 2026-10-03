@@ -354,3 +354,21 @@ async fn a_held_runs_state_reads_paused() {
     })
     .await;
 }
+
+/// A command line that began `lev run show` and did not parse points at the
+/// `--task`-first form, for a blueprint named `show`; nothing else does.
+#[test]
+fn a_bad_run_show_line_points_at_the_task_first_form() {
+    let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+    let hint = parse_hint(&argv(&["lev", "run", "show", "--task", "x"]), true).unwrap();
+    assert!(hint.contains("lev run --task <TASK> show"), "{hint}");
+    assert_eq!(
+        parse_hint(&argv(&["lev", "run", "show", "--help"]), false),
+        None
+    );
+    assert_eq!(
+        parse_hint(&argv(&["lev", "run", "bp", "--nope"]), true),
+        None
+    );
+    assert_eq!(parse_hint(&argv(&["lev"]), true), None);
+}

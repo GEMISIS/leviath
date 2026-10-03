@@ -84,7 +84,14 @@ fn nothing_found_says_what_to_pass() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("lev daemon restart"), "{err}");
-    assert!(err.contains(&installed.display().to_string()), "{err}");
+    // Named once, in the command that converts it, and once more as where
+    // that command writes.
+    let at = installed.display().to_string();
+    assert_eq!(err.matches(&at).count(), 2, "{err}");
+    assert!(installed_old_format_in("helper", Some(agents.path())));
+    assert!(!installed_old_format_in("helper", None));
+    assert!(!installed_old_format("no-such-blueprint-anywhere"));
+    assert!(!installed_old_format_in("other", Some(agents.path())));
     assert_eq!(
         std::fs::read(installed.join("agent.leviath")).unwrap(),
         b"old"

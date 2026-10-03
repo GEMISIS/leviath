@@ -115,3 +115,29 @@ fn a_home_with_no_daemon_has_nothing_to_say() {
         assert_eq!(mixed_notice_here(), None);
     });
 }
+
+/// `lev daemon status` says when the running daemon is another build than
+/// this `lev`, which is newer, and what to do; nothing while they match or
+/// none runs.
+#[test]
+fn daemon_status_says_how_the_builds_stand() {
+    let cli = build("bbbb", "0.6.4", 200);
+    assert_eq!(status_line(true, Some(&cli.marker()), &cli), None);
+    assert_eq!(status_line(false, Some(RELEASED), &cli), None);
+    let older = status_line(true, Some(RELEASED), &cli).unwrap_or_default();
+    assert!(
+        older.starts_with("build: an earlier release (build 839f0344), older than this lev"),
+        "{older}"
+    );
+    assert!(older.contains("`lev daemon restart`"), "{older}");
+    let newer = build("cccc", "0.6.5", 1).marker();
+    let newer = status_line(true, Some(&newer), &cli).unwrap_or_default();
+    assert!(
+        newer.starts_with("build: 0.6.5 (build cccc), newer than this lev"),
+        "{newer}"
+    );
+    let home = tempfile::tempdir().unwrap();
+    temp_env::with_var("LEVIATH_HOME", Some(home.path()), || {
+        assert_eq!(status_line_here(false), None);
+    });
+}
