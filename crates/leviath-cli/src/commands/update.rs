@@ -332,6 +332,9 @@ pub(crate) fn plan_json(
         "checked_at": latest.checked_at,
         "binary": binary,
         "agents": agents,
+        // An `agent.toml` refuses a key it does not know, so no blueprint has
+        // an old spelling to rewrite. Kept, empty, for the clients that read it.
+        "renamed_keys": [],
         "migrations": migrations,
         "config_error": match &plan.config {
             ConfigState::Unreadable(e) => serde_json::Value::String(e.clone()),

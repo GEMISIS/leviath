@@ -876,6 +876,8 @@ fn the_json_shape_carries_the_method_channel_command_and_rows() {
     assert_eq!(json["agents"][0]["changes"], true);
     assert_eq!(json["migrations"][0]["name"], "sample-default-provider");
     assert_eq!(json["config_error"], serde_json::Value::Null);
+    // Kept for the clients that read it, and always empty.
+    assert_eq!(json["renamed_keys"], serde_json::json!([]));
 
     // The advise arm, and a channel nothing can name.
     let plan = plan_for(
