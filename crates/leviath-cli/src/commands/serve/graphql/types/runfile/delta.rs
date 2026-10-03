@@ -255,6 +255,14 @@ change_member!(
     }
 );
 change_member!(
+    /// The remote jobs the run's model call has submitted changed: one was
+    /// submitted, or the call ended.
+    RemoteJobsChange {
+        /// The jobs now.
+        remote_jobs: Vec<super::state::RemoteJob>
+    }
+);
+change_member!(
     /// When the run last made progress, as its record keeps that apart from
     /// its last step, changed.
     LastProgressAtChange {
@@ -326,6 +334,8 @@ pub(crate) enum StateChange {
     Written(WrittenChange),
     /// When the run last made progress, apart from its last step.
     LastProgressAt(LastProgressAtChange),
+    /// The remote jobs its model call has submitted.
+    RemoteJobs(RemoteJobsChange),
 }
 
 impl From<&Change> for StateChange {
@@ -422,6 +432,9 @@ impl From<&Change> for StateChange {
             }),
             Change::Written(written) => Self::Written(WrittenChange {
                 written_bytes: big(*written),
+            }),
+            Change::RemoteJobs(jobs) => Self::RemoteJobs(RemoteJobsChange {
+                remote_jobs: super::state::remote_jobs(jobs),
             }),
             Change::LastProgressAt(at) => Self::LastProgressAt(LastProgressAtChange {
                 last_progress_at: at.map(Timestamp),

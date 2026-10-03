@@ -580,6 +580,7 @@ type InferenceQuery = (
     Option<&'static SystemBlockHashes>,
     Option<&'static crate::pipeline::PromptCalibration>,
     Option<&'static CaptureModelInput>,
+    Option<&'static crate::inference_call::RemoteJobs>,
 );
 
 /// The system prefix the last request sent, as a digest.
@@ -669,6 +670,7 @@ pub(crate) fn dispatch_inference(
             block_prefix,
             calibration,
             capture,
+            remote_jobs,
         )| {
             crate::tick_scope::run_agent_parallel(entity, &par_commands, &mut || {
                 if state.status != AgentStatus::Active {
@@ -872,7 +874,13 @@ pub(crate) fn dispatch_inference(
                     stream,
                     hydration,
                     journal,
+                    jobs: remote_jobs.map(|j| j.0.clone()),
                 };
+                // A job the call submits wakes the world, so the run's file
+                // records it at once rather than when the call ends.
+                if let Some(jobs) = &job.jobs {
+                    jobs.wake_with(stage.wake.clone());
+                }
                 // The call is held on the agent, permit and all, and its first
                 // trip goes out now. Whether a failed trip is tried again is
                 // decided by the collect system, and the next trip is sent by

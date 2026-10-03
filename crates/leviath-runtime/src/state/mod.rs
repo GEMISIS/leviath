@@ -97,6 +97,11 @@ pub struct RunState {
     /// parent touched its record after it finished. `None` means its last
     /// step.
     pub last_progress_at: Option<i64>,
+    /// The remote jobs its model call in flight has submitted (a Meshy task,
+    /// a video), by the call's name for each step, so the call made again
+    /// after a restart polls them rather than paying for them again. Empty
+    /// between calls.
+    pub remote_jobs: BTreeMap<String, String>,
 }
 
 /// The approvals a person granted a run beyond the call they were asked
@@ -163,6 +168,7 @@ impl RunState {
             grants: Grants::default(),
             written: 0,
             last_progress_at: None,
+            remote_jobs: BTreeMap::new(),
         }
     }
 

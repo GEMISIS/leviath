@@ -643,6 +643,7 @@ fn state() -> CoreState {
         },
         written: 600,
         last_progress_at: Some(1_700),
+        remote_jobs: [("meshy/rig/task".to_string(), "task-1".to_string())].into(),
     }
 }
 

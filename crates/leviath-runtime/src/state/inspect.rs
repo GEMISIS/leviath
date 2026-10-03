@@ -123,6 +123,10 @@ pub fn inspect(world: &World, entity: Entity) -> Option<RunState> {
             .map_or(0, |l| l.written),
         // A run in the world moves step by step: its last step is its progress.
         last_progress_at: None,
+        remote_jobs: world
+            .get::<crate::inference_call::RemoteJobs>(entity)
+            .map(|j| j.0.jobs())
+            .unwrap_or_default(),
     })
 }
 

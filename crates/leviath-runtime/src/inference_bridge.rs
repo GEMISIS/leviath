@@ -321,6 +321,9 @@ pub(crate) struct InferenceJob {
     /// Where to journal each attempt this job makes, or `None` for a world with
     /// no persistence lane at all.
     pub journal: Option<AttemptJournal>,
+    /// The run's log of the remote jobs this call submits, which each trip
+    /// runs inside, or `None` for a lane whose calls keep none (routing).
+    pub jobs: Option<leviath_providers::jobs::JobLog>,
 }
 
 /// What a call needs to record each of its attempts.
@@ -720,6 +723,8 @@ pub(crate) struct InferenceAttempt {
     pub deadline: tokio::time::Instant,
     /// The call's whole allowance, for the message a timeout gives.
     pub job_timeout: Duration,
+    /// The run's log of the remote jobs the call submits.
+    pub jobs: Option<leviath_providers::jobs::JobLog>,
 }
 
 /// What a trip came back with before it is reported: what the provider
@@ -753,6 +758,7 @@ pub(crate) async fn run_attempt(
         plan,
         deadline,
         job_timeout,
+        jobs,
     } = attempt;
     let pricing = provider.pricing(&request.model);
     // Refused before anything leaves the machine, uploads included.
@@ -805,7 +811,12 @@ pub(crate) async fn run_attempt(
                 false => provider.infer(&request).await,
             }
         };
-        let answer = call.await;
+        // Inside the run's job log, so a provider that polls a job it
+        // submitted picks it back up rather than paying for it again.
+        let answer = match jobs {
+            Some(jobs) => jobs.scope(call).await,
+            None => call.await,
+        };
         let report = AttemptReport {
             id,
             took: started.elapsed(),
@@ -937,6 +948,7 @@ mod tests {
     fn job(provider: Arc<dyn Provider>) -> InferenceJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -968,6 +980,7 @@ mod tests {
             calls: std::sync::Mutex::new(0),
         });
         let job = InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1052,6 +1065,7 @@ mod tests {
             calls: std::sync::Mutex::new(0),
         });
         let job = InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1202,6 +1216,7 @@ mod tests {
     ) -> InferenceJob {
         let pools = InferencePools::new(InferencePoolConfig::new());
         InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1542,6 +1557,7 @@ mod tests {
     async fn a_job_marked_to_stream_takes_the_streaming_path() {
         let pools = InferencePools::new(InferencePoolConfig::new());
         let job = InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,
@@ -1582,6 +1598,7 @@ mod tests {
     async fn a_job_not_marked_to_stream_calls_infer() {
         let pools = InferencePools::new(InferencePoolConfig::new());
         let job = InferenceJob {
+            jobs: None,
             entity: Entity::from_raw_u32(7)
                 .expect("a small literal index is always a valid entity id"),
             refused: None,

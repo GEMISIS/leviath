@@ -10803,6 +10803,26 @@ input RegionVolatilityFilter {
 	isNull: Boolean
 }
 
+"A remote job a run's model call submitted: a Meshy task, a video."
+type RemoteJobOutput {
+	"""
+	The call's name for the step the job is for, such as
+	`meshy/text-to-3d/preview`.
+	"""
+	step: String!
+	"The job's id at the provider."
+	job: String!
+}
+
+"""
+The remote jobs the run's model call has submitted changed: one was
+submitted, or the call ended.
+"""
+type RemoteJobsChangeOutput {
+	"The jobs now."
+	remoteJobs: [RemoteJobOutput!]!
+}
+
 """
 Filter on `RepetitionDetectionOutput`. Every field here mirrors the same-named field there; set the ones that have to hold.
 
@@ -12516,6 +12536,12 @@ type RunStateOutput {
 	its last step is its progress.
 	"""
 	lastProgressAt: Timestamp
+	"""
+	The remote jobs its model call in flight has submitted, which the
+	call made again after a restart polls rather than paying for again.
+	Empty between calls.
+	"""
+	remoteJobs: [RemoteJobOutput!]!
 }
 
 "Where a run is in its life."
@@ -15745,7 +15771,7 @@ type StateBlobOutput {
 }
 
 "One part of a run's state that a step changed, with its new value."
-union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput | GrantsChangeOutput | WrittenChangeOutput | LastProgressAtChangeOutput
+union StateChange = StatusChangeOutput | CursorChangeOutput | PhaseChangeOutput | AcceptsMessagesChangeOutput | VisitsChangeOutput | ProgressChangeOutput | LedgerRecordChangeOutput | LedgerTruncateChangeOutput | ContextDiffChangeOutput | PendingChangeOutput | FanOutChangeOutput | InboxChangeOutput | QuestionsChangeOutput | TotalsChangeOutput | ClockChangeOutput | FlagsChangeOutput | ChildrenChangeOutput | TitleChangeOutput | AnswerChangeOutput | WaitReasonChangeOutput | TransitionChangeOutput | TitleErrorChangeOutput | ReadPathsChangeOutput | CheckpointChangeOutput | HeldChangeOutput | FilesChangeOutput | BlobsChangeOutput | GrantsChangeOutput | WrittenChangeOutput | LastProgressAtChangeOutput | RemoteJobsChangeOutput
 
 "Working time: seconds banked, and when the running clock started."
 type StateClockOutput {

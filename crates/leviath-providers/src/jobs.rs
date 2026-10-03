@@ -7,7 +7,7 @@
 //! would submit, and pay for, the same job a second time. So the runtime runs
 //! each call inside [`JobLog::scope`], with a log seeded from the jobs its
 //! run recorded, and keeps on the run whatever the provider writes to it. A
-//! provider submits through `submit_or_resume`, which polls the job the log
+//! provider submits through [`submit_or_resume`], which polls the job the log
 //! already names for that step and records a new one the moment it is
 //! submitted.
 //!
@@ -145,14 +145,14 @@ fn current() -> Option<JobLog> {
 
 /// A job run to its end through [`submit_or_resume`].
 #[derive(Debug)]
-pub(crate) struct Ran<T> {
+pub struct Ran<T> {
     /// Its id.
-    pub(crate) id: String,
+    pub id: String,
     /// What waiting on it came back with.
-    pub(crate) value: T,
+    pub value: T,
     /// When the job this call had already submitted was gone and a new one
     /// was submitted in its place, the line that says so.
-    pub(crate) note: Option<String>,
+    pub note: Option<String>,
 }
 
 /// Run one remote job, `step` naming it within the call: wait on the job
@@ -164,11 +164,7 @@ pub(crate) struct Ran<T> {
 /// past its deadline, is forgotten, so the call made again submits afresh;
 /// one whose polling failed on the way (a dropped connection, a busy
 /// provider) is kept, so the call made again picks it back up.
-pub(crate) async fn submit_or_resume<T, S, SF, W, WF>(
-    step: &str,
-    submit: S,
-    mut wait: W,
-) -> Result<Ran<T>>
+pub async fn submit_or_resume<T, S, SF, W, WF>(step: &str, submit: S, mut wait: W) -> Result<Ran<T>>
 where
     S: FnOnce() -> SF,
     SF: Future<Output = Result<String>>,

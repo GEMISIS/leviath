@@ -209,6 +209,7 @@ impl LaneWorld {
     /// Start a call to `provider` on `lane`, as dispatch does.
     fn start(&mut self, provider: Arc<dyn Provider>, policy: RetryPolicy, lane: CallLane) {
         let job = InferenceJob {
+            jobs: None,
             entity: self.agent,
             refused: None,
             provider,
