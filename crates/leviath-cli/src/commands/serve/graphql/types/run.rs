@@ -365,8 +365,8 @@ impl Run {
 
     /// The run's context window as it stands right now.
     ///
-    /// Null for a run that has not written one yet, and for a finished run
-    /// whose window was never persisted. Region contents are their own field,
+    /// Null for a run that never held one: a run converted from an earlier
+    /// release whose record kept no window. Region contents are their own field,
     /// so asking for the shape of the window does not read its text.
     #[filter(io)]
     async fn context(&self) -> Option<ContextWindow> {

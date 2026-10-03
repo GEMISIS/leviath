@@ -78,9 +78,13 @@ pub(crate) fn latest_in(dir: &Path) -> Option<(RunFileReader, RunState)> {
     Some((reader, state))
 }
 
-/// The run's context window as of its last step.
+/// The run's context window as of its last step. `None` for a run that never
+/// held one.
 pub(crate) fn context_in(dir: &Path) -> Option<ContextSnapshot> {
     let tail = tail_in(dir).ok()?;
+    if tail.state.context.regions.is_empty() {
+        return None;
+    }
     Some(leviath_runtime::runfile::context_snapshot(
         &tail.spec,
         &tail.state,
@@ -90,7 +94,10 @@ pub(crate) fn context_in(dir: &Path) -> Option<ContextSnapshot> {
 /// The run's per-stage ledger as of its last step.
 pub(crate) fn stages_in(dir: &Path) -> Option<Vec<StageRecord>> {
     let tail = tail_in(dir).ok()?;
-    Some(leviath_runtime::runfile::stage_records(&tail.state))
+    Some(leviath_runtime::runfile::stage_records(
+        &tail.spec,
+        &tail.state,
+    ))
 }
 
 /// What a run's file says about how it got where it is: the window at every

@@ -92,13 +92,16 @@ async fn the_window_and_the_ledger_are_the_last_steps() {
         "{window:?}"
     );
     step(&dir, 11, |s| take(s, "analyze", "implement", "next"));
-    let (_, state) = latest_in(&dir).unwrap();
+    let (reader, state) = latest_in(&dir).unwrap();
     let names = |records: Vec<StageRecord>| -> Vec<String> {
         records.into_iter().map(|r| r.name).collect()
     };
     assert_eq!(
         names(stages_in(&dir).unwrap()),
-        names(leviath_runtime::runfile::stage_records(&state))
+        names(leviath_runtime::runfile::stage_records(
+            reader.spec(),
+            &state
+        ))
     );
 }
 
@@ -131,6 +134,14 @@ async fn a_history_holds_every_window_change_and_every_edge_taken() {
             .iter()
             .all(|p| p.meta.callback_secret.is_none())
     );
+}
+
+#[tokio::test]
+async fn a_run_with_no_window_reads_as_none() {
+    let runs = tempfile::tempdir().unwrap();
+    let dir = recorded(runs.path());
+    step(&dir, 10, |s| s.context.regions.clear());
+    assert!(context_in(&dir).is_none());
 }
 
 #[test]

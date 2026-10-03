@@ -213,9 +213,18 @@ fn count_unjoined(unjoined: &mut Vec<GraphEdge>, record: &TransitionRecord) {
 }
 
 /// The run's context window as of its last step.
+///
+/// Not found for a run that never held a window: one converted from an
+/// earlier release whose record kept none, which that release had no window
+/// to show for either.
 pub(crate) fn context(run_id: &str) -> Result<ContextSnapshot, ServeError> {
     let reader = run_file::require(run_id)?;
     let state = state_at(&reader, run_id, reader.last_seq())?;
+    if state.context.regions.is_empty() {
+        return Err(ServeError::NotFound(format!(
+            "No context snapshot for run '{run_id}'"
+        )));
+    }
     Ok(leviath_runtime::runfile::context_snapshot(
         reader.spec(),
         &state,
@@ -227,7 +236,10 @@ pub(crate) fn context(run_id: &str) -> Result<ContextSnapshot, ServeError> {
 pub(crate) fn stages(run_id: &str) -> Result<Vec<StageRecord>, ServeError> {
     let reader = run_file::require(run_id)?;
     let state = state_at(&reader, run_id, reader.last_seq())?;
-    Ok(leviath_runtime::runfile::stage_records(&state))
+    Ok(leviath_runtime::runfile::stage_records(
+        reader.spec(),
+        &state,
+    ))
 }
 
 /// The stored parts the run's context holds as of its last step, by hash,

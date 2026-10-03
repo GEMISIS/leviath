@@ -222,10 +222,10 @@ fn api_router() -> Router<AppState> {
             get(run_reads::get_run).delete(run_reads::cancel_run),
         )
         .route("/api/agents/{id}/children", get(run_reads::run_children))
-        .route("/api/agents/{id}/context", get(run_reads::run_context))
+        .route("/api/agents/{id}/context", get(compat::agent_context))
         .route(
             "/api/agents/{id}/context/history",
-            get(run_reads::run_context_history),
+            get(compat::agent_context_history),
         )
         .route("/api/agents/{id}/files", get(run_reads::run_file))
         .route("/api/agents/{id}/files/raw", get(blobs::raw_file))

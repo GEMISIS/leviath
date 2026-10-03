@@ -595,8 +595,8 @@ async fn a_context_history_filter_past_the_depth_limit_is_refused() {
     );
 }
 
-/// A run that has taken no step has one point of history: the window it
-/// started with.
+/// A run that never held a window has no point of history, as a release
+/// whose run kept no journal showed none.
 #[tokio::test]
 async fn a_run_with_no_journal_has_no_history() {
     crate::runstate::with_isolated_runs_dir_async("graphql-history-none", |_dir| async move {
@@ -607,12 +607,12 @@ async fn a_run_with_no_journal_has_no_history() {
             "{ run { contextHistory(first: 5) { total results { at } } } }",
         )
         .await;
-        assert_eq!(json["run"]["contextHistory"]["total"], 1);
+        assert_eq!(json["run"]["contextHistory"]["total"], 0);
         assert_eq!(
             json["run"]["contextHistory"]["results"]
                 .as_array()
                 .map(Vec::len),
-            Some(1)
+            Some(0)
         );
     })
     .await;

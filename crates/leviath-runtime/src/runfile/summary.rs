@@ -118,8 +118,34 @@ pub fn context_snapshot(spec: &RunSpec, state: &RunState) -> ContextSnapshot {
 
 /// The run's per-stage ledger in `state`: one record per stage it entered,
 /// with its spend and visits.
-pub fn stage_records(state: &RunState) -> Vec<StageRecord> {
-    place::stage_ledger(&standing(state)).0
+///
+/// Every stage and visit lists its working clock, a zero one included, as
+/// every release that kept the clock listed it. A run converted from an
+/// earlier release, standing where it was converted, lists whether each stage
+/// was entered and its clocks as that release listed them: none where its
+/// record kept none.
+pub fn stage_records(spec: &RunSpec, state: &RunState) -> Vec<StageRecord> {
+    let mut records = place::stage_ledger(&standing(state)).0;
+    for record in &mut records {
+        record.active.get_or_insert_default();
+        for visit in &mut record.visits {
+            visit.active.get_or_insert_default();
+        }
+    }
+    let Some(listed) = ListedAs::standing(spec.listed.as_ref(), state.seq) else {
+        return records;
+    };
+    for record in &mut records {
+        let Some(kept) = listed.stages.iter().find(|s| s.stage == record.name) else {
+            continue;
+        };
+        record.entered = kept.entered;
+        record.active = kept.clock.as_ref().map(active_clock);
+        for (visit, clock) in record.visits.iter_mut().zip(&kept.visits) {
+            visit.active = clock.as_ref().map(active_clock);
+        }
+    }
+    records
 }
 
 /// The run in `state` as its readers show it: as recorded, unless the machine

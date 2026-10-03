@@ -1768,7 +1768,7 @@ async fn a_run_carries_the_answer_it_submitted() {
 }
 
 /// A run that has submitted nothing says so with nulls, and its detail fields
-/// are empty rather than absent.
+/// are empty rather than absent. One that never held a window has none.
 #[tokio::test]
 async fn a_run_with_nothing_recorded_reads_as_empty() {
     crate::runstate::with_isolated_runs_dir_async("graphql-empty-detail", |_d| async move {
@@ -1785,7 +1785,7 @@ async fn a_run_with_nothing_recorded_reads_as_empty() {
         let json = serde_json::to_value(&answer.data).expect("data serializes");
         let node = &json["runs"]["results"][0];
         assert!(node["finalOutput"].is_null(), "nothing submitted");
-        assert_eq!(node["context"]["totalTokens"], 0, "an empty window");
+        assert!(node["context"].is_null(), "no window");
         assert!(node["waitReason"].is_null(), "not parked");
         assert_eq!(node["stages"]["results"].as_array().map(Vec::len), Some(0));
         assert_eq!(node["stages"]["total"], 0, "an empty page counts as none");

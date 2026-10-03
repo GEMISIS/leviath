@@ -4,7 +4,9 @@
 //! Most of them are the `/api/runs` handlers under the old path, since the
 //! response was already the same. Two are not: `POST /api/agents` takes the
 //! old task-and-flags body and answers `{agent_id, run_id}`, and
-//! `GET /api/agents` lists every run as one array. Both are here.
+//! `GET /api/agents` lists every run as one array. Both are here, with the
+//! reads that answer in the words older clients know: a stage's status, and
+//! a context window's region kinds.
 //!
 //! The old body becomes a [`SpawnRequest`](leviath_runtime::spec::request::SpawnRequest)
 //! and goes through the same checks as one sent to `POST /api/runs`. Its
@@ -34,7 +36,8 @@ use super::core::inspect;
 use super::core::spawn::{self as spawn_core, Verdict};
 use super::runs::run_json;
 use super::types::*;
-use leviath_core::run_meta::StageRunStatus;
+use leviath_core::run_meta::{ContextSnapshot, StageRunStatus};
+use leviath_runtime::runfile::history::RunPoint;
 
 /// The body `POST /api/agents` takes.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -301,6 +304,42 @@ pub(super) async fn agent_stages(
         stage.status = as_older_clients_know(&stage.status);
     }
     Ok(Json(RunStagesResp { run_id: id, stages }))
+}
+
+/// `GET /api/agents/{id}/context`: the window `GET /api/runs/{id}/context`
+/// serves, in the words older clients know. Those name a keyed region
+/// `hashmap`.
+pub(super) async fn agent_context(
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<ContextSnapshot>, ApiError> {
+    let mut snapshot = super::blocking::blocking(move || inspect::context(&id))
+        .await
+        .map_err(|e| as_api_error(&e))?;
+    in_older_words(&mut snapshot);
+    Ok(Json(snapshot))
+}
+
+/// `GET /api/agents/{id}/context/history`: the history
+/// `GET /api/runs/{id}/context/history` serves, each window in the words
+/// older clients know.
+pub(super) async fn agent_context_history(
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<Page<RunPoint>>, ApiError> {
+    let mut page = super::run_reads::context_history(id, query).await?;
+    for point in &mut page.items {
+        in_older_words(&mut point.context);
+    }
+    Ok(Json(page))
+}
+
+/// A window's region kinds in the words older clients know.
+fn in_older_words(snapshot: &mut ContextSnapshot) {
+    for region in &mut snapshot.regions {
+        if region.kind == "keyed" {
+            region.kind = "hashmap".to_string();
+        }
+    }
 }
 
 /// A stage's status in the words older clients know.

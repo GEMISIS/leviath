@@ -4048,6 +4048,16 @@ mod tests {
                 use crate::runstate;
                 let run_id = "test-yank-clipboard-unavailable-x7z9";
                 runstate::create_run(&crate::test_fixtures::fixtures::run_meta(run_id)).unwrap();
+                runstate::write_context_snapshot(
+                    run_id,
+                    &runstate::ContextSnapshot {
+                        stage_name: "main".to_string(),
+                        total_tokens: 0,
+                        max_tokens: 100,
+                        regions: vec![crate::test_fixtures::fixtures::region("task")],
+                    },
+                )
+                .unwrap();
 
                 let mut dash = make_test_dashboard();
                 let agent = make_test_agent(run_id, AgentDisplayStatus::Active);

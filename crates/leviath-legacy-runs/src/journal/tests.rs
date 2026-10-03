@@ -358,3 +358,46 @@ fn an_empty_batch_matches_no_turn() {
     let snapshot = window(vec![region("conv", vec![turn(&["c1"])])]);
     assert!(!context_contains_batch(&snapshot, &batch));
 }
+
+/// The first point of an old run's history is the first record that held its
+/// window, whichever kind it is, and a journal with none has no first point.
+#[test]
+fn the_first_point_is_the_first_record_that_held_the_window() {
+    let delta = || ContextDelta {
+        stage_name: "s".to_string(),
+        total_tokens: 0,
+        max_tokens: 10_000,
+        regions: Vec::new(),
+    };
+    let status = JournalRecord::StatusChanged {
+        status: RunStatus::Running,
+        at: 1,
+    };
+    let held = [
+        JournalRecord::ContextCheckpoint {
+            snapshot: window(Vec::new()),
+            at: 2,
+        },
+        JournalRecord::ContextDiff {
+            delta: delta(),
+            at: 3,
+        },
+        JournalRecord::Progress {
+            meta: Box::new(meta()),
+            delta: delta(),
+            at: 4,
+        },
+        JournalRecord::Checkpoint {
+            meta: Box::new(meta()),
+            context: window(Vec::new()),
+            at: 5,
+        },
+    ];
+    for (record, at) in held.into_iter().zip(2..) {
+        assert_eq!(
+            first_point_at(&[header(), status.clone(), record]),
+            Some(at)
+        );
+    }
+    assert_eq!(first_point_at(&[header(), status]), None);
+}

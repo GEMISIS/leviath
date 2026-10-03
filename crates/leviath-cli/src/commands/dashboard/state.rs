@@ -2561,7 +2561,7 @@ mod tests {
                 stage_name: "main".to_string(),
                 total_tokens: 10,
                 max_tokens: 100,
-                regions: vec![],
+                regions: vec![crate::test_fixtures::fixtures::region("task")],
             };
             for run_id in ["run-shown", "run-offscreen"] {
                 runstate::create_run(&make_run_meta(run_id, RunStatus::Complete)).unwrap();

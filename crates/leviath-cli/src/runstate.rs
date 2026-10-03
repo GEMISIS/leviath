@@ -1685,7 +1685,7 @@ mod tests {
                 stage_name: "test".into(),
                 total_tokens: 42,
                 max_tokens: 8192,
-                regions: vec![],
+                regions: vec![crate::test_fixtures::fixtures::region("task")],
             };
             write_context_snapshot(run_id, &snap).unwrap();
             let back = read_context_snapshot(run_id).unwrap();
@@ -1821,7 +1821,7 @@ mod tests {
                     stage_name: "plan".to_string(),
                     total_tokens: 3,
                     max_tokens: 100,
-                    regions: vec![],
+                    regions: vec![crate::test_fixtures::fixtures::region("task")],
                 },
             )
             .unwrap();

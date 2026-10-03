@@ -8,7 +8,7 @@ use crate::old::blueprint::Blueprint;
 use crate::old::layout::RegionSeed;
 use leviath_core::JsonDoc;
 use leviath_core::output::OutputSpec;
-use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus as OldStatus};
+use leviath_core::run_meta::{ActiveClock, ContextSnapshot, RunMeta, RunStatus as OldStatus};
 use leviath_runtime::spec::env::CodeFiles;
 use leviath_runtime::spec::graph::{ArtifactDef, CodeRef, OutputDef, RunGraph};
 use leviath_runtime::spec::inputs::{InputValue, InputValues};
@@ -20,7 +20,7 @@ use leviath_runtime::spec::names::{
     RunId,
 };
 use leviath_runtime::spec::run_spec::{
-    EnvFingerprint, ListedAs, RunSpec, SeededContent, SpecOrigin,
+    EnvFingerprint, ListedAs, ListedStage, RunSpec, SeededContent, SpecOrigin,
 };
 
 use crate::context::{Losses, parts};
@@ -223,9 +223,15 @@ pub(crate) fn build(
     })
 }
 
-/// What the release a run came from listed it with, as its `meta.json`
-/// says, for the run as it stands at step `seq` of its run file.
-pub(crate) fn listed(meta: &RunMeta, seq: u64) -> ListedAs {
+/// What the release a run came from listed it with, as its `meta.json`, its
+/// stage ledger and its journal say, for the run as it stands at step `seq`
+/// of its run file.
+pub(crate) fn listed(old: &LegacyRun, seq: u64) -> ListedAs {
+    let (meta, stages) = (old.meta(), &old.stages);
+    let clock = |a: &ActiveClock| leviath_runtime::state::Clock {
+        banked_secs: a.banked_secs,
+        since: a.since,
+    };
     ListedAs {
         model: meta.model.clone(),
         num_stages: crate::context::n32(meta.num_stages),
@@ -233,11 +239,22 @@ pub(crate) fn listed(meta: &RunMeta, seq: u64) -> ListedAs {
         blueprint_digest: meta.blueprint_digest.clone(),
         seq,
         last_progress_at: meta.last_progress_at,
-        clock: meta.active.map(|a| leviath_runtime::state::Clock {
-            banked_secs: a.banked_secs,
-            since: a.since,
-        }),
+        clock: meta.active.as_ref().map(clock),
         empty_output: meta.flags.empty_output,
+        first_point_at: old.first_point_at,
+        stages: stages
+            .iter()
+            .map(|r| ListedStage {
+                stage: r.name.clone(),
+                entered: r.entered,
+                clock: r.active.as_ref().map(clock),
+                visits: r
+                    .visits
+                    .iter()
+                    .map(|v| v.active.as_ref().map(clock))
+                    .collect(),
+            })
+            .collect(),
     }
 }
 

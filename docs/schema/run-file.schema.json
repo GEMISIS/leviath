@@ -5585,6 +5585,14 @@
             "description": "Whether it was listed as having stopped with nothing to show for\nitself.",
             "type": "boolean"
           },
+          "first_point_at": {
+            "description": "When the first point of its context history was recorded, as that\nrelease listed the history: the first record that held its window.\n`None` where it listed no history, for a run that kept no journal.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "last_progress_at": {
             "description": "When it was listed as last making progress, where its record said.",
             "format": "int64",
@@ -5617,13 +5625,65 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "stages": {
+            "description": "Its stage ledger as its record kept it, where this build reads the\nsame ledger another way: whether each stage was entered, and the\nworking clocks the stage and each of its visits kept.",
+            "items": {
+              "$ref": "#/$defs/ListedStage"
+            },
+            "type": "array"
           }
         },
         "required": [
           "num_stages",
           "max_child_depth",
           "seq",
-          "empty_output"
+          "empty_output",
+          "stages"
+        ],
+        "type": "object"
+      },
+      "ListedStage": {
+        "description": "One stage of a converted run's ledger, as its record kept it.",
+        "properties": {
+          "clock": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Clock"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The stage's working clock, where its record kept one."
+          },
+          "entered": {
+            "description": "Whether the record said the run entered it. A record from a release\nthat did not keep the answer says it did not.",
+            "type": "boolean"
+          },
+          "stage": {
+            "description": "The stage, by name.",
+            "type": "string"
+          },
+          "visits": {
+            "description": "Each recorded visit's working clock, in order, where its record kept\none.",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Clock"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "stage",
+          "entered",
+          "visits"
         ],
         "type": "object"
       },

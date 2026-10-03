@@ -489,6 +489,18 @@ pub fn fold(records: &[JournalRecord]) -> Option<Folded> {
     Some(folded)
 }
 
+/// When the first record that held the run's window was written: what every
+/// earlier release listed as the first point of its context history.
+pub(crate) fn first_point_at(records: &[JournalRecord]) -> Option<i64> {
+    records.iter().find_map(|r| match r {
+        JournalRecord::ContextCheckpoint { at, .. }
+        | JournalRecord::ContextDiff { at, .. }
+        | JournalRecord::Progress { at, .. }
+        | JournalRecord::Checkpoint { at, .. } => Some(*at),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

@@ -146,7 +146,7 @@ pub fn convert(run_dir: &Path, env: &ConvertEnv<'_>) -> Result<ConvertReport, Co
     let mut report = report::Report::default();
     let mut built = spec::build(&old, env.stages, &mut report)?;
     let (start, deltas, last) = history::build(&old, &built.spec, &mut report);
-    built.spec.listed = Some(spec::listed(old.meta(), last.seq));
+    built.spec.listed = Some(spec::listed(&old, last.seq));
     let bytes = write::encode(&built, &start, &deltas, &last);
     let written = write::install(run_dir, &bytes)?;
     let blueprint_name = old.meta().agent_name.clone();

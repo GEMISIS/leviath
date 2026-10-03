@@ -140,7 +140,7 @@ fn a_held_run_and_its_stage_read_paused() {
     rec.status = crate::state::StageStatus::Active;
     state.ledger = vec![rec];
     let stage_word = |state: &crate::state::RunState| {
-        serde_json::to_value(&stage_records(state)[0].status).unwrap()
+        serde_json::to_value(&stage_records(&spec(), state)[0].status).unwrap()
     };
     let back = summary_of(&spec(), &state, 5);
     assert_eq!(
@@ -204,7 +204,7 @@ fn any_step_reads_as_its_record_window_and_ledger() {
         last.context.region("conversation").unwrap().entries.len()
     );
 
-    let ledger = stage_records(last);
+    let ledger = stage_records(&spec, last);
     assert_eq!(ledger.len(), last.ledger.len());
     assert_eq!(ledger[0].name, "plan");
 }
@@ -238,7 +238,7 @@ fn an_unheld_run_stands_as_recorded_and_a_cancelled_stage_reads_so() {
     state.ledger = vec![rec];
     assert_eq!(as_it_stands(state.clone()), state);
     assert_eq!(
-        serde_json::to_value(&stage_records(&state)[0].status).unwrap(),
+        serde_json::to_value(&stage_records(&spec(), &state)[0].status).unwrap(),
         serde_json::json!("cancelled")
     );
 }
@@ -298,7 +298,7 @@ fn a_cost_never_named_lists_as_unknown() {
     let meta = summary_of(&spec(), &state, 9);
     assert_eq!((meta.cost_usd, meta.unpriced_calls), (None, 0));
     assert!(!meta.cost_is_exact);
-    let stages = stage_records(&state);
+    let stages = stage_records(&spec(), &state);
     assert_eq!((stages[0].cost_usd, stages[0].unpriced_calls), (None, 0));
     state.totals.spend.cost_unknown = false;
     assert_eq!(summary_of(&spec(), &state, 9).cost_usd, Some(0.0));
@@ -315,5 +315,73 @@ fn a_stage_entered_without_a_counted_visit_is_named() {
     state.ledger = vec![rec];
     let meta = summary_of(&spec(), &state, 9);
     assert_eq!(meta.current_stage, state.cursor.stage.as_str());
-    assert_eq!(stage_records(&state)[0].visit_count, 0);
+    assert_eq!(stage_records(&spec(), &state)[0].visit_count, 0);
+}
+
+/// Every stage and visit lists its working clock, a zero one included, the
+/// way every release that kept the clock listed it. A run converted from an
+/// earlier release lists whether each stage was entered and its clocks as
+/// that release listed them while it stands where it was converted, and as
+/// any run's once it moves on.
+#[test]
+fn a_stage_ledger_lists_every_clock_and_a_converted_one_as_recorded() {
+    let clock =
+        |a: Option<leviath_core::run_meta::ActiveClock>| a.map(|a| (a.banked_secs, a.since));
+    let mut state = initial();
+    state.seq = 4;
+    let mut rec =
+        crate::insert::place::pending_stage(crate::spec::names::StageName::new("plan").unwrap());
+    rec.entered = true;
+    rec.clock = crate::state::Clock {
+        banked_secs: 30,
+        since: None,
+    };
+    let visit = |banked_secs| crate::state::VisitRecord {
+        id: "v".into(),
+        entered_at: 1,
+        left_at: Some(2),
+        spend: Default::default(),
+        clock: crate::state::Clock {
+            banked_secs,
+            since: None,
+        },
+    };
+    rec.visits = vec![visit(10), visit(20)];
+    let mut other =
+        crate::insert::place::pending_stage(crate::spec::names::StageName::new("other").unwrap());
+    other.visits = vec![visit(0)];
+    state.ledger = vec![rec, other];
+
+    let native = stage_records(&spec(), &state);
+    assert_eq!(clock(native[0].active), Some((30, None)));
+    assert_eq!(
+        clock(native[1].active),
+        Some((0, None)),
+        "a zero clock is a clock"
+    );
+    assert_eq!(clock(native[1].visits[0].active), Some((0, None)));
+
+    let mut converted = spec();
+    converted.listed = Some(crate::spec::run_spec::tests::listed());
+    let listed = stage_records(&converted, &state);
+    assert!(!listed[0].entered);
+    assert_eq!(clock(listed[0].active), None);
+    assert_eq!(
+        listed[0]
+            .visits
+            .iter()
+            .map(|v| clock(v.active))
+            .collect::<Vec<_>>(),
+        vec![None, Some((0, None))]
+    );
+    assert_eq!(
+        clock(listed[1].active),
+        Some((0, None)),
+        "a stage it kept nothing for"
+    );
+
+    state.seq = 5;
+    let moved = stage_records(&converted, &state);
+    assert!(moved[0].entered);
+    assert_eq!(clock(moved[0].active), Some((30, None)));
 }

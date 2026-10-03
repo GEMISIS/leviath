@@ -154,6 +154,93 @@ async fn a_paused_or_cancelled_stage_reads_as_older_clients_know_on_the_old_rout
     .await;
 }
 
+/// The region kinds `uri` answers with: a window's, or each history point's.
+async fn region_kinds(uri: &str) -> (StatusCode, Vec<String>) {
+    use crate::commands::serve::compat;
+    let app = Router::new()
+        .route("/api/runs/{id}/context", get(run_context))
+        .route("/api/runs/{id}/context/history", get(run_context_history))
+        .route("/api/agents/{id}/context", get(compat::agent_context))
+        .route(
+            "/api/agents/{id}/context/history",
+            get(compat::agent_context_history),
+        )
+        .with_state(test_state());
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let windows: Vec<&serde_json::Value> = match body["items"].as_array() {
+        Some(points) => points.iter().map(|p| &p["context"]).collect(),
+        None => vec![&body],
+    };
+    let kinds = windows
+        .iter()
+        .flat_map(|w| w["regions"].as_array().into_iter().flatten())
+        .filter_map(|r| r["kind"].as_str().map(str::to_string))
+        .collect();
+    (status, kinds)
+}
+
+/// A keyed region reads as `keyed` on `/api/runs`, and on `/api/agents` as
+/// `hashmap`, the word older clients know it by, in the window and in each
+/// point of its history.
+#[tokio::test]
+async fn a_keyed_region_reads_as_older_clients_know_on_the_old_routes() {
+    use leviath_core::run_meta::{ContextSnapshot, RegionSnapshot};
+    crate::runstate::with_isolated_runs_dir_async("context_old_words", |_d| async move {
+        let run_id = unique_run_id("context-words");
+        create_run(&make_run(&run_id)).unwrap();
+        let region = |name: &str, kind: &str| RegionSnapshot {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            current_tokens: 0,
+            max_tokens: 500,
+            entries: Vec::new(),
+            description: None,
+        };
+        runstate::write_context_snapshot(
+            &run_id,
+            &ContextSnapshot {
+                stage_name: "main".to_string(),
+                total_tokens: 0,
+                max_tokens: 1000,
+                regions: vec![region("facts", "keyed"), region("task", "pinned")],
+            },
+        )
+        .unwrap();
+
+        let (status, kinds) = region_kinds(&format!("/api/runs/{run_id}/context")).await;
+        assert_eq!(
+            (status, kinds),
+            (StatusCode::OK, vec!["keyed".into(), "pinned".into()])
+        );
+        let (status, kinds) = region_kinds(&format!("/api/agents/{run_id}/context")).await;
+        assert_eq!(
+            (status, kinds),
+            (StatusCode::OK, vec!["hashmap".into(), "pinned".into()])
+        );
+        let (_, kinds) = region_kinds(&format!("/api/runs/{run_id}/context/history")).await;
+        assert!(kinds.contains(&"keyed".to_string()), "{kinds:?}");
+        let (status, kinds) = region_kinds(&format!("/api/agents/{run_id}/context/history")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(kinds.contains(&"hashmap".to_string()), "{kinds:?}");
+        assert!(!kinds.contains(&"keyed".to_string()), "{kinds:?}");
+        assert_eq!(
+            region_kinds("/api/agents/ghost/context").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            region_kinds("/api/agents/ghost/context/history").await.0,
+            StatusCode::NOT_FOUND
+        );
+    })
+    .await;
+}
+
 // ─── run_logs ───────────────────────────────────────────────────────────
 
 #[tokio::test]

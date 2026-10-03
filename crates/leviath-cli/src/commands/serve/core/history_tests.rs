@@ -63,6 +63,92 @@ async fn the_points_are_the_start_and_every_step_that_moved_the_window() {
     .await;
 }
 
+/// A state with no window at all is no point of the history, and the points
+/// after it keep counting from where the last one left off.
+#[tokio::test]
+async fn a_state_with_no_window_is_no_point() {
+    crate::runstate::with_isolated_runs_dir_async("history-no-window", |_d| async move {
+        let run_id = recorded();
+        said(&run_id, 10, "one");
+        let regions = run_file::require(&run_id)
+            .unwrap()
+            .latest_state()
+            .unwrap()
+            .context
+            .regions;
+        step(&run_id, 20, Vec::new(), |s| s.context.regions.clear());
+        step(&run_id, 30, Vec::new(), |s| s.context.regions = regions);
+        assert_eq!(point_count(&run_id), Some(3));
+        let at: Vec<i64> = every_window(&run_id).iter().map(|p| p.at).collect();
+        let spec_at = run_file::require(&run_id).unwrap().spec().created_at;
+        assert_eq!(at, vec![spec_at, 10, 30]);
+        let picked = windows_at(&run_id, &[2]);
+        assert_eq!(picked[0].1.at, 30);
+    })
+    .await;
+}
+
+/// Start `run_id`'s file again from the state it started in, as a run
+/// converted from an earlier release that listed it with `first_point_at`,
+/// converted at step `seq`.
+fn as_converted(run_id: &str, first_point_at: Option<i64>, seq: u64) {
+    use leviath_runtime::runfile::{CheckpointPolicy, RunFileReader, RunFileWriter};
+    let path = run_file::path(run_id);
+    let reader = RunFileReader::open(&path).unwrap();
+    let mut spec = reader.spec().clone();
+    spec.listed = Some(leviath_runtime::spec::run_spec::ListedAs {
+        model: None,
+        num_stages: 1,
+        max_child_depth: 0,
+        blueprint_digest: None,
+        seq,
+        last_progress_at: None,
+        clock: None,
+        empty_output: false,
+        stages: Vec::new(),
+        first_point_at,
+    });
+    let start = reader.state_at(0).unwrap();
+    RunFileWriter::create(
+        &path,
+        &spec,
+        &leviath_runtime::spec::env::CodeFiles::new(),
+        &start,
+        CheckpointPolicy::default(),
+    )
+    .unwrap();
+}
+
+/// A converted run's history starts when its release listed the first point,
+/// and one whose release listed no history lists none up to the step it was
+/// converted at: only the steps this build took after it.
+#[tokio::test]
+async fn a_converted_history_starts_where_its_release_listed_it() {
+    crate::runstate::with_isolated_runs_dir_async("history-converted", |_d| async move {
+        let run_id = recorded();
+        as_converted(&run_id, Some(5), 1);
+        said(&run_id, 10, "one");
+        let at: Vec<i64> = every_window(&run_id).iter().map(|p| p.at).collect();
+        assert_eq!(at, vec![5, 10]);
+
+        let unlisted = recorded();
+        as_converted(&unlisted, None, 1);
+        said(&unlisted, 10, "one");
+        // Nothing to list yet: no history at all, as its release answered.
+        let spec = HistorySpec::resolve(&unlisted, None, None, None).unwrap();
+        let err = page(&unlisted, &spec).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("No context history for run '{unlisted}'")
+        );
+        said(&unlisted, 20, "two");
+        let at: Vec<i64> = every_window(&unlisted).iter().map(|p| p.at).collect();
+        assert_eq!(at, vec![20]);
+        assert_eq!(point_count(&unlisted), Some(1));
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_history_pages_forwards_and_backwards() {
     crate::runstate::with_isolated_runs_dir_async("history-page", |_d| async move {

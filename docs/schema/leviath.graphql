@@ -2320,8 +2320,9 @@ input ContextChangeInput {
 	
 	Where in the run's journal the record that carries this change sits.
 	
-	A byte offset. It only climbs within a run and never changes, so it orders
-	changes and names one for as long as the run exists.
+	The step of the run file that made the change, counted from the run's
+	start. It only climbs within a run and never changes, so it orders
+	changes; the changes one step made share it.
 	"""
 	journalPosition: BigIntFilter
 	"""
@@ -2415,8 +2416,9 @@ type ContextChangeOutput {
 	"""
 	Where in the run's journal the record that carries this change sits.
 	
-	A byte offset. It only climbs within a run and never changes, so it orders
-	changes and names one for as long as the run exists.
+	The step of the run file that made the change, counted from the run's
+	start. It only climbs within a run and never changes, so it orders
+	changes; the changes one step made share it.
 	"""
 	journalPosition: BigInt!
 	"When the transaction committed."
@@ -11654,8 +11656,8 @@ input RunInput {
 	
 	The run's context window as it stands right now.
 	
-	Null for a run that has not written one yet, and for a finished run
-	whose window was never persisted. Region contents are their own field,
+	Null for a run that never held one: a run converted from an earlier
+	release whose record kept no window. Region contents are their own field,
 	so asking for the shape of the window does not read its text.
 	"""
 	context: ContextWindowInput
@@ -11916,8 +11918,8 @@ type RunOutput implements Node {
 	"""
 	The run's context window as it stands right now.
 	
-	Null for a run that has not written one yet, and for a finished run
-	whose window was never persisted. Region contents are their own field,
+	Null for a run that never held one: a run converted from an earlier
+	release whose record kept no window. Region contents are their own field,
 	so asking for the shape of the window does not read its text.
 	"""
 	context: ContextWindowOutput
@@ -16869,8 +16871,10 @@ input ToolExecutionInput {
 	
 	Where in the run's journal the record that dispatched it sits.
 	
-	A byte offset. It only climbs within a run and never changes, so it orders
-	executions and names one for as long as the run exists.
+	The step of the run file that dispatched it, counted from the run's
+	start. It only climbs within a run and never changes, so it orders
+	executions. The calls one batch dispatched share a step, so with
+	`callId` it names one for as long as the run exists.
 	"""
 	journalPosition: BigIntFilter
 	"""
@@ -17026,8 +17030,10 @@ type ToolExecutionOutput {
 	"""
 	Where in the run's journal the record that dispatched it sits.
 	
-	A byte offset. It only climbs within a run and never changes, so it orders
-	executions and names one for as long as the run exists.
+	The step of the run file that dispatched it, counted from the run's
+	start. It only climbs within a run and never changes, so it orders
+	executions. The calls one batch dispatched share a step, so with
+	`callId` it names one for as long as the run exists.
 	"""
 	journalPosition: BigInt!
 	"""

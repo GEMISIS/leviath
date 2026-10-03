@@ -133,6 +133,11 @@ pub(crate) struct LegacyRun {
     /// Files under `blobs/` whose names are not a digest, which the run file
     /// does not name.
     pub(crate) stray_blobs: Vec<String>,
+    /// When the first point of its context history was recorded, as every
+    /// earlier release listed the history: the first journal record that
+    /// held the window. `None` for a run that kept no journal, which those
+    /// releases listed no history for.
+    pub(crate) first_point_at: Option<i64>,
 }
 
 impl LegacyRun {
@@ -162,6 +167,7 @@ impl LegacyRun {
             path: dir.to_path_buf(),
             why: format!("it has no {META_FILE}"),
         })?;
+        let journaled = journal.is_some();
         let records = match journal {
             Some(bytes) => journal_records(&journal_path, &bytes)?,
             None => records_without_journal(dir, meta.clone())?,
@@ -175,6 +181,9 @@ impl LegacyRun {
         let header = (**header).clone();
         let folded = journal::fold(&records).expect("a journal that starts with its header folds");
         let (blobs, stray_blobs) = blobs(&dir.join(BLOBS_DIR));
+        let first_point_at = journaled
+            .then(|| journal::first_point_at(&records))
+            .flatten();
         Ok(Self {
             stages: json_file(&dir.join(STAGES_FILE))?.unwrap_or_default(),
             fanout: json_file(&dir.join(FANOUT_FILE))?,
@@ -189,6 +198,7 @@ impl LegacyRun {
             folded,
             blobs,
             stray_blobs,
+            first_point_at,
         })
     }
 }

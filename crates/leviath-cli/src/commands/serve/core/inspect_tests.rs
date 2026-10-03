@@ -297,6 +297,23 @@ async fn the_window_and_ledger_are_read_as_of_the_last_step() {
     .await;
 }
 
+/// A run that holds no window at all has none to show, as a release that
+/// kept no window for a run showed none: not an empty one.
+#[tokio::test]
+async fn a_run_with_no_window_has_no_context() {
+    crate::runstate::with_isolated_runs_dir_async("inspect-no-window", |_d| async move {
+        let run_id = recorded();
+        step(&run_id, 10, Vec::new(), |s| s.context.regions.clear());
+        let err = context(&run_id).unwrap_err();
+        assert_eq!(err.code(), "NOT_FOUND");
+        assert_eq!(
+            err.to_string(),
+            format!("No context snapshot for run '{run_id}'")
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn parts_are_read_from_the_blob_directory() {
     crate::runstate::with_isolated_runs_dir_async("inspect-blobs", |_d| async move {

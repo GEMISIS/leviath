@@ -188,8 +188,9 @@ pub(crate) struct ContextChange {
     pub(crate) regions: Vec<RegionTransition>,
     /// Where in the run's journal the record that carries this change sits.
     ///
-    /// A byte offset. It only climbs within a run and never changes, so it orders
-    /// changes and names one for as long as the run exists.
+    /// The step of the run file that made the change, counted from the run's
+    /// start. It only climbs within a run and never changes, so it orders
+    /// changes; the changes one step made share it.
     pub(crate) journal_position: BigInt,
     /// When the transaction committed.
     pub(crate) at: Timestamp,

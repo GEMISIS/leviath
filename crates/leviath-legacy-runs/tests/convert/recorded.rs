@@ -539,7 +539,7 @@ fn a_record_without_a_cost_shows_none() {
     assert_eq!((stage.unpriced_calls, stage.cost_unknown), (0, true));
     let reader = RunFileReader::open(&run.path("run.lvr")).unwrap();
     let tail = leviath_runtime::runfile::RunFileTail::of(&reader).unwrap();
-    let stages = leviath_runtime::runfile::stage_records(&tail.state);
+    let stages = leviath_runtime::runfile::stage_records(&tail.spec, &tail.state);
     assert_eq!((stages[0].cost_usd, stages[0].unpriced_calls), (None, 0));
     let kept = Run::fixture("real-finished");
     kept.converted();

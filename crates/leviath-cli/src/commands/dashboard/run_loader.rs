@@ -309,7 +309,7 @@ mod tests {
             stage_name: "main".to_string(),
             total_tokens: 1,
             max_tokens: 10,
-            regions: vec![],
+            regions: vec![crate::test_fixtures::fixtures::region("task")],
         }
     }
 
@@ -328,6 +328,7 @@ mod tests {
                     .unwrap();
             }
             runstate::write_context_snapshot("newer", &context()).unwrap();
+            runstate::write_context_snapshot("older", &context()).unwrap();
 
             let mut loader = RunLoader::default();
             let list_only = loader.collect(Some("newer"), false);

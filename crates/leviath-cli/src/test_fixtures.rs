@@ -181,6 +181,19 @@ pub(crate) mod fixtures {
             1,
         )
     }
+
+    /// An empty pinned region named `name`: what makes a recorded window one,
+    /// since a run with no region at all holds no window.
+    pub(crate) fn region(name: &str) -> leviath_core::run_meta::RegionSnapshot {
+        leviath_core::run_meta::RegionSnapshot {
+            name: name.to_string(),
+            kind: "pinned".to_string(),
+            current_tokens: 0,
+            max_tokens: 100,
+            entries: Vec::new(),
+            description: None,
+        }
+    }
 }
 
 #[cfg(test)]

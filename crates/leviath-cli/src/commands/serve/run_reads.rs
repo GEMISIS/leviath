@@ -123,6 +123,14 @@ pub(super) async fn run_context_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Page<leviath_runtime::runfile::history::RunPoint>>, ApiError> {
+    context_history(id, query).await.map(Json)
+}
+
+/// One page of run `id`'s context history, as `query` asks for it.
+pub(super) async fn context_history(
+    id: String,
+    query: HistoryQuery,
+) -> Result<Page<leviath_runtime::runfile::history::RunPoint>, ApiError> {
     let spec = history::HistorySpec::resolve(
         &id,
         query.limit,
@@ -133,12 +141,12 @@ pub(super) async fn run_context_history(
     let page = super::blocking::blocking(move || history::page(&id, &spec))
         .await
         .map_err(|e| as_api_error(&e))?;
-    Ok(Json(Page::new(
+    Ok(Page::new(
         page.points,
         page.next_cursor,
         Some(page.total),
         leviath_core::duration::now_secs(),
-    )))
+    ))
 }
 
 /// `GET /api/runs/{id}/logs`: what a run has written, by stage.

@@ -410,10 +410,74 @@ fn a_ledger_that_did_not_count_visits_lists_none() {
     });
     let (_, file) = run.converted();
     assert!(file.last.visits.is_empty(), "{:?}", file.last.visits);
-    let stages = leviath_runtime::runfile::stage_records(&file.last);
+    let stages = leviath_runtime::runfile::stage_records(&file.spec, &file.last);
     assert_eq!((stages[0].visit_count, stages[0].entered), (0, true));
     assert_eq!(listed(&run).current_stage, "main");
     assert_eq!(file.fold(), file.last);
+}
+
+/// A converted run's stage ledger lists whether each stage was entered and
+/// its working clocks as its record kept them while it stands where it was
+/// converted: a zero clock as a zero clock, none where the record kept none,
+/// and not entered where a release that did not keep the answer said so.
+/// The state still knows the stage ran, so its status reads right, and once
+/// the run moves on the ledger lists as any run's does.
+#[test]
+fn a_converted_ledger_lists_entered_and_clocks_as_recorded() {
+    let run = Run::fixture("finished");
+    run.json("stages.json", |v| {
+        let stage = &mut v.as_array_mut().unwrap()[0];
+        let m = stage.as_object_mut().unwrap();
+        m.remove("entered");
+        m.remove("active");
+    });
+    let (_, file) = run.converted();
+    assert!(file.last.ledger[0].entered, "the state knows it ran");
+    let stages = leviath_runtime::runfile::stage_records(&file.spec, &file.last);
+    let clock =
+        |a: Option<leviath_core::run_meta::ActiveClock>| a.map(|a| (a.banked_secs, a.since));
+    assert!(!stages[0].entered);
+    assert_eq!(clock(stages[0].active), None);
+    assert_eq!(clock(stages[0].visits[0].active), Some((0, None)));
+    let body = serde_json::to_value(&stages[0]).unwrap();
+    assert_eq!(body["active"], json!(null));
+    assert_eq!(
+        body["visits"][0]["active"],
+        json!({"banked_secs": 0, "since": null})
+    );
+
+    let mut moved = file.last.clone();
+    moved.seq += 1;
+    let later = leviath_runtime::runfile::stage_records(&file.spec, &moved);
+    assert!(later[0].entered);
+    assert!(later[0].active.is_some());
+}
+
+/// A converted run's history starts when its journal first held the window,
+/// as every earlier release listed it, and a run that kept no journal, which
+/// those releases listed no history for, starts none.
+#[test]
+fn a_converted_history_starts_when_its_journal_first_held_the_window() {
+    use leviath_legacy_runs::journal::JournalRecord;
+    let run = Run::fixture("finished");
+    let first = run
+        .records()
+        .iter()
+        .find_map(|r| match r {
+            JournalRecord::ContextCheckpoint { at, .. }
+            | JournalRecord::ContextDiff { at, .. }
+            | JournalRecord::Progress { at, .. }
+            | JournalRecord::Checkpoint { at, .. } => Some(*at),
+            _ => None,
+        })
+        .expect("the fixture's journal holds a window");
+    let (_, file) = run.converted();
+    assert_eq!(file.spec.listed.unwrap().first_point_at, Some(first));
+
+    let bare = Run::fixture("finished");
+    bare.remove("run.lvr");
+    let (_, file) = bare.converted();
+    assert_eq!(file.spec.listed.unwrap().first_point_at, None);
 }
 
 /// A run that was not finished lists the copy of its blueprint it was

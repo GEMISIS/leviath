@@ -116,7 +116,13 @@ pub(crate) struct HistoryPage {
 /// run file this server can read.
 ///
 /// The first point is the state the run started in, recorded when the run was
-/// resolved; every later one is a step that changed the window.
+/// resolved; every later one is a step that changed the window. A state with
+/// no window at all is no point.
+///
+/// A run converted from an earlier release lists the history that release
+/// listed, up to the step it was converted at: its first point when the first
+/// record that held its window was written, and none at all for a run that
+/// kept no journal.
 fn visit_points(
     run_id: &str,
     visit: &mut dyn FnMut(usize, i64, &RunSpec, &RunState) -> ControlFlow<()>,
@@ -124,10 +130,24 @@ fn visit_points(
     let reader = run_file::open(run_id).ok().flatten()?;
     let spec = reader.spec();
     let start = run_file::initial(run_id, &reader).ok()?;
-    if visit(0, spec.created_at, spec, &start).is_break() {
+    // Up to which step a converted run lists no history, and when the
+    // history it lists starts.
+    let listed = spec.listed.as_ref();
+    let unlisted_to = listed.filter(|l| l.first_point_at.is_none()).map(|l| l.seq);
+    let started = listed
+        .and_then(|l| l.first_point_at)
+        .unwrap_or(spec.created_at);
+    let mut index = 0usize;
+    let mut point = |seq: u64, at: i64, state: &RunState| {
+        if state.context.regions.is_empty() || unlisted_to.is_some_and(|to| seq <= to) {
+            return ControlFlow::Continue(());
+        }
+        index += 1;
+        visit(index - 1, at, spec, state)
+    };
+    if point(start.seq, started, &start).is_break() {
         return Some(());
     }
-    let mut index = 0usize;
     run_file::walk(run_id, &reader, &mut |step| {
         let moved = step
             .delta
@@ -137,8 +157,7 @@ fn visit_points(
         if !moved {
             return ControlFlow::Continue(());
         }
-        index += 1;
-        visit(index, step.delta.at, spec, step.after)
+        point(step.delta.seq, step.delta.at, step.after)
     })
     .ok()
 }
@@ -265,8 +284,9 @@ pub(crate) fn every_window(run_id: &str) -> Vec<RunPoint> {
 pub(crate) fn page(run_id: &str, spec: &HistorySpec) -> Result<HistoryPage, ServeError> {
     // One pass to count, so `total` is honest and a descending window knows
     // where to start. Counting replays the deltas but builds no window. A run
-    // file always holds its start, so a run that has one has a history.
-    let Some(total) = point_count(run_id) else {
+    // with no point has no history, as earlier releases listed none for a
+    // run that kept no journal.
+    let Some(total) = point_count(run_id).filter(|n| *n > 0) else {
         return Err(ServeError::NotFound(format!(
             "No context history for run '{run_id}'"
         )));

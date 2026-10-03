@@ -96,6 +96,29 @@ pub struct ListedAs {
     /// Whether it was listed as having stopped with nothing to show for
     /// itself.
     pub empty_output: bool,
+    /// Its stage ledger as its record kept it, where this build reads the
+    /// same ledger another way: whether each stage was entered, and the
+    /// working clocks the stage and each of its visits kept.
+    pub stages: Vec<ListedStage>,
+    /// When the first point of its context history was recorded, as that
+    /// release listed the history: the first record that held its window.
+    /// `None` where it listed no history, for a run that kept no journal.
+    pub first_point_at: Option<i64>,
+}
+
+/// One stage of a converted run's ledger, as its record kept it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ListedStage {
+    /// The stage, by name.
+    pub stage: String,
+    /// Whether the record said the run entered it. A record from a release
+    /// that did not keep the answer says it did not.
+    pub entered: bool,
+    /// The stage's working clock, where its record kept one.
+    pub clock: Option<crate::state::Clock>,
+    /// Each recorded visit's working clock, in order, where its record kept
+    /// one.
+    pub visits: Vec<Option<crate::state::Clock>>,
 }
 
 impl ListedAs {
@@ -443,6 +466,19 @@ pub(crate) mod tests {
                 since: Some(7),
             }),
             empty_output: true,
+            first_point_at: Some(3),
+            stages: vec![ListedStage {
+                stage: "plan".into(),
+                entered: false,
+                clock: None,
+                visits: vec![
+                    None,
+                    Some(crate::state::Clock {
+                        banked_secs: 0,
+                        since: None,
+                    }),
+                ],
+            }],
         }
     }
 
