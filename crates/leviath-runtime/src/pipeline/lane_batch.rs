@@ -50,7 +50,26 @@ pub(crate) struct PendingBatch {
     /// Whether the batch was brought back from the run's file, which already
     /// records it as dispatched.
     resumed: bool,
+    /// The question each call was put to a person under before a restart,
+    /// by call id, asked again under the same id.
+    asked: HashMap<String, String>,
 }
+
+/// A held batch as the run's state records it (see [`PendingBatch::held`]).
+pub(crate) struct HeldView {
+    /// The results it already has, by call id.
+    pub done: Vec<(String, String)>,
+    /// The execution each call was recorded as, by call id.
+    pub executions: HashMap<String, String>,
+    /// What it holds.
+    pub hold: crate::state::HeldBatch,
+}
+
+/// What a batch brought back from the run's file had settled while it was
+/// held on a person (see [`crate::state::HeldBatch`]), carried until the
+/// batch is sent.
+#[derive(Component, Debug, Clone, Default)]
+pub(crate) struct ResumedHold(pub crate::state::HeldBatch);
 
 /// The journaling a batch did when it was first seen.
 struct BatchJournal {
@@ -67,6 +86,8 @@ struct BatchJournal {
 pub(crate) struct AwaitingApproval {
     /// The call being asked about.
     pub call_id: String,
+    /// The id of the question it was put to a person under.
+    pub question: String,
     /// What an approval for the stage or the run is remembered under.
     pub keys: Vec<String>,
     /// The bytes an approval charges the run.
@@ -97,12 +118,67 @@ impl PendingBatch {
             decided: HashMap::new(),
             seeds: false,
             resumed: false,
+            asked: HashMap::new(),
         }
     }
 
     /// The batch, brought back from the run's file when `resumed`.
     pub(crate) fn resumed(self, resumed: bool) -> Self {
         Self { resumed, ..self }
+    }
+
+    /// The batch, with what it had settled while held before a restart: a
+    /// call already decided to run is not decided again, and an approval
+    /// still open is asked again under its id. A question about a call not
+    /// yet through the taint gate was the gate's, and is not an approval.
+    pub(crate) fn holding(mut self, hold: Option<&ResumedHold>) -> Self {
+        let hold = hold.map(|h| h.0.clone()).unwrap_or_default();
+        for id in hold.allowed {
+            self.decided.insert(id, Decision::Run);
+        }
+        let cleared = hold.cleared;
+        self.asked = hold
+            .asked
+            .into_iter()
+            .filter(|(id, _)| cleared.contains(id))
+            .collect();
+        self
+    }
+
+    /// The batch as the run's state records it while it is held on a
+    /// person, `asking` about one of its calls: the results it already has,
+    /// the executions its calls were recorded as, and what it holds. `None`
+    /// for a stage's seed calls, which are no turn's batch.
+    pub(crate) fn held(&self, asking: Option<&AwaitingApproval>) -> Option<HeldView> {
+        if self.seeds {
+            return None;
+        }
+        // What a restart carried over stays on the run as its
+        // `RecoveredResults` until the batch lands, and is read from there.
+        let mut done = self.context_results.clone();
+        let mut allowed = Vec::new();
+        for (id, decision) in &self.decided {
+            match decision {
+                Decision::Refuse(text) => done.push((id.clone(), text.clone())),
+                Decision::Run => allowed.push(id.clone()),
+                Decision::Interact { .. } => {}
+            }
+        }
+        allowed.sort();
+        let mut asked: std::collections::BTreeMap<String, String> =
+            self.asked.clone().into_iter().collect();
+        asked.extend(asking.map(|ask| (ask.call_id.clone(), ask.question.clone())));
+        let hold = crate::state::HeldBatch {
+            asked,
+            allowed,
+            // A call on its way to the lane is through the gate.
+            cleared: self.lane_calls.iter().map(|c| c.id.clone()).collect(),
+        };
+        Some(HeldView {
+            done,
+            executions: self.executions.clone(),
+            hold,
+        })
     }
 
     /// A stage's seed calls: decided like any batch, journaled not at all.
@@ -205,17 +281,29 @@ pub(crate) fn dispatch_lane_batches(
                 .expect("an asked call is one of the batch's");
             match lane.hub.as_deref().zip(lane.approvals.as_deref()) {
                 Some(prompts) => {
+                    // A question asked before a restart is the same question,
+                    // so it keeps its id: an answer given to it still lands.
+                    let question = batch
+                        .asked
+                        .remove(&ask.call_id)
+                        .unwrap_or_else(|| prompts.0.next_request_id(&state.agent_id, "approve"));
                     crate::approval_prompt::ask(
                         prompts,
                         crate::approval_prompt::ApprovalAsk {
                             entity,
                             agent_id: state.agent_id.clone(),
+                            question: question.clone(),
                             call,
                             stage: state.current_stage.clone(),
                             keys: ask.keys.clone(),
                         },
                     );
-                    commands.entity(entity).insert(ask);
+                    commands.entity(entity).insert(AwaitingApproval {
+                        call_id: ask.call_id,
+                        question,
+                        keys: ask.keys,
+                        charge: ask.charge,
+                    });
                     break true;
                 }
                 // No one to ask: the answer a prompt nobody answered gets.
@@ -241,6 +329,14 @@ pub(crate) fn dispatch_lane_batches(
     }
 }
 
+/// A call that needs a person's approval: what [`AwaitingApproval`] holds
+/// once the question is put.
+struct Ask {
+    call_id: String,
+    keys: Vec<String>,
+    charge: u64,
+}
+
 /// Decide every call not yet decided, in order. Stops at the first that needs
 /// a person's approval, and returns what to ask.
 fn decide_in_order(
@@ -250,7 +346,7 @@ fn decide_in_order(
     grants: &ToolGrants,
     ledger: &mut WriteLedger,
     stage_index: usize,
-) -> Option<AwaitingApproval> {
+) -> Option<Ask> {
     for call in batch.lane_calls.clone() {
         if batch.decided.contains_key(&call.id) {
             continue;
@@ -268,7 +364,7 @@ fn decide_in_order(
             ToolVerdict::Interact { attended } => Decision::Interact { attended },
             ToolVerdict::Refuse(text) => Decision::Refuse(text),
             ToolVerdict::Ask { keys, charge } => {
-                return Some(AwaitingApproval {
+                return Some(Ask {
                     call_id: call.id,
                     keys,
                     charge,

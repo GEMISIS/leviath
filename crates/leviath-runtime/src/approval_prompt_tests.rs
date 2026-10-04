@@ -42,6 +42,7 @@ async fn a_prompt_that_panics_refuses_its_call_instead_of_hanging() {
             ),
             AwaitingApproval {
                 call_id: "c0".to_string(),
+                question: "run-approve-1".to_string(),
                 keys: vec!["k".to_string()],
                 charge: 3,
             },

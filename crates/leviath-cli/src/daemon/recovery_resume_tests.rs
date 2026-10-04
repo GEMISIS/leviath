@@ -197,6 +197,7 @@ async fn a_question_put_to_a_person_is_asked_again_after_a_restart() {
             }],
             done: Default::default(),
             executions: [("call_1".to_string(), "exec-1".to_string())].into(),
+            held: None,
         });
         s.interactions = vec![OpenInteraction {
             id: old_id.clone(),
@@ -477,6 +478,7 @@ async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
                 )]
                 .into(),
                 executions: Default::default(),
+                held: None,
             });
         });
         change(runs.path(), &asking, |s| {
@@ -485,6 +487,7 @@ async fn a_call_running_when_the_daemon_died_comes_back_interrupted() {
                 calls: vec![call("q", "ask_user_text"), call("c2", "shell")],
                 done: Default::default(),
                 executions: Default::default(),
+                held: None,
             });
         });
         if crashed {
@@ -731,6 +734,7 @@ async fn a_call_running_at_a_clean_stop_is_not_started_again() {
             }],
             done: Default::default(),
             executions: Default::default(),
+            held: None,
         });
     });
     let mut world = world_for(&starter);
@@ -756,4 +760,175 @@ async fn a_call_running_at_a_clean_stop_is_not_started_again() {
     let applied = drive_until(&mut again, |w| live(w, &run).pending.is_none()).await;
     assert!(applied, "the batch lands without running again");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "start\n");
+}
+
+/// A blueprint whose one stage lists a directory, which a person approves.
+const APPROVER: &str = r#"[blueprint]
+name = "approver"
+version = "0.0.0"
+description = "Lists a directory once a person allows it."
+
+[graph]
+entry = "work"
+inputs = [{ name = "task", type = { kind = "text", multiline = true }, binds = [{ region = "task" }] }]
+
+[graph.layout]
+total_budget_tokens = 50000
+regions = [
+    { name = "task", kind = "pinned", budget = 2000 },
+    { name = "conversation", kind = { kind = "sliding_window", max_items = 40 }, budget = 20000 },
+]
+
+[[graph.stages]]
+name = "work"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+tools = ["list_dir"]
+tool_permissions = { list_dir = "ask" }
+system_prompt = "Work."
+"#;
+
+/// A model that lists the working directory on its first turn and says
+/// `done` on every turn after, counting the turns it is asked for. A
+/// request offering no tools (a run's title) is answered and not counted.
+#[derive(Debug, Default)]
+struct ListsThenDone {
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl leviath_providers::Provider for ListsThenDone {
+    async fn infer(
+        &self,
+        request: &leviath_providers::InferenceRequest,
+    ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+        let mut reply = crate::test_fixtures::fixtures::inference_response("done");
+        let turn = match request.tools.is_empty() {
+            true => return Ok(reply),
+            false => self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        };
+        if turn == 0 {
+            reply.tool_calls = vec![leviath_providers::ToolCall {
+                id: "c1".to_string(),
+                name: "list_dir".to_string(),
+                arguments: serde_json::json!({ "path": "." }),
+                thought_signature: None,
+            }];
+        }
+        Ok(reply)
+    }
+
+    async fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+        1
+    }
+
+    fn max_context_tokens(&self, _model: &str) -> usize {
+        100_000
+    }
+
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+        leviath_providers::ModelCapabilities::default()
+    }
+}
+
+/// A registry whose `anthropic` provider is `model`.
+fn registry_of(model: &Arc<ListsThenDone>) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
+    registry.register("anthropic".to_string(), model.clone());
+    registry
+}
+
+/// A run waiting on a person to approve a tool call when the daemon stops,
+/// cleanly or not, comes back asking the same question under the same id,
+/// without asking its model for the turn again; allowing it runs the call
+/// once, as the execution it was recorded as.
+#[tokio::test]
+async fn an_approval_waiting_at_a_restart_is_asked_again_without_a_new_turn() {
+    use leviath_runtime::spec::env::Caller;
+    use std::sync::atomic::Ordering;
+    for crashed in [false, true] {
+        let agent = tempfile::tempdir().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let manifest = manifest_in(agent.path(), APPROVER);
+        let model = Arc::new(ListsThenDone::default());
+        let first = starter(Config::default(), registry_of(&model), runs.path());
+        let request = crate::daemon::requests::TaskLaunch {
+            blueprint: manifest.to_string_lossy().into_owned(),
+            task: "look around".to_string(),
+            workdir: Some(work.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        }
+        .into_request()
+        .expect("the request reads");
+        let env = first.env_for(&request, first.config.current());
+        let run = first
+            .start_with(env, request, Caller::TopLevel)
+            .await
+            .expect("the run starts")
+            .spec
+            .run_id
+            .to_string();
+        let mut world = world_for(&first);
+        resume_all(&mut world, &first, runs.path());
+        let asked = drive_until(&mut world, |w| {
+            open_for(&first, &run).len() == 1
+                && live(w, &run).wait_reason == Some(WaitState::ToolApproval)
+        })
+        .await;
+        assert!(asked, "the call is put to a person");
+        let question = open_for(&first, &run).remove(0);
+        assert_eq!(model.asked.load(Ordering::SeqCst), 1);
+
+        match crashed {
+            // A daemon that dies leaves its world as it was.
+            true => drop(world),
+            false => {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                drop(tx);
+                leviath_runtime::host::WorldHost::with_interactions(world, first.hub.clone())
+                    .serve(rx)
+                    .await;
+            }
+        }
+
+        let second = starter(Config::default(), registry_of(&model), runs.path());
+        let mut world = world_for(&second);
+        resume_all(&mut world, &second, runs.path());
+        let reopened = drive_until(&mut world, |w| {
+            open_for(&second, &run).len() == 1
+                && live(w, &run).wait_reason == Some(WaitState::ToolApproval)
+        })
+        .await;
+        assert!(reopened, "the approval is asked again (crashed: {crashed})");
+        let again = open_for(&second, &run).remove(0);
+        assert_eq!(again.id, question.id, "the same question, under its id");
+        assert_eq!(again.prompt, question.prompt);
+        assert_eq!(
+            model.asked.load(Ordering::SeqCst),
+            1,
+            "the model is not asked for the turn again (crashed: {crashed})"
+        );
+
+        assert!(second.hub.answer(InteractionResponse::approval(
+            again.id.clone(),
+            true,
+            leviath_core::interaction::ApprovalScope::Once,
+        )));
+        let finished =
+            drive_until(&mut world, |w| live(w, &run).status == RunStatus::Complete).await;
+        assert!(finished, "the allowed call runs and the run finishes");
+        assert_eq!(model.asked.load(Ordering::SeqCst), 2);
+        let told = told_in_file(runs.path(), &run);
+        let ended = told.iter().filter(|t| t.starts_with("ended c1")).count();
+        assert_eq!(ended, 1, "the call ran once: {told:?}");
+        let sent: Vec<&String> = told.iter().filter(|t| t.starts_with("sent c1")).collect();
+        assert!(
+            sent.windows(2).all(|w| w[0] == w[1]),
+            "one execution throughout: {told:?}"
+        );
+    }
 }

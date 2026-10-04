@@ -165,6 +165,11 @@ pub(crate) fn busy() -> RunState {
         )]
         .into(),
         executions: Default::default(),
+        held: Some(HeldBatch {
+            asked: [("c1".to_string(), "r-approve-1".to_string())].into(),
+            allowed: vec!["c0".into()],
+            cleared: vec!["c1".into()],
+        }),
     });
     s.fan_out = Some(FanOutState {
         stage: stage("split"),

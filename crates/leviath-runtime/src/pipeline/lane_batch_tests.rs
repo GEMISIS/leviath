@@ -483,6 +483,92 @@ async fn a_batch_whose_executor_panics_reports_each_call_failed() {
     assert!(results[0].1.as_str().contains("the executor blew up"));
 }
 
+/// A batch held on an approval reads back as held: the question it waits on
+/// by its id, the calls already decided to run, the refusals among its
+/// results, and every lane call through the gate. A stage's seed calls are
+/// no turn's batch, and read back as nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_held_on_an_approval_reads_back_as_held() {
+    let judge = Arc::new(Judge::default());
+    let (mut world, mut jobs) = world_with(judge.clone());
+    let hub = with_prompts(&mut world);
+    let e = agent(&mut world, &["ok", "no", "q", "ask"]);
+    run(&mut world);
+    assert!(jobs.try_recv().is_err(), "held, not sent");
+    let question = world
+        .get::<AwaitingApproval>(e)
+        .expect("held")
+        .question
+        .clone();
+    assert_eq!(open_request(&hub).await.id, question);
+
+    let batch = crate::state::inspect::pending_of(&world, e).expect("a batch in hand");
+    let hold = batch.held.expect("held on a person");
+    assert_eq!(hold.asked, [("c3".to_string(), question)].into());
+    assert_eq!(hold.allowed, ["c0"]);
+    assert_eq!(hold.cleared, ["c0", "c1", "c2", "c3"]);
+    assert_eq!(batch.done["c1"].text, "nope");
+    assert_eq!(batch.done.len(), 1);
+    assert_eq!(batch.executions.len(), 0);
+
+    let seeds = PendingBatch::seeds(Vec::new());
+    assert!(seeds.held(None).is_none());
+}
+
+/// A batch brought back held asks its open approval again under the id it
+/// had, and does not decide again a call already decided to run, which
+/// would charge the run twice. A question about a call not through the gate
+/// was the gate's: an approval for that call is asked under an id of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_batch_brought_back_asks_its_approval_under_the_same_id() {
+    let judge = Arc::new(Judge::default());
+    let (mut world, mut jobs) = world_with(judge.clone());
+    let hub = with_prompts(&mut world);
+    let e = agent(&mut world, &["ok", "ask"]);
+    let hold = crate::state::HeldBatch {
+        asked: [("c1".to_string(), "run-a-approve-7".to_string())].into(),
+        allowed: vec!["c0".to_string()],
+        cleared: vec!["c0".to_string(), "c1".to_string()],
+    };
+    let batch = world.entity_mut(e).take::<PendingBatch>().unwrap();
+    world
+        .entity_mut(e)
+        .insert(batch.holding(Some(&ResumedHold(hold))));
+    run(&mut world);
+    let req = open_request(&hub).await;
+    assert_eq!(req.id, "run-a-approve-7");
+    assert_eq!(
+        *judge.seen_written.lock().unwrap(),
+        vec![100],
+        "only the call still waiting is decided"
+    );
+    hub.answer(InteractionResponse::approval(
+        &req.id,
+        true,
+        ApprovalScope::Once,
+    ));
+    until_answered(&mut world, e).await;
+    assert!(jobs.try_recv().is_ok(), "sent once decided");
+    assert_eq!(
+        ran(&judge).iter().map(|r| r.1.clone()).collect::<Vec<_>>(),
+        vec![Decision::Run, Decision::Run]
+    );
+    assert_eq!(world.get::<WriteLedger>(e).unwrap().written, 107);
+
+    let other = agent(&mut world, &["ask"]);
+    let batch = world.entity_mut(other).take::<PendingBatch>().unwrap();
+    let gates = crate::state::HeldBatch {
+        asked: [("c0".to_string(), "run-a-gate-3".to_string())].into(),
+        ..Default::default()
+    };
+    world
+        .entity_mut(other)
+        .insert(batch.holding(Some(&ResumedHold(gates))));
+    run(&mut world);
+    let asked = world.get::<AwaitingApproval>(other).expect("held");
+    assert_eq!(asked.question, "run-a-approve-1");
+}
+
 /// The judge's exec_for is only there because the trait asks for it.
 #[tokio::test]
 async fn the_judges_plain_exec_runs_nothing() {

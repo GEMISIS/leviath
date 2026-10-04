@@ -35,15 +35,19 @@ use crate::taint::GateResolution;
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct AwaitingGatePrompt(pub usize);
 
-/// Per-agent record of resolved blocked calls, consumed by the tool-dispatch
-/// re-run: `approved` call ids execute, `denied` call ids get their stored
-/// `[blocked]` message. Removed once the batch is dispatched.
+/// Per-agent record of blocked calls, consumed by the tool-dispatch re-run:
+/// `approved` call ids execute, `denied` call ids get their stored
+/// `[blocked]` message, and `asked` names the question each call still
+/// waiting on a person was put under. Removed once the batch is dispatched.
 #[derive(Component, Debug, Clone, Default)]
 pub(crate) struct GateResolved {
     /// Tool-call ids the user allowed (execute without re-checking the gate).
     pub approved: HashSet<String>,
     /// Tool-call ids the user denied, mapped to their block message.
     pub denied: HashMap<String, String>,
+    /// The id of the question each call still waiting on a person was put
+    /// under, by tool-call id.
+    pub asked: HashMap<String, String>,
 }
 
 /// One resolved gate prompt, reported on the lane.
@@ -109,17 +113,19 @@ fn build_gate_request(
     )
 }
 
-/// The call being gated: who is asking, for what, and how the taint levels
-/// compare.
+/// The call being gated: who is asking, under which question, for what, and
+/// how the taint levels compare.
 ///
-/// Held apart from the lane it reports on because these six answer "what is the
-/// user being asked about" and the other three answer "where does the answer
-/// go" - and only the first six ever appear in the prompt.
+/// Held apart from the lane it reports on because these answer "what is the
+/// user being asked about" and the lane's three answer "where does the answer
+/// go".
 pub(crate) struct GatedCall {
     /// The agent whose call is blocked.
     pub entity: Entity,
     /// That agent's run id, for the hub's per-agent backend.
     pub agent_id: String,
+    /// The id the question is asked under.
+    pub question: String,
     /// The tool call's id, which the resolution is matched back to.
     pub tool_id: String,
     /// The tool being called, as the prompt names it.
@@ -172,6 +178,7 @@ pub(crate) async fn run_gate_prompt(call: GatedCall, lane: PromptLane<GatePrompt
     let GatedCall {
         entity,
         agent_id,
+        question,
         tool_id,
         tool_name,
         taint,
@@ -183,10 +190,7 @@ pub(crate) async fn run_gate_prompt(call: GatedCall, lane: PromptLane<GatePrompt
         wake,
     } = lane;
     let backend = hub.backend_for(agent_id);
-    // The backend mints the id, so two gates in one run cannot share one
-    // however the provider numbered their calls.
-    let id = backend.request_id("gate");
-    let req = build_gate_request(id, &tool_name, taint, clearance);
+    let req = build_gate_request(question, &tool_name, taint, clearance);
     let resolution = resolution_from_answer(&backend.ask(req).await);
     let _ = outcomes.send(GatePromptOutcome {
         entity,
@@ -236,6 +240,7 @@ pub(crate) fn collect_gate_prompt(
                 resolved.approved.insert(out.tool_id.clone());
             }
         }
+        resolved.asked.remove(&out.tool_id);
         awaiting.0 = awaiting.0.saturating_sub(1);
         if awaiting.0 == 0 {
             commands
@@ -300,6 +305,7 @@ mod tests {
                     entity: Entity::from_raw_u32(1)
                         .expect("a small literal index is always a valid entity id"),
                     agent_id: "run".to_string(),
+                    question: "run-gate-1".to_string(),
                     tool_id: "c1".to_string(),
                     tool_name: "shell".to_string(),
                     taint: TaintLevel::Internal,
@@ -332,6 +338,7 @@ mod tests {
             entity: Entity::from_raw_u32(1)
                 .expect("a small literal index is always a valid entity id"),
             agent_id: "run".to_string(),
+            question: "run-gate-1".to_string(),
             tool_id: "c1".to_string(),
             tool_name: "submit_output".to_string(),
             taint: TaintLevel::Private,

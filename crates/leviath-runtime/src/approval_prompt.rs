@@ -30,6 +30,8 @@ pub(crate) struct ApprovalAsk {
     pub entity: Entity,
     /// That agent's run id, for the hub's per-agent backend.
     pub agent_id: String,
+    /// The id the question is asked under.
+    pub question: String,
     /// The call.
     pub call: leviath_providers::ToolCall,
     /// The stage it was made in, which the prompt names.
@@ -124,18 +126,14 @@ async fn run_approval_prompt(ask: ApprovalAsk, lane: PromptLane<ApprovalOutcome>
     let ApprovalAsk {
         entity,
         agent_id,
+        question,
         call,
         stage,
         keys,
     } = ask;
     let backend = lane.hub.backend_for(agent_id);
-    let request = InteractionRequest::tool_approval(
-        backend.request_id("approve"),
-        &call.name,
-        call.arguments,
-        &stage,
-        &keys,
-    );
+    let request =
+        InteractionRequest::tool_approval(question, &call.name, call.arguments, &stage, &keys);
     let response = backend.ask(request).await;
     let _ = lane.outcomes.send(ApprovalOutcome {
         entity,

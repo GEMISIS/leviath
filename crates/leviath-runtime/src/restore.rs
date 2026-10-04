@@ -12,8 +12,11 @@
 //! the results that had come back carried over, so a call that finished is
 //! never run twice, a call that was still running is never started again (it
 //! comes back interrupted, for the model to check), and a question one of its
-//! calls put to a person is asked again; a run stopped at a checkpoint has it asked again over the same
-//! document; a run choosing its next stage is asked again among the same
+//! calls put to a person is asked again; a batch held on a person before it
+//! was sent (an approval, the taint gate) asks the same questions under the
+//! same ids, with what was settled while it waited kept; a run stopped at a
+//! checkpoint has it asked again over the same document; a run choosing its
+//! next stage is asked again among the same
 //! edges; a fan-out picks its workers back up by run id, and a worker that
 //! finished while the daemon was down is read from its own file. See
 //! [`insert::place`](crate::insert::place) for each.
@@ -205,10 +208,11 @@ pub fn end_session(runs_dir: &std::path::Path) {
 /// run's children for a call that starts one), so it is not run again. A
 /// batch stopped on a question to a person is left to ask it again: the
 /// question is asked before anything else in a batch runs, so nothing in it
-/// was running.
+/// was running; nor was anything in a batch held on a person before it was
+/// sent (see [`HeldBatch`](crate::state::HeldBatch)).
 pub fn interrupt_in_flight(state: &mut crate::state::RunState) {
     let children: Vec<String> = state.children.iter().map(ToString::to_string).collect();
-    let Some(batch) = state.pending.as_mut() else {
+    let Some(batch) = state.pending.as_mut().filter(|b| b.held.is_none()) else {
         return;
     };
     let settled = stand_ins(batch, &children);

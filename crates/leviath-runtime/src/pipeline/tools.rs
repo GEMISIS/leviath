@@ -494,7 +494,11 @@ pub(crate) struct DaemonServices<'w> {
 /// recorded results instead of re-running their side effects.
 pub(crate) fn dispatch_tools(
     mut agents: Query<DispatchToolsQuery, With<ReadyForTools>>,
-    carried: Query<(Option<&RecoveredResults>, Option<&ResumedExecutions>)>,
+    carried: Query<(
+        Option<&RecoveredResults>,
+        Option<&ResumedExecutions>,
+        Option<&super::lane_batch::ResumedHold>,
+    )>,
     daemon: DaemonServices,
     mime: crate::blob_store::MimeParams,
     mut commands: Commands,
@@ -568,7 +572,7 @@ pub(crate) fn dispatch_tools(
             leviath_core::TaintLevel,
             leviath_core::TaintLevel,
         )> = Vec::new();
-        let (recovered, resumed) = carried.get(entity).unwrap_or_default();
+        let (recovered, resumed, hold) = carried.get(entity).unwrap_or_default();
         // One execution id per call, minted before anything runs, and kept by
         // a batch brought back from the run's file, whose calls the file
         // already names. The provider's own id travels beside it: a provider
@@ -871,16 +875,23 @@ pub(crate) fn dispatch_tools(
                 .insert(crate::persistence::FinalOutput(output));
         }
 
-        // Hold the batch and ask the user about each blocked call.
+        // Hold the batch and ask the user about each blocked call. A call
+        // asked about before a restart is asked again under the same id.
         if let (false, Some((hub, gate_stage))) = (pending_prompts.is_empty(), interactive) {
             let n = pending_prompts.len();
+            let mut held = resolved.cloned().unwrap_or_default();
             for (tool_id, name, taint, clearance) in pending_prompts {
+                let question = hold
+                    .and_then(|h| h.0.asked.get(&tool_id).cloned())
+                    .unwrap_or_else(|| hub.next_request_id(&state.agent_id, "gate"));
+                held.asked.insert(tool_id.clone(), question.clone());
                 crate::gate_prompt::ask(
                     gate_stage,
                     hub,
                     crate::gate_prompt::GatedCall {
                         entity,
                         agent_id: state.agent_id.clone(),
+                        question,
                         tool_id,
                         tool_name: name,
                         taint,
@@ -892,7 +903,7 @@ pub(crate) fn dispatch_tools(
                 .entity(entity)
                 .remove::<ReadyForTools>()
                 .insert(crate::gate_prompt::AwaitingGatePrompt(n))
-                .insert(crate::gate_prompt::GateResolved::default());
+                .insert(held);
             continue; // re-run after the prompts resolve
         }
 
@@ -955,7 +966,11 @@ pub(crate) fn dispatch_tools(
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
-                .remove::<(RecoveredResults, ResumedExecutions)>()
+                .remove::<(
+                    RecoveredResults,
+                    ResumedExecutions,
+                    super::lane_batch::ResumedHold,
+                )>()
                 .insert(crate::fanout::PendingFanOut { call_id, request });
             continue;
         }
@@ -1027,7 +1042,11 @@ pub(crate) fn dispatch_tools(
             commands
                 .entity(entity)
                 .remove::<ReadyForTools>()
-                .remove::<(RecoveredResults, ResumedExecutions)>()
+                .remove::<(
+                    RecoveredResults,
+                    ResumedExecutions,
+                    super::lane_batch::ResumedHold,
+                )>()
                 .insert(ReadyToInfer);
             continue;
         }
@@ -1035,7 +1054,11 @@ pub(crate) fn dispatch_tools(
         // `dispatch_lane_batches`, which the batch is handed to here.
         commands
             .entity(entity)
-            .remove::<(ReadyForTools, ResumedExecutions)>()
+            .remove::<(
+                ReadyForTools,
+                ResumedExecutions,
+                super::lane_batch::ResumedHold,
+            )>()
             .insert(
                 super::lane_batch::PendingBatch::new(
                     lane_calls,
@@ -1044,7 +1067,8 @@ pub(crate) fn dispatch_tools(
                     recovered,
                     produced,
                 )
-                .resumed(resumed.is_some()),
+                .resumed(resumed.is_some())
+                .holding(hold),
             );
     }
 }

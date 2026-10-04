@@ -550,7 +550,9 @@ pub(crate) fn part_from(part: &PartState) -> Option<Part> {
 ///
 /// The calls come from the reply itself, not the context window: the turn
 /// that made them is written to the window only once every result is in. A
-/// batch waiting to be dispatched (a paused run's, say) is in flight too.
+/// batch waiting to be dispatched (a paused run's, say) is in flight too, and
+/// so is one held on a person before any of its calls is sent: waiting on
+/// an approval, or on the taint gate.
 pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> {
     let dispatched = world
         .get::<crate::pipeline::AwaitingTools>(entity)
@@ -558,7 +560,13 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
     let to_dispatch = world
         .get::<crate::pipeline::ReadyForTools>(entity)
         .is_some();
-    if !dispatched && !to_dispatch {
+    let lane_held = world
+        .get::<crate::pipeline::lane_batch::PendingBatch>(entity)
+        .and_then(|b| b.held(world.get(entity)));
+    let gate_held = world
+        .get::<crate::gate_prompt::AwaitingGatePrompt>(entity)
+        .is_some();
+    if !dispatched && !to_dispatch && lane_held.is_none() && !gate_held {
         return None;
     }
     let calls: Vec<ToolCallState> = world
@@ -591,6 +599,19 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
     for (id, content) in recovered.into_iter().chain(landed) {
         done.insert(id, result_of(content.into_string()));
     }
+    if let Some(view) = lane_held {
+        done.extend(
+            view.done
+                .into_iter()
+                .map(|(id, text)| (id, result_of(text))),
+        );
+        return Some(PendingBatch {
+            calls,
+            done,
+            executions: view.executions.into_iter().collect(),
+            held: Some(view.hold),
+        });
+    }
     // A batch on the lane was recorded as its executions when it was sent; one
     // brought back from the file and not yet sent again keeps the ones the
     // file recorded. One never sent has none yet.
@@ -605,11 +626,41 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
     .unwrap_or_default()
     .into_iter()
     .collect();
+    let held = gate_held.then(|| gate_hold(world, entity, &mut done));
     Some(PendingBatch {
         calls,
         done,
         executions,
+        held,
     })
+}
+
+/// What a batch held on the taint gate holds: the questions still open, what
+/// a person cleared and what a restart carried over, with each call a person
+/// refused added to `done`.
+fn gate_hold(
+    world: &World,
+    entity: Entity,
+    done: &mut BTreeMap<String, ToolResultState>,
+) -> crate::state::HeldBatch {
+    let resolved = world
+        .get::<crate::gate_prompt::GateResolved>(entity)
+        .cloned()
+        .unwrap_or_default();
+    let carried = world
+        .get::<crate::pipeline::lane_batch::ResumedHold>(entity)
+        .map(|h| h.0.allowed.clone())
+        .unwrap_or_default();
+    for (id, text) in resolved.denied {
+        done.insert(id, result_of(text));
+    }
+    let mut cleared: Vec<String> = resolved.approved.into_iter().collect();
+    cleared.sort();
+    crate::state::HeldBatch {
+        asked: resolved.asked.into_iter().collect(),
+        allowed: carried,
+        cleared,
+    }
 }
 
 fn result_of(text: String) -> ToolResultState {

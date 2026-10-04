@@ -475,6 +475,28 @@ pub struct PendingBatch {
     /// a batch the run's file records as dispatched, and none of one still
     /// waiting to be. Empty where a run recorded no execution id for a call.
     pub executions: BTreeMap<String, String>,
+    /// Where the batch stands while it waits on a person before any of its
+    /// calls is sent to run: `None` once it is sent.
+    pub held: Option<HeldBatch>,
+}
+
+/// A batch held on a person before any of its calls runs: a call's tool
+/// policy asks for approval, or the taint gate asks to clear calls that
+/// would send data further than it may go. What was decided while it waited
+/// is kept, so the batch comes back after a restart waiting on the same
+/// questions, and a call already settled is not asked about again. A call
+/// refused while it waited has its refusal among the batch's results.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HeldBatch {
+    /// The question open for each call still waiting on a person: its id,
+    /// by call id.
+    pub asked: BTreeMap<String, String>,
+    /// Calls already decided to run, a person's approval among them. A call
+    /// decided again would be asked about again, and charge the run's write
+    /// ceiling twice.
+    pub allowed: Vec<String>,
+    /// Calls a person cleared to pass the taint gate once.
+    pub cleared: Vec<String>,
 }
 
 /// A tool call's result.

@@ -240,6 +240,7 @@ fn a_run_comes_back_with_its_answer_and_the_questions_it_asked() {
         }],
         done: Default::default(),
         executions: Default::default(),
+        held: None,
     });
     next.final_output = Some(crate::state::FinalOutputState {
         bytes: 10,
@@ -458,8 +459,8 @@ fn a_fan_out_comes_back_with_the_workers_that_finished_settled() {
 
 /// A call interrupted by a daemon dying gets the stand-in result; one that
 /// starts sub-agents in a run that has some names them, so the model checks
-/// them before starting more. A run with no batch, or one stopped on a
-/// question, is left as it is.
+/// them before starting more. A run with no batch, one stopped on a
+/// question, or one held on a person before it was sent, is left as it is.
 #[test]
 fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
     use crate::state::PendingBatch;
@@ -479,6 +480,7 @@ fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
         calls: vec![call("a", "shell"), call("b", "spawn_agent")],
         done: Default::default(),
         executions: Default::default(),
+        held: None,
     });
     interrupt_in_flight(&mut state);
     let done = &state.pending.as_ref().unwrap().done;
@@ -490,6 +492,17 @@ fn calls_interrupted_by_a_crash_get_a_result_that_says_to_check() {
         calls: vec![call("q", "ask_user_text"), call("a", "shell")],
         done: Default::default(),
         executions: Default::default(),
+        held: None,
+    });
+    interrupt_in_flight(&mut state);
+    assert!(state.pending.unwrap().done.is_empty());
+
+    // Held on a person before it was sent: nothing in it ran.
+    state.pending = Some(PendingBatch {
+        calls: vec![call("a", "shell")],
+        done: Default::default(),
+        executions: Default::default(),
+        held: Some(Default::default()),
     });
     interrupt_in_flight(&mut state);
     assert!(state.pending.unwrap().done.is_empty());

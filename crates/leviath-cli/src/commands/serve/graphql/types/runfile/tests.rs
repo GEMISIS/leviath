@@ -521,6 +521,7 @@ fn pending() -> PendingBatch {
         )]
         .into(),
         executions: [("call-1".to_string(), "exec-1".to_string())].into(),
+        held: None,
     }
 }
 

@@ -8043,6 +8043,109 @@ async fn dispatch_tools_holds_batch_for_an_interactive_gate_prompt() {
     assert!(world.get::<AwaitingTools>(e).is_none());
 }
 
+/// A world over `EchoService` with a hub and a gate-prompt lane, and the hub.
+fn gate_prompt_world() -> (World, crate::interaction_hub::InteractionHub) {
+    let (jtx, _jrx) = mpsc::unbounded_channel();
+    let (gtx, _grx) = mpsc::unbounded_channel();
+    let hub = crate::interaction_hub::InteractionHub::new();
+    let mut world = World::new();
+    world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+    world.insert_resource(ToolStage::detached(jtx));
+    world.insert_resource(hub.clone());
+    world.insert_resource(crate::gate_prompt::GatePromptStage {
+        outcomes: gtx,
+        wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        runtime: tokio::runtime::Handle::current(),
+    });
+    (world, hub)
+}
+
+/// A batch held on the taint gate reads back as held, with the questions it
+/// waits on by their ids, what a person cleared and what they refused.
+/// Placed again (a restart), it asks the same questions under the same ids,
+/// and keeps what it carried.
+#[tokio::test]
+async fn a_batch_held_on_the_gate_comes_back_asking_under_the_same_ids() {
+    let (mut world, _hub) = gate_prompt_world();
+    let e = world
+        .spawn((
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell"), tc("c_web", "shell")]),
+            tainted_conv_window(),
+            ReadyForTools,
+            enabled_gate(),
+        ))
+        .id();
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(&mut world);
+    let asked = world
+        .get::<crate::gate_prompt::GateResolved>(e)
+        .unwrap()
+        .asked
+        .clone();
+    assert_eq!(asked.len(), 2);
+    // One answered: refused. It is the batch's result from now on.
+    {
+        let mut resolved = world
+            .get_mut::<crate::gate_prompt::GateResolved>(e)
+            .unwrap();
+        resolved.asked.remove("c_web");
+        resolved
+            .denied
+            .insert("c_web".to_string(), "[blocked] no".to_string());
+    }
+    let mut batch = crate::state::inspect::pending_of(&world, e).expect("a batch in hand");
+    let hold = batch.held.clone().expect("held on a person");
+    assert_eq!(
+        hold.asked,
+        [("c_shell".to_string(), asked["c_shell"].clone())].into()
+    );
+    assert!(hold.cleared.is_empty() && hold.allowed.is_empty());
+    assert_eq!(batch.done["c_web"].text, "[blocked] no");
+    assert!(batch.executions.is_empty(), "nothing was journaled");
+
+    // What a restart places: the batch, carrying a call it had cleared.
+    batch.calls.push(crate::state::context::ToolCallState {
+        id: "c_ok".to_string(),
+        name: "shell".to_string(),
+        args: leviath_core::JsonDoc::new(serde_json::Value::Null),
+        thought_signature: None,
+    });
+    let held = batch.held.as_mut().unwrap();
+    held.cleared.push("c_ok".to_string());
+    held.allowed.push("c_ok".to_string());
+    let (mut again, hub) = gate_prompt_world();
+    let placed = again
+        .spawn((
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell"), tc("c_ok", "shell")]),
+            tainted_conv_window(),
+            enabled_gate(),
+        ))
+        .id();
+    crate::insert::place::pending_batch(&mut again.entity_mut(placed), &batch);
+    let mut s = Schedule::default();
+    s.add_systems((dispatch_tools, crate::pipeline::dispatch_lane_batches).chain());
+    s.run(&mut again);
+    let reasked = again
+        .get::<crate::gate_prompt::GateResolved>(placed)
+        .unwrap();
+    assert_eq!(reasked.asked["c_shell"], asked["c_shell"]);
+    assert_eq!(reasked.asked.len(), 1, "a cleared call is not asked again");
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let open: Vec<String> = hub.pending().into_iter().map(|(_, r)| r.id).collect();
+    assert_eq!(open, [asked["c_shell"].clone()]);
+    let now = crate::state::inspect::pending_of(&again, placed)
+        .expect("a batch in hand")
+        .held
+        .expect("held on a person");
+    assert_eq!(now.allowed, ["c_ok"], "what it carried is kept");
+    assert_eq!(now.cleared, ["c_ok"]);
+}
+
 /// A taint-tracking output window over Internal data: what a stage that read
 /// a workdir file holds when it comes to answer.
 fn tainted_output_window() -> ContextWindow {

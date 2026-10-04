@@ -620,7 +620,8 @@ pub(crate) fn final_output(state: &RunState) -> Option<FinalOutput> {
 /// A run waiting on a reply or a summary goes back to asking (the reply it
 /// waited on did not survive); a run with tool calls in flight has them
 /// dispatched again, with the results that came back carried along, so a
-/// question one of them put to a person is asked again; a run stopped at a
+/// question one of them put to a person is asked again (one held on an
+/// approval or the taint gate under the same id); a run stopped at a
 /// checkpoint has it asked again over the same document; a run choosing its
 /// next edge is asked again among the same edges.
 pub(crate) fn phase(entity: &mut EntityWorldMut<'_>, spec: &RunSpec, state: &RunState) {
@@ -753,6 +754,17 @@ pub(crate) fn pending_batch(entity: &mut EntityWorldMut<'_>, batch: &crate::stat
     if !batch.executions.is_empty() {
         entity.insert(crate::pipeline::ResumedExecutions(
             batch.executions.clone().into_iter().collect(),
+        ));
+    }
+    // A batch held on a person: the calls already through the taint gate
+    // pass it again unasked, and the rest of what it held goes to the batch.
+    if let Some(hold) = &batch.held {
+        entity.insert((
+            crate::gate_prompt::GateResolved {
+                approved: hold.cleared.iter().cloned().collect(),
+                ..Default::default()
+            },
+            crate::pipeline::lane_batch::ResumedHold(hold.clone()),
         ));
     }
 }

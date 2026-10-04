@@ -518,6 +518,7 @@ fn pending(b: &PendingToolBatch, report: &mut Report) -> PendingBatch {
         calls,
         done,
         executions,
+        held: None,
     }
 }
 

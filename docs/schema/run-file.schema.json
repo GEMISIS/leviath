@@ -1752,6 +1752,38 @@
         ],
         "type": "object"
       },
+      "HeldBatch": {
+        "description": "A batch held on a person before any of its calls runs: a call's tool\npolicy asks for approval, or the taint gate asks to clear calls that\nwould send data further than it may go. What was decided while it waited\nis kept, so the batch comes back after a restart waiting on the same\nquestions, and a call already settled is not asked about again. A call\nrefused while it waited has its refusal among the batch's results.",
+        "properties": {
+          "allowed": {
+            "description": "Calls already decided to run, a person's approval among them. A call\ndecided again would be asked about again, and charge the run's write\nceiling twice.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "asked": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The question open for each call still waiting on a person: its id,\nby call id.",
+            "type": "object"
+          },
+          "cleared": {
+            "description": "Calls a person cleared to pass the taint gate once.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "asked",
+          "allowed",
+          "cleared"
+        ],
+        "type": "object"
+      },
       "InputValue": {
         "description": "A checked input value. Each variant matches one [`InputType`].",
         "oneOf": [
@@ -2271,6 +2303,17 @@
             },
             "description": "The execution each call was dispatched as, by call id: every call of\na batch the run's file records as dispatched, and none of one still\nwaiting to be. Empty where a run recorded no execution id for a call.",
             "type": "object"
+          },
+          "held": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HeldBatch"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the batch stands while it waits on a person before any of its\ncalls is sent to run: `None` once it is sent."
           }
         },
         "required": [
@@ -9464,6 +9507,38 @@
         ],
         "type": "object"
       },
+      "HeldBatch": {
+        "description": "A batch held on a person before any of its calls runs: a call's tool\npolicy asks for approval, or the taint gate asks to clear calls that\nwould send data further than it may go. What was decided while it waited\nis kept, so the batch comes back after a restart waiting on the same\nquestions, and a call already settled is not asked about again. A call\nrefused while it waited has its refusal among the batch's results.",
+        "properties": {
+          "allowed": {
+            "description": "Calls already decided to run, a person's approval among them. A call\ndecided again would be asked about again, and charge the run's write\nceiling twice.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "asked": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The question open for each call still waiting on a person: its id,\nby call id.",
+            "type": "object"
+          },
+          "cleared": {
+            "description": "Calls a person cleared to pass the taint gate once.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "asked",
+          "allowed",
+          "cleared"
+        ],
+        "type": "object"
+      },
       "InputValue": {
         "description": "A checked input value. Each variant matches one [`InputType`].",
         "oneOf": [
@@ -9937,6 +10012,17 @@
             },
             "description": "The execution each call was dispatched as, by call id: every call of\na batch the run's file records as dispatched, and none of one still\nwaiting to be. Empty where a run recorded no execution id for a call.",
             "type": "object"
+          },
+          "held": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HeldBatch"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the batch stands while it waits on a person before any of its\ncalls is sent to run: `None` once it is sent."
           }
         },
         "required": [
