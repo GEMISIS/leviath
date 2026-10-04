@@ -542,8 +542,13 @@ pub(crate) fn dispatch_tools(
         // `--yolo`: waive taint-gate enforcement so a headless run never blocks
         // on a gate prompt no one can answer (taint tracking still records).
         let auto_approve_gates = auto_gate.is_some();
-        if state.status != AgentStatus::Active {
-            continue; // paused / waiting / cancelled - don't start new work
+        let (recovered, resumed, hold) = carried.get(entity).unwrap_or_default();
+        // Paused, waiting or cancelled: no new work starts. A batch a paused
+        // run was holding on a person when the daemon stopped is not new
+        // work: it puts its questions again, as it was putting them before.
+        let reasking = state.status == AgentStatus::Paused && hold.is_some();
+        if state.status != AgentStatus::Active && !reasking {
+            continue;
         }
 
         // This stage, for routing the parts a reply produces to regions of
@@ -572,7 +577,6 @@ pub(crate) fn dispatch_tools(
             leviath_core::TaintLevel,
             leviath_core::TaintLevel,
         )> = Vec::new();
-        let (recovered, resumed, hold) = carried.get(entity).unwrap_or_default();
         // One execution id per call, minted before anything runs, and kept by
         // a batch brought back from the run's file, whose calls the file
         // already names. The provider's own id travels beside it: a provider

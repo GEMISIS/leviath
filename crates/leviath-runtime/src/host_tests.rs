@@ -1500,6 +1500,59 @@ async fn a_paused_run_waiting_to_choose_its_next_stage_is_not_parked() {
     assert!(host.by_run_id.contains_key("run-a"));
 }
 
+/// And one holding a tool batch on a person stays resident: the question is
+/// open on the hub, and parking would leave an answer given while paused
+/// with no batch to land on. A batch on an approval, one on the taint gate,
+/// and one brought back held by a restart that is about to ask again.
+#[tokio::test]
+async fn a_paused_run_holding_a_batch_on_a_person_is_not_parked() {
+    let holds: [fn(&mut bevy_ecs::world::EntityWorldMut<'_>); 3] = [
+        |e| {
+            e.insert(crate::pipeline::lane_batch::PendingBatch::new(
+                Vec::new(),
+                Vec::new(),
+                std::collections::HashMap::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
+        },
+        |e| {
+            e.insert(crate::gate_prompt::AwaitingGatePrompt(1));
+        },
+        |e| {
+            e.insert(crate::pipeline::lane_batch::ResumedHold::default());
+        },
+    ];
+    for hold in holds {
+        let mut host = host_with(vec![]);
+        host.set_reloader(sync_reloader(|world, run_id, _| {
+            let mut state = agent_state(run_id);
+            state.status = AgentStatus::Paused;
+            Ok(world.spawn_agent((state,)))
+        }));
+        let e = spawn(&mut host, "run-a", "agent-a");
+        assert!(
+            ask(&mut host, |reply| ControlOp::Pause {
+                run_id: "run-a".to_string(),
+                reply
+            })
+            .await
+        );
+        let mut wm = crate::pipeline::PersistWatermark::default();
+        wm.stamp_status(leviath_core::run_meta::RunStatus::Paused);
+        let mut entity = host.world_mut().world_mut().entity_mut(e.entity());
+        entity.insert(wm);
+        hold(&mut entity);
+
+        host.emit_events();
+
+        assert!(
+            host.world.world().get::<AgentState>(e.entity()).is_some(),
+            "the run stays in the world while its batch waits on a person"
+        );
+    }
+}
+
 /// A paused standalone root whose paused snapshot has been dispatched is
 /// paged out of the world: the entity is gone, but the listing and the
 /// Status op still report it, and a Resume pages it back in.

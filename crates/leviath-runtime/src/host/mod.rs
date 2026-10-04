@@ -336,6 +336,19 @@ impl WorldHost {
             && world
                 .get::<crate::pipeline::AwaitingTransitionChoice>(entity)
                 .is_none()
+            // A tool batch held on a person (an approval, the taint gate, or
+            // one a restart brought back to ask again) has its question open:
+            // an answer given while the run is paused lands on the batch, so
+            // the batch stays where the answer can find it.
+            && world
+                .get::<crate::pipeline::lane_batch::PendingBatch>(entity)
+                .is_none()
+            && world
+                .get::<crate::gate_prompt::AwaitingGatePrompt>(entity)
+                .is_none()
+            && world
+                .get::<crate::pipeline::lane_batch::ResumedHold>(entity)
+                .is_none()
     }
 
     /// Whether a terminal agent is safe to unload: it has no **live** parent that

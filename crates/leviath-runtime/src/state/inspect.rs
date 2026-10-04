@@ -626,7 +626,13 @@ pub(crate) fn pending_of(world: &World, entity: Entity) -> Option<PendingBatch> 
     .unwrap_or_default()
     .into_iter()
     .collect();
-    let held = gate_held.then(|| gate_hold(world, entity, &mut done));
+    // A batch brought back held, not yet dispatched again, holds what it held.
+    let held = match gate_held {
+        true => Some(gate_hold(world, entity, &mut done)),
+        false => world
+            .get::<crate::pipeline::lane_batch::ResumedHold>(entity)
+            .map(|h| h.0.clone()),
+    };
     Some(PendingBatch {
         calls,
         done,

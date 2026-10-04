@@ -772,6 +772,195 @@ fn held_on_disk(runs: &Path, run_id: &str) -> Option<leviath_runtime::state::Hel
         .held
 }
 
+/// A run of [`APPROVER`] whose call waits on a person's approval, with the
+/// step that holds the question in its run file.
+struct Approving {
+    /// The blueprint's and the workdir's directories, kept while the run is.
+    _dirs: [tempfile::TempDir; 2],
+    /// The runs directory.
+    runs: tempfile::TempDir,
+    /// Its model.
+    model: Arc<ListsThenDone>,
+    /// Its run id.
+    run: String,
+    /// The daemon it was started on.
+    first: DaemonStarter,
+    /// The world it is in.
+    world: PipelineWorld,
+    /// The approval it waits on.
+    question: leviath_core::interaction::InteractionRequest,
+}
+
+/// Start a run of [`APPROVER`] and drive it until its call waits on a
+/// person's approval and its run file holds the question.
+async fn approving() -> Approving {
+    use leviath_runtime::spec::env::Caller;
+    use std::sync::atomic::Ordering;
+    let agent = tempfile::tempdir().unwrap();
+    let runs = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let manifest = manifest_in(agent.path(), APPROVER);
+    let model = Arc::new(ListsThenDone::default());
+    let first = starter(Config::default(), registry_of(&model), runs.path());
+    let request = crate::daemon::requests::TaskLaunch {
+        blueprint: manifest.to_string_lossy().into_owned(),
+        task: "look around".to_string(),
+        workdir: Some(work.path().to_string_lossy().into_owned()),
+        ..Default::default()
+    }
+    .into_request()
+    .expect("the request reads");
+    let env = first.env_for(&request, first.config.current());
+    let run = first
+        .start_with(env, request, Caller::TopLevel)
+        .await
+        .expect("the run starts")
+        .spec
+        .run_id
+        .to_string();
+    let mut world = world_for(&first);
+    resume_all(&mut world, &first, runs.path());
+    let asked = drive_until(&mut world, |w| {
+        open_for(&first, &run).len() == 1
+            && live(w, &run).wait_reason == Some(WaitState::ToolApproval)
+    })
+    .await;
+    assert!(asked, "the call is put to a person");
+    let question = open_for(&first, &run).remove(0);
+    assert_eq!(model.asked.load(Ordering::SeqCst), 1);
+    // The run's file is written off the tick, so the step that holds the
+    // question lands a moment after it is asked. A daemon that died before
+    // then never recorded it, and asks its model again; one that died after
+    // comes back asking the same question.
+    let recorded = drive_until(&mut world, |_| {
+        held_on_disk(runs.path(), &run).is_some_and(|h| h.asked.contains_key("c1"))
+    })
+    .await;
+    assert!(recorded, "the run's file holds the question");
+    Approving {
+        _dirs: [agent, work],
+        runs,
+        model,
+        run,
+        first,
+        world,
+        question,
+    }
+}
+
+/// Stop the daemon `first` whose world is `world`: cleanly, or as one that
+/// died (`crashed`), which leaves its world as it was.
+async fn stop(world: PipelineWorld, first: &DaemonStarter, crashed: bool) {
+    match crashed {
+        true => drop(world),
+        false => {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            drop(tx);
+            leviath_runtime::host::WorldHost::with_interactions(world, first.hub.clone())
+                .serve(rx)
+                .await;
+        }
+    }
+}
+
+/// Whether the last step on `run_id`'s file has it paused.
+fn paused_on_disk(runs: &Path, run_id: &str) -> bool {
+    leviath_runtime::runfile::RunFileReader::open(&run_file(runs, run_id))
+        .and_then(|file| file.latest_state())
+        .is_ok_and(|s| s.status == RunStatus::Paused)
+}
+
+/// A run paused while its call waits on a person's approval comes back from
+/// a restart, clean or not, still paused and still asking the same question
+/// under the same id, as it does when nothing restarts. An answer given while
+/// it is paused is taken and the call runs then, once; the model is asked
+/// for its next turn only once the run is resumed.
+#[tokio::test]
+async fn a_paused_approval_keeps_its_question_across_a_restart() {
+    use std::sync::atomic::Ordering;
+    // No restart, a clean one, and a daemon that died.
+    for restart in [None, Some(false), Some(true)] {
+        let Approving {
+            _dirs,
+            runs,
+            model,
+            run,
+            first,
+            mut world,
+            question,
+        } = approving().await;
+        let entity = entity_of(&mut world, &run);
+        let agent = world.own_agent(entity);
+        assert!(
+            world.pause(agent),
+            "a run waiting on a person can be paused"
+        );
+        let recorded = drive_until(&mut world, |_| paused_on_disk(runs.path(), &run)).await;
+        assert!(recorded, "the run's file has it paused");
+        assert!(held_on_disk(runs.path(), &run).is_some_and(|h| h.asked.contains_key("c1")));
+        let (hub, mut world) = match restart {
+            None => (first.hub.clone(), world),
+            Some(crashed) => {
+                stop(world, &first, crashed).await;
+                let second = starter(Config::default(), registry_of(&model), runs.path());
+                let mut world = world_for(&second);
+                resume_all(&mut world, &second, runs.path());
+                (second.hub.clone(), world)
+            }
+        };
+        let open = |hub: &leviath_runtime::interaction_hub::InteractionHub| -> Vec<String> {
+            hub.pending()
+                .into_iter()
+                .filter(|(r, _)| r == &run)
+                .map(|(_, q)| q.id)
+                .collect()
+        };
+        let reopened = drive_until(&mut world, |_| open(&hub).len() == 1).await;
+        assert!(reopened, "the question is open while paused ({restart:?})");
+        assert_eq!(
+            open(&hub),
+            std::slice::from_ref(&question.id),
+            "under its id"
+        );
+        assert_eq!(live(&mut world, &run).status, RunStatus::Paused);
+        let held = live(&mut world, &run).pending.and_then(|p| p.held);
+        assert!(
+            held.is_some_and(|h| h.asked.contains_key("c1")),
+            "and says so"
+        );
+
+        assert!(hub.answer(InteractionResponse::approval(
+            question.id.clone(),
+            true,
+            leviath_core::interaction::ApprovalScope::Once,
+        )));
+        let ran = drive_until(&mut world, |_| {
+            told_in_file(runs.path(), &run)
+                .iter()
+                .any(|t| t.starts_with("ended c1"))
+        })
+        .await;
+        assert!(ran, "the allowed call runs while paused ({restart:?})");
+        assert_eq!(live(&mut world, &run).status, RunStatus::Paused);
+        assert_eq!(model.asked.load(Ordering::SeqCst), 1);
+
+        // What resuming a run with nothing held for its model does.
+        let entity = entity_of(&mut world, &run);
+        world
+            .world_mut()
+            .get_mut::<leviath_runtime::components::AgentState>(entity)
+            .expect("the run's state")
+            .status = leviath_runtime::components::AgentStatus::Active;
+        let finished =
+            drive_until(&mut world, |w| live(w, &run).status == RunStatus::Complete).await;
+        assert!(finished, "the resumed run finishes ({restart:?})");
+        assert_eq!(model.asked.load(Ordering::SeqCst), 2);
+        let told = told_in_file(runs.path(), &run);
+        let ended = told.iter().filter(|t| t.starts_with("ended c1")).count();
+        assert_eq!(ended, 1, "the call ran once: {told:?}");
+    }
+}
+
 /// A blueprint whose one stage lists a directory, which a person approves.
 const APPROVER: &str = r#"[blueprint]
 name = "approver"
@@ -857,62 +1046,18 @@ fn registry_of(model: &Arc<ListsThenDone>) -> ProviderRegistry {
 /// once, as the execution it was recorded as.
 #[tokio::test]
 async fn an_approval_waiting_at_a_restart_is_asked_again_without_a_new_turn() {
-    use leviath_runtime::spec::env::Caller;
     use std::sync::atomic::Ordering;
     for crashed in [false, true] {
-        let agent = tempfile::tempdir().unwrap();
-        let runs = tempfile::tempdir().unwrap();
-        let work = tempfile::tempdir().unwrap();
-        let manifest = manifest_in(agent.path(), APPROVER);
-        let model = Arc::new(ListsThenDone::default());
-        let first = starter(Config::default(), registry_of(&model), runs.path());
-        let request = crate::daemon::requests::TaskLaunch {
-            blueprint: manifest.to_string_lossy().into_owned(),
-            task: "look around".to_string(),
-            workdir: Some(work.path().to_string_lossy().into_owned()),
-            ..Default::default()
-        }
-        .into_request()
-        .expect("the request reads");
-        let env = first.env_for(&request, first.config.current());
-        let run = first
-            .start_with(env, request, Caller::TopLevel)
-            .await
-            .expect("the run starts")
-            .spec
-            .run_id
-            .to_string();
-        let mut world = world_for(&first);
-        resume_all(&mut world, &first, runs.path());
-        let asked = drive_until(&mut world, |w| {
-            open_for(&first, &run).len() == 1
-                && live(w, &run).wait_reason == Some(WaitState::ToolApproval)
-        })
-        .await;
-        assert!(asked, "the call is put to a person");
-        let question = open_for(&first, &run).remove(0);
-        assert_eq!(model.asked.load(Ordering::SeqCst), 1);
-        // The run's file is written off the tick, so the step that holds the
-        // question lands a moment after it is asked. A daemon that died
-        // before then never recorded it, and asks its model again; one that
-        // died after comes back asking the same question.
-        let recorded = drive_until(&mut world, |_| {
-            held_on_disk(runs.path(), &run).is_some_and(|h| h.asked.contains_key("c1"))
-        })
-        .await;
-        assert!(recorded, "the run's file holds the question");
-
-        match crashed {
-            // A daemon that dies leaves its world as it was.
-            true => drop(world),
-            false => {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                drop(tx);
-                leviath_runtime::host::WorldHost::with_interactions(world, first.hub.clone())
-                    .serve(rx)
-                    .await;
-            }
-        }
+        let Approving {
+            _dirs,
+            runs,
+            model,
+            run,
+            first,
+            world,
+            question,
+        } = approving().await;
+        stop(world, &first, crashed).await;
 
         let second = starter(Config::default(), registry_of(&model), runs.path());
         let mut world = world_for(&second);

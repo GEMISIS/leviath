@@ -86,7 +86,8 @@ placed back in the world where it stopped.
 
 A run that was waiting on a person comes back waiting on the same question. A tool call waiting
 for approval, or held at the taint gate, is asked again under the same id, and the model is not
-asked again. `lev respond` with that id answers it, and the call runs once.
+asked again. `lev respond` with that id answers it, and the call runs once. A paused run comes
+back paused with its question still open, and an answer given while it is paused runs the call.
 
 A run that no longer fits is held, with every problem recorded in its file. A provider whose key,
 base URL or model list changed since the run started is the usual cause. The daemon log names the

@@ -8146,6 +8146,51 @@ async fn a_batch_held_on_the_gate_comes_back_asking_under_the_same_ids() {
     assert_eq!(now.cleared, ["c_ok"]);
 }
 
+/// A paused run starts no new batch, but one it was holding on a person when
+/// the daemon stopped puts its questions again while it stays paused, and
+/// reads back as held until then.
+#[tokio::test]
+async fn a_paused_run_dispatches_only_a_batch_it_was_holding() {
+    let (mut world, _hub) = gate_prompt_world();
+    let paused = || AgentState {
+        status: AgentStatus::Paused,
+        ..agent_state()
+    };
+    let holding = world
+        .spawn((
+            paused(),
+            infer_with(vec![tc("c1", "read_file")]),
+            conv_window(),
+            ReadyForTools,
+            crate::pipeline::lane_batch::ResumedHold(crate::state::HeldBatch {
+                asked: [("c1".to_string(), "a-approve-1".to_string())].into(),
+                ..Default::default()
+            }),
+        ))
+        .id();
+    let idle = world
+        .spawn((
+            paused(),
+            infer_with(vec![tc("c1", "read_file")]),
+            conv_window(),
+            ReadyForTools,
+        ))
+        .id();
+    let held = crate::state::inspect::pending_of(&world, holding)
+        .and_then(|b| b.held)
+        .expect("a batch brought back held reads back held");
+    assert_eq!(held.asked["c1"], "a-approve-1");
+    let mut s = Schedule::default();
+    s.add_systems(dispatch_tools);
+    s.run(&mut world);
+    assert!(
+        world
+            .get::<crate::pipeline::lane_batch::PendingBatch>(holding)
+            .is_some()
+    );
+    assert!(world.get::<ReadyForTools>(idle).is_some(), "no new work");
+}
+
 /// A taint-tracking output window over Internal data: what a stage that read
 /// a workdir file holds when it comes to answer.
 fn tainted_output_window() -> ContextWindow {
