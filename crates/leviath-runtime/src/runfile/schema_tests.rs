@@ -134,8 +134,8 @@ fn the_fingerprint_is_the_hash_of_this_builds_frame_schemas() {
     let worked_out: [u8; 32] = h.finalize().into();
     assert!(
         worked_out == super::FINGERPRINT,
-        "the frame schemas changed: set runfile::FINGERPRINT to the bytes of {}",
-        hex::encode(worked_out)
+        "the frame schemas changed: set runfile::FINGERPRINT to {:#04x?}",
+        worked_out
     );
 }
 
