@@ -241,6 +241,49 @@ async fn an_abandoned_attempt_reads_as_indeterminate() {
     .await;
 }
 
+/// A call sent to the lane again after a restart (a question asked again) is
+/// the one execution it was: listed once, ending as itself.
+#[tokio::test]
+async fn a_call_sent_again_is_listed_once() {
+    crate::runstate::with_isolated_runs_dir_async("graphql-resent", |_dir| async move {
+        create_run(&meta()).expect("run written");
+        write_journal(vec![
+            RunRecord::ToolBatch {
+                calls: vec![call("q", "x1", "ask_user_text", r#"{"prompt":"colour?"}"#)],
+                at: 100,
+                stage_index: 0,
+                iteration: 1,
+                visit_id: String::new(),
+                requested_by: "a1".to_string(),
+                response: String::new(),
+            },
+            RunRecord::ToolCallsResent {
+                calls: vec![("q".to_string(), "x1".to_string())],
+                requested_by: String::new(),
+                at: 120,
+            },
+            RunRecord::ToolCallDone {
+                iteration: 1,
+                call_id: "q".to_string(),
+                execution_id: "x1".to_string(),
+                result: "blue".into(),
+                outcome: None,
+                at: 140,
+            },
+        ]);
+
+        let json =
+            data("{ run { executions(first: 10) { results { id callId endedAt } } } }").await;
+        let rows = json["run"]["executions"]["results"]
+            .as_array()
+            .expect("a list");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["id"], "x1");
+        assert_eq!(rows[0]["endedAt"], 140);
+    })
+    .await;
+}
+
 /// A call the dispatcher resolved before it reached the lane carries its result
 /// in the batch record, and reads back from there.
 #[tokio::test]

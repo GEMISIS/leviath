@@ -108,9 +108,8 @@ pub struct StatusWriter;
 impl Write for StatusWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut status = leviath_core::sync::lock(&STATUS);
-        std::io::stderr().write_all(buf)?;
         note_status(&mut status, buf);
-        Ok(buf.len())
+        std::io::stderr().write_all(buf).map(|()| buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -181,8 +180,7 @@ impl Write for TerminalAwareWriter {
             return Ok(buf.len());
         }
         let status = leviath_core::sync::lock(&STATUS);
-        write_under_status(&mut std::io::stderr(), &status, buf)?;
-        Ok(buf.len())
+        write_under_status(&mut std::io::stderr(), &status, buf).map(|()| buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
