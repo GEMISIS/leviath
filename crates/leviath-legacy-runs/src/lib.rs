@@ -115,6 +115,15 @@ pub trait StageLookup: Send + Sync {
     fn default_max_depth(&self, graph: &RunGraph) -> u8;
 }
 
+/// Put the old run in `run_dir` back in the old layout when a [`convert`] of
+/// it stopped part way (the process converting it was killed while it moved
+/// the old files aside), so it reads as an old run and converts again.
+/// Answers whether there was such a run; an error leaves the directory as it
+/// is, with its old files in `legacy/`.
+pub fn put_back(run_dir: &Path) -> std::io::Result<bool> {
+    write::put_back(run_dir)
+}
+
 /// Whether `run_dir` holds a run in the old layout that [`convert`] would
 /// convert: an LVR1 journal and its `meta.json`.
 pub fn is_legacy(run_dir: &Path) -> bool {

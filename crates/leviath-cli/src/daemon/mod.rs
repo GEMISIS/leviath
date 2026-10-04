@@ -9,6 +9,8 @@ pub mod build;
 pub(crate) mod catalog_refresh;
 pub mod client;
 pub(crate) mod config_reload;
+#[cfg(feature = "legacy-runs")]
+pub mod convert_child;
 pub(crate) mod convert_old;
 pub(crate) mod fanout_spawner;
 pub(crate) mod gate_rules;

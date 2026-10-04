@@ -273,6 +273,7 @@ impl RiskyExecutors for RealExecutors {
             Some(DaemonAction::Restart) => real_daemon_restart().await,
             Some(DaemonAction::Install) => real_daemon_install(),
             Some(DaemonAction::Uninstall) => real_daemon_uninstall(),
+            Some(DaemonAction::ConvertRuns(args)) => commands::daemon::convert_runs(&args),
         }
     }
 

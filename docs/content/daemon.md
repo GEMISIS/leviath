@@ -194,6 +194,12 @@ An upgraded blueprint keeps its warnings beside it, in `legacy/upgrade-warnings.
 `lev list` and `lev validate` show them under it until you edit its `agent.toml` or delete that
 file.
 
+The runs are converted by a second `lev` process that the daemon starts and waits for, so the
+memory converting takes goes back to the system when it exits and the daemon stays small. It
+shows as `lev daemon convert-runs` in the process list, and its log lines are in the daemon log.
+If it cannot start, or stops part way, the daemon converts the runs that are left itself. A run
+it was part way through is put back as it was and converted again.
+
 A run converts once. One that cannot be converted is left as it was and listed, with the reason, in
 `~/.leviath/runs.unconverted`. Later starts of the same release leave it alone, and the next release
 tries it again. To try again now, delete that file and run `lev daemon restart`.

@@ -66,6 +66,15 @@ static LOG_FILE: OnceLock<daemon_log::DaemonLog> = OnceLock::new();
 /// would otherwise keep an uncapped copy of the file.
 static STDERR_MIRROR: AtomicBool = AtomicBool::new(true);
 
+/// Whether [`init`] was asked for debug lines (`--verbose`).
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process logs debug lines, so a process it starts can be
+/// asked to as well.
+pub(crate) fn verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
 /// Lines written while the terminal was held, waiting to be flushed.
 static PARKED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
@@ -245,6 +254,15 @@ pub fn attach_log_file(path: PathBuf, mirror_stderr: bool) -> bool {
     true
 }
 
+/// Write a line another process logged, as it logged it, where this
+/// process's own lines go: its log file, and stderr while that is watched.
+/// The daemon hands its converting child's log lines on through this.
+pub(crate) fn forward(line: &str) {
+    let line = format!("{line}\n");
+    let _ = DaemonLogWriter.write_all(line.as_bytes());
+    let _ = TerminalAwareWriter.write_all(line.as_bytes());
+}
+
 /// Apply `[observability] log_file_max_bytes`. `false` when no log file is
 /// attached, which is every process but the daemon and a server.
 pub fn set_log_file_cap(bytes: u64) -> bool {
@@ -311,6 +329,7 @@ pub fn release_from_tui() {
 /// cases exist only inside the test binary, where other tests own the global
 /// slot.
 pub fn init(verbose: bool) {
+    VERBOSE.store(verbose, Ordering::Relaxed);
     let level = if verbose { "debug" } else { "info" };
     let (otel_layer, handle) = reload::Layer::new(None as OtelSlot);
     let subscriber = tracing_subscriber::registry()

@@ -111,7 +111,7 @@ impl Default for OperatorDefaults {
 }
 
 /// The model a stage runs on, chosen.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelPlan {
     /// The provider.
     pub provider: ProviderName,
@@ -192,7 +192,7 @@ pub type CodeFiles = BTreeMap<Digest, Vec<u8>>;
 /// The tools a stage gets, and the code of any script tool among them that the
 /// run did not already hold (a global script tool, say), so the run file
 /// carries every byte it runs.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StageTools {
     /// The tools, each with its schema.
     pub tools: Vec<ToolDef>,

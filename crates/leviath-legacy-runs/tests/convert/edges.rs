@@ -909,3 +909,43 @@ fn a_key_the_old_parser_ignored_is_left_out_and_reported() {
         "{notes:?}"
     );
 }
+
+/// A conversion killed while it moved the old files aside leaves the
+/// metadata and the old journal in `legacy/` and no run file. Putting the run
+/// back makes it an old run again, which converts as if nothing had happened;
+/// an old run, a converted one and a run whose files cannot all move back
+/// are left as they are.
+#[test]
+fn a_conversion_stopped_part_way_is_put_back_and_converts_again() {
+    use leviath_legacy_runs::{is_legacy, put_back};
+    let whole = Run::fixture("finished");
+    let (_, expected) = whole.converted();
+
+    let run = Run::fixture("finished");
+    assert!(!put_back(&run.dir).unwrap(), "an old run is left as it is");
+    let legacy = run.path("legacy");
+    std::fs::create_dir_all(&legacy).unwrap();
+    for name in ["meta.json", "run.lvr"] {
+        std::fs::rename(run.path(name), legacy.join(name)).unwrap();
+    }
+    run.write("run.lvr.converting", "half a run file");
+    assert!(!is_legacy(&run.dir));
+    assert!(put_back(&run.dir).unwrap());
+    assert!(is_legacy(&run.dir));
+    assert!(!legacy.exists());
+    assert!(!run.path("run.lvr.converting").exists());
+    let (_, file) = run.converted();
+    assert_eq!(file.spec, expected.spec);
+    assert!(
+        !put_back(&run.dir).unwrap(),
+        "a converted run is left as it is"
+    );
+
+    let clash = Run::fixture("finished");
+    let legacy = clash.path("legacy");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::rename(clash.path("run.lvr"), legacy.join("run.lvr")).unwrap();
+    std::fs::copy(clash.path("meta.json"), legacy.join("meta.json")).unwrap();
+    assert!(put_back(&clash.dir).is_err());
+    assert!(legacy.join("meta.json").is_file());
+}

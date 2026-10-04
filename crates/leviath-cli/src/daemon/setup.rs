@@ -257,6 +257,11 @@ pub(crate) async fn setup_daemon_host_with(
             mcp_owners: &registry.mcp_tool_owners,
             shared_mcp: registry.mcp.clone(),
             pool: &mcp_pool,
+            // The child is this executable; one that cannot be found
+            // converts in the daemon.
+            child: std::env::current_exe().ok().map(|exe| {
+                crate::daemon::convert_old::ChildCmd::lev(exe, &runs_dir, agents_dir.as_deref())
+            }),
         },
         board,
     )

@@ -8,7 +8,10 @@
 //! launched with and the tools it had. The daemon converts at start, before
 //! any run is brought back, and again whenever an unloaded run is paged in.
 //! At start the MCP servers an unfinished old run's stages connect to are
-//! connected first, so their tools are there to look up.
+//! connected first, so their tools are there to look up, and the runs are
+//! converted in a child process that asks the daemon about each stage (see
+//! [`crate::daemon::convert_child`]), so the memory converting takes is not
+//! the daemon's to keep.
 //!
 //! Each old run directory is saved in the home's backup (see
 //! [`crate::home_backup`]) before it is converted, and one that cannot be
@@ -35,6 +38,41 @@ use crate::home_backup::Backup;
 /// What the daemon resolves a run of a graph against.
 pub(crate) type Envs<'a> = dyn Fn(&RunGraph) -> DaemonEnv + Sync + 'a;
 
+/// What looks each stage of a resumable old run up as it converts: the
+/// daemon's own answers, in the daemon or asked of it from a converting
+/// child.
+#[cfg(feature = "legacy-runs")]
+pub(crate) type Stages<'a> = dyn leviath_legacy_runs::StageLookup + 'a;
+
+/// Without the converter no stage is looked up.
+#[cfg(not(feature = "legacy-runs"))]
+pub(crate) type Stages<'a> = dyn Sync + 'a;
+
+/// Where a pass over the old runs says how far along it is: the daemon's
+/// start-up board, or the output of a child converting for the daemon.
+pub(crate) trait Progress {
+    /// A step of `total` items begins (`0` when it cannot be counted).
+    fn begin(&self, step: &str, total: u64);
+    /// A line under the step.
+    fn detail(&self, detail: String);
+    /// `done` items of the step are done, and the pass has done `so_far`.
+    fn done(&self, done: u64, so_far: &Upgrade);
+}
+
+impl Progress for StartupBoard {
+    fn begin(&self, step: &str, total: u64) {
+        StartupBoard::begin(self, step, total);
+    }
+
+    fn detail(&self, detail: String) {
+        StartupBoard::detail(self, detail);
+    }
+
+    fn done(&self, done: u64, _so_far: &Upgrade) {
+        StartupBoard::done(self, done);
+    }
+}
+
 /// The daemon's answers about a stage, for the converter.
 ///
 /// What a lookup would log (a model no provider here serves, a script
@@ -42,7 +80,7 @@ pub(crate) type Envs<'a> = dyn Fn(&RunGraph) -> DaemonEnv + Sync + 'a;
 /// that fails is in the converted run's own log, with what it fell back to,
 /// and a thousand old runs would otherwise log it a thousand times.
 #[cfg(feature = "legacy-runs")]
-struct Lookup<'a>(&'a Envs<'a>);
+pub(crate) struct Lookup<'a>(pub(crate) &'a Envs<'a>);
 
 /// Run `f` with nothing it logs reaching the daemon's log.
 #[cfg(feature = "legacy-runs")]
@@ -225,11 +263,39 @@ impl Pass {
 /// layout, looking each stage up through `envs` when given, and say how far
 /// along it is on `board`. Each is saved in the home's backup first, and one
 /// that did not convert before is left as it is. Returns what it did.
+#[cfg(feature = "legacy-runs")]
 pub(crate) fn convert_all(
     runs_dir: &Path,
     agents_dir: Option<&Path>,
     envs: Option<&Envs<'_>>,
-    board: &StartupBoard,
+    board: &dyn Progress,
+) -> Upgrade {
+    let lookup = envs.map(Lookup);
+    convert_each(
+        runs_dir,
+        agents_dir,
+        lookup.as_ref().map(|l| l as &Stages<'_>),
+        board,
+    )
+}
+
+/// Without the converter there is nothing to look a stage up for.
+#[cfg(not(feature = "legacy-runs"))]
+pub(crate) fn convert_all(
+    runs_dir: &Path,
+    agents_dir: Option<&Path>,
+    _envs: Option<&Envs<'_>>,
+    board: &dyn Progress,
+) -> Upgrade {
+    convert_each(runs_dir, agents_dir, None, board)
+}
+
+/// [`convert_all`], looking each stage up through `stages`.
+pub(crate) fn convert_each(
+    runs_dir: &Path,
+    agents_dir: Option<&Path>,
+    stages: Option<&Stages<'_>>,
+    board: &dyn Progress,
 ) -> Upgrade {
     let mut upgrade = Upgrade {
         unconverted: Some(Unconverted::path_for(runs_dir)),
@@ -247,11 +313,11 @@ pub(crate) fn convert_all(
         pass.add(convert_in(
             dir,
             agents_dir,
-            envs,
+            stages,
             (&backup, &mut unconverted),
             &mut upgrade,
         ));
-        board.done(i as u64 + 1);
+        board.done(i as u64 + 1, &upgrade);
     }
     unconverted.save();
     pass.log(runs_dir, &backup);
@@ -262,6 +328,12 @@ pub(crate) fn convert_all(
 /// the way [`convert_all`] does for each run, and say what it did the way an
 /// upgrade at start does.
 pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&Envs<'_>>) {
+    #[cfg(feature = "legacy-runs")]
+    let lookup = envs.map(Lookup);
+    #[cfg(feature = "legacy-runs")]
+    let stages = lookup.as_ref().map(|l| l as &Stages<'_>);
+    #[cfg(not(feature = "legacy-runs"))]
+    let stages = envs.and(None);
     let runs_dir = dir.parent().unwrap_or(dir);
     let mut unconverted = Unconverted::load(runs_dir);
     let backup = Backup::of_runs(runs_dir);
@@ -273,7 +345,7 @@ pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&E
     pass.add(convert_in(
         dir,
         agents_dir,
-        envs,
+        stages,
         (&backup, &mut unconverted),
         &mut upgrade,
     ));
@@ -282,7 +354,29 @@ pub(crate) fn convert_one(dir: &Path, agents_dir: Option<&Path>, envs: Option<&E
     upgrade.finish(&backup);
 }
 
-/// Every directory under `runs_dir` that holds an old run, in name order.
+/// Whether an old run under `runs_dir` is waiting to be converted: one that
+/// did not fail to convert before.
+#[cfg(feature = "legacy-runs")]
+fn any_to_convert(runs_dir: &Path) -> bool {
+    let held = Unconverted::load(runs_dir);
+    old_runs(runs_dir)
+        .iter()
+        .any(|dir| held.why(&dir_name(dir)).is_none())
+}
+
+/// The name of the run directory `dir`, as the list of runs that did not
+/// convert names it.
+#[cfg(feature = "legacy-runs")]
+fn dir_name(dir: &Path) -> String {
+    dir.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Every directory under `runs_dir` that holds an old run, in name order. A
+/// conversion that was stopped part way is put back first, so the run is
+/// converted again.
 #[cfg(feature = "legacy-runs")]
 fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(runs_dir)
@@ -290,10 +384,28 @@ fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .flatten()
         .map(|e| e.path())
+        .inspect(|dir| put_back(dir))
         .filter(|dir| leviath_legacy_runs::is_legacy(dir))
         .collect();
     dirs.sort();
     dirs
+}
+
+/// Put back the old run in `dir` when its conversion was stopped part way,
+/// saying so in the log.
+#[cfg(feature = "legacy-runs")]
+fn put_back(dir: &Path) {
+    let shown = dir.display().to_string();
+    match leviath_legacy_runs::put_back(dir) {
+        Ok(false) => {}
+        Ok(true) => {
+            tracing::warn!(dir = %shown, "an old run whose conversion was stopped part way was put back, to be converted again");
+        }
+        Err(e) => {
+            let why = e.to_string();
+            tracing::warn!(dir = %shown, error = %why, "an old run whose conversion was stopped part way could not be put back; its files are in its legacy directory and the backup");
+        }
+    }
 }
 
 /// Without the converter every run directory is looked at, so one this
@@ -318,18 +430,14 @@ fn old_runs(runs_dir: &Path) -> Vec<PathBuf> {
 fn convert_in(
     dir: &Path,
     agents_dir: Option<&Path>,
-    envs: Option<&Envs<'_>>,
+    stages: Option<&Stages<'_>>,
     (backup, unconverted): (&Backup, &mut Unconverted),
     upgrade: &mut Upgrade,
 ) -> Done {
     if !leviath_legacy_runs::is_legacy(dir) {
         return Done::Nothing;
     }
-    let name = dir
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
+    let name = dir_name(dir);
     if unconverted.why(&name).is_some() {
         return Done::Held;
     }
@@ -340,12 +448,9 @@ fn convert_in(
         upgrade.failed += 1;
         return Done::Failed;
     }
-    let lookup = envs.map(Lookup);
     let env = leviath_legacy_runs::ConvertEnv {
         agents_dir: agents_dir.map(Path::to_path_buf),
-        stages: lookup
-            .as_ref()
-            .map(|l| l as &dyn leviath_legacy_runs::StageLookup),
+        stages,
     };
     match leviath_legacy_runs::convert(dir, &env) {
         Ok(report) => {
@@ -380,7 +485,7 @@ fn convert_in(
 fn convert_in(
     dir: &Path,
     _agents_dir: Option<&Path>,
-    _envs: Option<&Envs<'_>>,
+    _stages: Option<&Stages<'_>>,
     _kept: (&Backup, &mut Unconverted),
     _upgrade: &mut Upgrade,
 ) -> Done {
@@ -403,13 +508,62 @@ pub(crate) struct AtStart<'a> {
     pub(crate) mcp_owners: &'a leviath_runtime::pipeline::ToolOwners,
     pub(crate) shared_mcp: std::sync::Arc<tokio::sync::Mutex<leviath_mcp::ToolExecutor>>,
     pub(crate) pool: &'a crate::daemon::mcp_pool::McpPool,
+    /// The child that converts the runs, so the memory converting takes
+    /// leaves with it; `None` converts them in the daemon.
+    pub(crate) child: Option<ChildCmd>,
+}
+
+/// How the daemon starts the child that converts its old runs (see
+/// [`crate::daemon::convert_child`]).
+#[derive(Debug, Clone)]
+pub(crate) struct ChildCmd {
+    pub(crate) program: PathBuf,
+    pub(crate) args: Vec<std::ffi::OsString>,
+    /// Variables set for the child on top of the daemon's own environment,
+    /// which it inherits.
+    pub(crate) env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// How long the child may say nothing before it is taken to be stuck,
+    /// stopped, and its runs converted in the daemon.
+    pub(crate) quiet_limit: std::time::Duration,
+}
+
+impl ChildCmd {
+    /// How long a child may say nothing. It says something after every run,
+    /// and the largest old run converts in seconds.
+    pub(crate) const QUIET_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+    /// `lev daemon convert-runs` of the executable `program` (this one), for
+    /// the runs under `runs_dir` and the blueprints in `agents_dir`, logging
+    /// at debug level when this process does.
+    pub(crate) fn lev(program: PathBuf, runs_dir: &Path, agents_dir: Option<&Path>) -> Self {
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "daemon".into(),
+            "convert-runs".into(),
+            "--runs-dir".into(),
+            runs_dir.into(),
+            "--build".into(),
+            crate::daemon::setup::CURRENT_BUILD.into(),
+        ];
+        args.extend(
+            agents_dir
+                .into_iter()
+                .flat_map(|dir| ["--agents-dir".into(), dir.into()]),
+        );
+        args.extend(crate::logging::verbose().then_some("--verbose".into()));
+        Self {
+            program,
+            args,
+            env: Vec::new(),
+            quiet_limit: Self::QUIET_LIMIT,
+        }
+    }
 }
 
 impl AtStart<'_> {
     /// What a run of `graph` is resolved against: this machine's providers,
     /// its built-in and script tools, the global MCP servers' tools and the
     /// tools of the graph's own servers that are connected.
-    fn env(&self, graph: &RunGraph) -> DaemonEnv {
+    pub(crate) fn env(&self, graph: &RunGraph) -> DaemonEnv {
         let servers = crate::daemon::starter::mcp_configs(graph);
         let mut mcp_defs = self.mcp_defs.to_vec();
         mcp_defs.extend(self.pool.cached_defs_for(&servers));
@@ -435,14 +589,34 @@ impl AtStart<'_> {
     }
 }
 
-/// Convert every old run under `runs_dir` at daemon start: first connect the
-/// MCP servers each unfinished one's stages use, then convert them all,
-/// looking each stage up on this machine. Returns what it did.
+/// Convert every old run under `runs_dir` at daemon start, in the child
+/// `start` names when it names one: first connect the MCP servers each
+/// unfinished one's stages use, then convert them all, looking each stage up
+/// on this machine. A child that cannot start, or stops part way, leaves the
+/// rest to the daemon. Returns what it did.
 pub(crate) async fn convert_at_start(
     runs_dir: &Path,
     start: AtStart<'_>,
     board: &StartupBoard,
 ) -> Upgrade {
+    let child = start.child.as_ref();
+    #[cfg(feature = "legacy-runs")]
+    if let Some(cmd) = child.filter(|_| any_to_convert(runs_dir)) {
+        match crate::daemon::convert_child::convert(cmd, runs_dir, &start, board).await {
+            Ok(upgrade) => return upgrade,
+            Err(so_far) => {
+                let rest = in_daemon(runs_dir, &start, board).await;
+                return crate::daemon::convert_child::then(so_far, rest);
+            }
+        }
+    }
+    #[cfg(not(feature = "legacy-runs"))]
+    let _ = child;
+    in_daemon(runs_dir, &start, board).await
+}
+
+/// [`convert_at_start`] in the daemon's own process.
+async fn in_daemon(runs_dir: &Path, start: &AtStart<'_>, board: &StartupBoard) -> Upgrade {
     let servers = servers_of_unfinished(runs_dir, start.agents_dir);
     if !servers.is_empty() {
         board.begin("connecting the MCP servers of unfinished old runs", 0);
@@ -457,7 +631,7 @@ pub(crate) async fn convert_at_start(
 /// The MCP servers the stages of every unfinished old run under `runs_dir`
 /// connect to.
 #[cfg(feature = "legacy-runs")]
-fn servers_of_unfinished(
+pub(crate) fn servers_of_unfinished(
     runs_dir: &Path,
     agents_dir: Option<&Path>,
 ) -> Vec<leviath_mcp::MCPServerConfig> {
@@ -483,7 +657,7 @@ fn servers_of_unfinished(
 
 /// Without the converter there are no old runs to connect servers for.
 #[cfg(not(feature = "legacy-runs"))]
-fn servers_of_unfinished(
+pub(crate) fn servers_of_unfinished(
     _runs_dir: &Path,
     _agents_dir: Option<&Path>,
 ) -> Vec<leviath_mcp::MCPServerConfig> {

@@ -108,6 +108,7 @@ async fn old_runs_convert_at_start_with_this_machines_models_and_tools() {
                 mcp_owners: &Default::default(),
                 shared_mcp: shared.clone(),
                 pool: &pool,
+                child: None,
             },
             &board,
         )
@@ -203,6 +204,7 @@ fn what_the_machine_cannot_answer_comes_back_as_why() {
         mcp_owners: &Default::default(),
         shared_mcp: Arc::new(tokio::sync::Mutex::new(leviath_mcp::ToolExecutor::new())),
         pool: &pool,
+        child: None,
     };
     let envs = |g: &RunGraph| start.env(g);
     let lookup = Lookup(&envs);
@@ -406,4 +408,62 @@ async fn a_converted_batch_keeps_the_executions_the_old_journal_named() {
         [(execution, Some(ToolOutcomeState::Indeterminate))],
         "the running call ends once, as the execution it was"
     );
+}
+
+/// The daemon's child is this executable's `lev daemon convert-runs`, for
+/// the daemon's runs, blueprints and build, logging as the daemon does.
+#[test]
+fn the_child_is_this_lev_converting_these_runs() {
+    let exe = std::env::current_exe().unwrap();
+    let cmd = ChildCmd::lev(
+        exe.clone(),
+        Path::new("/home/runs"),
+        Some(Path::new("/home/agents")),
+    );
+    assert_eq!(cmd.program, exe);
+    let args: Vec<String> = cmd
+        .args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let at = |flag: &str| args.iter().position(|a| a == flag).map(|i| &args[i + 1]);
+    assert_eq!(&args[..2], ["daemon", "convert-runs"]);
+    assert_eq!(at("--runs-dir").unwrap(), "/home/runs");
+    assert_eq!(at("--agents-dir").unwrap(), "/home/agents");
+    assert_eq!(at("--build").unwrap(), crate::daemon::setup::CURRENT_BUILD);
+    assert_eq!(cmd.quiet_limit, ChildCmd::QUIET_LIMIT);
+    assert!(cmd.env.is_empty());
+    let bare = ChildCmd::lev(exe, Path::new("/home/runs"), None);
+    assert!(!bare.args.iter().any(|a| a == "--agents-dir"));
+}
+
+/// A run whose conversion was stopped part way is put back and converted
+/// again; one that cannot be put back is said so and left as it is.
+#[cfg(feature = "legacy-runs")]
+#[test]
+fn a_run_stopped_part_way_converts_again() {
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().join("runs");
+    let run = runs.join("old");
+    copy_dir(&fixture("finished"), &run);
+    std::fs::create_dir_all(run.join("legacy")).unwrap();
+    for name in ["meta.json", "run.lvr"] {
+        std::fs::rename(run.join(name), run.join("legacy").join(name)).unwrap();
+    }
+    let stuck = runs.join("stuck");
+    copy_dir(&fixture("finished"), &stuck);
+    std::fs::create_dir_all(stuck.join("legacy")).unwrap();
+    std::fs::copy(
+        stuck.join("meta.json"),
+        stuck.join("legacy").join("meta.json"),
+    )
+    .unwrap();
+    std::fs::rename(stuck.join("run.lvr"), stuck.join("legacy").join("run.lvr")).unwrap();
+    let upgrade = crate::test_support::with_tracing(|| {
+        convert_all(&runs, None, None, &StartupBoard::default())
+    });
+    assert_eq!(upgrade.converted, 2);
+    assert!(run.join("legacy").join("meta.json").is_file());
+    assert!(leviath_runtime::restore::read_for_resume(&run).is_ok());
+    assert!(stuck.join(leviath_core::files::RUN_FILE).is_file());
 }

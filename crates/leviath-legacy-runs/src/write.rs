@@ -81,3 +81,32 @@ pub(crate) fn install(dir: &Path, bytes: &[u8]) -> Result<(PathBuf, PathBuf), Co
         .map_err(ConvertError::io(dir))?;
     Ok((file, legacy))
 }
+
+/// Put the old run in `dir` back as it was before a conversion that stopped
+/// part way through [`install`]: its metadata already moved into `legacy/`
+/// and no run file written in `dir` yet. Every file in `legacy/` moves back
+/// and the half-written run file goes. Answers whether there was a run to
+/// put back; one whose files cannot all move back is an error, and is left
+/// as it is.
+pub(crate) fn put_back(dir: &Path) -> std::io::Result<bool> {
+    let legacy = dir.join(LEGACY_DIR);
+    if !legacy.join(crate::legacy::META_FILE).is_file()
+        || crate::legacy::is_run_file(&dir.join(RUN_FILE))
+    {
+        return Ok(false);
+    }
+    let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&legacy)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect();
+    entries
+        .iter()
+        .filter(|e| !dir.join(e.file_name()).exists())
+        .try_for_each(|e| std::fs::rename(e.path(), dir.join(e.file_name())))
+        .and_then(|()| std::fs::remove_dir(&legacy))
+        .map(|()| {
+            let _ = std::fs::remove_file(dir.join(PARTIAL));
+            true
+        })
+}
