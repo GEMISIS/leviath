@@ -772,18 +772,19 @@ impl ControlClient {
     /// [`Self::subscribe`], picking up where a stream that dropped had got
     /// to ([`WorldEventStream::cursor`]): the events it missed come first,
     /// including those of a daemon that replaced the one it was reading.
+    ///
+    /// A daemon that does not take the request up (an older build, which
+    /// answers it as an unknown request) is asked for a plain subscription on
+    /// the same connection instead, so the stream carries on without the
+    /// events it missed rather than not at all.
     pub async fn subscribe_from(
         &self,
         cursor: Option<&super::EventCursor>,
     ) -> std::io::Result<WorldEventStream> {
-        let request = cursor.map_or(ControlRequest::Subscribe, |c| ControlRequest::Resubscribe {
-            session: c.session.clone(),
-            after: c.after,
-        });
         let mut refreshed = false;
         let mut backoff = RECONNECT_BACKOFF_START;
         loop {
-            match self.subscribe_once(&request).await {
+            match self.subscribe_once(cursor).await {
                 Ok(stream) => {
                     self.reached();
                     return Ok(stream);
@@ -805,21 +806,62 @@ impl ControlClient {
     }
 
     /// One subscribe attempt with the currently-cached token.
-    async fn subscribe_once(&self, request: &ControlRequest) -> std::io::Result<WorldEventStream> {
+    async fn subscribe_once(
+        &self,
+        from: Option<&super::EventCursor>,
+    ) -> std::io::Result<WorldEventStream> {
         let stream = connect(&self.id).await?;
         let (read_half, mut write_half) = tokio::io::split(stream);
         let mut lines = BufReader::new(read_half).lines();
         self.authenticate(&mut write_half, &mut lines).await?;
-        let mut line = serde_json::to_string(request).expect("ControlRequest serializes");
-        line.push('\n');
-        // A failed write means the peer is already gone; the read side then sees
-        // EOF and `next` returns `None`, so the write needs no separate handling.
-        let _ = write_half.write_all(line.as_bytes()).await;
+        let cursor = match from {
+            None => {
+                send_line(&mut write_half, &ControlRequest::Subscribe).await;
+                None
+            }
+            Some(from) => pick_up(&mut lines, &mut write_half, from).await,
+        };
         Ok(WorldEventStream {
             lines,
             _write: write_half,
-            cursor: None,
+            cursor,
         })
+    }
+}
+
+/// Write one request line. A failed write means the peer is already gone;
+/// the read side then sees EOF and the stream ends, so the write needs no
+/// separate handling.
+async fn send_line(write_half: &mut tokio::io::WriteHalf<ClientStream>, request: &ControlRequest) {
+    let mut line = serde_json::to_string(request).expect("ControlRequest serializes");
+    line.push('\n');
+    let _ = write_half.write_all(line.as_bytes()).await;
+}
+
+/// Ask to pick a stream up after `from`, and read the daemon's first line
+/// to see whether it did. A daemon that numbers its events opens the stream
+/// with where it starts. Anything else - the refusal an older daemon gives a
+/// request it does not know, or a connection that closed - is answered with
+/// a plain subscription, which every daemon takes.
+async fn pick_up(
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::ReadHalf<ClientStream>>>,
+    write_half: &mut tokio::io::WriteHalf<ClientStream>,
+    from: &super::EventCursor,
+) -> Option<super::EventCursor> {
+    let request = ControlRequest::Resubscribe {
+        session: from.session.clone(),
+        after: from.after,
+    };
+    send_line(write_half, &request).await;
+    let first = lines.next_line().await.ok().flatten().unwrap_or_default();
+    match serde_json::from_str(&first) {
+        Ok(ControlResponse::Subscribed { session, after }) => {
+            Some(super::EventCursor { session, after })
+        }
+        _ => {
+            send_line(write_half, &ControlRequest::Subscribe).await;
+            None
+        }
     }
 }
 

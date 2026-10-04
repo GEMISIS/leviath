@@ -291,3 +291,82 @@ async fn a_client_picks_up_after_a_replaced_daemon_with_what_it_missed() {
     drop(stream);
     served.await.unwrap();
 }
+
+/// A daemon on `id` built before streams were numbered, serving one
+/// connection: it refuses any request it does not know as invalid, the way
+/// such a daemon refuses `resubscribe`, and streams `event` unnumbered on a
+/// plain `subscribe`. With `hang_up`, it closes the connection instead of
+/// refusing.
+fn older_daemon(
+    id: &crate::control_socket::ControlId,
+    event: WorldEvent,
+    hang_up: bool,
+) -> tokio::task::JoinHandle<Vec<String>> {
+    let mut listener = crate::control_socket::bind_control_listener(id).unwrap();
+    tokio::spawn(async move {
+        let stream = listener.accept().await.unwrap().unwrap();
+        let (read, mut write) = tokio::io::split(stream);
+        let mut lines = BufReader::new(read).lines();
+        let mut asked = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let op = serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            asked.push(op.clone());
+            if op == "subscribe" {
+                let mut out = serde_json::to_string(&event).unwrap();
+                out.push('\n');
+                write.write_all(out.as_bytes()).await.unwrap();
+                break;
+            }
+            if hang_up {
+                return asked;
+            }
+            let refusal = ControlResponse::Error {
+                message: format!("{}: unknown variant `{op}`", super::super::INVALID_REQUEST),
+            };
+            write_line(&mut write, &refusal).await;
+        }
+        // Held until the client hangs up.
+        while let Ok(Some(_)) = lines.next_line().await {}
+        asked
+    })
+}
+
+/// Picking a stream up from a daemon that does not know how - an older
+/// build, after `lev daemon restart` brought one back - falls back to a
+/// plain subscription on the same connection, and events keep coming.
+#[tokio::test]
+async fn an_older_daemon_refusing_to_pick_up_is_subscribed_plainly() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = crate::control_socket::control_id(dir.path());
+    let client = crate::control_socket::ControlClient::new(id.clone());
+    let from = EventCursor {
+        session: "a newer daemon, since replaced".to_string(),
+        after: 7,
+    };
+    let served = older_daemon(&id, completed("still-streaming"), false);
+    let mut stream = client.subscribe_from(Some(&from)).await.unwrap();
+    assert_eq!(stream.next().await, Some(completed("still-streaming")));
+    assert_eq!(stream.cursor(), None, "an older daemon numbers nothing");
+    drop(stream);
+    assert_eq!(served.await.unwrap(), ["resubscribe", "subscribe"]);
+}
+
+/// A daemon that closes the connection rather than answering is asked
+/// plainly too, and the stream it gives is simply over.
+#[tokio::test]
+async fn a_daemon_that_hangs_up_on_a_pick_up_gives_an_ended_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = crate::control_socket::control_id(dir.path());
+    let client = crate::control_socket::ControlClient::new(id.clone());
+    let from = EventCursor {
+        session: "gone".to_string(),
+        after: 1,
+    };
+    let served = older_daemon(&id, completed("never"), true);
+    let mut stream = client.subscribe_from(Some(&from)).await.unwrap();
+    assert_eq!(stream.next().await, None);
+    assert_eq!(served.await.unwrap(), ["resubscribe"]);
+}

@@ -1370,6 +1370,52 @@ mod tests {
         })
     }
 
+    /// A relay holding a cursor, reconnecting to a daemon built before
+    /// streams were numbered (`lev daemon restart` onto an older build): the
+    /// daemon refuses `resubscribe` as an unknown request, and the relay
+    /// subscribes plainly and keeps forwarding.
+    #[tokio::test]
+    async fn a_relay_back_on_an_older_daemon_keeps_forwarding() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = control_id(dir.path());
+        let mut listener = bind_control_listener(&id).unwrap();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap().unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let refused = lines.next_line().await.unwrap().unwrap();
+            assert!(refused.contains("\"resubscribe\""), "{refused}");
+            write_half
+                .write_all(
+                    b"{\"result\":\"error\",\"message\":\"invalid request: unknown variant\"}\n",
+                )
+                .await
+                .unwrap();
+            let plain = lines.next_line().await.unwrap().unwrap();
+            assert!(plain.contains("\"subscribe\""), "{plain}");
+            let mut line = serde_json::to_string(&WorldEvent::Log {
+                run_id: "r".into(),
+                agent_id: "a".into(),
+                line: "still here".into(),
+            })
+            .unwrap();
+            line.push('\n');
+            write_half.write_all(line.as_bytes()).await.unwrap();
+            // Dropped: the stream ends and the relay's pass returns.
+        });
+        let (state, mut rx) = state_with(ControlClient::new(id));
+        let client = reqwest::Client::new();
+        let before = leviath_runtime::control_socket::EventCursor {
+            session: "a newer daemon".into(),
+            after: 3,
+        };
+        let mut cursor = Some(before.clone());
+        consume_once(&state, &client, &mut LinkWatch::new(&state), &mut cursor).await;
+        server.await.unwrap();
+        assert_eq!(tag(&rx.try_recv().unwrap()), "log");
+        assert_eq!(cursor, Some(before), "nothing newer to pick up from");
+    }
+
     /// The daemon was killed and started again, and a run it restored
     /// finished before this relay was subscribed again. Its completion went
     /// out to nobody; the relay picks the stream up from where it was, so it
